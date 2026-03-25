@@ -1,5 +1,6 @@
 import json
 import re
+from dotenv import load_dotenv
 import threading
 import requests
 import time
@@ -37,6 +38,7 @@ import mdr
 import p0
 
 # ================= CONFIGURATION =================
+load_dotenv()
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET") 
 VERIFICATION_TOKEN = os.getenv("VERIFICATION_TOKEN")
@@ -756,4 +758,4 @@ atexit.register(lambda: scheduler.shutdown())
 send_restart_ready()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5001, debug=False)
+    app.run(host="0.0.0.0", port=5000, debug=False)
