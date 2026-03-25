@@ -5,7 +5,8 @@ import requests
 from datetime import datetime, timedelta
 import os
 import re
-
+from dotenv import load_dotenv
+load_dotenv()
 # ================= 配置信息 =================
 from dotenv import load_dotenv
 load_dotenv()

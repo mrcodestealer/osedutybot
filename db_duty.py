@@ -17,7 +17,8 @@ import csv
 import os
 import requests
 from datetime import datetime, timedelta
-
+from dotenv import load_dotenv
+load_dotenv()
 # ================= Configuration =================
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")

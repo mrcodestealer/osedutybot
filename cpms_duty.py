@@ -18,13 +18,13 @@ import sys
 import requests
 from datetime import datetime, timedelta
 import os
-
+from dotenv import load_dotenv
+load_dotenv()
 # ================= Configuration =================
 # !! 请务必替换为您的实际凭证 !!
-APP_ID = "cli_a9ca652b89b85ed1"
-APP_SECRET = "VQJh0oFKfsyCHr5tQDMVNbr4o4kmjbFr"
-SPREADSHEET_TOKEN = "GpJZw9oySizpADkH3b6l8Zx3g7f"   # 表格 token
-
+APP_ID = os.getenv("APP_ID")
+APP_SECRET = os.getenv("APP_SECRET")
+SPREADSHEET_TOKEN = os.getenv("CPMS_SPREADSHEET_TOKEN")
 
 # ================= Helper Functions =================
 def get_tenant_access_token():

@@ -10,7 +10,8 @@ import sys
 import requests
 import json
 import os
-
+from dotenv import load_dotenv
+load_dotenv()
 # ================= Configuration =================
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")

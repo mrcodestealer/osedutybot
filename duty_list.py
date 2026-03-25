@@ -1,6 +1,7 @@
 import csv
 import difflib
-
+from dotenv import load_dotenv
+load_dotenv()
 # Load duty list once when the module is imported
 _duty_list = None
 

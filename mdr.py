@@ -10,7 +10,8 @@ Usage:
 import re
 import requests
 import os
-
+from dotenv import load_dotenv
+load_dotenv()
 # ================= Configuration =================
 APP_ID = "cli_a9ca652b89b85ed1"
 APP_SECRET = "VQJh0oFKfsyCHr5tQDMVNbr4o4kmjbFr"

@@ -1,7 +1,8 @@
 import re
 from datetime import datetime, timedelta
 import functools
-
+from dotenv import load_dotenv
+load_dotenv()
 def parse_duration(duration_str):
     pattern = re.compile(r'^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$', re.IGNORECASE)
     match = pattern.match(duration_str.strip())

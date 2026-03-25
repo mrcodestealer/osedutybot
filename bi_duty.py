@@ -3,12 +3,13 @@ import requests
 from datetime import datetime, timedelta
 import os
 from calendar import monthrange
-
+from dotenv import load_dotenv
+load_dotenv()
 # ================= 配置信息 =================
-APP_ID = "cli_a9ca652b89b85ed1"
-APP_SECRET = "VQJh0oFKfsyCHr5tQDMVNbr4o4kmjbFr"
-SPREADSHEET_TOKEN = "EywEsYs6vhMaGQtsbBHluy5cgGg"
-SHEET_ID = "gDCoYb"
+APP_ID = os.getenv("APP_ID")
+APP_SECRET = os.getenv("APP_SECRET")
+SPREADSHEET_TOKEN = os.getenv("BI_SPREADSHEET_TOKEN")
+SHEET_ID = os.getenv("BI_SHEET_ID")
 DUTY_LIST_PATH = "dutyList.csv"
 
 # ================= 月份映射 =================

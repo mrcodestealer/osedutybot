@@ -1,6 +1,7 @@
 from datetime import datetime
 import csv
-
+from dotenv import load_dotenv
+load_dotenv()
 def get_today_date():
     """Return today's date as YYYY-MM-DD."""
     return datetime.now().strftime("%Y-%m-%d")

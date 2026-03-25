@@ -5,7 +5,8 @@ P0 Incident command handler.
 
 import re
 from datetime import datetime
-
+from dotenv import load_dotenv
+load_dotenv()
 def handle_p0(command_text):
     """
     Parse the command text after "/p0" or "/p0test".

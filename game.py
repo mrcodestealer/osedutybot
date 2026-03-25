@@ -1,7 +1,8 @@
 # game.py
 import random
 from datetime import datetime, timedelta
-
+from dotenv import load_dotenv
+load_dotenv()
 _active_games = {}  # user_id -> { 'number': str, 'expiry': datetime, 'job_id': str }
 
 def _generate_number(digits=8):
