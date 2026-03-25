@@ -2,16 +2,17 @@ import json
 import requests
 import re
 from datetime import datetime
+import os
 
 # ================= CONFIGURATION =================
-APP_ID = "cli_a9ca652b89b85ed1"
-APP_SECRET = "VQJh0oFKfsyCHr5tQDMVNbr4o4kmjbFr"
+APP_ID = os.getenv("APP_ID")
+APP_SECRET = os.getenv("APP_SECRET")
 
-FIRST_SPREADSHEET_TOKEN = "QfbCwKBA3i2tjrkxknyloZ04gZc"
-FIRST_SHEET_ID = "0cece9"
+FIRST_SPREADSHEET_TOKEN = os.getenv("NWR_FIRST_SPREADSHEET_TOKEN")
+FIRST_SHEET_ID = os.getenv("NWR_FIRST_SHEET_ID")
 
-SECOND_SPREADSHEET_TOKEN = "XMLTwObQ1iu2VWk1yxTlREu2gfe"
-SECOND_SHEET_ID = "e72d83"
+SECOND_SPREADSHEET_TOKEN = os.getenv("NWR_SECOND_SPREADSHEET_TOKEN")
+SECOND_SHEET_ID = os.getenv("NWR_SECOND_SHEET_ID")
 
 # ================= API FUNCTIONS =================
 def get_tenant_access_token():

@@ -12,12 +12,13 @@ import re
 import sys
 import requests
 from datetime import datetime
+import os
 
 # ================= Configuration =================
-APP_ID = "cli_a9ca652b89b85ed1"
-APP_SECRET = "VQJh0oFKfsyCHr5tQDMVNbr4o4kmjbFr"
-SPREADSHEET_TOKEN = "O4Dfw4DVTiPpFukn801l5z3WgMd"
-SHEET_ID = "3RIBRL"
+APP_ID = os.getenv("APP_ID")
+APP_SECRET = os.getenv("APP_SECRET")
+SPREADSHEET_TOKEN = os.env("OSE_SPREADSHEET_TOKEN")
+SHEET_ID = os.env("OSE_SHEET_ID")
 
 # Target names as they appear in column A (case‑insensitive start‑match)
 TARGET_NAMES = [

@@ -8,9 +8,9 @@ import os
 import re
 
 # ================= 配置信息 =================
-APP_ID = "cli_a9ca652b89b85ed1"
-APP_SECRET = "VQJh0oFKfsyCHr5tQDMVNbr4o4kmjbFr"
-SPREADSHEET_TOKEN = "JSKQwaZc9iL0aikLCnPl57dsgAd"   # 表格 token
+APP_ID = os.getenv("APP_ID")
+APP_SECRET = os.getenv("APP_SECRET")
+SPREADSHEET_TOKEN = os.getenv("PMS_SPREADSHEET_TOKEN")
 
 DUTY_LIST_PATH = "dutyList.csv"   # 统一电话号码参考文件
 

@@ -9,14 +9,14 @@ Usage:
 
 import re
 import requests
+import os
 
 # ================= Configuration =================
-APP_ID = "cli_a9ca652b89b85ed1"
-APP_SECRET = "VQJh0oFKfsyCHr5tQDMVNbr4o4kmjbFr"
+APP_ID = os.getenv("APP_ID")
+APP_SECRET = os.getenv("APP_SECRET")
 
-# TODO: Replace with the correct spreadsheet token and sheet ID for CP data
-SPREADSHEET_TOKEN = "SrjQwRcxciS2SlkECOhlCvKOgNg"   # <-- change if needed
-SHEET_ID = "739e56"                                  # <-- change if needed
+SPREADSHEET_TOKEN = os.getenv("CP_SPREADSHEET_TOKEN")
+SHEET_ID = os.getenv("CP_SHEET_ID")
 
 # Column headers as they appear in the sheet (exact match)
 COLUMNS = {

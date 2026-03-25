@@ -18,11 +18,11 @@ from datetime import datetime, timedelta
 from calendar import monthrange
 
 # ================= Configuration =================
-APP_ID = "cli_a9ca652b89b85ed1"
-APP_SECRET = "VQJh0oFKfsyCHr5tQDMVNbr4o4kmjbFr"
-SPREADSHEET_TOKEN = "O4Dfw4DVTiPpFukn801l5z3WgMd"
-SHEET_ID = "3RIBRL"
-DUTY_LIST_PATH = "dutyList.csv"          # CSV 文件：姓名,团队,电话
+APP_ID = os.getenv("APP_ID")
+APP_SECRET = os.getenv("APP_SECRET")
+SPREADSHEET_TOKEN = os.env("OSE_SPREADSHEET_TOKEN")
+SHEET_ID = os.env("OSE_SHEET_ID")
+DUTY_LIST_PATH = "dutyList.csv"
 
 # Target names as they appear in column A (case‑insensitive start‑match)
 TARGET_NAMES = [

@@ -9,12 +9,13 @@ Usage:
 
 import re
 import requests
+import os
 
 # ================= Configuration =================
-APP_ID = "cli_a9ca652b89b85ed1"
-APP_SECRET = "VQJh0oFKfsyCHr5tQDMVNbr4o4kmjbFr"
-SPREADSHEET_TOKEN = "S1piwkzK7iiF8akjMmEln5cGgGh"
-SHEET_ID = "525976"
+APP_ID = os.getenv("APP_ID")
+APP_SECRET = os.getenv("APP_SECRET")
+SPREADSHEET_TOKEN = os.getenv("DHS_SPREADSHEET_TOKEN")
+SHEET_ID = os.getenv("DHS_SHEET_ID")
 
 # Column headers as they appear in the sheet (exact match)
 COLUMNS = {

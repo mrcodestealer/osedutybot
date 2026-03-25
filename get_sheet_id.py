@@ -1,9 +1,10 @@
 import requests
+import os
 
 # ================= 配置信息 =================
-APP_ID = "cli_a9ca652b89b85ed1"
-APP_SECRET = "VQJh0oFKfsyCHr5tQDMVNbr4o4kmjbFr"
-SPREADSHEET_TOKEN = "EywEsYs6vhMaGQtsbBHluy5cgGg"  # 从您的 wiki 链接提取的 token
+APP_ID = os.getenv("APP_ID")
+APP_SECRET = os.getenv("APP_SECRET")
+SPREADSHEET_TOKEN = ""  # 从您的 wiki 链接提取的 token
 
 def get_tenant_access_token():
     """获取 tenant_access_token"""

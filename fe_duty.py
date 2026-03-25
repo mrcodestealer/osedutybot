@@ -4,17 +4,17 @@ from datetime import datetime, timedelta
 import os
 
 # ================= 配置信息 =================
-APP_ID = "cli_a9ca652b89b85ed1"
-APP_SECRET = "VQJh0oFKfsyCHr5tQDMVNbr4o4kmjbFr"
-SPREADSHEET_TOKEN = "BguAsEcCHhdL9WtV2p1l7jC2g8X"   # 表格 token
-SHEET_ID = "HoMkYJ"   # "Latest Duty List" 的 sheet_id
+APP_ID = os.getenv("APP_ID")
+APP_SECRET = os.getenv("APP_SECRET")
+SPREADSHEET_TOKEN = os.getenv("FE_SPREADSHEET_TOKEN")
+SHEET_ID = os.getenv("FE_SHEET_ID") 
 
 # 要读取的范围（与之前一致，共31个单元格）
 RANGES = [
-    f"{SHEET_ID}!A2:J2",   # 第2行 → 1-10号
-    f"{SHEET_ID}!A5:J5",   # 第5行 → 11-20号
-    f"{SHEET_ID}!A8:J8",   # 第8行 → 21-30号
-    f"{SHEET_ID}!A11:A11", # 第11行 → 31号
+    f"{SHEET_ID}!A2:J2",   
+    f"{SHEET_ID}!A5:J5",   
+    f"{SHEET_ID}!A8:J8",   
+    f"{SHEET_ID}!A11:A11", 
 ]
 
 DUTY_LIST_PATH = "dutyList.csv"   # 用于查询电话号码

@@ -5,10 +5,10 @@ import os
 from calendar import monthrange
 
 # ================= 配置信息 =================
-APP_ID = "cli_a9ca652b89b85ed1"
-APP_SECRET = "VQJh0oFKfsyCHr5tQDMVNbr4o4kmjbFr"
-SPREADSHEET_TOKEN = "FRGDsIAChhoc1WtTBfplZyqJgQf"
-SHEET_ID = "jYPIOK"
+APP_ID = os.getenv("APP_ID")
+APP_SECRET = os.getenv("APP_SECRET")
+SPREADSHEET_TOKEN = os.getenv("FPMS_SPREADSHEET_TOKEN")
+SHEET_ID = os.getenv("FPMS_SHEET_ID")
 
 DUTY_LIST_PATH = "dutyList.csv"
 

@@ -35,14 +35,13 @@ import dhs
 import mdr
 
 import p0
+#ywydawyada
 
 # ================= CONFIGURATION =================
-APP_ID = "cli_a9ca652b89b85ed1"
-APP_SECRET = "VQJh0oFKfsyCHr5tQDMVNbr4o4kmjbFr"
-VERIFICATION_TOKEN = "17CBLymsuOVyXaRv6Ig4lhDBXH3n1giI"
-
-# The chat ID where daily shift reminders should be sent
-DUTY_CHAT_ID = "oc_9de3d63fc589df6feeb9b0bee9c45b72"
+APP_ID = os.getenv("APP_ID")
+APP_SECRET = os.getenv("APP_SECRET") 
+VERIFICATION_TOKEN = os.getenv("VERIFICATION_TOKEN")
+DUTY_CHAT_ID = os.getenv("DUTY_CHAT_ID")
 
 app = Flask(__name__)
 
