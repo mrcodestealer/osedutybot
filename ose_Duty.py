@@ -20,6 +20,8 @@ APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
 SPREADSHEET_TOKEN = os.getenv("OSE_SPREADSHEET_TOKEN")
 SHEET_ID = os.getenv("OSE_SHEET_ID")
+LEAVE_SPREADSHEET_TOKEN = os.getenv("OSE_LEAVE_SPREADSHEET_TOKEN")
+LEAVE_SHEET_ID = os.getenv("OSE_LEAVE_SHEET_ID")
 
 # Target names as they appear in column A (case‑insensitive start‑match)
 TARGET_NAMES = [
@@ -67,7 +69,9 @@ def get_sheet_metadata(token, spreadsheet_token, sheet_id):
     headers = {"Authorization": f"Bearer {token}"}
     resp = requests.get(url, headers=headers)
     result = resp.json()
+    debug_print(f"Metadata response: {result}")  # 添加这行
     if result.get("code") != 0:
+        debug_print(f"Metadata error: {result.get('msg')}")
         return None
     sheets = result.get("data", {}).get("sheets", [])
     for sheet in sheets:
@@ -86,6 +90,79 @@ def get_range_values(token, spreadsheet_token, sheet_id, range_str):
     if result.get("code") != 0:
         return None
     return result.get("data", {}).get("valueRange", {}).get("values", [])
+
+def get_leaves_for_date(target_date):
+    """
+    从请假表读取指定日期的请假信息。
+    假设请假表的结构：
+        - 第一行是表头，包含 "Name" 和 "Leave Type" 列
+        - 有一列是日期列（格式 DD/MM/YYYY 或类似）
+    返回列表，元素为 (name, leave_type)
+    """
+    if not LEAVE_SPREADSHEET_TOKEN or not LEAVE_SHEET_ID:
+        debug_print("Leave sheet not configured (missing token or sheet ID).")
+        return []
+
+    try:
+        token = get_tenant_access_token()
+    except Exception as e:
+        debug_print(f"Failed to get token for leave sheet: {e}")
+        return []
+
+    # 获取请假表的最大行列数（用于全表扫描）
+    props = get_sheet_metadata(token, LEAVE_SPREADSHEET_TOKEN, LEAVE_SHEET_ID)
+    if not props:
+        debug_print("Cannot retrieve leave sheet metadata")
+        return []
+    max_row = props.get("rowCount", 500)
+    max_col = props.get("columnCount", 20)
+    end_col = col_index_to_letter(max_col)
+    scan_range = f"A1:{end_col}{max_row}"
+
+    values = get_range_values(token, LEAVE_SPREADSHEET_TOKEN, LEAVE_SHEET_ID, scan_range)
+    if values is None or len(values) < 2:
+        debug_print("No data in leave sheet")
+        return []
+
+    # 假设第一行是表头，找到 "Name" 和 "Leave Type" 以及日期列
+    header = values[0]
+    name_col = None
+    leave_type_col = None
+    date_col = None
+
+    for idx, cell in enumerate(header):
+        if cell is None:
+            continue
+        cell_str = str(cell).strip().lower()
+        if "name" in cell_str:
+            name_col = idx
+        elif "leave type" in cell_str or "type" in cell_str:
+            leave_type_col = idx
+        elif "date" in cell_str or "day" in cell_str:
+            date_col = idx
+
+    if name_col is None or leave_type_col is None or date_col is None:
+        debug_print("Leave sheet missing required columns (Name, Leave Type, Date)")
+        return []
+
+    leaves = []
+    target_date_str = target_date.strftime("%d/%m/%Y")  # 可根据实际日期格式调整
+
+    for row in values[1:]:  # 跳过表头
+        if len(row) <= max(name_col, leave_type_col, date_col):
+            continue
+        cell_date = row[date_col]
+        if cell_date is None:
+            continue
+        # 尝试匹配日期，支持多种格式
+        row_date_str = str(cell_date).strip()
+        if target_date_str in row_date_str or target_date.strftime("%Y-%m-%d") in row_date_str:
+            name = row[name_col] if name_col < len(row) else None
+            leave_type = row[leave_type_col] if leave_type_col < len(row) else None
+            if name and leave_type:
+                leaves.append((str(name).strip(), str(leave_type).strip()))
+
+    return leaves
 
 def get_shift_names_for_date(target_date):
     """
@@ -333,6 +410,31 @@ def get_ose_duty_for_date(target_date):
         lines.append("Night Shift")
         for name in night:
             lines.append(f"• {name}")
+
+    # 2. 获取请假信息
+    leaves = get_leaves_for_date(target_date)
+
+    # 3. 构建输出
+    lines = [f"OSE Duty – {target_date.strftime('%d/%m/%Y')}", ""]
+
+    if morning:
+        lines.append("Morning Shift")
+        lines.extend([f"• {name}" for name in morning])
+    if night:
+        if morning:
+            lines.append("")
+        lines.append("Night Shift")
+        lines.extend([f"• {name}" for name in night])
+
+    if leaves:
+        if morning or night:
+            lines.append("")
+        lines.append("Leave")
+        for name, leave_type in leaves:
+            lines.append(f"• {name} - {leave_type}")
+
+    if not morning and not night and not leaves:
+        return f"📅 {target_date.strftime('%d/%m/%Y')} – no duty or leave records found."
 
     return "\n".join(lines)
 
