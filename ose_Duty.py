@@ -17,8 +17,8 @@ import os
 # ================= Configuration =================
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
-SPREADSHEET_TOKEN = os.env("OSE_SPREADSHEET_TOKEN")
-SHEET_ID = os.env("OSE_SHEET_ID")
+SPREADSHEET_TOKEN = os.getenv("OSE_SPREADSHEET_TOKEN")
+SHEET_ID = os.getenv("OSE_SHEET_ID")
 
 # Target names as they appear in column A (case‑insensitive start‑match)
 TARGET_NAMES = [

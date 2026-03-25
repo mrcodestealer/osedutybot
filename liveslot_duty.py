@@ -21,7 +21,7 @@ from datetime import datetime, timedelta
 # ================= Configuration =================
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
-SPREADSHEET_TOKEN = os.env("OSE_SPREADSHEET_TOKEN")
+SPREADSHEET_TOKEN = os.getenv("OSE_SPREADSHEET_TOKEN")
 DUTY_LIST_PATH = "dutyList.csv"          # CSV file: name,team,phone
 
 # Team members (as they appear in column A) and their CSV‑lookup names
