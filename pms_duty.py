@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-from dotenv import load_dotenv
 import csv
 import requests
 from datetime import datetime, timedelta
@@ -8,6 +7,7 @@ import os
 import re
 
 # ================= 配置信息 =================
+from dotenv import load_dotenv
 load_dotenv()
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
