@@ -35,7 +35,6 @@ import dhs
 import mdr
 
 import p0
-#ywydawyada
 
 # ================= CONFIGURATION =================
 APP_ID = os.getenv("APP_ID")
