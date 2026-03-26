@@ -36,6 +36,7 @@ import dhs
 import mdr
 
 import p0
+import maintenance
 
 # ================= CONFIGURATION =================
 APP_ID = "cli_a9ca652b89b85ed1"
@@ -556,6 +557,13 @@ def lark_webhook():
     elif clean_text == '/cashout':
         reply = f'the player has been get back his credit. @On-Duty-OSM-Lavie(Podium1) kindly manual cashout the credit and reboot the machine. After that, @Xavier (CS OSM) kindly unset and test the machine thanks'
         send_message(chat_id, reply)
+        
+    elif clean_text == '/maintenanceshort':
+        email_text = clean_text.split(' ', 1)[1] if ' ' in clean_text else ''
+        if email_text:
+            reply = maintenance.process_email(email_text)
+        else:
+            reply = "Please provide the email text after the command."
         
     ################################################################################
     ##################        Machine List       ###################################
