@@ -25,6 +25,7 @@ import sre_Duty
 import cpms_duty
 import db_duty
 import liveslot_duty
+import ote_duty
 
 import nwr
 import winford
@@ -533,6 +534,9 @@ def lark_webhook():
     
     elif clean_text.lower() == '/liveslot':
         reply = liveslot_duty.get_three_weeks_summary()
+    
+    elif clean_text.lower() == '/liveslot':
+        reply = ote_duty.get_three_weeks_summary()
         
     elif clean_text == '/ose':
         reply = ose_Duty.get_ose_today_duty()          # uses today's date
