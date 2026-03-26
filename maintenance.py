@@ -1,12 +1,3 @@
-#!/usr/bin/env python3
-"""
-Generate a simplified maintenance summary from a full email.
-
-Usage:
-    ./maintenance.py "Dear Casino Team, ..."   # Pass email as quoted string
-    ./maintenance.py                           # Paste email, then Ctrl+D
-"""
-
 import sys
 import re
 
@@ -74,34 +65,13 @@ def generate_output(info):
     ]
     return "\n".join(output)
 
-def main():
-    # Check if email was provided as a command-line argument
-    if len(sys.argv) > 1:
-        # Join all arguments in case the user didn't quote (though quoting is recommended)
-        text = " ".join(sys.argv[1:])
-    else:
-        # Read from stdin (paste then Ctrl+D)
-        text = sys.stdin.read()
-
-    if not text.strip():
-        print("No input provided. Please pass the email as a quoted argument or paste it and press Ctrl+D.", file=sys.stderr)
-        sys.exit(1)
-
-    try:
-        info = extract_info(text)
-        output = generate_output(info)
-        print(output)
-    except Exception as e:
-        print(f"Error processing input: {e}", file=sys.stderr)
-        sys.exit(1)
-
 def process_email(text):
     """Process email text and return the formatted summary."""
     info = extract_info(text)
     return generate_output(info)
 
 def main():
-    # Command-line interface: read from argument or stdin
+    """Command‑line interface."""
     if len(sys.argv) > 1:
         text = " ".join(sys.argv[1:])
     else:

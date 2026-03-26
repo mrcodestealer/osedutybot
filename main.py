@@ -558,9 +558,14 @@ def lark_webhook():
         reply = f'the player has been get back his credit. @On-Duty-OSM-Lavie(Podium1) kindly manual cashout the credit and reboot the machine. After that, @Xavier (CS OSM) kindly unset and test the machine thanks'
         send_message(chat_id, reply)
         
-    elif clean_text == '/maintenanceshort':
-        email_text = clean_text.split(' ', 1)[1] if ' ' in clean_text else ''
-        if email_text:
+    elif clean_text.lower().startswith('/maintenanceshort'):
+        # Split into command and the rest (email text)
+        parts = clean_text.split(maxsplit=1)
+        if len(parts) > 1:
+            email_text = parts[1].strip()
+            # Remove surrounding quotes if present (some clients add them)
+            if email_text.startswith('"') and email_text.endswith('"'):
+                email_text = email_text[1:-1]
             reply = maintenance.process_email(email_text)
         else:
             reply = "Please provide the email text after the command."
