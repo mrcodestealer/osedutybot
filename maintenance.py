@@ -2,7 +2,6 @@ import sys
 import re
 
 def extract_info(text):
-    """Extract relevant fields from the email text."""
     info = {}
 
     # Extract table name
@@ -16,8 +15,8 @@ def extract_info(text):
         else:
             info['table'] = "Unknown"
 
-    # Extract reason
-    reason_match = re.search(r'Reason:\s*(.*?)(?:\n|$)', text, re.IGNORECASE)
+    # Extract reason: stop before next field (Status, Date, Time, or end)
+    reason_match = re.search(r'Reason:\s*(.*?)(?=\s*(?:Status:|Date:|Time of resolution:|$))', text, re.IGNORECASE | re.DOTALL)
     if reason_match:
         reason = reason_match.group(1).strip()
         reason = re.sub(r'\s*\([^)]*\)', '', reason)  # remove parentheses
@@ -25,17 +24,16 @@ def extract_info(text):
     else:
         info['reason'] = "Unknown"
 
-    # Extract status
-    status_match = re.search(r'Status:\s*(.*?)(?:\n|$)', text, re.IGNORECASE)
+    # Extract status: stop before next field (Date, Time, or end)
+    status_match = re.search(r'Status:\s*(.*?)(?=\s*(?:Date:|Time of resolution:|$))', text, re.IGNORECASE | re.DOTALL)
     info['status'] = status_match.group(1).strip() if status_match else "Unknown"
 
-    # Extract start and end times from "Time of resolution:" line
-    resolution_match = re.search(r'Time of resolution:\s*from\s+(.*?)\s+till\s+(.*?)(?:\s*\(|$)', text, re.IGNORECASE)
+    # Extract start and end times
+    resolution_match = re.search(r'Time of resolution:\s*from\s+(.*?)\s+till\s+(.*?)(?:\s*\(|$)', text, re.IGNORECASE | re.DOTALL)
     if resolution_match:
         info['start_time'] = resolution_match.group(1).strip()
         info['end_time'] = resolution_match.group(2).strip()
     else:
-        # Fallback: look for "from ... UTC till ... UTC" in the first paragraph
         from_match = re.search(r'from\s+(.*?)\s+UTC\s+till\s+(.*?)\s+UTC', text, re.IGNORECASE)
         if from_match:
             info['start_time'] = from_match.group(1).strip() + " UTC"
@@ -44,7 +42,7 @@ def extract_info(text):
             info['start_time'] = "Unknown"
             info['end_time'] = "Unknown"
 
-    # Extract reference (the line starting with TINC-)
+    # Extract reference (line starting with TINC-)
     ref_match = re.search(r'(TINC-\d+\s+.*?)(?:\n|$)', text, re.IGNORECASE)
     info['reference'] = ref_match.group(1).strip() if ref_match else "Unknown"
 
