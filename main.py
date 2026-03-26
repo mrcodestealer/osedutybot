@@ -535,7 +535,7 @@ def lark_webhook():
     elif clean_text.lower() == '/liveslot':
         reply = liveslot_duty.get_three_weeks_summary()
     
-    elif clean_text.lower() == '/liveslot':
+    elif clean_text.lower() == '/ote':
         reply = ote_duty.get_three_weeks_summary()
         
     elif clean_text == '/ose':
