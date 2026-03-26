@@ -63,6 +63,16 @@ def generate_output(info):
     ]
     return "\n".join(output)
 
+def get_table_name(text):
+    """Extract just the affected table name from email text."""
+    table_match = re.search(r'table\s+([^\.]+?)\s+in\s+[^\.]+', text, re.IGNORECASE)
+    if table_match:
+        return table_match.group(1).strip()
+    table_match = re.search(r'table\s+(.*?)\s+was', text, re.IGNORECASE)
+    if table_match:
+        return table_match.group(1).strip()
+    return "Unknown"
+
 def process_email(text):
     """Process email text and return the formatted summary."""
     info = extract_info(text)

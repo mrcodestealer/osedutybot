@@ -559,16 +559,28 @@ def lark_webhook():
         send_message(chat_id, reply)
         
     elif clean_text.lower().startswith('/maintenanceshort'):
-        # Split into command and the rest (email text)
         parts = clean_text.split(maxsplit=1)
         if len(parts) > 1:
             email_text = parts[1].strip()
-            # Remove surrounding quotes if present (some clients add them)
+            # Remove surrounding quotes if present
             if email_text.startswith('"') and email_text.endswith('"'):
                 email_text = email_text[1:-1]
-            reply = maintenance.process_email(email_text)
+
+            # First message: tag the user with the game name
+            game_name = maintenance.get_table_name(email_text)
+            if game_name == "Unknown":
+                game_name = "Unknown table"
+            # Use the specific user ID; display name can be anything (the mention will show the user's name)
+            first_reply = f'<at user_id="ou_8faac9cb9f7bf3ee69dc09f8e1f147bc">User</at> {game_name}'
+            send_message(chat_id, first_reply)
+
+            # Second message: the full summary
+            second_reply = maintenance.process_email(email_text)
+            send_message(chat_id, second_reply)
         else:
-            reply = "Please provide the email text after the command."
+            send_message(chat_id, "Please provide the email text after the command.")
+        # Early return to avoid sending an extra reply
+        return jsonify({"success": True})
         
     ################################################################################
     ##################        Machine List       ###################################
