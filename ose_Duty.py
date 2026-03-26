@@ -21,7 +21,7 @@ SHEET_ID = "3RIBRL"
 
 # Target names as they appear in column A (case‑insensitive start‑match)
 TARGET_NAMES = [
-    "Louie", "Bryan Peh", "Eduard James", "Chrisjames", "Si Yew",
+    "Louie", "Bryan Peh", "Eduard James", "Chrisjames", "Augustine Siyew",
     "Man Chung", "JanRei", "Katleen", "Lynette", "Chun Chee",
     "Renzel", "Jun Chen", "Kenneth", "Jewel", "Justine Miguel",
     "Kheng Kwan", "Kris Ng"
