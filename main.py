@@ -559,22 +559,26 @@ def lark_webhook():
         send_message(chat_id, reply)
         
     elif clean_text.lower().startswith('/maintenanceshort'):
-        parts = clean_text.split(maxsplit=1)
-        if len(parts) > 1:
-            email_text = parts[1].strip()
-            # Remove surrounding quotes if present
+        # Extract the email text from the original message (which preserves newlines)
+        # Find the command in original_text (case‑insensitive)
+        match = re.search(r'/maintenanceshort\s+', original_text, re.IGNORECASE)
+        if match:
+            email_text = original_text[match.end():].strip()
+            # Remove surrounding quotes if present (some clients add them)
             if email_text.startswith('"') and email_text.endswith('"'):
                 email_text = email_text[1:-1]
+        else:
+            email_text = ''
 
-            # First message: tag the user with the game name
+        if email_text:
+            # First message: tag user with table name
             game_name = maintenance.get_table_name(email_text)
             if game_name == "Unknown":
                 game_name = "Unknown table"
-            # Use the specific user ID; display name can be anything (the mention will show the user's name)
             first_reply = f'<at user_id="ou_8faac9cb9f7bf3ee69dc09f8e1f147bc">User</at> {game_name}'
             send_message(chat_id, first_reply)
 
-            # Second message: the full summary
+            # Second message: full summary
             second_reply = maintenance.process_email(email_text)
             send_message(chat_id, second_reply)
         else:
