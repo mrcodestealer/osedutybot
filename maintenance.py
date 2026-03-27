@@ -118,9 +118,13 @@ def extract_info(text):
     return info
 
 def generate_output(info):
-    """Format the extracted info into the desired output."""
+    """Format the extracted info into the desired output with user mentions."""
+    # Use the provided open IDs for the two roles
+    qa_os_local_id = "ou_c927a378e9b464741c67b61c1641577b"
+    cs_team_id = "ou_24fc78938c54f1eda34bb7a446c4a664"
+
     output = [
-        "Hi @QA OS Local @CS (Team) , kindly check this email. Thank you.",
+        f'Hi <at user_id="{qa_os_local_id}">QA OS Local</at> <at user_id="{cs_team_id}">CS (Team)</at> , kindly check this email. Thank you.',
         "",
         f"Affected table : {info['table']}",
         f"Reason : {info['reason']}",
