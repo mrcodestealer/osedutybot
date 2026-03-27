@@ -559,19 +559,17 @@ def lark_webhook():
         send_message(chat_id, reply)
         
     elif clean_text.lower().startswith('/maintenance'):
-        # Extract the email text from the original message (which preserves newlines)
-        # Find the command in original_text (case‑insensitive)
-        match = re.search(r'/maintenanceshort\s+', original_text, re.IGNORECASE)
+        # Extract the email text from the original message (preserves newlines)
+        match = re.search(r'/maintenance\s+', original_text, re.IGNORECASE)
         if match:
             email_text = original_text[match.end():].strip()
-            # Remove surrounding quotes if present (some clients add them)
             if email_text.startswith('"') and email_text.endswith('"'):
                 email_text = email_text[1:-1]
         else:
             email_text = ''
 
         if email_text:
-            # First message: tag user with table name
+            # First message: tag the user with the table name
             game_name = maintenance.get_table_name(email_text)
             if game_name == "Unknown":
                 game_name = "Unknown table"
@@ -583,7 +581,6 @@ def lark_webhook():
             send_message(chat_id, second_reply)
         else:
             send_message(chat_id, "Please provide the email text after the command.")
-        # Early return to avoid sending an extra reply
         return jsonify({"success": True})
         
     ################################################################################
