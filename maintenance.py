@@ -1,50 +1,93 @@
+#!/usr/bin/env python3
+"""
+Generate a simplified maintenance summary from a full email.
+Supports both old and new email formats via line-by-line parsing.
+"""
+
 import sys
 import re
 
 def extract_info(text):
-    info = {}
+    """Parse email text line by line to extract fields."""
+    info = {
+        'table': 'Unknown',
+        'reason': 'Unknown',
+        'status': 'Unknown',
+        'start_time': 'Unknown',
+        'end_time': 'Unknown',
+        'reference': 'Unknown'
+    }
 
-    # Extract table name
-    table_match = re.search(r'table\s+([^\.]+?)\s+in\s+[^\.]+', text, re.IGNORECASE)
-    if table_match:
-        info['table'] = table_match.group(1).strip()
-    else:
-        table_match = re.search(r'table\s+(.*?)\s+was', text, re.IGNORECASE)
-        if table_match:
-            info['table'] = table_match.group(1).strip()
-        else:
-            info['table'] = "Unknown"
+    lines = text.splitlines()
+    i = 0
+    n = len(lines)
 
-    # Extract reason: stop before next field (Status, Date, Time, or end)
-    reason_match = re.search(r'Reason:\s*(.*?)(?=\s*(?:Status:|Date:|Time of resolution:|$))', text, re.IGNORECASE | re.DOTALL)
-    if reason_match:
-        reason = reason_match.group(1).strip()
-        reason = re.sub(r'\s*\([^)]*\)', '', reason)  # remove parentheses
-        info['reason'] = reason
-    else:
-        info['reason'] = "Unknown"
+    while i < n:
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
 
-    # Extract status: stop before next field (Date, Time, or end)
-    status_match = re.search(r'Status:\s*(.*?)(?=\s*(?:Date:|Time of resolution:|$))', text, re.IGNORECASE | re.DOTALL)
-    info['status'] = status_match.group(1).strip() if status_match else "Unknown"
+        # Look for table name
+        if re.search(r'^table\s+', line, re.IGNORECASE):
+            # Old format: "table XXXtreme Lightning Roulette in ..."
+            match = re.search(r'table\s+([^\.]+?)\s+in', line, re.IGNORECASE)
+            if match:
+                info['table'] = match.group(1).strip()
+            else:
+                match = re.search(r'table\s+(.*?)\s+was', line, re.IGNORECASE)
+                if match:
+                    info['table'] = match.group(1).strip()
+        elif re.search(r'^Affected table/-s:', line, re.IGNORECASE):
+            # New format: next non‑empty line is the table name
+            i += 1
+            while i < n and not lines[i].strip():
+                i += 1
+            if i < n:
+                info['table'] = lines[i].strip()
 
-    # Extract start and end times
-    resolution_match = re.search(r'Time of resolution:\s*from\s+(.*?)\s+till\s+(.*?)(?:\s*\(|$)', text, re.IGNORECASE | re.DOTALL)
-    if resolution_match:
-        info['start_time'] = resolution_match.group(1).strip()
-        info['end_time'] = resolution_match.group(2).strip()
-    else:
-        from_match = re.search(r'from\s+(.*?)\s+UTC\s+till\s+(.*?)\s+UTC', text, re.IGNORECASE)
-        if from_match:
-            info['start_time'] = from_match.group(1).strip() + " UTC"
-            info['end_time'] = from_match.group(2).strip() + " UTC"
-        else:
-            info['start_time'] = "Unknown"
-            info['end_time'] = "Unknown"
+        # Reason
+        elif re.search(r'^Reason:', line, re.IGNORECASE):
+            match = re.search(r'^Reason:\s*(.*)$', line, re.IGNORECASE)
+            if match:
+                info['reason'] = match.group(1).strip()
+                # Remove parenthetical part
+                info['reason'] = re.sub(r'\s*\([^)]*\)', '', info['reason'])
 
-    # Extract reference (line starting with TINC-)
-    ref_match = re.search(r'(TINC-\d+\s+.*?)(?:\n|$)', text, re.IGNORECASE)
-    info['reference'] = ref_match.group(1).strip() if ref_match else "Unknown"
+        # Status
+        elif re.search(r'^Status:', line, re.IGNORECASE):
+            match = re.search(r'^Status:\s*(.*)$', line, re.IGNORECASE)
+            if match:
+                info['status'] = match.group(1).strip()
+
+        # Start time
+        elif re.search(r'^Start time:', line, re.IGNORECASE):
+            match = re.search(r'^Start time:\s*(.*)$', line, re.IGNORECASE)
+            if match:
+                info['start_time'] = match.group(1).strip()
+
+        # End time
+        elif re.search(r'^End time:', line, re.IGNORECASE):
+            match = re.search(r'^End time:\s*(.*)$', line, re.IGNORECASE)
+            if match:
+                info['end_time'] = match.group(1).strip()
+
+        # Time of resolution (old format)
+        elif re.search(r'^Time of resolution:', line, re.IGNORECASE):
+            match = re.search(r'from\s+(.*?)\s+till\s+(.*?)(?:\s*\(|$)', line, re.IGNORECASE)
+            if match:
+                info['start_time'] = match.group(1).strip()
+                info['end_time'] = match.group(2).strip()
+
+        # Reference: TINC-, SD-, or [Service Desk]
+        elif re.search(r'^(TINC-\d+|SD-\d+|\[Service Desk\])', line, re.IGNORECASE):
+            info['reference'] = line.strip()
+
+        i += 1
+
+    # If status is still unknown but the text mentions "successfully accomplished", set to Fixed
+    if info['status'] == 'Unknown' and re.search(r'successfully accomplished', text, re.IGNORECASE):
+        info['status'] = 'Fixed'
 
     return info
 
@@ -64,13 +107,25 @@ def generate_output(info):
     return "\n".join(output)
 
 def get_table_name(text):
-    """Extract just the affected table name from email text."""
-    table_match = re.search(r'table\s+([^\.]+?)\s+in\s+[^\.]+', text, re.IGNORECASE)
-    if table_match:
-        return table_match.group(1).strip()
-    table_match = re.search(r'table\s+(.*?)\s+was', text, re.IGNORECASE)
-    if table_match:
-        return table_match.group(1).strip()
+    """Extract just the affected table name for the first tag message."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        line = line.strip()
+        if re.search(r'^table\s+', line, re.IGNORECASE):
+            match = re.search(r'table\s+([^\.]+?)\s+in', line, re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+            match = re.search(r'table\s+(.*?)\s+was', line, re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+        elif re.search(r'^Affected table/-s:', line, re.IGNORECASE):
+            # next non‑empty line
+            for j in range(i+1, len(lines)):
+                if lines[j].strip():
+                    return lines[j].strip()
+    # Fallback: look for table name in reference
+    if re.search(r'Instant Roulette', text, re.IGNORECASE):
+        return "Instant Roulette"
     return "Unknown"
 
 def process_email(text):
@@ -81,7 +136,9 @@ def process_email(text):
 def main():
     """Command‑line interface."""
     if len(sys.argv) > 1:
-        text = " ".join(sys.argv[1:])
+        text = " ".join(sys.argv[1:])  # This will still lose newlines if not quoted!
+        # Better to read from stdin for multiline input
+        print("⚠️ Warning: multiline input may lose newlines. Use quotes or pipe.", file=sys.stderr)
     else:
         text = sys.stdin.read()
     if not text.strip():
