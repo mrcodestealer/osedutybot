@@ -135,6 +135,8 @@ def get_tenant_access_token():
     return response.json().get("tenant_access_token")
 
 # ================= SCHEDULED REMINDERS =================
+TARGET_USER_OPEN_ID = "ou_d7bc33724e2d6ced4050c944c2ca5650"
+
 def send_shift_reminder(chat_id, message):
     """Send a shift reminder message to the given chat."""
     send_message(chat_id, message)
@@ -170,6 +172,9 @@ def morning_reminder():
         lines.append("(～￣▽￣)～ Rest Well Night Shift\nGood Luck Morning Shift ヾ(≧▽≦*)o")
 
     msg = "\n".join(lines)
+    # Prepend a mention for the target user
+    mention_line = f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>'
+    msg = mention_line + "\n" + msg
     send_shift_reminder(DUTY_CHAT_ID, msg)
 
 def evening_reminder():
@@ -200,6 +205,9 @@ def evening_reminder():
         lines.append("(～￣▽￣)～ Rest Well Morning Shift\nGood Luck Night Shift ヾ(≧▽≦*)o")
 
     msg = "\n".join(lines)
+    # Prepend a mention for the target user
+    mention_line = f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>'
+    msg = mention_line + "\n" + msg
     send_shift_reminder(DUTY_CHAT_ID, msg)
 
 # Set up scheduler

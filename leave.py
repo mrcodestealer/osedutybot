@@ -1,28 +1,25 @@
 #!/usr/bin/env python3
 """
-Leave Records – Fetch and display all entries from a Lark Base table.
+Fetch approved leave records from Lark Base table.
+Columns: Name, Leave Type, Start Date, End Date, Reason
+Only shows records with Status = Approved.
 
 Usage:
-    ./leave.py                     # Show all records from the default table
-    ./leave.py --base BASE_ID      # Use a different base ID
-    ./leave.py --table TABLE_ID    # Use a different table ID
-    ./leave.py --csv                # Output in CSV format
-    ./leave.py --debug              # Show raw API response for debugging
-
-The default base ID and table ID are taken from the URL:
-https://casinoplus.sg.larksuite.com/wiki/O4Dfw4DVTiPpFukn801l5z3WgMd?sheet=65p5cn&table=tblfC3XoBP3as3Ci&view=vewMweziue
+    ./leave.py                # Show approved leaves as table
+    ./leave.py --csv          # Output CSV
+    ./leave.py --debug        # Show raw API responses
 """
 
 import sys
 import csv
+import json
 import requests
 from datetime import datetime
 
-# ================= Configuration =================
 APP_ID = "cli_a9ca652b89b85ed1"
 APP_SECRET = "VQJh0oFKfsyCHr5tQDMVNbr4o4kmjbFr"
-DEFAULT_BASE_ID = "O4Dfw4DVTiPpFukn801l5z3WgMd"
-DEFAULT_TABLE_ID = "tblfC3XoBP3as3Ci"
+BASE_ID = "O4Dfw4DVTiPpFukn801l5z3WgMd"
+TABLE_ID = "tblfC3XoBP3as3Ci"
 
 DEBUG = False
 
@@ -31,49 +28,72 @@ def debug_print(*args, **kwargs):
         print("[DEBUG]", *args, file=sys.stderr, **kwargs)
 
 def get_tenant_access_token():
-    """Obtain a tenant access token for Lark API."""
+    """Obtain a tenant access token."""
     url = "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal"
     headers = {"Content-Type": "application/json"}
     data = {"app_id": APP_ID, "app_secret": APP_SECRET}
+    debug_print("Requesting token...")
     resp = requests.post(url, headers=headers, json=data)
-    result = resp.json()
+    debug_print(f"Token response status: {resp.status_code}")
+    if DEBUG:
+        debug_print("Raw response:", resp.text[:500])
+    try:
+        result = resp.json()
+    except Exception as e:
+        raise Exception(f"Invalid JSON from token endpoint: {e}\nRaw: {resp.text}")
     if result.get("code") != 0:
-        raise Exception(f"Failed to get token: {result}")
+        raise Exception(f"Token error: {result}")
     return result["tenant_access_token"]
 
-def get_table_meta(base_id, table_id, token):
-    """Fetch field metadata for the given table."""
-    url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{base_id}/tables/{table_id}"
+def get_table_meta(token):
+    """Fetch field metadata for the table."""
+    url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{BASE_ID}/tables/{TABLE_ID}"
     headers = {"Authorization": f"Bearer {token}"}
+    debug_print(f"Fetching table metadata: {url}")
     resp = requests.get(url, headers=headers)
-    result = resp.json()
+    debug_print(f"Metadata response status: {resp.status_code}")
+    if DEBUG:
+        debug_print("Raw metadata response:", resp.text[:500])
+    try:
+        result = resp.json()
+    except Exception as e:
+        raise Exception(f"Invalid JSON from metadata: {e}\nRaw: {resp.text}")
     if result.get("code") != 0:
-        raise Exception(f"Failed to get table metadata: {result}")
+        raise Exception(f"Metadata error: {result}")
     fields = result["data"]["table"]["fields"]
-    # Create mapping from field_id to (field_name, field_type)
+    # Map field_id -> (field_name, field_type)
     field_map = {f["field_id"]: (f["field_name"], f["type"]) for f in fields}
+    debug_print(f"Fields: {[name for name, _ in field_map.values()]}")
     return field_map
 
-def get_all_records(base_id, table_id, token, page_size=100):
-    """Retrieve all records from the specified table (with pagination)."""
+def get_all_records(token, page_size=100):
+    """Retrieve all records from the table, handling pagination."""
     records = []
     page_token = None
     while True:
-        url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{base_id}/tables/{table_id}/records"
+        url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{BASE_ID}/tables/{TABLE_ID}/records"
         params = {"page_size": page_size}
         if page_token:
             params["page_token"] = page_token
         headers = {"Authorization": f"Bearer {token}"}
+        debug_print(f"Fetching records, page_token={page_token}")
         resp = requests.get(url, headers=headers, params=params)
-        result = resp.json()
+        debug_print(f"Records response status: {resp.status_code}")
+        if DEBUG:
+            debug_print("Raw records response:", resp.text[:500])
+        try:
+            result = resp.json()
+        except Exception as e:
+            raise Exception(f"Invalid JSON from records: {e}\nRaw: {resp.text}")
         if result.get("code") != 0:
-            raise Exception(f"Failed to fetch records: {result}")
+            raise Exception(f"Records error: {result}")
         data = result.get("data", {})
         items = data.get("items", [])
         records.extend(items)
         if not data.get("has_more"):
             break
         page_token = data.get("page_token")
+    debug_print(f"Total records fetched: {len(records)}")
     return records
 
 def format_field_value(value, field_type):
@@ -85,10 +105,9 @@ def format_field_value(value, field_type):
     if field_type == 3:  # Checkbox
         return "✓" if value else "✗"
     if field_type == 4:  # DateTime
-        # value is timestamp in milliseconds
         if isinstance(value, (int, float)):
             dt = datetime.fromtimestamp(value / 1000)
-            return dt.strftime("%Y-%m-%d %H:%M")
+            return dt.strftime("%Y-%m-%d")
         return str(value)
     if field_type == 5:  # Attachment
         return f"[{len(value)} files]"
@@ -103,126 +122,96 @@ def format_field_value(value, field_type):
             names = [p.get("name", "") for p in value if isinstance(p, dict)]
             return ", ".join(names)
         return str(value)
-    # Fallback
     return str(value)
 
-def print_records_as_table(records, field_map):
-    """Print records in a formatted table."""
-    if not records:
-        print("No records found.")
-        return
-
-    # Collect all field IDs present in records
-    field_ids = set()
-    for rec in records:
-        field_ids.update(rec.get("fields", {}).keys())
-    # Also include all fields from metadata for completeness
-    field_ids.update(field_map.keys())
-    field_ids = sorted(field_ids, key=lambda fid: field_map.get(fid, ("", ""))[0])
-
-    # Prepare header
-    headers = []
-    col_widths = []
-    for fid in field_ids:
-        name, _ = field_map.get(fid, (fid, 0))
-        headers.append(name)
-        col_widths.append(len(name))
-
-    # Gather rows
-    rows = []
-    for rec in records:
-        row = []
-        fields = rec.get("fields", {})
-        for fid in field_ids:
-            val = fields.get(fid)
-            _, ftype = field_map.get(fid, (None, 0))
-            display = format_field_value(val, ftype)
-            row.append(display)
-            col_widths = [max(w, len(display)) for w, display in zip(col_widths, row)]
-        rows.append(row)
-
-    # Print table
-    def print_sep():
-        print("+" + "+".join("-" * (w + 2) for w in col_widths) + "+")
-
-    print_sep()
-    header_row = "| " + " | ".join(h.ljust(w) for h, w in zip(headers, col_widths)) + " |"
-    print(header_row)
-    print_sep()
-    for row in rows:
-        line = "| " + " | ".join(cell.ljust(w) for cell, w in zip(row, col_widths)) + " |"
-        print(line)
-    print_sep()
-    print(f"Total records: {len(records)}")
-
-def print_records_as_csv(records, field_map):
-    """Output records in CSV format."""
-    if not records:
-        return
-
-    field_ids = sorted(field_map.keys(), key=lambda fid: field_map.get(fid, ("", ""))[0])
-    headers = [field_map.get(fid, (fid, 0))[0] for fid in field_ids]
-
-    writer = csv.writer(sys.stdout)
-    writer.writerow(headers)
-
-    for rec in records:
-        row = []
-        fields = rec.get("fields", {})
-        for fid in field_ids:
-            val = fields.get(fid)
-            _, ftype = field_map.get(fid, (None, 0))
-            display = format_field_value(val, ftype)
-            row.append(display)
-        writer.writerow(row)
+def extract_field_value(record, field_name, field_map):
+    """Given a field name, find its field_id and extract value."""
+    name_to_id = {name: (fid, ftype) for fid, (name, ftype) in field_map.items()}
+    if field_name not in name_to_id:
+        debug_print(f"Field '{field_name}' not found in metadata")
+        return ""
+    fid, ftype = name_to_id[field_name]
+    value = record.get("fields", {}).get(fid)
+    return format_field_value(value, ftype)
 
 def main():
     global DEBUG
     args = sys.argv[1:]
-
-    base_id = DEFAULT_BASE_ID
-    table_id = DEFAULT_TABLE_ID
     output_csv = False
-
-    i = 0
-    while i < len(args):
-        arg = args[i]
+    for arg in args:
         if arg == "--debug":
             DEBUG = True
-            i += 1
         elif arg == "--csv":
             output_csv = True
-            i += 1
-        elif arg == "--base":
-            if i+1 >= len(args):
-                print("Error: --base requires an argument")
-                sys.exit(1)
-            base_id = args[i+1]
-            i += 2
-        elif arg == "--table":
-            if i+1 >= len(args):
-                print("Error: --table requires an argument")
-                sys.exit(1)
-            table_id = args[i+1]
-            i += 2
         else:
-            print(f"Unknown argument: {arg}")
+            print(f"Unknown argument: {arg}", file=sys.stderr)
             sys.exit(1)
 
     try:
         token = get_tenant_access_token()
-        debug_print("Token obtained")
+        debug_print("Token obtained successfully")
 
-        field_map = get_table_meta(base_id, table_id, token)
-        debug_print(f"Found {len(field_map)} fields")
+        field_map = get_table_meta(token)
 
-        records = get_all_records(base_id, table_id, token)
-        debug_print(f"Retrieved {len(records)} records")
+        # Find Status field ID
+        status_field_id = None
+        for fid, (name, ftype) in field_map.items():
+            if name == "Status":
+                status_field_id = fid
+                break
+        if status_field_id is None:
+            raise Exception("Status field not found in table")
+
+        records = get_all_records(token)
+
+        # Filter approved records
+        approved = []
+        for rec in records:
+            status_value = rec.get("fields", {}).get(status_field_id)
+            # Status is usually a single select
+            if isinstance(status_value, dict):
+                status_text = status_value.get("name", "")
+            else:
+                status_text = str(status_value) if status_value else ""
+            if status_text.lower() == "approved":
+                approved.append(rec)
+
+        debug_print(f"Approved records: {len(approved)}")
+
+        if not approved:
+            print("No approved leave records found.")
+            return
+
+        # Define columns to display
+        columns = ["Name", "Leave Type", "Start Date", "End Date", "Reason"]
+        rows = []
+        for rec in approved:
+            row = [extract_field_value(rec, col, field_map) for col in columns]
+            rows.append(row)
 
         if output_csv:
-            print_records_as_csv(records, field_map)
+            writer = csv.writer(sys.stdout)
+            writer.writerow(columns)
+            writer.writerows(rows)
         else:
-            print_records_as_table(records, field_map)
+            # Pretty print table
+            col_widths = [len(col) for col in columns]
+            for row in rows:
+                for i, cell in enumerate(row):
+                    col_widths[i] = max(col_widths[i], len(cell))
+
+            def print_sep():
+                print("+" + "+".join("-" * (w + 2) for w in col_widths) + "+")
+
+            print_sep()
+            header = "| " + " | ".join(c.ljust(w) for c, w in zip(columns, col_widths)) + " |"
+            print(header)
+            print_sep()
+            for row in rows:
+                line = "| " + " | ".join(cell.ljust(w) for cell, w in zip(row, col_widths)) + " |"
+                print(line)
+            print_sep()
+            print(f"Total approved leaves: {len(approved)}")
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
