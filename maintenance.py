@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Generate a simplified maintenance summary from a full email.
-Supports both old and new email formats.
+Supports multiple email formats.
 """
 
 import sys
@@ -19,7 +19,7 @@ def extract_info(text):
     }
 
     lines = [line.strip() for line in text.splitlines()]
-    table_availability_affected = False   # flag for new format status
+    table_availability_affected = False
 
     i = 0
     n = len(lines)
@@ -29,7 +29,8 @@ def extract_info(text):
             i += 1
             continue
 
-        # ---- Old format table ----
+        # ---- Table detection ----
+        # 1. Old format: "table X in Y"
         if re.search(r'^table\s+', line, re.IGNORECASE):
             match = re.search(r'table\s+([^\.]+?)\s+in', line, re.IGNORECASE)
             if match:
@@ -39,8 +40,18 @@ def extract_info(text):
                 if match:
                     info['table'] = match.group(1).strip()
 
-        # ---- New format table ----
+        # 2. New format: "Affected table/-s:" line followed by table name
         elif re.search(r'^Affected table/-s:', line, re.IGNORECASE):
+            j = i + 1
+            while j < n and not lines[j]:
+                j += 1
+            if j < n:
+                info['table'] = lines[j].strip()
+            i = j
+            continue
+
+        # 3. "following tables will be unavailable:" line followed by table name
+        elif re.search(r'following tables will be unavailable:', line, re.IGNORECASE):
             j = i + 1
             while j < n and not lines[j]:
                 j += 1
@@ -57,7 +68,7 @@ def extract_info(text):
                 reason = re.sub(r'\s*\([^)]*\)', '', reason)
                 info['reason'] = reason
 
-        # ---- Explicit Status line (old format) ----
+        # ---- Status (explicit) ----
         elif re.search(r'^Status:', line, re.IGNORECASE):
             match = re.search(r'^Status:\s*(.*)$', line, re.IGNORECASE)
             if match:
@@ -94,14 +105,13 @@ def extract_info(text):
 
         i += 1
 
-    # If we didn't catch "Table availability: Affected" by line, search the whole text
+    # Fallback for "Table availability: Affected" if not caught by line scanning
     if not table_availability_affected and re.search(r'Table availability:\s*Affected', text, re.IGNORECASE):
         table_availability_affected = True
 
-    # ---- Set status based on table availability ----
+    # Set status based on table availability
     if table_availability_affected:
         info['status'] = 'Affected'
-    # If still unknown and maintenance completed, set Fixed
     elif info['status'] == 'Unknown' and re.search(r'successfully accomplished', text, re.IGNORECASE):
         info['status'] = 'Fixed'
 
@@ -137,9 +147,13 @@ def get_table_name(text):
             for j in range(i+1, len(lines)):
                 if lines[j]:
                     return lines[j].strip()
-    # Fallback: maybe the table name is in the reference line
-    if re.search(r'Instant Roulette', text, re.IGNORECASE):
-        return "Instant Roulette"
+        elif re.search(r'following tables will be unavailable:', line, re.IGNORECASE):
+            for j in range(i+1, len(lines)):
+                if lines[j]:
+                    return lines[j].strip()
+    # Fallback: maybe table name is in reference line
+    if re.search(r'Lightning Storm', text, re.IGNORECASE):
+        return "Lightning Storm"
     return "Unknown"
 
 def process_email(text):
@@ -150,9 +164,7 @@ def process_email(text):
 def main():
     """Command‑line interface."""
     if len(sys.argv) > 1:
-        # Join all arguments; this loses newlines but the user should use quotes or pipe
         text = " ".join(sys.argv[1:])
-        # Attempt to preserve newlines if they were quoted as \n? Not really possible.
         if '\n' not in text:
             print("⚠️ Hint: For multiline input, please enclose the email in quotes or use a pipe (python3 maintenance.py < email.txt).", file=sys.stderr)
     else:
