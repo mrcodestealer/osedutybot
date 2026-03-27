@@ -558,7 +558,7 @@ def lark_webhook():
         reply = f'the player has been get back his credit. @On-Duty-OSM-Lavie(Podium1) kindly manual cashout the credit and reboot the machine. After that, @Xavier (CS OSM) kindly unset and test the machine thanks'
         send_message(chat_id, reply)
         
-    elif clean_text.lower().startswith('/maintenanceone'):
+    elif clean_text.lower().startswith('/maintenance'):
         # Extract the email text from the original message (which preserves newlines)
         # Find the command in original_text (case‑insensitive)
         match = re.search(r'/maintenanceshort\s+', original_text, re.IGNORECASE)
