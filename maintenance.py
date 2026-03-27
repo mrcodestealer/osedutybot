@@ -18,19 +18,19 @@ def extract_info(text):
         'reference': 'Unknown'
     }
 
-    lines = text.splitlines()
+    lines = [line.strip() for line in text.splitlines()]
+    table_availability_affected = False   # flag for new format status
+
     i = 0
     n = len(lines)
-
     while i < n:
-        line = lines[i].strip()
+        line = lines[i]
         if not line:
             i += 1
             continue
 
-        # Look for table name
+        # ---- Old format table ----
         if re.search(r'^table\s+', line, re.IGNORECASE):
-            # Old format: "table XXXtreme Lightning Roulette in ..."
             match = re.search(r'table\s+([^\.]+?)\s+in', line, re.IGNORECASE)
             if match:
                 info['table'] = match.group(1).strip()
@@ -38,55 +38,68 @@ def extract_info(text):
                 match = re.search(r'table\s+(.*?)\s+was', line, re.IGNORECASE)
                 if match:
                     info['table'] = match.group(1).strip()
-        elif re.search(r'^Affected table/-s:', line, re.IGNORECASE):
-            # New format: next non‑empty line is the table name
-            i += 1
-            while i < n and not lines[i].strip():
-                i += 1
-            if i < n:
-                info['table'] = lines[i].strip()
 
-        # Reason
+        # ---- New format table ----
+        elif re.search(r'^Affected table/-s:', line, re.IGNORECASE):
+            j = i + 1
+            while j < n and not lines[j]:
+                j += 1
+            if j < n:
+                info['table'] = lines[j].strip()
+            i = j
+            continue
+
+        # ---- Reason ----
         elif re.search(r'^Reason:', line, re.IGNORECASE):
             match = re.search(r'^Reason:\s*(.*)$', line, re.IGNORECASE)
             if match:
-                info['reason'] = match.group(1).strip()
-                # Remove parenthetical part
-                info['reason'] = re.sub(r'\s*\([^)]*\)', '', info['reason'])
+                reason = match.group(1).strip()
+                reason = re.sub(r'\s*\([^)]*\)', '', reason)
+                info['reason'] = reason
 
-        # Status
+        # ---- Explicit Status line (old format) ----
         elif re.search(r'^Status:', line, re.IGNORECASE):
             match = re.search(r'^Status:\s*(.*)$', line, re.IGNORECASE)
             if match:
                 info['status'] = match.group(1).strip()
 
-        # Start time
+        # ---- Table availability (new format status) ----
+        elif re.search(r'^Table availability:', line, re.IGNORECASE):
+            # e.g., "Table availability: Affected" -> status = Affected
+            match = re.search(r'^Table availability:\s*(.*)$', line, re.IGNORECASE)
+            if match and match.group(1).strip().lower() == 'affected':
+                table_availability_affected = True
+
+        # ---- Start time ----
         elif re.search(r'^Start time:', line, re.IGNORECASE):
             match = re.search(r'^Start time:\s*(.*)$', line, re.IGNORECASE)
             if match:
                 info['start_time'] = match.group(1).strip()
 
-        # End time
+        # ---- End time ----
         elif re.search(r'^End time:', line, re.IGNORECASE):
             match = re.search(r'^End time:\s*(.*)$', line, re.IGNORECASE)
             if match:
                 info['end_time'] = match.group(1).strip()
 
-        # Time of resolution (old format)
+        # ---- Time of resolution (old format) ----
         elif re.search(r'^Time of resolution:', line, re.IGNORECASE):
             match = re.search(r'from\s+(.*?)\s+till\s+(.*?)(?:\s*\(|$)', line, re.IGNORECASE)
             if match:
                 info['start_time'] = match.group(1).strip()
                 info['end_time'] = match.group(2).strip()
 
-        # Reference: TINC-, SD-, or [Service Desk]
+        # ---- Reference lines ----
         elif re.search(r'^(TINC-\d+|SD-\d+|\[Service Desk\])', line, re.IGNORECASE):
             info['reference'] = line.strip()
 
         i += 1
 
-    # If status is still unknown but the text mentions "successfully accomplished", set to Fixed
-    if info['status'] == 'Unknown' and re.search(r'successfully accomplished', text, re.IGNORECASE):
+    # ---- Set status based on table availability ----
+    if table_availability_affected:
+        info['status'] = 'Affected'
+    # If still unknown and maintenance completed, set Fixed
+    elif info['status'] == 'Unknown' and re.search(r'successfully accomplished', text, re.IGNORECASE):
         info['status'] = 'Fixed'
 
     return info
