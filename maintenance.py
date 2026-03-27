@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Generate a simplified maintenance summary from a full email.
-Supports both old and new email formats via line-by-line parsing.
+Supports both old and new email formats.
 """
 
 import sys
@@ -65,7 +65,6 @@ def extract_info(text):
 
         # ---- Table availability (new format status) ----
         elif re.search(r'^Table availability:', line, re.IGNORECASE):
-            # e.g., "Table availability: Affected" -> status = Affected
             match = re.search(r'^Table availability:\s*(.*)$', line, re.IGNORECASE)
             if match and match.group(1).strip().lower() == 'affected':
                 table_availability_affected = True
@@ -95,6 +94,10 @@ def extract_info(text):
 
         i += 1
 
+    # If we didn't catch "Table availability: Affected" by line, search the whole text
+    if not table_availability_affected and re.search(r'Table availability:\s*Affected', text, re.IGNORECASE):
+        table_availability_affected = True
+
     # ---- Set status based on table availability ----
     if table_availability_affected:
         info['status'] = 'Affected'
@@ -121,9 +124,8 @@ def generate_output(info):
 
 def get_table_name(text):
     """Extract just the affected table name for the first tag message."""
-    lines = text.splitlines()
+    lines = [line.strip() for line in text.splitlines()]
     for i, line in enumerate(lines):
-        line = line.strip()
         if re.search(r'^table\s+', line, re.IGNORECASE):
             match = re.search(r'table\s+([^\.]+?)\s+in', line, re.IGNORECASE)
             if match:
@@ -132,11 +134,10 @@ def get_table_name(text):
             if match:
                 return match.group(1).strip()
         elif re.search(r'^Affected table/-s:', line, re.IGNORECASE):
-            # next non‑empty line
             for j in range(i+1, len(lines)):
-                if lines[j].strip():
+                if lines[j]:
                     return lines[j].strip()
-    # Fallback: look for table name in reference
+    # Fallback: maybe the table name is in the reference line
     if re.search(r'Instant Roulette', text, re.IGNORECASE):
         return "Instant Roulette"
     return "Unknown"
@@ -149,9 +150,11 @@ def process_email(text):
 def main():
     """Command‑line interface."""
     if len(sys.argv) > 1:
-        text = " ".join(sys.argv[1:])  # This will still lose newlines if not quoted!
-        # Better to read from stdin for multiline input
-        print("⚠️ Warning: multiline input may lose newlines. Use quotes or pipe.", file=sys.stderr)
+        # Join all arguments; this loses newlines but the user should use quotes or pipe
+        text = " ".join(sys.argv[1:])
+        # Attempt to preserve newlines if they were quoted as \n? Not really possible.
+        if '\n' not in text:
+            print("⚠️ Hint: For multiline input, please enclose the email in quotes or use a pipe (python3 maintenance.py < email.txt).", file=sys.stderr)
     else:
         text = sys.stdin.read()
     if not text.strip():
