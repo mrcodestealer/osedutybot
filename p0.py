@@ -19,26 +19,42 @@ def handle_p0(command_text):
     issue = None
     count = None
     support = None
+    more_than = False   # flag for '2+'
 
     # 1. Try double‑quoted issue
     dq_match = re.match(r'\s*"([^"]+)"\s*(.*)$', command_text)
     if dq_match:
         issue = dq_match.group(1)
         rest = dq_match.group(2)
-        num_match = re.search(r'\b(\d+)\b', rest)
+        # Find the first number (allow trailing +, ?, etc.)
+        num_match = re.search(r'\b(\d+)\s*([+?*]?)\s*(.*)$', rest)
         if num_match:
             count = int(num_match.group(1))
-            support = rest[num_match.end():].strip()
+            operator = num_match.group(2).strip()
+            if operator == '+':
+                more_than = True
+            support = num_match.group(3).strip()
+            if not support:
+                support = "(no support teams specified)"
+        else:
+            return "❌ Could not find a number (players affected) after the quoted issue."
     else:
         # 2. Try single‑quoted issue
         sq_match = re.match(r"\s*'([^']+)'\s*(.*)$", command_text)
         if sq_match:
             issue = sq_match.group(1)
             rest = sq_match.group(2)
-            num_match = re.search(r'\b(\d+)\b', rest)
+            num_match = re.search(r'\b(\d+)\s*([+?*]?)\s*(.*)$', rest)
             if num_match:
                 count = int(num_match.group(1))
-                support = rest[num_match.end():].strip()
+                operator = num_match.group(2).strip()
+                if operator == '+':
+                    more_than = True
+                support = num_match.group(3).strip()
+                if not support:
+                    support = "(no support teams specified)"
+            else:
+                return "❌ Could not find a number (players affected) after the quoted issue."
 
     if issue and count is not None:
         if not support:
@@ -56,6 +72,14 @@ def handle_p0(command_text):
             start, end, count = numbers[0]
             before = command_text[:start].strip()
             after = command_text[end:].strip()
+            # Check if the original text after the number has a '+'
+            # (but it might be part of support, so we need to look ahead)
+            # For simplicity, we can check if after starts with '+'
+            if after.lstrip().startswith('+'):
+                more_than = True
+                after = re.sub(r'^[+?*]\s*', '', after)
+            else:
+                after = re.sub(r'^[+?*]\s*', '', after)
             issue = before.strip('"').strip("'")
             support = after if after else "(no support teams specified)"
         else:
@@ -64,11 +88,13 @@ def handle_p0(command_text):
     now = datetime.now()
     timestamp = now.strftime("%Y-%m-%d %H:%M")
 
+    impact_text = f"more than {count} players" if more_than else f"{count} players"
+
     message = (
         f"📍 P0 Incident Overview\n"
         f"🕐 Time : {timestamp} - Incident Start\n"
         f"🔥 Issue : {issue}\n"
-        f"🎯 Impact Scope: {count} players\n"
+        f"🎯 Impact Scope: {impact_text}\n"
         f"👥 Support Request: {support}"
     )
     return message
