@@ -566,11 +566,15 @@ def lark_webhook():
         reply = f'the player has been get back his credit. @On-Duty-OSM-Lavie(Podium1) kindly manual cashout the credit and reboot the machine. After that, @Xavier (CS OSM) kindly unset and test the machine thanks'
         send_message(chat_id, reply)
         
-    elif clean_text.lower().startswith('/maintenance'):
-        # Extract the email text from the original message (preserves newlines)
-        match = re.search(r'/maintenance\s+', original_text, re.IGNORECASE)
+    elif clean_text.lower().startswith('/maintenance') or clean_text.lower().startswith('/maintenanceshort'):
+        # Determine which command was used
+        cmd = 'maintenance' if clean_text.lower().startswith('/maintenance') else 'maintenanceshort'
+        # Use original_text (the raw message) to capture everything after the command
+        pattern = rf'/{cmd}\s+(.*)'
+        match = re.search(pattern, original_text, re.IGNORECASE | re.DOTALL)
         if match:
-            email_text = original_text[match.end():].strip()
+            email_text = match.group(1).strip()
+            # Remove surrounding quotes if present
             if email_text.startswith('"') and email_text.endswith('"'):
                 email_text = email_text[1:-1]
         else:
@@ -590,6 +594,7 @@ def lark_webhook():
         else:
             send_message(chat_id, "Please provide the email text after the command.")
         return jsonify({"success": True})
+
         
     ################################################################################
     ##################        Machine List       ###################################
