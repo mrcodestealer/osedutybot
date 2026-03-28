@@ -30,7 +30,6 @@ def extract_info(text):
             continue
 
         # ---- Table detection ----
-        # 1. Old format: "table X in Y"
         if re.search(r'^table\s+', line, re.IGNORECASE):
             match = re.search(r'table\s+([^\.]+?)\s+in', line, re.IGNORECASE)
             if match:
@@ -39,8 +38,6 @@ def extract_info(text):
                 match = re.search(r'table\s+(.*?)\s+was', line, re.IGNORECASE)
                 if match:
                     info['table'] = match.group(1).strip()
-
-        # 2. New format: "Affected table/-s:" line followed by table name
         elif re.search(r'^Affected table/-s:', line, re.IGNORECASE):
             j = i + 1
             while j < n and not lines[j]:
@@ -49,8 +46,6 @@ def extract_info(text):
                 info['table'] = lines[j].strip()
             i = j
             continue
-
-        # 3. "following tables will be unavailable:" line followed by table name
         elif re.search(r'following tables will be unavailable:', line, re.IGNORECASE):
             j = i + 1
             while j < n and not lines[j]:
@@ -59,12 +54,6 @@ def extract_info(text):
                 info['table'] = lines[j].strip()
             i = j
             continue
-
-        # 4. Direct table name in the message (e.g., "table Perya Super Color Game in ...")
-        elif re.search(r'table\s+([^\.]+?)\s+in', line, re.IGNORECASE):
-            match = re.search(r'table\s+([^\.]+?)\s+in', line, re.IGNORECASE)
-            if match:
-                info['table'] = match.group(1).strip()
 
         # ---- Reason ----
         elif re.search(r'^Reason:', line, re.IGNORECASE):
@@ -115,14 +104,26 @@ def extract_info(text):
 
         i += 1
 
-    # If we didn't get an explicit end_time and there's no end time mentioned,
-    # and it's a "Time of resolution: We will inform you..." case, set to TBA.
-    if info['end_time'] == 'Unknown' and re.search(r'Time of resolution:.*We will inform you', text, re.IGNORECASE):
+    # --- Fallbacks ---
+    # If start time still unknown, try to find it in the first paragraph
+    if info['start_time'] == 'Unknown':
+        # Look for "from ... UTC" pattern
+        from_match = re.search(r'from\s+(.*?)\s+UTC', text, re.IGNORECASE)
+        if from_match:
+            info['start_time'] = from_match.group(1).strip() + " UTC"
+    # If end time still unknown and "We will inform you" appears, set TBA
+    if info['end_time'] == 'Unknown' and re.search(r'We will inform you as soon', text, re.IGNORECASE):
         info['end_time'] = "TBA"
-
-    # Fallback for "Table availability: Affected" if not caught by line scanning
-    if not table_availability_affected and re.search(r'Table availability:\s*Affected', text, re.IGNORECASE):
-        table_availability_affected = True
+    # If table name still unknown, try to extract from "table X in Y" in the first paragraph
+    if info['table'] == 'Unknown':
+        table_match = re.search(r'table\s+([^\.]+?)\s+in', text, re.IGNORECASE)
+        if table_match:
+            info['table'] = table_match.group(1).strip()
+    # If reference still unknown, use a generic summary from the first line of the email
+    if info['reference'] == 'Unknown':
+        # Extract the first line (or first sentence) as a fallback reference
+        first_line = text.splitlines()[0] if text.splitlines() else ""
+        info['reference'] = first_line[:50] + "..." if len(first_line) > 50 else first_line
 
     # Set status based on table availability (only if not already set)
     if info['status'] == 'Unknown' and table_availability_affected:
