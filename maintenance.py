@@ -98,7 +98,7 @@ def extract_info(text):
                 if re.search(r'We will inform you as soon', line, re.IGNORECASE):
                     info['end_time'] = "TBA"
 
-        # ---- Reference lines ----
+        # ---- Reference lines (only if they match expected patterns) ----
         elif re.search(r'^(TINC-\d+|SD-\d+|\[Service Desk\])', line, re.IGNORECASE):
             info['reference'] = line.strip()
 
@@ -119,11 +119,7 @@ def extract_info(text):
         table_match = re.search(r'table\s+([^\.]+?)\s+in', text, re.IGNORECASE)
         if table_match:
             info['table'] = table_match.group(1).strip()
-    # If reference still unknown, use a generic summary from the first line of the email
-    if info['reference'] == 'Unknown':
-        # Extract the first line (or first sentence) as a fallback reference
-        first_line = text.splitlines()[0] if text.splitlines() else ""
-        info['reference'] = first_line[:50] + "..." if len(first_line) > 50 else first_line
+    # Do NOT fallback to first line for reference; leave as "Unknown" if not found
 
     # Set status based on table availability (only if not already set)
     if info['status'] == 'Unknown' and table_availability_affected:
