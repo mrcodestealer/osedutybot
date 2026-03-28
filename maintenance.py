@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Generate a simplified maintenance summary from a full email.
-Supports multiple email formats.
+Supports multiple email formats, including ongoing maintenance.
 """
 
 import sys
@@ -60,6 +60,12 @@ def extract_info(text):
             i = j
             continue
 
+        # 4. Direct table name in the message (e.g., "table Perya Super Color Game in ...")
+        elif re.search(r'table\s+([^\.]+?)\s+in', line, re.IGNORECASE):
+            match = re.search(r'table\s+([^\.]+?)\s+in', line, re.IGNORECASE)
+            if match:
+                info['table'] = match.group(1).strip()
+
         # ---- Reason ----
         elif re.search(r'^Reason:', line, re.IGNORECASE):
             match = re.search(r'^Reason:\s*(.*)$', line, re.IGNORECASE)
@@ -98,6 +104,10 @@ def extract_info(text):
             if match:
                 info['start_time'] = match.group(1).strip()
                 info['end_time'] = match.group(2).strip()
+            else:
+                # Check for "We will inform you as soon..." pattern
+                if re.search(r'We will inform you as soon', line, re.IGNORECASE):
+                    info['end_time'] = "TBA"
 
         # ---- Reference lines ----
         elif re.search(r'^(TINC-\d+|SD-\d+|\[Service Desk\])', line, re.IGNORECASE):
@@ -105,12 +115,17 @@ def extract_info(text):
 
         i += 1
 
+    # If we didn't get an explicit end_time and there's no end time mentioned,
+    # and it's a "Time of resolution: We will inform you..." case, set to TBA.
+    if info['end_time'] == 'Unknown' and re.search(r'Time of resolution:.*We will inform you', text, re.IGNORECASE):
+        info['end_time'] = "TBA"
+
     # Fallback for "Table availability: Affected" if not caught by line scanning
     if not table_availability_affected and re.search(r'Table availability:\s*Affected', text, re.IGNORECASE):
         table_availability_affected = True
 
-    # Set status based on table availability
-    if table_availability_affected:
+    # Set status based on table availability (only if not already set)
+    if info['status'] == 'Unknown' and table_availability_affected:
         info['status'] = 'Affected'
     elif info['status'] == 'Unknown' and re.search(r'successfully accomplished', text, re.IGNORECASE):
         info['status'] = 'Fixed'
@@ -155,9 +170,14 @@ def get_table_name(text):
             for j in range(i+1, len(lines)):
                 if lines[j]:
                     return lines[j].strip()
-    # Fallback: maybe table name is in reference line
-    if re.search(r'Lightning Storm', text, re.IGNORECASE):
-        return "Lightning Storm"
+        elif re.search(r'table\s+([^\.]+?)\s+in', line, re.IGNORECASE):
+            match = re.search(r'table\s+([^\.]+?)\s+in', line, re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+    # Fallback: if none of the above, try to extract from the first line containing "table"
+    first_table = re.search(r'table\s+([^\.]+?)\s+in', text, re.IGNORECASE)
+    if first_table:
+        return first_table.group(1).strip()
     return "Unknown"
 
 def process_email(text):
