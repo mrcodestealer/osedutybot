@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Generate a simplified maintenance summary from a full email.
-Supports multiple email formats, including ongoing maintenance.
+Supports multiple email formats: fixed, ongoing, and planned.
 """
 
 import sys
@@ -30,6 +30,7 @@ def extract_info(text):
             continue
 
         # ---- Table detection ----
+        # 1. Old format: "table X in Y"
         if re.search(r'^table\s+', line, re.IGNORECASE):
             match = re.search(r'table\s+([^\.]+?)\s+in', line, re.IGNORECASE)
             if match:
@@ -38,6 +39,7 @@ def extract_info(text):
                 match = re.search(r'table\s+(.*?)\s+was', line, re.IGNORECASE)
                 if match:
                     info['table'] = match.group(1).strip()
+        # 2. "Affected table/-s:" line
         elif re.search(r'^Affected table/-s:', line, re.IGNORECASE):
             j = i + 1
             while j < n and not lines[j]:
@@ -46,6 +48,7 @@ def extract_info(text):
                 info['table'] = lines[j].strip()
             i = j
             continue
+        # 3. "following tables will be unavailable:" line
         elif re.search(r'following tables will be unavailable:', line, re.IGNORECASE):
             j = i + 1
             while j < n and not lines[j]:
@@ -54,6 +57,11 @@ def extract_info(text):
                 info['table'] = lines[j].strip()
             i = j
             continue
+        # 4. Inline "table X in Y" (fallback during scanning)
+        elif re.search(r'table\s+([^\.]+?)\s+in', line, re.IGNORECASE):
+            match = re.search(r'table\s+([^\.]+?)\s+in', line, re.IGNORECASE)
+            if match:
+                info['table'] = match.group(1).strip()
 
         # ---- Reason ----
         elif re.search(r'^Reason:', line, re.IGNORECASE):
@@ -70,8 +78,9 @@ def extract_info(text):
                 info['status'] = match.group(1).strip()
 
         # ---- Table availability (new format status) ----
-        elif re.search(r'^Table availability:', line, re.IGNORECASE):
-            match = re.search(r'^Table availability:\s*(.*)$', line, re.IGNORECASE)
+        elif re.search(r'^Table\s+availability\s*:', line, re.IGNORECASE):
+            # Relaxed to allow spaces before colon
+            match = re.search(r'^Table\s+availability\s*:\s*(.*)$', line, re.IGNORECASE)
             if match and match.group(1).strip().lower() == 'affected':
                 table_availability_affected = True
 
@@ -98,28 +107,32 @@ def extract_info(text):
                 if re.search(r'We will inform you as soon', line, re.IGNORECASE):
                     info['end_time'] = "TBA"
 
-        # ---- Reference lines (only if they match expected patterns) ----
+        # ---- Reference lines ----
         elif re.search(r'^(TINC-\d+|SD-\d+|\[Service Desk\])', line, re.IGNORECASE):
             info['reference'] = line.strip()
 
         i += 1
 
     # --- Fallbacks ---
-    # If start time still unknown, try to find it in the first paragraph
+    # Start time: look for "from ... UTC" in whole text
     if info['start_time'] == 'Unknown':
-        # Look for "from ... UTC" pattern
         from_match = re.search(r'from\s+(.*?)\s+UTC', text, re.IGNORECASE)
         if from_match:
             info['start_time'] = from_match.group(1).strip() + " UTC"
-    # If end time still unknown and "We will inform you" appears, set TBA
+
+    # End time: if "We will inform you" appears and end time still unknown, set TBA
     if info['end_time'] == 'Unknown' and re.search(r'We will inform you as soon', text, re.IGNORECASE):
         info['end_time'] = "TBA"
-    # If table name still unknown, try to extract from "table X in Y" in the first paragraph
+
+    # Table name: fallback to "table X in Y" pattern in whole text
     if info['table'] == 'Unknown':
         table_match = re.search(r'table\s+([^\.]+?)\s+in', text, re.IGNORECASE)
         if table_match:
             info['table'] = table_match.group(1).strip()
-    # Do NOT fallback to first line for reference; leave as "Unknown" if not found
+
+    # Table availability flag: if not caught in line scan, check full text
+    if not table_availability_affected and re.search(r'Table\s+availability\s*:\s*Affected', text, re.IGNORECASE):
+        table_availability_affected = True
 
     # Set status based on table availability (only if not already set)
     if info['status'] == 'Unknown' and table_availability_affected:
@@ -131,7 +144,6 @@ def extract_info(text):
 
 def generate_output(info):
     """Format the extracted info into the desired output with user mentions."""
-    # Use the provided open IDs for the two roles
     qa_os_local_id = "ou_c927a378e9b464741c67b61c1641577b"
     cs_team_id = "ou_24fc78938c54f1eda34bb7a446c4a664"
 
@@ -150,6 +162,7 @@ def generate_output(info):
 
 def get_table_name(text):
     """Extract just the affected table name for the first tag message."""
+    # (unchanged, but ensure it's present)
     lines = [line.strip() for line in text.splitlines()]
     for i, line in enumerate(lines):
         if re.search(r'^table\s+', line, re.IGNORECASE):
@@ -171,10 +184,10 @@ def get_table_name(text):
             match = re.search(r'table\s+([^\.]+?)\s+in', line, re.IGNORECASE)
             if match:
                 return match.group(1).strip()
-    # Fallback: if none of the above, try to extract from the first line containing "table"
-    first_table = re.search(r'table\s+([^\.]+?)\s+in', text, re.IGNORECASE)
-    if first_table:
-        return first_table.group(1).strip()
+    # Fallback
+    table_match = re.search(r'table\s+([^\.]+?)\s+in', text, re.IGNORECASE)
+    if table_match:
+        return table_match.group(1).strip()
     return "Unknown"
 
 def process_email(text):
