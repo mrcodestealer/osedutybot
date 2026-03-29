@@ -534,15 +534,24 @@ def lark_webhook():
         
     elif clean_text.lower() == '/cpms':
         reply = cpms_duty.get_cpms_three_days()
-        
-    elif clean_text.lower() == '/cpmscheck':
-        print("DEBUG: /cpmscheck triggered")
-        try:
-            report = cpms_duty.check_missing_duty_for_month()
-            reply = cpms_duty.format_missing_report(report)
-        except Exception as e:
-            print(f"DEBUG: Exception - {e}")
-            reply = f"❌ Failed to check duty: {e}"
+    elif clean_text.lower().startswith('/cpmscheck'):
+        parts = clean_text.split()
+        if len(parts) > 1:
+            try:
+                date_str = parts[1]
+                if '/' in date_str:
+                    month, year = map(int, date_str.split('/'))
+                elif '-' in date_str:
+                    year, month = map(int, date_str.split('-'))
+                else:
+                    raise ValueError
+                reply = cpms_duty.cpms_check(month=month, year=year)
+            except ValueError:
+                reply = "❌ 格式错误。请使用 `/cpmscheck MM/YYYY` 或 `/cpmscheck YYYY-MM`"
+        else:
+            reply = cpms_duty.cpms_check()
+        send_message(chat_id, reply)
+        return jsonify({"success": True})
         
     elif clean_text.lower() == '/sre':
         reply = sre_Duty.get_sre_week_duty()
