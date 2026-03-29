@@ -48,6 +48,141 @@ DUTY_CHAT_ID = "oc_9de3d63fc589df6feeb9b0bee9c45b72"
 
 app = Flask(__name__)
 
+# ================= ALL-DUTY SUMMARY AND CHECK =================
+
+def get_all_duty_summary():
+    """Collect today's duty information from all teams and return a combined message."""
+    lines = []
+    lines.append("📋 **ALL DUTY SUMMARY FOR TODAY** 📋\n")
+
+    # FPMS
+    lines.append("**【FPMS】**")
+    lines.append(fpms_duty.get_fpms_today_duty())
+    lines.append("")
+
+    # PMS
+    lines.append("**【PMS】**")
+    lines.append(pms_duty.dutyNextDay())   # shows next day (which includes today if before midnight? better use dutyForDate)
+    lines.append("")
+
+    # BI
+    lines.append("**【BI】**")
+    lines.append(bi_duty.get_bi_today_duty())
+    lines.append("")
+
+    # FE
+    lines.append("**【FE】**")
+    lines.append(fe_duty.get_fe_next_three_duty())
+    lines.append("")
+
+    # CPMS
+    lines.append("**【CPMS】**")
+    lines.append(cpms_duty.get_cpms_three_days())
+    lines.append("")
+
+    # SRE
+    lines.append("**【SRE】**")
+    lines.append(sre_Duty.get_sre_week_duty())
+    lines.append("")
+
+    # DB
+    lines.append("**【DB】**")
+    lines.append(db_duty.get_three_weeks_summary())
+    lines.append("")
+
+    # Liveslot
+    lines.append("**【Liveslot】**")
+    lines.append(liveslot_duty.get_three_weeks_summary())
+    lines.append("")
+
+    # OTE
+    lines.append("**【OTE】**")
+    lines.append(ote_duty.get_three_weeks_summary())
+    lines.append("")
+
+    # OSE
+    lines.append("**【OSE】**")
+    lines.append(ose_Duty.get_ose_today_duty())
+    lines.append("")
+
+    return "\n".join(lines).strip()
+
+def get_all_duty_check(month=None, year=None):
+    """
+    Run all `*_check` functions and return combined report.
+    If month/year not provided, uses current month.
+    """
+    if year is None:
+        year = datetime.now().year
+    if month is None:
+        month = datetime.now().month
+
+    lines = []
+    lines.append(f"🔍 **DUTY MISSING REPORT – {datetime(year, month, 1).strftime('%B %Y')}** 🔍\n")
+
+    # FPMS
+    lines.append("**【FPMS】**")
+    lines.append(fpms_duty.fpms_check(month=month, year=year))
+    lines.append("")
+
+    # PMS
+    lines.append("**【PMS】**")
+    lines.append(pms_duty.pmsCheck(month=month, year=year))
+    lines.append("")
+
+    # BI
+    lines.append("**【BI】**")
+    lines.append(bi_duty.bi_check(month=month, year=year))
+    lines.append("")
+
+    # FE
+    lines.append("**【FE】**")
+    lines.append(fe_duty.fe_check(month=month, year=year))
+    lines.append("")
+
+    # CPMS
+    lines.append("**【CPMS】**")
+    lines.append(cpms_duty.cpms_check(month=month, year=year))
+    lines.append("")
+
+    # SRE
+    lines.append("**【SRE】**")
+    lines.append(sre_Duty.sre_check(month=month, year=year))
+    lines.append("")
+
+    # DB
+    lines.append("**【DB】**")
+    lines.append(db_duty.db_check(month=month, year=year))
+    lines.append("")
+
+    # Liveslot
+    lines.append("**【Liveslot】**")
+    lines.append(liveslot_duty.liveslot_check(month=month, year=year))
+    lines.append("")
+
+    # OTE
+    lines.append("**【OTE】**")
+    lines.append(ote_duty.ote_check(month=month, year=year))
+    lines.append("")
+
+    return "\n".join(lines).strip()
+
+def display_all_duty():
+    """Send the all-duty summary to the designated duty chat."""
+    summary = get_all_duty_summary()
+    send_message(DUTY_CHAT_ID, summary)
+    print("✅ Sent all-duty summary to", DUTY_CHAT_ID)
+
+def monthly_duty_check():
+    """Run all checks for the new month on the 1st day at midnight."""
+    now = datetime.now()
+    # Ensure we are checking the month that just started (e.g., if run at 00:00 on 1st, it's the new month)
+    month = now.month
+    year = now.year
+    report = get_all_duty_check(month=month, year=year)
+    send_message(DUTY_CHAT_ID, report)
+    print(f"✅ Sent monthly duty check for {year}-{month:02d} to {DUTY_CHAT_ID}")
+
 # ================= LARK API HELPERS =================
     
 def recall_message(message_id):
@@ -210,12 +345,17 @@ def evening_reminder():
     msg = mention_line + "\n" + msg
     send_shift_reminder(DUTY_CHAT_ID, msg)
 
-# Set up scheduler
 scheduler = BackgroundScheduler()
-# Schedule at 7:00 AM every day
+
+# Existing shift reminders
 scheduler.add_job(func=morning_reminder, trigger="cron", hour=7, minute=00)
-# Schedule at 7:00 PM every day
 scheduler.add_job(func=evening_reminder, trigger="cron", hour=19, minute=0)
+
+# New: daily all-duty summary at midnight
+scheduler.add_job(func=display_all_duty, trigger="cron", hour=0, minute=0)
+
+# New: monthly duty check on 1st day at midnight
+scheduler.add_job(func=monthly_duty_check, trigger="cron", day=1, hour=0, minute=0)
 
 PENDING_RESTART_FILE = "restart_pending.json"
 
@@ -683,6 +823,25 @@ def lark_webhook():
                 reply = ose_Duty.get_ose_duty_for_date(target_date)   # function from ose_Duty
             except ValueError:
                 reply = "❌ Invalid date format. Please use DD/MM/YYYY (e.g., 12/12/2026)"
+                
+    elif clean_text.lower().startswith('/dutycheckall'):
+        parts = clean_text.split()
+        if len(parts) > 1:
+            try:
+                date_str = parts[1]
+                if '/' in date_str:
+                    month, year = map(int, date_str.split('/'))
+                elif '-' in date_str:
+                    year, month = map(int, date_str.split('-'))
+                else:
+                    raise ValueError
+                reply = get_all_duty_check(month=month, year=year)
+            except ValueError:
+                reply = "❌ 格式错误。请使用 `/dutycheckall MM/YYYY` 或 `/dutycheckall YYYY-MM`"
+        else:
+            reply = get_all_duty_check()
+        send_message(chat_id, reply)
+        return jsonify({"success": True})
                 
     elif clean_text == '/cashout':
         reply = f'the player has been get back his credit. @On-Duty-OSM-Lavie(Podium1) kindly manual cashout the credit and reboot the machine. After that, @Xavier (CS OSM) kindly unset and test the machine thanks'
