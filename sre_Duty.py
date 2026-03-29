@@ -402,7 +402,7 @@ def sre_check(month=None, year=None):
         return f"✅ All days in {month_name} have duty assigned."
     else:
         missing_str = ", ".join(str(d) for d in missing)
-        return f"⚠️ {month_name} 缺少值班的日期：{missing_str}"
+        return f"⚠️ {month_name} missing duty date：{missing_str}"
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
