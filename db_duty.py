@@ -361,6 +361,44 @@ def list_sheet_ids():
             print(f"  Title: {sheet.get('title')}, ID: {sheet.get('sheetId')}")
     except Exception as e:
         print("Error listing sheets:", e)
+        
+def db_check(month=None, year=None):
+    """
+    检查 DB 值班表中指定月份（默认为当前月份）是否有空缺。
+    返回字符串，格式与其他 check 命令一致。
+    """
+    if year is None:
+        year = datetime.now().year
+    if month is None:
+        month = datetime.now().month
+
+    # 计算该月的总天数
+    if month == 12:
+        next_month_first = datetime(year + 1, 1, 1).date()
+    else:
+        next_month_first = datetime(year, month + 1, 1).date()
+    days_in_month = (next_month_first - datetime(year, month, 1).date()).days
+
+    # 获取该年份的表格数据
+    values, target_rows, error = get_values_and_targets_for_year(year)
+    if error:
+        return error
+    if not target_rows:
+        return f"❌ 在 OSE{year} 工作表中未找到 DB 值班人员区域。"
+
+    missing = []
+    for day in range(1, days_in_month + 1):
+        target_date = datetime(year, month, day).date()
+        checked = get_duty_for_date(target_date, values, target_rows)
+        if not checked:
+            missing.append(day)
+
+    month_name = datetime(year, month, 1).strftime("%B %Y")
+    if not missing:
+        return f"✅ All days in {month_name} have duty assigned."
+    else:
+        missing_str = ", ".join(str(d) for d in missing)
+        return f"⚠️ {month_name} 缺少值班的日期：{missing_str}"
 
 if __name__ == "__main__":
     if "--debug" in sys.argv:

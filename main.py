@@ -479,8 +479,22 @@ def lark_webhook():
     
     elif clean_text.lower() == '/fpms':
         reply = fpms_duty.get_fpms_today_duty()
-    elif clean_text.lower() == '/fpmscheck':
-        reply = fpms_duty.fpms_check()
+    elif clean_text.lower().startswith('/fpmscheck'):
+        parts = clean_text.split()
+        if len(parts) > 1:
+            try:
+                date_str = parts[1]
+                if '/' in date_str:
+                    month, year = map(int, date_str.split('/'))
+                elif '-' in date_str:
+                    year, month = map(int, date_str.split('-'))
+                else:
+                    raise ValueError
+                reply = fpms_duty.fpms_check(month=month, year=year)
+            except ValueError:
+                reply = "❌ 格式错误。请使用 `/fpmscheck MM/YYYY` 或 `/fpmscheck YYYY-MM`"
+        else:
+            reply = fpms_duty.fpms_check()
         send_message(chat_id, reply)
         return jsonify({"success": True})
         
@@ -573,15 +587,87 @@ def lark_webhook():
         
     elif clean_text.lower() == '/sre':
         reply = sre_Duty.get_sre_week_duty()
+    elif clean_text.lower().startswith('/srecheck'):
+        parts = clean_text.split()
+        if len(parts) > 1:
+            try:
+                date_str = parts[1]
+                if '/' in date_str:
+                    month, year = map(int, date_str.split('/'))
+                elif '-' in date_str:
+                    year, month = map(int, date_str.split('-'))
+                else:
+                    raise ValueError
+                reply = sre_Duty.sre_check(month=month, year=year)
+            except ValueError:
+                reply = "❌ 格式错误。请使用 `/srecheck MM/YYYY` 或 `/srecheck YYYY-MM`"
+        else:
+            reply = sre_Duty.sre_check()
+        send_message(chat_id, reply)
+        return jsonify({"success": True})
         
     elif clean_text.lower() == '/db':
         reply = db_duty.get_three_weeks_summary()
+    elif clean_text.lower().startswith('/dbcheck'):
+        parts = clean_text.split()
+        if len(parts) > 1:
+            try:
+                date_str = parts[1]
+                if '/' in date_str:
+                    month, year = map(int, date_str.split('/'))
+                elif '-' in date_str:
+                    year, month = map(int, date_str.split('-'))
+                else:
+                    raise ValueError
+                reply = db_duty.db_check(month=month, year=year)
+            except ValueError:
+                reply = "❌ 格式错误。请使用 `/dbcheck MM/YYYY` 或 `/dbcheck YYYY-MM`"
+        else:
+            reply = db_duty.db_check()
+        send_message(chat_id, reply)
+        return jsonify({"success": True})
     
     elif clean_text.lower() == '/liveslot':
         reply = liveslot_duty.get_three_weeks_summary()
+    elif clean_text.lower().startswith('/liveslotcheck'):
+        parts = clean_text.split()
+        if len(parts) > 1:
+            try:
+                date_str = parts[1]
+                if '/' in date_str:
+                    month, year = map(int, date_str.split('/'))
+                elif '-' in date_str:
+                    year, month = map(int, date_str.split('-'))
+                else:
+                    raise ValueError
+                reply = liveslot_duty.liveslot_check(month=month, year=year)
+            except ValueError:
+                reply = "❌ 格式错误。请使用 `/liveslotcheck MM/YYYY` 或 `/liveslotcheck YYYY-MM`"
+        else:
+            reply = liveslot_duty.liveslot_check()
+        send_message(chat_id, reply)
+        return jsonify({"success": True})
     
     elif clean_text.lower() == '/ote':
         reply = ote_duty.get_three_weeks_summary()
+    elif clean_text.lower().startswith('/otecheck'):
+        parts = clean_text.split()
+        if len(parts) > 1:
+            try:
+                date_str = parts[1]
+                if '/' in date_str:
+                    month, year = map(int, date_str.split('/'))
+                elif '-' in date_str:
+                    year, month = map(int, date_str.split('-'))
+                else:
+                    raise ValueError
+                reply = ote_duty.ote_check(month=month, year=year)
+            except ValueError:
+                reply = "❌ 格式错误。请使用 `/otecheck MM/YYYY` 或 `/otecheck YYYY-MM`"
+        else:
+            reply = ote_duty.ote_check()
+        send_message(chat_id, reply)
+        return jsonify({"success": True})
         
     elif clean_text == '/ose':
         reply = ose_Duty.get_ose_today_duty()          # uses today's date
