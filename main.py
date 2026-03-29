@@ -531,6 +531,24 @@ def lark_webhook():
         
     elif clean_text.lower() == '/fe':
         reply = fe_duty.get_fe_next_three_duty()
+    elif clean_text.lower().startswith('/fecheck'):
+        parts = clean_text.split()
+        if len(parts) > 1:
+            try:
+                date_str = parts[1]
+                if '/' in date_str:
+                    month, year = map(int, date_str.split('/'))
+                elif '-' in date_str:
+                    year, month = map(int, date_str.split('-'))
+                else:
+                    raise ValueError
+                reply = fe_duty.fe_check(month=month, year=year)
+            except ValueError:
+                reply = "❌ 格式错误。请使用 `/fecheck MM/YYYY` 或 `/fecheck YYYY-MM`"
+        else:
+            reply = fe_duty.fe_check()
+        send_message(chat_id, reply)
+        return jsonify({"success": True})
         
     elif clean_text.lower() == '/cpms':
         reply = cpms_duty.get_cpms_three_days()
