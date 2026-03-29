@@ -534,6 +534,8 @@ def lark_webhook():
         
     elif clean_text.lower() == '/cpms':
         reply = cpms_duty.get_cpms_three_days()
+    elif clean_text.lower() == '/cpmscheck':
+        reply = cpms_duty.check_missing_duty_for_month()
         
     elif clean_text.lower() == '/sre':
         reply = sre_Duty.get_sre_week_duty()
