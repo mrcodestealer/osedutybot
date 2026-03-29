@@ -535,7 +535,12 @@ def lark_webhook():
     elif clean_text.lower() == '/cpms':
         reply = cpms_duty.get_cpms_three_days()
     elif clean_text.lower() == '/cpmscheck':
-        reply = cpms_duty.check_missing_duty_for_month()
+        try:
+            # Get missing duty report for the current month (default)
+            report = cpms_duty.check_missing_duty_for_month()
+            reply = cpms_duty.format_missing_report(report)
+        except Exception as e:
+            reply = f"❌ Failed to check duty: {e}"
         
     elif clean_text.lower() == '/sre':
         reply = sre_Duty.get_sre_week_duty()
