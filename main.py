@@ -866,8 +866,8 @@ def lark_webhook():
             game_name = maintenance.get_table_name(email_text)
             if game_name == "Unknown":
                 game_name = "Unknown table"
-            first_reply = f'<at user_id="ou_8faac9cb9f7bf3ee69dc09f8e1f147bc">User</at> {game_name}'
-            send_message(chat_id, first_reply)
+            #first_reply = f'<at user_id="ou_8faac9cb9f7bf3ee69dc09f8e1f147bc">User</at> {game_name}'
+            #send_message(chat_id, first_reply)
 
             # Second message: full summary
             second_reply = maintenance.process_email(email_text)
