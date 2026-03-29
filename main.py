@@ -609,7 +609,7 @@ def lark_webhook():
         p0_details = p0.handle_p0(args)
         reply = (
             "📍 !!!P0 Incident Alert!!!\n\n"
-            f'<at user_id="{junchen}">Jun Chen</at>\n'
+            #f'<at user_id="{junchen}">Jun Chen</at>\n'
             f'<at user_id="{yuxuan}">Yuxuan</at>\n'
             f'<at user_id="{shen}">Shen</at>\n\n'
             f"{p0_details}"
