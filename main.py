@@ -352,7 +352,7 @@ scheduler.add_job(func=morning_reminder, trigger="cron", hour=7, minute=00)
 scheduler.add_job(func=evening_reminder, trigger="cron", hour=19, minute=0)
 
 # New: daily all-duty summary at midnight
-scheduler.add_job(func=display_all_duty, trigger="cron", hour=0, minute=0)
+#scheduler.add_job(func=display_all_duty, trigger="cron", hour=0, minute=0)
 
 # New: monthly duty check on 1st day at midnight
 scheduler.add_job(func=monthly_duty_check, trigger="cron", day=1, hour=0, minute=0)
