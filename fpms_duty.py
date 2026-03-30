@@ -114,6 +114,9 @@ def get_month_duty_map(year, month):
     if not month_abbr:
         return None
 
+    # 获取完整月份名称，例如 "March"
+    full_month = datetime(year, month, 1).strftime("%B")
+
     try:
         token = get_tenant_access_token()
     except Exception:
@@ -138,8 +141,9 @@ def get_month_duty_map(year, month):
     for r, row in enumerate(values):
         for c, cell in enumerate(row):
             if isinstance(cell, str) and cell.startswith("日期 - "):
-                abbr = cell[4:].strip()
-                if abbr == month_abbr:
+                suffix = cell[4:].strip()
+                # 同时支持三字母缩写和完整英文月份
+                if suffix == month_abbr or suffix == full_month:
                     header_row = r
                     header_col = c
                     break
