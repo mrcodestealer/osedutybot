@@ -684,6 +684,7 @@ def lark_webhook():
         return jsonify({"success": True})
         
     elif clean_text.lower() == '/fe':
+        reply = "yes?"
         reply = fe_duty.get_fe_next_three_duty()
     elif clean_text.lower().startswith('/fecheck'):
         parts = clean_text.split()
