@@ -23,7 +23,7 @@ import os
 # !! 请务必替换为您的实际凭证 !!
 APP_ID = "cli_a9ca652b89b85ed1"
 APP_SECRET = "VQJh0oFKfsyCHr5tQDMVNbr4o4kmjbFr"
-SPREADSHEET_TOKEN = "GpJZw9oySizpADkH3b6l8Zx3g7f"   # 表格 token
+SPREADSHEET_TOKEN = "VwgCwAdrziR1j1k9u7rlMHpogXf"   
 
 
 # ================= Helper Functions =================
