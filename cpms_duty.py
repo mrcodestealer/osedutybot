@@ -20,10 +20,9 @@ from datetime import datetime, timedelta
 import os
 
 # ================= Configuration =================
-# !! 请务必替换为您的实际凭证 !!
 APP_ID = "cli_a9ca652b89b85ed1"
 APP_SECRET = "VQJh0oFKfsyCHr5tQDMVNbr4o4kmjbFr"
-SPREADSHEET_TOKEN = "VwgCwAdrziR1j1k9u7rlMHpogXf"   
+SPREADSHEET_TOKEN = "VwgCwAdrziR1j1k9u7rlMHpogXf"
 
 
 # ================= Helper Functions =================
@@ -159,6 +158,10 @@ def get_cpms_duty_for_date(target_date):
     month = target_date.month
     day = target_date.day
     weekday = target_date.strftime("%A")  # 英文星期几，如 Monday
+    
+    token = get_tenant_access_token()
+    sheets = get_sheet_list(token)
+    print("Sheets found:", [s.get("title") for s in sheets])
 
     try:
         token = get_tenant_access_token()

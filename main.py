@@ -706,7 +706,10 @@ def lark_webhook():
         return jsonify({"success": True})
         
     elif clean_text.lower() == '/cpms':
+        send_message(chat_id, "CPMS command received, processing...")
         reply = cpms_duty.get_cpms_three_days()
+        send_message(chat_id, reply)
+        return jsonify({"success": True})
     elif clean_text.lower().startswith('/cpmscheck'):
         parts = clean_text.split()
         if len(parts) > 1:
