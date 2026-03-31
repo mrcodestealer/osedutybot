@@ -163,17 +163,12 @@ def get_fe_next_three_duty():
 def fe_check(month=None, year=None):
     """
     检查 FE 值班表中指定月份（默认为当前月份）是否有空缺。
-    由于 FE 表格仅包含当前月份的日期（1-31号），如果传入的月份不是当前月份，则提示不支持。
+    注意：该脚本始终读取同一个固定表格，请确保表格已更新为要检查的月份的数据。
     """
-    today = datetime.now().date()
     if year is None:
-        year = today.year
+        year = datetime.now().year
     if month is None:
-        month = today.month
-
-    # 只允许检查当前月份（因为表格数据固定对应当前月份）
-    if (year, month) != (today.year, today.month):
-        return f"⚠️ FE 表格仅包含当前月份（{today.strftime('%B %Y')}）的数据，无法检查其他月份。"
+        month = datetime.now().month
 
     try:
         token = get_tenant_access_token()
@@ -187,16 +182,17 @@ def fe_check(month=None, year=None):
     if len(values) < 31:
         return f"⚠️ 数据不完整（仅 {len(values)} 天）。"
 
-    # 获取当前月份的总天数
+    # 获取目标月份的总天数
+    first_day = datetime(year, month, 1).date()
     if month == 12:
         next_month_first = datetime(year + 1, 1, 1).date()
     else:
         next_month_first = datetime(year, month + 1, 1).date()
-    days_in_month = (next_month_first - datetime(year, month, 1).date()).days
+    days_in_month = (next_month_first - first_day).days
 
     missing = []
     for day in range(1, days_in_month + 1):
-        raw_name = values[day - 1].strip() if values[day - 1] else ""
+        raw_name = values[day - 1].strip() if day - 1 < len(values) and values[day - 1] else ""
         if not raw_name or raw_name == "No duty":
             missing.append(day)
 
