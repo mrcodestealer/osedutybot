@@ -227,31 +227,39 @@ def get_month_duty_map(year, month):
 def get_fpms_today_duty():
     """Return FPMS schedule for today, tomorrow, and the day after tomorrow."""
     today = datetime.now().date()
-    current_year = today.year
-    current_month = today.month
-
-    duty_map = get_month_duty_map(current_year, current_month)
-    if duty_map is None:
-        return "无法获取当月值班数据，请检查表格结构。"
-
     output_lines = []
+    # Cache to avoid fetching the same month multiple times
+    month_cache = {}
+
     for offset in range(3):
         target_date = today + timedelta(days=offset)
-        if target_date.year == current_year and target_date.month == current_month:
-            day_num = target_date.day
-            duty_names = duty_map.get(day_num, [])
+        year = target_date.year
+        month = target_date.month
+        day = target_date.day
+
+        # Fetch duty map for the month (if not already cached)
+        cache_key = (year, month)
+        if cache_key not in month_cache:
+            month_cache[cache_key] = get_month_duty_map(year, month)
+        duty_map = month_cache.get(cache_key)
+
+        # If map is None (e.g., sheet not found), treat as no duty
+        if duty_map is None:
+            duty_names = []
         else:
-            duty_names = []  # no data for other months
+            duty_names = duty_map.get(day, [])
 
         date_str = target_date.strftime("%B %d, %Y %A")
         header = f"📅 FPMS Schedule - {date_str}"
         output_lines.append(header)
+
         if duty_names:
             for name in duty_names:
                 phone = get_phone(name)
                 output_lines.append(f"• {name}  (Phone: {phone})")
         else:
             output_lines.append("• No duty")
+
         output_lines.append("")  # blank line separator
 
     return "\n".join(output_lines).strip()
