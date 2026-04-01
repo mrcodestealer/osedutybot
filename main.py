@@ -185,7 +185,8 @@ def monthly_duty_check():
 
 # ================= LARK API HELPERS =================
 
-def add_reaction(message_id, reaction_type="❤️"):
+def add_heart_reaction(message_id):
+    """Add a heart reaction to a message."""
     token = get_tenant_access_token()
     url = f"https://open.larksuite.com/open-apis/im/v1/messages/{message_id}/reactions"
     headers = {
@@ -193,10 +194,15 @@ def add_reaction(message_id, reaction_type="❤️"):
         "Content-Type": "application/json"
     }
     payload = {
-        "reaction_type": "emoji",
-        "content": reaction_type
+        "reaction_type": {
+            "emoji_type": "HEART"
+        }
     }
     response = requests.post(url, headers=headers, json=payload)
+    if response.status_code == 200:
+        print(f"✅ Added heart reaction to message {message_id}")
+    else:
+        print(f"❌ Failed to add reaction: {response.text}")
     return response.json()
     
 def recall_message(message_id):
@@ -514,8 +520,9 @@ def lark_webhook():
         send_message(chat_id, reply)
         return jsonify({"success": True})
     
-    if "good luck" in text.lower():
-        add_reaction(message_id, "❤️")
+    if "good luck" in clean_text.lower():
+        add_heart_reaction(message_id)
+        #send_message(chat_id, "Good luck to you too! 🍀")
 
     # 8. Group mention check (supports both schemas)
     if chat_type == "group":
