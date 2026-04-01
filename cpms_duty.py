@@ -21,17 +21,11 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 # ================= Configuration =================
-<<<<<<< HEAD
+
 # !! 请务必替换为您的实际凭证 !!
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
 SPREADSHEET_TOKEN = os.getenv("CPMS_SPREADSHEET_TOKEN")
-=======
-APP_ID = "cli_a9ca652b89b85ed1"
-APP_SECRET = "VQJh0oFKfsyCHr5tQDMVNbr4o4kmjbFr"
-SPREADSHEET_TOKEN = "FYaZw5QdgiT7SdkytKslIYoHgrf"
-
->>>>>>> 6a6dc44fabd80c2d61aea89b37419dbf2ca2ad9f
 
 # ================= Helper Functions =================
 def get_tenant_access_token():
