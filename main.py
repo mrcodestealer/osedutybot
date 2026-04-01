@@ -184,6 +184,20 @@ def monthly_duty_check():
     print(f"✅ Sent monthly duty check for {year}-{month:02d} to {DUTY_CHAT_ID}")
 
 # ================= LARK API HELPERS =================
+
+def add_reaction(message_id, reaction_type="❤️"):
+    token = get_tenant_access_token()
+    url = f"https://open.larksuite.com/open-apis/im/v1/messages/{message_id}/reactions"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "reaction_type": "emoji",
+        "content": reaction_type
+    }
+    response = requests.post(url, headers=headers, json=payload)
+    return response.json()
     
 def recall_message(message_id):
     """Delete a message using Lark's recall API."""
@@ -499,6 +513,9 @@ def lark_webhook():
         reply = f'<at user_id="{sender_id}"></at> 给我擦皮鞋'
         send_message(chat_id, reply)
         return jsonify({"success": True})
+    
+    if "good luck" in text.lower():
+        add_reaction(message_id, "❤️")
 
     # 8. Group mention check (supports both schemas)
     if chat_type == "group":
