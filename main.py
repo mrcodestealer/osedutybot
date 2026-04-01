@@ -520,9 +520,9 @@ def lark_webhook():
         send_message(chat_id, reply)
         return jsonify({"success": True})
     
-    if "good luck" in clean_text.lower():
+    if "good luck" in text:
         add_heart_reaction(message_id)
-        send_message(chat_id, "Good luck to you too! 🍀")
+        #send_message(chat_id, "Good luck to you too! 🍀")
 
     # 8. Group mention check (supports both schemas)
     if chat_type == "group":
