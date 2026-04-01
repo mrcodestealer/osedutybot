@@ -495,7 +495,7 @@ def lark_webhook():
         print("❌ Could not extract chat_id or text")
         return jsonify({"error": "Missing data"}), 400
     
-    if "我要验牌" in clean_text:
+    if "我要验牌" in text:
         reply = f'<at user_id="{sender_id}"></at> 给我擦皮鞋'
         send_message(chat_id, reply)
         return jsonify({"success": True})
