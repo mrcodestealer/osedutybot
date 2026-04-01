@@ -32,16 +32,14 @@ def get_duty_list():
 def search_duty(query):
     """
     Search duty_list using:
-    - exact match (case‑insensitive, ignoring spaces)
-    - substring match (if no exact match)
-    - fuzzy match (if no substring match)
+    - substring match (case‑insensitive, ignoring spaces)
+    - fuzzy match as fallback
     Multiple names can be given separated by commas or '&'.
     """
     duty_list = get_duty_list()
     if not duty_list:
         return "Duty list is empty or not loaded."
 
-    # If query is empty, return all entries
     if not query:
         lines = []
         for entry in duty_list:
@@ -63,34 +61,30 @@ def search_duty(query):
 
     for part in parts:
         part_norm = part.lower().replace(' ', '')
-        matched = False
 
-        # 1. Exact match
-        for entry in duty_list:
-            name_norm = entry['name'].lower().replace(' ', '')
-            if part_norm == name_norm:
-                results[entry['phone']] = entry
-                matched = True
-        if matched:
-            continue
-
-        # 2. Substring match
+        # 1. Substring match
+        matched_entries = []
         for entry in duty_list:
             name_norm = entry['name'].lower().replace(' ', '')
             if part_norm in name_norm:
+                matched_entries.append(entry)
+
+        if matched_entries:
+            for entry in matched_entries:
                 results[entry['phone']] = entry
-                matched = True
-        if matched:
             continue
 
-        # 3. Fuzzy match
+        # 2. Fuzzy match
+        fuzzy_matches = []
         for entry in duty_list:
             name_norm = entry['name'].lower().replace(' ', '')
             similarity = difflib.SequenceMatcher(None, part_norm, name_norm).ratio()
             if similarity >= THRESHOLD:
+                fuzzy_matches.append((similarity, entry))
+        if fuzzy_matches:
+            fuzzy_matches.sort(key=lambda x: x[0], reverse=True)
+            for _, entry in fuzzy_matches:
                 results[entry['phone']] = entry
-                matched = True
-        # if still no match, do nothing (part ignored)
 
     if not results:
         return f"No matching duty personnel found for '{query}'."
