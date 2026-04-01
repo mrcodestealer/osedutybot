@@ -202,7 +202,6 @@ def monthly_duty_check():
 # ================= LARK API HELPERS =================
 
 def add_all_reactions(message_id):
-    """Add all reactions from the list to a message."""
     token = get_tenant_access_token()
     headers = {
         "Authorization": f"Bearer {token}",
@@ -210,17 +209,15 @@ def add_all_reactions(message_id):
     }
     for emoji_code in ALL_EMOJI_CODES:
         url = f"https://open.larksuite.com/open-apis/im/v1/messages/{message_id}/reactions"
-        payload = {
-            "reaction_type": {
-                "emoji_type": emoji_code
-            }
-        }
+        payload = {"reaction_type": {"emoji_type": emoji_code}}
         try:
-            response = requests.post(url, headers=headers, json=payload)
-            if response.status_code == 200:
+            resp = requests.post(url, headers=headers, json=payload)
+            if resp.status_code == 200:
                 print(f"✅ Added {emoji_code} reaction")
             else:
-                print(f"⚠️ Failed to add {emoji_code}: {response.text}")
+                # Log full response for debugging
+                print(f"⚠️ {emoji_code} failed: {resp.status_code} {resp.text}")
+            time.sleep(0.5)   # 500 ms between requests – adjust if needed
         except Exception as e:
             print(f"❌ Error adding {emoji_code}: {e}")
 
