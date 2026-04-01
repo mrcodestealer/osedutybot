@@ -203,23 +203,27 @@ def monthly_duty_check():
 
 def add_all_reactions(message_id):
     token = get_tenant_access_token()
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
-    for emoji_code in ALL_EMOJI_CODES:
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    success_count = 0
+    for emoji in ALL_EMOJI_CODES:
         url = f"https://open.larksuite.com/open-apis/im/v1/messages/{message_id}/reactions"
-        payload = {"reaction_type": {"emoji_type": emoji_code}}
-        try:
+        payload = {"reaction_type": {"emoji_type": emoji}}
+        for attempt in range(3):
             resp = requests.post(url, headers=headers, json=payload)
             if resp.status_code == 200:
-                print(f"✅ Added {emoji_code} reaction")
+                print(f"✅ Added {emoji}")
+                success_count += 1
+                break
+            elif resp.status_code == 429:
+                wait = (2 ** attempt) + random.uniform(0, 0.5)
+                print(f"⚠️ Rate limited on {emoji}, retrying after {wait:.1f}s")
+                time.sleep(wait)
+                continue
             else:
-                # Log full response for debugging
-                print(f"⚠️ {emoji_code} failed: {resp.status_code} {resp.text}")
-            time.sleep(0.5)   # 500 ms between requests – adjust if needed
-        except Exception as e:
-            print(f"❌ Error adding {emoji_code}: {e}")
+                print(f"⚠️ {emoji} failed: {resp.status_code} {resp.text}")
+                break
+        time.sleep(1.0)   # base delay between emojis
+    print(f"Added {success_count} of {len(ALL_EMOJI_CODES)} reactions")
 
 def add_random_reaction(message_id):
     """Add a random reaction from the predefined list to a message."""
