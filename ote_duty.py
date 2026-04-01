@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Liveslot Duty Schedule – Weekly Summary (3 weeks by default)
+OTE Duty Schedule – Weekly Summary (3 weeks by default)
 
 Usage:
-    ./liveslot_duty.py                # shows next 3 weeks of Liveslot duty
-    ./liveslot_duty.py DD/MM/YYYY     # shows duty for the specified date
-    ./liveslot_duty.py --week         # shows this week's duty summary (single week)
-    ./liveslot_duty.py --week-detail   # shows day-by-day duty for the current week
-    ./liveslot_duty.py --week-detail DD/MM/YYYY  # day-by-day for the week containing the given date
-    ./liveslot_duty.py --debug         # enables debug output
+    ./ote_duty.py                # shows next 3 weeks of OTE duty
+    ./ote_duty.py DD/MM/YYYY     # shows duty for the specified date
+    ./ote_duty.py --week         # shows this week's duty summary (single week)
+    ./ote_duty.py --week-detail   # shows day-by-day duty for the current week
+    ./ote_duty.py --week-detail DD/MM/YYYY  # day-by-day for the week containing the given date
+    ./ote_duty.py --debug         # enables debug output
 """
 
 import re
@@ -17,20 +17,19 @@ import csv
 import os
 import requests
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
-load_dotenv()
+
 # ================= Configuration =================
-APP_ID = os.getenv("APP_ID")
-APP_SECRET = os.getenv("APP_SECRET")
-SPREADSHEET_TOKEN = os.getenv("OSE_SPREADSHEET_TOKEN")
+APP_ID = "cli_a9ca652b89b85ed1"
+APP_SECRET = "VQJh0oFKfsyCHr5tQDMVNbr4o4kmjbFr"
+SPREADSHEET_TOKEN = "O4Dfw4DVTiPpFukn801l5z3WgMd"
 DUTY_LIST_PATH = "dutyList.csv"          # CSV file: name,team,phone
 
 # Team members (as they appear in column A) and their CSV‑lookup names
 TARGET_DUTY = [
-    {"display": "YY", "lookup": "Yu Yang"},
-    {"display": "Aaron", "lookup": "Aaron Wong"},
-    {"display": "Joseph", "lookup": "Joseph"},
-    {"display": "Albert", "lookup": "Albert"},
+    {"display": "Faye", "lookup": "Faye"},
+    {"display": "Shie Ni", "lookup": "Shie Ni"},
+    {"display": "Kwang Ming", "lookup": "Kwang Ming"},
+    {"display": "Xinyee", "lookup": "Xinyee"},
 ]
 
 # Month name to number mapping (full and abbreviated)
@@ -179,12 +178,12 @@ def find_section_marker(values, marker):
 
 def find_target_rows(values):
     """
-    Find rows under the "Liveslot" section that contain one of the target display names.
+    Find rows under the "OTE" section that contain one of the target display names.
     Returns list of (row_idx, display_name, lookup_name).
     """
-    marker_row = find_section_marker(values, "Liveslot")
+    marker_row = find_section_marker(values, "OTE")
     if marker_row is None:
-        debug_print("Liveslot section not found")
+        debug_print("OTE section not found")
         return []
 
     target_rows = []
@@ -252,7 +251,7 @@ def get_date_column(target_date, values):
     return None
 
 def get_duty_for_date(target_date, values, target_rows):
-    """Return list of display names for Liveslot members checked on target_date."""
+    """Return list of display names for OTE members checked on target_date."""
     date_col = get_date_column(target_date, values)
     if date_col is None:
         return []
@@ -303,7 +302,7 @@ def get_week_summary_from_data(week_start, values, target_rows):
         duty_names.update(checked)
 
     week_end = week_start + timedelta(days=6)
-    title = f"📅 Liveslot Duty – {week_start.strftime('%B %d, %Y Monday')} – {week_end.strftime('%B %d, %Y Sunday')}"
+    title = f"📅 OTE Duty – {week_start.strftime('%B %d, %Y Monday')} – {week_end.strftime('%B %d, %Y Sunday')}"
     if not duty_names:
         return f"{title}\n• no duty"
 
@@ -312,7 +311,7 @@ def get_week_summary_from_data(week_start, values, target_rows):
         # Find lookup name for this display name
         lookup_name = next((t["lookup"] for t in TARGET_DUTY if t["display"] == name), name)
         phone = get_phone_from_dutylist(lookup_name)
-        lines.append(f"• {name} Liveslot (Phone: {phone})")
+        lines.append(f"• {name} OTE (Phone: {phone})")
     return "\n".join(lines)
 
 def get_three_weeks_summary():
@@ -325,13 +324,13 @@ def get_three_weeks_summary():
     if error:
         return error
     if not target_rows:
-        return "❌ No Liveslot section found in sheet."
+        return "❌ No OTE section found in sheet."
 
     results = []
     for i in range(3):
         week_start = monday + timedelta(days=7*i)
         results.append(get_week_summary_from_data(week_start, values, target_rows))
-    return "\n\n".join(results)
+    return "\n\n".join(results) + "\n\nKindly remind for MY OTE call the phone number first instead of call Whatsapp"
 
 def get_day_duty(target_date):
     """Return duty for a single date."""
@@ -339,18 +338,18 @@ def get_day_duty(target_date):
     if error:
         return error
     if not target_rows:
-        return f"📅 {target_date.strftime('%d/%m/%Y')} – no Liveslot section found."
+        return f"📅 {target_date.strftime('%d/%m/%Y')} – no OTE section found."
 
     checked = get_duty_for_date(target_date, values, target_rows)
     if not checked:
-        return f"📅 {target_date.strftime('%d/%m/%Y')} – no Liveslot duty assigned."
+        return f"📅 {target_date.strftime('%d/%m/%Y')} – no OTE duty assigned."
 
     checked.sort()
-    lines = [f"📅 Liveslot Duty – {target_date.strftime('%d/%m/%Y')}"]
+    lines = [f"📅 OTE Duty – {target_date.strftime('%d/%m/%Y')}"]
     for name in checked:
         lookup_name = next((t["lookup"] for t in TARGET_DUTY if t["display"] == name), name)
         phone = get_phone_from_dutylist(lookup_name)
-        lines.append(f"• {name} Liveslot (Phone: {phone})")
+        lines.append(f"• {name} OTE (Phone: {phone})")
     return "\n".join(lines)
 
 def get_week_detail(week_start=None):
@@ -365,9 +364,9 @@ def get_week_detail(week_start=None):
     if error:
         return error
     if not target_rows:
-        return "❌ No Liveslot section found in sheet."
+        return "❌ No OTE section found in sheet."
 
-    lines = [f"📅 Liveslot Duty details – week starting {week_start.strftime('%d/%m/%Y')}"]
+    lines = [f"📅 OTE Duty details – week starting {week_start.strftime('%d/%m/%Y')}"]
     missing_days = []
     for i in range(7):
         day = week_start + timedelta(days=i)
@@ -381,7 +380,7 @@ def get_week_detail(week_start=None):
             for name in checked:
                 lookup_name = next((t["lookup"] for t in TARGET_DUTY if t["display"] == name), name)
                 phone = get_phone_from_dutylist(lookup_name)
-                duty_list.append(f"{name} Liveslot (Phone: {phone})")
+                duty_list.append(f"{name} OTE (Phone: {phone})")
             lines.append(f"  {day.strftime('%A %d/%m/%Y')}: ✅ " + ", ".join(duty_list))
     if missing_days:
         lines.append(f"\n⚠️ Missing duty on: {', '.join(missing_days)}")
@@ -408,9 +407,9 @@ def list_sheet_ids():
     except Exception as e:
         print("Error listing sheets:", e)
         
-def liveslot_check(month=None, year=None):
+def ote_check(month=None, year=None):
     """
-    检查 Liveslot 值班表中指定月份（默认为当前月份）是否有空缺。
+    检查 OTE 值班表中指定月份（默认为当前月份）是否有空缺。
     返回字符串，格式与其他 check 命令一致。
     """
     if year is None:
@@ -430,7 +429,7 @@ def liveslot_check(month=None, year=None):
     if error:
         return error
     if not target_rows:
-        return f"❌ 在 OSE{year} 工作表中未找到 Liveslot 值班人员区域。"
+        return f"❌ 在 OSE{year} 工作表中未找到 OTE 值班人员区域。"
 
     missing = []
     for day in range(1, days_in_month + 1):

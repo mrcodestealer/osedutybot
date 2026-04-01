@@ -161,6 +161,49 @@ def get_fe_next_three_duty():
 
     return "\n\n".join(blocks)   # 每个块之间空一行
 
+def fe_check(month=None, year=None):
+    """
+    检查 FE 值班表中指定月份（默认为当前月份）是否有空缺。
+    注意：该脚本始终读取同一个固定表格，请确保表格已更新为要检查的月份的数据。
+    """
+    if year is None:
+        year = datetime.now().year
+    if month is None:
+        month = datetime.now().month
+
+    try:
+        token = get_tenant_access_token()
+    except Exception as e:
+        return f"❌ Failed to get access token: {e}"
+
+    values = get_sheet_values(token)
+    if values is None:
+        return "❌ Unable to read data from Lark sheet, please try again later."
+
+    if len(values) < 31:
+        return f"⚠️ 数据不完整（仅 {len(values)} 天）。"
+
+    # 获取目标月份的总天数
+    first_day = datetime(year, month, 1).date()
+    if month == 12:
+        next_month_first = datetime(year + 1, 1, 1).date()
+    else:
+        next_month_first = datetime(year, month + 1, 1).date()
+    days_in_month = (next_month_first - first_day).days
+
+    missing = []
+    for day in range(1, days_in_month + 1):
+        raw_name = values[day - 1].strip() if day - 1 < len(values) and values[day - 1] else ""
+        if not raw_name or raw_name == "No duty":
+            missing.append(day)
+
+    month_name = datetime(year, month, 1).strftime("%B %Y")
+    if not missing:
+        return f"✅ All days in {month_name} have duty assigned."
+    else:
+        missing_str = ", ".join(str(d) for d in missing)
+        return f"⚠️ {month_name} 缺少值班的日期：{missing_str}"
+
 # 测试用
 if __name__ == "__main__":
     print("=== Today's duty ===")

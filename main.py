@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 import atexit
 from collections import OrderedDict
+import random
 
 # Import command handlers from separate modules
 from duty_list import search_duty
@@ -25,6 +26,7 @@ import sre_Duty
 import cpms_duty
 import db_duty
 import liveslot_duty
+import ote_duty
 
 import nwr
 import winford
@@ -35,6 +37,7 @@ import dhs
 import mdr
 
 import p0
+import maintenance
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -47,7 +50,222 @@ DUTY_CHAT_ID = os.getenv("DUTY_CHAT_ID")
 
 app = Flask(__name__)
 
+RANDOM_EMOJI_CODES = [
+    "GRINNING", "JOY", "WINK", "BLUSH", "YUM", "HEART_EYES", "KISSING_HEART", "SUNGLASSES",
+    "THINKING_FACE", "HUGGING_FACE", "MONKEY_FACE", "DOG", "CAT", "FOX_FACE", "LION_FACE",
+    "UNICORN_FACE", "EARTH_ASIA", "VOLCANO", "APPLE", "PIZZA", "BEER", "COFFEE", "BALLOON",
+    "GIFT", "TICKET", "TROPHY"
+]
+
+# List of all emoji codes from your provided list
+ALL_EMOJI_CODES = [
+    "GRINNING", "JOY", "WINK", "BLUSH", "YUM", "HEART_EYES", "KISSING_HEART", "SUNGLASSES",
+    "THINKING_FACE", "HUGGING_FACE", "MONKEY_FACE", "DOG", "CAT", "FOX_FACE", "LION_FACE",
+    "UNICORN_FACE", "EARTH_ASIA", "VOLCANO", "APPLE", "PIZZA", "BEER", "COFFEE", "BALLOON",
+    "GIFT", "TICKET", "TROPHY"
+]
+
+# ================= ALL-DUTY SUMMARY AND CHECK =================
+
+def get_all_duty_summary():
+    """Collect today's duty information from all teams and return a combined message."""
+    lines = []
+    lines.append("📋 **ALL DUTY SUMMARY FOR TODAY** 📋\n")
+
+    # FPMS
+    lines.append("**【FPMS】**")
+    lines.append(fpms_duty.get_fpms_today_duty())
+    lines.append("")
+
+    # PMS
+    lines.append("**【PMS】**")
+    lines.append(pms_duty.dutyNextDay())   # shows next day (which includes today if before midnight? better use dutyForDate)
+    lines.append("")
+
+    # BI
+    lines.append("**【BI】**")
+    lines.append(bi_duty.get_bi_today_duty())
+    lines.append("")
+
+    # FE
+    lines.append("**【FE】**")
+    lines.append(fe_duty.get_fe_next_three_duty())
+    lines.append("")
+
+    # CPMS
+    lines.append("**【CPMS】**")
+    lines.append(cpms_duty.get_cpms_three_days())
+    lines.append("")
+
+    # SRE
+    lines.append("**【SRE】**")
+    lines.append(sre_Duty.get_sre_week_duty())
+    lines.append("")
+
+    # DB
+    lines.append("**【DB】**")
+    lines.append(db_duty.get_three_weeks_summary())
+    lines.append("")
+
+    # Liveslot
+    lines.append("**【Liveslot】**")
+    lines.append(liveslot_duty.get_three_weeks_summary())
+    lines.append("")
+
+    # OTE
+    lines.append("**【OTE】**")
+    lines.append(ote_duty.get_three_weeks_summary())
+    lines.append("")
+
+    # OSE
+    lines.append("**【OSE】**")
+    lines.append(ose_Duty.get_ose_today_duty())
+    lines.append("")
+
+    return "\n".join(lines).strip()
+
+def get_all_duty_check(month=None, year=None):
+    """
+    Run all `*_check` functions and return combined report.
+    If month/year not provided, uses current month.
+    """
+    if year is None:
+        year = datetime.now().year
+    if month is None:
+        month = datetime.now().month
+
+    lines = []
+    lines.append(f"🔍 **DUTY MISSING REPORT – {datetime(year, month, 1).strftime('%B %Y')}** 🔍\n")
+
+    # FPMS
+    lines.append("**【FPMS】**")
+    lines.append(fpms_duty.fpms_check(month=month, year=year))
+    lines.append("")
+
+    # PMS
+    lines.append("**【PMS】**")
+    lines.append(pms_duty.pmsCheck(month=month, year=year))
+    lines.append("")
+
+    # BI
+    lines.append("**【BI】**")
+    lines.append(bi_duty.bi_check(month=month, year=year))
+    lines.append("")
+
+    # FE
+    lines.append("**【FE】**")
+    lines.append(fe_duty.fe_check(month=month, year=year))
+    lines.append("")
+
+    # CPMS
+    lines.append("**【CPMS】**")
+    lines.append(cpms_duty.cpms_check(month=month, year=year))
+    lines.append("")
+
+    # SRE
+    lines.append("**【SRE】**")
+    lines.append(sre_Duty.sre_check(month=month, year=year))
+    lines.append("")
+
+    # DB
+    lines.append("**【DB】**")
+    lines.append(db_duty.db_check(month=month, year=year))
+    lines.append("")
+
+    # Liveslot
+    lines.append("**【Liveslot】**")
+    lines.append(liveslot_duty.liveslot_check(month=month, year=year))
+    lines.append("")
+
+    # OTE
+    lines.append("**【OTE】**")
+    lines.append(ote_duty.ote_check(month=month, year=year))
+    lines.append("")
+
+    return "\n".join(lines).strip()
+
+def display_all_duty():
+    """Send the all-duty summary to the designated duty chat."""
+    summary = get_all_duty_summary()
+    send_message(DUTY_CHAT_ID, summary)
+    print("✅ Sent all-duty summary to", DUTY_CHAT_ID)
+
+def monthly_duty_check():
+    """Run all checks for the new month on the 1st day at midnight."""
+    now = datetime.now()
+    # Ensure we are checking the month that just started (e.g., if run at 00:00 on 1st, it's the new month)
+    month = now.month
+    year = now.year
+    report = get_all_duty_check(month=month, year=year)
+    send_message(DUTY_CHAT_ID, report)
+    print(f"✅ Sent monthly duty check for {year}-{month:02d} to {DUTY_CHAT_ID}")
+
 # ================= LARK API HELPERS =================
+
+def add_all_reactions(message_id):
+    token = get_tenant_access_token()
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    success_count = 0
+    for emoji in ALL_EMOJI_CODES:
+        url = f"https://open.larksuite.com/open-apis/im/v1/messages/{message_id}/reactions"
+        payload = {"reaction_type": {"emoji_type": emoji}}
+        for attempt in range(3):
+            resp = requests.post(url, headers=headers, json=payload)
+            if resp.status_code == 200:
+                print(f"✅ Added {emoji}")
+                success_count += 1
+                break
+            elif resp.status_code == 429:
+                wait = (2 ** attempt) + random.uniform(0, 0.5)
+                print(f"⚠️ Rate limited on {emoji}, retrying after {wait:.1f}s")
+                time.sleep(wait)
+                continue
+            else:
+                print(f"⚠️ {emoji} failed: {resp.status_code} {resp.text}")
+                break
+        time.sleep(1.0)   # base delay between emojis
+    print(f"Added {success_count} of {len(ALL_EMOJI_CODES)} reactions")
+
+def add_random_reaction(message_id):
+    """Add a random reaction from the predefined list to a message."""
+    token = get_tenant_access_token()
+    url = f"https://open.larksuite.com/open-apis/im/v1/messages/{message_id}/reactions"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    random_emoji = random.choice(RANDOM_EMOJI_CODES)
+    payload = {
+        "reaction_type": {
+            "emoji_type": random_emoji
+        }
+    }
+    response = requests.post(url, headers=headers, json=payload)
+    if response.status_code == 200:
+        print(f"✅ Added {random_emoji} reaction to message {message_id}")
+    else:
+        print(f"❌ Failed to add reaction: {response.text}")
+    return response.json()
+
+def add_heart_reaction(message_id):
+    """Add a heart reaction to a message."""
+    token = get_tenant_access_token()
+    url = f"https://open.larksuite.com/open-apis/im/v1/messages/{message_id}/reactions"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "reaction_type": {
+            "emoji_type": "HEART"
+        }
+    }
+    response = requests.post(url, headers=headers, json=payload)
+    if response.status_code == 200:
+        print(f"✅ Added heart reaction to message {message_id}")
+    else:
+        print(f"❌ Failed to add reaction: {response.text}")
+    return response.json()
     
 def recall_message(message_id):
     """Delete a message using Lark's recall API."""
@@ -134,6 +352,8 @@ def get_tenant_access_token():
     return response.json().get("tenant_access_token")
 
 # ================= SCHEDULED REMINDERS =================
+TARGET_USER_OPEN_ID = "ou_d7bc33724e2d6ced4050c944c2ca5650"
+
 def send_shift_reminder(chat_id, message):
     """Send a shift reminder message to the given chat."""
     send_message(chat_id, message)
@@ -169,6 +389,9 @@ def morning_reminder():
         lines.append("(～￣▽￣)～ Rest Well Night Shift\nGood Luck Morning Shift ヾ(≧▽≦*)o")
 
     msg = "\n".join(lines)
+    # Prepend a mention for the target user
+    mention_line = f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>'
+    msg = mention_line + "\n" + msg
     send_shift_reminder(DUTY_CHAT_ID, msg)
 
 def evening_reminder():
@@ -199,14 +422,22 @@ def evening_reminder():
         lines.append("(～￣▽￣)～ Rest Well Morning Shift\nGood Luck Night Shift ヾ(≧▽≦*)o")
 
     msg = "\n".join(lines)
+    # Prepend a mention for the target user
+    mention_line = f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>'
+    msg = mention_line + "\n" + msg
     send_shift_reminder(DUTY_CHAT_ID, msg)
 
-# Set up scheduler
 scheduler = BackgroundScheduler()
-# Schedule at 7:00 AM every day
+
+# Existing shift reminders
 scheduler.add_job(func=morning_reminder, trigger="cron", hour=7, minute=00)
-# Schedule at 7:00 PM every day
 scheduler.add_job(func=evening_reminder, trigger="cron", hour=19, minute=0)
+
+# New: daily all-duty summary at midnight
+#scheduler.add_job(func=display_all_duty, trigger="cron", hour=0, minute=0)
+
+# New: monthly duty check on 1st day at midnight
+scheduler.add_job(func=monthly_duty_check, trigger="cron", day=1, hour=0, minute=0)
 
 PENDING_RESTART_FILE = "restart_pending.json"
 
@@ -345,6 +576,22 @@ def lark_webhook():
     if not chat_id or text is None:
         print("❌ Could not extract chat_id or text")
         return jsonify({"error": "Missing data"}), 400
+    
+    if text == "我要验牌":
+        reply = f'<at user_id="{sender_id}"></at> 给我擦皮鞋'
+        send_message(chat_id, reply)
+        return jsonify({"success": True})
+    
+    if text == "good luck":
+        add_heart_reaction(message_id)
+        #send_message(chat_id, "Good luck to you too! 🍀")
+        
+    if text == "random":
+        add_random_reaction(message_id)
+        
+    if text == "spam":
+        add_all_reactions(message_id)
+        return jsonify({"success": True})  # Optional: stop further processing
 
     # 8. Group mention check (supports both schemas)
     if chat_type == "group":
@@ -460,7 +707,7 @@ def lark_webhook():
         p0_details = p0.handle_p0(args)
         reply = (
             "📍 !!!P0 Incident Alert!!!\n\n"
-            f'<at user_id="{junchen}">Jun Chen</at>\n'
+            #f'<at user_id="{junchen}">Jun Chen</at>\n'
             f'<at user_id="{yuxuan}">Yuxuan</at>\n'
             f'<at user_id="{shen}">Shen</at>\n\n'
             f"{p0_details}"
@@ -470,8 +717,22 @@ def lark_webhook():
     
     elif clean_text.lower() == '/fpms':
         reply = fpms_duty.get_fpms_today_duty()
-    elif clean_text.lower() == '/fpmscheck':
-        reply = fpms_duty.fpms_check()
+    elif clean_text.lower().startswith('/fpmscheck'):
+        parts = clean_text.split()
+        if len(parts) > 1:
+            try:
+                date_str = parts[1]
+                if '/' in date_str:
+                    month, year = map(int, date_str.split('/'))
+                elif '-' in date_str:
+                    year, month = map(int, date_str.split('-'))
+                else:
+                    raise ValueError
+                reply = fpms_duty.fpms_check(month=month, year=year)
+            except ValueError:
+                reply = "❌ 格式错误。请使用 `/fpmscheck MM/YYYY` 或 `/fpmscheck YYYY-MM`"
+        else:
+            reply = fpms_duty.fpms_check()
         send_message(chat_id, reply)
         return jsonify({"success": True})
         
@@ -521,19 +782,136 @@ def lark_webhook():
         return jsonify({"success": True})
         
     elif clean_text.lower() == '/fe':
+        reply = "yes?"
         reply = fe_duty.get_fe_next_three_duty()
+    elif clean_text.lower().startswith('/fecheck'):
+        parts = clean_text.split()
+        if len(parts) > 1:
+            try:
+                date_str = parts[1]
+                if '/' in date_str:
+                    month, year = map(int, date_str.split('/'))
+                elif '-' in date_str:
+                    year, month = map(int, date_str.split('-'))
+                else:
+                    raise ValueError
+                reply = fe_duty.fe_check(month=month, year=year)
+            except ValueError:
+                reply = "❌ 格式错误。请使用 `/fecheck MM/YYYY` 或 `/fecheck YYYY-MM`"
+        else:
+            reply = fe_duty.fe_check()
+        send_message(chat_id, reply)
+        return jsonify({"success": True})
         
     elif clean_text.lower() == '/cpms':
-        reply = cpms_duty.get_cpms_three_days()
+        results = cpms_duty.get_cpms_three_days()
+        # Format the results properly
+        formatted = cpms_duty.format_output(results)
+        send_message(chat_id, formatted)
+        send_message(chat_id, "FYI Wailoon - onleave 2026-04-04 to 2026-04-17")
+        return jsonify({"success": True})
+    elif clean_text.lower().startswith('/cpmscheck'):
+        parts = clean_text.split()
+        if len(parts) > 1:
+            try:
+                date_str = parts[1]
+                if '/' in date_str:
+                    month, year = map(int, date_str.split('/'))
+                elif '-' in date_str:
+                    year, month = map(int, date_str.split('-'))
+                else:
+                    raise ValueError
+                reply = cpms_duty.cpms_check(month=month, year=year)
+            except ValueError:
+                reply = "❌ 格式错误。请使用 `/cpmscheck MM/YYYY` 或 `/cpmscheck YYYY-MM`"
+        else:
+            reply = cpms_duty.cpms_check()
+        send_message(chat_id, reply)
+        return jsonify({"success": True})
         
     elif clean_text.lower() == '/sre':
         reply = sre_Duty.get_sre_week_duty()
+    elif clean_text.lower().startswith('/srecheck'):
+        parts = clean_text.split()
+        if len(parts) > 1:
+            try:
+                date_str = parts[1]
+                if '/' in date_str:
+                    month, year = map(int, date_str.split('/'))
+                elif '-' in date_str:
+                    year, month = map(int, date_str.split('-'))
+                else:
+                    raise ValueError
+                reply = sre_Duty.sre_check(month=month, year=year)
+            except ValueError:
+                reply = "❌ 格式错误。请使用 `/srecheck MM/YYYY` 或 `/srecheck YYYY-MM`"
+        else:
+            reply = sre_Duty.sre_check()
+        send_message(chat_id, reply)
+        return jsonify({"success": True})
         
     elif clean_text.lower() == '/db':
         reply = db_duty.get_three_weeks_summary()
+    elif clean_text.lower().startswith('/dbcheck'):
+        parts = clean_text.split()
+        if len(parts) > 1:
+            try:
+                date_str = parts[1]
+                if '/' in date_str:
+                    month, year = map(int, date_str.split('/'))
+                elif '-' in date_str:
+                    year, month = map(int, date_str.split('-'))
+                else:
+                    raise ValueError
+                reply = db_duty.db_check(month=month, year=year)
+            except ValueError:
+                reply = "❌ 格式错误。请使用 `/dbcheck MM/YYYY` 或 `/dbcheck YYYY-MM`"
+        else:
+            reply = db_duty.db_check()
+        send_message(chat_id, reply)
+        return jsonify({"success": True})
     
     elif clean_text.lower() == '/liveslot':
         reply = liveslot_duty.get_three_weeks_summary()
+    elif clean_text.lower().startswith('/liveslotcheck'):
+        parts = clean_text.split()
+        if len(parts) > 1:
+            try:
+                date_str = parts[1]
+                if '/' in date_str:
+                    month, year = map(int, date_str.split('/'))
+                elif '-' in date_str:
+                    year, month = map(int, date_str.split('-'))
+                else:
+                    raise ValueError
+                reply = liveslot_duty.liveslot_check(month=month, year=year)
+            except ValueError:
+                reply = "❌ 格式错误。请使用 `/liveslotcheck MM/YYYY` 或 `/liveslotcheck YYYY-MM`"
+        else:
+            reply = liveslot_duty.liveslot_check()
+        send_message(chat_id, reply)
+        return jsonify({"success": True})
+    
+    elif clean_text.lower() == '/ote':
+        reply = ote_duty.get_three_weeks_summary()
+    elif clean_text.lower().startswith('/otecheck'):
+        parts = clean_text.split()
+        if len(parts) > 1:
+            try:
+                date_str = parts[1]
+                if '/' in date_str:
+                    month, year = map(int, date_str.split('/'))
+                elif '-' in date_str:
+                    year, month = map(int, date_str.split('-'))
+                else:
+                    raise ValueError
+                reply = ote_duty.ote_check(month=month, year=year)
+            except ValueError:
+                reply = "❌ 格式错误。请使用 `/otecheck MM/YYYY` 或 `/otecheck YYYY-MM`"
+        else:
+            reply = ote_duty.ote_check()
+        send_message(chat_id, reply)
+        return jsonify({"success": True})
         
     elif clean_text == '/ose':
         reply = ose_Duty.get_ose_today_duty()          # uses today's date
@@ -550,9 +928,58 @@ def lark_webhook():
             except ValueError:
                 reply = "❌ Invalid date format. Please use DD/MM/YYYY (e.g., 12/12/2026)"
                 
+    elif clean_text.lower().startswith('/dutycheckall'):
+        parts = clean_text.split()
+        if len(parts) > 1:
+            try:
+                date_str = parts[1]
+                if '/' in date_str:
+                    month, year = map(int, date_str.split('/'))
+                elif '-' in date_str:
+                    year, month = map(int, date_str.split('-'))
+                else:
+                    raise ValueError
+                reply = get_all_duty_check(month=month, year=year)
+            except ValueError:
+                reply = "❌ 格式错误。请使用 `/dutycheckall MM/YYYY` 或 `/dutycheckall YYYY-MM`"
+        else:
+            reply = get_all_duty_check()
+        send_message(chat_id, reply)
+        return jsonify({"success": True})
+                
     elif clean_text == '/cashout':
         reply = f'the player has been get back his credit. @On-Duty-OSM-Lavie(Podium1) kindly manual cashout the credit and reboot the machine. After that, @Xavier (CS OSM) kindly unset and test the machine thanks'
         send_message(chat_id, reply)
+        
+    elif clean_text.lower().startswith('/maintenance') or clean_text.lower().startswith('/maintenanceshort'):
+        # Determine which command was used
+        cmd = 'maintenance' if clean_text.lower().startswith('/maintenance') else 'maintenanceshort'
+        # Use original_text (the raw message) to capture everything after the command
+        pattern = rf'/{cmd}\s+(.*)'
+        match = re.search(pattern, original_text, re.IGNORECASE | re.DOTALL)
+        if match:
+            email_text = match.group(1).strip()
+            # Remove surrounding quotes if present
+            if email_text.startswith('"') and email_text.endswith('"'):
+                email_text = email_text[1:-1]
+        else:
+            email_text = ''
+
+        if email_text:
+            # First message: tag the user with the table name
+            game_name = maintenance.get_table_name(email_text)
+            if game_name == "Unknown":
+                game_name = "Unknown table"
+            #first_reply = f'<at user_id="ou_8faac9cb9f7bf3ee69dc09f8e1f147bc">User</at> {game_name}'
+            #send_message(chat_id, first_reply)
+
+            # Second message: full summary
+            second_reply = maintenance.process_email(email_text)
+            send_message(chat_id, second_reply)
+        else:
+            send_message(chat_id, "Please provide the email text after the command.")
+        return jsonify({"success": True})
+
         
     ################################################################################
     ##################        Machine List       ###################################

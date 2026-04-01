@@ -21,10 +21,17 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 # ================= Configuration =================
+<<<<<<< HEAD
 # !! 请务必替换为您的实际凭证 !!
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
 SPREADSHEET_TOKEN = os.getenv("CPMS_SPREADSHEET_TOKEN")
+=======
+APP_ID = "cli_a9ca652b89b85ed1"
+APP_SECRET = "VQJh0oFKfsyCHr5tQDMVNbr4o4kmjbFr"
+SPREADSHEET_TOKEN = "FYaZw5QdgiT7SdkytKslIYoHgrf"
+
+>>>>>>> 6a6dc44fabd80c2d61aea89b37419dbf2ca2ad9f
 
 # ================= Helper Functions =================
 def get_tenant_access_token():
@@ -112,6 +119,43 @@ def parse_person_info(cell_text):
             break
     return name, phone
 
+def cpms_check(month=None, year=None):
+    """
+    检查指定月份（默认为当前月份）中是否有任何日期缺少值班。
+    返回字符串，格式与 fpms_check 一致。
+    """
+    if year is None:
+        year = datetime.now().year
+    if month is None:
+        month = datetime.now().month
+
+    # 计算该月的总天数
+    first_day = datetime(year, month, 1).date()
+    if month == 12:
+        next_month_first = datetime(year + 1, 1, 1).date()
+    else:
+        next_month_first = datetime(year, month + 1, 1).date()
+    days_in_month = (next_month_first - first_day).days
+
+    missing = []
+    for day in range(1, days_in_month + 1):
+        target_date = datetime(year, month, day).date()
+        try:
+            _, main_name, _, backup_name, _ = get_cpms_duty_for_date(target_date)
+            # 如果主值班人和备份值班人都为空，则视为缺失
+            if not main_name and not backup_name:
+                missing.append(day)
+        except Exception:
+            # 例如找不到对应月份的工作表，也视为缺失
+            missing.append(day)
+
+    month_name = datetime(year, month, 1).strftime("%B %Y")
+    if not missing:
+        return f"✅ All days in {month_name} have duty assigned."
+    else:
+        missing_str = ", ".join(str(d) for d in missing)
+        return f"⚠️ {month_name} 缺少值班的日期：{missing_str}"
+
 # ================= Core Logic =================
 def get_cpms_duty_for_date(target_date):
     """
@@ -122,6 +166,10 @@ def get_cpms_duty_for_date(target_date):
     month = target_date.month
     day = target_date.day
     weekday = target_date.strftime("%A")  # 英文星期几，如 Monday
+    
+    token = get_tenant_access_token()
+    sheets = get_sheet_list(token)
+    print("Sheets found:", [s.get("title") for s in sheets])
 
     try:
         token = get_tenant_access_token()
@@ -191,26 +239,6 @@ def format_output(results):
 
         lines.append("")  # 空行分隔
     return "\n".join(lines)
-
-def get_cpms_three_days(start_date=None):
-    """获取连续三天的值班信息，返回已格式化的字符串"""
-    if start_date is None:
-        start_date = datetime.now().date()
-
-    results = []
-    for i in range(3):
-        target = start_date + timedelta(days=i)
-        try:
-            result = get_cpms_duty_for_date(target)
-            results.append(result)
-        except Exception as e:
-            # 如果某天出错（如跨月找不到工作表），添加错误信息
-            results.append((target, f"Error: {e}", "", "", ""))
-    
-    # 🔥 关键修改：直接返回格式化后的字符串
-    return format_output(results)
-
-
 
 # ================= Main =================
 if __name__ == "__main__":

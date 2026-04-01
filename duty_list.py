@@ -31,7 +31,12 @@ def get_duty_list():
     return _duty_list
 
 def search_duty(query):
-    """Search duty_list using: exact match, then substring match, then fuzzy match."""
+    """
+    Search duty_list using:
+    - substring match (case‑insensitive, ignoring spaces)
+    - fuzzy match as fallback
+    Multiple names can be given separated by commas or '&'.
+    """
     duty_list = get_duty_list()
     if not duty_list:
         return "Duty list is empty or not loaded."
@@ -46,42 +51,51 @@ def search_duty(query):
             )
         return "\n\n".join(lines)
 
-    query_norm = query.lower().replace(' ', '')
+    # Split query on commas or ampersands
+    query = query.replace('&', ',')
+    parts = [part.strip() for part in query.split(',') if part.strip()]
+    if not parts:
+        parts = [query]
 
-    # 1. Exact match
-    exact_matches = []
-    for entry in duty_list:
-        name_norm = entry['name'].lower().replace(' ', '')
-        if query_norm == name_norm:
-            exact_matches.append(entry)
-
-    if exact_matches:
-        lines = [f"Name : {e['name']}\nDepartment : {e['department']}\nPhone number : {e['phone']}" for e in exact_matches]
-        return "\n\n".join(lines)
-
-    # 2. Substring match
-    substring_matches = []
-    for entry in duty_list:
-        name_norm = entry['name'].lower().replace(' ', '')
-        if query_norm in name_norm:
-            substring_matches.append(entry)
-
-    if substring_matches:
-        lines = [f"Name : {e['name']}\nDepartment : {e['department']}\nPhone number : {e['phone']}" for e in substring_matches]
-        return "\n\n".join(lines)
-
-    # 3. Fuzzy match
     THRESHOLD = 0.8
-    fuzzy_matches = []
-    for entry in duty_list:
-        name_norm = entry['name'].lower().replace(' ', '')
-        similarity = difflib.SequenceMatcher(None, query_norm, name_norm).ratio()
-        if similarity >= THRESHOLD:
-            fuzzy_matches.append((similarity, entry))
+    results = {}  # use phone as key to avoid duplicates
 
-    if not fuzzy_matches:
+    for part in parts:
+        part_norm = part.lower().replace(' ', '')
+
+        # 1. Substring match
+        matched_entries = []
+        for entry in duty_list:
+            name_norm = entry['name'].lower().replace(' ', '')
+            if part_norm in name_norm:
+                matched_entries.append(entry)
+
+        if matched_entries:
+            for entry in matched_entries:
+                results[entry['phone']] = entry
+            continue
+
+        # 2. Fuzzy match
+        fuzzy_matches = []
+        for entry in duty_list:
+            name_norm = entry['name'].lower().replace(' ', '')
+            similarity = difflib.SequenceMatcher(None, part_norm, name_norm).ratio()
+            if similarity >= THRESHOLD:
+                fuzzy_matches.append((similarity, entry))
+        if fuzzy_matches:
+            fuzzy_matches.sort(key=lambda x: x[0], reverse=True)
+            for _, entry in fuzzy_matches:
+                results[entry['phone']] = entry
+
+    if not results:
         return f"No matching duty personnel found for '{query}'."
 
-    fuzzy_matches.sort(key=lambda x: x[0], reverse=True)
-    lines = [f"Name : {e['name']}\nDepartment : {e['department']}\nPhone number : {e['phone']}" for sim, e in fuzzy_matches]
+    # Format output
+    lines = []
+    for entry in results.values():
+        lines.append(
+            f"Name : {entry['name']}\n"
+            f"Department : {entry['department']}\n"
+            f"Phone number : {entry['phone']}"
+        )
     return "\n\n".join(lines)
