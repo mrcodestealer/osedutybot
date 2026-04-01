@@ -69,7 +69,6 @@ def get_sheet_metadata(token, spreadsheet_token, sheet_id):
     headers = {"Authorization": f"Bearer {token}"}
     resp = requests.get(url, headers=headers)
     result = resp.json()
-    debug_print(f"Metadata response: {result}")  # 添加这行
     if result.get("code") != 0:
         debug_print(f"Metadata error: {result.get('msg')}")
         return None
@@ -87,6 +86,7 @@ def get_range_values(token, spreadsheet_token, sheet_id, range_str):
     headers = {"Authorization": f"Bearer {token}"}
     resp = requests.get(url, headers=headers)
     result = resp.json()
+    debug_print(f"Range values response: {result}")  # 添加这行
     if result.get("code") != 0:
         return None
     return result.get("data", {}).get("valueRange", {}).get("values", [])
@@ -120,6 +120,10 @@ def get_leaves_for_date(target_date):
     scan_range = f"A1:{end_col}{max_row}"
 
     values = get_range_values(token, LEAVE_SPREADSHEET_TOKEN, LEAVE_SHEET_ID, scan_range)
+    debug_print(f"values type: {type(values)}, length: {len(values) if values else 0}")
+    if values:
+        debug_print(f"First row: {values[0] if len(values)>0 else None}")
+        debug_print(f"Second row: {values[1] if len(values)>1 else None}")
     if values is None or len(values) < 2:
         debug_print("No data in leave sheet")
         return []
@@ -134,12 +138,15 @@ def get_leaves_for_date(target_date):
         if cell is None:
             continue
         cell_str = str(cell).strip().lower()
-        if "name" in cell_str:
+        if "name" in cell_str or "姓名" in cell_str:
             name_col = idx
-        elif "leave type" in cell_str or "type" in cell_str:
+        elif "leave type" in cell_str or "type" in cell_str or "请假类型" in cell_str:
             leave_type_col = idx
-        elif "date" in cell_str or "day" in cell_str:
+        elif "date" in cell_str or "day" in cell_str or "日期" in cell_str:
             date_col = idx
+    debug_print("First few rows of leave sheet:")
+    for i, row in enumerate(values[:5]):
+        debug_print(f"Row {i}: {row}")
 
     if name_col is None or leave_type_col is None or date_col is None:
         debug_print("Leave sheet missing required columns (Name, Leave Type, Date)")

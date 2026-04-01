@@ -1,0 +1,18 @@
+2026-04-01 11:18:06,321 - ERROR - Main loop exception
+Traceback (most recent call last):
+  File "C:\Users\jcsia\Desktop\osedutybot-main\testing\oanda.py", line 272, in main
+    if cond_1h_trend and cond_1h_diff:
+       ^^^^^^^^^^^^^
+UnboundLocalError: cannot access local variable 'cond_1h_trend' where it is not associated with a value
+2026-04-01 11:18:37,112 - ERROR - Main loop exception
+Traceback (most recent call last):
+  File "C:\Users\jcsia\Desktop\osedutybot-main\testing\oanda.py", line 271, in main
+    ema20_1h = calculate_ema(df_1h, EMA_FAST).iloc[-1]
+                             ^^^^^
+UnboundLocalError: cannot access local variable 'df_1h' where it is not associated with a value
+2026-04-01 11:18:47,114 - ERROR - Main loop exception
+Traceback (most recent call last):
+  File "C:\Users\jcsia\Desktop\osedutybot-main\testing\oanda.py", line 271, in main
+    ema20_1h = calculate_ema(df_1h, EMA_FAST).iloc[-1]
+                             ^^^^^
+UnboundLocalError: cannot access local variable 'df_1h' where it is not associated with a value
