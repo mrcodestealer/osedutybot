@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 import atexit
 from collections import OrderedDict
+import random
 
 # Import command handlers from separate modules
 from duty_list import search_duty
@@ -47,6 +48,21 @@ VERIFICATION_TOKEN = "17CBLymsuOVyXaRv6Ig4lhDBXH3n1giI"
 DUTY_CHAT_ID = "oc_9de3d63fc589df6feeb9b0bee9c45b72"
 
 app = Flask(__name__)
+
+RANDOM_EMOJI_CODES = [
+    "GRINNING", "JOY", "WINK", "BLUSH", "YUM", "HEART_EYES", "KISSING_HEART", "SUNGLASSES",
+    "THINKING_FACE", "HUGGING_FACE", "MONKEY_FACE", "DOG", "CAT", "FOX_FACE", "LION_FACE",
+    "UNICORN_FACE", "EARTH_ASIA", "VOLCANO", "APPLE", "PIZZA", "BEER", "COFFEE", "BALLOON",
+    "GIFT", "TICKET", "TROPHY"
+]
+
+# List of all emoji codes from your provided list
+ALL_EMOJI_CODES = [
+    "GRINNING", "JOY", "WINK", "BLUSH", "YUM", "HEART_EYES", "KISSING_HEART", "SUNGLASSES",
+    "THINKING_FACE", "HUGGING_FACE", "MONKEY_FACE", "DOG", "CAT", "FOX_FACE", "LION_FACE",
+    "UNICORN_FACE", "EARTH_ASIA", "VOLCANO", "APPLE", "PIZZA", "BEER", "COFFEE", "BALLOON",
+    "GIFT", "TICKET", "TROPHY"
+]
 
 # ================= ALL-DUTY SUMMARY AND CHECK =================
 
@@ -184,6 +200,50 @@ def monthly_duty_check():
     print(f"✅ Sent monthly duty check for {year}-{month:02d} to {DUTY_CHAT_ID}")
 
 # ================= LARK API HELPERS =================
+
+def add_all_reactions(message_id):
+    """Add all reactions from the list to a message."""
+    token = get_tenant_access_token()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    for emoji_code in ALL_EMOJI_CODES:
+        url = f"https://open.larksuite.com/open-apis/im/v1/messages/{message_id}/reactions"
+        payload = {
+            "reaction_type": {
+                "emoji_type": emoji_code
+            }
+        }
+        try:
+            response = requests.post(url, headers=headers, json=payload)
+            if response.status_code == 200:
+                print(f"✅ Added {emoji_code} reaction")
+            else:
+                print(f"⚠️ Failed to add {emoji_code}: {response.text}")
+        except Exception as e:
+            print(f"❌ Error adding {emoji_code}: {e}")
+
+def add_random_reaction(message_id):
+    """Add a random reaction from the predefined list to a message."""
+    token = get_tenant_access_token()
+    url = f"https://open.larksuite.com/open-apis/im/v1/messages/{message_id}/reactions"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    random_emoji = random.choice(RANDOM_EMOJI_CODES)
+    payload = {
+        "reaction_type": {
+            "emoji_type": random_emoji
+        }
+    }
+    response = requests.post(url, headers=headers, json=payload)
+    if response.status_code == 200:
+        print(f"✅ Added {random_emoji} reaction to message {message_id}")
+    else:
+        print(f"❌ Failed to add reaction: {response.text}")
+    return response.json()
 
 def add_heart_reaction(message_id):
     """Add a heart reaction to a message."""
@@ -515,14 +575,21 @@ def lark_webhook():
         print("❌ Could not extract chat_id or text")
         return jsonify({"error": "Missing data"}), 400
     
-    if "我要验牌" in text:
+    if text == "我要验牌":
         reply = f'<at user_id="{sender_id}"></at> 给我擦皮鞋'
         send_message(chat_id, reply)
         return jsonify({"success": True})
     
-    if "good luck" in text:
+    if text == "good luck":
         add_heart_reaction(message_id)
         #send_message(chat_id, "Good luck to you too! 🍀")
+        
+    if text == "random":
+        add_random_reaction(message_id)
+        
+    if text == "spam":
+        add_all_reactions(message_id)
+        return jsonify({"success": True})  # Optional: stop further processing
 
     # 8. Group mention check (supports both schemas)
     if chat_type == "group":
