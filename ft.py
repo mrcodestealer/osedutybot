@@ -39,7 +39,7 @@ NAME_MAPPING = {
     "Lian Cheng": "Lim Lian Cheng",
     "Qi Xiang": "Phan Qi Xiang",
     "Ho Ching": "Ho Ching",
-    "Cheong Rui Zhe": "Rui Zhe",      # adjust if needed
+    "Cheong Rui Zhe": "Rui Zhe",
 }
 
 # ================= Helper Functions =================
@@ -54,13 +54,13 @@ def get_tenant_access_token():
     resp = requests.post(url, headers=headers, json=data)
     result = resp.json()
     if result.get("code") != 0:
-        raise Exception(f"Failed to get token: {result}")
+        raise Exception("Failed to get token: {}".format(result))
     return result["tenant_access_token"]
 
 def get_table_records(token, base_id, table_id):
     """Retrieve all records from the given base/table."""
-    url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{base_id}/tables/{table_id}/records"
-    headers = {"Authorization": f"Bearer {token}"}
+    url = "https://open.larksuite.com/open-apis/bitable/v1/apps/{}/tables/{}/records".format(base_id, table_id)
+    headers = {"Authorization": "Bearer {}".format(token)}
     records = []
     page_token = None
     while True:
@@ -70,7 +70,7 @@ def get_table_records(token, base_id, table_id):
         resp = requests.get(url, headers=headers, params=params)
         result = resp.json()
         if result.get("code") != 0:
-            raise Exception(f"Failed to fetch records: {result}")
+            raise Exception("Failed to fetch records: {}".format(result))
         data = result.get("data", {})
         records.extend(data.get("items", []))
         page_token = data.get("page_token")
@@ -119,7 +119,7 @@ def load_phone_map(csv_path):
     """
     phone_map = {}
     if not os.path.exists(csv_path):
-        print(f"⚠️ {csv_path} not found. Phones will be 'Not found'.")
+        print("⚠️ {} not found. Phones will be 'Not found'.".format(csv_path))
         return phone_map
     try:
         with open(csv_path, newline='', encoding='utf-8') as f:
@@ -129,9 +129,9 @@ def load_phone_map(csv_path):
                     name = row[0].strip()
                     phone = row[2].strip()
                     phone_map[name] = phone
-        debug_print(f"Loaded {len(phone_map)} contacts")
+        debug_print("Loaded {} contacts".format(len(phone_map)))
     except Exception as e:
-        print(f"❌ Error loading {csv_path}: {e}")
+        print("❌ Error loading {}: {}".format(csv_path, e))
     return phone_map
 
 def get_ft_duty_for_date(target_date, records, phone_map):
@@ -142,7 +142,7 @@ def get_ft_duty_for_date(target_date, records, phone_map):
         if rec_date == target_date:
             names = extract_names_from_record(record)
             duty_names.extend(names)
-            debug_print(f"Found duty for {target_date}: {names}")
+            debug_print("Found duty for {}: {}".format(target_date, names))
     # Remove duplicates
     seen = set()
     unique_names = []
@@ -151,13 +151,13 @@ def get_ft_duty_for_date(target_date, records, phone_map):
             seen.add(name)
             unique_names.append(name)
 
-    lines = [f"📅 FT Schedule - {target_date.strftime('%B %d, %Y %A')}"]
+    lines = ["📅 FT Schedule - {}".format(target_date.strftime("%B %d, %Y %A"))]
     if not unique_names:
         lines.append("• No duty assigned")
     else:
         for name in unique_names:
             phone = phone_map.get(name, "Not found")
-            lines.append(f"• {name}  (Phone: {phone})")
+            lines.append("• {}  (Phone: {})".format(name, phone))
     return "\n".join(lines)
 
 def get_ft_three_days(start_date=None):
@@ -169,9 +169,9 @@ def get_ft_three_days(start_date=None):
     try:
         token = get_tenant_access_token()
         records = get_table_records(token, BASE_ID, TABLE_ID)
-        debug_print(f"Retrieved {len(records)} records")
+        debug_print("Retrieved {} records".format(len(records)))
     except Exception as e:
-        return f"❌ Failed to fetch records: {e}"
+        return "❌ Failed to fetch records: {}".format(e)
 
     phone_map = load_phone_map(DUTY_LIST_PATH)
 
@@ -182,6 +182,45 @@ def get_ft_three_days(start_date=None):
         results.append(result)
 
     return "\n\n".join(results)
+
+def ft_check(month=None, year=None):
+    """Check if all days in the given month have duty assigned."""
+    if year is None:
+        year = datetime.now().year
+    if month is None:
+        month = datetime.now().month
+
+    try:
+        token = get_tenant_access_token()
+        records = get_table_records(token, BASE_ID, TABLE_ID)
+    except Exception as e:
+        return "❌ Failed to fetch records: {}".format(e)
+
+    # Build a set of days that have duty assigned
+    assigned_days = set()
+    for record in records:
+        date_obj = extract_date_from_record(record)
+        if date_obj and date_obj.year == year and date_obj.month == month:
+            names = extract_names_from_record(record)
+            if names:  # only consider if there is at least one name
+                assigned_days.add(date_obj.day)
+
+    # Determine days in month
+    first_day = datetime(year, month, 1).date()
+    if month == 12:
+        next_month_first = datetime(year + 1, 1, 1).date()
+    else:
+        next_month_first = datetime(year, month + 1, 1).date()
+    days_in_month = (next_month_first - first_day).days
+
+    missing = [day for day in range(1, days_in_month + 1) if day not in assigned_days]
+
+    month_name = datetime(year, month, 1).strftime("%B %Y")
+    if not missing:
+        return "✅ All days in {} have duty assigned.".format(month_name)
+    else:
+        missing_str = ", ".join(str(d) for d in missing)
+        return "⚠️ {} 缺少值班的日期：{}".format(month_name, missing_str)
 
 # ================= Main =================
 def main():
@@ -207,7 +246,7 @@ def main():
             phone_map = load_phone_map(DUTY_LIST_PATH)
             print(get_ft_duty_for_date(target_date, records, phone_map))
         except Exception as e:
-            print(f"❌ Error: {e}")
+            print("❌ Error: {}".format(e))
     except ValueError:
         print("❌ Invalid date format. Use YYYY-MM-DD (e.g., 2026-04-02) or no argument for three days.")
 
