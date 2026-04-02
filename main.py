@@ -583,14 +583,14 @@ def lark_webhook():
         send_message(chat_id, reply)
         return jsonify({"success": True})
     
-    if clean_text.lower() == "good luck":
+    if text == "good luck" or text == "Good luck":
         add_heart_reaction(message_id)
         #send_message(chat_id, "Good luck to you too! 🍀")
         
-    if clean_text.lower() ==  "random":
+    if text ==  "random":
         add_random_reaction(message_id)
         
-    if clean_text.lower() == "spamreact":
+    if text == "spamreact":
         add_all_reactions(message_id)
         return jsonify({"success": True})  # Optional: stop further processing
 
