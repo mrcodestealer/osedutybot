@@ -916,12 +916,12 @@ def lark_webhook():
     
     elif clean_text.lower() == '/ft':
         duty_schedule = ft.get_ft_three_days()
-        send_message(chat_id, duty_schedule)   # Send duty schedule first
+        send_message(chat_id, duty_schedule)   
         fyi_message = """FYI
         Phan Qi Xiang - Try whatsapp first, else use phone line 
-        Kevin Lim     - Call phone number , not whatapps call
-        Pin Quan      - Try whatsapp first, else use phone line
-        Winson Hong   - try to spam 
+        Kevin Lim       - Call phone number , not whatapps call
+        Pin Quan        - Try whatsapp first, else use phone line
+        Winson Hong   - Try to spam 
         """
         send_message(chat_id, fyi_message)
         return jsonify({"success": True})  
