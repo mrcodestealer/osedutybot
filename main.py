@@ -914,7 +914,7 @@ def lark_webhook():
         send_message(chat_id, reply)
         return jsonify({"success": True})
     
-    elif clean_text.lower() == '/ft' or clean_text.lower() == '/f&t':
+    elif clean_text.lower() == '/ft':
         reply = ft.get_ft_three_days()
     elif clean_text.lower().startswith('/ftcheck'):
         parts = clean_text.split()
