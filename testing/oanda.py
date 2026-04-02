@@ -21,7 +21,7 @@ ATR_MULTIPLIER_SL = 2          # 初始止损倍数
 # 多周期均线参数
 EMA_FAST = 20
 EMA_SLOW = 50
-EMA_DIFF_THRESHOLD = 18        # 1H均线差阈值（点数，黄金1点=0.01美元）
+EMA_DIFF_THRESHOLD = 25        # 1H均线差阈值（点数，黄金1点=0.01美元）
 
 # MACD参数
 MACD_FAST = 12
@@ -76,6 +76,76 @@ def calculate_macd(df, fast=12, slow=26, signal=9):
     macd_line = exp1 - exp2
     signal_line = macd_line.ewm(span=signal, adjust=False).mean()
     return macd_line, signal_line
+
+def close_partial_and_move_stop(ticket, entry_price, atr_fixed, initial_sl_points, partial_closed, order_details_path):
+    """
+    Closes half of the position if profit >= 2R and not yet partially closed.
+    Returns (updated_partial_closed, success)
+    """
+    if partial_closed:
+        return partial_closed, True
+
+    # Get current position
+    position = mt5.positions_get(ticket=ticket)
+    if not position:
+        return partial_closed, False
+    pos = position[0]
+
+    # Calculate current profit in points (for long)
+    tick = mt5.symbol_info_tick(pos.symbol)
+    if tick is None:
+        return partial_closed, False
+    current_price = tick.bid   # for long, bid is used for closing
+    profit_points = current_price - entry_price
+
+    # Check if profit reached 2R
+    if profit_points < 2 * initial_sl_points:
+        return partial_closed, False
+
+    # Calculate half volume
+    half_vol = round(pos.volume / 2, 3)   # adjust decimal places as needed (e.g., 3 for lot size)
+    if half_vol <= 0:
+        print("Half volume too small, cannot partial close")
+        return partial_closed, False
+
+    # Send close order for half the volume
+    order_type = mt5.ORDER_TYPE_SELL   # because we are long
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": pos.symbol,
+        "volume": half_vol,
+        "type": order_type,
+        "position": ticket,
+        "price": current_price,
+        "deviation": 10,
+        "magic": 123456,
+        "comment": "Partial close at 2R",
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_FOK,
+    }
+    result = mt5.order_send(request)
+    if result.retcode != mt5.TRADE_RETCODE_DONE:
+        print(f"Partial close failed: {result.comment}")
+        return partial_closed, False
+
+    print(f"✅ Partially closed {half_vol} at {current_price}")
+    logging.info(f"Partially closed {half_vol} at {current_price} for ticket {ticket}")
+
+    # Update order_details.json with partial_closed = True
+    try:
+        with open(order_details_path, 'r') as f:
+            details = json.load(f)
+        details['partial_closed'] = True
+        with open(order_details_path, 'w') as f:
+            json.dump(details, f, indent=4)
+    except Exception as e:
+        print(f"⚠️ Could not update order_details: {e}")
+
+    # Move stop loss of the remaining position to breakeven + buffer
+    new_sl = entry_price + 0.1 * atr_fixed
+    modify_order(ticket, new_sl)
+
+    return True, True   # partial_closed becomes True, success
 
 def calculate_atr(df, period=ATR_PERIOD):
     """计算ATR"""
@@ -243,21 +313,36 @@ def main():
     entry_atr_fixed = None
     initial_sl_points = None
     direction = None
+    partial_closed = False
+    entry_time = None   # <-- initialize
 
     if persisted:
-        pos = mt5.positions_get(ticket=persisted['ticket'])
+        # Load values from file
+        ticket = persisted.get('ticket')
+        entry_price = persisted.get('entry_price')
+        entry_atr_fixed = persisted.get('atr_fixed')
+        initial_sl_points = persisted.get('initial_sl_points')
+        direction = persisted.get('direction')
+        partial_closed = persisted.get('partial_closed', False)
+        entry_time = persisted.get('entry_time')   # <-- load entry time
+
+        # Check if the order still exists
+        pos = mt5.positions_get(ticket=ticket) if ticket else None
         if pos:
-            ticket = persisted['ticket']
-            entry_price = persisted['entry_price']
-            entry_atr_fixed = persisted['atr_fixed']
-            initial_sl_points = persisted['initial_sl_points']
-            direction = persisted['direction']
             print(f"Restored active order: {ticket} at {entry_price}")
             logging.info(f"Restored active order: {ticket} at {entry_price}")
         else:
-            print(f"Order {persisted['ticket']} not found, removing details")
-            logging.info(f"Order {persisted['ticket']} not found, removing details")
+            print(f"Order {ticket} not found, removing details")
+            logging.info(f"Order {ticket} not found, removing details")
             remove_order_details()
+            # Reset all variables
+            ticket = None
+            entry_price = None
+            entry_atr_fixed = None
+            initial_sl_points = None
+            direction = None
+            partial_closed = False
+            entry_time = None
 
     # --- Flag to track whether all conditions were already logged ---
     conditions_met_previously = False
@@ -309,7 +394,7 @@ def main():
                 h1_signal = "(Buy signal)"
             else:
                 h1_signal = ""
-            print(f"1H {h1_signal:<12} EMA20={ema20_1h:.2f}  EMA50={ema50_1h:.2f}  Diff={diff_1h:.2f}  (Threshold=18)")
+            print(f"1H {h1_signal:<12} EMA20={ema20_1h:.2f}  EMA50={ema50_1h:.2f}  Diff={diff_1h:.2f}  (Threshold=25)")
 
             # 15M line
             if cond_15m_trend:
@@ -333,7 +418,7 @@ def main():
             # Conditions line
             trend_1h_str = "Bullish" if cond_1h_trend else "Neutral/Bearish"
             trend_15m_str = "Bullish" if cond_15m_trend else "Neutral/Bearish"
-            print(f"Conditions: 1H Trend={trend_1h_str} 1H Diff>18={cond_1h_diff} 15M Trend={trend_15m_str} GoldenCross={golden_cross}")
+            print(f"Conditions: 1H Trend={trend_1h_str} 1H Diff>25={cond_1h_diff} 15M Trend={trend_15m_str} GoldenCross={golden_cross}")
 
             # If all trend conditions are met, show where SL would be placed
             if cond_1h_trend and cond_1h_diff and cond_15m_trend:
@@ -343,6 +428,51 @@ def main():
                 print("If place order, SL will be ---")
 
             print("="*70)
+
+            # --- Display active order status (if any) ---
+            if ticket is not None and entry_price is not None:
+                # Get current position info
+                positions = mt5.positions_get(magic=123456)
+                if positions:
+                    pos = positions[0]
+                    current_price_pos = pos.price_current
+                    sl_display = f"{pos.sl:.2f}"
+                else:
+                    # No active position, but we have persisted data – shouldn't happen
+                    current_price_pos = current_price
+                    sl_display = "N/A (no position)"
+
+                profit_points = current_price_pos - entry_price
+                profit_r = profit_points / initial_sl_points if initial_sl_points != 0 else 0
+
+                print("\n" + "="*70)
+                print("📊 **ACTIVE ORDER STATUS**")
+                print(f"Ticket: {ticket}  |  Entry Time: {entry_time if entry_time else 'N/A'}")
+                print(f"Entry Price: {entry_price:.2f}  |  Current Price: {current_price_pos:.2f}")
+                print(f"ATR Fixed: {entry_atr_fixed:.2f}  |  Current SL: {sl_display}")
+                print(f"Profit: {profit_points:.2f} points  |  R Multiple: {profit_r:.2f}R")
+
+                if not partial_closed:
+                    target_2r = entry_price + 2 * initial_sl_points
+                    print(f"\n🔹 2R Target: {target_2r:.2f} (Profit = {2*initial_sl_points:.2f} points)")
+                    print(f"   → When price reaches {target_2r:.2f}: close 50% position and move SL to {entry_price + 0.1 * entry_atr_fixed:.2f}")
+                else:
+                    print("\n✅ Already closed 50% at 2R. Remaining position now follows trailing stop.")
+                    thresholds = [3, 4, 5, 6]
+                    for r_mult in thresholds:
+                        target_price = entry_price + r_mult * initial_sl_points
+                        if profit_points < r_mult * initial_sl_points:
+                            if r_mult == 3:
+                                sl_move = entry_price + initial_sl_points
+                            elif r_mult == 4:
+                                sl_move = entry_price + 2 * initial_sl_points
+                            elif r_mult == 5:
+                                sl_move = entry_price + 3 * initial_sl_points
+                            else:
+                                sl_move = entry_price + (r_mult - 2) * initial_sl_points
+                            print(f"🔹 {r_mult}R Target: {target_price:.2f} → SL moves to {sl_move:.2f}")
+                            break
+                print("="*70)
 
             # --- Log when all conditions become true (runs every iteration, regardless of trading hours) ---
             all_conditions_met = cond_1h_trend and cond_1h_diff and cond_15m_trend and golden_cross
@@ -371,10 +501,20 @@ def main():
                 if ticket is None or pos.ticket != ticket:
                     print("Position exists but no matching persisted order. Skipping trailing stop.")
                 else:
-                    tick = mt5.symbol_info_tick(SYMBOL)
-                    if tick is not None:
-                        current_price_pos = tick.bid if pos.type == mt5.ORDER_TYPE_BUY else tick.ask
-                        update_trailing_stop(ticket, entry_price, current_price_pos, entry_atr_fixed, initial_sl_points)
+                    # First, check if we need to close half at 2R
+                    new_partial, success = close_partial_and_move_stop(
+                        ticket, entry_price, entry_atr_fixed, initial_sl_points,
+                        partial_closed, ORDER_DETAILS_FILE
+                    )
+                    if success and new_partial != partial_closed:
+                        partial_closed = new_partial
+                        # The stop loss has already been moved to breakeven+buffer, so skip trailing update for this loop
+                    else:
+                        # Continue with normal trailing stop
+                        tick = mt5.symbol_info_tick(SYMBOL)
+                        if tick is not None:
+                            current_price_pos = tick.bid if pos.type == mt5.ORDER_TYPE_BUY else tick.ask
+                            update_trailing_stop(ticket, entry_price, current_price_pos, entry_atr_fixed, initial_sl_points)
             else:
                 if ticket is not None:
                     print(f"Position closed, removing details")
@@ -385,6 +525,8 @@ def main():
                     entry_atr_fixed = None
                     initial_sl_points = None
                     direction = None
+                    partial_closed = False
+                    entry_time = None
 
             # 如果没有持仓，尝试开新仓
             if not positions and all_conditions_met:
@@ -407,6 +549,8 @@ def main():
                     entry_atr_fixed = atr_value
                     initial_sl_points = atr_value * ATR_MULTIPLIER_SL
                     direction = 'buy'
+                    partial_closed = False
+                    entry_time = datetime.now().isoformat()   # <-- store local variable
                     print("Order executed and details saved")
                     logging.info(f"Order placed with values: 1H EMA20={ema20_1h:.2f} EMA50={ema50_1h:.2f} Diff={diff_1h:.2f} | "
                                  f"15M EMA20={ema20_15m:.2f} EMA50={ema50_15m:.2f} | "
