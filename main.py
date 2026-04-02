@@ -27,6 +27,7 @@ import cpms_duty
 import db_duty
 import liveslot_duty
 import ote_duty
+import ft
 
 import nwr
 import winford
@@ -910,6 +911,27 @@ def lark_webhook():
                 reply = "❌ 格式错误。请使用 `/otecheck MM/YYYY` 或 `/otecheck YYYY-MM`"
         else:
             reply = ote_duty.ote_check()
+        send_message(chat_id, reply)
+        return jsonify({"success": True})
+    
+    elif clean_text.lower() == '/ft' or clean_text.lower() == '/f&t':
+        reply = ft.get_ft_three_days()
+    elif clean_text.lower().startswith('/ftcheck'):
+        parts = clean_text.split()
+        if len(parts) > 1:
+            try:
+                date_str = parts[1]
+                if '/' in date_str:
+                    month, year = map(int, date_str.split('/'))
+                elif '-' in date_str:
+                    year, month = map(int, date_str.split('-'))
+                else:
+                    raise ValueError
+                reply = ft.ft_check(month=month, year=year)
+            except ValueError:
+                reply = "❌ 格式错误。请使用 `/ftcheck MM/YYYY` 或 `/ftcheck YYYY-MM`"
+        else:
+            reply = ft.ft_check()
         send_message(chat_id, reply)
         return jsonify({"success": True})
         
