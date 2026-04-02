@@ -916,6 +916,12 @@ def lark_webhook():
     
     elif clean_text.lower() == '/ft':
         reply = ft.get_ft_three_days()
+        send_message(chat_id, """FYI
+                                    \nPhan Qi Xiang - Try whatsapp first, else use phone line 
+                                    \nKevin Lim     - Call phone number , not whatapps call
+                                    \nPin Quan      - Try whatsapp first, else use phone line
+                                    \nWinson Hong   - try to spam 
+                                    """)
     elif clean_text.lower().startswith('/ftcheck'):
         parts = clean_text.split()
         if len(parts) > 1:
