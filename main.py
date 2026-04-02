@@ -915,13 +915,16 @@ def lark_webhook():
         return jsonify({"success": True})
     
     elif clean_text.lower() == '/ft':
-        reply = ft.get_ft_three_days()
-        send_message(chat_id, """FYI
-                                    \nPhan Qi Xiang - Try whatsapp first, else use phone line 
-                                    \nKevin Lim     - Call phone number , not whatapps call
-                                    \nPin Quan      - Try whatsapp first, else use phone line
-                                    \nWinson Hong   - try to spam 
-                                    """)
+        duty_schedule = ft.get_ft_three_days()
+        send_message(chat_id, duty_schedule)   # Send duty schedule first
+        fyi_message = """FYI
+        Phan Qi Xiang - Try whatsapp first, else use phone line 
+        Kevin Lim     - Call phone number , not whatapps call
+        Pin Quan      - Try whatsapp first, else use phone line
+        Winson Hong   - try to spam 
+        """
+        send_message(chat_id, fyi_message)
+        return jsonify({"success": True})  
     elif clean_text.lower().startswith('/ftcheck'):
         parts = clean_text.split()
         if len(parts) > 1:
