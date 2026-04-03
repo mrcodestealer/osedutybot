@@ -21,7 +21,6 @@ ATR_MULTIPLIER_SL = 2          # 初始止损倍数
 # 多周期均线参数
 EMA_FAST = 20
 EMA_SLOW = 50
-EMA_DIFF_THRESHOLD = 25        # 1H均线差阈值（点数，黄金1点=0.01美元）
 
 # MACD参数
 MACD_FAST = 12
@@ -380,9 +379,8 @@ def main():
             # 当前价格 (5M close)
             current_price = df_5m['close'].iloc[-1]
 
-            # --- 条件判断 ---
+            # --- 条件判断（移除了1H差值过滤）---
             cond_1h_trend = ema20_1h > ema50_1h
-            cond_1h_diff = diff_1h > EMA_DIFF_THRESHOLD
             cond_15m_trend = ema20_15m > ema50_15m
             golden_cross = (macd_current > signal_current) and (macd_prev <= signal_prev) and (macd_current > 0)
 
@@ -390,11 +388,11 @@ def main():
             print("\n" + "="*70)
 
             # 1H line
-            if cond_1h_trend and cond_1h_diff:
+            if cond_1h_trend:
                 h1_signal = "(Buy signal)"
             else:
                 h1_signal = ""
-            print(f"1H {h1_signal:<12} EMA20={ema20_1h:.2f}  EMA50={ema50_1h:.2f}  Diff={diff_1h:.2f}  (Threshold=25)")
+            print(f"1H {h1_signal:<12} EMA20={ema20_1h:.2f}  EMA50={ema50_1h:.2f}  Diff={diff_1h:.2f}")
 
             # 15M line
             if cond_15m_trend:
@@ -418,10 +416,10 @@ def main():
             # Conditions line
             trend_1h_str = "Bullish" if cond_1h_trend else "Neutral/Bearish"
             trend_15m_str = "Bullish" if cond_15m_trend else "Neutral/Bearish"
-            print(f"Conditions: 1H Trend={trend_1h_str} 1H Diff>25={cond_1h_diff} 15M Trend={trend_15m_str} GoldenCross={golden_cross}")
+            print(f"Conditions: 1H Trend={trend_1h_str} 15M Trend={trend_15m_str} GoldenCross={golden_cross}")
 
             # If all trend conditions are met, show where SL would be placed
-            if cond_1h_trend and cond_1h_diff and cond_15m_trend:
+            if cond_1h_trend and cond_15m_trend:
                 potential_sl = current_price - atr_value * ATR_MULTIPLIER_SL
                 print(f"If place order, SL will be {potential_sl:.2f}")
             else:
@@ -475,7 +473,7 @@ def main():
                 print("="*70)
 
             # --- Log when all conditions become true (runs every iteration, regardless of trading hours) ---
-            all_conditions_met = cond_1h_trend and cond_1h_diff and cond_15m_trend and golden_cross
+            all_conditions_met = cond_1h_trend and cond_15m_trend and golden_cross
             if all_conditions_met:
                 if not conditions_met_previously:
                     potential_sl = current_price - atr_value * ATR_MULTIPLIER_SL
@@ -541,7 +539,8 @@ def main():
                         'entry_price': current_price,
                         'atr_fixed': atr_value,
                         'initial_sl_points': atr_value * ATR_MULTIPLIER_SL,
-                        'entry_time': datetime.now().isoformat()
+                        'entry_time': datetime.now().isoformat(),
+                        'partial_closed': False
                     }
                     save_order_details(order_details)
                     ticket = new_ticket

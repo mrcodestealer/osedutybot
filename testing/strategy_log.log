@@ -36,3 +36,5 @@ UnboundLocalError: cannot access local variable 'partial_closed' where it is not
 2026-04-02 01:18:24,958 - INFO - Restored active order: 35272576 at 4748.87
 2026-04-02 01:30:09,066 - INFO - Restored active order: 35272576 at 4748.87
 2026-04-02 02:16:45,811 - INFO - Restored active order: 35272576 at 4748.87
+2026-04-02 21:17:28,864 - INFO - Order 35272576 not found, removing details
+2026-04-02 21:17:28,865 - INFO - Order details file removed
