@@ -43,6 +43,7 @@ TABLE_TO_CSV = {
     "YoonHong": "Yoon Hong",
     "Alex Tai": "Alex Tai",
     "Kelvin": "Kelvin",
+    "Kelvin": "Kelvin Er",
     "Jay": "Jay",
     "Linus Lim": "Linus Lim",
     "Jeng Liang": "Jeng Liang",

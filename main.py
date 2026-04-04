@@ -981,6 +981,7 @@ def lark_webhook():
     elif clean_text == '/cashout':
         reply = f'the player has been get back his credit. @On-Duty-OSM-Lavie(Podium1) kindly manual cashout the credit and reboot the machine. After that, @Xavier (CS OSM) kindly unset and test the machine thanks'
         send_message(chat_id, reply)
+        return jsonify({"success": True})
         
     elif clean_text.lower().startswith('/maintenance') or clean_text.lower().startswith('/maintenanceshort'):
         # Determine which command was used
