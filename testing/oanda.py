@@ -7,7 +7,9 @@ import json
 import os
 
 # ----------------------------- 配置 -----------------------------
-oanda_mt5_path = r"C:\Program Files\OANDA MetaTrader Second\terminal64.exe"
+#oanda_mt5_path = r"C:\Program Files\OANDA MetaTrader Second\terminal64.exe"
+oanda_mt5_path = r'/Users/junchen/Library/Application Support/net.metaquotes.wine.metatrader5/drive_c/Program Files/MetaTrader 5/terminal64.exe'
+
 server = "OANDA_Global-Demo-1"
 login = 1715532098
 password = "Jcsiah0318--=="
