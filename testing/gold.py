@@ -342,7 +342,7 @@ def remove_order_details():
     except Exception as e:
         logging.error(f"Failed to remove order details: {e}")
 
-def find_peaks(series, order=2):
+def find_peaks(series, order=1):
     """找到局部峰值（高点），返回按价格降序排序的列表"""
     peaks = []
     for i in range(order, len(series) - order):
@@ -456,19 +456,33 @@ def main():
                 print("If place order, SL will be ---")
             print("="*70)
             
-            high_series = df_1h['high'].iloc[-STRUCTURE_LOOKBACK_HOURS:]
-            low_series = df_1h['low'].iloc[-STRUCTURE_LOOKBACK_HOURS:]
+                        # 设置回溯窗口（1小时图K线根数）
+            lookback_hours = 15   # 可根据需要调整，确保不包含 4800.80
+            high_series = df_1h['high'].iloc[-lookback_hours:]
+            low_series = df_1h['low'].iloc[-lookback_hours:]
             
-            # 取最高点和次高点
-            sorted_highs = high_series.sort_values(ascending=False)
-            higher_high = sorted_highs.iloc[0] if len(sorted_highs) > 0 else None
-            previous_higher_high = sorted_highs.iloc[1] if len(sorted_highs) > 1 else None
+            # 使用局部峰值检测高点
+            peaks = find_peaks(high_series, order=1)
+            higher_high = peaks[0] if peaks else None
+            previous_higher_high = None
+            if higher_high is not None and len(peaks) > 1:
+                # 设置最小差距（例如 0.5 倍 ATR 或固定点数 15）
+                min_diff = max(atr_value * 0.8, 20)   # 将 0.5 提高到 0.8，固定点数提高到 20
+                for p in peaks[1:]:
+                    if higher_high - p >= min_diff:
+                        previous_higher_high = p
+                        break
+                # 如果没找到，可以降级取第二高峰值
+                if previous_higher_high is None and len(peaks) > 1:
+                    previous_higher_high = peaks[1]
             
             # 当前低点（最近5根K线的最低价）
             curr_low = low_series.iloc[-5:].min()
-            # 取整体窗口内的最低点作为 Previous Higher low（或者也可以取次低点）
-            sorted_lows = low_series.sort_values()
-            previous_higher_low = sorted_lows.iloc[0] if len(sorted_lows) > 0 else None
+            
+            # 使用局部谷底检测低点（可选，保持原有逻辑或改用 troughs）
+            troughs = find_troughs(low_series, order=1)
+            # 取最低的谷底作为 Previous Higher low（您也可以保留原来的排序取最低）
+            previous_higher_low = troughs[0] if len(troughs) > 0 else None
             
             print("Market Structure")
             print(f"Higher high : {higher_high:.2f}" if higher_high is not None else "Higher high : N/A")
