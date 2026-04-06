@@ -40,6 +40,7 @@ import mdr
 import p0
 import maintenance
 import emergency
+importlib.reload(emergency)
 
 from dotenv import load_dotenv
 load_dotenv()
