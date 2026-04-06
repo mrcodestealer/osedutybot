@@ -390,8 +390,8 @@ def find_responsible_marker(values):
 def get_responsible_games(target_game=None):
     """
     Extract game names and the person responsible (1st负责人) using the '负责游戏' marker.
-    The responsible person is in the column immediately to the right of the game name.
-    Phone numbers are looked up from dutyList.csv.
+    The responsible person is in the column that has the header '1st负责人' (or '1st Product Manager')
+    in the same row as the marker. Phone numbers are looked up from dutyList.csv.
     Stops when a blank cell is encountered in the game name column.
     """
     try:
@@ -404,11 +404,30 @@ def get_responsible_games(target_game=None):
         if not values:
             return "No data found in sheet."
 
+        # Find the '负责游戏' marker
         marker = find_responsible_marker(values)
         if not marker:
             return "Could not find '负责游戏' marker in the sheet."
         marker_row, marker_col = marker
         debug_print(f"Responsible marker at row {marker_row}, col {marker_col}")
+
+        # Find the column that contains '1st负责人' or '1st Product Manager' in the same row
+        responsible_col = None
+        header_row = values[marker_row] if marker_row < len(values) else []
+        for col_idx, cell in enumerate(header_row):
+            if col_idx == marker_col:
+                continue  # skip the marker column itself
+            cell_text = extract_text_from_cell(cell).strip()
+            if not cell_text:
+                continue
+            normalized = re.sub(r'\s+', ' ', cell_text).lower()
+            if re.search(r'1st\s*负责人|1st\s*product\s*manager', normalized):
+                responsible_col = col_idx
+                debug_print(f"Found '1st负责人' at column {responsible_col}")
+                break
+
+        if responsible_col is None:
+            return "Could not find '1st负责人' column in the marker row."
 
         games = []
         start_row = marker_row + 1
@@ -419,7 +438,7 @@ def get_responsible_games(target_game=None):
             game_name = extract_text_from_cell(row[marker_col] if marker_col < len(row) else "").strip()
             if not game_name:
                 break
-            responsible = extract_text_from_cell(row[marker_col + 1] if marker_col + 1 < len(row) else "").strip()
+            responsible = extract_text_from_cell(row[responsible_col] if responsible_col < len(row) else "").strip()
             if responsible:
                 phone = search_phone_in_dutylist(responsible)
                 games.append((game_name, responsible, phone))
