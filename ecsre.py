@@ -111,6 +111,7 @@ def search_phone_in_dutylist(name):
         return "N/A"
 
 def get_responsible_games(target_game=None):
+    print("DEBUG: ecsre.get_responsible_games called with", target_game)
     """
     返回负责游戏列表（只显示1st负责人）
     """

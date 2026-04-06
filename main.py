@@ -1002,10 +1002,7 @@ def lark_webhook():
     elif clean_text.lower().startswith('/ecsre'):
         parts = clean_text.split(maxsplit=1)
         game_name = parts[1].strip() if len(parts) > 1 else None
-        try:
-            reply = ecsre.get_responsible_games(game_name)
-        except Exception as e:
-            reply = f"Error: {e}"
+        reply = ecsre.get_responsible_games(game_name)   # ← 注意是 ecsre，不是 emergency
         send_message(chat_id, reply)
         return jsonify({"success": True})
                 
