@@ -64,25 +64,33 @@ def normalize_name(name):
     return name
 
 def get_phone_from_dutylist(name):
-    """从 dutyList.csv 中查找姓名对应的电话号码，支持标准化匹配和模糊匹配"""
+    """从 dutyList.csv 中查找姓名对应的电话号码，支持精确、标准化、子串和模糊匹配"""
     if not name:
         return None
     cache = _load_duty_cache()
     if not cache:
         return None
-    
+
     # 1. 精确匹配（原样）
     if name in cache:
         return cache[name]
-    
-    # 2. 标准化匹配（去除空格、括号等）
+
+    # 2. 标准化匹配（去除括号、头衔、空格、标点，转为小写）
     norm_name = normalize_name(name)
     for cached_name, phone in cache.items():
         if normalize_name(cached_name) == norm_name:
             return phone
-    
-    # 3. 模糊匹配（使用 difflib）
-    best_ratio = 0.7
+
+    # 3. 子串匹配：如果查询姓名是缓存姓名的子串（忽略大小写和空格）
+    # 例如 "Mark" 匹配 "Mark Paulo"
+    name_lower = re.sub(r'[^\w\u4e00-\u9fff]', '', name).lower()
+    for cached_name, phone in cache.items():
+        cached_clean = re.sub(r'[^\w\u4e00-\u9fff]', '', cached_name).lower()
+        if name_lower in cached_clean or cached_clean in name_lower:
+            return phone
+
+    # 4. 模糊匹配（提高阈值或使用更智能的算法）
+    best_ratio = 0.65  # 降低阈值，使得 "mark" 与 "markpaulo" 更容易匹配
     best_match = None
     for cached_name in cache.keys():
         ratio = difflib.SequenceMatcher(None, norm_name, normalize_name(cached_name)).ratio()
@@ -91,7 +99,7 @@ def get_phone_from_dutylist(name):
             best_match = cached_name
     if best_match:
         return cache[best_match]
-    
+
     return None
 
 # ================= API 函数 =================
