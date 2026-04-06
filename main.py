@@ -39,6 +39,7 @@ import mdr
 
 import p0
 import maintenance
+import emergency
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -429,10 +430,9 @@ def evening_reminder():
     send_shift_reminder(DUTY_CHAT_ID, msg)
 
 def amountloss():
-    
     # Prepend a mention for the target user
     mention_line = f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>'
-    msg = mention_line + "\n" + "Kindly reminder to do Amount Loss"
+    msg = mention_line + "\n" + "Hi Morning Shift kindly reminder to do Amount Loss~"
     send_shift_reminder(DUTY_CHAT_ID, msg)
 
 scheduler = BackgroundScheduler()
@@ -984,6 +984,17 @@ def lark_webhook():
                 reply = "❌ 格式错误。请使用 `/dutycheckall MM/YYYY` 或 `/dutycheckall YYYY-MM`"
         else:
             reply = get_all_duty_check()
+        send_message(chat_id, reply)
+        return jsonify({"success": True})
+    
+    elif clean_text.lower().startswith('/ec'):
+        # Extract game name after /ec (optional)
+        parts = clean_text.split(maxsplit=1)
+        game_name = parts[1].strip() if len(parts) > 1 else None
+        try:
+            reply = emergency.get_emergency_contacts(game_name)
+        except Exception as e:
+            reply = f"Error: {e}"
         send_message(chat_id, reply)
         return jsonify({"success": True})
                 
