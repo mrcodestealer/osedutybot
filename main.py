@@ -988,21 +988,22 @@ def lark_webhook():
         send_message(chat_id, reply)
         return jsonify({"success": True})
     
-    elif clean_text.lower().startswith('/ecsre'):
-        parts = clean_text.split(maxsplit=1)
-        game_name = parts[1].strip() if len(parts) > 1 else None
-        reply = ecsre.get_responsible_games(game_name)   # ← 注意是 ecsre，不是 emergency
+    cmd_parts = clean_text.split()
+    if not cmd_parts:
+        return
+    cmd = cmd_parts[0].lower()
+
+    if cmd == '/ecsre':
+        # 处理 /ecsre
+        game_name = cmd_parts[1] if len(cmd_parts) > 1 else None
+        reply = ecsre.get_responsible_games(game_name)
         send_message(chat_id, reply)
         return jsonify({"success": True})
-    
-    elif clean_text.lower().startswith('/ec'):
-        # Extract game name after /ec (optional)
-        parts = clean_text.split(maxsplit=1)
-        game_name = parts[1].strip() if len(parts) > 1 else None
-        try:
-            reply = emergency.get_emergency_contacts(game_name)
-        except Exception as e:
-            reply = f"Error: {e}"
+
+    elif cmd == '/ec':
+        # 处理 /ec
+        game_name = cmd_parts[1] if len(cmd_parts) > 1 else None
+        reply = emergency.get_emergency_contacts(game_name)
         send_message(chat_id, reply)
         return jsonify({"success": True})
                 
