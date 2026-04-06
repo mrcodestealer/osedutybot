@@ -1002,6 +1002,11 @@ def lark_webhook():
         reply = f'the player has been get back his credit. @On-Duty-OSM-Lavie(Podium1) kindly manual cashout the credit and reboot the machine. After that, @Xavier (CS OSM) kindly unset and test the machine thanks'
         send_message(chat_id, reply)
         return jsonify({"success": True})
+    
+    elif clean_text == '/restartA':
+        reply = f'cd /home/pi/osm && ./stopallserver.sh && ./startserver.sh'
+        send_message(chat_id, reply)
+        return jsonify({"success": True})
         
     elif clean_text.lower().startswith('/maintenance') or clean_text.lower().startswith('/maintenanceshort'):
         # Determine which command was used
@@ -1057,7 +1062,7 @@ def lark_webhook():
         send_message(chat_id, reply)
         return jsonify({"success": True})
     
-    elif clean_text.lower().startswith('/winford'):
+    elif clean_text.lower().startswith('/wf'):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
             reply = "❌ Usage: `/winford <asset_id(s)>`\nExamples: `/winford 8092`, `/winford 8092,8093`, `/winford win8092 win8093`"
