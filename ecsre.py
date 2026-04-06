@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Game Responsible Person (1st负责人) - 读取 Lark 表格中“负责游戏”区域的数据
+Game Responsible Persons (1st,2nd,3rd,4th,5th负责人) - 读取 Lark 表格中“负责游戏”区域的数据
 """
 
 import os
 import re
-import csv
 import difflib
 import requests
 from dotenv import load_dotenv
@@ -82,39 +81,67 @@ def extract_text_from_cell(cell):
         return ''.join(parts)
     return str(cell)
 
-def search_phone_in_dutylist(name):
-    csv_path = 'dutyList.csv'
-    if not os.path.exists(csv_path):
-        return "N/A"
-    try:
-        with open(csv_path, newline='', encoding='utf-8') as f:
-            reader = csv.reader(f)
-            entries = []
-            for row in reader:
-                if len(row) >= 3:
-                    entries.append((row[0].strip(), row[2].strip()))
-        if not entries:
-            return "N/A"
-        name_norm = name.lower().replace(' ', '')
-        best_match = None
-        best_ratio = 0
-        for entry_name, phone in entries:
-            entry_norm = entry_name.lower().replace(' ', '')
-            ratio = difflib.SequenceMatcher(None, name_norm, entry_norm).ratio()
-            if ratio > best_ratio:
-                best_ratio = ratio
-                best_match = phone
-        if best_ratio >= 0.7:
-            return best_match
-        return "N/A"
-    except Exception:
-        return "N/A"
+def find_marker(values):
+    """Find the cell that exactly contains '负责游戏'."""
+    for r, row in enumerate(values):
+        for c, cell in enumerate(row):
+            cell_text = extract_text_from_cell(cell).strip()
+            if cell_text == "负责游戏":
+                debug_print(f"Marker found at row {r}, col {c}")
+                return (r, c)
+    return None
+
+def find_header_row(values, marker_row):
+    """Find the row above the marker that contains '1st负责人' or '1st Person in Charge'."""
+    for r in range(marker_row - 1, -1, -1):
+        row = values[r]
+        if not row:
+            continue
+        for cell in row:
+            cell_text = extract_text_from_cell(cell).strip()
+            normalized = re.sub(r'\s+', ' ', cell_text).lower()
+            if re.search(r'1st\s*负责人|1st\s*person\s*in\s*charge', normalized):
+                debug_print(f"Header row found at {r}")
+                return r
+    return None
+
+def get_responsible_columns(header_row):
+    """
+    Scan the header row and return a list of (name_col, phone_col) for each responsible person.
+    Assumes order: name, phone, email (skip), then next name, etc.
+    """
+    phone_pattern = re.compile(r'紧急联络电话|contact\s*no\.', re.IGNORECASE)
+    responsible_columns = []
+    i = 0
+    while i < len(header_row):
+        cell_text = extract_text_from_cell(header_row[i]).strip()
+        if not cell_text:
+            i += 1
+            continue
+        normalized = re.sub(r'\s+', ' ', cell_text).lower()
+        # Look for patterns like '1st负责人', '2nd负责人', '1st person in charge', etc.
+        if re.search(r'\d+\s*负责人|\d+\s*person\s*in\s*charge', normalized):
+            name_col = i
+            # Find the phone column (should be the next column that matches phone pattern)
+            phone_col = None
+            for j in range(i+1, len(header_row)):
+                phone_text = extract_text_from_cell(header_row[j]).strip()
+                if phone_pattern.search(phone_text):
+                    phone_col = j
+                    break
+            if phone_col is not None:
+                responsible_columns.append((name_col, phone_col))
+                # Skip the email column (next after phone) – but we don't know exactly, so we'll advance i to phone_col+1
+                i = phone_col + 1
+            else:
+                i += 1
+        else:
+            i += 1
+    debug_print(f"Found {len(responsible_columns)} responsible person columns")
+    return responsible_columns
 
 def get_responsible_games(target_game=None):
-    print("DEBUG: ecsre.get_responsible_games called with", target_game)
-    """
-    返回负责游戏列表（只显示1st负责人）
-    """
+    """Return formatted list of games with all responsible persons."""
     try:
         token = get_tenant_access_token()
         metadata = get_sheet_metadata(token)
@@ -123,42 +150,24 @@ def get_responsible_games(target_game=None):
         if not values:
             return "No data found in sheet."
 
-        # 1. 找到“负责游戏”标记
-        marker = None
-        for r, row in enumerate(values):
-            for c, cell in enumerate(row):
-                cell_text = extract_text_from_cell(cell).strip()
-                if cell_text == "负责游戏":
-                    marker = (r, c)
-                    break
-            if marker:
-                break
+        # 1. Find marker
+        marker = find_marker(values)
         if not marker:
             return "Could not find '负责游戏' marker."
-
         marker_row, marker_col = marker
 
-        # 2. 找到“1st负责人”所在的列（整个表格中搜索）
-        responsible_col = None
-        for r, row in enumerate(values):
-            if not row:
-                continue
-            for c, cell in enumerate(row):
-                cell_text = extract_text_from_cell(cell).strip()
-                if not cell_text:
-                    continue
-                normalized = re.sub(r'\s+', ' ', cell_text).lower()
-                if re.search(r'1st\s*负责人|1st\s*product\s*manager', normalized):
-                    responsible_col = c
-                    debug_print(f"Found 1st负责人 at row {r}, col {c}")
-                    break
-            if responsible_col is not None:
-                break
+        # 2. Find header row
+        header_row_idx = find_header_row(values, marker_row)
+        if header_row_idx is None:
+            return "Could not find header row with '1st负责人'."
+        header_row = values[header_row_idx]
 
-        if responsible_col is None:
-            return "Could not find '1st负责人' column."
+        # 3. Get responsible columns
+        responsible_cols = get_responsible_columns(header_row)
+        if not responsible_cols:
+            return "Could not find any responsible person columns."
 
-        # 3. 提取游戏名称和负责人
+        # 4. Extract games
         games = []
         start_row = marker_row + 1
         for r in range(start_row, len(values)):
@@ -168,40 +177,44 @@ def get_responsible_games(target_game=None):
             game_name = extract_text_from_cell(row[marker_col] if marker_col < len(row) else "").strip()
             if not game_name:
                 break
-            responsible = extract_text_from_cell(row[responsible_col] if responsible_col < len(row) else "").strip()
-            if responsible:
-                phone = search_phone_in_dutylist(responsible)
-                games.append((game_name, responsible, phone))
-            else:
-                games.append((game_name, "Unknown", "N/A"))
+            # For each responsible person, get name and phone
+            persons = []
+            for name_col, phone_col in responsible_cols:
+                name = extract_text_from_cell(row[name_col] if name_col < len(row) else "").strip()
+                phone = extract_text_from_cell(row[phone_col] if phone_col < len(row) else "").strip()
+                if name:  # Only add if name exists
+                    persons.append((name, phone))
+            if persons:
+                games.append((game_name, persons))
 
         if not games:
             return "No games found under '负责游戏'."
 
-        # 4. 模糊搜索
+        # 5. Fuzzy match if target_game provided
         if target_game:
             target_lower = target_game.lower().strip()
             target_norm = target_lower.replace(' ', '')
             matches = []
-            for name, resp, phone in games:
+            for name, persons in games:
                 name_lower = name.lower()
                 name_norm = name_lower.replace(' ', '')
                 if target_lower in name_lower or name_lower in target_lower:
-                    matches.append((name, resp, phone))
+                    matches.append((name, persons))
                 else:
                     ratio = difflib.SequenceMatcher(None, target_norm, name_norm).ratio()
                     if ratio >= 0.65:
-                        matches.append((name, resp, phone))
+                        matches.append((name, persons))
             games = matches
 
         if not games:
             return f"No game found matching '{target_game}'"
 
-        # 5. 格式化输出
+        # 6. Format output
         lines = []
-        for name, resp, phone in games:
-            lines.append(f"🎮 {name}")
-            lines.append(f"  Responsible: {resp} (📞 {phone})")
+        for game_name, persons in games:
+            lines.append(f"🎮 {game_name}")
+            for i, (name, phone) in enumerate(persons, start=1):
+                lines.append(f"  {i}st Responsible: {name} (📞 {phone if phone else 'N/A'})")
             lines.append("")
         return "\n".join(lines).strip()
 
