@@ -513,6 +513,39 @@ def get_emergency_contacts(target_game=None):
 
     except Exception as e:
         return f"Error: {e}"
+    
+def debug_responsible_games():
+    """Print all game names found under the '负责游戏' marker (for debugging)."""
+    try:
+        token = get_tenant_access_token()
+        metadata = get_sheet_metadata(token)
+        max_row = metadata.get("rowCount", 500)
+        values = get_range_values(token, f"A1:ZZ{max_row}")
+        if not values:
+            return "No data found in sheet."
+
+        marker = find_responsible_marker(values)
+        if not marker:
+            return "Could not find '负责游戏' marker."
+        marker_row, marker_col = marker
+
+        game_names = []
+        start_row = marker_row + 1
+        for r in range(start_row, len(values)):
+            row = values[r]
+            if not row or all(not extract_text_from_cell(cell) for cell in row):
+                break
+            game_name = extract_text_from_cell(row[marker_col] if marker_col < len(row) else "").strip()
+            if not game_name:
+                break
+            game_names.append(game_name)
+
+        if not game_names:
+            return "No game names found below '负责游戏'."
+        return "Game names under '负责游戏':\n" + "\n".join(f"  - {name}" for name in game_names)
+
+    except Exception as e:
+        return f"Error: {e}"
 
 def main():
     """Command-line entry point."""
@@ -520,6 +553,7 @@ def main():
     target_game = None
     list_only = False
     output_csv_flag = False
+    debug_responsible = False
 
     for arg in args:
         if arg == "--debug":
@@ -529,8 +563,14 @@ def main():
             list_only = True
         elif arg == "--csv":
             output_csv_flag = True
+        elif arg == "--debug_responsible":
+            debug_responsible = True
         elif not arg.startswith("--"):
             target_game = arg
+
+    if debug_responsible:
+        print(debug_responsible_games())
+        return
 
     result = get_emergency_contacts(target_game)
     if result:

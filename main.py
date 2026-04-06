@@ -1002,8 +1002,7 @@ def lark_webhook():
         parts = clean_text.split(maxsplit=1)
         game_name = parts[1].strip() if len(parts) > 1 else None
         try:
-            # ✅ Call the function that searches for "负责游戏"
-            reply = emergency.get_responsible_games(game_name)
+            reply = emergency.get_responsible_games(game_name)   # ← correct function
         except Exception as e:
             reply = f"Error: {e}"
         send_message(chat_id, reply)
