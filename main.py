@@ -997,6 +997,16 @@ def lark_webhook():
             reply = f"Error: {e}"
         send_message(chat_id, reply)
         return jsonify({"success": True})
+    
+    elif clean_text.lower().startswith('/ecsre'):
+        parts = clean_text.split(maxsplit=1)
+        game_name = parts[1].strip() if len(parts) > 1 else None
+        try:
+            reply = emergency.get_game_owners(game_name)
+        except Exception as e:
+            reply = f"Error: {e}"
+        send_message(chat_id, reply)
+        return jsonify({"success": True})
                 
     elif clean_text == '/cashout':
         reply = f'the player has been get back his credit. @On-Duty-OSM-Lavie(Podium1) kindly manual cashout the credit and reboot the machine. After that, @Xavier (CS OSM) kindly unset and test the machine thanks'
