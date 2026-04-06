@@ -390,9 +390,8 @@ def find_responsible_marker(values):
 def get_responsible_games(target_game=None):
     """
     Extract game names and the person responsible (1st负责人) using the '负责游戏' marker.
-    The responsible person is in the column that has the header '1st负责人' (or '1st Product Manager')
-    in the same row as the marker. Phone numbers are looked up from dutyList.csv.
-    Stops when a blank cell is encountered in the game name column.
+    The responsible person is taken from the column that has the header '1st负责人'
+    (or '1st Product Manager') in the header row. Phone numbers from dutyList.csv.
     """
     try:
         token = get_tenant_access_token()
@@ -404,31 +403,37 @@ def get_responsible_games(target_game=None):
         if not values:
             return "No data found in sheet."
 
-        # Find the '负责游戏' marker
+        # 1. Find '负责游戏' marker
         marker = find_responsible_marker(values)
         if not marker:
-            return "Could not find '负责游戏' marker in the sheet."
+            return "Could not find '负责游戏' marker."
         marker_row, marker_col = marker
-        debug_print(f"Responsible marker at row {marker_row}, col {marker_col}")
+        debug_print(f"Marker at row {marker_row}, col {marker_col}")
 
-        # Find the column that contains '1st负责人' or '1st Product Manager' in the same row
+        # 2. Find header row containing '1st负责人' (search from row 0 upward to marker_row)
+        header_row_idx = None
         responsible_col = None
-        header_row = values[marker_row] if marker_row < len(values) else []
-        for col_idx, cell in enumerate(header_row):
-            if col_idx == marker_col:
-                continue  # skip the marker column itself
-            cell_text = extract_text_from_cell(cell).strip()
-            if not cell_text:
+        for r in range(0, marker_row):
+            row = values[r]
+            if not row:
                 continue
-            normalized = re.sub(r'\s+', ' ', cell_text).lower()
-            if re.search(r'1st\s*负责人|1st\s*product\s*manager', normalized):
-                responsible_col = col_idx
-                debug_print(f"Found '1st负责人' at column {responsible_col}")
+            for c, cell in enumerate(row):
+                cell_text = extract_text_from_cell(cell).strip()
+                if not cell_text:
+                    continue
+                normalized = re.sub(r'\s+', ' ', cell_text).lower()
+                if re.search(r'1st\s*负责人|1st\s*product\s*manager', normalized):
+                    header_row_idx = r
+                    responsible_col = c
+                    debug_print(f"Found header '1st负责人' at row {r}, col {c}")
+                    break
+            if responsible_col is not None:
                 break
 
         if responsible_col is None:
-            return "Could not find '1st负责人' column in the marker row."
+            return "Could not find '1st负责人' header in the sheet."
 
+        # 3. Extract game names and responsible persons
         games = []
         start_row = marker_row + 1
         for r in range(start_row, len(values)):
@@ -448,6 +453,7 @@ def get_responsible_games(target_game=None):
         if not games:
             return "No games found under '负责游戏'."
 
+        # 4. Fuzzy match if target_game provided
         if target_game:
             target_lower = target_game.lower().strip()
             target_norm = target_lower.replace(' ', '')
@@ -466,6 +472,7 @@ def get_responsible_games(target_game=None):
         if not games:
             return f"No game found matching '{target_game}'"
 
+        # 5. Format output
         lines = []
         for name, resp, phone in games:
             lines.append(f"🎮 {name}")
