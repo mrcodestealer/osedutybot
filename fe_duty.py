@@ -2,8 +2,11 @@ import csv
 import requests
 from datetime import datetime, timedelta
 import os
+import re
+import difflib
 from dotenv import load_dotenv
 load_dotenv()
+
 # ================= 配置信息 =================
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
@@ -19,6 +22,77 @@ RANGES = [
 ]
 
 DUTY_LIST_PATH = "dutyList.csv"   # 用于查询电话号码
+
+# 预加载 duty list 并建立索引（姓名->电话）
+_duty_cache = None
+
+def _load_duty_cache():
+    global _duty_cache
+    if _duty_cache is not None:
+        return _duty_cache
+    _duty_cache = {}
+    if not os.path.exists(DUTY_LIST_PATH):
+        return _duty_cache
+    try:
+        with open(DUTY_LIST_PATH, newline='', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if len(row) >= 3:
+                    name = row[0].strip()
+                    dept = row[1].strip()
+                    phone = row[2].strip()
+                    # 只保留部门为 FE 的记录（可选，根据您的 CSV 内容）
+                    if dept.upper() == "FE":
+                        _duty_cache[name] = phone
+                    else:
+                        # 如果 CSV 中没有部门列或者部门不是 FE，仍然保存
+                        _duty_cache[name] = phone
+    except Exception as e:
+        print(f"⚠️ 加载 dutyList.csv 失败: {e}")
+    return _duty_cache
+
+def normalize_name(name):
+    """标准化姓名：去除多余空格、括号及括号内容、转为小写、去除标点符号"""
+    if not name:
+        return ""
+    # 移除括号及其内容（如 "(Manager)"）
+    name = re.sub(r'\([^)]*\)', '', name)
+    # 移除常见的头衔（例如 "Team Lead"）
+    name = re.sub(r'\s*(Team\s*Lead|Manager)\s*', '', name, flags=re.IGNORECASE)
+    # 去除空格和标点
+    name = re.sub(r'[^\w\u4e00-\u9fff]', '', name).lower()
+    return name
+
+def get_phone_from_dutylist(name):
+    """从 dutyList.csv 中查找姓名对应的电话号码，支持标准化匹配和模糊匹配"""
+    if not name:
+        return None
+    cache = _load_duty_cache()
+    if not cache:
+        return None
+    
+    # 1. 精确匹配（原样）
+    if name in cache:
+        return cache[name]
+    
+    # 2. 标准化匹配（去除空格、括号等）
+    norm_name = normalize_name(name)
+    for cached_name, phone in cache.items():
+        if normalize_name(cached_name) == norm_name:
+            return phone
+    
+    # 3. 模糊匹配（使用 difflib）
+    best_ratio = 0.7
+    best_match = None
+    for cached_name in cache.keys():
+        ratio = difflib.SequenceMatcher(None, norm_name, normalize_name(cached_name)).ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_match = cached_name
+    if best_match:
+        return cache[best_match]
+    
+    return None
 
 # ================= API 函数 =================
 def get_tenant_access_token():
@@ -51,21 +125,6 @@ def get_sheet_values(token):
             all_values.extend(row)   # 直接添加该行的所有单元格
     return all_values
 
-def get_phone_from_dutylist(name):
-    """从 dutyList.csv 中查找姓名对应的电话号码"""
-    if not os.path.exists(DUTY_LIST_PATH):
-        return None
-    try:
-        with open(DUTY_LIST_PATH, newline='', encoding='utf-8') as f:
-            reader = csv.reader(f)
-            for row in reader:
-                if len(row) >= 3 and row[0].strip() == name:
-                    return row[2].strip()
-    except Exception:
-        return None
-    return None
-
-# ================= 新增辅助函数：解析多姓名并获取电话 =================
 def parse_names_and_get_phones(raw_name):
     """
     处理可能包含多个姓名的字符串（以逗号分隔），返回 (name, phone) 列表。
@@ -91,17 +150,13 @@ def format_duty_block(date_obj, names_phones):
     • Name1  (Phone: 123456)
     • Name2  (Phone: 789012)
     """
-    # 格式化日期：例如 "March 20, 2026 Friday"
-    
     date_str = date_obj.strftime("%B %d, %Y %A")
-    
     lines = [f"📅 FE Schedule - {date_str}"]
     if not names_phones:
         lines.append("• No duty")
     else:
         for name, phone in names_phones:
             lines.append(f"• {name}  (Phone: {phone})")
-            #lines.append("=" * 40)  # 分隔线，长度可调整
     return "\n".join(lines)
 
 # ================= 主要功能函数 =================
@@ -149,22 +204,20 @@ def get_fe_next_three_duty():
     blocks = []
     for offset in range(3):
         day_date = today + timedelta(days=offset)
-        if day_date.day > 31:   # 简单处理：如果超出本月31号，显示占位信息
+        if day_date.day > 31:
             raw_name = "Out of month"
-            names_phones = []   # 无姓名
+            names_phones = []
         else:
             raw_name = values[day_date.day - 1].strip() if values[day_date.day - 1] else ""
             if not raw_name:
                 raw_name = "No duty"
             names_phones = parse_names_and_get_phones(raw_name)
         blocks.append(format_duty_block(day_date, names_phones))
-
-    return "\n\n".join(blocks)   # 每个块之间空一行
+    return "\n\n".join(blocks)
 
 def fe_check(month=None, year=None):
     """
     检查 FE 值班表中指定月份（默认为当前月份）是否有空缺。
-    注意：该脚本始终读取同一个固定表格，请确保表格已更新为要检查的月份的数据。
     """
     if year is None:
         year = datetime.now().year
@@ -183,7 +236,6 @@ def fe_check(month=None, year=None):
     if len(values) < 31:
         return f"⚠️ 数据不完整（仅 {len(values)} 天）。"
 
-    # 获取目标月份的总天数
     first_day = datetime(year, month, 1).date()
     if month == 12:
         next_month_first = datetime(year + 1, 1, 1).date()
@@ -204,7 +256,6 @@ def fe_check(month=None, year=None):
         missing_str = ", ".join(str(d) for d in missing)
         return f"⚠️ {month_name} 缺少值班的日期：{missing_str}"
 
-# 测试用
 if __name__ == "__main__":
     print("=== Today's duty ===")
     print(get_fe_today_duty())
