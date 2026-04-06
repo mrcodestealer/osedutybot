@@ -388,6 +388,7 @@ def find_responsible_marker(values):
     return None
 
 def get_responsible_games(target_game=None):
+    print("DEBUG: get_responsible_games was called")   # ← add this
     """
     Extract game names and the person responsible (1st负责人) using the '负责游戏' marker.
     The responsible person is taken from the column that has the header '1st负责人'
@@ -574,8 +575,10 @@ def debug_responsible_games():
         return f"Error: {e}"
 
 def main():
-    """Command-line entry point."""
     args = sys.argv[1:]
+    if "--test-responsible" in args:
+        print(get_responsible_games())
+        return
     target_game = None
     list_only = False
     output_csv_flag = False
