@@ -17,8 +17,8 @@ load_dotenv()
 
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
-SPREADSHEET_TOKEN = "P7ATwNGfci7idPkqlm4l4YUGgFn"
-SHEET_ID = "fea5bc"
+SPREADSHEET_TOKEN = os.getenv("EC_SPREADSHEET_TOKEN")
+SHEET_ID = os.getenv("EC_SHEET_ID") 
 
 DEBUG = False
 FUZZY_THRESHOLD = 0.75
@@ -159,19 +159,31 @@ def get_contacts_for_game(values, game_row, role_map):
     return contacts
 
 def fuzzy_match_games(games_contacts, target_game):
-    """Return list of (game_name, contacts) that fuzzy match target_game."""
-    target_norm = target_game.lower().replace(' ', '')
-    best_matches = []
+    """Return list of (game_name, contacts) that match target_game using:
+    - substring match (case-insensitive)
+    - fuzzy match with lower threshold
+    """
+    target_lower = target_game.lower().strip()
+    target_norm = target_lower.replace(' ', '')
+    matches = []
     for name, contacts in games_contacts:
-        name_norm = name.lower().replace(' ', '')
+        name_lower = name.lower()
+        name_norm = name_lower.replace(' ', '')
+        # Substring match (if query is part of game name)
+        if target_lower in name_lower or name_lower in target_lower:
+            matches.append((1.0, name, contacts))
+            continue
+        # Fuzzy match
         ratio = difflib.SequenceMatcher(None, target_norm, name_norm).ratio()
-        if ratio >= FUZZY_THRESHOLD:
-            best_matches.append((ratio, name, contacts))
-    if not best_matches:
+        if ratio >= 0.65:  # lowered threshold
+            matches.append((ratio, name, contacts))
+    if not matches:
         return []
-    best_matches.sort(key=lambda x: x[0], reverse=True)
-    best_ratio = best_matches[0][0]
-    return [(name, contacts) for ratio, name, contacts in best_matches if ratio >= best_ratio - 0.05]
+    # Sort by ratio descending
+    matches.sort(key=lambda x: x[0], reverse=True)
+    best_ratio = matches[0][0]
+    # Return all matches within 0.1 of the best
+    return [(name, contacts) for ratio, name, contacts in matches if ratio >= best_ratio - 0.1]
 
 def format_output(games_contacts, target_game=None):
     if target_game:
