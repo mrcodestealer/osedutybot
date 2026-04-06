@@ -270,6 +270,193 @@ def format_output(games_contacts, target_game=None):
         lines.append("")
     return "\n".join(lines)
 
+def get_game_owners(target_game=None):
+    """
+    Extract game names and the person responsible (1st负责人) from the sheet.
+    Phone numbers are looked up from dutyList.csv.
+    """
+    try:
+        token = get_tenant_access_token()
+        debug_print("Token obtained")
+
+        metadata = get_sheet_metadata(token)
+        max_row = metadata.get("rowCount", 500)
+        values = get_range_values(token, f"A1:ZZ{max_row}")
+        if not values:
+            return "No data found in sheet."
+
+        marker = find_marker_cell(values)
+        if not marker:
+            return "Could not find '游戏\\nGame' marker in the sheet."
+        marker_row, marker_col = marker
+        debug_print(f"Marker at row {marker_row}, col {marker_col}")
+
+        # Extract game names and responsible persons
+        games = []
+        start_row = marker_row + 1
+        for r in range(start_row, len(values)):
+            row = values[r]
+            if not row or all(not extract_text_from_cell(cell) for cell in row):
+                break
+            game_name = extract_text_from_cell(row[marker_col] if marker_col < len(row) else "").strip()
+            if not game_name:
+                continue
+            # Responsible person is in the next column (marker_col + 1)
+            responsible = extract_text_from_cell(row[marker_col + 1] if marker_col + 1 < len(row) else "").strip()
+            if responsible:
+                # Lookup phone from dutyList.csv
+                phone = search_phone_in_dutylist(responsible)
+                games.append((game_name, responsible, phone))
+            else:
+                games.append((game_name, "Unknown", "N/A"))
+        if not games:
+            return "No game owners found."
+
+        # Filter if target_game provided (fuzzy match)
+        if target_game:
+            target_lower = target_game.lower().strip()
+            target_norm = target_lower.replace(' ', '')
+            matches = []
+            for name, resp, phone in games:
+                name_lower = name.lower()
+                name_norm = name_lower.replace(' ', '')
+                if target_lower in name_lower or name_lower in target_lower:
+                    matches.append((name, resp, phone))
+                else:
+                    ratio = difflib.SequenceMatcher(None, target_norm, name_norm).ratio()
+                    if ratio >= 0.65:
+                        matches.append((name, resp, phone))
+            games = matches
+
+        if not games:
+            return f"No game found matching '{target_game}'"
+
+        # Format output
+        lines = []
+        for name, resp, phone in games:
+            lines.append(f"🎮 {name}")
+            lines.append(f"  Responsible: {resp} (📞 {phone})")
+            lines.append("")
+        return "\n".join(lines).strip()
+
+    except Exception as e:
+        return f"Error: {e}"
+
+def search_phone_in_dutylist(name):
+    """Look up phone number from dutyList.csv using fuzzy matching."""
+    import csv
+    import difflib
+    csv_path = 'dutyList.csv'
+    if not os.path.exists(csv_path):
+        return "N/A"
+    try:
+        with open(csv_path, newline='', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            entries = []
+            for row in reader:
+                if len(row) >= 3:
+                    entries.append((row[0].strip(), row[2].strip()))
+        if not entries:
+            return "N/A"
+        # Normalize input name
+        name_norm = name.lower().replace(' ', '')
+        best_match = None
+        best_ratio = 0
+        for entry_name, phone in entries:
+            entry_norm = entry_name.lower().replace(' ', '')
+            ratio = difflib.SequenceMatcher(None, name_norm, entry_norm).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_match = phone
+        if best_ratio >= 0.7:
+            return best_match
+        return "N/A"
+    except Exception:
+        return "N/A"
+    
+def find_responsible_marker(values):
+    """Find the cell that contains '负责游戏' (exact)."""
+    for r, row in enumerate(values):
+        for c, cell in enumerate(row):
+            cell_text = extract_text_from_cell(cell).strip()
+            if not cell_text:
+                continue
+            normalized = re.sub(r'\s+', ' ', cell_text).lower()
+            if normalized == '负责游戏':
+                debug_print(f"Responsible marker found at row {r}, col {c}: '{cell_text}'")
+                return (r, c)
+    return None
+
+def get_responsible_games(target_game=None):
+    """
+    Extract game names and the person responsible (1st负责人) using the '负责游戏' marker.
+    The responsible person is in the column immediately to the right of the game name.
+    Phone numbers are looked up from dutyList.csv.
+    Stops when a blank cell is encountered in the game name column.
+    """
+    try:
+        token = get_tenant_access_token()
+        debug_print("Token obtained")
+
+        metadata = get_sheet_metadata(token)
+        max_row = metadata.get("rowCount", 500)
+        values = get_range_values(token, f"A1:ZZ{max_row}")
+        if not values:
+            return "No data found in sheet."
+
+        marker = find_responsible_marker(values)
+        if not marker:
+            return "Could not find '负责游戏' marker in the sheet."
+        marker_row, marker_col = marker
+        debug_print(f"Responsible marker at row {marker_row}, col {marker_col}")
+
+        games = []
+        start_row = marker_row + 1
+        for r in range(start_row, len(values)):
+            row = values[r]
+            if not row or all(not extract_text_from_cell(cell) for cell in row):
+                break
+            game_name = extract_text_from_cell(row[marker_col] if marker_col < len(row) else "").strip()
+            if not game_name:
+                break
+            responsible = extract_text_from_cell(row[marker_col + 1] if marker_col + 1 < len(row) else "").strip()
+            if responsible:
+                phone = search_phone_in_dutylist(responsible)
+                games.append((game_name, responsible, phone))
+            else:
+                games.append((game_name, "Unknown", "N/A"))
+
+        if not games:
+            return "No games found under '负责游戏'."
+
+        if target_game:
+            target_lower = target_game.lower().strip()
+            target_norm = target_lower.replace(' ', '')
+            matches = []
+            for name, resp, phone in games:
+                name_lower = name.lower()
+                name_norm = name_lower.replace(' ', '')
+                if target_lower in name_lower or name_lower in target_lower:
+                    matches.append((name, resp, phone))
+                else:
+                    ratio = difflib.SequenceMatcher(None, target_norm, name_norm).ratio()
+                    if ratio >= 0.65:
+                        matches.append((name, resp, phone))
+            games = matches
+
+        if not games:
+            return f"No game found matching '{target_game}'"
+
+        lines = []
+        for name, resp, phone in games:
+            lines.append(f"🎮 {name}")
+            lines.append(f"  Responsible: {resp} (📞 {phone})")
+            lines.append("")
+        return "\n".join(lines).strip()
+
+    except Exception as e:
+        return f"Error: {e}"
+
 def get_emergency_contacts(target_game=None):
     """Main function to fetch and return emergency contacts."""
     try:
