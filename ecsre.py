@@ -91,10 +91,9 @@ def find_marker(values):
                 return (r, c)
     return None
 
-def find_header_row(values, marker_row):
-    """Find the row above the marker that contains '1st负责人' or '1st Person in Charge'."""
-    for r in range(marker_row - 1, -1, -1):
-        row = values[r]
+def find_header_row(values):
+    """Find the row that contains '1st负责人' or '1st Person in Charge'."""
+    for r, row in enumerate(values):
         if not row:
             continue
         for cell in row:
@@ -108,9 +107,11 @@ def find_header_row(values, marker_row):
 def get_responsible_columns(header_row):
     """
     Scan the header row and return a list of (name_col, phone_col) for each responsible person.
-    Assumes order: name, phone, email (skip), then next name, etc.
+    Assumes order: name, phone, (optional email), then next name, etc.
     """
     phone_pattern = re.compile(r'紧急联络电话|contact\s*no\.', re.IGNORECASE)
+    name_pattern = re.compile(r'负责人|person\s*in\s*charge', re.IGNORECASE)
+    
     responsible_columns = []
     i = 0
     while i < len(header_row):
@@ -119,25 +120,24 @@ def get_responsible_columns(header_row):
             i += 1
             continue
         normalized = re.sub(r'\s+', ' ', cell_text).lower()
-        # Look for patterns like '1st负责人', '2nd负责人', '1st person in charge', etc.
-        if re.search(r'\d+\s*负责人|\d+\s*person\s*in\s*charge', normalized):
+        if name_pattern.search(normalized):
             name_col = i
-            # Find the phone column (should be the next column that matches phone pattern)
+            # search forward up to 5 columns for phone
             phone_col = None
-            for j in range(i+1, len(header_row)):
+            for j in range(i+1, min(i+6, len(header_row))):
                 phone_text = extract_text_from_cell(header_row[j]).strip()
                 if phone_pattern.search(phone_text):
                     phone_col = j
                     break
             if phone_col is not None:
                 responsible_columns.append((name_col, phone_col))
-                # Skip the email column (next after phone) – but we don't know exactly, so we'll advance i to phone_col+1
+                # Move i to phone_col+1 to continue scanning after this group
                 i = phone_col + 1
             else:
+                # No phone found for this name, skip this column
                 i += 1
         else:
             i += 1
-    debug_print(f"Found {len(responsible_columns)} responsible person columns")
     return responsible_columns
 
 def get_responsible_games(target_game=None):
@@ -156,8 +156,8 @@ def get_responsible_games(target_game=None):
             return "Could not find '负责游戏' marker."
         marker_row, marker_col = marker
 
-        # 2. Find header row
-        header_row_idx = find_header_row(values, marker_row)
+        # 2. Find header row (anywhere, not necessarily above)
+        header_row_idx = find_header_row(values)
         if header_row_idx is None:
             return "Could not find header row with '1st负责人'."
         header_row = values[header_row_idx]
@@ -213,8 +213,9 @@ def get_responsible_games(target_game=None):
         lines = []
         for game_name, persons in games:
             lines.append(f"🎮 {game_name}")
-            for i, (name, phone) in enumerate(persons, start=1):
-                lines.append(f"  {i}st Responsible: {name} (📞 {phone if phone else 'N/A'})")
+            for idx, (name, phone) in enumerate(persons, start=1):
+                suffix = "st" if idx == 1 else "nd" if idx == 2 else "rd" if idx == 3 else "th"
+                lines.append(f"  {idx}{suffix} Responsible: {name} (📞 {phone if phone else 'N/A'})")
             lines.append("")
         return "\n".join(lines).strip()
 
