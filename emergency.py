@@ -147,15 +147,10 @@ def extract_games(values, marker_row, marker_col):
 
 def get_contacts_for_game(values, game_row, start_col):
     """
-    Extract contacts for a game row.
-    The columns from start_col to start_col+13 are fixed:
-    0: 1st PM name, 1: phone, 2: 1st GO name, 3: phone,
-    4: 2nd PM name, 5: phone, 6: 2nd GO name, 7: phone,
-    8: 3rd PM name, 9: phone, 10: 3rd GO name, 11: phone,
-    12: 4th GO name, 13: phone
+    Extract contacts for a game row, handling multi-line name and phone cells.
+    Columns from start_col to start_col+13 are fixed offsets.
     """
     row = values[game_row]
-    # Ensure row has enough columns
     while len(row) <= start_col + 13:
         row.append("")
     contacts = {}
@@ -177,8 +172,41 @@ def get_contacts_for_game(values, game_row, start_col):
     for key, label in role_labels.items():
         name_col = start_col + offsets[key]
         phone_col = name_col + 1
-        name = extract_text_from_cell(row[name_col]).strip()
-        phone = extract_text_from_cell(row[phone_col]).strip()
+        raw_name = extract_text_from_cell(row[name_col]).strip()
+        raw_phone = extract_text_from_cell(row[phone_col]).strip()
+        
+        # Split by newline (and also possible \r\n or multiple lines)
+        names = [n.strip() for n in raw_name.splitlines() if n.strip()]
+        phones = [p.strip() for p in raw_phone.splitlines() if p.strip()]
+        
+        if not names:
+            contacts[key] = {'name': '', 'phone': '', 'label': label}
+            continue
+        
+        # If multiple names but only one phone, replicate phone for all
+        if len(names) > 1 and len(phones) == 1:
+            phones = phones * len(names)
+        # If multiple phones but only one name, use first phone
+        if len(phones) > 1 and len(names) == 1:
+            phones = [phones[0]]
+        # If counts mismatch, pad with empty
+        if len(phones) < len(names):
+            phones.extend([''] * (len(names) - len(phones)))
+        if len(names) < len(phones):
+            names.extend([''] * (len(phones) - len(names)))
+        
+        # For display, we want to show each name with its phone.
+        # We'll store as a list of dicts for the role? Or combine into single string?
+        # The original design expects a single name and phone per role. To keep compatibility,
+        # we will concatenate multiple entries with newline in the output string.
+        # But the format_output expects a single string. We'll create a combined string.
+        if len(names) == 1:
+            name = names[0]
+            phone = phones[0] if phones else ''
+        else:
+            # Combine multiple entries with newline
+            name = '\n'.join(names)
+            phone = '\n'.join(phones)
         contacts[key] = {'name': name, 'phone': phone, 'label': label}
     return contacts
 
@@ -222,7 +250,23 @@ def format_output(games_contacts, target_game=None):
                 phone = contacts[key]['phone']
                 label = contacts[key]['label']
                 if name:
-                    lines.append(f"  {label}: {name} (📞 {phone if phone else 'N/A'})")
+                    # Handle multi-line names and phones
+                    name_lines = name.split('\n')
+                    phone_lines = phone.split('\n')
+                    # Ensure same number of lines
+                    max_lines = max(len(name_lines), len(phone_lines))
+                    if len(name_lines) < max_lines:
+                        name_lines.extend([''] * (max_lines - len(name_lines)))
+                    if len(phone_lines) < max_lines:
+                        phone_lines.extend([''] * (max_lines - len(phone_lines)))
+                    for i in range(max_lines):
+                        n = name_lines[i].strip()
+                        p = phone_lines[i].strip()
+                        if n:
+                            if i == 0:
+                                lines.append(f"  {label}: {n} (📞 {p if p else 'N/A'})")
+                            else:
+                                lines.append(f"    {n} (📞 {p if p else 'N/A'})")
         lines.append("")
     return "\n".join(lines)
 
