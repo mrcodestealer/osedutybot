@@ -437,6 +437,12 @@ def amountloss():
     mention_line = f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>'
     msg = mention_line + "\n" + "Hi Morning Shift kindly reminder to do Amount Loss~"
     send_shift_reminder(DUTY_CHAT_ID, msg)
+    
+def myoseweeklymeeting():
+    # Prepend a mention for the target user
+    mention_line = f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>'
+    msg = mention_line + "\n" + "MY OSE WEEKLY MEETING"
+    send_shift_reminder(DUTY_CHAT_ID, msg)
 
 scheduler = BackgroundScheduler()
 
@@ -445,6 +451,9 @@ scheduler.add_job(func=morning_reminder, trigger="cron", hour=7, minute=00)
 scheduler.add_job(func=evening_reminder, trigger="cron", hour=19, minute=0)
 # Amount Loss
 scheduler.add_job(func=amountloss, trigger="cron", hour=9, minute=0)
+# MY OSE WEEKLY MEETING
+scheduler.add_job(func=myoseweeklymeeting, trigger="cron", hour=17, minute=0)
+
 
 # New: daily all-duty summary at midnight
 #scheduler.add_job(func=display_all_duty, trigger="cron", hour=0, minute=0)
