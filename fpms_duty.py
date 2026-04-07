@@ -2,9 +2,12 @@ import csv
 import requests
 from datetime import datetime, timedelta
 import os
+import re
+import difflib
 from calendar import monthrange
 from dotenv import load_dotenv
 load_dotenv()
+
 # ================= 配置信息 =================
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
@@ -18,8 +21,90 @@ MONTH_ABBR = {
     "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12
 }
 
+# 预加载 duty list 缓存
+_duty_cache = None
+
+def _load_duty_cache():
+    global _duty_cache
+    if _duty_cache is not None:
+        return _duty_cache
+    _duty_cache = {}
+    if not os.path.exists(DUTY_LIST_PATH):
+        print(f"⚠️ {DUTY_LIST_PATH} not found")
+        return _duty_cache
+    try:
+        with open(DUTY_LIST_PATH, newline='', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if len(row) >= 3:
+                    name = row[0].strip()
+                    dept = row[1].strip()
+                    phone = row[2].strip()
+                    # 只保留部门为 FPMS 的记录（根据您的 CSV 格式）
+                    if dept.upper() == "FPMS":
+                        _duty_cache[name] = phone
+                    # 如果 CSV 中没有部门列或部门不是 FPMS，可根据需要调整
+    except Exception as e:
+        print(f"⚠️ 加载 {DUTY_LIST_PATH} 失败: {e}")
+    return _duty_cache
+
+def normalize_name(name):
+    """标准化姓名：去除多余空格、括号及括号内容、常见头衔、转为小写、去除标点"""
+    if not name:
+        return ""
+    # 移除括号及其内容（如 "(Manager)"）
+    name = re.sub(r'\([^)]*\)', '', name)
+    # 移除常见的头衔（例如 "Team Lead"、"Manager"）
+    name = re.sub(r'\s*(Team\s*Lead|Manager)\s*', '', name, flags=re.IGNORECASE)
+    # 去除空格和标点符号（保留字母数字和中文字符）
+    name = re.sub(r'[^\w\u4e00-\u9fff]', '', name).lower()
+    return name
+
+def get_phone(name):
+    """
+    根据姓名从 dutyList.csv 中获取电话号码，仅匹配部门为 FPMS 的记录。
+    支持精确匹配、标准化匹配、子串匹配和模糊匹配。
+    """
+    if not name:
+        return "未找到电话号码"
+    cache = _load_duty_cache()
+    if not cache:
+        return "未找到电话号码文件或无FPMS记录"
+
+    # 1. 精确匹配（原样）
+    if name in cache:
+        return cache[name]
+
+    # 2. 标准化匹配（去除括号、头衔、空格、标点）
+    norm_name = normalize_name(name)
+    for cached_name, phone in cache.items():
+        if normalize_name(cached_name) == norm_name:
+            return phone
+
+    # 3. 子串匹配（例如 "Mark" 匹配 "Mark Paulo"）
+    name_clean = re.sub(r'[^\w\u4e00-\u9fff]', '', name).lower()
+    for cached_name, phone in cache.items():
+        cached_clean = re.sub(r'[^\w\u4e00-\u9fff]', '', cached_name).lower()
+        if name_clean in cached_clean or cached_clean in name_clean:
+            return phone
+
+    # 4. 模糊匹配（使用 difflib）
+    best_ratio = 0.65
+    best_match = None
+    for cached_name in cache.keys():
+        ratio = difflib.SequenceMatcher(None, norm_name, normalize_name(cached_name)).ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_match = cached_name
+    if best_match:
+        return cache[best_match]
+
+    return "未找到电话号码"
+
+# 以下原有函数保持不变（col_index_to_letter, get_tenant_access_token, get_sheet_metadata, get_range_values, format_table, get_month_duty_map, get_fpms_today_duty, fpms_check）
+# 注意：format_table 在 fpms_duty.py 中未被使用，但保留无妨。
+
 def col_index_to_letter(col_index):
-    """将1-based列索引转换为Excel列字母（A, B, ..., Z, AA, AB, ...）"""
     letters = ''
     while col_index > 0:
         col_index -= 1
@@ -77,36 +162,8 @@ def format_table(headers, rows):
     lines.append(sep)
     return "\n".join(lines)
 
-def get_phone(name):
-    """
-    根据姓名从 dutyList.csv 中获取电话号码。
-    支持姓名映射：若表格中姓名为 'nicole'，则实际查找 'nicole lai'。
-    """
-    # 姓名映射字典：键为表格中的名字（小写），值为 CSV 中对应的名字（原样）
-    name_mapping = {
-        "nicole": "nicole lai",
-        # 可在此添加其他映射
-    }
-    # 根据映射获取实际用于查找的名字（不改变原始显示名）
-    lookup_name = name_mapping.get(name.lower(), name)
-
-    if not os.path.exists(DUTY_LIST_PATH):
-        return "未找到电话号码文件"
-    try:
-        with open(DUTY_LIST_PATH, newline='', encoding='utf-8') as f:
-            reader = csv.reader(f)
-            for row in reader:
-                if len(row) >= 3 and row[0].strip().lower() == lookup_name.lower():
-                    return row[2].strip()
-    except Exception:
-        pass
-    return "未找到电话号码"
-
 def get_month_duty_map(year, month):
-    """
-    Returns a dictionary: day -> list of duty names for the given month.
-    Returns None if data cannot be retrieved or month not found.
-    """
+    """返回字典 {day: [姓名列表]}，若获取失败返回 None"""
     month_abbr = None
     for abbr, m in MONTH_ABBR.items():
         if m == month:
@@ -115,7 +172,6 @@ def get_month_duty_map(year, month):
     if not month_abbr:
         return None
 
-    # 获取完整月份名称，例如 "March"
     full_month = datetime(year, month, 1).strftime("%B")
 
     try:
@@ -129,32 +185,29 @@ def get_month_duty_map(year, month):
     max_row = props.get("rowCount", 200)
     max_col = props.get("columnCount", 26)
 
-    # Build full data range
     max_col_letter = col_index_to_letter(max_col)
     scan_range = f"A1:{max_col_letter}{max_row}"
     values = get_range_values(token, SPREADSHEET_TOKEN, SHEET_ID, scan_range)
     if values is None:
         return None
 
-    # Locate the month header ("日期 - Month")
+    # 定位月份表头
     header_row = None
     header_col = None
     for r, row in enumerate(values):
         for c, cell in enumerate(row):
             if isinstance(cell, str) and cell.startswith("日期 - "):
                 suffix = cell[4:].strip()
-                # 同时支持三字母缩写和完整英文月份
                 if suffix == month_abbr or suffix == full_month:
                     header_row = r
                     header_col = c
                     break
         if header_row is not None:
             break
-
     if header_row is None:
         return None
 
-    # Find date columns (cells containing day numbers)
+    # 查找日期列
     date_start_col = header_col + 1
     date_end_col = date_start_col
     for c in range(date_start_col, len(values[header_row])):
@@ -170,7 +223,7 @@ def get_month_duty_map(year, month):
         num_date_cols = max_days
         date_end_col = date_start_col + max_days - 1
 
-    # Find name rows (people)
+    # 查找人员行
     name_col_idx = header_col
     name_start_row = header_row + 1
     name_end_row = name_start_row
@@ -189,7 +242,6 @@ def get_month_duty_map(year, month):
     if data_top_row > data_bottom_row or data_left_col > data_right_col:
         return None
 
-    # Read the duty cells
     start_col_letter = col_index_to_letter(data_left_col + 1)
     end_col_letter = col_index_to_letter(data_right_col + 1)
     start_cell = f"{start_col_letter}{data_top_row+1}"
@@ -199,7 +251,7 @@ def get_month_duty_map(year, month):
     if region_values is None:
         return None
 
-    # Extract day numbers from the header row
+    # 提取日期数字
     date_row_values = values[header_row][date_start_col:date_end_col+1]
     date_numbers = []
     for cell in date_row_values:
@@ -208,7 +260,6 @@ def get_month_duty_map(year, month):
         except:
             date_numbers.append(None)
 
-    # Build mapping: day → list of duty names
     duty_map = {}
     for i in range(len(region_values)):
         name_cell = values[name_start_row + i][name_col_idx] if (name_start_row + i) < len(values) else None
@@ -226,10 +277,8 @@ def get_month_duty_map(year, month):
     return duty_map
 
 def get_fpms_today_duty():
-    """Return FPMS schedule for today, tomorrow, and the day after tomorrow."""
     today = datetime.now().date()
     output_lines = []
-    # Cache to avoid fetching the same month multiple times
     month_cache = {}
 
     for offset in range(3):
@@ -238,13 +287,11 @@ def get_fpms_today_duty():
         month = target_date.month
         day = target_date.day
 
-        # Fetch duty map for the month (if not already cached)
         cache_key = (year, month)
         if cache_key not in month_cache:
             month_cache[cache_key] = get_month_duty_map(year, month)
         duty_map = month_cache.get(cache_key)
 
-        # If map is None (e.g., sheet not found), treat as no duty
         if duty_map is None:
             duty_names = []
         else:
@@ -261,15 +308,10 @@ def get_fpms_today_duty():
         else:
             output_lines.append("• No duty")
 
-        output_lines.append("")  # blank line separator
-
+        output_lines.append("")
     return "\n".join(output_lines).strip()
 
 def fpms_check(month=None, year=None):
-    """
-    Check whether any day in the given month (default current month) has no duty.
-    Returns a string listing missing dates or a confirmation that all days are covered.
-    """
     if year is None:
         year = datetime.now().year
     if month is None:
@@ -279,14 +321,12 @@ def fpms_check(month=None, year=None):
     if duty_map is None:
         return f"❌ 无法获取 {year}年{month}月 的值班数据，请确认表格中存在该月份。"
 
-    # Get all days in month
     _, max_days = monthrange(year, month)
     missing = []
     for day in range(1, max_days + 1):
         if day not in duty_map:
             missing.append(day)
 
-    # Format output
     month_name = datetime(year, month, 1).strftime("%B %Y")
     if not missing:
         return f"✅ All days in {month_name} have duty assigned."
