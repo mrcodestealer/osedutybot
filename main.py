@@ -42,6 +42,8 @@ import maintenance
 import emergency
 import ecsre
 
+import update
+
 from dotenv import load_dotenv
 load_dotenv()
 # ================= CONFIGURATION =================
@@ -1014,25 +1016,11 @@ def lark_webhook():
     
     elif clean_text.lower().startswith('/update'):
         parts = clean_text.split(maxsplit=1)
-        if len(parts) < 2:
-            reply = "Usage: /update <project> <environment>\nExample: /update fpms prod"
-        else:
-            args = parts[1].strip().lower()
-            # 映射字典：参数 -> (显示名称, 链接)
-            update_map = {
-                "fpms prod": ("FPMS PROD SCRIPT", "https://jenkins.client8.me/job/FPMS/job/FPMS_PROD_SCRIPT_RUN/"),
-                "frontend uat1 h5": ("FRONTEND UAT1 H5", "https://jenkins.client8.me/job/FRONTEND/job/UAT/job/projects/job/uat-1/job/h5-uat/"),
-                # 可根据需要添加更多映射
-            }
-            if args in update_map:
-                display, url = update_map[args]
-                reply = f"{display}\nLINK : {url}"
-            else:
-                available = ", ".join(update_map.keys())
-                reply = f"Unknown update target '{args}'. Available: {available}"
+        args = parts[1].strip() if len(parts) > 1 else ""
+        reply = update.handle_update(args)
         send_message(chat_id, reply)
         return jsonify({"success": True})
-    
+        
     elif clean_text == '/restartA':
         reply = f'cd /home/pi/osm && ./stopallserver.sh && ./startserver.sh'
         send_message(chat_id, reply)
