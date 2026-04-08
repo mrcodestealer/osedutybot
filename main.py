@@ -52,8 +52,8 @@ APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET") 
 VERIFICATION_TOKEN = os.getenv("VERIFICATION_TOKEN")
 DUTY_CHAT_ID = os.getenv("DUTY_CHAT_ID")
-LABORATORY_GROUP = os.getenv("LABORATORY_GROUP")
-OSE_BOT_GROUP = os.getenv("OSE_BOT_GROUP")
+LABORATORY_GROUP = "oc_ad9b5bdbb2826ba2ee9730920ef25432"  # 实际群组 ID
+OSE_BOT_GROUP = "oc_9de3d63fc589df6feeb9b0bee9c45b72"     # 实际群组 ID
 
 app = Flask(__name__)
 
