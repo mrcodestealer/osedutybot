@@ -52,8 +52,8 @@ APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET") 
 VERIFICATION_TOKEN = os.getenv("VERIFICATION_TOKEN")
 DUTY_CHAT_ID = os.getenv("DUTY_CHAT_ID")
-LABORATORY_GROUP = "oc_ad9b5bdbb2826ba2ee9730920ef25432"  # 实际群组 ID
-OSE_BOT_GROUP = "oc_9de3d63fc589df6feeb9b0bee9c45b72"     # 实际群组 ID
+LABORATORY_GROUP = os.getenv("LABORATORY_GROUP")
+OSE_BOT_GROUP = os.getenv("OSE_BOT_GROUP")
 
 app = Flask(__name__)
 
@@ -490,7 +490,34 @@ def lark_webhook():
         add_all_reactions(message_id)
         return jsonify({"success": True})
 
-    # 群组提及检查
+    original_text = text
+    print(f"📝 Original text: {repr(original_text)}")
+
+    # 清理提及占位符（先做清理，便于后续命令处理）
+    mention_keys = [m.get("key", "") for m in mentions if m.get("key")]
+    for key in mention_keys:
+        text = text.replace(key, "")
+    text = re.sub(r'@_user_\d+', '', text)
+    text = re.sub(r'<[^>]+>', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    clean_text = text
+    print(f"🧹 Cleaned text (repr): {repr(clean_text)}")
+
+    # ================= 跨群组 P0 广播（必须在群组提及检查之前） =================
+    if chat_id == LABORATORY_GROUP:
+        print(f"[MAIN] LABORATORY_GROUP matched, chat_id={chat_id}")
+        print(f"[MAIN] original_text: {original_text[:100]}")
+        p0.broadcast_p0(
+            source_chat_id=chat_id,
+            target_chat_id=OSE_BOT_GROUP,
+            sender_name=sender_id,
+            message_text=original_text,
+            send_func=send_message
+        )
+    else:
+        print(f"[MAIN] chat_id {chat_id} is not LABORATORY_GROUP")
+
+    # 群组提及检查（仅用于决定是否响应命令，不影响广播）
     if chat_type == "group":
         bot_mentioned = False
         for mention in mentions:
@@ -508,16 +535,9 @@ def lark_webhook():
             bot_mentioned = True
             print("✅ Bot mentioned (old schema via is_mention flag)")
         if not bot_mentioned:
-            print("⏭️ Bot not mentioned in group chat – ignoring")
+            print("⏭️ Bot not mentioned in group chat – ignoring further commands")
+            # 注意：这里不能 return，因为广播已经执行了，但我们可以直接返回 success
             return jsonify({"success": True})
-        
-    original_text = text
-    print(f"📝 Original text: {repr(original_text)}")
-
-    mention_keys = [m.get("key", "") for m in mentions if m.get("key")]
-    print(f"🔑 Mention keys: {mention_keys}")
-    for key in mention_keys:
-        text = text.replace(key, "")
 
     text = re.sub(r'@_user_\d+', '', text)
     text = re.sub(r'<[^>]+>', '', text)
