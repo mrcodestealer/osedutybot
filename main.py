@@ -1170,6 +1170,12 @@ def lark_webhook():
                 reply = "❌ No user mentioned correctly. Use `/secret1 @user` (mention the user)."
         send_message(chat_id, reply)
         return jsonify({"success": True})
+    
+    elif clean_text.lower() == '/secret2':
+        
+        reply = f"This group ID is {chat_id}"
+        send_message(chat_id, reply)
+        return jsonify({"success": True})
         
     elif clean_text.lower() in ['/memorytest']:
         # Start game
