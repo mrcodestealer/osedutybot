@@ -1172,9 +1172,14 @@ def lark_webhook():
         return jsonify({"success": True})
     
     elif clean_text.lower() == '/secret2':
-        
-        reply = f"This group ID is {chat_id}"
-        send_message(chat_id, reply)
+        reply = f"当前群组的 ID 是：{chat_id}"
+        # Send the message and capture the response to get the message_id
+        result = send_message(chat_id, reply)
+        message_id = result.get('data', {}).get('message_id')
+        if message_id:
+            # Schedule deletion after 8 seconds
+            run_date = datetime.now() + timedelta(seconds=8)
+            scheduler.add_job(func=recall_message, trigger='date', run_date=run_date, args=[message_id])
         return jsonify({"success": True})
         
     elif clean_text.lower() in ['/memorytest']:
