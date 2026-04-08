@@ -52,6 +52,8 @@ APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET") 
 VERIFICATION_TOKEN = os.getenv("VERIFICATION_TOKEN")
 DUTY_CHAT_ID = os.getenv("DUTY_CHAT_ID")
+LABORATORY_GROUP = os.getenv("LABORATORY_GROUP")
+OSE_BOT_GROUP = os.getenv("OSE_BOT_GROUP")
 
 app = Flask(__name__)
 
@@ -705,37 +707,6 @@ def lark_webhook():
         else:
             send_message(chat_id, "❌ Failed to upload cat picture.")
         return jsonify({"success": True})
-        
-    elif clean_text.lower().startswith('/p0test'):
-        junchen = "ou_5f660c0fb0769d184aca635d02209272"
-        # Split command from arguments
-        parts = clean_text.split(maxsplit=1)
-        args = parts[1].strip() if len(parts) > 1 else ""
-        p0_details = p0.handle_p0(args)
-        reply = (
-            "🧪 **P0 Test**\n\n"
-            f'<at user_id="{junchen}">Jun Chen</at>\n\n'
-            f"{p0_details}"
-        )
-        send_message(chat_id, reply)
-        return jsonify({"success": True})
-
-    elif clean_text.lower().startswith('/p0'):
-        yuxuan = "ou_c4346ace5927c14f51a89b2394b55338"
-        junchen = "ou_5f660c0fb0769d184aca635d02209272"
-        shen = "ou_060a405a6f3fd35456b719ef9ba62a86"
-        parts = clean_text.split(maxsplit=1)
-        args = parts[1].strip() if len(parts) > 1 else ""
-        p0_details = p0.handle_p0(args)
-        reply = (
-            "📍 !!!P0 Incident Alert!!!\n\n"
-            #f'<at user_id="{junchen}">Jun Chen</at>\n'
-            f'<at user_id="{yuxuan}">Yuxuan</at>\n'
-            f'<at user_id="{shen}">Shen</at>\n\n'
-            f"{p0_details}"
-        )
-        send_message(chat_id, reply)
-        return jsonify({"success": True})
     
     elif clean_text.lower() == '/fpms':
         reply = fpms_duty.get_fpms_today_duty()
@@ -1250,6 +1221,18 @@ def lark_webhook():
 
         send_message(chat_id, reply)
         return jsonify({"success": True})
+    
+    if chat_id == LABORATORY_GROUP:
+        # 可选：获取发送者名称（可以从用户信息 API 获取，或者直接用 open_id）
+        sender_name = sender_id  # 或者通过 contact API 获取姓名，简化用 open_id
+        # 调用广播函数
+        p0.broadcast_p0(
+            source_chat_id=chat_id,
+            target_chat_id=OSE_BOT_GROUP,
+            sender_name=sender_name,
+            message_text=text,
+            send_func=send_message
+        )
     
     elif clean_text.lower() == '/restart':
         # Send initial notification

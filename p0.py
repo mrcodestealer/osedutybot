@@ -1,101 +1,60 @@
 #!/usr/bin/env python3
 """
-P0 Incident command handler.
+P0 跨群组广播模块：
+监听 LABORATORY_GROUP 中的消息，若包含 "p0" 或 "P0"，则转发到 OSE_BOT_GROUP。
 """
 
 import re
 from datetime import datetime
-from dotenv import load_dotenv
-load_dotenv()
-def handle_p0(command_text):
+
+# 群组 ID 从环境变量读取（在 bot 主脚本中传入，或在此读取）
+# 为了模块独立，我们设计为函数接收群组 ID 和消息内容
+
+def format_p0_alert(group_id, sender_name, text):
     """
-    Parse the command text after "/p0" or "/p0test".
-    Supports quoted issue: `/p0 "issue description" <number> <support teams>`
-    If no quotes, uses a fallback that avoids percentages.
+    格式化要发送的告警消息。
+    group_id: 来源群组 ID
+    sender_name: 发送者名称（可选）
+    text: 原始消息内容
     """
-    command_text = command_text.strip()
-    if not command_text:
-        return "❌ No arguments provided. Use: `/p0 \"<issue>\" <number> <teams>`\nExample: `/p0 \"Several players cannot login\" 6 SRE,FE`"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    msg = f"🚨 **P0 关键词告警** 🚨\n"
+    msg += f"来源群组: `{group_id}`\n"
+    if sender_name:
+        msg += f"发送者: {sender_name}\n"
+    msg += f"时间: {timestamp}\n"
+    msg += f"内容: {text}"
+    return msg
 
-    issue = None
-    count = None
-    support = None
-    more_than = False   # flag for '2+'
+def should_broadcast(text):
+    """
+    判断消息是否包含 P0 关键词（不区分大小写）。
+    可扩展为更复杂的模式，比如正则匹配 'p0' 作为独立单词。
+    """
+    if not text:
+        return False
+    # 简单匹配：包含 "p0" 或 "P0"
+    return re.search(r'\bp0\b', text, re.IGNORECASE) is not None
 
-    # 1. Try double‑quoted issue
-    dq_match = re.match(r'\s*"([^"]+)"\s*(.*)$', command_text)
-    if dq_match:
-        issue = dq_match.group(1)
-        rest = dq_match.group(2)
-        # Find the first number (allow trailing +, ?, etc.)
-        num_match = re.search(r'\b(\d+)\s*([+?*]?)\s*(.*)$', rest)
-        if num_match:
-            count = int(num_match.group(1))
-            operator = num_match.group(2).strip()
-            if operator == '+':
-                more_than = True
-            support = num_match.group(3).strip()
-            if not support:
-                support = "(no support teams specified)"
-        else:
-            return "❌ Could not find a number (players affected) after the quoted issue."
-    else:
-        # 2. Try single‑quoted issue
-        sq_match = re.match(r"\s*'([^']+)'\s*(.*)$", command_text)
-        if sq_match:
-            issue = sq_match.group(1)
-            rest = sq_match.group(2)
-            num_match = re.search(r'\b(\d+)\s*([+?*]?)\s*(.*)$', rest)
-            if num_match:
-                count = int(num_match.group(1))
-                operator = num_match.group(2).strip()
-                if operator == '+':
-                    more_than = True
-                support = num_match.group(3).strip()
-                if not support:
-                    support = "(no support teams specified)"
-            else:
-                return "❌ Could not find a number (players affected) after the quoted issue."
+# 如果需要更精确的独立单词匹配，使用 \b 边界
+# 示例：re.search(r'\bp0\b', text, re.IGNORECASE)
 
-    if issue and count is not None:
-        if not support:
-            support = "(no support teams specified)"
-    else:
-        # 3. Fallback: no quotes – find the first number that is not part of a percentage
-        numbers = []
-        for match in re.finditer(r'\b(\d+)\b', command_text):
-            # Skip if the number is immediately followed by '%'
-            after = command_text[match.end():]
-            if after.startswith('%'):
-                continue
-            numbers.append((match.start(), match.end(), int(match.group(1))))
-        if numbers:
-            start, end, count = numbers[0]
-            before = command_text[:start].strip()
-            after = command_text[end:].strip()
-            # Check if the original text after the number has a '+'
-            # (but it might be part of support, so we need to look ahead)
-            # For simplicity, we can check if after starts with '+'
-            if after.lstrip().startswith('+'):
-                more_than = True
-                after = re.sub(r'^[+?*]\s*', '', after)
-            else:
-                after = re.sub(r'^[+?*]\s*', '', after)
-            issue = before.strip('"').strip("'")
-            support = after if after else "(no support teams specified)"
-        else:
-            return "❌ Could not find a number (players affected). Use: `/p0 \"<issue>\" <number> <teams>`\nExample: `/p0 \"Several players cannot login\" 6 SRE,FE`"
-
-    now = datetime.now()
-    timestamp = now.strftime("%Y-%m-%d %H:%M")
-
-    impact_text = f"more than {count} players" if more_than else f"{count} players"
-
-    message = (
-        f"📍 P0 Incident Overview\n"
-        f"🕐 Time : {timestamp} - Incident Start\n"
-        f"🔥 Issue : {issue}\n"
-        f"🎯 Impact Scope: {impact_text}\n"
-        f"👥 Support Request: {support}"
-    )
-    return message
+def broadcast_p0(source_chat_id, target_chat_id, sender_name, message_text, send_func):
+    """
+    检测并广播 P0 消息。
+    source_chat_id: 当前消息所在群组 ID
+    target_chat_id: 目标广播群组 ID（OSE_BOT_GROUP）
+    sender_name: 发送者显示名称（可选）
+    message_text: 消息文本
+    send_func: 发送消息的函数，例如 send_message(chat_id, text)
+    返回是否执行了广播。
+    """
+    # 避免广播自己（如果目标群组与来源相同，则忽略）
+    if source_chat_id == target_chat_id:
+        return False
+    # 检查关键词
+    if should_broadcast(message_text):
+        alert = format_p0_alert(source_chat_id, sender_name, message_text)
+        send_func(target_chat_id, alert)
+        return True
+    return False
