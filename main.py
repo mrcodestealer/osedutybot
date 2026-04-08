@@ -664,6 +664,22 @@ def lark_webhook():
     clean_text = text
     print(f"🧹 Cleaned text (repr): {repr(clean_text)}")
     
+    # ================= 跨群组 P0 广播（必须放在最前面，避免被命令 return 跳过） =================
+    reply = ""
+    if chat_id == LABORATORY_GROUP:
+        # 使用原始消息文本（或已清理的 text，但最好保留原样）
+        p0.broadcast_p0(
+            source_chat_id=chat_id,
+            target_chat_id=OSE_BOT_GROUP,
+            sender_name=sender_id,          # 可改用用户真实姓名，但 open_id 也够用
+            message_text=original_text,     # 用原始文本保留完整上下文
+            send_func=send_message
+        )
+        if reply:
+            send_message(chat_id, reply)
+        print(f"✅ Replied to chat {chat_id}: {reply}")   
+        return jsonify({"success": True})
+    
     if game.has_active_game(sender_id):
         reply, should_clear, job_id = game.check_answer(sender_id, clean_text)
         if reply:
@@ -1239,25 +1255,6 @@ def lark_webhook():
         
         threading.Thread(target=delayed_exit).start()
         return jsonify({"success": True})
-    
-    if chat_id == LABORATORY_GROUP:
-        # 可选：获取发送者名称（可以从用户信息 API 获取，或者直接用 open_id）
-        sender_name = sender_id  # 或者通过 contact API 获取姓名，简化用 open_id
-        # 调用广播函数
-        p0.broadcast_p0(
-            source_chat_id=chat_id,
-            target_chat_id=OSE_BOT_GROUP,
-            sender_name=sender_name,
-            message_text=text,
-            send_func=send_message
-        )
-
-    send_message(chat_id, reply)
-    print(f"✅ Replied to chat {chat_id}: {reply}")
-
-    return jsonify({"success": True})
-
-    
 
 scheduler.start()
 atexit.register(lambda: scheduler.shutdown())
