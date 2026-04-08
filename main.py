@@ -647,7 +647,7 @@ def lark_webhook():
             # print("Ignored event full data:", json.dumps(data, indent=2))
             return jsonify({"success": True})
         
-        # 9. 清理文本中的提及占位符
+    # 9. 清理文本中的提及占位符
     original_text = text
     print(f"📝 Original text: {repr(original_text)}")
 
@@ -665,7 +665,6 @@ def lark_webhook():
     print(f"🧹 Cleaned text (repr): {repr(clean_text)}")
     
     # ================= 跨群组 P0 广播（必须放在最前面，避免被命令 return 跳过） =================
-    reply = ""
     if chat_id == LABORATORY_GROUP:
         # 使用原始消息文本（或已清理的 text，但最好保留原样）
         p0.broadcast_p0(
@@ -675,9 +674,6 @@ def lark_webhook():
             message_text=original_text,     # 用原始文本保留完整上下文
             send_func=send_message
         )
-        if reply:
-            send_message(chat_id, reply)
-        print(f"✅ Replied to chat {chat_id}: {reply}")    
     
     if game.has_active_game(sender_id):
         reply, should_clear, job_id = game.check_answer(sender_id, clean_text)
@@ -1254,6 +1250,7 @@ def lark_webhook():
         
         threading.Thread(target=delayed_exit).start()
         return jsonify({"success": True})
+
 
 scheduler.start()
 atexit.register(lambda: scheduler.shutdown())
