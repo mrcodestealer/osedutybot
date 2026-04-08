@@ -27,34 +27,32 @@ def format_p0_alert(group_id, sender_name, text):
     return msg
 
 def should_broadcast(text):
-    """
-    判断消息是否包含 P0 关键词（不区分大小写）。
-    可扩展为更复杂的模式，比如正则匹配 'p0' 作为独立单词。
-    """
     if not text:
         return False
-    # 简单匹配：包含 "p0" 或 "P0"
-    return re.search(r'\bp0\b', text, re.IGNORECASE) is not None
+    result = re.search(r'\bp0\b', text, re.IGNORECASE) is not None
+    print(f"[P0] should_broadcast check: text='{text[:50]}', result={result}")
+    return result
 
 # 如果需要更精确的独立单词匹配，使用 \b 边界
 # 示例：re.search(r'\bp0\b', text, re.IGNORECASE)
 
 def broadcast_p0(source_chat_id, target_chat_id, sender_name, message_text, send_func):
-    """
-    检测并广播 P0 消息。
-    source_chat_id: 当前消息所在群组 ID
-    target_chat_id: 目标广播群组 ID（OSE_BOT_GROUP）
-    sender_name: 发送者显示名称（可选）
-    message_text: 消息文本
-    send_func: 发送消息的函数，例如 send_message(chat_id, text)
-    返回是否执行了广播。
-    """
-    # 避免广播自己（如果目标群组与来源相同，则忽略）
+    print(f"[P0] broadcast_p0 called: source={source_chat_id}, target={target_chat_id}")
+    print(f"[P0] message_text: {message_text[:100]}")
     if source_chat_id == target_chat_id:
+        print("[P0] source == target, skipping")
         return False
-    # 检查关键词
     if should_broadcast(message_text):
+        print("[P0] should_broadcast returned True")
         alert = format_p0_alert(source_chat_id, sender_name, message_text)
-        send_func(target_chat_id, alert)
+        print(f"[P0] alert content: {alert[:200]}")
+        try:
+            send_func(target_chat_id, alert)
+            print(f"[P0] alert sent to {target_chat_id}")
+        except Exception as e:
+            print(f"[P0] Failed to send alert: {e}")
         return True
+    else:
+        print("[P0] should_broadcast returned False")
     return False
+

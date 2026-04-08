@@ -527,6 +527,8 @@ def lark_webhook():
     
     # ================= 跨群组 P0 广播 =================
     if chat_id == LABORATORY_GROUP:
+        print(f"[MAIN] LABORATORY_GROUP matched, chat_id={chat_id}")
+        print(f"[MAIN] original_text: {original_text[:100]}")
         p0.broadcast_p0(
             source_chat_id=chat_id,
             target_chat_id=OSE_BOT_GROUP,
@@ -534,6 +536,8 @@ def lark_webhook():
             message_text=original_text,
             send_func=send_message
         )
+    else:
+        print(f"[MAIN] chat_id {chat_id} is not LABORATORY_GROUP")
     
     # 初始化回复变量
     reply = ""
