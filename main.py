@@ -647,7 +647,7 @@ def lark_webhook():
             # print("Ignored event full data:", json.dumps(data, indent=2))
             return jsonify({"success": True})
         
-    # 9. 清理文本中的提及占位符
+        # 9. 清理文本中的提及占位符
     original_text = text
     print(f"📝 Original text: {repr(original_text)}")
 
@@ -677,8 +677,7 @@ def lark_webhook():
         )
         if reply:
             send_message(chat_id, reply)
-        print(f"✅ Replied to chat {chat_id}: {reply}")   
-        return jsonify({"success": True})
+        print(f"✅ Replied to chat {chat_id}: {reply}")    
     
     if game.has_active_game(sender_id):
         reply, should_clear, job_id = game.check_answer(sender_id, clean_text)
