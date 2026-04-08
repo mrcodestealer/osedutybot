@@ -1222,18 +1222,6 @@ def lark_webhook():
         send_message(chat_id, reply)
         return jsonify({"success": True})
     
-    if chat_id == LABORATORY_GROUP:
-        # 可选：获取发送者名称（可以从用户信息 API 获取，或者直接用 open_id）
-        sender_name = sender_id  # 或者通过 contact API 获取姓名，简化用 open_id
-        # 调用广播函数
-        p0.broadcast_p0(
-            source_chat_id=chat_id,
-            target_chat_id=OSE_BOT_GROUP,
-            sender_name=sender_name,
-            message_text=text,
-            send_func=send_message
-        )
-    
     elif clean_text.lower() == '/restart':
         # Send initial notification
         send_message(chat_id, "🔄 Restarting bot...")
@@ -1251,11 +1239,25 @@ def lark_webhook():
         
         threading.Thread(target=delayed_exit).start()
         return jsonify({"success": True})
+    
+    if chat_id == LABORATORY_GROUP:
+        # 可选：获取发送者名称（可以从用户信息 API 获取，或者直接用 open_id）
+        sender_name = sender_id  # 或者通过 contact API 获取姓名，简化用 open_id
+        # 调用广播函数
+        p0.broadcast_p0(
+            source_chat_id=chat_id,
+            target_chat_id=OSE_BOT_GROUP,
+            sender_name=sender_name,
+            message_text=text,
+            send_func=send_message
+        )
 
     send_message(chat_id, reply)
     print(f"✅ Replied to chat {chat_id}: {reply}")
 
     return jsonify({"success": True})
+
+    
 
 scheduler.start()
 atexit.register(lambda: scheduler.shutdown())
