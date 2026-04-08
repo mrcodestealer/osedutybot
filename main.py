@@ -46,8 +46,8 @@ import update
 
 from dotenv import load_dotenv
 load_dotenv()
-# ================= CONFIGURATION =================
 
+# ================= CONFIGURATION =================
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET") 
 VERIFICATION_TOKEN = os.getenv("VERIFICATION_TOKEN")
@@ -64,7 +64,6 @@ RANDOM_EMOJI_CODES = [
     "GIFT", "TICKET", "TROPHY"
 ]
 
-# List of all emoji codes from your provided list
 ALL_EMOJI_CODES = [
     "GRINNING", "JOY", "WINK", "BLUSH", "YUM", "HEART_EYES", "KISSING_HEART", "SUNGLASSES",
     "THINKING_FACE", "HUGGING_FACE", "MONKEY_FACE", "DOG", "CAT", "FOX_FACE", "LION_FACE",
@@ -73,134 +72,84 @@ ALL_EMOJI_CODES = [
 ]
 
 # ================= ALL-DUTY SUMMARY AND CHECK =================
-
 def get_all_duty_summary():
-    """Collect today's duty information from all teams and return a combined message."""
     lines = []
     lines.append("📋 **ALL DUTY SUMMARY FOR TODAY** 📋\n")
-
-    # FPMS
     lines.append("**【FPMS】**")
     lines.append(fpms_duty.get_fpms_today_duty())
     lines.append("")
-
-    # PMS
     lines.append("**【PMS】**")
-    lines.append(pms_duty.dutyNextDay())   # shows next day (which includes today if before midnight? better use dutyForDate)
+    lines.append(pms_duty.dutyNextDay())
     lines.append("")
-
-    # BI
     lines.append("**【BI】**")
     lines.append(bi_duty.get_bi_today_duty())
     lines.append("")
-
-    # FE
     lines.append("**【FE】**")
     lines.append(fe_duty.get_fe_next_three_duty())
     lines.append("")
-
-    # CPMS
     lines.append("**【CPMS】**")
     lines.append(cpms_duty.get_cpms_three_days())
     lines.append("")
-
-    # SRE
     lines.append("**【SRE】**")
     lines.append(sre_Duty.get_sre_week_duty())
     lines.append("")
-
-    # DB
     lines.append("**【DB】**")
     lines.append(db_duty.get_three_weeks_summary())
     lines.append("")
-
-    # Liveslot
     lines.append("**【Liveslot】**")
     lines.append(liveslot_duty.get_three_weeks_summary())
     lines.append("")
-
-    # OTE
     lines.append("**【OTE】**")
     lines.append(ote_duty.get_three_weeks_summary())
     lines.append("")
-
-    # OSE
     lines.append("**【OSE】**")
     lines.append(ose_Duty.get_ose_today_duty())
     lines.append("")
-
     return "\n".join(lines).strip()
 
 def get_all_duty_check(month=None, year=None):
-    """
-    Run all `*_check` functions and return combined report.
-    If month/year not provided, uses current month.
-    """
     if year is None:
         year = datetime.now().year
     if month is None:
         month = datetime.now().month
-
     lines = []
     lines.append(f"🔍 **DUTY MISSING REPORT – {datetime(year, month, 1).strftime('%B %Y')}** 🔍\n")
-
-    # FPMS
     lines.append("**【FPMS】**")
     lines.append(fpms_duty.fpms_check(month=month, year=year))
     lines.append("")
-
-    # PMS
     lines.append("**【PMS】**")
     lines.append(pms_duty.pmsCheck(month=month, year=year))
     lines.append("")
-
-    # BI
     lines.append("**【BI】**")
     lines.append(bi_duty.bi_check(month=month, year=year))
     lines.append("")
-
-    # FE
     lines.append("**【FE】**")
     lines.append(fe_duty.fe_check(month=month, year=year))
     lines.append("")
-
-    # CPMS
     lines.append("**【CPMS】**")
     lines.append(cpms_duty.cpms_check(month=month, year=year))
     lines.append("")
-
-    # SRE
     lines.append("**【SRE】**")
     lines.append(sre_Duty.sre_check(month=month, year=year))
     lines.append("")
-
-    # DB
     lines.append("**【DB】**")
     lines.append(db_duty.db_check(month=month, year=year))
     lines.append("")
-
-    # Liveslot
     lines.append("**【Liveslot】**")
     lines.append(liveslot_duty.liveslot_check(month=month, year=year))
     lines.append("")
-
-    # OTE
     lines.append("**【OTE】**")
     lines.append(ote_duty.ote_check(month=month, year=year))
     lines.append("")
-
     return "\n".join(lines).strip()
 
 def display_all_duty():
-    """Send the all-duty summary to the designated duty chat."""
     summary = get_all_duty_summary()
     send_message(DUTY_CHAT_ID, summary)
     print("✅ Sent all-duty summary to", DUTY_CHAT_ID)
 
 def monthly_duty_check():
-    """Run all checks for the new month on the 1st day at midnight."""
     now = datetime.now()
-    # Ensure we are checking the month that just started (e.g., if run at 00:00 on 1st, it's the new month)
     month = now.month
     year = now.year
     report = get_all_duty_check(month=month, year=year)
@@ -208,7 +157,6 @@ def monthly_duty_check():
     print(f"✅ Sent monthly duty check for {year}-{month:02d} to {DUTY_CHAT_ID}")
 
 # ================= LARK API HELPERS =================
-
 def add_all_reactions(message_id):
     token = get_tenant_access_token()
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -230,23 +178,15 @@ def add_all_reactions(message_id):
             else:
                 print(f"⚠️ {emoji} failed: {resp.status_code} {resp.text}")
                 break
-        time.sleep(1.0)   # base delay between emojis
+        time.sleep(1.0)
     print(f"Added {success_count} of {len(ALL_EMOJI_CODES)} reactions")
 
 def add_random_reaction(message_id):
-    """Add a random reaction from the predefined list to a message."""
     token = get_tenant_access_token()
     url = f"https://open.larksuite.com/open-apis/im/v1/messages/{message_id}/reactions"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     random_emoji = random.choice(RANDOM_EMOJI_CODES)
-    payload = {
-        "reaction_type": {
-            "emoji_type": random_emoji
-        }
-    }
+    payload = {"reaction_type": {"emoji_type": random_emoji}}
     response = requests.post(url, headers=headers, json=payload)
     if response.status_code == 200:
         print(f"✅ Added {random_emoji} reaction to message {message_id}")
@@ -255,18 +195,10 @@ def add_random_reaction(message_id):
     return response.json()
 
 def add_heart_reaction(message_id):
-    """Add a heart reaction to a message."""
     token = get_tenant_access_token()
     url = f"https://open.larksuite.com/open-apis/im/v1/messages/{message_id}/reactions"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "reaction_type": {
-            "emoji_type": "HEART"
-        }
-    }
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    payload = {"reaction_type": {"emoji_type": "HEART"}}
     response = requests.post(url, headers=headers, json=payload)
     if response.status_code == 200:
         print(f"✅ Added heart reaction to message {message_id}")
@@ -275,7 +207,6 @@ def add_heart_reaction(message_id):
     return response.json()
     
 def recall_message(message_id):
-    """Delete a message using Lark's recall API."""
     token = get_tenant_access_token()
     url = f"https://open.larksuite.com/open-apis/im/v1/messages/{message_id}"
     headers = {"Authorization": f"Bearer {token}"}
@@ -288,15 +219,12 @@ def recall_message(message_id):
 def send_message(chat_id, text, msg_type="text", mentions=None):
     token = get_tenant_access_token()
     url = "https://open.larksuite.com/open-apis/im/v1/messages"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     body = {
         "receive_id": chat_id,
         "msg_type": msg_type,
         "content": json.dumps({"text": text}),
-        "user_id": BOT_OPEN_ID   # <-- Add the bot's open_id
+        "user_id": BOT_OPEN_ID
     }
     if mentions:
         body["mentions"] = mentions
@@ -305,13 +233,9 @@ def send_message(chat_id, text, msg_type="text", mentions=None):
     return response.json()
 
 def send_file(chat_id, file_token):
-    """Send a file message using a file_token."""
     token = get_tenant_access_token()
     url = "https://open.larksuite.com/open-apis/im/v1/messages"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {
         "receive_id": chat_id,
         "msg_type": "file",
@@ -323,7 +247,6 @@ def send_file(chat_id, file_token):
     return response.json()
     
 def upload_file_to_drive(file_path):
-    """Upload a file to Lark Drive and return the file_token."""
     token = get_tenant_access_token()
     url = "https://open.larksuite.com/open-apis/drive/v1/files/upload_all"
     headers = {"Authorization": f"Bearer {token}"}
@@ -339,7 +262,6 @@ def upload_file_to_drive(file_path):
         return None
 
 _CAT_FILE_TOKEN = None
-
 def get_cat_file_token():
     global _CAT_FILE_TOKEN
     if _CAT_FILE_TOKEN is None:
@@ -362,111 +284,72 @@ def get_tenant_access_token():
 TARGET_USER_OPEN_ID = "ou_d7bc33724e2d6ced4050c944c2ca5650"
 
 def send_shift_reminder(chat_id, message):
-    """Send a shift reminder message to the given chat."""
     send_message(chat_id, message)
     print(f"⏰ Shift reminder sent to {chat_id}: {message}")
 
 def morning_reminder():
-    """7am message: Rest Well yesterday night shift / Good Luck today morning shift"""
     today = datetime.now().date()
     yesterday = today - timedelta(days=1)
-
-    # Get yesterday's night shift
     _, night_yesterday = ose_Duty.get_shift_names_for_date(yesterday)
-    # Get today's morning shift
     morning_today, _ = ose_Duty.get_shift_names_for_date(today)
-
     lines = []
-
-    # Rest Well section (night shift of yesterday)
     if night_yesterday:
         lines.append("(～￣▽￣)～ Rest Well")
         for name in night_yesterday:
             lines.append(f"• {name}")
-        lines.append("")  # blank line
-
-    # Good Luck section (morning shift of today)
+        lines.append("")
     if morning_today:
         lines.append("Good Luckヾ(≧▽≦*)o")
         for name in morning_today:
             lines.append(f"• {name}")
-
-    # If both are empty, send a generic message
     if not night_yesterday and not morning_today:
         lines.append("(～￣▽￣)～ Rest Well Night Shift\nGood Luck Morning Shift ヾ(≧▽≦*)o")
-
     msg = "\n".join(lines)
-    # Prepend a mention for the target user
     mention_line = f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>'
     msg = mention_line + "\n" + msg
     send_shift_reminder(DUTY_CHAT_ID, msg)
 
 def evening_reminder():
-    """7pm message: Rest Well today morning shift / Good Luck tonight night shift"""
     today = datetime.now().date()
-
-    # Get today's morning shift
     morning_today, _ = ose_Duty.get_shift_names_for_date(today)
-    # Get today's night shift
     _, night_today = ose_Duty.get_shift_names_for_date(today)
-
     lines = []
-
-    # Rest Well section (morning shift of today)
     if morning_today:
         lines.append("(～￣▽￣)～ Rest Well")
         for name in morning_today:
             lines.append(f"• {name}")
-        lines.append("")  # blank line
-
-    # Good Luck section (night shift of today)
+        lines.append("")
     if night_today:
         lines.append("Good Luckヾ(≧▽≦*)o")
         for name in night_today:
             lines.append(f"• {name}")
-
     if not morning_today and not night_today:
         lines.append("(～￣▽￣)～ Rest Well Morning Shift\nGood Luck Night Shift ヾ(≧▽≦*)o")
-
     msg = "\n".join(lines)
-    # Prepend a mention for the target user
     mention_line = f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>'
     msg = mention_line + "\n" + msg
     send_shift_reminder(DUTY_CHAT_ID, msg)
 
 def amountloss():
-    # Prepend a mention for the target user
     mention_line = f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>'
     msg = mention_line + "\n" + "Hi Morning Shift kindly reminder to do Amount Loss~"
     send_shift_reminder(DUTY_CHAT_ID, msg)
     
 def myoseweeklymeeting():
-    # Prepend a mention for the target user
     mention_line = f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>'
     msg = mention_line + "\n" + "MY OSE WEEKLY MEETING"
     send_shift_reminder(DUTY_CHAT_ID, msg)
 
 scheduler = BackgroundScheduler()
-
-# Shift 
 scheduler.add_job(func=morning_reminder, trigger="cron", hour=7, minute=00)
 scheduler.add_job(func=evening_reminder, trigger="cron", hour=19, minute=0)
-# Amount Loss
 scheduler.add_job(func=amountloss, trigger="cron", hour=9, minute=0)
-# MY OSE WEEKLY MEETING
 scheduler.add_job(func=myoseweeklymeeting, trigger="cron", hour=17, minute=0)
-
-
-# New: daily all-duty summary at midnight
-#scheduler.add_job(func=display_all_duty, trigger="cron", hour=0, minute=0)
-
-# New: monthly duty check on 1st day at midnight
 scheduler.add_job(func=monthly_duty_check, trigger="cron", day=1, hour=0, minute=0)
 
 PENDING_RESTART_FILE = "restart_pending.json"
 
 def write_restart_pending(chat_id):
-    """Save the chat_id where the restart command was issued."""
     data = {
         "chat_id": chat_id,
         "timestamp": datetime.now().isoformat()
@@ -478,7 +361,6 @@ def write_restart_pending(chat_id):
         print(f"❌ Failed to write restart pending file: {e}")
 
 def send_restart_ready():
-    """If a restart was pending, send a ready message and clean up."""
     if not os.path.exists(PENDING_RESTART_FILE):
         return
     try:
@@ -488,7 +370,6 @@ def send_restart_ready():
         timestamp_str = data.get("timestamp")
         if chat_id and timestamp_str:
             timestamp = datetime.fromisoformat(timestamp_str)
-            # Only send if the restart was requested recently (within last minute)
             if (datetime.now() - timestamp).total_seconds() < 60:
                 send_message(chat_id, "✅ Bot is ready.")
         os.remove(PENDING_RESTART_FILE)
@@ -518,11 +399,9 @@ processed_lock = threading.Lock()
 def lark_webhook():
     data = request.json
 
-    # 1. URL verification (优先处理，不依赖 message_id)
     if data.get("type") == "url_verification":
         return jsonify({"challenge": data["challenge"]})
 
-    # 2. Token verification (同样不依赖 message_id)
     token = None
     if data.get("schema") == "2.0":
         token = data.get("header", {}).get("token")
@@ -532,7 +411,6 @@ def lark_webhook():
         print(f"❌ Token mismatch: expected {VERIFICATION_TOKEN}, got {token}")
         return jsonify({"error": "Invalid token"}), 403
 
-    # 3. 提取 sender_id（用于后续判断）
     sender_id = None
     if data.get("schema") == "2.0":
         event = data.get("event", {})
@@ -542,20 +420,17 @@ def lark_webhook():
         event = data.get("event", {})
         sender_id = event.get("open_id") or event.get("user_id")
 
-    # 忽略 Bot 自己发送的消息
     if sender_id and sender_id == BOT_OPEN_ID:
         print("⏭️ Ignoring own message")
         return jsonify({"success": True})
 
-        # 4. Initialize variables
     chat_id = None
     text = None
     chat_type = None
     mentions = []
     message_id = None
-    is_mention_old = False   # <-- for old schema
+    is_mention_old = False
 
-    # 5. Extract message details (two schema branches)
     if data.get("header", {}).get("event_type") == "im.message.receive_v1":
         event = data.get("event", {})
         message = event.get("message", {})
@@ -574,8 +449,8 @@ def lark_webhook():
         chat_id = event.get("open_chat_id") or event.get("chat_id")
         message_id = event.get("open_message_id") or event.get("message_id")
         chat_type = event.get("chat_type")
-        mentions = event.get("mentions", [])          # usually empty
-        is_mention_old = event.get("is_mention", False)   # <-- capture flag
+        mentions = event.get("mentions", [])
+        is_mention_old = event.get("is_mention", False)
         text = event.get("text_without_at_bot") or event.get("text", "")
         if not text:
             content_str = event.get("content")
@@ -596,7 +471,6 @@ def lark_webhook():
         if message_id:
             processed_messages.add(message_id)
 
-    # 7. Check required fields
     if not chat_id or text is None:
         print("❌ Could not extract chat_id or text")
         return jsonify({"error": "Missing data"}), 400
@@ -608,46 +482,35 @@ def lark_webhook():
     
     if text == "good luck" or text == "Good luck":
         add_heart_reaction(message_id)
-        #send_message(chat_id, "Good luck to you too! 🍀")
         
-    if text ==  "random":
+    if text == "random":
         add_random_reaction(message_id)
         
     if text == "spamreact":
         add_all_reactions(message_id)
-        return jsonify({"success": True})  # Optional: stop further processing
+        return jsonify({"success": True})
 
-    # 8. Group mention check (supports both schemas)
+    # 群组提及检查
     if chat_type == "group":
         bot_mentioned = False
         for mention in mentions:
-            # Get the id field; it could be a dict (new schema) or a string (old schema)
             mention_id_obj = mention.get("id")
             if isinstance(mention_id_obj, dict):
                 mention_id = mention_id_obj.get("open_id", "")
             else:
-                mention_id = mention_id_obj  # old schema: direct string
-
-            # Debug: print the extracted open_id
+                mention_id = mention_id_obj
             print(f"🔍 Mention open_id: {mention_id}")
-
             if mention_id == BOT_OPEN_ID:
                 bot_mentioned = True
                 print(f"✅ Bot mentioned by open_id: {mention_id}")
                 break
-
-        # Check old schema via is_mention flag
         if not bot_mentioned and is_mention_old:
             bot_mentioned = True
             print("✅ Bot mentioned (old schema via is_mention flag)")
-
         if not bot_mentioned:
             print("⏭️ Bot not mentioned in group chat – ignoring")
-            # Optionally log full event for ignored messages
-            # print("Ignored event full data:", json.dumps(data, indent=2))
             return jsonify({"success": True})
         
-    # 9. 清理文本中的提及占位符
     original_text = text
     print(f"📝 Original text: {repr(original_text)}")
 
@@ -656,29 +519,28 @@ def lark_webhook():
     for key in mention_keys:
         text = text.replace(key, "")
 
-    # Additional cleanup
     text = re.sub(r'@_user_\d+', '', text)
     text = re.sub(r'<[^>]+>', '', text)
     text = re.sub(r'\s+', ' ', text).strip()
-
     clean_text = text
     print(f"🧹 Cleaned text (repr): {repr(clean_text)}")
     
-    # ================= 跨群组 P0 广播（必须放在最前面，避免被命令 return 跳过） =================
+    # ================= 跨群组 P0 广播 =================
     if chat_id == LABORATORY_GROUP:
-        # 使用原始消息文本（或已清理的 text，但最好保留原样）
         p0.broadcast_p0(
             source_chat_id=chat_id,
             target_chat_id=OSE_BOT_GROUP,
-            sender_name=sender_id,          # 可改用用户真实姓名，但 open_id 也够用
-            message_text=original_text,     # 用原始文本保留完整上下文
+            sender_name=sender_id,
+            message_text=original_text,
             send_func=send_message
         )
+    
+    # 初始化回复变量
+    reply = ""
     
     if game.has_active_game(sender_id):
         reply, should_clear, job_id = game.check_answer(sender_id, clean_text)
         if reply:
-            # Cancel the scheduled recall (if any)
             if job_id:
                 try:
                     scheduler.remove_job(job_id)
@@ -687,7 +549,7 @@ def lark_webhook():
             send_message(chat_id, reply)
         return jsonify({"success": True})
 
-    # 10. COMMAND HANDLING
+    # 命令处理
     if len(clean_text) >= 3 and clean_text[:3].lower() == '/s ':
         query = clean_text[3:].strip()
         print(f"🔍 Duty query extracted: '{query}'")
@@ -695,20 +557,16 @@ def lark_webhook():
     elif clean_text.lower() == '/date':
         today = get_today_date()
         reply = f"Today's date is {today}."
-        print(f"📅 Date reply: {reply}")
     elif clean_text.lower() == '/holiday':
         reply = format_holidays()
     elif clean_text.lower() == '/holidaythismonth':
         reply = holidays_this_month()
-        print(f"📅 Holiday reply: {reply}")
-        
     elif clean_text.lower() == '/miao':
         reply = get_miao()
     elif clean_text.lower() == '/lucifer':
         reply = lucifer()
     elif clean_text.lower() == '/dog':
         reply = dog()
-        
     elif clean_text.lower() == '/picture cat':
         file_token = get_cat_file_token()
         if file_token:
@@ -718,7 +576,6 @@ def lark_webhook():
         else:
             send_message(chat_id, "❌ Failed to upload cat picture.")
         return jsonify({"success": True})
-    
     elif clean_text.lower() == '/fpms':
         reply = fpms_duty.get_fpms_today_duty()
     elif clean_text.lower().startswith('/fpmscheck'):
@@ -739,14 +596,12 @@ def lark_webhook():
             reply = fpms_duty.fpms_check()
         send_message(chat_id, reply)
         return jsonify({"success": True})
-        
     elif clean_text.lower() == '/pms':
         reply = pms_duty.dutyNextDay()
     elif clean_text.lower().startswith('/pmscheck'):
         parts = clean_text.split()
         if len(parts) > 1:
             try:
-                # Expect format: MM/YYYY or YYYY-MM
                 date_str = parts[1]
                 if '/' in date_str:
                     month, year = map(int, date_str.split('/'))
@@ -755,21 +610,18 @@ def lark_webhook():
                 else:
                     raise ValueError
                 reply = pms_duty.pmsCheck(month=month, year=year)
-                
             except ValueError:
                 reply = "❌ Invalid format. Use `/pmscheck MM/YYYY` or `/pmscheck YYYY-MM`"
         else:
             reply = pms_duty.pmsCheck()
         send_message(chat_id, reply)
         return jsonify({"success": True})
-        
     elif clean_text.lower() == '/bi':
         reply = bi_duty.get_bi_today_duty()
     elif clean_text.lower().startswith('/bicheck'):
         parts = clean_text.split()
         if len(parts) > 1:
             try:
-                # Expect format: MM/YYYY or YYYY-MM
                 date_str = parts[1]
                 if '/' in date_str:
                     month, year = map(int, date_str.split('/'))
@@ -784,9 +636,7 @@ def lark_webhook():
             reply = bi_duty.bi_check()
         send_message(chat_id, reply)
         return jsonify({"success": True})
-        
     elif clean_text.lower() == '/fe':
-        reply = "yes?"
         reply = fe_duty.get_fe_next_three_duty()
     elif clean_text.lower().startswith('/fecheck'):
         parts = clean_text.split()
@@ -806,10 +656,8 @@ def lark_webhook():
             reply = fe_duty.fe_check()
         send_message(chat_id, reply)
         return jsonify({"success": True})
-        
     elif clean_text.lower() == '/cpms':
         results = cpms_duty.get_cpms_three_days()
-        # Format the results properly
         formatted = cpms_duty.format_output(results)
         send_message(chat_id, formatted)
         send_message(chat_id, "FYI Wailoon - onleave 2026-04-04 to 2026-04-17")
@@ -832,7 +680,6 @@ def lark_webhook():
             reply = cpms_duty.cpms_check()
         send_message(chat_id, reply)
         return jsonify({"success": True})
-        
     elif clean_text.lower() == '/sre':
         reply = sre_Duty.get_sre_week_duty()
     elif clean_text.lower().startswith('/srecheck'):
@@ -853,7 +700,6 @@ def lark_webhook():
             reply = sre_Duty.sre_check()
         send_message(chat_id, reply)
         return jsonify({"success": True})
-        
     elif clean_text.lower() == '/db':
         reply = db_duty.get_three_weeks_summary()
     elif clean_text.lower().startswith('/dbcheck'):
@@ -874,7 +720,6 @@ def lark_webhook():
             reply = db_duty.db_check()
         send_message(chat_id, reply)
         return jsonify({"success": True})
-    
     elif clean_text.lower() == '/liveslot':
         reply = liveslot_duty.get_three_weeks_summary()
     elif clean_text.lower().startswith('/liveslotcheck'):
@@ -895,7 +740,6 @@ def lark_webhook():
             reply = liveslot_duty.liveslot_check()
         send_message(chat_id, reply)
         return jsonify({"success": True})
-    
     elif clean_text.lower() == '/ote':
         reply = ote_duty.get_three_weeks_summary()
     elif clean_text.lower().startswith('/otecheck'):
@@ -916,7 +760,6 @@ def lark_webhook():
             reply = ote_duty.ote_check()
         send_message(chat_id, reply)
         return jsonify({"success": True})
-    
     elif clean_text.lower() == '/ft':
         duty_schedule = ft.get_ft_three_days()
         send_message(chat_id, duty_schedule)   
@@ -946,22 +789,19 @@ def lark_webhook():
             reply = ft.ft_check()
         send_message(chat_id, reply)
         return jsonify({"success": True})
-        
     elif clean_text == '/ose':
-        reply = ose_Duty.get_ose_today_duty()          # uses today's date
+        reply = ose_Duty.get_ose_today_duty()
     elif clean_text.startswith('/osedate'):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
-            # no date argument → show today's duty
             reply = ose_Duty.get_ose_today_duty()
         else:
             date_str = parts[1].strip()
             try:
                 target_date = datetime.strptime(date_str, "%d/%m/%Y").date()
-                reply = ose_Duty.get_ose_duty_for_date(target_date)   # function from ose_Duty
+                reply = ose_Duty.get_ose_duty_for_date(target_date)
             except ValueError:
                 reply = "❌ Invalid date format. Please use DD/MM/YYYY (e.g., 12/12/2026)"
-                
     elif clean_text.lower().startswith('/dutycheckall'):
         parts = clean_text.split()
         if len(parts) > 1:
@@ -985,71 +825,49 @@ def lark_webhook():
     if not cmd_parts:
         return
     cmd = cmd_parts[0].lower()
-
     if cmd == '/ecsre':
-        # 处理 /ecsre
         game_name = cmd_parts[1] if len(cmd_parts) > 1 else None
         reply = ecsre.get_responsible_games(game_name)
         send_message(chat_id, reply)
         return jsonify({"success": True})
-
     elif cmd == '/ec':
-        # 处理 /ec
         game_name = cmd_parts[1] if len(cmd_parts) > 1 else None
         reply = emergency.get_emergency_contacts(game_name)
         send_message(chat_id, reply)
         return jsonify({"success": True})
-                
     elif clean_text == '/cashout':
         reply = f'the player has been get back his credit. @On-Duty-OSM-Lavie(Podium1) kindly manual cashout the credit and reboot the machine. After that, @Xavier (CS OSM) kindly unset and test the machine thanks'
         send_message(chat_id, reply)
         return jsonify({"success": True})
-    
     elif clean_text.lower().startswith('/update'):
         parts = clean_text.split(maxsplit=1)
         args = parts[1].strip() if len(parts) > 1 else ""
         reply = update.handle_update(args)
         send_message(chat_id, reply)
         return jsonify({"success": True})
-        
     elif clean_text == '/restartA':
         reply = f'cd /home/pi/osm && ./stopallserver.sh && ./startserver.sh'
         send_message(chat_id, reply)
         return jsonify({"success": True})
-        
     elif clean_text.lower().startswith('/maintenance') or clean_text.lower().startswith('/maintenanceshort'):
-        # Determine which command was used
         cmd = 'maintenance' if clean_text.lower().startswith('/maintenance') else 'maintenanceshort'
-        # Use original_text (the raw message) to capture everything after the command
         pattern = rf'/{cmd}\s+(.*)'
         match = re.search(pattern, original_text, re.IGNORECASE | re.DOTALL)
         if match:
             email_text = match.group(1).strip()
-            # Remove surrounding quotes if present
             if email_text.startswith('"') and email_text.endswith('"'):
                 email_text = email_text[1:-1]
         else:
             email_text = ''
-
         if email_text:
-            # First message: tag the user with the table name
             game_name = maintenance.get_table_name(email_text)
             if game_name == "Unknown":
                 game_name = "Unknown table"
-            #first_reply = f'<at user_id="ou_8faac9cb9f7bf3ee69dc09f8e1f147bc">User</at> {game_name}'
-            #send_message(chat_id, first_reply)
-
-            # Second message: full summary
             second_reply = maintenance.process_email(email_text)
             send_message(chat_id, second_reply)
         else:
             send_message(chat_id, "Please provide the email text after the command.")
         return jsonify({"success": True})
-
-        
-    ################################################################################
-    ##################        Machine List       ###################################
-    
     elif clean_text.lower().startswith('/nch'):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
@@ -1059,9 +877,7 @@ def lark_webhook():
             reply = nch.get_nch_info(query)
         send_message(chat_id, reply)
         return jsonify({"success": True})
-    
     elif clean_text.lower().startswith('/nwr'):
-        # Extract the part after /nwr (if any)
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
             reply = "❌ Usage: `/nwr <nwr_number(s)>`\nExamples: `/nwr 2005`, `/nwr 2005,2006`, `/nwr nwr2005 nwr2006`"
@@ -1070,7 +886,6 @@ def lark_webhook():
             reply = nwr.get_nwr_info(query)
         send_message(chat_id, reply)
         return jsonify({"success": True})
-    
     elif clean_text.lower().startswith('/wf'):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
@@ -1080,7 +895,6 @@ def lark_webhook():
             reply = winford.get_winford_info(query)
         send_message(chat_id, reply)
         return jsonify({"success": True})
-    
     elif clean_text.lower().startswith('/tbp'):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
@@ -1090,7 +904,6 @@ def lark_webhook():
             reply = tbp.get_tbp_info(query)
         send_message(chat_id, reply)
         return jsonify({"success": True})
-    
     elif clean_text.lower().startswith('/cp'):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
@@ -1100,7 +913,6 @@ def lark_webhook():
             reply = cp.get_cp_info(query)
         send_message(chat_id, reply)
         return jsonify({"success": True})
-    
     elif clean_text.lower().startswith('/dhs'):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
@@ -1110,7 +922,6 @@ def lark_webhook():
             reply = dhs.get_dhs_info(query)
         send_message(chat_id, reply)
         return jsonify({"success": True})
-    
     elif clean_text.lower().startswith('/mdr'):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
@@ -1120,18 +931,13 @@ def lark_webhook():
             reply = mdr.get_mdr_info(query)
         send_message(chat_id, reply)
         return jsonify({"success": True})
-    
-    ################################################################################
-    
     elif clean_text.lower().startswith('/secret1'):
-        # Use the original text (before cleanup) to extract the mentioned user
         match = re.search(r'<at open_id="([^"]+)"[^>]*>([^<]+)</at>', original_text)
         if match:
             open_id = match.group(1)
             name = match.group(2).strip()
             reply = f"Tagged {name} with open_id: {open_id}\nMention: <at user_id=\"{open_id}\">{name}</at>"
         else:
-            # Fallback for new schema (mentions array)
             target_mention = None
             for m in mentions:
                 mention_id = m.get("id", {})
@@ -1152,60 +958,47 @@ def lark_webhook():
                 reply = "❌ No user mentioned correctly. Use `/secret1 @user` (mention the user)."
         send_message(chat_id, reply)
         return jsonify({"success": True})
-    
     elif clean_text.lower() == '/secret2':
         reply = f"当前群组的 ID 是：{chat_id}"
-        # Send the message and capture the response to get the message_id
         result = send_message(chat_id, reply)
         message_id = result.get('data', {}).get('message_id')
         if message_id:
-            # Schedule deletion after 8 seconds
             run_date = datetime.now() + timedelta(seconds=8)
             scheduler.add_job(func=recall_message, trigger='date', run_date=run_date, args=[message_id])
         return jsonify({"success": True})
-        
     elif clean_text.lower() in ['/memorytest']:
-        # Start game
         number = game.start_game(sender_id)
-        # Send the number message
         send_result = send_message(chat_id, f"🧠 **Memory Game**\nRemember this number: **{number}**\nYou have 5 seconds to type it back.")
         message_id = send_result.get("data", {}).get("message_id")
         if message_id:
-            # Schedule recall after 2 seconds
             run_date = datetime.now() + timedelta(seconds=2)
             job = scheduler.add_job(func=recall_message, trigger='date', run_date=run_date, args=[message_id])
             game.set_game_job(sender_id, job.id)
         return jsonify({"success": True}) 
-    
     elif clean_text.lower().startswith('/reminder'):
         parts = clean_text.split()
         if len(parts) < 3:
             reply = "❌ Usage: `/reminder [at] <time|duration> <message>`\nExamples:\n  `/reminder 1h30m Team meeting`\n  `/reminder 8:39PM Lunch`\n  `/reminder at 2039 Break`"
         else:
-            # Skip optional 'at' and find the first token that looks like a time/duration
             time_or_duration = None
             msg_start_idx = None
             for i in range(1, len(parts)):
                 token = parts[i]
                 if token.lower() == 'at':
                     continue
-                # Detect absolute time patterns
                 if (':' in token or token.lower().endswith(('am', 'pm')) or
                     (token.isdigit() and len(token) == 4)):
                     time_or_duration = token
                     msg_start_idx = i + 1
                     break
             if time_or_duration is None:
-                # No absolute time found, assume first non-at token is a duration
                 if len(parts) > 1:
                     time_or_duration = parts[1]
                     msg_start_idx = 2
                 else:
                     reply = "❌ Missing time/duration and message."
-
             if time_or_duration and msg_start_idx and msg_start_idx < len(parts):
                 message = ' '.join(parts[msg_start_idx:])
-                # Decide which scheduler to use
                 if (':' in time_or_duration or
                     time_or_duration.lower().endswith(('am', 'pm')) or
                     (time_or_duration.isdigit() and len(time_or_duration) == 4)):
@@ -1229,33 +1022,29 @@ def lark_webhook():
                 reply = result
             else:
                 reply = "❌ Invalid format. Please specify a time/duration and a message."
-
         send_message(chat_id, reply)
         return jsonify({"success": True})
-    
     elif clean_text.lower() == '/restart':
-        # Send initial notification
         send_message(chat_id, "🔄 Restarting bot...")
-        
-        # Write pending restart info so the new instance can announce readiness
         write_restart_pending(chat_id)
-        
-        # Shut down the scheduler
         scheduler.shutdown(wait=False)
-        
-        # Delay exit to allow messages to be sent
         def delayed_exit():
             time.sleep(1)
             os._exit(0)
-        
         threading.Thread(target=delayed_exit).start()
         return jsonify({"success": True})
 
+    # 如果前面没有任何命令匹配，并且 reply 为空，则忽略
+    if reply:
+        send_message(chat_id, reply)
+        print(f"✅ Replied to chat {chat_id}: {reply}")
+    else:
+        print(f"⚠️ No command matched and no reply generated for chat {chat_id}")
+
+    return jsonify({"success": True})
 
 scheduler.start()
 atexit.register(lambda: scheduler.shutdown())
-
-# Send ready message if this is a restart
 send_restart_ready()
 
 if __name__ == "__main__":
