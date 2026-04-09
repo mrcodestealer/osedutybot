@@ -541,7 +541,7 @@ def get_sre_week_duty():
 
 # Keep the original p0sre function as is
 def p0sre():
-    return srethisweek + "\nIf cannot contact SRE Duty, Kindly contact the duty below\n• Wei Siong 📞60163132882\n• Adrian 📞60123156848"
+    return srethisweek() + "\nIf cannot contact SRE Duty, Kindly contact the duty below\n• Wei Siong 📞60163132882\n• Adrian 📞60123156848"
 
 
 if __name__ == "__main__":
