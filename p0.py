@@ -19,7 +19,7 @@ def format_p0_alert(group_id, sender_name, text):
     text: 原始消息内容
     """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    msg = f"🚨 **P0 detected(TESTING ONLY)** 🚨\n"
+    msg = f"🚨 **P0 detected IN EMERGENCY GROUP(TESTING ONLY)** 🚨\n"
     msg += sre_Duty.p0sre + "\n"
     msg += f"\n"
     msg += f"\n"

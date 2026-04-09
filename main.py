@@ -344,7 +344,7 @@ scheduler = BackgroundScheduler()
 scheduler.add_job(func=morning_reminder, trigger="cron", hour=7, minute=00)
 scheduler.add_job(func=evening_reminder, trigger="cron", hour=19, minute=0)
 scheduler.add_job(func=amountloss, trigger="cron", hour=9, minute=0)
-scheduler.add_job(func=myoseweeklymeeting, trigger="cron", hour=17, minute=0)
+scheduler.add_job(func=myoseweeklymeeting, trigger="cron", day_of_week='tue', hour=17, minute=0)
 scheduler.add_job(func=monthly_duty_check, trigger="cron", day=1, hour=0, minute=0)
 
 PENDING_RESTART_FILE = "restart_pending.json"
