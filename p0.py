@@ -6,6 +6,7 @@ P0 跨群组广播模块：
 
 import re
 from datetime import datetime
+import sre_Duty
 
 # 群组 ID 从环境变量读取（在 bot 主脚本中传入，或在此读取）
 # 为了模块独立，我们设计为函数接收群组 ID 和消息内容
@@ -18,12 +19,11 @@ def format_p0_alert(group_id, sender_name, text):
     text: 原始消息内容
     """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    msg = f"🚨 **P0 关键词告警** 🚨\n"
-    msg += f"来源群组: `{group_id}`\n"
-    if sender_name:
-        msg += f"发送者: {sender_name}\n"
-    msg += f"时间: {timestamp}\n"
-    msg += f"内容: {text}"
+    msg = f"🚨 **P0 detected(TESTING ONLY)** 🚨\n"
+    msg += sre_Duty.p0sre + "\n"
+    msg += f"\n"
+    msg += f"\n"
+    msg += f""
     return msg
 
 def should_broadcast(text):

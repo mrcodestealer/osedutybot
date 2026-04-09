@@ -406,12 +406,155 @@ def sre_check(month=None, year=None):
         missing_str = ", ".join(str(d) for d in missing)
         return f"⚠️ {month_name} missing duty date：{missing_str}"
 
+def _get_week_duty_summary(start_monday, title_prefix="SRE Duty week starting"):
+    """
+    Return a formatted string for the week starting at start_monday.
+    title_prefix is used to generate the heading.
+    """
+    # Collect all names for the week (Monday to Sunday)
+    week_names = set()
+    for i in range(7):
+        day = start_monday + timedelta(days=i)
+        day_checked = _get_duty_names_for_date(day, values)  # needs values, but we'll pass it
+        week_names.update(day_checked)
+    week_names = sorted(week_names)
+
+    heading = f"📅 {title_prefix} – {start_monday.strftime('%d/%m/%Y')}"
+    if not week_names:
+        return f"{heading} – no duty"
+
+    lines = [heading]
+    for name in week_names:
+        csv_name = TABLE_TO_CSV.get(name, name)
+        phone = get_phone_from_dutylist(csv_name)
+        project = NAME_TO_PROJECT.get(name, "")
+        if project:
+            lines.append(f"• {name} {project} (Phone: {phone})")
+        else:
+            lines.append(f"• {name} (Phone: {phone})")
+    return "\n".join(lines)
+
+
+def srethisweek():
+    """Display duty for the current week only."""
+    today = datetime.now().date()
+    monday = today - timedelta(days=today.weekday())
+
+    # Need to read sheet data again inside this function
+    try:
+        token = get_tenant_access_token()
+    except Exception as e:
+        return f"❌ Failed to get access token: {e}"
+
+    props = get_sheet_metadata(token, SPREADSHEET_TOKEN, SHEET_ID)
+    if not props:
+        return "❌ Cannot retrieve sheet metadata"
+    max_row = props.get("rowCount", 200)
+    scan_range = f"A1:ZZ{max_row}"
+    values = get_range_values(token, SPREADSHEET_TOKEN, SHEET_ID, scan_range)
+    if values is None:
+        return "❌ Failed to read sheet data"
+    if len(values) < 2:
+        return "Sheet has fewer than 2 rows."
+
+    # Monkey‑patch the helper so it can access the local 'values' variable
+    # We'll rewrite _get_week_duty_summary to accept values as an argument.
+    # For clarity, we'll inline the logic here.
+    week_names = set()
+    for i in range(7):
+        day = monday + timedelta(days=i)
+        day_checked = _get_duty_names_for_date(day, values)
+        week_names.update(day_checked)
+    week_names = sorted(week_names)
+
+    heading = f"📅 SRE Duty this week – {monday.strftime('%d/%m/%Y')}"
+    if not week_names:
+        return f"{heading} – no duty"
+
+    lines = [heading]
+    for name in week_names:
+        csv_name = TABLE_TO_CSV.get(name, name)
+        phone = get_phone_from_dutylist(csv_name)
+        project = NAME_TO_PROJECT.get(name, "")
+        if project:
+            lines.append(f"• {name} {project} (Phone: {phone})")
+        else:
+            lines.append(f"• {name} (Phone: {phone})")
+    return "\n".join(lines)
+
+
+def sretwoweek():
+    """Display duty for the current week and the following week."""
+    today = datetime.now().date()
+    monday = today - timedelta(days=today.weekday())
+    next_monday = monday + timedelta(days=7)
+
+    # Read sheet data
+    try:
+        token = get_tenant_access_token()
+    except Exception as e:
+        return f"❌ Failed to get access token: {e}"
+
+    props = get_sheet_metadata(token, SPREADSHEET_TOKEN, SHEET_ID)
+    if not props:
+        return "❌ Cannot retrieve sheet metadata"
+    max_row = props.get("rowCount", 200)
+    scan_range = f"A1:ZZ{max_row}"
+    values = get_range_values(token, SPREADSHEET_TOKEN, SHEET_ID, scan_range)
+    if values is None:
+        return "❌ Failed to read sheet data"
+    if len(values) < 2:
+        return "Sheet has fewer than 2 rows."
+
+    def week_summary(start_monday, title):
+        week_names = set()
+        for i in range(7):
+            day = start_monday + timedelta(days=i)
+            day_checked = _get_duty_names_for_date(day, values)
+            week_names.update(day_checked)
+        week_names = sorted(week_names)
+        lines = [title]
+        if not week_names:
+            lines.append("– no duty")
+        else:
+            for name in week_names:
+                csv_name = TABLE_TO_CSV.get(name, name)
+                phone = get_phone_from_dutylist(csv_name)
+                project = NAME_TO_PROJECT.get(name, "")
+                if project:
+                    lines.append(f"• {name} {project} (Phone: {phone})")
+                else:
+                    lines.append(f"• {name} (Phone: {phone})")
+        return "\n".join(lines)
+
+    this_week_str = week_summary(monday, f"📅 SRE Duty this week – {monday.strftime('%d/%m/%Y')}")
+    next_week_str = week_summary(next_monday, f"📅 SRE Duty next week – {next_monday.strftime('%d/%m/%Y')}")
+    return f"{this_week_str}\n\n{next_week_str}"
+
+
+# Update the existing get_sre_week_duty to use the new two‑week implementation
+# (keeping the original name for backward compatibility)
+def get_sre_week_duty():
+    """Return this week and next week duty summary (same as sretwoweek)."""
+    return sretwoweek()
+
+
+# Keep the original p0sre function as is
+def p0sre():
+    return srethisweek + "\nIf cannot contact SRE Duty, Kindly contact the duty below\n• Wei Siong 📞60163132882\n• Adrian 📞60123156848"
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
-        if sys.argv[1] in ("--week", "-w"):
+        arg = sys.argv[1]
+        if arg in ("--week", "-w"):
             print(get_sre_week_duty())
+        elif arg == "--thisweek":
+            print(srethisweek())
+        elif arg == "--twoweek":
+            print(sretwoweek())
         else:
-            user_date = parse_date_arg(sys.argv[1])
+            user_date = parse_date_arg(arg)
             if user_date is None:
                 print(f"❌ Invalid date format. Please use DD/MM/YYYY (e.g., 03/02/2026)")
                 sys.exit(1)
