@@ -927,7 +927,7 @@ def lark_webhook():
     elif clean_text.lower().startswith('/wf'):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
-            reply = "❌ Usage: `/winford <asset_id(s)>`\nExamples: `/winford 8092`, `/winford 8092,8093`, `/winford win8092 win8093`"
+            reply = "❌ Usage: `/wf <asset_id(s)>`\nExamples: `/wf 8092`, `/wf 8092,8093`, `/wf win8092 win8093`"
         else:
             query = parts[1]
             reply = winford.get_winford_info(query)
