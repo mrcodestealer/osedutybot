@@ -19,10 +19,10 @@ def format_p0_alert(group_id, sender_name, text):
     text: 原始消息内容
     """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    msg = f'🚨 <b>P0 detected IN EMERGENCY GROUP(TESTING ONLY)</b> 🚨\n'
+    msg = f'🚨 <b>P0 detected IN EMERGENCY GROUP(TESTING ONLY)</b> 🚨\n\n'
+    msg += f"<b>Senior kindly send P0 Overview</b>\n\n"
     msg += f'<b>CALL SRE DUTY</b> \n' + sre_Duty.p0sre() 
-    msg += f"\n<b>Senior kindly send P0 Overview</b>\n\n"
-    msg += f"<b>Identify P0 Issue</b>\nKindly provide what P0 issue now: /p0major /p0fpms /p0cpms /p0otp\n"
+    msg += f"\n\n<b>Identify P0 Issue</b>\nKindly provide what P0 issue now: /p0major /p0fpms /p0cpms /p0otp\n"
     return msg
 
 def should_broadcast(text):
