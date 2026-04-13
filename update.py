@@ -18,9 +18,9 @@ UPDATE_MAP = {
     "frontend uat4 web": ("FRONTEND UAT4 WEB", "https://jenkins.client8.me/job/FRONTEND/job/UAT/job/projects/job/uat-4/job/web-uat/build?delay=0sec"),
     "fpms uat fgs": ("FPMS FGS", "https://jenkins.client8.me/job/FGS_CLIENT/job/FGS-UAT-UPDATE/build?delay=0sec"),
     "ccms uat fe bo": ("FPMS_NT_UAT_BO_UPDATE", "https://jenkins.client8.me/job/FPMS_NT/view/all/job/FPMS_NT_UAT_BO_UPDATE/build?delay=0sec"),
-    "fpms uat fnt":("FPMS FNT","https://jenkins.client8.me/job/FNT/job/FNT_UAT_SCRIPT_RUN/build?delay=0sec"),
-    "cpms uat update":("CPMS-UAT-UPDATE","\nhttps://jenkins.client8.me/job/FNT/job/FNT_UAT_SCRIPT_RUN/build?delay=0sec\nhttps://jenkins.client8.me/job/IGO/job/UAT/job/IGO-UAT-UPDATE/build?delay=0sec"),
-    "igo uat script run":("IGO UAT SCRIPT RUN","https://jenkins.client8.me/job/IGO/job/UAT/job/IGO-UAT-SCRIPT-RUN/")
+    "fpms uat fnt": ("FPMS FNT","https://jenkins.client8.me/job/FNT/job/FNT_UAT_SCRIPT_RUN/build?delay=0sec"),
+    "cpms uat update": ("CPMS-UAT-UPDATE","\nhttps://jenkins.client8.me/job/FNT/job/FNT_UAT_SCRIPT_RUN/build?delay=0sec\nhttps://jenkins.client8.me/job/IGO/job/UAT/job/IGO-UAT-UPDATE/build?delay=0sec"),
+    "igo uat script run": ("IGO UAT SCRIPT RUN","https://jenkins.client8.me/job/IGO/job/UAT/job/IGO-UAT-SCRIPT-RUN/")
 }
 
 # 所有有效命令的列表（用于模糊匹配）
@@ -30,17 +30,47 @@ def handle_update(args):
     """
     处理 /update 命令的参数，返回要发送的消息字符串。
     args: 用户输入的参数字符串（例如 "fpms prod" 或 "fpms prd"）
+    
+    行为：
+      - 如果 args 精确或部分匹配多个命令（子串匹配），列出所有匹配项。
+      - 如果只匹配一个，直接返回该命令的链接。
+      - 如果没有匹配，尝试模糊匹配（类似拼写纠错）并返回最佳建议。
+      - 如果仍无结果，显示可用命令列表。
     """
     if not args:
         return "Usage: /update <project> <environment>\nExample: /update fpms prod"
 
     args_lower = args.strip().lower()
-    # 模糊匹配，找到最相似的命令（相似度阈值 0.6）
-    matches = difflib.get_close_matches(args_lower, VALID_COMMANDS, n=1, cutoff=0.6)
-    if matches:
-        matched = matches[0]
+    
+    # 1. 子串匹配（找出所有包含 args_lower 的命令）
+    substring_matches = [cmd for cmd in VALID_COMMANDS if args_lower in cmd]
+    
+    if len(substring_matches) == 1:
+        # 唯一匹配，直接返回
+        matched = substring_matches[0]
         display, url = UPDATE_MAP[matched]
         return f"{display}\nLINK : {url}"
-    else:
-        available = ", ".join(VALID_COMMANDS)
-        return f"Unknown update target '{args}'. Available: {available}"
+    
+    elif len(substring_matches) > 1:
+        # 多个匹配，列出所有
+        lines = [f"Multiple matches for '{args}':"]
+        for cmd in substring_matches:
+            display, url = UPDATE_MAP[cmd]
+            # 将多行 URL 中的换行符替换为空格，避免格式错乱
+            url_display = url.replace('\n', ' / ')
+            lines.append(f"• {display} : {url_display}")
+        return "\n".join(lines)
+    
+    # 2. 没有子串匹配，尝试模糊匹配
+    fuzzy_matches = difflib.get_close_matches(args_lower, VALID_COMMANDS, n=3, cutoff=0.6)
+    if fuzzy_matches:
+        lines = [f"Did you mean one of these?"]
+        for cmd in fuzzy_matches:
+            display, url = UPDATE_MAP[cmd]
+            url_display = url.replace('\n', ' / ')
+            lines.append(f"• {display} : {url_display}")
+        return "\n".join(lines)
+    
+    # 3. 完全没找到，显示帮助
+    available = ", ".join(VALID_COMMANDS)
+    return f"Unknown update target '{args}'. Available: {available}"
