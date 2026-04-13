@@ -38,6 +38,7 @@ import dhs
 import mdr
 
 import p0
+import p1
 import maintenance
 import emergency
 import ecsre
@@ -550,6 +551,19 @@ def lark_webhook():
         print(f"[MAIN] LABORATORY_GROUP matched, chat_id={chat_id}")
         print(f"[MAIN] original_text: {original_text[:100]}")
         p0.broadcast_p0(
+            source_chat_id=chat_id,
+            target_chat_id=OSE_BOT_GROUP,
+            sender_name=sender_id,
+            message_text=original_text,
+            send_func=send_message
+        )
+    else:
+        print(f"[MAIN] chat_id {chat_id} is not LABORATORY_GROUP")
+        
+    if chat_id == LABORATORY_GROUP:
+        print(f"[MAIN] LABORATORY_GROUP matched, chat_id={chat_id}")
+        print(f"[MAIN] original_text: {original_text[:100]}")
+        p1.broadcast_p1(
             source_chat_id=chat_id,
             target_chat_id=OSE_BOT_GROUP,
             sender_name=sender_id,
