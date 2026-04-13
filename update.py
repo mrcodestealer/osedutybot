@@ -19,7 +19,7 @@ UPDATE_MAP = {
     "fpms uat fgs": ("FPMS FGS", "https://jenkins.client8.me/job/FGS_CLIENT/job/FGS-UAT-UPDATE/build?delay=0sec"),
     "ccms uat fe bo": ("FPMS_NT_UAT_BO_UPDATE", "https://jenkins.client8.me/job/FPMS_NT/view/all/job/FPMS_NT_UAT_BO_UPDATE/build?delay=0sec"),
     "fpms uat fnt": ("FPMS FNT","https://jenkins.client8.me/job/FNT/job/FNT_UAT_SCRIPT_RUN/build?delay=0sec"),
-    "cpms uat update": ("CPMS-UAT-UPDATE","\nhttps://jenkins.client8.me/job/FNT/job/FNT_UAT_SCRIPT_RUN/build?delay=0sec\nhttps://jenkins.client8.me/job/IGO/job/UAT/job/IGO-UAT-UPDATE/build?delay=0sec"),
+    "cpms uat update": ("CPMS-UAT-UPDATE","\nhttps://jenkins.client8.me/job/IGO/job/UAT/job/IGO-UAT-UPDATE/build?delay=0sec\nhttps://jenkins.client8.me/job/CPMS/job/UAT/job/CPMS-UAT-UPDATE/build?delay=0sec"),
     "igo uat script run": ("IGO UAT SCRIPT RUN","https://jenkins.client8.me/job/IGO/job/UAT/job/IGO-UAT-SCRIPT-RUN/")
 }
 
