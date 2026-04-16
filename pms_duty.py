@@ -286,7 +286,7 @@ def _format_level_section(level_name, names_list):
     for name in names_list:
         query_name = QUERY_NAME_MAPPING.get(name, name)
         phone = get_phone_from_dutylist(query_name)
-        lines.append(f"• {name}  (Phone: {phone})")
+        lines.append(f"• {name}  📞 {phone}")
     return "\n".join(lines)
 
 

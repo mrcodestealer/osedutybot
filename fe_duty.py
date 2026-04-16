@@ -164,7 +164,7 @@ def format_duty_block(date_obj, names_phones):
         lines.append("• No duty")
     else:
         for name, phone in names_phones:
-            lines.append(f"• {name}  (Phone: {phone})")
+            lines.append(f"• {name} 📞 {phone}")
     return "\n".join(lines)
 
 # ================= 主要功能函数 =================

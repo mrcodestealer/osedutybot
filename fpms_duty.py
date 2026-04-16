@@ -304,7 +304,7 @@ def get_fpms_today_duty():
         if duty_names:
             for name in duty_names:
                 phone = get_phone(name)
-                output_lines.append(f"• {name}  (Phone: {phone})")
+                output_lines.append(f"• {name}  📞 {phone}")
         else:
             output_lines.append("• No duty")
 
