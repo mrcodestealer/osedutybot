@@ -574,7 +574,7 @@ def lark_webhook():
     original_text = text
     print(f"📝 Original text: {repr(original_text)}")
 
-    # 清理提及占位符（先做清理，便于后续命令处理）
+        # 清理提及占位符（先做清理，便于后续命令处理）
     mention_keys = [m.get("key", "") for m in mentions if m.get("key")]
     for key in mention_keys:
         text = text.replace(key, "")
@@ -584,10 +584,9 @@ def lark_webhook():
     clean_text = text
     print(f"🧹 Cleaned text (repr): {repr(clean_text)}")
 
-    # ================= 跨群组 P0 广播（必须在群组提及检查之前） =================
+    # ================= 跨群组 P0 广播（不依赖 @ 机器人） =================
     if chat_id == LABORATORY_GROUP:
         print(f"[MAIN] LABORATORY_GROUP matched, chat_id={chat_id}")
-        print(f"[MAIN] original_text: {original_text[:100]}")
         p0.broadcast_p0(
             source_chat_id=chat_id,
             target_chat_id=OSE_BOT_GROUP,
@@ -595,10 +594,16 @@ def lark_webhook():
             message_text=original_text,
             send_func=send_message
         )
-    else:
-        print(f"[MAIN] chat_id {chat_id} is not LABORATORY_GROUP")
 
-    # 群组提及检查（仅用于决定是否响应命令，不影响广播）
+    # ================= 跨群组 P1 交互确认（不依赖 @ 机器人） =================
+    if chat_id == LABORATORY_GROUP:
+        handled, p1_reply = handle_p1_confirmation(chat_id, sender_id, clean_text, original_text, send_message)
+        if handled:
+            if p1_reply:
+                send_message(chat_id, p1_reply)
+            return jsonify({"success": True})
+
+    # 群组提及检查（仅用于后续命令，不影响 P0/P1）
     if chat_type == "group":
         bot_mentioned = False
         for mention in mentions:
@@ -617,7 +622,6 @@ def lark_webhook():
             print("✅ Bot mentioned (old schema via is_mention flag)")
         if not bot_mentioned:
             print("⏭️ Bot not mentioned in group chat – ignoring further commands")
-            # 注意：这里不能 return，因为广播已经执行了，但我们可以直接返回 success
             return jsonify({"success": True})
 
     text = re.sub(r'@_user_\d+', '', text)
