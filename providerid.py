@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Provider & Game Lookup
-触发方式：
-    /pid <provider_id>     e.g. /pid 30
-    /pid 30 31 32
-    纯数字（@机器人后）        e.g. 30
+Provider Name Lookup (Simple)
+Usage:
+    /pid <id>   e.g. /pid 30
+    <number>    (when mentioning bot) e.g. 30
 """
 
 import re
@@ -13,20 +12,13 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-# ================= 配置（从环境变量读取）=================
+# ================= Configuration =================
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
 PROVIDER_SPREADSHEET_TOKEN = os.getenv("PROVIDER_SPREADSHEET_TOKEN")
 PROVIDER_SHEET_ID = os.getenv("PROVIDER_SHEET_ID")
 
-# 表格中的列名（请根据实际表格调整）
-COLUMNS = {
-    "Provider ID": "Provider ID",
-    "Provider Name": "Provider Name",
-    "Game ID": "Game ID",
-}
-
-# ================= Lark API 辅助函数 =================
+# ================= Lark API Helpers =================
 def get_tenant_access_token():
     url = "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal"
     headers = {"Content-Type": "application/json"}
@@ -100,16 +92,28 @@ def extract_cell_value(cell):
         return "".join(parts).strip()
     return str(cell).strip()
 
-# ================= 核心查询逻辑 =================
-def find_provider_mappings(data, provider_id):
+def get_provider_info(query_str):
     """
-    在表格数据中查找指定 Provider ID 对应的所有行，
-    返回 provider_name 和 game_ids 列表
+    提取第一个数字作为前缀，在表格中查找所有以该前缀开头的 Provider ID。
+    返回对应的 Provider ID 和 Provider Name。
     """
-    if not data:
-        return None
+    # 提取数字（忽略任何前缀）
+    numbers = re.findall(r'\b(\d+)\b', query_str)
+    if not numbers:
+        return "❌ No provider ID found. Usage: `/pid 30` or just `30`."
 
-    # 定位表头行（第一行包含 "Provider ID"）
+    prefix = numbers[0]   # 取第一个数字作为前缀
+
+    try:
+        token = get_tenant_access_token()
+    except Exception as e:
+        return f"❌ Failed to get access token: {e}"
+
+    data = get_all_sheet_data(token, PROVIDER_SPREADSHEET_TOKEN, PROVIDER_SHEET_ID)
+    if not data:
+        return "❌ Failed to read sheet data."
+
+    # 定位表头行
     header_row = None
     for i, row in enumerate(data):
         if not row:
@@ -122,90 +126,43 @@ def find_provider_mappings(data, provider_id):
             break
 
     if header_row is None:
-        return None
+        return "❌ Could not find header row with 'Provider ID'."
 
     headers = data[header_row]
 
-    # 查找各列索引
-    col_indexes = {}
-    for col_name in COLUMNS.values():
-        col_indexes[col_name] = None
-        for idx, cell in enumerate(headers):
-            if cell and isinstance(cell, str) and col_name.lower() in cell.lower():
-                col_indexes[col_name] = idx
-                break
+    # 查找 Provider ID 和 Provider Name 列索引
+    pid_col = None
+    name_col = None
+    for idx, cell in enumerate(headers):
+        if cell and isinstance(cell, str):
+            if "provider id" in cell.lower():
+                pid_col = idx
+            elif "provider name" in cell.lower():
+                name_col = idx
 
-    if col_indexes["Provider ID"] is None:
-        return None
+    if pid_col is None:
+        return "❌ 'Provider ID' column not found."
 
-    provider_name = None
-    game_ids = []
-
-    # 遍历数据行
+    # 收集所有前缀匹配的结果
+    matches = []
     for row in data[header_row+1:]:
-        if len(row) <= col_indexes["Provider ID"]:
+        if len(row) <= pid_col:
             continue
-        pid_cell = extract_cell_value(row[col_indexes["Provider ID"]])
-        if pid_cell == str(provider_id):
-            # 记录 Provider Name（取第一个非空值）
-            if provider_name is None and col_indexes["Provider Name"] is not None:
-                name_val = extract_cell_value(row[col_indexes["Provider Name"]])
-                if name_val:
-                    provider_name = name_val
-            # 收集 Game ID
-            if col_indexes["Game ID"] is not None:
-                game_val = extract_cell_value(row[col_indexes["Game ID"]])
-                if game_val and game_val not in game_ids:
-                    game_ids.append(game_val)
+        pid_val = extract_cell_value(row[pid_col])
+        if pid_val.startswith(prefix):   # 前缀匹配
+            provider_name = ""
+            if name_col is not None and len(row) > name_col:
+                provider_name = extract_cell_value(row[name_col])
+            matches.append((pid_val, provider_name))
 
-    if provider_name is not None:
-        return {"provider_name": provider_name, "game_ids": game_ids}
-    return None
+    if not matches:
+        return f"❌ No provider ID starting with '{prefix}' found."
 
-def get_provider_info(query_str):
-    """
-    主查询函数，接收用户输入的字符串，提取数字作为 Provider ID 进行查询
-    支持多个 ID，用空格或逗号分隔
-    """
-    # 提取数字（支持 "pid" 前缀和纯数字）
-    numbers = re.findall(r'(?i)pid?(\d+)', query_str)
-    if not numbers:
-        numbers = re.findall(r'\b(\d+)\b', query_str)
-    if not numbers:
-        return "❌ No valid provider IDs found. Usage: `/pid 30` or just `30` when mentioning me."
+    # 构建返回消息（多条结果）
+    lines = []
+    for pid, name in matches:
+        lines.append(f"🎮 Provider ID: {pid}")
+        lines.append(f"📛 Provider Name: {name}")
+        lines.append("")   # 空行分隔
 
-    # 去重并保持顺序
-    seen = set()
-    numbers_unique = []
-    for n in numbers:
-        if n not in seen:
-            seen.add(n)
-            numbers_unique.append(n)
-
-    try:
-        token = get_tenant_access_token()
-    except Exception as e:
-        return f"❌ Failed to get access token: {e}"
-
-    data = get_all_sheet_data(token, PROVIDER_SPREADSHEET_TOKEN, PROVIDER_SHEET_ID)
-    if not data:
-        return "❌ Failed to read provider sheet data."
-
-    output_lines = []
-    for pid in numbers_unique:
-        mapping = find_provider_mappings(data, pid)
-        if mapping:
-            output_lines.append(f"🎮 Provider ID: {pid}")
-            output_lines.append(f"📛 Provider Name: {mapping['provider_name']}")
-            if mapping['game_ids']:
-                output_lines.append("🕹️ Associated Game IDs:")
-                for gid in mapping['game_ids']:
-                    output_lines.append(f"   - {gid}")
-            else:
-                output_lines.append("ℹ️ No game IDs listed for this provider.")
-            output_lines.append("")  # 空行分隔多个结果
-        else:
-            output_lines.append(f"❌ Provider ID {pid} not found.")
-            output_lines.append("")
-
-    return "\n".join(output_lines).strip()
+    return "\n".join(lines).strip()
