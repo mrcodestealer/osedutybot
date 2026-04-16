@@ -503,9 +503,8 @@ def get_sre_week_duty():
     """Return this week and next week duty summary (same as sretwoweek)."""
     return sretwoweek()
 
-# Keep the original p0sre function as is
 def p0sre():
-    return srethisweek() + "\nIf cannot contact SRE ON Duty, Kindly contact the duty below\n• Wei Siong 📞60163132882\n• Adrian 📞60123156848"
+    return srethisweek() + "\n<b>If cannot contact SRE ON Duty, Kindly contact the duty below</b>\n• Wei Siong 📞60163132882\n• Adrian 📞60123156848"
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
