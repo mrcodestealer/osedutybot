@@ -18,8 +18,8 @@ load_dotenv()
 
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
-SPREADSHEET_TOKEN = "P7ATwNGfci7idPkqlm4l4YUGgFn"
-SHEET_ID = "fea5bc"
+SPREADSHEET_TOKEN = os.getenv("EMERGENCY_TOKEN")
+SHEET_ID = os.getenv("EMERGENCY_SHEET")
 
 DEBUG = False
 FUZZY_THRESHOLD = 0.65
