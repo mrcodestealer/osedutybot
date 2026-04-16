@@ -177,13 +177,23 @@ def handle_p0_confirmation(chat_id, sender_id, clean_text, original_text, send_f
             del pending_p0_confirmation[sender_id]
             alert_msg = p0.format_p0_alert(chat_id, sender_id, entry["original_text"])
             send_func(OSE_BOT_GROUP, alert_msg)
-            print(f"[P0] Alert sent to {OSE_BOT_GROUP}")
             return True, "✅ P0 alert sent."
         elif reply_lower in ('no', 'n'):
             del pending_p0_confirmation[sender_id]
             return True, "👌 Understood, not a P0."
         else:
             return True, "❓ Please confirm: is this a P0? Reply 'yes' or 'no'."
+
+    # 情况2：在 LABORATORY_GROUP 中检测到 P0 关键字（此分支之前缺失）
+    if chat_id == LABORATORY_GROUP and p0.should_broadcast(original_text):
+        pending_p0_confirmation[sender_id] = {
+            "timestamp": now,
+            "original_text": original_text
+        }
+        send_func(OSE_BOT_GROUP, f'⚠️ <at user_id="{sender_id}">User</at> This is P0? (Reply "yes" or "no" without mentioning me)')
+        return True, None
+
+    return False, None
 
 def clean_pending_p0_confirmations():
     now = datetime.now()
