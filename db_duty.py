@@ -268,7 +268,7 @@ def get_week_summary_from_data(week_start, values, target_rows):
     lines = [title]
     for name in sorted(duty_names):
         phone = next((t["phone"] for t in TARGET_DUTY if t["name"] == name), "未找到电话号码")
-        lines.append(f"• {name} DB (Phone: {phone})")
+        lines.append(f"• {name} 📞 {phone}")
     return "\n".join(lines)
 
 def get_three_weeks_summary():

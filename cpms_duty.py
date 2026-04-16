@@ -220,13 +220,13 @@ def format_output(results):
         lines.append(f"📅 CPMS Schedule - {date_str}")
 
         if main_name:
-            lines.append(f"• {main_name}  (Phone: {main_phone})")
+            lines.append(f"• {main_name}  📞 {main_phone}")
         else:
             lines.append("• No main duty assigned")
 
         if backup_name:
             lines.append(f"Backup :")
-            lines.append(f"• {backup_name}  (Phone: {backup_phone})")
+            lines.append(f"• {backup_name}  📞 {backup_phone}")
         else:
             lines.append("Backup :")
             lines.append("• No backup duty assigned")

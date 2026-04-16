@@ -223,7 +223,7 @@ def get_bi_today_duty():
         range_str = f"{start_date.strftime('%d/%m/%Y')} - {end_date.strftime('%d/%m/%Y')}"
         output_lines.append(f"📅 BI Duty {range_str}")
         phone = get_phone(name)
-        output_lines.append(f"• {name} (Phone: {phone})")
+        output_lines.append(f"• {name} 📞 {phone}")
         output_lines.append("")
 
     return "\n".join(output_lines).strip()
