@@ -346,7 +346,6 @@ def get_sre_week_duty():
         f"SRE Duty next week – {next_monday.strftime('%d/%m/%Y')}",
         next_week_names
     )
-    return f"{this_week_str}\n\n{next_week_str}"
 
 def parse_date_arg(arg):
     """Parse a string in DD/MM/YYYY format and return a date object."""
@@ -456,7 +455,6 @@ def sretwoweek():
     monday = today - timedelta(days=today.weekday())
     next_monday = monday + timedelta(days=7)
 
-    # Read sheet data
     try:
         token = get_tenant_access_token()
     except Exception as e:
@@ -473,7 +471,6 @@ def sretwoweek():
     if len(values) < 2:
         return "Sheet has fewer than 2 rows."
 
-    # 在 sretwoweek 的 week_summary 中
     def week_summary(start_monday, title):
         week_names = set()
         for i in range(7):
@@ -495,8 +492,9 @@ def sretwoweek():
                     lines.append(f"• {name} 📞{phone}")
         return "\n".join(lines)
 
-    this_week_str = week_summary(monday, f"📅 SRE Duty this week – {monday.strftime('%d/%m/%Y')}")
-    next_week_str = week_summary(next_monday, f"📅 SRE Duty next week – {next_monday.strftime('%d/%m/%Y')}")
+    # 注意：title 不再包含 "📅 " 前缀
+    this_week_str = week_summary(monday, f"SRE Duty this week – {monday.strftime('%d/%m/%Y')}")
+    next_week_str = week_summary(next_monday, f"SRE Duty next week – {next_monday.strftime('%d/%m/%Y')}")
     return f"{this_week_str}\n\n{next_week_str}"
 
 # Update the existing get_sre_week_duty to use the new two‑week implementation
