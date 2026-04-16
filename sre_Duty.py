@@ -323,10 +323,11 @@ def get_sre_week_duty():
     this_week_names = collect_week_names(monday)
     next_week_names = collect_week_names(next_monday)
 
+    # 在 get_sre_week_duty 中
     def format_week_block(title, names):
         if not names:
-            return f"📅 {title} – no duty"
-        lines = [f"📅 {title}"]
+            return f"📅 <b>{title}</b> – no duty"
+        lines = [f"📅 <b>{title}</b>"]
         for name in names:
             csv_name = TABLE_TO_CSV.get(name, name)
             phone = get_phone_from_dutylist(csv_name)
@@ -338,11 +339,11 @@ def get_sre_week_duty():
         return "\n".join(lines)
 
     this_week_str = format_week_block(
-        f"<b>SRE Duty this week – {monday.strftime('%d/%m/%Y')}<b>",
+        f"SRE Duty this week – {monday.strftime('%d/%m/%Y')}",
         this_week_names
     )
     next_week_str = format_week_block(
-        f"<b>SRE Duty next week – {next_monday.strftime('%d/%m/%Y')}<b>",
+        f"SRE Duty next week – {next_monday.strftime('%d/%m/%Y')}",
         next_week_names
     )
     return f"{this_week_str}\n\n{next_week_str}"
@@ -434,7 +435,7 @@ def srethisweek():
         week_names.update(day_checked)
     week_names = sorted(week_names)
 
-    heading = f"<b>📅 SRE Duty this week – {monday.strftime('%d/%m/%Y')}</b>"
+    heading = f"📅 <b>SRE Duty this week – {monday.strftime('%d/%m/%Y')}</b>"
     if not week_names:
         return f"{heading} – no duty"
 
@@ -472,6 +473,7 @@ def sretwoweek():
     if len(values) < 2:
         return "Sheet has fewer than 2 rows."
 
+    # 在 sretwoweek 的 week_summary 中
     def week_summary(start_monday, title):
         week_names = set()
         for i in range(7):
@@ -479,7 +481,7 @@ def sretwoweek():
             day_checked = _get_duty_names_for_date(day, values)
             week_names.update(day_checked)
         week_names = sorted(week_names)
-        lines = [title]
+        lines = [f"📅 <b>{title}</b>"]
         if not week_names:
             lines.append("– no duty")
         else:
@@ -493,8 +495,8 @@ def sretwoweek():
                     lines.append(f"• {name} 📞{phone}")
         return "\n".join(lines)
 
-    this_week_str = week_summary(monday, f"<b>📅 SRE Duty this week – {monday.strftime('%d/%m/%Y')}<b>")
-    next_week_str = week_summary(next_monday, f"<b>📅 SRE Duty next week – {next_monday.strftime('%d/%m/%Y')}<b>")
+    this_week_str = week_summary(monday, f"📅 SRE Duty this week – {monday.strftime('%d/%m/%Y')}")
+    next_week_str = week_summary(next_monday, f"📅 SRE Duty next week – {next_monday.strftime('%d/%m/%Y')}")
     return f"{this_week_str}\n\n{next_week_str}"
 
 # Update the existing get_sre_week_duty to use the new two‑week implementation
