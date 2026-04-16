@@ -85,21 +85,10 @@ def schedule_reminder(chat_id, user_id, duration_str, message, scheduler, send_f
 
     run_time = datetime.now() + timedelta(seconds=delay_seconds)
     reminder_text = f'<at user_id="{user_id}">you</at> ⏰ Reminder: {message}'
-    scheduler.add_job(func=send_func, trigger='date', run_date=run_time, args=[chat_id, reminder_text])
+    job = scheduler.add_job(func=send_func, trigger='date', run_date=run_time, args=[chat_id, reminder_text])
 
-    # Format readable duration
-    hours, remainder = divmod(delay_seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    parts = []
-    if hours:
-        parts.append(f"{hours}h")
-    if minutes:
-        parts.append(f"{minutes}m")
-    if seconds:
-        parts.append(f"{seconds}s")
-    duration_readable = ''.join(parts)
-
-    return f"✅ Reminder set for {duration_readable} from now. I'll remind you about: {message}"
+    # 返回 job 对象，以便外部取消
+    return job
 
 def schedule_reminder_absolute(chat_id, user_id, time_str, message, scheduler, send_func):
     try:

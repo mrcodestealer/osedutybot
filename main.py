@@ -160,6 +160,7 @@ def monthly_duty_check():
 # ================= P1 交互确认相关 =================
 pending_p1_confirmation = {}  # key: sender_id -> {"timestamp": datetime, "original_text": str}
 P1_CONFIRMATION_TIMEOUT = 60  # 秒
+active_p1_reminders = {}      # key: sender_id -> job_id (用于取消提醒)
 
 def handle_p1_confirmation(chat_id, sender_id, clean_text, original_text, send_func):
     global pending_p1_confirmation
@@ -179,8 +180,8 @@ def handle_p1_confirmation(chat_id, sender_id, clean_text, original_text, send_f
             reply_lower = clean_text.strip().lower()
             if reply_lower in ('yes', 'y'):
                 del pending_p1_confirmation[sender_id]
-                send_p1_alert_and_reminder(OSE_BOT_GROUP, sender_id, entry["original_text"], send_func)
-                return True, "✅ P1 alert sent and 15-min reminder set."
+                _, confirm_reply = send_p1_alert_and_reminder(OSE_BOT_GROUP, sender_id, entry["original_text"], send_func)
+                return True, confirm_reply
             elif reply_lower in ('no', 'n'):
                 del pending_p1_confirmation[sender_id]
                 return True, "👌 Understood, not a P1."
@@ -205,25 +206,27 @@ def handle_p1_confirmation(chat_id, sender_id, clean_text, original_text, send_f
     return False, None
 
 def send_p1_alert_and_reminder(source_chat_id, sender_id, original_text, send_func):
-    # 发送告警到 OSE_BOT_GROUP
     alert_msg = p1.format_p1_alert(source_chat_id, sender_id, original_text)
     send_func(OSE_BOT_GROUP, alert_msg)
     print(f"[P1] Alert sent to {OSE_BOT_GROUP}")
 
-    # 设置15分钟后提醒到 OSE_BOT_GROUP
     reminder_text = f'<at user_id="{TARGET_USER_OPEN_ID}">User</at> ⏰ Already 15mins it might escalate to p0'
     try:
-        reminder.schedule_reminder(
-            chat_id=OSE_BOT_GROUP,       # 改为此处提醒发送到 OSE_BOT_GROUP
+        job = reminder.schedule_reminder(
+            chat_id=OSE_BOT_GROUP,
             user_id=sender_id,
             duration_str="15m",
             message=reminder_text,
             scheduler=scheduler,
             send_func=send_func
         )
-        print(f"[P1] 15-min reminder scheduled")
+        if job:
+            active_p1_reminders[sender_id] = job.id
+            print(f"[P1] Reminder job {job.id} saved for sender {sender_id}")
+        return True, "✅ Will remind after 15minutes escalate to P0. If problem solved kindly say /cancelp1"
     except Exception as e:
         print(f"[P1] Failed to schedule reminder: {e}")
+        return True, "✅ P1 alert sent but failed to set reminder."
 
 # ================= LARK API HELPERS =================
 def add_all_reactions(message_id):
@@ -643,9 +646,25 @@ def lark_webhook():
                     print(f"⚠️ Could not cancel job {job_id}: {e}")
             send_message(chat_id, reply)
         return jsonify({"success": True})
+    
+    
 
     # 命令处理
-    if len(clean_text) >= 3 and clean_text[:3].lower() == '/s ':
+    if clean_text.lower() == '/cancelp1':
+        if sender_id in active_p1_reminders:
+            job_id = active_p1_reminders[sender_id]
+            try:
+                scheduler.remove_job(job_id)
+                del active_p1_reminders[sender_id]
+                reply = "✅ P1 reminder has been cancelled."
+            except Exception as e:
+                reply = f"❌ Failed to cancel reminder: {e}"
+        else:
+            reply = "ℹ️ No active P1 reminder to cancel."
+        send_message(chat_id, reply)
+        return jsonify({"success": True})
+    
+    elif len(clean_text) >= 3 and clean_text[:3].lower() == '/s ':
         query = clean_text[3:].strip()
         print(f"🔍 Duty query extracted: '{query}'")
         reply = search_duty(query)
