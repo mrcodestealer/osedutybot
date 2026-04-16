@@ -177,7 +177,7 @@ def handle_p0_confirmation(chat_id, sender_id, clean_text, original_text, send_f
             del pending_p0_confirmation[sender_id]
             alert_msg = p0.format_p0_alert(chat_id, sender_id, entry["original_text"])
             send_func(OSE_BOT_GROUP, alert_msg)
-            return True, "✅ P0 alert sent."
+            return True, None
         elif reply_lower in ('no', 'n'):
             del pending_p0_confirmation[sender_id]
             return True, "👌 Understood, not a P0."
