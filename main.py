@@ -29,6 +29,8 @@ import liveslot_duty
 import ote_duty
 import ft
 
+import providerid
+
 import nwr
 import winford
 import nch
@@ -1114,6 +1116,15 @@ def lark_webhook():
                 reply = f"Tagged {name} with open_id: {open_id}\nMention: <at user_id=\"{open_id}\">{name}</at>"
             else:
                 reply = "❌ No user mentioned correctly. Use `/secret1 @user` (mention the user)."
+        send_message(chat_id, reply)
+        return jsonify({"success": True})
+    elif clean_text.lower().startswith('/pid'):
+        parts = clean_text.split(maxsplit=1)
+        if len(parts) == 1:
+            reply = "❌ Usage: `/pid <provider_id>`\nExamples: `/pid 30`, `/pid 30 31 32`"
+        else:
+            query = parts[1]
+            reply = providerid.get_provider_info(query)
         send_message(chat_id, reply)
         return jsonify({"success": True})
     elif clean_text.lower() == '/secret2':
