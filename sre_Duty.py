@@ -338,11 +338,11 @@ def get_sre_week_duty():
         return "\n".join(lines)
 
     this_week_str = format_week_block(
-        f"SRE Duty this week – {monday.strftime('%d/%m/%Y')}",
+        f"<b>SRE Duty this week – {monday.strftime('%d/%m/%Y')}<b>",
         this_week_names
     )
     next_week_str = format_week_block(
-        f"SRE Duty next week – {next_monday.strftime('%d/%m/%Y')}",
+        f"<b>SRE Duty next week – {next_monday.strftime('%d/%m/%Y')}<b>",
         next_week_names
     )
     return f"{this_week_str}\n\n{next_week_str}"
