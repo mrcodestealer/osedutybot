@@ -162,64 +162,54 @@ pending_p1_confirmation = {}  # key: sender_id -> {"timestamp": datetime, "origi
 P1_CONFIRMATION_TIMEOUT = 60  # 秒
 
 def handle_p1_confirmation(chat_id, sender_id, clean_text, original_text, send_func):
-    """
-    处理 P1 确认流程。
-    - 仅在 LABORATORY_GROUP 中检测触发，不在其中发送任何消息。
-    - 确认对话在 OSE_BOT_GROUP 中进行。
-    返回 (handled, reply_message) 元组。
-    """
     global pending_p1_confirmation
     now = datetime.now()
 
-    # 情况1：用户在 OSE_BOT_GROUP 中回复确认
+    # 调试日志（上线后可删除）
+    print(f"[P1] chat_id={chat_id}, OSE_BOT_GROUP={OSE_BOT_GROUP}, sender_id={sender_id}, clean_text='{clean_text}'")
+    print(f"[P1] pending keys: {list(pending_p1_confirmation.keys())}")
+
+    # 情况1：用户在 OSE_BOT_GROUP 回复确认
     if chat_id == OSE_BOT_GROUP and sender_id in pending_p1_confirmation:
         entry = pending_p1_confirmation[sender_id]
-        # 超时清理
         if (now - entry["timestamp"]).total_seconds() > P1_CONFIRMATION_TIMEOUT:
             del pending_p1_confirmation[sender_id]
             return False, None
 
         reply_lower = clean_text.strip().lower()
-        if reply_lower == 'yes':
+        if reply_lower in ('yes', 'y'):
             del pending_p1_confirmation[sender_id]
-            # 发送 P1 告警并设置提醒
             send_p1_alert_and_reminder(OSE_BOT_GROUP, sender_id, entry["original_text"], send_func)
             return True, "✅ P1 alert sent and 15-min reminder set."
-        elif reply_lower == 'no':
+        elif reply_lower in ('no', 'n'):
             del pending_p1_confirmation[sender_id]
             return True, "👌 Understood, not a P1."
         else:
-            # 用户回复其他内容，再次提示确认
             return True, "❓ Please confirm: is this a P1? Reply 'yes' or 'no'."
 
-    # 情况2：在 LABORATORY_GROUP 中检测到 P1 关键字，触发确认流程
+    # 情况2：在 LABORATORY_GROUP 中检测到 P1 关键字
     if chat_id == LABORATORY_GROUP and p1.should_broadcast(original_text):
-        # 保存待确认状态（以 sender_id 为键）
         pending_p1_confirmation[sender_id] = {
             "timestamp": now,
             "original_text": original_text
         }
-        # 向 OSE_BOT_GROUP 发送确认提问
-        send_func(OSE_BOT_GROUP, f"⚠️ <at user_id=\"{sender_id}\">User</at> This is P1? (Reply 'yes' or 'no' without mentioning me)")
-        # 返回 handled=True，但不向 LABORATORY_GROUP 发送任何内容
+        # 向 OSE_BOT_GROUP 发送确认提问，并 @ 触发者
+        send_func(OSE_BOT_GROUP, f'⚠️ <at user_id="{sender_id}">User</at> This is P1? (Reply "yes" or "no" without mentioning me)')
         return True, None
 
     return False, None
 
 def send_p1_alert_and_reminder(source_chat_id, sender_id, original_text, send_func):
-    """
-    发送 P1 告警到 OSE_BOT_GROUP，并设置 15 分钟后提醒。
-    """
-    # 生成告警内容并发送到目标群
+    # 发送告警到 OSE_BOT_GROUP
     alert_msg = p1.format_p1_alert(source_chat_id, sender_id, original_text)
     send_func(OSE_BOT_GROUP, alert_msg)
     print(f"[P1] Alert sent to {OSE_BOT_GROUP}")
 
-    # 设置 15 分钟后提醒，提及 TARGET_USER_OPEN_ID
+    # 设置15分钟后提醒到 OSE_BOT_GROUP
     reminder_text = f'<at user_id="{TARGET_USER_OPEN_ID}">User</at> ⏰ Already 15mins it might escalate to p0'
     try:
         reminder.schedule_reminder(
-            chat_id=source_chat_id,
+            chat_id=OSE_BOT_GROUP,       # 改为此处提醒发送到 OSE_BOT_GROUP
             user_id=sender_id,
             duration_str="15m",
             message=reminder_text,
@@ -633,8 +623,9 @@ def lark_webhook():
     clean_text = text
     print(f"🧹 Cleaned text (repr): {repr(clean_text)}")
     
-        # ================= 跨群组 P0 广播 =================
+    # ================= 跨群组 P0 广播 =================
     if chat_id == LABORATORY_GROUP:
+        print(f"[MAIN] LABORATORY_GROUP matched, chat_id={chat_id}")
         p0.broadcast_p0(
             source_chat_id=chat_id,
             target_chat_id=OSE_BOT_GROUP,
@@ -643,26 +634,33 @@ def lark_webhook():
             send_func=send_message
         )
 
-    # ================= 跨群组 P1 交互确认（新流程） =================
+    # ================= 跨群组 P1 交互确认（对所有群组生效） =================
     handled, p1_reply = handle_p1_confirmation(chat_id, sender_id, clean_text, original_text, send_message)
     if handled:
-        if p1_reply:  # 有回复内容才发送（即确认/否认后的反馈）
+        if p1_reply:  # 有回复内容才发送（确认后的反馈）
             send_message(chat_id, p1_reply)
         return jsonify({"success": True})
-    
-    # 初始化回复变量
-    reply = ""
-    
-    if game.has_active_game(sender_id):
-        reply, should_clear, job_id = game.check_answer(sender_id, clean_text)
-        if reply:
-            if job_id:
-                try:
-                    scheduler.remove_job(job_id)
-                except Exception as e:
-                    print(f"⚠️ Could not cancel job {job_id}: {e}")
-            send_message(chat_id, reply)
-        return jsonify({"success": True})
+
+    # 群组提及检查（仅用于后续命令，不影响 P0/P1）
+    if chat_type == "group":
+        bot_mentioned = False
+        for mention in mentions:
+            mention_id_obj = mention.get("id")
+            if isinstance(mention_id_obj, dict):
+                mention_id = mention_id_obj.get("open_id", "")
+            else:
+                mention_id = mention_id_obj
+            print(f"🔍 Mention open_id: {mention_id}")
+            if mention_id == BOT_OPEN_ID:
+                bot_mentioned = True
+                print(f"✅ Bot mentioned by open_id: {mention_id}")
+                break
+        if not bot_mentioned and is_mention_old:
+            bot_mentioned = True
+            print("✅ Bot mentioned (old schema via is_mention flag)")
+        if not bot_mentioned:
+            print("⏭️ Bot not mentioned in group chat – ignoring further commands")
+            return jsonify({"success": True})
 
     # 命令处理
     if len(clean_text) >= 3 and clean_text[:3].lower() == '/s ':
