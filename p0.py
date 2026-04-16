@@ -1,22 +1,16 @@
 #!/usr/bin/env python3
 """
-P0 跨群组广播模块：
-监听 LABORATORY_GROUP 中的消息，若包含 "p0" 或 "P0"，则转发到 OSE_BOT_GROUP。
+P0 跨群组广播模块（交互确认版）：
+监听 LABORATORY_GROUP 中的消息，若包含 "p0" 或 "P0"，则触发确认流程。
 """
 
 import re
 from datetime import datetime
 import sre_Duty
 
-# 群组 ID 从环境变量读取（在 bot 主脚本中传入，或在此读取）
-# 为了模块独立，我们设计为函数接收群组 ID 和消息内容
-
 def format_p0_alert(group_id, sender_name, text):
     """
     格式化要发送的告警消息。
-    group_id: 来源群组 ID
-    sender_name: 发送者名称（可选）
-    text: 原始消息内容
     """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     msg = f'🚨 <b>P0 detected IN EMERGENCY GROUP(TESTING ONLY)</b> 🚨\n\n'
@@ -32,27 +26,3 @@ def should_broadcast(text):
     result = re.search(r'\bp0\b', text, re.IGNORECASE) is not None
     print(f"[P0] should_broadcast check: text='{text[:50]}', result={result}")
     return result
-
-# 如果需要更精确的独立单词匹配，使用 \b 边界
-# 示例：re.search(r'\bp0\b', text, re.IGNORECASE)
-
-def broadcast_p0(source_chat_id, target_chat_id, sender_name, message_text, send_func):
-    print(f"[P0] broadcast_p0 called: source={source_chat_id}, target={target_chat_id}")
-    print(f"[P0] message_text: {message_text[:100]}")
-    if source_chat_id == target_chat_id:
-        print("[P0] source == target, skipping")
-        return False
-    if should_broadcast(message_text):
-        print("[P0] should_broadcast returned True")
-        alert = format_p0_alert(source_chat_id, sender_name, message_text)
-        print(f"[P0] alert content: {alert[:200]}")
-        try:
-            send_func(target_chat_id, alert)
-            print(f"[P0] alert sent to {target_chat_id}")
-        except Exception as e:
-            print(f"[P0] Failed to send alert: {e}")
-        return True
-    else:
-        print("[P0] should_broadcast returned False")
-    return False
-

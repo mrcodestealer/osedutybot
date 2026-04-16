@@ -157,6 +157,43 @@ def monthly_duty_check():
     send_message(DUTY_CHAT_ID, report)
     print(f"✅ Sent monthly duty check for {year}-{month:02d} to {DUTY_CHAT_ID}")
 
+# ================= P0 交互确认相关 =================
+pending_p0_confirmation = {}  # key: sender_id -> {"timestamp": datetime, "original_text": str}
+P0_CONFIRMATION_TIMEOUT = 60  # 秒
+
+def handle_p0_confirmation(chat_id, sender_id, clean_text, original_text, send_func):
+    global pending_p0_confirmation
+    now = datetime.now()
+
+    # 情况1：用户在 OSE_BOT_GROUP 回复确认
+    if chat_id == OSE_BOT_GROUP and sender_id in pending_p0_confirmation:
+        entry = pending_p0_confirmation[sender_id]
+        if (now - entry["timestamp"]).total_seconds() > P0_CONFIRMATION_TIMEOUT:
+            del pending_p0_confirmation[sender_id]
+            return False, None
+
+        reply_lower = clean_text.strip().lower()
+        if reply_lower in ('yes', 'y'):
+            del pending_p0_confirmation[sender_id]
+            alert_msg = p0.format_p0_alert(chat_id, sender_id, entry["original_text"])
+            send_func(OSE_BOT_GROUP, alert_msg)
+            print(f"[P0] Alert sent to {OSE_BOT_GROUP}")
+            return True, "✅ P0 alert sent."
+        elif reply_lower in ('no', 'n'):
+            del pending_p0_confirmation[sender_id]
+            return True, "👌 Understood, not a P0."
+        else:
+            return True, "❓ Please confirm: is this a P0? Reply 'yes' or 'no'."
+
+def clean_pending_p0_confirmations():
+    now = datetime.now()
+    expired = [k for k, v in pending_p0_confirmation.items()
+               if (now - v["timestamp"]).total_seconds() > P0_CONFIRMATION_TIMEOUT]
+    for k in expired:
+        del pending_p0_confirmation[k]
+    if expired:
+        print(f"🧹 Cleaned {len(expired)} expired P0 confirmations")
+
 # ================= P1 交互确认相关 =================
 pending_p1_confirmation = {}  # key: sender_id -> {"timestamp": datetime, "original_text": str}
 P1_CONFIRMATION_TIMEOUT = 60  # 秒
@@ -223,7 +260,7 @@ def send_p1_alert_and_reminder(source_chat_id, sender_id, original_text, send_fu
         if job:
             active_p1_reminders[sender_id] = job.id
             print(f"[P1] Reminder job {job.id} saved for sender {sender_id}")
-        return True, "✅ Will remind after 15minutes escalate to P0. If problem solved kindly say /cancelp1"
+        return True, "✅ Will remind after 15minutes escalate to P0. If problem solved kindly tag me and use command /cancelp1"
     except Exception as e:
         print(f"[P1] Failed to schedule reminder: {e}")
         return True, "✅ P1 alert sent but failed to set reminder."
@@ -427,6 +464,7 @@ scheduler.add_job(func=evening_reminder, trigger="cron", hour=19, minute=0)
 scheduler.add_job(func=amountloss, trigger="cron", hour=9, minute=0)
 scheduler.add_job(func=myoseweeklymeeting, trigger="cron", day_of_week='tue', hour=17, minute=0)
 scheduler.add_job(func=monthly_duty_check, trigger="cron", day=1, hour=0, minute=0)
+scheduler.add_job(func=clean_pending_p0_confirmations, trigger="interval", minutes=5)
 scheduler.add_job(func=clean_pending_p1_confirmations, trigger="interval", minutes=5)
 
 PENDING_RESTART_FILE = "restart_pending.json"
@@ -595,21 +633,17 @@ def lark_webhook():
     clean_text = text
     print(f"🧹 Cleaned text (repr): {repr(clean_text)}")
 
-    # ================= 跨群组 P0 广播（仅在 LABORATORY_GROUP 触发） =================
-    if chat_id == LABORATORY_GROUP:
-        print(f"[MAIN] LABORATORY_GROUP matched, chat_id={chat_id}")
-        p0.broadcast_p0(
-            source_chat_id=chat_id,
-            target_chat_id=OSE_BOT_GROUP,
-            sender_name=sender_id,
-            message_text=original_text,
-            send_func=send_message
-        )
+        # ================= 跨群组 P0 交互确认 =================
+    handled_p0, p0_reply = handle_p0_confirmation(chat_id, sender_id, clean_text, original_text, send_message)
+    if handled_p0:
+        if p0_reply:
+            send_message(chat_id, p0_reply)
+        return jsonify({"success": True})
 
-    # ================= 跨群组 P1 交互确认（对所有群组生效） =================
-    handled, p1_reply = handle_p1_confirmation(chat_id, sender_id, clean_text, original_text, send_message)
-    if handled:
-        if p1_reply:  # 有回复内容才发送（确认后的反馈）
+    # ================= 跨群组 P1 交互确认 =================
+    handled_p1, p1_reply = handle_p1_confirmation(chat_id, sender_id, clean_text, original_text, send_message)
+    if handled_p1:
+        if p1_reply:
             send_message(chat_id, p1_reply)
         return jsonify({"success": True})
 
