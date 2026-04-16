@@ -42,7 +42,6 @@ TABLE_TO_CSV = {
     "Yoon Hong": "Yoon Hong",
     "YoonHong": "Yoon Hong",
     "Alex Tai": "Alex Tai",
-    "Kelvin": "Kelvin",
     "Kelvin": "Kelvin Er",
     "Jay": "Jay",
     "Linus Lim": "Linus Lim",
@@ -283,9 +282,9 @@ def get_sre_duty(target_date):
         phone = get_phone_from_dutylist(csv_name)
         project = NAME_TO_PROJECT.get(name, "")
         if project:
-            lines.append(f"• {name} {project} (Phone: {phone})")
+            lines.append(f"• {name} {project} 📞{phone}")
         else:
-            lines.append(f"• {name} (Phone: {phone})")
+            lines.append(f"• {name} 📞{phone}")
     return "\n".join(lines)
 
 def get_sre_week_duty():
@@ -333,9 +332,9 @@ def get_sre_week_duty():
             phone = get_phone_from_dutylist(csv_name)
             project = NAME_TO_PROJECT.get(name, "")
             if project:
-                lines.append(f"• {name} {project} (Phone: {phone})")
+                lines.append(f"• {name} {project} 📞{phone}")
             else:
-                lines.append(f"• {name} (Phone: {phone})")
+                lines.append(f"• {name} 📞{phone}")
         return "\n".join(lines)
 
     this_week_str = format_week_block(
@@ -406,35 +405,6 @@ def sre_check(month=None, year=None):
         missing_str = ", ".join(str(d) for d in missing)
         return f"⚠️ {month_name} missing duty date：{missing_str}"
 
-def _get_week_duty_summary(start_monday, title_prefix="SRE Duty week starting"):
-    """
-    Return a formatted string for the week starting at start_monday.
-    title_prefix is used to generate the heading.
-    """
-    # Collect all names for the week (Monday to Sunday)
-    week_names = set()
-    for i in range(7):
-        day = start_monday + timedelta(days=i)
-        day_checked = _get_duty_names_for_date(day, values)  # needs values, but we'll pass it
-        week_names.update(day_checked)
-    week_names = sorted(week_names)
-
-    heading = f"📅 {title_prefix} – {start_monday.strftime('%d/%m/%Y')}"
-    if not week_names:
-        return f"{heading} – no duty"
-
-    lines = [heading]
-    for name in week_names:
-        csv_name = TABLE_TO_CSV.get(name, name)
-        phone = get_phone_from_dutylist(csv_name)
-        project = NAME_TO_PROJECT.get(name, "")
-        if project:
-            lines.append(f"• {name} {project} (Phone: {phone})")
-        else:
-            lines.append(f"• {name} (Phone: {phone})")
-    return "\n".join(lines)
-
-
 def srethisweek():
     """Display duty for the current week only."""
     today = datetime.now().date()
@@ -457,9 +427,6 @@ def srethisweek():
     if len(values) < 2:
         return "Sheet has fewer than 2 rows."
 
-    # Monkey‑patch the helper so it can access the local 'values' variable
-    # We'll rewrite _get_week_duty_summary to accept values as an argument.
-    # For clarity, we'll inline the logic here.
     week_names = set()
     for i in range(7):
         day = monday + timedelta(days=i)
@@ -477,11 +444,10 @@ def srethisweek():
         phone = get_phone_from_dutylist(csv_name)
         project = NAME_TO_PROJECT.get(name, "")
         if project:
-            lines.append(f"• {name} {project} (Phone: {phone})")
+            lines.append(f"• {name} {project} 📞{phone}")
         else:
-            lines.append(f"• {name} (Phone: {phone})")
+            lines.append(f"• {name} 📞{phone}")
     return "\n".join(lines)
-
 
 def sretwoweek():
     """Display duty for the current week and the following week."""
@@ -522,15 +488,14 @@ def sretwoweek():
                 phone = get_phone_from_dutylist(csv_name)
                 project = NAME_TO_PROJECT.get(name, "")
                 if project:
-                    lines.append(f"• {name} {project} (Phone: {phone})")
+                    lines.append(f"• {name} {project} 📞{phone}")
                 else:
-                    lines.append(f"• {name} (Phone: {phone})")
+                    lines.append(f"• {name} 📞{phone}")
         return "\n".join(lines)
 
     this_week_str = week_summary(monday, f"📅 SRE Duty this week – {monday.strftime('%d/%m/%Y')}")
     next_week_str = week_summary(next_monday, f"📅 SRE Duty next week – {next_monday.strftime('%d/%m/%Y')}")
     return f"{this_week_str}\n\n{next_week_str}"
-
 
 # Update the existing get_sre_week_duty to use the new two‑week implementation
 # (keeping the original name for backward compatibility)
@@ -538,11 +503,9 @@ def get_sre_week_duty():
     """Return this week and next week duty summary (same as sretwoweek)."""
     return sretwoweek()
 
-
 # Keep the original p0sre function as is
 def p0sre():
-    return srethisweek() + "\nIf cannot contact SRE Duty, Kindly contact the duty below\n• Wei Siong 📞60163132882\n• Adrian 📞60123156848"
-
+    return srethisweek() + "\nIf cannot contact SRE ON Duty, Kindly contact the duty below\n• Wei Siong 📞60163132882\n• Adrian 📞60123156848"
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
