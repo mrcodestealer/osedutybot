@@ -13,13 +13,16 @@ Usage:
 import sys
 import csv
 import json
+import os
 import requests
 from datetime import datetime
+from dotenv import load_dotenv
+load_dotenv()
 
-APP_ID = "cli_a9ca652b89b85ed1"
-APP_SECRET = "VQJh0oFKfsyCHr5tQDMVNbr4o4kmjbFr"
-BASE_ID = "O4Dfw4DVTiPpFukn801l5z3WgMd"
-TABLE_ID = "tblfC3XoBP3as3Ci"
+APP_ID = os.getenv("APP_ID")
+APP_SECRET = os.getenv("APP_SECRET")
+BASE_ID = os.getenv("LEAVE_BASE_ID")
+TABLE_ID = os.getenv("LEAVE_TABLE_ID")
 
 DEBUG = False
 

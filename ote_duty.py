@@ -19,10 +19,10 @@ import requests
 from datetime import datetime, timedelta
 
 # ================= Configuration =================
-APP_ID = "cli_a9ca652b89b85ed1"
-APP_SECRET = "VQJh0oFKfsyCHr5tQDMVNbr4o4kmjbFr"
-SPREADSHEET_TOKEN = "O4Dfw4DVTiPpFukn801l5z3WgMd"
-DUTY_LIST_PATH = "dutyList.csv"          # CSV file: name,team,phone
+APP_ID = os.getenv("APP_ID")
+APP_SECRET = os.getenv("APP_SECRET")
+SPREADSHEET_TOKEN = os.getenv("OTE_SPREADSHEET_TOKEN")
+DUTY_LIST_PATH = "dutyList.csv"         
 
 # Team members (as they appear in column A) and their CSV‑lookup names
 TARGET_DUTY = [

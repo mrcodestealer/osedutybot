@@ -19,9 +19,8 @@ load_dotenv()
 # ================= Configuration =================
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
-
-BASE_ID = "ER4pbXXTcaSKQDsdPL0lB7BDgVh"
-TABLE_ID = "tbllX9TYI9PxAtCO"
+BASE_ID = os.getenv("FT_BASE_ID")
+TABLE_ID = os.getenv("FT_TABLE_ID")
 
 # Actual field names in the Lark Base table
 FIELD_DATE = "Date"
@@ -157,7 +156,7 @@ def get_ft_duty_for_date(target_date, records, phone_map):
     else:
         for name in unique_names:
             phone = phone_map.get(name, "Not found")
-            lines.append("• {}  (Phone: {})".format(name, phone))
+            lines.append("• {}  📞 {}".format(name, phone))
     return "\n".join(lines)
 
 def get_ft_three_days(start_date=None):
