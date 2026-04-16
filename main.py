@@ -158,48 +158,51 @@ def monthly_duty_check():
     print(f"✅ Sent monthly duty check for {year}-{month:02d} to {DUTY_CHAT_ID}")
 
 # ================= P1 交互确认相关 =================
-pending_p1_confirmation = {}  # key: (chat_id, sender_id) -> {"timestamp": datetime, "original_text": str}
+pending_p1_confirmation = {}  # key: sender_id -> {"timestamp": datetime, "original_text": str}
 P1_CONFIRMATION_TIMEOUT = 60  # 秒
 
 def handle_p1_confirmation(chat_id, sender_id, clean_text, original_text, send_func):
     """
     处理 P1 确认流程。
+    - 仅在 LABORATORY_GROUP 中检测触发，不在其中发送任何消息。
+    - 确认对话在 OSE_BOT_GROUP 中进行。
     返回 (handled, reply_message) 元组。
     """
     global pending_p1_confirmation
-    key = (chat_id, sender_id)
     now = datetime.now()
 
-    # 检查是否有待确认的 P1 对话
-    if key in pending_p1_confirmation:
-        entry = pending_p1_confirmation[key]
+    # 情况1：用户在 OSE_BOT_GROUP 中回复确认
+    if chat_id == OSE_BOT_GROUP and sender_id in pending_p1_confirmation:
+        entry = pending_p1_confirmation[sender_id]
         # 超时清理
         if (now - entry["timestamp"]).total_seconds() > P1_CONFIRMATION_TIMEOUT:
-            del pending_p1_confirmation[key]
+            del pending_p1_confirmation[sender_id]
             return False, None
 
-        # 处理回复
         reply_lower = clean_text.strip().lower()
         if reply_lower == 'yes':
-            del pending_p1_confirmation[key]
+            del pending_p1_confirmation[sender_id]
             # 发送 P1 告警并设置提醒
-            send_p1_alert_and_reminder(chat_id, sender_id, entry["original_text"], send_func)
+            send_p1_alert_and_reminder(OSE_BOT_GROUP, sender_id, entry["original_text"], send_func)
             return True, "✅ P1 alert sent and 15-min reminder set."
         elif reply_lower == 'no':
-            del pending_p1_confirmation[key]
+            del pending_p1_confirmation[sender_id]
             return True, "👌 Understood, not a P1."
         else:
             # 用户回复其他内容，再次提示确认
             return True, "❓ Please confirm: is this a P1? Reply 'yes' or 'no'."
 
-    # 没有待确认条目，检查当前消息是否触发 P1 检测
-    if p1.should_broadcast(original_text):
-        # 保存待确认状态
-        pending_p1_confirmation[key] = {
+    # 情况2：在 LABORATORY_GROUP 中检测到 P1 关键字，触发确认流程
+    if chat_id == LABORATORY_GROUP and p1.should_broadcast(original_text):
+        # 保存待确认状态（以 sender_id 为键）
+        pending_p1_confirmation[sender_id] = {
             "timestamp": now,
             "original_text": original_text
         }
-        return True, "⚠️ This is P1? (Reply 'yes' or 'no' without mentioning me)"
+        # 向 OSE_BOT_GROUP 发送确认提问
+        send_func(OSE_BOT_GROUP, f"⚠️ <at user_id=\"{sender_id}\">User</at> This is P1? (Reply 'yes' or 'no' without mentioning me)")
+        # 返回 handled=True，但不向 LABORATORY_GROUP 发送任何内容
+        return True, None
 
     return False, None
 
@@ -630,7 +633,7 @@ def lark_webhook():
     clean_text = text
     print(f"🧹 Cleaned text (repr): {repr(clean_text)}")
     
-    # ================= 跨群组 P0 广播（保持不变） =================
+        # ================= 跨群组 P0 广播 =================
     if chat_id == LABORATORY_GROUP:
         p0.broadcast_p0(
             source_chat_id=chat_id,
@@ -640,13 +643,12 @@ def lark_webhook():
             send_func=send_message
         )
 
-    # ================= 跨群组 P1 交互确认 =================
-    if chat_id == LABORATORY_GROUP:
-        handled, p1_reply = handle_p1_confirmation(chat_id, sender_id, clean_text, original_text, send_message)
-        if handled:
-            if p1_reply:
-                send_message(chat_id, p1_reply)
-            return jsonify({"success": True})
+    # ================= 跨群组 P1 交互确认（新流程） =================
+    handled, p1_reply = handle_p1_confirmation(chat_id, sender_id, clean_text, original_text, send_message)
+    if handled:
+        if p1_reply:  # 有回复内容才发送（即确认/否认后的反馈）
+            send_message(chat_id, p1_reply)
+        return jsonify({"success": True})
     
     # 初始化回复变量
     reply = ""
