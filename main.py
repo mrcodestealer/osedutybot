@@ -736,6 +736,8 @@ def lark_webhook():
         else:
             send_message(chat_id, "❌ Failed to upload cat picture.")
         return jsonify({"success": True})
+    elif clean_text.lower() == '/fpmsp0':
+        reply = fpms_duty.fpmsp0()
     elif clean_text.lower() == '/fpms':
         reply = fpms_duty.get_fpms_today_duty()
     elif clean_text.lower().startswith('/fpmscheck'):

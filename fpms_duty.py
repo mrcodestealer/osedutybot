@@ -333,6 +333,53 @@ def fpms_check(month=None, year=None):
     else:
         missing_str = ", ".join(str(d) for d in missing)
         return f"⚠️ {month_name} 缺少值班的日期：{missing_str}"
+    
+def fpmsp0():
+    """返回未来三天的 FPMS 值班信息，并附加固定的 P0 额外联系人"""
+    today = datetime.now().date()
+    output_lines = []
+    month_cache = {}
+
+    for offset in range(3):
+        target_date = today + timedelta(days=offset)
+        year = target_date.year
+        month = target_date.month
+        day = target_date.day
+
+        cache_key = (year, month)
+        if cache_key not in month_cache:
+            month_cache[cache_key] = get_month_duty_map(year, month)
+        duty_map = month_cache.get(cache_key)
+
+        if duty_map is None:
+            duty_names = []
+        else:
+            duty_names = duty_map.get(day, [])
+
+        date_str = target_date.strftime("%B %d, %Y %A")
+        header = f"📅 FPMS Schedule - {date_str}"
+        output_lines.append(header)
+
+        if duty_names:
+            for name in duty_names:
+                phone = get_phone(name)
+                output_lines.append(f"• {name}  📞 {phone}")
+        else:
+            output_lines.append("• No duty")
+
+        output_lines.append("")   # 空行分隔
+
+    # 添加固定联系人列表
+    output_lines.append("<b>Addtional Contact number for P0</b>")
+    output_lines.append("• David 📞 60102703549")
+    output_lines.append("• Olivia 📞 60163661007")
+    output_lines.append("• Eason 📞 60129687432")
+    output_lines.append("• Lim Lian Cheng 📞 60196549698")
+    output_lines.append("• Yang 📞 60168109045")
+    output_lines.append("• BK 📞 601133798396")
+    output_lines.append("• Hui Min 📞 01125808539")
+
+    return "\n".join(output_lines).strip()
 
 if __name__ == "__main__":
     print("=== Today's Duty ===")
