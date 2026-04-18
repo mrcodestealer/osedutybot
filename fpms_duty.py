@@ -298,7 +298,7 @@ def get_fpms_today_duty():
             duty_names = duty_map.get(day, [])
 
         date_str = target_date.strftime("%B %d, %Y %A")
-        header = f"📅 FPMS Schedule - {date_str}"
+        header = f"📅 <b>FPMS Schedule - {date_str}</b>"
         output_lines.append(header)
 
         if duty_names:
