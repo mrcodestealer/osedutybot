@@ -16,7 +16,7 @@ def get_otp_p0_guide():
     lines.append('Kindly send screenshot to emergency group and say "OTP sent out success, Ask players to try and login again"')
     lines.append("")
     lines.append("<b>Scenario 2 (MUST OPEN P0 MEETING): Status and Provider Status show FAILED</b>")
-    lines.append("<b>Kindly ask SRE to check the SMS server<b>")
+    lines.append("<b>Kindly ask SRE to check the SMS server</b>")   # 修正这里
     lines.append(sre_Duty.sretwoweek())
     lines.append("")
     lines.append("<b>Call the person below to join the meeting.</b>")
