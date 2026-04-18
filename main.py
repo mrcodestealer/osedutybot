@@ -46,6 +46,7 @@ import emergency
 import ecsre
 
 import update
+import otpp0
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -738,6 +739,8 @@ def lark_webhook():
         return jsonify({"success": True})
     elif clean_text.lower() == '/fpmsp0':
         reply = fpms_duty.fpmsp0()
+    elif clean_text.lower() == '/otpp0':
+        reply = otpp0.get_otp_p0_guide()
     elif clean_text.lower() == '/fpms':
         reply = fpms_duty.get_fpms_today_duty()
     elif clean_text.lower().startswith('/fpmscheck'):
