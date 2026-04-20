@@ -23,7 +23,9 @@ UPDATE_MAP = {
     "igo uat script run": ("IGO UAT SCRIPT RUN","https://jenkins.client8.me/job/IGO/job/UAT/job/IGO-UAT-SCRIPT-RUN/"),
     "telesales": ("CRS UAT Master(telesales)","https://jenkins.client8.me/job/FNT/job/TELESALES-UAT-UPDATE/build?delay=0sec"),
     "fpms nt uat branch": ("FPMS NT UAT BRANCH UPDATE","https://jenkins.client8.me/job/FPMS_NT/view/all/job/FPMS_NT_UAT_BRANCH_UPDATE/build?delay=0sec"),
-    "fpms nt uat master": ("FPMS NT UAT MASTER UPDATE","https://jenkins.client8.me/job/FPMS_NT/view/all/job/FPMS_NT_UAT_MASTER_UPDATE/build?delay=0sec")
+    "fpms nt uat master": ("FPMS NT UAT MASTER UPDATE","https://jenkins.client8.me/job/FPMS_NT/view/all/job/FPMS_NT_UAT_MASTER_UPDATE/build?delay=0sec"),
+    "igo prod script": ("IGO PROD SCRIPT RUN","https://jenkins.client8.me/job/IGO/job/PROD/job/IGO-PROD-SCRIPT-RUN/build?delay=0sec")
+
 }
 
 # 所有有效命令的列表（用于模糊匹配）
