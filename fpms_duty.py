@@ -370,13 +370,14 @@ def fpmsp0():
         output_lines.append("")   # 空行分隔
 
     # 添加固定联系人列表
+    output_lines.append("<b>On-duty → BK → Yang → Eason</b>")
     output_lines.append("<b>Addtional Contact number for P0</b>")
+    output_lines.append("• BK 📞 601133798396")
+    output_lines.append("• Yang 📞 60168109045")
+    output_lines.append("• Eason 📞 60129687432")
     output_lines.append("• David 📞 60102703549")
     output_lines.append("• Olivia 📞 60163661007")
-    output_lines.append("• Eason 📞 60129687432")
     output_lines.append("• Lim Lian Cheng 📞 60196549698")
-    output_lines.append("• Yang 📞 60168109045")
-    output_lines.append("• BK 📞 601133798396")
     output_lines.append("• Hui Min 📞 01125808539")
 
     return "\n".join(output_lines).strip()
