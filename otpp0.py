@@ -23,6 +23,6 @@ def get_otp_p0_guide():
     lines.append("- Kindly call Jacob C 📞 09681199077")
     lines.append("- Kindly call Lim Lian Cheng first. If can't reach then call others.")
     lines.append("• Lim Lian Cheng 📞 60196549698")
-    lines.append("• Qi Xiang 📞 ")
+    lines.append("• Qi Xiang 📞 60164521373")
     lines.append("• Ho Ching 📞 60165010188")
     return "\n".join(lines)
