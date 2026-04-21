@@ -623,9 +623,9 @@ def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
 
             _fpms_log(15, f"解析结果：{total_text[:120]!r} …")
             if "Total 0 records" in total_text:
-                _fpms_log(16, "完成：Today no Amount Loss record")
+                _fpms_log(16, "✅ Today no Amount Loss records found")
                 return "no amount loss record found for today"
-            _fpms_log(16, "Kindly check amount loss today have records")
+            _fpms_log(16, "✅ Today have Amount Loss records found")
             return "as checked amount loss have record today"
 
         except Exception as e:
