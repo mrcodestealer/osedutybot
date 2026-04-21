@@ -622,11 +622,24 @@ def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
             total_text = total_label.text_content().strip()
 
             _fpms_log(15, f"解析结果：{total_text[:120]!r} …")
-            if "Total 0 records" in total_text:
-                _fpms_log(16, "完成：今日无 Amount Loss 记录")
-                return "no amount loss record found for today"
-            _fpms_log(16, "完成：今日存在 Amount Loss 记录")
-            return "as checked amount loss have record today"
+
+            # 解析记录数与搜索时间
+            import re
+            records_match = re.search(r'Total\s+(\d+)\s+record', total_text, re.IGNORECASE)
+            seconds_match = re.search(r'Search time:\s*([\d.]+)\s*Seconds?', total_text, re.IGNORECASE)
+
+            records = records_match.group(1) if records_match else "?"
+            seconds = seconds_match.group(1) if seconds_match else "?"
+
+            detail_msg = f"Total {records} records / Search time: {seconds} seconds"
+
+            if records != "?" and int(records) > 0:
+                detail_msg += " (amount loss record found)"
+            else:
+                detail_msg += " (no amount loss record)"
+
+            _fpms_log(16, f"完成：{detail_msg}")
+            return detail_msg
 
         except Exception as e:
             print(f"❌ 错误: {e}")
