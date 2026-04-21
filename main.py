@@ -178,11 +178,9 @@ def run_amountloss_check(chat_id, date_str=None):
         return
     try:
         result = fetch_fpms_data(headless=True, target_date_str=date_str)
-        if result == "no amount loss record found for today":
-            reply = "✅ Today no Amount Loss records found"
-        else:
-            reply = "⚠️ As checked Amount Loss records found, kindly check!!"
-        send_message(chat_id, reply)
+        # amountloss.fetch_fpms_data 返回页面摘要，例如：
+        # Total 0 records / Search time: 0.205 seconds
+        send_message(chat_id, result)
     except Exception as e:
         error_msg = f"❌ Amount Loss 检查失败: {str(e)}"
         send_message(chat_id, error_msg)

@@ -458,6 +458,33 @@ def _do_full_login(page, context, save_state_only=False):
         return
 
 
+def _amount_loss_result_summary(page, total_label_text: str) -> str:
+    """
+    组合页面上的 Total 行与 Search time 行，例如：
+    Total 0 records / Search time: 0.205 seconds
+    """
+    merged = page.evaluate(
+        r"""() => {
+            let totalLine = '';
+            let searchLine = '';
+            const nodes = document.querySelectorAll('label, span, div, p, td, li');
+            for (const el of nodes) {
+                const raw = (el.textContent || '').replace(/\s+/g, ' ').trim();
+                if (!raw || raw.length > 220) continue;
+                if (/^Total\s+\d+\s+records?\.?$/i.test(raw)) totalLine = raw;
+                if (/search\s*time/i.test(raw) && /second/i.test(raw)) searchLine = raw;
+            }
+            if (totalLine && searchLine) return totalLine + ' / ' + searchLine;
+            if (totalLine) return totalLine;
+            if (searchLine) return searchLine;
+            return '';
+        }"""
+    )
+    if merged and str(merged).strip():
+        return str(merged).strip()
+    return " ".join((total_label_text or "").split())
+
+
 def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
     with sync_playwright() as p:
         _fpms_log(1, f"启动 Playwright Chromium（headless={headless}）…")
@@ -621,12 +648,10 @@ def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
             total_label.wait_for(state="visible", timeout=30000)
             total_text = total_label.text_content().strip()
 
-            _fpms_log(15, f"解析结果：{total_text[:120]!r} …")
-            if "Total 0 records" in total_text:
-                _fpms_log(16, "✅ Today no Amount Loss records found")
-                return "no amount loss record found for today"
-            _fpms_log(16, "✅ Today have Amount Loss records found")
-            return "as checked amount loss have record today"
+            summary = _amount_loss_result_summary(page, total_text)
+            _fpms_log(15, f"解析结果：{summary[:200]!r} …")
+            _fpms_log(16, "完成，返回 Total / Search time 摘要给 Bot")
+            return summary
 
         except Exception as e:
             print(f"❌ 错误: {e}")
