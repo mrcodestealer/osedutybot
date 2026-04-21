@@ -10,6 +10,7 @@ import re
 import pyotp
 import sys
 import os
+import platform
 from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
@@ -30,7 +31,17 @@ MENU_TIMEOUT_MS = 60_000
 REPORT_MENU_LABEL_FULL = "CREDIT_LOST_FIX_PROPOSAL_REPORT"
 REPORT_MENU_LABEL_RE = re.compile(r"CREDIT_LOST_FIX_PROPOSAL", re.IGNORECASE)
 
+# 与桌面 Chrome 一致，避免 headless 默认小视口触发「移动端」隐藏侧栏
+DESKTOP_VIEWPORT = {"width": 1920, "height": 1080}
+DESKTOP_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
 CHROMIUM_ARGS = ["--disable-blink-features=AutomationControlled"]
+if platform.system() == "Linux":
+    # 服务器 / Docker 常见：避免共享内存不足导致页面不完整
+    CHROMIUM_ARGS.append("--disable-dev-shm-usage")
 
 
 def _normalize_cookies(cookies):
@@ -77,14 +88,40 @@ def _misc_report_heading_locator(page):
     return page.locator(f"xpath={misc_xpath}").first
 
 
+def _prepare_report_page_layout(page):
+    """Headless 小视口下侧栏常被 CSS 隐藏，先固定桌面布局再操作菜单。"""
+    page.evaluate("() => { window.scrollTo(0, 0); }")
+    page.wait_for_timeout(300)
+
+
+def _click_miscellaneous_report_section(page):
+    """等待并点击「Miscellaneous Report」折叠标题（服务器上 visible 判定易失败，多路兜底）。"""
+    print("📂 展开 Miscellaneous Report 菜单...")
+    _prepare_report_page_layout(page)
+
+    primary = _misc_report_heading_locator(page)
+    try:
+        primary.wait_for(state="visible", timeout=25000)
+        primary.scroll_into_view_if_needed()
+        primary.click(timeout=15000)
+    except PlaywrightTimeout:
+        print("⚠️ XPath 侧栏标题未在时限内可见，尝试 get_by_text / attached…")
+        fallback = page.get_by_text("Miscellaneous Report", exact=False).first
+        try:
+            fallback.wait_for(state="visible", timeout=15000)
+        except PlaywrightTimeout:
+            fallback.wait_for(state="attached", timeout=MENU_TIMEOUT_MS)
+        fallback.scroll_into_view_if_needed()
+        try:
+            fallback.click(timeout=15000)
+        except PlaywrightTimeout:
+            fallback.click(force=True, timeout=15000)
+    page.wait_for_timeout(1500)
+
+
 def _open_credit_lost_proposal_report(page):
     """展开 Miscellaneous Report 并点击 CREDIT_LOST_FIX_PROPOSAL_REPORT（兼容子节点文案）。"""
-    print("📂 展开 Miscellaneous Report 菜单...")
-    misc_heading = _misc_report_heading_locator(page)
-    misc_heading.wait_for(state="visible", timeout=MENU_TIMEOUT_MS)
-    misc_heading.scroll_into_view_if_needed()
-    misc_heading.click()
-    page.wait_for_timeout(1500)
+    _click_miscellaneous_report_section(page)
 
     print("🖱️ 点击 CREDIT_LOST_FIX_PROPOSAL_REPORT...")
     # contains(., ...) 包含子节点文本；text() 仅直接文本，易导致 li 匹配不到
@@ -110,17 +147,23 @@ def _open_credit_lost_proposal_report(page):
             report_link.wait_for(state="visible", timeout=20000)
         except PlaywrightTimeout:
             print("⚠️ 仍未可见，再次点击 Miscellaneous Report 折叠后再试…")
-            misc_heading.click()
-            page.wait_for_timeout(1500)
+            _click_miscellaneous_report_section(page)
             report_link = (
                 page.locator('a, li, span, [role="link"], .list-group-item')
                 .filter(has_text=REPORT_MENU_LABEL_RE)
                 .first
             )
-            report_link.wait_for(state="visible", timeout=MENU_TIMEOUT_MS)
+            try:
+                report_link.wait_for(state="visible", timeout=MENU_TIMEOUT_MS)
+            except PlaywrightTimeout:
+                report_link.wait_for(state="attached", timeout=15000)
+                report_link.scroll_into_view_if_needed()
 
     report_link.scroll_into_view_if_needed()
-    report_link.click()
+    try:
+        report_link.click(timeout=15000)
+    except PlaywrightTimeout:
+        report_link.click(force=True, timeout=15000)
     page.wait_for_timeout(500)
 
 
@@ -177,7 +220,13 @@ def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
             args=CHROMIUM_ARGS,
         )
 
-        ctx_opts = {}
+        ctx_opts = {
+            "viewport": DESKTOP_VIEWPORT,
+            "user_agent": DESKTOP_USER_AGENT,
+            "device_scale_factor": 1,
+            "is_mobile": False,
+            "has_touch": False,
+        }
         if os.path.exists(STATE_FILE) and not save_state:
             ctx_opts["storage_state"] = STATE_FILE
 
