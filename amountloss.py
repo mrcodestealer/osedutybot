@@ -1,9 +1,9 @@
 """
-FPMS 自动登录与表格抓取模块（最终版：包含 Provider 选择）
+FPMS Amount Loss 查询（供 main.py /al 调用）
 
 用法:
-  python3 amountloss_backup.py           # 有界面
-  python3 amountloss_backup.py -headless # 无头（亦支持 --headless）
+  python3 amountloss.py
+  python3 amountloss.py -headless
 """
 import pyotp
 import sys
@@ -17,7 +17,39 @@ TOTP_SECRET = "MNYG63JQGEYTMOJTHE4DMMBTGQYDIOI"
 TABLE_SELECTOR = "#creditLostFixSummaryTable tbody tr"
 REPORT_URL = "https://mgnt-webserver.casinoplus.top/report"
 
-def fetch_fpms_data(headless=False):
+
+def _amount_loss_result_summary(page, total_label_text: str) -> str:
+    """组合 Total … records 与 Search time …，供飞书展示。"""
+    merged = page.evaluate(
+        r"""() => {
+            let totalLine = '';
+            let searchLine = '';
+            const nodes = document.querySelectorAll('label, span, div, p, td, li');
+            for (const el of nodes) {
+                const raw = (el.textContent || '').replace(/\s+/g, ' ').trim();
+                if (!raw || raw.length > 220) continue;
+                if (/^Total\s+\d+\s+records?\.?$/i.test(raw)) totalLine = raw;
+                if (/search\s*time/i.test(raw) && /second/i.test(raw)) searchLine = raw;
+            }
+            if (totalLine && searchLine) return totalLine + ' / ' + searchLine;
+            if (totalLine) return totalLine;
+            if (searchLine) return searchLine;
+            return '';
+        }"""
+    )
+    if merged and str(merged).strip():
+        return str(merged).strip()
+    return " ".join((total_label_text or "").split())
+
+
+def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
+    """
+    main.py 调用: fetch_fpms_data(headless=True, target_date_str=date_str)
+    target_date_str: 可选，格式 DD/MM，对应查询结束日；未传则用「昨天 00:00 ~ 今天 00:00」。
+    save_state: 兼容参数，当前脚本未使用。
+    返回: 一行摘要字符串，例如 Total 0 records / Search time: 0.205 seconds
+    """
+    _ = save_state  # 保留与旧版 fpms_fetcher 相同的调用约定
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless, slow_mo=100 if not headless else 0)
         page = browser.new_page()
@@ -96,12 +128,17 @@ def fetch_fpms_data(headless=False):
             page.locator('.bootstrap-select.open .bs-actionsbox .bs-select-all').click()
             page.keyboard.press("Escape")
 
-            # 2. 设置日期：昨天 00:00:00 至 今天 00:00:00
-            print("📅 设置日期范围：昨天 00:00:00 至 今天 00:00:00")
+            # 2. 日期：与 fpms 一致 — end = 目标日 00:00，start = 前一日 00:00
             today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-            yesterday = today - timedelta(days=1)
-            start_str = yesterday.strftime("%Y/%m/%d 00:00:00")
-            end_str = today.strftime("%Y/%m/%d 00:00:00")
+            if target_date_str:
+                day, month = map(int, target_date_str.split("/"))
+                end_date = datetime(today.year, month, day)
+            else:
+                end_date = today
+            start_date = end_date - timedelta(days=1)
+            start_str = start_date.strftime("%Y/%m/%d 00:00:00")
+            end_str = end_date.strftime("%Y/%m/%d 00:00:00")
+            print(f"📅 设置日期范围：{start_str} ~ {end_str}")
 
             start_label = page.locator('label:has-text("Start date")')
             start_input = start_label.locator('..').locator('input')
@@ -180,26 +217,15 @@ def fetch_fpms_data(headless=False):
             search_btn = page.locator('button:has-text("Search")').first
             search_btn.click()
 
-            # 临时等待10秒观察页面状态
-            print("⏳ 等待10秒观察页面状态...")
-            page.wait_for_timeout(10000)
+            print("⏳ 等待查询结果…")
+            page.wait_for_timeout(5000)
 
-            # ---------- 等待表格数据 ----------
-            print("⏳ 等待表格数据加载...")
-            page.wait_for_selector(TABLE_SELECTOR, timeout=30000)
-            print("✅ 表格已加载")
-
-            # 抓取表格
-            rows = page.query_selector_all(TABLE_SELECTOR)
-            data = []
-            for row in rows:
-                cells = row.query_selector_all("td")
-                row_data = [c.inner_text().strip() for c in cells]
-                if row_data:
-                    data.append(row_data)
-
-            print(f"📊 成功抓取 {len(data)} 行数据")
-            return data
+            total_label = page.locator('label.ng-binding:has-text("Total")').first
+            total_label.wait_for(state="visible", timeout=30000)
+            total_text = total_label.text_content().strip()
+            summary = _amount_loss_result_summary(page, total_text)
+            print(f"📊 {summary}")
+            return summary
 
         except Exception as e:
             print(f"❌ 脚本执行出错: {e}")
@@ -214,8 +240,13 @@ def fetch_fpms_data(headless=False):
 
 if __name__ == "__main__":
     headless = "--headless" in sys.argv or "-headless" in sys.argv
-    data = fetch_fpms_data(headless=headless)
-    print("\n===== 抓取结果 =====")
-    for i, row in enumerate(data):
-        print(f"第{i+1}行: {row}")
+    date_arg = None
+    for a in sys.argv[1:]:
+        if a.startswith("-"):
+            continue
+        date_arg = a
+        break
+    out = fetch_fpms_data(headless=headless, target_date_str=date_arg)
+    print("\n===== 结果 =====")
+    print(out)
 
