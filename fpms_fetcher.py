@@ -1,13 +1,13 @@
 """
-FPMS 自动登录与表格抓取模块（增加 stealth 反检测）
-用法：python3 fpms_fetcher.py [DD/MM]
+FPMS 自动登录与表格抓取模块（最终稳定版 - 增强菜单点击）
 """
 import pyotp
 import sys
+import json
+import os
 import time
 from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
-
 
 LOGIN_URL = "https://mgnt-webserver.casinoplus.top/"
 USERNAME = "CPOM01"
@@ -15,112 +15,78 @@ PASSWORD = "8c0fa1"
 TOTP_SECRET = "MNYG63JQGEYTMOJTHE4DMMBTGQYDIOI"
 TABLE_SELECTOR = "#creditLostFixSummaryTable tbody tr"
 REPORT_URL = "https://mgnt-webserver.casinoplus.top/report"
+COOKIES_FILE = "cookies.json"
 
 def fetch_fpms_data(headless=False, target_date_str=None):
     with sync_playwright() as p:
-        # 启动浏览器，增加反检测参数
         browser = p.chromium.launch(
             headless=headless,
             slow_mo=100 if not headless else 0,
-            args=[
-                '--disable-blink-features=AutomationControlled',
-                '--no-sandbox',
-                '--disable-web-security',
-                '--disable-features=IsolateOrigins,site-per-process',
-                '--disable-dev-shm-usage',
-                '--start-maximized',
-            ]
+            args=['--disable-blink-features=AutomationControlled']
         )
-        context = browser.new_context(
-            viewport={'width': 1280, 'height': 800},
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-        )
+        context = browser.new_context()
         page = context.new_page()
 
         try:
-            print("🌐 访问登录页...")
-            page.goto(LOGIN_URL, wait_until="domcontentloaded")
-            # 额外等待网络空闲，确保 Cloudflare 验证完成
-            page.wait_for_load_state("networkidle", timeout=30000)
-
-            # 如果页面包含 Cloudflare 验证，尝试等待自动通过（一般几秒）
-            # 这里简单等待 5 秒让可能的 JS 挑战执行
-            print("⏳ 等待 Cloudflare 验证...")
-            time.sleep(5)
-
-            # 保存初始页面截图，便于排查
-            page.screenshot(path="initial_page.png")
-
-            print("🔐 等待用户名输入框...")
-            # 增强等待：同时检查多个选择器，并延长超时
-            try:
-                page.wait_for_selector("#username", state="visible", timeout=30000)
-                page.fill("#username", USERNAME)
-                print("✅ 使用 #username 填入用户名")
-            except PlaywrightTimeout:
-                # 备用：查找任何可见的文本输入框，排除密码框
-                alt_input = page.locator('input:visible:not([type="password"])').first
-                alt_input.wait_for(state="visible", timeout=30000)
-                alt_input.fill(USERNAME)
-                print("⚠️ 使用备用输入框填入用户名")
-
-            # 密码框
-            page.fill("#password", PASSWORD)
-            page.click('input[type="submit"]')
-
-            print("⏳ 等待 TOTP 输入框出现...")
-            page.wait_for_selector("#OTP", state="visible", timeout=15000)
-
-            code = pyotp.TOTP(TOTP_SECRET).now()
-            print(f"🔢 当前验证码: {code}")
-
-            totp_input = page.locator("#OTP")
-            totp_input.click()
-            totp_input.fill(code)
-            print("⏳ 按 Enter 提交验证...")
-            totp_input.press("Enter")
-
-            # ---------- 导航到报表页并处理弹窗 ----------
-            print("⏳ 等待登录完成...")
-            try:
-                page.wait_for_url("**/report", timeout=5000)
-                print("✅ 已到达报表页面")
-            except PlaywrightTimeout:
-                print("⚠️ 未自动跳转，手动导航到 /report")
+            # ---------- Cookies 注入 ----------
+            if os.path.exists(COOKIES_FILE):
+                print("🍪 加载 cookies.json ...")
+                with open(COOKIES_FILE, 'r') as f:
+                    cookies = json.load(f)
+                
+                valid_same_site = {"Strict", "Lax", "None"}
+                for cookie in cookies:
+                    if "sameSite" in cookie and cookie["sameSite"] not in valid_same_site:
+                        cookie["sameSite"] = "Lax"
+                
+                context.add_cookies(cookies)
+                print("🚀 直接访问报表页")
                 page.goto(REPORT_URL, wait_until="networkidle")
+                page.wait_for_timeout(3000)
 
-            if "/report" not in page.url:
-                print("⚠️ 再次导航到报表页...")
-                page.goto(REPORT_URL, wait_until="networkidle")
+                if "login" in page.url.lower() or page.locator('#username').count() > 0:
+                    print("⚠️ Cookies 已失效，请更新 cookies.json")
+                    return "cookies_expired"
+                else:
+                    print("✅ 已进入报表页")
+                    page.wait_for_timeout(2000)
+                    page.keyboard.press("Escape")
+                    page.wait_for_timeout(500)
+            else:
+                print("❌ cookies.json 不存在")
+                return "no_cookies"
 
-            print("⏳ 等待约2秒让弹窗出现...")
+            # ---------- 使用更稳定的方式点击菜单 ----------
+            print("📂 等待左侧菜单加载...")
+            # 等待页面完全渲染
+            page.wait_for_load_state("networkidle")
             page.wait_for_timeout(2000)
-            print("🛡️ 按 ESC 关闭弹窗...")
-            page.keyboard.press("Escape")
-            page.wait_for_timeout(500)
-
-            try:
-                page.wait_for_selector("#creditLostFixSummaryTable", timeout=1000)
-            except PlaywrightTimeout:
-                print("⚠️ 表格未出现，再次按 ESC...")
-                page.keyboard.press("Escape")
+            
+            # 尝试直接通过文本点击 Miscellaneous Report（使用 XPath）
+            misc_xpath = '//div[contains(@class, "panel-heading")]//label[contains(text(), "Miscellaneous Report")] | //h4[contains(text(), "Miscellaneous Report")]'
+            misc_heading = page.locator(f'xpath={misc_xpath}').first
+            misc_heading.wait_for(state="visible", timeout=15000)
+            # 检查是否已展开，若未展开则点击
+            parent = misc_heading.evaluate("el => el.closest('.panel-heading')")
+            if parent:
+                is_expanded = page.evaluate("el => el.getAttribute('aria-expanded')", parent)
+                if is_expanded != "true":
+                    misc_heading.click()
+                    page.wait_for_timeout(1000)
+            else:
+                misc_heading.click()
                 page.wait_for_timeout(1000)
-
-            # ---------- 点击菜单进入目标报表 ----------
-            print("📂 展开 Miscellaneous Report 菜单...")
-            misc_heading = page.locator('div.panel-heading:has-text("Miscellaneous Report")')
-            misc_heading.wait_for(state="visible", timeout=10000)
-            misc_heading.click()
-
+            
             print("🖱️ 点击 CREDIT_LOST_FIX_PROPOSAL_REPORT...")
-            report_link = page.locator('li:has-text("CREDIT_LOST_FIX_PROPOSAL_REPORT")')
+            report_xpath = '//li[contains(text(), "CREDIT_LOST_FIX_PROPOSAL_REPORT")]'
+            report_link = page.locator(f'xpath={report_xpath}').first
             report_link.wait_for(state="visible", timeout=10000)
             report_link.click()
 
             page.wait_for_selector("#creditLostFixProposalReportQuery", timeout=15000)
             print("✅ 进入报表查询界面")
 
-            # ---------- 通用函数：纯 JS 设置 select 值 ----------
+            # ---------- 通用 JS 设置 ----------
             def set_select_value(selector, value, multiple=False):
                 page.wait_for_selector(selector, timeout=10000)
                 js = """
@@ -143,8 +109,8 @@ def fetch_fpms_data(headless=False, target_date_str=None):
                 """
                 return page.evaluate(js, [selector, value, multiple])
 
-            # 1. Product (Multiple) -> 全选
-            print("📌 选择 Product: 全选")
+            # 1. Product 全选
+            print("📌 Product 全选")
             all_product_values = page.evaluate("""
                 () => {
                     const select = document.querySelector('select[ng-model="vm.creditLostFixProposalReportQuery.platformList"]');
@@ -154,39 +120,24 @@ def fetch_fpms_data(headless=False, target_date_str=None):
             """)
             if all_product_values:
                 set_select_value('select[ng-model="vm.creditLostFixProposalReportQuery.platformList"]', all_product_values, multiple=True)
-                print("✅ Product 全选完成")
-            else:
-                print("⚠️ 未能获取 Product 选项，跳过")
 
-            # 2. 设置日期（支持命令行参数）
-            print("📅 计算日期范围...")
+            # 2. 日期
+            print("📅 设置日期")
             today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
             if target_date_str:
-                try:
-                    day, month = map(int, target_date_str.split('/'))
-                    target_date = datetime(today.year, month, day)
-                except ValueError:
-                    raise ValueError("日期格式错误，应为 DD/MM，例如 14/03")
+                day, month = map(int, target_date_str.split('/'))
+                target_date = datetime(today.year, month, day)
             else:
                 target_date = today
             end_date = target_date
             start_date = end_date - timedelta(days=1)
             start_str = start_date.strftime("%Y/%m/%d 00:00:00")
             end_str = end_date.strftime("%Y/%m/%d 00:00:00")
-            print(f"📅 查询日期范围：{start_str} 至 {end_str}")
 
-            start_label = page.locator('label:has-text("Start date")')
-            start_input = start_label.locator('..').locator('input')
-            start_input.click()
-            start_input.fill(start_str)
+            page.locator('label:has-text("Start date")').locator('..').locator('input').fill(start_str)
+            page.locator('label:has-text("End date")').locator('..').locator('input').fill(end_str)
 
-            end_label = page.locator('label:has-text("End date")')
-            end_input = end_label.locator('..').locator('input')
-            end_input.click()
-            end_input.fill(end_str)
-
-            # 3. Proposal Type -> 全选
-            print("📌 选择 Proposal Type: 全选")
+            # 3. Proposal Type 全选
             all_type_values = page.evaluate("""
                 () => {
                     const select = document.querySelector('select[ng-model="vm.creditLostFixProposalReportQuery.proposalTypeNames"]');
@@ -196,70 +147,39 @@ def fetch_fpms_data(headless=False, target_date_str=None):
             """)
             if all_type_values:
                 set_select_value('select[ng-model="vm.creditLostFixProposalReportQuery.proposalTypeNames"]', all_type_values, multiple=True)
-                print("✅ Proposal Type 全选完成")
-            else:
-                print("⚠️ 未能获取 Proposal Type 选项，跳过")
 
             # 4. Provider -> "all"
-            print("📌 选择 Provider: All")
             set_select_value('select[ng-model="vm.creditLostFixProposalReportQuery.providerId"]', "all")
-            print("✅ Provider 已设置为 All")
 
             # 5. Proposal Status -> "Success"
-            print("📌 选择 Proposal Status: Success")
-            success_set = False
             for attempt in range(3):
                 set_select_value('select[ng-model="vm.creditLostFixProposalReportQuery.proposalStatus"]', "Success")
                 current_val = page.evaluate('document.querySelector(\'select[ng-model="vm.creditLostFixProposalReportQuery.proposalStatus"]\').value')
-                print(f"   尝试 {attempt+1}: select.value = {current_val}")
                 if current_val == "Success":
-                    success_set = True
                     break
-                time.sleep(0.5)
-            if not success_set:
-                raise Exception("Proposal Status 无法设置为 Success")
-            print("✅ Proposal Status 已设置为 Success")
+                page.wait_for_timeout(500)
 
-            # 6. 点击 Search
-            print("🔍 点击 Search 按钮...")
-            search_btn = page.locator('button:has-text("Search")').first
-            search_btn.click()
-
-            print("⏳ 等待5秒让数据加载...")
+            # 6. Search
+            print("🔍 点击 Search")
+            page.locator('button:has-text("Search")').first.click()
             page.wait_for_timeout(5000)
 
-            # 等待 Total 统计标签出现
-            print("⏳ 等待查询结果统计...")
+            # 等待结果
             total_label = page.locator('label.ng-binding:has-text("Total")').first
             total_label.wait_for(state="visible", timeout=30000)
             total_text = total_label.text_content().strip()
-            print(f"📊 统计信息: {total_text}")
 
             if "Total 0 records" in total_text:
-                print("✅ 今日无 Amount Loss 记录")
                 return "no amount loss record found for today"
             else:
-                print("⏳ 等待表格数据加载...")
-                page.wait_for_selector(TABLE_SELECTOR, timeout=10000)
-                rows = page.query_selector_all(TABLE_SELECTOR)
-                data = []
-                for row in rows:
-                    cells = row.query_selector_all("td")
-                    row_data = [c.inner_text().strip() for c in cells]
-                    if row_data:
-                        data.append(row_data)
-                print(f"📊 成功抓取 {len(data)} 行数据")
                 return "as checked amount loss have record today"
 
         except Exception as e:
-            print(f"❌ 脚本执行出错: {e}")
-            try:
-                page.screenshot(path="error_screenshot.png")
-                print("📸 已保存错误截图 error_screenshot.png")
-            except:
-                pass
+            print(f"❌ 错误: {e}")
+            page.screenshot(path="error_screenshot.png")
             raise
         finally:
+            context.close()
             browser.close()
 
 if __name__ == "__main__":
@@ -270,5 +190,4 @@ if __name__ == "__main__":
             target_date = arg
             break
     result = fetch_fpms_data(headless=headless, target_date_str=target_date)
-    print("\n===== 最终结果 =====")
     print(result)
