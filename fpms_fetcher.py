@@ -29,8 +29,12 @@ def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
                 args=['--disable-blink-features=AutomationControlled']
             )
         else:
-            # 首次或保存状态时，不使用持久化目录，手动登录后保存
-            browser = p.chromium.launch(headless=False, slow_mo=100)
+            # 首次或保存状态时：无状态文件时用普通 launch；必须尊重 headless（服务器无 X11 时需 True）
+            browser = p.chromium.launch(
+                headless=headless,
+                slow_mo=100 if not headless else 0,
+                args=['--disable-blink-features=AutomationControlled'],
+            )
             context = browser.new_context()
         
         page = context.new_page()
