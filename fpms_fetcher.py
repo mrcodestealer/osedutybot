@@ -1,5 +1,5 @@
 """
-FPMS 自动登录与表格抓取模块（服务器优化版）
+FPMS 自动登录与表格抓取模块（增加 stealth 反检测）
 用法：python3 fpms_fetcher.py [DD/MM]
 """
 import pyotp
@@ -7,6 +7,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+from playwright_stealth import stealth_sync  # 新增
 
 LOGIN_URL = "https://mgnt-webserver.casinoplus.top/"
 USERNAME = "CPOM01"
@@ -17,30 +18,55 @@ REPORT_URL = "https://mgnt-webserver.casinoplus.top/report"
 
 def fetch_fpms_data(headless=False, target_date_str=None):
     with sync_playwright() as p:
+        # 启动浏览器，增加反检测参数
         browser = p.chromium.launch(
             headless=headless,
             slow_mo=100 if not headless else 0,
-            args=['--disable-blink-features=AutomationControlled']  # 防止部分网站检测
+            args=[
+                '--disable-blink-features=AutomationControlled',
+                '--no-sandbox',
+                '--disable-web-security',
+                '--disable-features=IsolateOrigins,site-per-process',
+                '--disable-dev-shm-usage',
+                '--start-maximized',
+            ]
         )
-        page = browser.new_page()
+        context = browser.new_context(
+            viewport={'width': 1280, 'height': 800},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+        )
+        page = context.new_page()
+        # 注入 stealth 脚本
+        stealth_sync(page)
 
         try:
-            # ---------- 登录部分（优化等待）----------
             print("🌐 访问登录页...")
-            page.goto(LOGIN_URL, wait_until="networkidle")
+            page.goto(LOGIN_URL, wait_until="domcontentloaded")
+            # 额外等待网络空闲，确保 Cloudflare 验证完成
+            page.wait_for_load_state("networkidle", timeout=30000)
+
+            # 如果页面包含 Cloudflare 验证，尝试等待自动通过（一般几秒）
+            # 这里简单等待 5 秒让可能的 JS 挑战执行
+            print("⏳ 等待 Cloudflare 验证...")
+            time.sleep(5)
+
+            # 保存初始页面截图，便于排查
+            page.screenshot(path="initial_page.png")
 
             print("🔐 等待用户名输入框...")
+            # 增强等待：同时检查多个选择器，并延长超时
             try:
-                page.wait_for_selector("#username", state="visible", timeout=20000)
+                page.wait_for_selector("#username", state="visible", timeout=30000)
                 page.fill("#username", USERNAME)
+                print("✅ 使用 #username 填入用户名")
             except PlaywrightTimeout:
-                page.screenshot(path="login_error.png")
-                # 尝试备用选择器
-                alt_user = page.locator('input[type="text"]').first
-                alt_user.wait_for(state="visible", timeout=10000)
-                alt_user.fill(USERNAME)
-                print("⚠️ 使用备用用户名输入框")
+                # 备用：查找任何可见的文本输入框，排除密码框
+                alt_input = page.locator('input:visible:not([type="password"])').first
+                alt_input.wait_for(state="visible", timeout=30000)
+                alt_input.fill(USERNAME)
+                print("⚠️ 使用备用输入框填入用户名")
 
+            # 密码框
             page.fill("#password", PASSWORD)
             page.click('input[type="submit"]')
 
