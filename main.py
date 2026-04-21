@@ -186,10 +186,39 @@ def run_amountloss_check(chat_id, date_str=None):
         send_message(chat_id, error_msg)
         
 def scheduled_amountloss_check():
-    # 目标群聊 ID（例如你的 DUTY_CHAT_ID 或 OSE_BOT_GROUP）
-    target_chat_id = DUTY_CHAT_ID   # 或直接写死群 ID
-    # 默认查询昨天至今天的数据（相当于不带参数的 /al）
-    run_amountloss_check(target_chat_id, date_str=None)
+    """
+    每日 9:00：在 DUTY_CHAT_ID 群 @TARGET_USER_OPEN_ID，
+    文案格式：As checked amount loss show 0 records / Search time: 0.029 seconds
+    （数字与耗时来自 amountloss.fetch_fpms_data 实时结果）
+    """
+    target_chat_id = DUTY_CHAT_ID
+    try:
+        from amountloss import fetch_fpms_data
+
+        result = fetch_fpms_data(headless=True, target_date_str=None)
+    except ImportError as e:
+        send_message(
+            target_chat_id,
+            f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>\n'
+            f"❌ 无法加载 amountloss 模块: {str(e)}",
+        )
+        return
+    except Exception as e:
+        send_message(
+            target_chat_id,
+            f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>\n'
+            f"❌ Amount Loss 检查失败: {str(e)}",
+        )
+        print(f"scheduled_amountloss_check error: {e}")
+        return
+
+    line = (result or "").strip()
+    # 页面原文多为 "Total 0 records / Search time: ..."，去掉开头 Total 以贴合口头文案
+    line = re.sub(r"^Total\s+", "", line, count=1, flags=re.IGNORECASE)
+    mention = f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>'
+    text = f"{mention}\nAs checked amount loss show {line}"
+    send_message(target_chat_id, text)
+    print(f"✅ Scheduled Amount Loss (9:00) sent to {target_chat_id}")
 
 # ================= P0 交互确认相关 =================
 pending_p0_confirmation = {}  # key: sender_id -> {"timestamp": datetime, "original_text": str}
