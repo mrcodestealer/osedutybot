@@ -6,6 +6,7 @@ FPMS 自动登录与表格抓取模块（支持保存/加载浏览器状态）
     python3 fpms_fetcher.py DD/MM          # 指定日期查询
 """
 import json
+import re
 import pyotp
 import sys
 import os
@@ -25,6 +26,10 @@ NAV_TIMEOUT_MS = 90_000
 LOGIN_FIELD_TIMEOUT_MS = 90_000
 MENU_TIMEOUT_MS = 60_000
 
+# 侧栏报表名（页面可能把文案放在子节点，勿用 XPath 的 text() 只匹配直接文本）
+REPORT_MENU_LABEL_FULL = "CREDIT_LOST_FIX_PROPOSAL_REPORT"
+REPORT_MENU_LABEL_RE = re.compile(r"CREDIT_LOST_FIX_PROPOSAL", re.IGNORECASE)
+
 CHROMIUM_ARGS = ["--disable-blink-features=AutomationControlled"]
 
 
@@ -42,9 +47,88 @@ def _is_login_page(page):
     return page.locator("#username").count() > 0
 
 
+def _dismiss_report_password_popup(page):
+    """进入 /report 后常见「强制改密」弹窗：先 Esc → 等 2 秒 → 再 Esc，再操作左侧菜单。"""
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(2000)
+    page.keyboard.press("Escape")
+
+
+def _ensure_report_table_visible(page, max_extra_esc_rounds=5):
+    """
+    等待 #creditLostFixSummaryTable 出现（说明弹层已关）；超时则再按 ESC，与手工调试一致。
+    """
+    for _ in range(max_extra_esc_rounds):
+        try:
+            page.wait_for_selector("#creditLostFixSummaryTable", timeout=1000)
+            return
+        except PlaywrightTimeout:
+            print("⚠️ 表格未出现，再次按 ESC...")
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(1000)
+
+
+def _misc_report_heading_locator(page):
+    misc_xpath = (
+        '//div[contains(@class, "panel-heading")]//label[contains(., "Miscellaneous Report")]'
+        ' | //h4[contains(., "Miscellaneous Report")]'
+        ' | //div[contains(@class, "panel-heading")]//*[contains(normalize-space(.), "Miscellaneous Report")]'
+    )
+    return page.locator(f"xpath={misc_xpath}").first
+
+
+def _open_credit_lost_proposal_report(page):
+    """展开 Miscellaneous Report 并点击 CREDIT_LOST_FIX_PROPOSAL_REPORT（兼容子节点文案）。"""
+    print("📂 展开 Miscellaneous Report 菜单...")
+    misc_heading = _misc_report_heading_locator(page)
+    misc_heading.wait_for(state="visible", timeout=MENU_TIMEOUT_MS)
+    misc_heading.scroll_into_view_if_needed()
+    misc_heading.click()
+    page.wait_for_timeout(1500)
+
+    print("🖱️ 点击 CREDIT_LOST_FIX_PROPOSAL_REPORT...")
+    # contains(., ...) 包含子节点文本；text() 仅直接文本，易导致 li 匹配不到
+    report_xpath = (
+        f'//a[contains(., "{REPORT_MENU_LABEL_FULL}")]'
+        f' | //li[contains(., "{REPORT_MENU_LABEL_FULL}")]'
+        f' | //span[contains(., "{REPORT_MENU_LABEL_FULL}")]'
+        ' | //a[contains(., "CREDIT_LOST_FIX")]'
+        ' | //li[contains(., "CREDIT_LOST_FIX")]'
+    )
+    report_link = page.locator(f"xpath={report_xpath}").first
+
+    try:
+        report_link.wait_for(state="visible", timeout=20000)
+    except PlaywrightTimeout:
+        print("⚠️ XPath 未命中，改用 Playwright has_text（正则）…")
+        report_link = (
+            page.locator('a, li, span, [role="link"], .list-group-item, [ng-click]')
+            .filter(has_text=REPORT_MENU_LABEL_RE)
+            .first
+        )
+        try:
+            report_link.wait_for(state="visible", timeout=20000)
+        except PlaywrightTimeout:
+            print("⚠️ 仍未可见，再次点击 Miscellaneous Report 折叠后再试…")
+            misc_heading.click()
+            page.wait_for_timeout(1500)
+            report_link = (
+                page.locator('a, li, span, [role="link"], .list-group-item')
+                .filter(has_text=REPORT_MENU_LABEL_RE)
+                .first
+            )
+            report_link.wait_for(state="visible", timeout=MENU_TIMEOUT_MS)
+
+    report_link.scroll_into_view_if_needed()
+    report_link.click()
+    page.wait_for_timeout(500)
+
+
 def _goto_report(page):
     page.goto(REPORT_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
-    page.wait_for_timeout(1500)
+    page.wait_for_timeout(500)
+    _dismiss_report_password_popup(page)
+    _ensure_report_table_visible(page)
 
 
 def _do_full_login(page, context, save_state_only=False):
@@ -66,12 +150,17 @@ def _do_full_login(page, context, save_state_only=False):
     print(f"🔢 当前验证码: {code}")
     page.fill("#OTP", code)
     page.keyboard.press("Enter")
+    navigated_via_goto = False
     try:
         page.wait_for_url("**/report", timeout=15000)
         print("✅ 页面已自动跳转到报表页")
     except PlaywrightTimeout:
         print("⚠️ 未自动跳转，正在手动导航到 /report...")
         _goto_report(page)
+        navigated_via_goto = True
+    if not navigated_via_goto:
+        _dismiss_report_password_popup(page)
+        _ensure_report_table_visible(page)
 
     print("✅ 登录成功，正在保存浏览器状态...")
     context.storage_state(path=STATE_FILE)
@@ -129,38 +218,16 @@ def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
                     "`python fpms_fetcher.py --save-state` 生成有效的 browser_state.json 后上传到服务器。"
                 )
 
-            page.keyboard.press("Escape")
-            page.wait_for_timeout(500)
+            # /report 弹窗已在 _goto_report / _do_full_login 内用 Esc 处理
 
             # ---------- 以下为通用查询流程 ----------
             try:
                 page.wait_for_load_state("networkidle", timeout=45000)
             except PlaywrightTimeout:
                 pass
-            page.wait_for_timeout(2000)
-
-            # 文本可能在 panel-heading 内的 label/h4 上，:has-text 对 div 可能匹配不到
-            print("📂 展开 Miscellaneous Report 菜单...")
-            misc_xpath = (
-                '//div[contains(@class, "panel-heading")]//label[contains(text(), "Miscellaneous Report")]'
-                ' | //h4[contains(text(), "Miscellaneous Report")]'
-                ' | //div[contains(@class, "panel-heading")]//*[contains(normalize-space(.), "Miscellaneous Report")]'
-            )
-            misc_heading = page.locator(f"xpath={misc_xpath}").first
-            misc_heading.wait_for(state="visible", timeout=MENU_TIMEOUT_MS)
-            misc_heading.scroll_into_view_if_needed()
-            misc_heading.click()
             page.wait_for_timeout(1000)
 
-            print("🖱️ 点击 CREDIT_LOST_FIX_PROPOSAL_REPORT...")
-            report_xpath = (
-                '//li[contains(text(), "CREDIT_LOST_FIX_PROPOSAL_REPORT")]'
-                ' | //a[contains(text(), "CREDIT_LOST_FIX_PROPOSAL_REPORT")]'
-            )
-            report_link = page.locator(f"xpath={report_xpath}").first
-            report_link.wait_for(state="visible", timeout=MENU_TIMEOUT_MS)
-            report_link.scroll_into_view_if_needed()
-            report_link.click()
+            _open_credit_lost_proposal_report(page)
 
             page.wait_for_selector("#creditLostFixProposalReportQuery", timeout=MENU_TIMEOUT_MS)
             print("✅ 进入报表查询界面")
