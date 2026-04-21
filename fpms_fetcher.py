@@ -68,6 +68,43 @@ def _is_login_page(page):
     return page.locator("#username").count() > 0
 
 
+def _raise_if_cloudflare_blocked(page):
+    """
+    数据中心/服务器出口 IP 常被 Cloudflare WAF 直接拦截，返回与业务站完全不同的 HTML。
+    无法靠 Playwright 改选择器解决，需换出口 IP、白名单或站点侧放行。
+    """
+    try:
+        title = (page.title() or "").lower()
+    except Exception:
+        title = ""
+    try:
+        html = (page.content() or "")[:100000].lower()
+    except Exception:
+        html = ""
+    if (
+        "sorry, you have been blocked" in html
+        or "cf-error-details" in html
+        or ("cloudflare" in title and "attention required" in title)
+    ):
+        raise RuntimeError(
+            "【Cloudflare 拦截】当前出口 IP 被站点 WAF 拒绝，页面为 “Sorry, you have been blocked”，"
+            "不是 FPMS 业务页。请在 Cloudflare / 防火墙将本机出口 IP 加入允许列表，或改用未被拦的网络（如办公网）运行；"
+            "仅靠改自动化脚本无法绕过。\n"
+            "[EN] Egress IP blocked by Cloudflare WAF; whitelist this server IP or use an allowed network. "
+            "Not a Playwright/locator issue."
+        )
+    if (
+        "just a moment" in title
+        or "checking your browser" in html
+        or "cf-browser-verification" in html
+        or "challenge-platform" in html
+    ):
+        raise RuntimeError(
+            "【Cloudflare 挑战页】出现 “Just a moment” / 浏览器检测，无头环境通常无法自动通过。\n"
+            "[EN] Cloudflare challenge page; use manual session export from a trusted browser or ask site to allow your IP."
+        )
+
+
 def _dismiss_report_password_popup(page):
     """进入 /report 后常见「强制改密」弹窗：先 Esc → 等 2 秒 → 再 Esc，再操作左侧菜单。"""
     page.keyboard.press("Escape")
@@ -372,6 +409,7 @@ def _goto_report(page):
     _fpms_log(4, "打开 /report（domcontentloaded）…")
     page.goto(REPORT_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
     page.wait_for_timeout(500)
+    _raise_if_cloudflare_blocked(page)
     _fpms_log(4, "关闭改密相关弹层（Esc → 2s → Esc）…")
     _dismiss_report_password_popup(page)
     _fpms_log(4, "等待 #creditLostFixSummaryTable 或循环 ESC…")
@@ -383,6 +421,7 @@ def _do_full_login(page, context, save_state_only=False):
     """完整账号+TOTP 登录；成功后写入 browser_state.json。"""
     _fpms_log(3, "完整登录：打开登录页并填写账号/密码/TOTP…")
     page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    _raise_if_cloudflare_blocked(page)
     try:
         page.wait_for_load_state("networkidle", timeout=45000)
     except PlaywrightTimeout:
@@ -411,6 +450,7 @@ def _do_full_login(page, context, save_state_only=False):
         _dismiss_report_password_popup(page)
         _ensure_report_table_visible(page)
 
+    _raise_if_cloudflare_blocked(page)
     _fpms_log(3, "写入 browser_state.json …")
     context.storage_state(path=STATE_FILE)
     _fpms_log(3, f"状态已保存到 {STATE_FILE}")
@@ -475,6 +515,7 @@ def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
                     "`python fpms_fetcher.py --save-state` 生成有效的 browser_state.json 后上传到服务器。"
                 )
 
+            _raise_if_cloudflare_blocked(page)
             _fpms_log(5, "会话就绪：当前不在登录页，准备查询 Amount Loss …")
 
             # ---------- 以下为通用查询流程 ----------
