@@ -76,8 +76,7 @@ def _do_full_login(page, context, save_state_only=False):
     context.storage_state(path=STATE_FILE)
     print(f"✅ 状态已保存到 {STATE_FILE}")
     if save_state_only:
-        return True
-    return False
+        return
 
 
 def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
@@ -100,26 +99,37 @@ def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
                 _do_full_login(page, context, save_state_only=True)
                 return "state_saved"
 
-            # 1) 已有 Playwright storage_state：先直接打开报表
+            # 会话恢复顺序：browser_state.json → cookies.json → 完整登录
             if ctx_opts:
                 print("🚀 使用 browser_state.json 访问报表页…")
                 _goto_report(page)
+            elif os.path.exists(COOKIES_FILE):
+                print("🍪 使用 cookies.json 访问报表页…")
+                with open(COOKIES_FILE, "r", encoding="utf-8") as f:
+                    context.add_cookies(_normalize_cookies(json.load(f)))
+                _goto_report(page)
+            else:
+                print("📭 无本地会话文件，执行完整登录…")
+                _do_full_login(page, context, save_state_only=False)
 
-            # 2) 仍落在登录页：尝试 cookies.json（与旧版脚本兼容）
-            if _is_login_page(page) and os.path.exists(COOKIES_FILE):
-                print("🍪 尝试加载 cookies.json …")
+            if _is_login_page(page) and os.path.exists(COOKIES_FILE) and ctx_opts:
+                print("🍪 browser_state 失效，尝试 cookies.json …")
                 with open(COOKIES_FILE, "r", encoding="utf-8") as f:
                     context.add_cookies(_normalize_cookies(json.load(f)))
                 _goto_report(page)
 
-            # 3) 仍需要登录：走完整登录并刷新 browser_state.json
             if _is_login_page(page):
-                ended = _do_full_login(page, context, save_state_only=False)
-                if ended:
-                    return "state_saved"
-            else:
-                page.keyboard.press("Escape")
-                page.wait_for_timeout(500)
+                print("⚠️ 会话无效或已过期，执行完整登录…")
+                _do_full_login(page, context, save_state_only=False)
+
+            if _is_login_page(page):
+                raise RuntimeError(
+                    "仍停留在登录页：请检查网络、账号权限，或在本机执行 "
+                    "`python fpms_fetcher.py --save-state` 生成有效的 browser_state.json 后上传到服务器。"
+                )
+
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(500)
 
             # ---------- 以下为通用查询流程 ----------
             print("📂 展开 Miscellaneous Report 菜单...")

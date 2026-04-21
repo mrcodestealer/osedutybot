@@ -4,6 +4,11 @@ import threading
 import requests
 import time
 import os
+from dotenv import load_dotenv
+
+# Load .env from the project directory (works under systemd when CWD is not the app folder)
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+
 from flask import Flask, request, jsonify
 from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -31,8 +36,6 @@ import ft
 
 import providerid
 
-from fpms_fetcher import fetch_fpms_data
-
 import nwr
 import winford
 import nch
@@ -49,9 +52,6 @@ import ecsre
 
 import update
 import otpp1
-
-from dotenv import load_dotenv
-load_dotenv()
 
 # ================= CONFIGURATION =================
 APP_ID = os.getenv("APP_ID")
@@ -166,6 +166,15 @@ def monthly_duty_check():
 
 def run_amountloss_check(chat_id, date_str=None):
     """在后台线程中执行 amount loss 检查，并将结果发送到指定 chat_id"""
+    try:
+        from fpms_fetcher import fetch_fpms_data
+    except ImportError as e:
+        send_message(
+            chat_id,
+            "❌ 无法加载 FPMS 抓取模块（fetch_fpms_data）。"
+            f" 请把与开发环境一致的 fpms_fetcher.py 部署到服务器，并安装 playwright。\n{str(e)}",
+        )
+        return
     try:
         result = fetch_fpms_data(headless=True, target_date_str=date_str)
         if result == "no amount loss record found for today":
