@@ -30,6 +30,8 @@ MENU_TIMEOUT_MS = 60_000
 # 侧栏报表名（页面可能把文案放在子节点，勿用 XPath 的 text() 只匹配直接文本）
 REPORT_MENU_LABEL_FULL = "CREDIT_LOST_FIX_PROPOSAL_REPORT"
 REPORT_MENU_LABEL_RE = re.compile(r"CREDIT_LOST_FIX_PROPOSAL", re.IGNORECASE)
+# 菜单标题可能换行 / 多空格；勿用纯字符串 get_by_text 在服务器上易超时
+MISC_MENU_TEXT_RE = re.compile(r"Miscellaneous\s*Report", re.IGNORECASE)
 
 # 与桌面 Chrome 一致，避免 headless 默认小视口触发「移动端」隐藏侧栏
 DESKTOP_VIEWPORT = {"width": 1920, "height": 1080}
@@ -94,29 +96,141 @@ def _prepare_report_page_layout(page):
     page.wait_for_timeout(300)
 
 
+def _wait_body_contains_misc_menu(page, timeout=90000):
+    """等 Angular 把侧栏文案渲染进 DOM（innerText 含 miscellaneous + report）。"""
+    page.wait_for_function(
+        """() => {
+            const b = document.body;
+            if (!b) return false;
+            const t = (b.innerText || '').toLowerCase();
+            return t.includes('miscellaneous') && t.includes('report');
+        }""",
+        timeout=timeout,
+    )
+
+
+def _try_click_misc_in_frame(frame):
+    """在单个 frame 内尝试点击 Miscellaneous Report 标题。"""
+    xp = (
+        '//div[contains(@class, "panel-heading")]//label[contains(., "Miscellaneous")]'
+        '[contains(., "Report")]'
+        ' | //h4[contains(., "Miscellaneous")]'
+        ' | //*[contains(@class, "panel-heading")]//*[contains(., "Miscellaneous")]'
+    )
+    loc = frame.locator(f"xpath={xp}").first
+    try:
+        loc.wait_for(state="attached", timeout=8000)
+        loc.scroll_into_view_if_needed()
+        loc.click(timeout=8000)
+        return True
+    except PlaywrightTimeout:
+        pass
+    except Exception:
+        pass
+    try:
+        loc2 = frame.get_by_text(MISC_MENU_TEXT_RE).first
+        loc2.wait_for(state="attached", timeout=8000)
+        loc2.scroll_into_view_if_needed()
+        loc2.click(timeout=8000, force=True)
+        return True
+    except PlaywrightTimeout:
+        pass
+    except Exception:
+        pass
+    return False
+
+
+def _click_misc_menu_via_js(page):
+    """不依赖 Playwright visible，直接在 DOM 中找含文案的 panel 并派发自定义 click。"""
+    return page.evaluate(
+        """() => {
+            const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+            const nodes = document.querySelectorAll(
+                '.panel-heading, .panel-heading *, label, h4, [class*="panel"]'
+            );
+            for (const el of nodes) {
+                const raw = norm(el.innerText || el.textContent || '');
+                if (!/miscellaneous/i.test(raw) || !/report/i.test(raw)) continue;
+                let head = el.closest('.panel-heading');
+                if (!head) head = el.closest('[class*="panel"]') || el;
+                try {
+                    head.scrollIntoView({ block: 'center', inline: 'nearest' });
+                    head.click();
+                    return true;
+                } catch (e1) {
+                    try {
+                        head.dispatchEvent(
+                            new MouseEvent('click', { bubbles: true, cancelable: true, view: window })
+                        );
+                        return true;
+                    } catch (e2) {}
+                }
+            }
+            return false;
+        }"""
+    )
+
+
 def _click_miscellaneous_report_section(page):
-    """等待并点击「Miscellaneous Report」折叠标题（服务器上 visible 判定易失败，多路兜底）。"""
+    """展开 Miscellaneous Report（主 frame / 子 frame / XPath / 正则 / JS 兜底）。"""
     print("📂 展开 Miscellaneous Report 菜单...")
     _prepare_report_page_layout(page)
 
+    try:
+        _wait_body_contains_misc_menu(page, timeout=90000)
+    except PlaywrightTimeout:
+        print("⚠️ 90s 内页面 innerText 仍未出现 Miscellaneous+Report，继续尝试定位…")
+
     primary = _misc_report_heading_locator(page)
     try:
-        primary.wait_for(state="visible", timeout=25000)
+        primary.wait_for(state="attached", timeout=20000)
         primary.scroll_into_view_if_needed()
-        primary.click(timeout=15000)
+        primary.click(timeout=12000, force=True)
+        page.wait_for_timeout(1500)
+        return
     except PlaywrightTimeout:
-        print("⚠️ XPath 侧栏标题未在时限内可见，尝试 get_by_text / attached…")
-        fallback = page.get_by_text("Miscellaneous Report", exact=False).first
+        pass
+    except Exception as e:
+        print(f"⚠️ 主 frame XPath 点击失败: {e}")
+
+    # Playwright 文本引擎（正则，兼容多空格）
+    try:
+        fb = page.get_by_text(MISC_MENU_TEXT_RE).first
+        fb.wait_for(state="attached", timeout=20000)
+        fb.scroll_into_view_if_needed()
+        fb.click(timeout=12000, force=True)
+        page.wait_for_timeout(1500)
+        return
+    except PlaywrightTimeout:
+        pass
+    except Exception as e:
+        print(f"⚠️ get_by_text(正则) 失败: {e}")
+
+    # 子 frame（少数部署把侧栏放在 iframe）
+    for frame in page.frames:
+        if frame.is_detached():
+            continue
+        u = ""
         try:
-            fallback.wait_for(state="visible", timeout=15000)
-        except PlaywrightTimeout:
-            fallback.wait_for(state="attached", timeout=MENU_TIMEOUT_MS)
-        fallback.scroll_into_view_if_needed()
-        try:
-            fallback.click(timeout=15000)
-        except PlaywrightTimeout:
-            fallback.click(force=True, timeout=15000)
-    page.wait_for_timeout(1500)
+            u = frame.url or ""
+        except Exception:
+            pass
+        if u.startswith("about:"):
+            continue
+        if _try_click_misc_in_frame(frame):
+            page.wait_for_timeout(1500)
+            return
+
+    print("⚠️ 尝试用浏览器脚本点击 Miscellaneous Report …")
+    if _click_misc_menu_via_js(page):
+        page.wait_for_timeout(1500)
+        return
+
+    page.screenshot(path="error_misc_menu.png")
+    raise RuntimeError(
+        "无法展开 Miscellaneous Report：主页面与子 frame、JS 兜底均失败。"
+        "已保存 error_misc_menu.png；请确认服务器上 /report 与本地一致、无额外登录页。"
+    )
 
 
 def _open_credit_lost_proposal_report(page):
