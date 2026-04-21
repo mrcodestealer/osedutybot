@@ -7,7 +7,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
-from playwright_stealth import stealth_sync  # 新增
+
 
 LOGIN_URL = "https://mgnt-webserver.casinoplus.top/"
 USERNAME = "CPOM01"
@@ -36,8 +36,6 @@ def fetch_fpms_data(headless=False, target_date_str=None):
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
         )
         page = context.new_page()
-        # 注入 stealth 脚本
-        stealth_sync(page)
 
         try:
             print("🌐 访问登录页...")
