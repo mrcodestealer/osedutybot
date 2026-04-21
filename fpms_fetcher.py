@@ -5,6 +5,7 @@ FPMS 自动登录与表格抓取模块（支持保存/加载浏览器状态）
     python3 fpms_fetcher.py                # 无头模式使用已保存状态自动查询
     python3 fpms_fetcher.py DD/MM          # 指定日期查询
 """
+import json
 import pyotp
 import sys
 import os
@@ -18,64 +19,109 @@ TOTP_SECRET = "MNYG63JQGEYTMOJTHE4DMMBTGQYDIOI"
 TABLE_SELECTOR = "#creditLostFixSummaryTable tbody tr"
 REPORT_URL = "https://mgnt-webserver.casinoplus.top/report"
 STATE_FILE = "browser_state.json"
+COOKIES_FILE = "cookies.json"
+
+NAV_TIMEOUT_MS = 90_000
+LOGIN_FIELD_TIMEOUT_MS = 90_000
+
+CHROMIUM_ARGS = ["--disable-blink-features=AutomationControlled"]
+
+
+def _normalize_cookies(cookies):
+    valid = {"Strict", "Lax", "None"}
+    for c in cookies:
+        if c.get("sameSite") not in valid:
+            c["sameSite"] = "Lax"
+    return cookies
+
+
+def _is_login_page(page):
+    if "login" in page.url.lower():
+        return True
+    return page.locator("#username").count() > 0
+
+
+def _goto_report(page):
+    page.goto(REPORT_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    page.wait_for_timeout(1500)
+
+
+def _do_full_login(page, context, save_state_only=False):
+    """完整账号+TOTP 登录；成功后写入 browser_state.json。"""
+    print("🔐 正在登录 FPMS...")
+    page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    try:
+        page.wait_for_load_state("networkidle", timeout=45000)
+    except PlaywrightTimeout:
+        pass
+
+    user_loc = page.locator("#username, input[name='username'], input[type='text']").first
+    user_loc.wait_for(state="visible", timeout=LOGIN_FIELD_TIMEOUT_MS)
+    user_loc.fill(USERNAME)
+    page.locator("#password, input[name='password'], input[type='password']").first.fill(PASSWORD)
+    page.locator('input[type="submit"], button[type="submit"]').first.click()
+    page.wait_for_selector("#OTP", state="visible", timeout=LOGIN_FIELD_TIMEOUT_MS)
+    code = pyotp.TOTP(TOTP_SECRET).now()
+    print(f"🔢 当前验证码: {code}")
+    page.fill("#OTP", code)
+    page.keyboard.press("Enter")
+    try:
+        page.wait_for_url("**/report", timeout=15000)
+        print("✅ 页面已自动跳转到报表页")
+    except PlaywrightTimeout:
+        print("⚠️ 未自动跳转，正在手动导航到 /report...")
+        _goto_report(page)
+
+    print("✅ 登录成功，正在保存浏览器状态...")
+    context.storage_state(path=STATE_FILE)
+    print(f"✅ 状态已保存到 {STATE_FILE}")
+    if save_state_only:
+        return True
+    return False
+
 
 def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
     with sync_playwright() as p:
-        # 启动持久化上下文（如果状态文件存在则加载）
+        browser = p.chromium.launch(
+            headless=headless,
+            slow_mo=100 if not headless else 0,
+            args=CHROMIUM_ARGS,
+        )
+
+        ctx_opts = {}
         if os.path.exists(STATE_FILE) and not save_state:
-            context = p.chromium.launch_persistent_context(
-                user_data_dir="./browser_data",
-                headless=headless,
-                args=['--disable-blink-features=AutomationControlled']
-            )
-        else:
-            # 首次或保存状态时：无状态文件时用普通 launch；必须尊重 headless（服务器无 X11 时需 True）
-            browser = p.chromium.launch(
-                headless=headless,
-                slow_mo=100 if not headless else 0,
-                args=['--disable-blink-features=AutomationControlled'],
-            )
-            context = browser.new_context()
-        
+            ctx_opts["storage_state"] = STATE_FILE
+
+        context = browser.new_context(**ctx_opts)
         page = context.new_page()
 
         try:
-            # 如果处于保存状态模式，手动登录
-            if save_state or not os.path.exists(STATE_FILE):
-                print("🔐 需要进行手动登录（有头模式）...")
-                page.goto(LOGIN_URL, wait_until="networkidle")
-                page.fill("#username", USERNAME)
-                page.fill("#password", PASSWORD)
-                page.click('input[type="submit"]')
-                page.wait_for_selector("#OTP", state="visible", timeout=30000)
-                code = pyotp.TOTP(TOTP_SECRET).now()
-                print(f"🔢 当前验证码: {code}")
-                page.fill("#OTP", code)
-                page.keyboard.press("Enter")
-                # 等待登录完成
-                try:
-                    page.wait_for_url("**/report", timeout=5000)
-                    print("✅ 页面已自动跳转到报表页")
-                except PlaywrightTimeout:
-                    print("⚠️ 未自动跳转，正在手动导航到 /report...")
-                    page.goto(REPORT_URL, wait_until="networkidle")
-                print("✅ 登录成功，正在保存浏览器状态...")
-                context.storage_state(path=STATE_FILE)
-                print(f"✅ 状态已保存到 {STATE_FILE}")
-                # 如果只是保存状态，则退出
-                if save_state:
+            if save_state:
+                _do_full_login(page, context, save_state_only=True)
+                return "state_saved"
+
+            # 1) 已有 Playwright storage_state：先直接打开报表
+            if ctx_opts:
+                print("🚀 使用 browser_state.json 访问报表页…")
+                _goto_report(page)
+
+            # 2) 仍落在登录页：尝试 cookies.json（与旧版脚本兼容）
+            if _is_login_page(page) and os.path.exists(COOKIES_FILE):
+                print("🍪 尝试加载 cookies.json …")
+                with open(COOKIES_FILE, "r", encoding="utf-8") as f:
+                    context.add_cookies(_normalize_cookies(json.load(f)))
+                _goto_report(page)
+
+            # 3) 仍需要登录：走完整登录并刷新 browser_state.json
+            if _is_login_page(page):
+                ended = _do_full_login(page, context, save_state_only=False)
+                if ended:
                     return "state_saved"
-                # 否则继续执行后续查询
             else:
-                # 正常查询流程：直接访问报表页
-                print("🚀 使用已保存状态直接访问报表页")
-                page.goto(REPORT_URL, wait_until="networkidle")
-                page.wait_for_timeout(2000)
                 page.keyboard.press("Escape")
                 page.wait_for_timeout(500)
 
             # ---------- 以下为通用查询流程 ----------
-            # 点击菜单进入目标报表
             print("📂 展开 Miscellaneous Report 菜单...")
             misc_heading = page.locator('div.panel-heading:has-text("Miscellaneous Report")')
             misc_heading.wait_for(state="visible", timeout=15000)
@@ -89,7 +135,6 @@ def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
             page.wait_for_selector("#creditLostFixProposalReportQuery", timeout=15000)
             print("✅ 进入报表查询界面")
 
-            # 通用JS设置函数
             def set_select_value(selector, value, multiple=False):
                 page.wait_for_selector(selector, timeout=10000)
                 js = """
@@ -112,7 +157,6 @@ def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
                 """
                 return page.evaluate(js, [selector, value, multiple])
 
-            # 1. Product 全选
             all_product_values = page.evaluate("""
                 () => {
                     const select = document.querySelector('select[ng-model="vm.creditLostFixProposalReportQuery.platformList"]');
@@ -121,12 +165,15 @@ def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
                 }
             """)
             if all_product_values:
-                set_select_value('select[ng-model="vm.creditLostFixProposalReportQuery.platformList"]', all_product_values, multiple=True)
+                set_select_value(
+                    'select[ng-model="vm.creditLostFixProposalReportQuery.platformList"]',
+                    all_product_values,
+                    multiple=True,
+                )
 
-            # 2. 日期
             today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
             if target_date_str:
-                day, month = map(int, target_date_str.split('/'))
+                day, month = map(int, target_date_str.split("/"))
                 target_date = datetime(today.year, month, day)
             else:
                 target_date = today
@@ -135,10 +182,9 @@ def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
             start_str = start_date.strftime("%Y/%m/%d 00:00:00")
             end_str = end_date.strftime("%Y/%m/%d 00:00:00")
 
-            page.locator('label:has-text("Start date")').locator('..').locator('input').fill(start_str)
-            page.locator('label:has-text("End date")').locator('..').locator('input').fill(end_str)
+            page.locator('label:has-text("Start date")').locator("..").locator("input").fill(start_str)
+            page.locator('label:has-text("End date")').locator("..").locator("input").fill(end_str)
 
-            # 3. Proposal Type 全选
             all_type_values = page.evaluate("""
                 () => {
                     const select = document.querySelector('select[ng-model="vm.creditLostFixProposalReportQuery.proposalTypeNames"]');
@@ -147,20 +193,23 @@ def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
                 }
             """)
             if all_type_values:
-                set_select_value('select[ng-model="vm.creditLostFixProposalReportQuery.proposalTypeNames"]', all_type_values, multiple=True)
+                set_select_value(
+                    'select[ng-model="vm.creditLostFixProposalReportQuery.proposalTypeNames"]',
+                    all_type_values,
+                    multiple=True,
+                )
 
-            # 4. Provider -> "all"
             set_select_value('select[ng-model="vm.creditLostFixProposalReportQuery.providerId"]', "all")
 
-            # 5. Proposal Status -> "Success"
-            for attempt in range(3):
+            for _ in range(3):
                 set_select_value('select[ng-model="vm.creditLostFixProposalReportQuery.proposalStatus"]', "Success")
-                current_val = page.evaluate('document.querySelector(\'select[ng-model="vm.creditLostFixProposalReportQuery.proposalStatus"]\').value')
+                current_val = page.evaluate(
+                    'document.querySelector(\'select[ng-model="vm.creditLostFixProposalReportQuery.proposalStatus"]\').value'
+                )
                 if current_val == "Success":
                     break
                 page.wait_for_timeout(500)
 
-            # 6. Search
             page.locator('button:has-text("Search")').first.click()
             page.wait_for_timeout(5000)
 
@@ -170,8 +219,7 @@ def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
 
             if "Total 0 records" in total_text:
                 return "no amount loss record found for today"
-            else:
-                return "as checked amount loss have record today"
+            return "as checked amount loss have record today"
 
         except Exception as e:
             print(f"❌ 错误: {e}")
@@ -179,8 +227,8 @@ def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
             raise
         finally:
             context.close()
-            if 'browser' in locals():
-                browser.close()
+            browser.close()
+
 
 if __name__ == "__main__":
     headless = "--headless" in sys.argv
