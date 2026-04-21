@@ -31,6 +31,8 @@ import ft
 
 import providerid
 
+from fpms_fetcher import fetch_fpms_data
+
 import nwr
 import winford
 import nch
@@ -46,7 +48,7 @@ import emergency
 import ecsre
 
 import update
-import otpp0
+import otpp1
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -159,6 +161,21 @@ def monthly_duty_check():
     report = get_all_duty_check(month=month, year=year)
     send_message(DUTY_CHAT_ID, report)
     print(f"✅ Sent monthly duty check for {year}-{month:02d} to {DUTY_CHAT_ID}")
+
+# ================= Amount Loss =================
+
+def run_amountloss_check(chat_id, date_str=None):
+    """在后台线程中执行 amount loss 检查，并将结果发送到指定 chat_id"""
+    try:
+        result = fetch_fpms_data(headless=True, target_date_str=date_str)
+        if result == "no amount loss record found for today":
+            reply = "✅ 今日无 Amount Loss 记录"
+        else:
+            reply = "⚠️ 今日存在 Amount Loss 记录，请检查！"
+        send_message(chat_id, reply)
+    except Exception as e:
+        error_msg = f"❌ Amount Loss 检查失败: {str(e)}"
+        send_message(chat_id, error_msg)
 
 # ================= P0 交互确认相关 =================
 pending_p0_confirmation = {}  # key: sender_id -> {"timestamp": datetime, "original_text": str}
@@ -740,7 +757,7 @@ def lark_webhook():
     elif clean_text.lower() == '/fpmsp0':
         reply = fpms_duty.fpmsp0()
     elif clean_text.lower() == '/otpp0':
-        reply = otpp0.get_otp_p0_guide()
+        reply = otpp1.get_otp_p0_guide()
     elif clean_text.lower() == '/fpms':
         reply = fpms_duty.get_fpms_today_duty()
     elif clean_text.lower().startswith('/fpmscheck'):
@@ -1123,6 +1140,14 @@ def lark_webhook():
                 reply = "❌ No user mentioned correctly. Use `/secret1 @user` (mention the user)."
         send_message(chat_id, reply)
         return jsonify({"success": True})
+    elif clean_text.lower().startswith('/al'):
+            parts = clean_text.split()
+            date_param = None
+            if len(parts) > 1:
+                date_param = parts[1]   # 如 "16/04"
+            send_message(chat_id, "⏳ 正在查询 Amount Loss，请稍候...")
+            threading.Thread(target=run_amountloss_check, args=(chat_id, date_param), daemon=True).start()
+            return jsonify({"success": True})
     elif clean_text.lower().startswith('/pid'):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
