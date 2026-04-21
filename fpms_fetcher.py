@@ -1,11 +1,10 @@
 """
-FPMS 自动登录与表格抓取模块（支持指定日期查询）
+FPMS 自动登录与表格抓取模块（服务器优化版）
 用法：python3 fpms_fetcher.py [DD/MM]
-示例：python3 fpms_fetcher.py 14/03   # 查询3月14日的数据
-      python3 fpms_fetcher.py         # 默认查询昨天的数据
 """
 import pyotp
 import sys
+import time
 from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
@@ -18,21 +17,35 @@ REPORT_URL = "https://mgnt-webserver.casinoplus.top/report"
 
 def fetch_fpms_data(headless=False, target_date_str=None):
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless, slow_mo=100 if not headless else 0)
+        browser = p.chromium.launch(
+            headless=headless,
+            slow_mo=100 if not headless else 0,
+            args=['--disable-blink-features=AutomationControlled']  # 防止部分网站检测
+        )
         page = browser.new_page()
 
         try:
-            # ---------- 登录部分 ----------
+            # ---------- 登录部分（优化等待）----------
             print("🌐 访问登录页...")
             page.goto(LOGIN_URL, wait_until="networkidle")
 
-            print("🔐 填写用户名密码并登录...")
-            page.fill("#username", USERNAME)
+            print("🔐 等待用户名输入框...")
+            try:
+                page.wait_for_selector("#username", state="visible", timeout=20000)
+                page.fill("#username", USERNAME)
+            except PlaywrightTimeout:
+                page.screenshot(path="login_error.png")
+                # 尝试备用选择器
+                alt_user = page.locator('input[type="text"]').first
+                alt_user.wait_for(state="visible", timeout=10000)
+                alt_user.fill(USERNAME)
+                print("⚠️ 使用备用用户名输入框")
+
             page.fill("#password", PASSWORD)
             page.click('input[type="submit"]')
 
             print("⏳ 等待 TOTP 输入框出现...")
-            page.wait_for_selector("#OTP", state="visible", timeout=10000)
+            page.wait_for_selector("#OTP", state="visible", timeout=15000)
 
             code = pyotp.TOTP(TOTP_SECRET).now()
             print(f"🔢 当前验证码: {code}")
@@ -46,7 +59,7 @@ def fetch_fpms_data(headless=False, target_date_str=None):
             # ---------- 导航到报表页并处理弹窗 ----------
             print("⏳ 等待登录完成...")
             try:
-                page.wait_for_url("**/report", timeout=2000)
+                page.wait_for_url("**/report", timeout=5000)
                 print("✅ 已到达报表页面")
             except PlaywrightTimeout:
                 print("⚠️ 未自动跳转，手动导航到 /report")
@@ -131,7 +144,7 @@ def fetch_fpms_data(headless=False, target_date_str=None):
                 except ValueError:
                     raise ValueError("日期格式错误，应为 DD/MM，例如 14/03")
             else:
-                target_date = today  # 默认结束日期为今天（查询昨天到今天的数据）
+                target_date = today
             end_date = target_date
             start_date = end_date - timedelta(days=1)
             start_str = start_date.strftime("%Y/%m/%d 00:00:00")
@@ -178,7 +191,7 @@ def fetch_fpms_data(headless=False, target_date_str=None):
                 if current_val == "Success":
                     success_set = True
                     break
-                page.wait_for_timeout(500)
+                time.sleep(0.5)
             if not success_set:
                 raise Exception("Proposal Status 无法设置为 Success")
             print("✅ Proposal Status 已设置为 Success")
@@ -188,9 +201,8 @@ def fetch_fpms_data(headless=False, target_date_str=None):
             search_btn = page.locator('button:has-text("Search")').first
             search_btn.click()
 
-            # 等待5秒让数据加载
-            print("⏳ 等待8秒让数据加载...")
-            page.wait_for_timeout(8000)
+            print("⏳ 等待5秒让数据加载...")
+            page.wait_for_timeout(5000)
 
             # 等待 Total 统计标签出现
             print("⏳ 等待查询结果统计...")
@@ -199,7 +211,6 @@ def fetch_fpms_data(headless=False, target_date_str=None):
             total_text = total_label.text_content().strip()
             print(f"📊 统计信息: {total_text}")
 
-            # 根据记录数返回消息
             if "Total 0 records" in total_text:
                 print("✅ 今日无 Amount Loss 记录")
                 return "no amount loss record found for today"
@@ -230,7 +241,6 @@ def fetch_fpms_data(headless=False, target_date_str=None):
 if __name__ == "__main__":
     headless = "--headless" in sys.argv
     target_date = None
-    # 解析命令行参数，忽略以 "--" 开头的选项
     for arg in sys.argv[1:]:
         if not arg.startswith("--"):
             target_date = arg
