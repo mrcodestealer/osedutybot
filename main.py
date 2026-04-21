@@ -179,9 +179,9 @@ def run_amountloss_check(chat_id, date_str=None):
     try:
         result = fetch_fpms_data(headless=True, target_date_str=date_str)
         if result == "no amount loss record found for today":
-            reply = "✅ 今日无 Amount Loss 记录"
+            reply = "✅ Today no Amount Loss records found"
         else:
-            reply = "⚠️ 今日存在 Amount Loss 记录，请检查！"
+            reply = "⚠️ As checked Amount Loss records found, kindly check!!"
         send_message(chat_id, reply)
     except Exception as e:
         error_msg = f"❌ Amount Loss 检查失败: {str(e)}"
@@ -1159,7 +1159,7 @@ def lark_webhook():
     elif clean_text.lower().startswith('/al'):
             parts = clean_text.split()
             date_param = None
-            if len(parts) > 1:
+            if len(parts) > 1:  
                 date_param = parts[1]   # 如 "16/04"
             send_message(chat_id, "⏳ 正在查询 Amount Loss，请稍候...")
             threading.Thread(target=run_amountloss_check, args=(chat_id, date_param), daemon=True).start()
