@@ -52,6 +52,7 @@ import ecsre
 
 import update
 import otpp1
+import amountloss
 
 # ================= CONFIGURATION =================
 APP_ID = os.getenv("APP_ID")
@@ -167,7 +168,7 @@ def monthly_duty_check():
 def run_amountloss_check(chat_id, date_str=None):
     """在后台线程中执行 amount loss 检查，并将结果发送到指定 chat_id"""
     try:
-        from fpms_fetcher import fetch_fpms_data
+        from amountloss import fetch_fpms_data
     except ImportError as e:
         send_message(
             chat_id,
@@ -185,6 +186,12 @@ def run_amountloss_check(chat_id, date_str=None):
     except Exception as e:
         error_msg = f"❌ Amount Loss 检查失败: {str(e)}"
         send_message(chat_id, error_msg)
+        
+def scheduled_amountloss_check():
+    # 目标群聊 ID（例如你的 DUTY_CHAT_ID 或 OSE_BOT_GROUP）
+    target_chat_id = DUTY_CHAT_ID   # 或直接写死群 ID
+    # 默认查询昨天至今天的数据（相当于不带参数的 /al）
+    run_amountloss_check(target_chat_id, date_str=None)
 
 # ================= P0 交互确认相关 =================
 pending_p0_confirmation = {}  # key: sender_id -> {"timestamp": datetime, "original_text": str}
@@ -478,10 +485,10 @@ def evening_reminder():
     msg = mention_line + "\n" + msg
     send_shift_reminder(DUTY_CHAT_ID, msg)
 
-def amountloss():
-    mention_line = f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>'
-    msg = mention_line + "\n" + "Hi Morning Shift kindly reminder to do Amount Loss~"
-    send_shift_reminder(DUTY_CHAT_ID, msg)
+# def amountloss():
+#     mention_line = f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>'
+#     msg = mention_line + "\n" + "Hi Morning Shift kindly reminder to do Amount Loss~"
+#     send_shift_reminder(DUTY_CHAT_ID, msg)
     
 def myoseweeklymeeting():
     mention_line = f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>'
@@ -500,7 +507,7 @@ def clean_pending_p1_confirmations():
 scheduler = BackgroundScheduler()
 scheduler.add_job(func=morning_reminder, trigger="cron", hour=7, minute=00)
 scheduler.add_job(func=evening_reminder, trigger="cron", hour=19, minute=0)
-scheduler.add_job(func=amountloss, trigger="cron", hour=9, minute=0)
+scheduler.add_job(func=scheduled_amountloss_check,trigger="cron",hour=9,minute=0)
 scheduler.add_job(func=myoseweeklymeeting, trigger="cron", day_of_week='tue', hour=17, minute=0)
 scheduler.add_job(func=monthly_duty_check, trigger="cron", day=1, hour=0, minute=0)
 scheduler.add_job(func=clean_pending_p0_confirmations, trigger="interval", minutes=5)
