@@ -23,6 +23,7 @@ COOKIES_FILE = "cookies.json"
 
 NAV_TIMEOUT_MS = 90_000
 LOGIN_FIELD_TIMEOUT_MS = 90_000
+MENU_TIMEOUT_MS = 60_000
 
 CHROMIUM_ARGS = ["--disable-blink-features=AutomationControlled"]
 
@@ -55,7 +56,7 @@ def _do_full_login(page, context, save_state_only=False):
     except PlaywrightTimeout:
         pass
 
-    user_loc = page.locator("#username, input[name='username'], input[type='text']").first
+    user_loc = page.locator("#username, input[name='username'], input[formcontrolname='username']").first
     user_loc.wait_for(state="visible", timeout=LOGIN_FIELD_TIMEOUT_MS)
     user_loc.fill(USERNAME)
     page.locator("#password, input[name='password'], input[type='password']").first.fill(PASSWORD)
@@ -132,17 +133,36 @@ def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
             page.wait_for_timeout(500)
 
             # ---------- 以下为通用查询流程 ----------
+            try:
+                page.wait_for_load_state("networkidle", timeout=45000)
+            except PlaywrightTimeout:
+                pass
+            page.wait_for_timeout(2000)
+
+            # 文本可能在 panel-heading 内的 label/h4 上，:has-text 对 div 可能匹配不到
             print("📂 展开 Miscellaneous Report 菜单...")
-            misc_heading = page.locator('div.panel-heading:has-text("Miscellaneous Report")')
-            misc_heading.wait_for(state="visible", timeout=15000)
+            misc_xpath = (
+                '//div[contains(@class, "panel-heading")]//label[contains(text(), "Miscellaneous Report")]'
+                ' | //h4[contains(text(), "Miscellaneous Report")]'
+                ' | //div[contains(@class, "panel-heading")]//*[contains(normalize-space(.), "Miscellaneous Report")]'
+            )
+            misc_heading = page.locator(f"xpath={misc_xpath}").first
+            misc_heading.wait_for(state="visible", timeout=MENU_TIMEOUT_MS)
+            misc_heading.scroll_into_view_if_needed()
             misc_heading.click()
+            page.wait_for_timeout(1000)
 
             print("🖱️ 点击 CREDIT_LOST_FIX_PROPOSAL_REPORT...")
-            report_link = page.locator('li:has-text("CREDIT_LOST_FIX_PROPOSAL_REPORT")')
-            report_link.wait_for(state="visible", timeout=10000)
+            report_xpath = (
+                '//li[contains(text(), "CREDIT_LOST_FIX_PROPOSAL_REPORT")]'
+                ' | //a[contains(text(), "CREDIT_LOST_FIX_PROPOSAL_REPORT")]'
+            )
+            report_link = page.locator(f"xpath={report_xpath}").first
+            report_link.wait_for(state="visible", timeout=MENU_TIMEOUT_MS)
+            report_link.scroll_into_view_if_needed()
             report_link.click()
 
-            page.wait_for_selector("#creditLostFixProposalReportQuery", timeout=15000)
+            page.wait_for_selector("#creditLostFixProposalReportQuery", timeout=MENU_TIMEOUT_MS)
             print("✅ 进入报表查询界面")
 
             def set_select_value(selector, value, multiple=False):
