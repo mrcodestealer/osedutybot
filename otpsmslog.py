@@ -4,8 +4,11 @@ OTP / SMS 相关：自动登录 SMS Gateway CP，进入 Messages，筛选 OTP �
 站点: https://sms-web.platform10.me/
 
 用法：
-  python otpsmslog.py              # 有界面
-  python otpsmslog.py --headless   # 无头
+  python otpsmslog.py                    # 有界面（默认 /smsfail 风格筛选）
+  python otpsmslog.py --headless
+  python otpsmslog.py 1044737626         # 按 Player ID 查（Status/Provider 留空）
+  python otpsmslog.py 7052472, 1069954565, 1040662396   # 多个 ID：逗号 / 空格 / 换行 分隔
+  python otpsmslog.py 7052472 1069954565 1040662396 --headless
 """
 import re
 import sys
@@ -591,6 +594,59 @@ def _fill_player_id_filter(page, text: str):
     raise RuntimeError("Player ID filter input not found on Message page")
 
 
+def parse_player_ids(text) -> list[str]:
+    """
+    从一段文本解析多个 Player ID：逗号、分号、空白、换行 均可作分隔；去首尾空白；保序去重。
+    """
+    if text is None:
+        return []
+    s = str(text).strip()
+    if not s:
+        return []
+    parts = re.split(r"[\s,;]+", s)
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in parts:
+        t = p.strip().strip(",").strip()
+        if not t:
+            continue
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def normalize_player_ids_arg(player_id) -> list[str]:
+    """run_otp_login 用：None → []；str → parse_player_ids；list/tuple → 保序去重 strip。"""
+    if player_id is None:
+        return []
+    if isinstance(player_id, (list, tuple)):
+        seen: set[str] = set()
+        out: list[str] = []
+        for x in player_id:
+            t = (str(x) if x is not None else "").strip()
+            if not t or t in seen:
+                continue
+            seen.add(t)
+            out.append(t)
+        return out
+    return parse_player_ids(str(player_id))
+
+
+def _wait_parse_after_player_search(page, first_search: bool):
+    """Search 之后等待表格、解析；仅首次尝试把分页拉到最大。"""
+    page.wait_for_timeout(2000)
+    if first_search:
+        _set_rows_per_page_max(page)
+    print("→ 等待 3 秒加载表格…")
+    page.wait_for_timeout(3000)
+    try:
+        page.wait_for_selector(".k2table-group .k2table .tbody .tr", timeout=20_000)
+    except PlaywrightTimeout:
+        print("⚠️ 未检测到数据行，仍尝试统计…")
+    return _parse_otp_table(page)
+
+
 def _set_rows_per_page_max(page):
     """分页下拉选最大条数（如 1000/page），便于一页看清。"""
     pag = None
@@ -831,7 +887,11 @@ def format_otp_log_summary_for_player(counter: Counter, player_id: str) -> str:
 
 
 def run_otp_login(headless=False, player_id=None):
-    """登录 SMS 网关，进入 Messages，按条件查询 OTP 并返回统计文案。player_id 若给定则只填 Player ID，不选 Status / Provider Status。"""
+    """
+    登录 SMS 网关，进入 Messages，按条件查询 OTP 并返回统计文案。
+    player_id: None = 默认 /smsfail 筛选；str 或 list = 只填 Player ID（可多 ID，逗号/空格/换行）；
+    多个 ID 时共用一次登录与 Platform/日期/Message，仅每次改 Player ID 再 Search。
+    """
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=headless,
@@ -945,10 +1005,14 @@ def run_otp_login(headless=False, player_id=None):
 
             now = datetime.now()
             date_from = now - timedelta(hours=1)
-            pid_arg = (player_id or "").strip() or None
-            if pid_arg:
+            pid_list = normalize_player_ids_arg(player_id)
+            if pid_list:
+                if len(pid_list) == 1:
+                    pid_desc = f"Player ID={pid_list[0]!r}"
+                else:
+                    pid_desc = f"Player IDs ({len(pid_list)}): {', '.join(pid_list)}"
                 print(
-                    f"→ Filter Platform={DEFAULT_PLATFORM!r}, Player ID={pid_arg!r}, "
+                    f"→ Filter Platform={DEFAULT_PLATFORM!r}, {pid_desc}, "
                     f"Status/Provider Status (leave empty), "
                     f"Date from={date_from.strftime(DATE_DISPLAY_FMT)}, "
                     f"Date to={now.strftime(DATE_DISPLAY_FMT)}, Message={DEFAULT_MESSAGE_FILTER!r}"
@@ -961,35 +1025,41 @@ def run_otp_login(headless=False, player_id=None):
                     f"Date to={now.strftime(DATE_DISPLAY_FMT)}，Message={DEFAULT_MESSAGE_FILTER!r}"
                 )
             _fill_platform(page, DEFAULT_PLATFORM)
-            if not pid_arg:
+            if not pid_list:
                 _fill_multiselect_filter(page, "status", FILTER_STATUS_OPTION, "Status")
                 _fill_multiselect_filter(
                     page, "provider_status", FILTER_PROVIDER_STATUS_OPTION, "Provider Status"
                 )
             _fill_date_range_mmddyyyy_hhmm(page, date_from, now)
             _fill_message_filter(page, DEFAULT_MESSAGE_FILTER)
-            if pid_arg:
-                _fill_player_id_filter(page, pid_arg)
 
-            print("→ 点击 Search")
-            _click_search_messages(page)
-
-            page.wait_for_timeout(2000)
-            _set_rows_per_page_max(page)
-            print("→ 等待 3 秒加载表格…")
-            page.wait_for_timeout(3000)
-
-            try:
-                page.wait_for_selector(".k2table-group .k2table .tbody .tr", timeout=20_000)
-            except PlaywrightTimeout:
-                print("⚠️ 未检测到数据行，仍尝试统计…")
-
-            counter, detail_rows = _parse_otp_table(page)
-            if pid_arg:
-                summary = format_otp_log_summary_for_player(counter, pid_arg)
+            if pid_list:
+                summary_blocks: list[str] = []
+                for i, pid in enumerate(pid_list):
+                    if i > 0:
+                        print(f"→ Same session: change Player ID → {pid!r}, Search again")
+                    _fill_player_id_filter(page, pid)
+                    print("→ 点击 Search")
+                    _click_search_messages(page)
+                    counter, detail_rows = _wait_parse_after_player_search(page, i == 0)
+                    block = format_otp_log_summary_for_player(counter, pid)
+                    summary_blocks.append(block)
+                    print(block)
+                summary = "\n\n".join(summary_blocks)
             else:
+                print("→ 点击 Search")
+                _click_search_messages(page)
+                page.wait_for_timeout(2000)
+                _set_rows_per_page_max(page)
+                print("→ 等待 3 秒加载表格…")
+                page.wait_for_timeout(3000)
+                try:
+                    page.wait_for_selector(".k2table-group .k2table .tbody .tr", timeout=20_000)
+                except PlaywrightTimeout:
+                    print("⚠️ 未检测到数据行，仍尝试统计…")
+                counter, detail_rows = _parse_otp_table(page)
                 summary = format_otp_log_summary(counter, detail_rows=detail_rows)
-            print(summary)
+                print(summary)
 
             final_url = page.url
             print(f"✅ 完成，当前 URL: {final_url}")
@@ -1009,6 +1079,14 @@ def run_otp_login(headless=False, player_id=None):
 
 if __name__ == "__main__":
     headless = "--headless" in sys.argv
-    out = run_otp_login(headless=headless)
+    positional: list[str] = []
+    for a in sys.argv[1:]:
+        if a == "--headless":
+            continue
+        if not a.startswith("-"):
+            positional.append(a)
+    # 多个 argv 用空格拼后再按逗号/空白切分；单参内可含逗号或换行
+    player_id = " ".join(positional).strip() or None
+    out = run_otp_login(headless=headless, player_id=player_id)
     print("\n===== 输出 =====\n")
     print(out)

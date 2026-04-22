@@ -214,24 +214,30 @@ def run_smsfail_check(chat_id):
 
 
 def run_smscheckplayer_check(chat_id, player_id: str):
-    """Background: OTP log for one player (Status/Provider left blank in filter)."""
+    """Background: OTP log for one or more players (Status/Provider left blank); same browser session, only Player ID changes between searches."""
     try:
-        from otpsmslog import run_otp_login
+        from otpsmslog import parse_player_ids, run_otp_login
     except ImportError as e:
         send_message(
             chat_id,
             f"❌ Cannot load otpsmslog (install playwright, etc.): {e}",
         )
         return
-    pid = (player_id or "").strip()
-    if not pid:
+    raw = (player_id or "").strip()
+    if not raw:
         send_message(
             chat_id,
-            "❌ Usage: `/smscheckplayer <player_id>` e.g. `/smscheckplayer 127317237`",
+            "❌ Usage: `/smscheckplayer <player_id(s)>` — one or many, e.g. `/smscheckplayer 127317237` or `/smscheckplayer 7052472, 1069954565, 1040662396`",
+        )
+        return
+    if not parse_player_ids(raw):
+        send_message(
+            chat_id,
+            "❌ No valid player IDs after parsing. Use commas, spaces, or newlines between IDs.",
         )
         return
     try:
-        result = run_otp_login(headless=True, player_id=pid)
+        result = run_otp_login(headless=True, player_id=raw)
         send_message(chat_id, result)
     except Exception as e:
         send_message(chat_id, f"❌ SMS player OTP log check failed: {str(e)}")
@@ -1268,17 +1274,17 @@ def lark_webhook():
         if len(parts) < 2 or not parts[1].strip():
             send_message(
                 chat_id,
-                "❌ Usage: `/smscheckplayer <player_id>` e.g. `/smscheckplayer 127317237`",
+                "❌ Usage: `/smscheckplayer <player_id(s)>` — e.g. `/smscheckplayer 127317237` or `/smscheckplayer 7052472, 1069954565` (commas / spaces / newlines OK)",
             )
             return jsonify({"success": True})
-        pid = parts[1].strip().split()[0]
+        payload = parts[1].strip()
         send_message(
             chat_id,
-            "⏳ Running SMS OTP log check for player, please wait...",
+            "⏳ Running SMS OTP log check for player(s), please wait...",
         )
         threading.Thread(
             target=run_smscheckplayer_check,
-            args=(chat_id, pid),
+            args=(chat_id, payload),
             daemon=True,
         ).start()
         return jsonify({"success": True})
