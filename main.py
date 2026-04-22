@@ -214,7 +214,7 @@ def run_smsfail_check(chat_id):
 
 
 def run_smscheckplayer_check(chat_id, player_id: str):
-    """Background: OTP log for one or more players (Status/Provider left blank); same browser session, only Player ID changes between searches."""
+    """Background: OTP log for one or more players (Status/Provider left blank). Date range: today 00:00—now. At most the 3 newest rows per player with a summary of Status/Provider mix. Same browser session; only Player ID changes between searches."""
     try:
         from otpsmslog import parse_player_ids, run_otp_login
     except ImportError as e:
@@ -227,7 +227,7 @@ def run_smscheckplayer_check(chat_id, player_id: str):
     if not raw:
         send_message(
             chat_id,
-            "❌ Usage: `/smscheckplayer <player_id(s)>` — one or many, e.g. `/smscheckplayer 127317237` or `/smscheckplayer 7052472, 1069954565, 1040662396`",
+            "❌ Usage: `/smscheckplayer <player_id(s)>` — one or many (today 00:00—now, up to 3 newest logs each), e.g. `/smscheckplayer 127317237` or `/smscheckplayer 7052472, 1069954565, 1040662396`",
         )
         return
     if not parse_player_ids(raw):
@@ -1288,13 +1288,13 @@ def lark_webhook():
         if len(parts) < 2 or not parts[1].strip():
             send_message(
                 chat_id,
-                "❌ Usage: `/smscheckplayer <player_id(s)>` — e.g. `/smscheckplayer 127317237` or `/smscheckplayer 7052472, 1069954565` (commas / spaces / newlines OK)",
+                "❌ Usage: `/smscheckplayer <player_id(s)>` — today 00:00—now, up to 3 newest logs per player; e.g. `/smscheckplayer 127317237` or `/smscheckplayer 7052472, 1069954565` (commas / spaces / newlines OK)",
             )
             return jsonify({"success": True})
         payload = parts[1].strip()
         send_message(
             chat_id,
-            "⏳ Running SMS OTP log check for player(s), please wait...",
+            "⏳ Running SMS OTP log check for player(s) (today 00:00—now, up to 3 newest rows each), please wait...",
         )
         threading.Thread(
             target=run_smscheckplayer_check,

@@ -6,7 +6,7 @@ OTP / SMS 相关：自动登录 SMS Gateway CP，进入 Messages，筛选 OTP �
 用法：
   python otpsmslog.py                    # 有界面（默认 /smsfail 风格筛选）
   python otpsmslog.py --headless
-  python otpsmslog.py 1044737626         # 按 Player ID 查（Status/Provider 留空）
+  python otpsmslog.py 1044737626         # 按 Player ID：当天 00:00—此刻，最多展示最新 3 条
   python otpsmslog.py 7052472, 1069954565, 1040662396   # 多个 ID：逗号 / 空格 / 换行 分隔
   python otpsmslog.py 7052472 1069954565 1040662396 --headless
 """
@@ -29,6 +29,8 @@ DEFAULT_MESSAGE_FILTER = "OTP"
 FILTER_STATUS_OPTION = "All"
 FILTER_PROVIDER_STATUS_OPTION = "Failed"
 DATE_DISPLAY_FMT = "%m-%d-%Y %H:%M"
+# /smscheckplayer：只展示每名玩家表格里**最新**的几条（时间降序，与 _parse_otp_table 一致）
+PLAYER_OTP_DISPLAY_MAX = 3
 
 NAV_TIMEOUT_MS = 90_000
 FIELD_TIMEOUT_MS = 60_000
@@ -1187,6 +1189,32 @@ def _read_logs_from_otp_row(page, row) -> str:
     return body or "(empty logs)"
 
 
+def _summary_line_for_otp_player_logs(st_pv_pairs: list[tuple[str, str]]) -> str:
+    """
+    English one-liner for the **displayed** rows only (max PLAYER_OTP_DISPLAY_MAX):
+    counts per Status / Provider pair, e.g. ``Success / Success ×2, Pending / Success``.
+    """
+    if not st_pv_pairs:
+        return (
+            f"Summary: no rows (today 00:00 — now, up to {PLAYER_OTP_DISPLAY_MAX} most recent)."
+        )
+    pairs_norm = [
+        ((st or "").strip() or "—", (pv or "").strip() or "—") for st, pv in st_pv_pairs
+    ]
+    c = Counter(pairs_norm)
+    n = len(st_pv_pairs)
+    parts: list[str] = []
+    for (st_d, pv_d), k in sorted(c.items(), key=lambda x: (-x[1], x[0][0].lower(), x[0][1].lower())):
+        if k > 1:
+            parts.append(f"{st_d} / {pv_d} ×{k}")
+        else:
+            parts.append(f"{st_d} / {pv_d}")
+    return (
+        f"Summary: {n} most recent log(s) (max {PLAYER_OTP_DISPLAY_MAX}) — "
+        + ", ".join(parts)
+    )
+
+
 def _emoji_for_status_line(st: str, pv: str) -> str:
     """Leading emoji for the Status / Provider summary line (plaintext + card)."""
     su = (st or "").strip().upper()
@@ -1207,10 +1235,14 @@ def _trunc_log_for_card(s: str, max_len: int = 4500) -> str:
     return s[: max_len - 25] + "\n… (truncated)"
 
 
-def _format_player_otp_plaintext(player_id: str, row_parts: list[dict]) -> str:
+def _format_player_otp_plaintext(
+    player_id: str, row_parts: list[dict], *, summary_line=None
+) -> str:
     """Plain text with emojis (CLI / fallback if Lark card send fails)."""
     pid = (player_id or "").strip()
     lines = [f"📇 As checked OTP logs for player {pid}:"]
+    if summary_line:
+        lines.append(summary_line)
     if not row_parts:
         lines.append("(No rows)")
         return "\n".join(lines)
@@ -1218,7 +1250,7 @@ def _format_player_otp_plaintext(player_id: str, row_parts: list[dict]) -> str:
         em = _emoji_for_status_line(rp["st"], rp["pv"])
         lines.append("")
         lines.append(f"🆔 Message ID : {rp['mid']}")
-        lines.append(f"{em} Status {rp['st']} & Provider Status {rp['pv']} : {rp['cnt']}")
+        lines.append(f"{em} Status {rp['st']} & Provider Status {rp['pv']}")
         lines.append("📋 Logs :")
         lines.append(rp["log"])
     return "\n".join(lines)
@@ -1235,7 +1267,9 @@ def _lark_card_shell(elements: list, header_title: str) -> dict:
     }
 
 
-def _build_lark_card_player_report(player_id: str, row_parts: list[dict]) -> dict:
+def _build_lark_card_player_report(
+    player_id: str, row_parts: list[dict], *, summary_line=None
+) -> dict:
     """Lark interactive v1 card: Message card layout with emoji-prefixed fields."""
     pid = (player_id or "").strip()
     elements: list = [
@@ -1247,6 +1281,10 @@ def _build_lark_card_player_report(player_id: str, row_parts: list[dict]) -> dic
             },
         }
     ]
+    if summary_line:
+        elements.append(
+            {"tag": "div", "text": {"tag": "lark_md", "content": summary_line}}
+        )
     if not row_parts:
         elements.append(
             {"tag": "div", "text": {"tag": "plain_text", "content": "(No rows)"}}
@@ -1257,13 +1295,12 @@ def _build_lark_card_player_report(player_id: str, row_parts: list[dict]) -> dic
         if idx:
             elements.append({"tag": "hr"})
         mid = rp["mid"]
-        cnt = rp["cnt"]
         st_s, pv_s = rp["st"], rp["pv"]
         em = _emoji_for_status_line(st_s, pv_s)
         log_b = _trunc_log_for_card(rp["log"])
         md_head = (
             f"🆔 **Message ID** : `{mid}`\n"
-            f"{em} **Status** {st_s} & **Provider Status** {pv_s} : **{cnt}**"
+            f"{em} **Status** {st_s} & **Provider Status** {pv_s}"
         )
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": md_head}})
         elements.append(
@@ -1291,31 +1328,26 @@ def _merge_lark_otp_cards(cards: list[dict]) -> dict:
 
 def format_otp_log_summary_for_player(page, player_id: str, detail_rows: list) -> tuple[str, dict]:
     """
-    Per-player OTP report: Message ID / Status & Provider / Logs with emojis;
+    Per-player OTP report: up to PLAYER_OTP_DISPLAY_MAX **most recent** rows (newest first),
+    Message ID / Status & Provider / Logs with emojis;
     returns (plain_text_for_CLI, Lark_interactive_card_dict).
     detail_rows: [msg_id, player_id, status, provider_status, time] from _parse_otp_table.
     """
     pid = (player_id or "").strip()
     items = [x for x in (detail_rows or []) if isinstance(x, (list, tuple)) and len(x) >= 5]
+    items = items[:PLAYER_OTP_DISPLAY_MAX]
+    summary_line = _summary_line_for_otp_player_logs([(it[2], it[3]) for it in items])
     if not items:
         row_parts: list[dict] = []
-        text = _format_player_otp_plaintext(pid, row_parts)
-        card = _build_lark_card_player_report(pid, row_parts)
+        text = _format_player_otp_plaintext(pid, row_parts, summary_line=summary_line)
+        card = _build_lark_card_player_report(pid, row_parts, summary_line=summary_line)
         return text, card
-
-    bucket_counts = Counter()
-    for it in items:
-        st = (it[2] or "").strip()
-        pv = (it[3] or "").strip()
-        su, pu = st.upper(), pv.upper()
-        bucket_counts[(su, pu)] += 1
 
     row_parts: list[dict] = []
     for it in items:
         msg_id, _ply, st, pv, _tm = it[0], it[1], it[2], it[3], it[4]
         st_s = (st or "").strip()
         pv_s = (pv or "").strip()
-        cnt = bucket_counts[(st_s.upper(), pv_s.upper())]
         mid = " ".join(str(msg_id).split())
 
         row = _locate_otp_row_by_message_id(page, mid)
@@ -1327,19 +1359,18 @@ def format_otp_log_summary_for_player(page, player_id: str, detail_rows: list) -
             except Exception as e:
                 log_body = f"(Logs read failed: {e})"
 
-        row_parts.append(
-            {"mid": mid, "st": st_s, "pv": pv_s, "cnt": cnt, "log": log_body}
-        )
+        row_parts.append({"mid": mid, "st": st_s, "pv": pv_s, "log": log_body})
 
-    text = _format_player_otp_plaintext(pid, row_parts)
-    card = _build_lark_card_player_report(pid, row_parts)
+    text = _format_player_otp_plaintext(pid, row_parts, summary_line=summary_line)
+    card = _build_lark_card_player_report(pid, row_parts, summary_line=summary_line)
     return text, card
 
 
 def run_otp_login(headless=False, player_id=None):
     """
     登录 SMS 网关，进入 Messages，按条件查询 OTP 并返回统计文案。
-    player_id: None = 默认 /smsfail 筛选；str 或 list = 只填 Player ID（可多 ID，逗号/空格/换行）；
+    player_id: None = 默认 /smsfail 筛选（最近 1 小时）；str 或 list = 只填 Player ID（可多 ID，逗号/空格/换行）；
+    有 player_id 时日期为**当天 00:00:00 至当前**，每名玩家表格结果只取**最新 3 条**并带 Status/Provider 摘要行。
     多个 ID 时共用一次登录与 Platform/日期/Message，仅每次改 Player ID 再 Search。
 
     返回值：无 player_id 时为 str；有 player_id 时为 dict：
@@ -1457,9 +1488,9 @@ def run_otp_login(headless=False, player_id=None):
             page.wait_for_selector(".main-content-wrap", state="visible", timeout=15_000)
 
             now = datetime.now()
-            date_from = now - timedelta(hours=1)
             pid_list = normalize_player_ids_arg(player_id)
             if pid_list:
+                date_from = datetime(now.year, now.month, now.day, 0, 0, 0)
                 if len(pid_list) == 1:
                     pid_desc = f"Player ID={pid_list[0]!r}"
                 else:
@@ -1467,10 +1498,13 @@ def run_otp_login(headless=False, player_id=None):
                 print(
                     f"→ Filter Platform={DEFAULT_PLATFORM!r}, {pid_desc}, "
                     f"Status/Provider Status (leave empty), "
-                    f"Date from={date_from.strftime(DATE_DISPLAY_FMT)}, "
-                    f"Date to={now.strftime(DATE_DISPLAY_FMT)}, Message={DEFAULT_MESSAGE_FILTER!r}"
+                    f"Date from={date_from.strftime(DATE_DISPLAY_FMT)} (today 00:00), "
+                    f"Date to={now.strftime(DATE_DISPLAY_FMT)} (now), "
+                    f"show up to {PLAYER_OTP_DISPLAY_MAX} newest rows, "
+                    f"Message={DEFAULT_MESSAGE_FILTER!r}"
                 )
             else:
+                date_from = now - timedelta(hours=1)
                 print(
                     f"→ 筛选 Platform={DEFAULT_PLATFORM!r}，Status={FILTER_STATUS_OPTION!r}，"
                     f"Provider Status={FILTER_PROVIDER_STATUS_OPTION!r}，"
