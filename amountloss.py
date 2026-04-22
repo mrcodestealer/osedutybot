@@ -125,37 +125,16 @@ def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
                 page.keyboard.press("Escape")
                 page.wait_for_timeout(1000)
 
-            # 等侧栏 Angular 渲染完（间歇超时多因点太早或 :has-text 匹配不到子节点文案）
-            page.evaluate("() => window.scrollTo(0, 0)")
-            try:
-                page.wait_for_load_state("networkidle", timeout=45000)
-            except PlaywrightTimeout:
-                pass
-            page.wait_for_timeout(2000)
-
-            # ---------- 点击菜单进入目标报表（XPath：文案常在 label/h4 内）----------
+            # ---------- 点击菜单进入目标报表 ----------
             print("📂 展开 Miscellaneous Report 菜单...")
-            misc_xpath = (
-                '//div[contains(@class, "panel-heading")]//label[contains(., "Miscellaneous Report")]'
-                ' | //h4[contains(., "Miscellaneous Report")]'
-                ' | //div[contains(@class, "panel-heading")]//*[contains(normalize-space(.), "Miscellaneous Report")]'
-            )
-            misc_heading = page.locator(f"xpath={misc_xpath}").first
-            misc_heading.wait_for(state="visible", timeout=MENU_TIMEOUT_MS)
-            misc_heading.scroll_into_view_if_needed()
-            misc_heading.click(timeout=15000)
-            page.wait_for_timeout(1000)
+            misc_heading = page.locator('div.panel-heading:has-text("Miscellaneous Report")')
+            misc_heading.wait_for(state="visible", timeout=10000)
+            misc_heading.click()
 
             print("🖱️ 点击 CREDIT_LOST_FIX_PROPOSAL_REPORT...")
-            report_xpath = (
-                '//li[contains(., "CREDIT_LOST_FIX_PROPOSAL_REPORT")]'
-                ' | //a[contains(., "CREDIT_LOST_FIX_PROPOSAL_REPORT")]'
-                ' | //span[contains(., "CREDIT_LOST_FIX")]'
-            )
-            report_link = page.locator(f"xpath={report_xpath}").first
-            report_link.wait_for(state="visible", timeout=MENU_TIMEOUT_MS)
-            report_link.scroll_into_view_if_needed()
-            report_link.click(timeout=15000)
+            report_link = page.locator('li:has-text("CREDIT_LOST_FIX_PROPOSAL_REPORT")')
+            report_link.wait_for(state="visible", timeout=10000)
+            report_link.click()
 
             # 等待报表查询区域加载
             page.wait_for_selector("#creditLostFixProposalReportQuery", timeout=15000)
@@ -279,10 +258,6 @@ def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
                 pass
             raise
         finally:
-            try:
-                context.close()
-            except Exception:
-                pass
             browser.close()
 
 if __name__ == "__main__":
