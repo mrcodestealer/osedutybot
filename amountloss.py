@@ -5,6 +5,7 @@ FPMS Amount Loss 查询（供 main.py /al 调用）
   python3 amountloss.py
   python3 amountloss.py -headless
 """
+import platform
 import pyotp
 import sys
 from datetime import datetime, timedelta
@@ -16,6 +17,16 @@ PASSWORD = "8c0fa1"
 TOTP_SECRET = "MNYG63JQGEYTMOJTHE4DMMBTGQYDIOI"
 TABLE_SELECTOR = "#creditLostFixSummaryTable tbody tr"
 REPORT_URL = "https://mgnt-webserver.casinoplus.top/report"
+
+MENU_TIMEOUT_MS = 60_000
+CHROMIUM_ARGS = ["--disable-blink-features=AutomationControlled"]
+if platform.system() == "Linux":
+    CHROMIUM_ARGS.append("--disable-dev-shm-usage")
+
+DESKTOP_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 
 
 def _amount_loss_result_summary(page, total_label_text: str) -> str:
@@ -51,8 +62,19 @@ def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
     """
     _ = save_state  # 保留与旧版 fpms_fetcher 相同的调用约定
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless, slow_mo=100 if not headless else 0)
-        page = browser.new_page()
+        browser = p.chromium.launch(
+            headless=headless,
+            slow_mo=100 if not headless else 0,
+            args=CHROMIUM_ARGS,
+        )
+        context = browser.new_context(
+            viewport={"width": 1920, "height": 1080},
+            user_agent=DESKTOP_UA,
+            device_scale_factor=1,
+            is_mobile=False,
+            has_touch=False,
+        )
+        page = context.new_page()
 
         try:
             # ---------- 登录部分 ----------
@@ -103,16 +125,37 @@ def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
                 page.keyboard.press("Escape")
                 page.wait_for_timeout(1000)
 
-            # ---------- 点击菜单进入目标报表 ----------
+            # 等侧栏 Angular 渲染完（间歇超时多因点太早或 :has-text 匹配不到子节点文案）
+            page.evaluate("() => window.scrollTo(0, 0)")
+            try:
+                page.wait_for_load_state("networkidle", timeout=45000)
+            except PlaywrightTimeout:
+                pass
+            page.wait_for_timeout(2000)
+
+            # ---------- 点击菜单进入目标报表（XPath：文案常在 label/h4 内）----------
             print("📂 展开 Miscellaneous Report 菜单...")
-            misc_heading = page.locator('div.panel-heading:has-text("Miscellaneous Report")')
-            misc_heading.wait_for(state="visible", timeout=10000)
-            misc_heading.click()
+            misc_xpath = (
+                '//div[contains(@class, "panel-heading")]//label[contains(., "Miscellaneous Report")]'
+                ' | //h4[contains(., "Miscellaneous Report")]'
+                ' | //div[contains(@class, "panel-heading")]//*[contains(normalize-space(.), "Miscellaneous Report")]'
+            )
+            misc_heading = page.locator(f"xpath={misc_xpath}").first
+            misc_heading.wait_for(state="visible", timeout=MENU_TIMEOUT_MS)
+            misc_heading.scroll_into_view_if_needed()
+            misc_heading.click(timeout=15000)
+            page.wait_for_timeout(1000)
 
             print("🖱️ 点击 CREDIT_LOST_FIX_PROPOSAL_REPORT...")
-            report_link = page.locator('li:has-text("CREDIT_LOST_FIX_PROPOSAL_REPORT")')
-            report_link.wait_for(state="visible", timeout=10000)
-            report_link.click()
+            report_xpath = (
+                '//li[contains(., "CREDIT_LOST_FIX_PROPOSAL_REPORT")]'
+                ' | //a[contains(., "CREDIT_LOST_FIX_PROPOSAL_REPORT")]'
+                ' | //span[contains(., "CREDIT_LOST_FIX")]'
+            )
+            report_link = page.locator(f"xpath={report_xpath}").first
+            report_link.wait_for(state="visible", timeout=MENU_TIMEOUT_MS)
+            report_link.scroll_into_view_if_needed()
+            report_link.click(timeout=15000)
 
             # 等待报表查询区域加载
             page.wait_for_selector("#creditLostFixProposalReportQuery", timeout=15000)
@@ -236,6 +279,10 @@ def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
                 pass
             raise
         finally:
+            try:
+                context.close()
+            except Exception:
+                pass
             browser.close()
 
 if __name__ == "__main__":
