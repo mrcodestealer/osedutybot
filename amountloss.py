@@ -56,7 +56,9 @@ def _amount_loss_result_summary(page, total_label_text: str) -> str:
 def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
     """
     main.py 调用: fetch_fpms_data(headless=True, target_date_str=date_str)
-    target_date_str: 可选，格式 DD/MM，对应查询结束日；未传则用「昨天 00:00 ~ 今天 00:00」。
+    target_date_str: 可选，格式 DD/MM。
+      - 未传: Start = 昨天 00:00:00，End = 今天 00:00:00
+      - 例如 16/04: Start = 当年 16/04 00:00:00，End = 17/04 00:00:00
     save_state: 兼容参数，当前脚本未使用。
     返回: 一行摘要字符串，例如 Total 0 records / Search time: 0.205 seconds
     """
@@ -150,14 +152,17 @@ def fetch_fpms_data(headless=False, target_date_str=None, save_state=False):
             page.locator('.bootstrap-select.open .bs-actionsbox .bs-select-all').click()
             page.keyboard.press("Escape")
 
-            # 2. 日期：与 fpms 一致 — end = 目标日 00:00，start = 前一日 00:00
-            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            # 2. 日期：默认 昨天 00:00 ~ 今天 00:00；DD/MM 则为 该日 00:00 ~ 次日 00:00
+            now = datetime.now()
+            today_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
             if target_date_str:
-                day, month = map(int, target_date_str.split("/"))
-                end_date = datetime(today.year, month, day)
+                part = target_date_str.strip()
+                day, month = map(int, part.split("/"))
+                start_date = datetime(now.year, month, day)
+                end_date = start_date + timedelta(days=1)
             else:
-                end_date = today
-            start_date = end_date - timedelta(days=1)
+                end_date = today_midnight
+                start_date = end_date - timedelta(days=1)
             start_str = start_date.strftime("%Y/%m/%d 00:00:00")
             end_str = end_date.strftime("%Y/%m/%d 00:00:00")
             print(f"📅 设置日期范围：{start_str} ~ {end_str}")

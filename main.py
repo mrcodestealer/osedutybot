@@ -1208,10 +1208,11 @@ def lark_webhook():
         send_message(chat_id, reply)
         return jsonify({"success": True})
     elif clean_text.lower().startswith('/al'):
+            # /al → 昨天 00:00 ~ 今天 00:00；/al DD/MM → 该日 00:00 ~ 次日 00:00（见 amountloss.fetch_fpms_data）
             parts = clean_text.split()
             date_param = None
-            if len(parts) > 1:  
-                date_param = parts[1]   # 如 "16/04"
+            if len(parts) > 1:
+                date_param = parts[1]  # 如 "16/04"
             send_message(chat_id, "⏳ Checking Amount Loss，please wait...")
             threading.Thread(target=run_amountloss_check, args=(chat_id, date_param), daemon=True).start()
             return jsonify({"success": True})
