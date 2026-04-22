@@ -165,8 +165,12 @@ def monthly_duty_check():
 
 # ================= Amount Loss =================
 
+AMOUNT_LOSS_MAX_ATTEMPTS = 2
+AMOUNT_LOSS_RETRY_NOTICE = "Error occurred... Auto retry Please wait..."
+
+
 def run_amountloss_check(chat_id, date_str=None):
-    """在后台线程中执行 amount loss 检查，并将结果发送到指定 chat_id"""
+    """在后台线程中执行 amount loss 检查，并将结果发送到指定 chat_id（失败自动重跑一轮）"""
     try:
         from amountloss import fetch_fpms_data
     except ImportError as e:
@@ -176,15 +180,21 @@ def run_amountloss_check(chat_id, date_str=None):
             f" 请把与开发环境一致的 fpms_fetcher.py 部署到服务器，并安装 playwright。\n{str(e)}",
         )
         return
-    try:
-        result = fetch_fpms_data(headless=True, target_date_str=date_str)
-        # amountloss.fetch_fpms_data 返回页面摘要，例如：
-        # Total 0 records / Search time: 0.205 seconds
-        send_message(chat_id, result)
-    except Exception as e:
-        error_msg = f"❌ Amount Loss 检查失败: {str(e)}"
-        send_message(chat_id, error_msg)
-        
+
+    for attempt in range(1, AMOUNT_LOSS_MAX_ATTEMPTS + 1):
+        try:
+            result = fetch_fpms_data(headless=True, target_date_str=date_str)
+            send_message(chat_id, result)
+            return
+        except Exception as e:
+            if attempt < AMOUNT_LOSS_MAX_ATTEMPTS:
+                send_message(chat_id, AMOUNT_LOSS_RETRY_NOTICE)
+                print(f"[Amount Loss] attempt {attempt} failed: {e!r}, auto-retrying...")
+            else:
+                send_message(chat_id, f"❌ Amount Loss 检查失败: {str(e)}")
+                print(f"[Amount Loss] failed after {AMOUNT_LOSS_MAX_ATTEMPTS} attempts: {e!r}")
+
+
 def scheduled_amountloss_check():
     """
     每日 9:00：在 DUTY_CHAT_ID 群 @TARGET_USER_OPEN_ID，
@@ -194,8 +204,6 @@ def scheduled_amountloss_check():
     target_chat_id = DUTY_CHAT_ID
     try:
         from amountloss import fetch_fpms_data
-
-        result = fetch_fpms_data(headless=True, target_date_str=None)
     except ImportError as e:
         send_message(
             target_chat_id,
@@ -203,13 +211,29 @@ def scheduled_amountloss_check():
             f"❌ 无法加载 amountloss 模块: {str(e)}",
         )
         return
-    except Exception as e:
-        send_message(
-            target_chat_id,
-            f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>\n'
-            f"❌ Amount Loss 检查失败: {str(e)}",
-        )
-        print(f"scheduled_amountloss_check error: {e}")
+
+    result = None
+    for attempt in range(1, AMOUNT_LOSS_MAX_ATTEMPTS + 1):
+        try:
+            result = fetch_fpms_data(headless=True, target_date_str=None)
+            break
+        except Exception as e:
+            if attempt < AMOUNT_LOSS_MAX_ATTEMPTS:
+                send_message(
+                    target_chat_id,
+                    f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>\n{AMOUNT_LOSS_RETRY_NOTICE}',
+                )
+                print(f"[scheduled_amountloss_check] attempt {attempt} failed: {e!r}, auto-retrying...")
+            else:
+                send_message(
+                    target_chat_id,
+                    f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>\n'
+                    f"❌ Amount Loss 检查失败: {str(e)}",
+                )
+                print(f"scheduled_amountloss_check failed after {AMOUNT_LOSS_MAX_ATTEMPTS} attempts: {e}")
+                return
+
+    if result is None:
         return
 
     line = (result or "").strip()
