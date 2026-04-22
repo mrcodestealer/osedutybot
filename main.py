@@ -238,7 +238,16 @@ def run_smscheckplayer_check(chat_id, player_id: str):
         return
     try:
         result = run_otp_login(headless=True, player_id=raw)
-        send_message(chat_id, result)
+        if isinstance(result, dict) and result.get("lark_card"):
+            card_json = json.dumps(result["lark_card"])
+            resp = send_message(chat_id, card_json, msg_type="interactive")
+            if resp.get("code") != 0:
+                send_message(chat_id, result.get("text") or str(result))
+        else:
+            send_message(
+                chat_id,
+                result if isinstance(result, str) else (result.get("text") or str(result)),
+            )
     except Exception as e:
         send_message(chat_id, f"❌ SMS player OTP log check failed: {str(e)}")
         print(f"[SMS check player] error: {e!r}")
@@ -475,10 +484,15 @@ def send_message(chat_id, text, msg_type="text", mentions=None):
     token = get_tenant_access_token()
     url = "https://open.larksuite.com/open-apis/im/v1/messages"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    if msg_type == "interactive":
+        # Lark: content is the interactive card JSON string (not wrapped in {"text": ...}).
+        content = text if isinstance(text, str) else json.dumps(text)
+    else:
+        content = json.dumps({"text": text})
     body = {
         "receive_id": chat_id,
         "msg_type": msg_type,
-        "content": json.dumps({"text": text}),
+        "content": content,
         "user_id": BOT_OPEN_ID
     }
     if mentions:

@@ -1187,20 +1187,121 @@ def _read_logs_from_otp_row(page, row) -> str:
     return body or "(empty logs)"
 
 
-def format_otp_log_summary_for_player(page, player_id: str, detail_rows: list) -> str:
+def _emoji_for_status_line(st: str, pv: str) -> str:
+    """Leading emoji for the Status / Provider summary line (plaintext + card)."""
+    su = (st or "").strip().upper()
+    pu = (pv or "").strip().upper()
+    if su == "FAILED" or pu == "FAILED":
+        return "❌"
+    if su == "PENDING" or pu == "PENDING":
+        return "⏳"
+    if su == "SUCCESS" and pu == "SUCCESS":
+        return "✅"
+    return "📊"
+
+
+def _trunc_log_for_card(s: str, max_len: int = 4500) -> str:
+    s = s or ""
+    if len(s) <= max_len:
+        return s
+    return s[: max_len - 25] + "\n… (truncated)"
+
+
+def _format_player_otp_plaintext(player_id: str, row_parts: list[dict]) -> str:
+    """Plain text with emojis (CLI / fallback if Lark card send fails)."""
+    pid = (player_id or "").strip()
+    lines = [f"📇 As checked OTP logs for player {pid}:"]
+    if not row_parts:
+        lines.append("(No rows)")
+        return "\n".join(lines)
+    for rp in row_parts:
+        em = _emoji_for_status_line(rp["st"], rp["pv"])
+        lines.append("")
+        lines.append(f"🆔 Message ID : {rp['mid']}")
+        lines.append(f"{em} Status {rp['st']} & Provider Status {rp['pv']} : {rp['cnt']}")
+        lines.append("📋 Logs :")
+        lines.append(rp["log"])
+    return "\n".join(lines)
+
+
+def _lark_card_shell(elements: list, header_title: str) -> dict:
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": (header_title or "OTP logs")[:200]},
+        },
+        "elements": elements,
+    }
+
+
+def _build_lark_card_player_report(player_id: str, row_parts: list[dict]) -> dict:
+    """Lark interactive v1 card: Message card layout with emoji-prefixed fields."""
+    pid = (player_id or "").strip()
+    elements: list = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"📇 **As checked OTP logs for player** `{pid}`",
+            },
+        }
+    ]
+    if not row_parts:
+        elements.append(
+            {"tag": "div", "text": {"tag": "plain_text", "content": "(No rows)"}}
+        )
+        return _lark_card_shell(elements, f"OTP — {pid}")
+
+    for idx, rp in enumerate(row_parts):
+        if idx:
+            elements.append({"tag": "hr"})
+        mid = rp["mid"]
+        cnt = rp["cnt"]
+        st_s, pv_s = rp["st"], rp["pv"]
+        em = _emoji_for_status_line(st_s, pv_s)
+        log_b = _trunc_log_for_card(rp["log"])
+        md_head = (
+            f"🆔 **Message ID** : `{mid}`\n"
+            f"{em} **Status** {st_s} & **Provider Status** {pv_s} : **{cnt}**"
+        )
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": md_head}})
+        elements.append(
+            {
+                "tag": "div",
+                "text": {"tag": "plain_text", "content": f"📋 Logs :\n{log_b}"},
+            }
+        )
+    return _lark_card_shell(elements, f"OTP — player {pid}")
+
+
+def _merge_lark_otp_cards(cards: list[dict]) -> dict:
+    """Combine one card per player into a single interactive message."""
+    if not cards:
+        return {}
+    if len(cards) == 1:
+        return cards[0]
+    elements: list = []
+    for i, c in enumerate(cards):
+        if i:
+            elements.append({"tag": "hr"})
+        elements.extend(c.get("elements") or [])
+    return _lark_card_shell(elements, "OTP player log(s)")
+
+
+def format_otp_log_summary_for_player(page, player_id: str, detail_rows: list) -> tuple[str, dict]:
     """
-    Per-player OTP report: each row shows Message ID, Status & Provider line
-    (count = number of rows in this search with same Status/Provider pair),
-    then full Logs panel text from the Logs button.
+    Per-player OTP report: Message ID / Status & Provider / Logs with emojis;
+    returns (plain_text_for_CLI, Lark_interactive_card_dict).
     detail_rows: [msg_id, player_id, status, provider_status, time] from _parse_otp_table.
     """
     pid = (player_id or "").strip()
-    lines = [f"As checked OTP logs for player {pid}:"]
-
     items = [x for x in (detail_rows or []) if isinstance(x, (list, tuple)) and len(x) >= 5]
     if not items:
-        lines.append("(No rows)")
-        return "\n".join(lines)
+        row_parts: list[dict] = []
+        text = _format_player_otp_plaintext(pid, row_parts)
+        card = _build_lark_card_player_report(pid, row_parts)
+        return text, card
 
     bucket_counts = Counter()
     for it in items:
@@ -1209,7 +1310,7 @@ def format_otp_log_summary_for_player(page, player_id: str, detail_rows: list) -
         su, pu = st.upper(), pv.upper()
         bucket_counts[(su, pu)] += 1
 
-    blocks: list[str] = []
+    row_parts: list[dict] = []
     for it in items:
         msg_id, _ply, st, pv, _tm = it[0], it[1], it[2], it[3], it[4]
         st_s = (st or "").strip()
@@ -1226,14 +1327,13 @@ def format_otp_log_summary_for_player(page, player_id: str, detail_rows: list) -
             except Exception as e:
                 log_body = f"(Logs read failed: {e})"
 
-        blocks.append(
-            f"Message ID : {mid}\n"
-            f"Status {st_s} & Provider Status {pv_s} : {cnt}\n"
-            f"Logs :\n"
-            f"{log_body}"
+        row_parts.append(
+            {"mid": mid, "st": st_s, "pv": pv_s, "cnt": cnt, "log": log_body}
         )
 
-    return lines[0] + "\n\n" + "\n\n".join(blocks)
+    text = _format_player_otp_plaintext(pid, row_parts)
+    card = _build_lark_card_player_report(pid, row_parts)
+    return text, card
 
 
 def run_otp_login(headless=False, player_id=None):
@@ -1241,6 +1341,9 @@ def run_otp_login(headless=False, player_id=None):
     登录 SMS 网关，进入 Messages，按条件查询 OTP 并返回统计文案。
     player_id: None = 默认 /smsfail 筛选；str 或 list = 只填 Player ID（可多 ID，逗号/空格/换行）；
     多个 ID 时共用一次登录与 Platform/日期/Message，仅每次改 Player ID 再 Search。
+
+    返回值：无 player_id 时为 str；有 player_id 时为 dict：
+    ``{"text": "…", "lark_card": {...}}``（Lark interactive 卡片 + 纯文本副本）。
     """
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -1384,7 +1487,8 @@ def run_otp_login(headless=False, player_id=None):
             _fill_message_filter(page, DEFAULT_MESSAGE_FILTER)
 
             if pid_list:
-                summary_blocks: list[str] = []
+                summary_text_blocks: list[str] = []
+                summary_cards: list[dict] = []
                 for i, pid in enumerate(pid_list):
                     if i > 0:
                         print(f"→ Same session: change Player ID → {pid!r}, Search again")
@@ -1392,10 +1496,14 @@ def run_otp_login(headless=False, player_id=None):
                     print("→ 点击 Search")
                     _click_search_messages(page)
                     counter, detail_rows = _wait_parse_after_player_search(page, i == 0)
-                    block = format_otp_log_summary_for_player(page, pid, detail_rows)
-                    summary_blocks.append(block)
-                    print(block)
-                summary = "\n\n".join(summary_blocks)
+                    text_b, card = format_otp_log_summary_for_player(page, pid, detail_rows)
+                    summary_text_blocks.append(text_b)
+                    summary_cards.append(card)
+                    print(text_b)
+                summary = {
+                    "text": "\n\n".join(summary_text_blocks),
+                    "lark_card": _merge_lark_otp_cards(summary_cards),
+                }
             else:
                 print("→ 点击 Search")
                 _click_search_messages(page)
@@ -1439,4 +1547,7 @@ if __name__ == "__main__":
     player_id = " ".join(positional).strip() or None
     out = run_otp_login(headless=headless, player_id=player_id)
     print("\n===== 输出 =====\n")
-    print(out)
+    if isinstance(out, dict):
+        print(out.get("text", ""))
+    else:
+        print(out)
