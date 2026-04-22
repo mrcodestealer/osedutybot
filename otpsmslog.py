@@ -697,7 +697,8 @@ def _click_search_messages(page):
 
 def _parse_otp_table(page):
     """
-    解析 Message 表格：Player ID、Status、Provider Status、Time。
+    解析 Message 表格：每行 detail 为
+    ``[message_id, player_id, status, provider_status, time]``（虚拟滚动合并多屏行）。
 
     n>=9（含 10 列）：MessageId(0), Platform(1), Provider(2), **Player ID(3)**, Message(4),
     Status(5), Provider Status(6), Length(7), Time(8)…
@@ -761,7 +762,7 @@ def _parse_otp_table(page):
 
                     if (!st && !pv && !msgId) continue;
                     const key = msgId || (displayPlayer + '|' + tm + '|' + st + '|' + pv);
-                    byKey.set(key, [displayPlayer, st, pv, tm]);
+                    byKey.set(key, [msgId, displayPlayer, st, pv, tm]);
                 }
             };
 
@@ -797,13 +798,24 @@ def _parse_otp_table(page):
     )
 
     rows = rows or []
-    rows.sort(key=lambda x: (x[3] if len(x) > 3 else ""), reverse=True)
+
+    def _detail_time(it):
+        if len(it) >= 5:
+            return it[4] or ""
+        if len(it) >= 4:
+            return it[3] or ""
+        return ""
+
+    rows.sort(key=_detail_time, reverse=True)
 
     counter: Counter = Counter()
     for item in rows:
-        if len(item) < 3:
+        if len(item) >= 5:
+            st, pv = item[2], item[3]
+        elif len(item) >= 3:
+            st, pv = item[1], item[2]
+        else:
             continue
-        pid, st, pv = item[0], item[1], item[2]
         counter[(st, pv)] += 1
     return counter, rows
 
@@ -822,10 +834,14 @@ def format_otp_log_summary(counter: Counter, detail_rows=None) -> str:
     failed_rows = []
     if detail_rows:
         for item in detail_rows:
-            if len(item) < 3:
+            if len(item) >= 5:
+                _mid, pid, st, pv = item[0], item[1], item[2], item[3]
+                tm = item[4] if len(item) > 4 else ""
+            elif len(item) >= 3:
+                pid, st, pv = item[0], item[1], item[2]
+                tm = item[3] if len(item) > 3 else ""
+            else:
                 continue
-            pid, st, pv = item[0], item[1], item[2]
-            tm = item[3] if len(item) > 3 else ""
             if _status_or_provider_is_failed(st, pv):
                 failed_rows.append((pid, st, pv, tm))
 
@@ -864,26 +880,185 @@ def format_otp_log_summary(counter: Counter, detail_rows=None) -> str:
     return "\n".join(lines)
 
 
-def format_otp_log_summary_for_player(counter: Counter, player_id: str) -> str:
+def _otp_table_scroll_step(page) -> float:
+    """Scroll OTP 虚拟列表一步；返回当前 scrollTop。"""
+    return page.evaluate(
+        r"""() => {
+            const table = document.querySelector('.k2table-group .k2table');
+            if (!table) return -1;
+            const tbody = table.querySelector('.tbody');
+            const scroller = (tbody && tbody.parentElement) || table;
+            const sh = scroller.scrollHeight;
+            const ch = scroller.clientHeight || 1;
+            const st = scroller.scrollTop;
+            if (st + ch >= sh - 3) {
+                scroller.scrollTop = 0;
+            } else {
+                scroller.scrollTop = Math.min(
+                    st + Math.max(80, Math.floor(ch * 0.88)), sh
+                );
+            }
+            return scroller.scrollTop;
+        }"""
+    )
+
+
+def _locate_otp_row_by_message_id(page, message_id: str):
+    """在 Message 表格中按首列 Message ID 精确匹配一行（含虚拟滚动）。"""
+    want = " ".join((message_id or "").split())
+    if not want:
+        return None
+    prev_top = None
+    stall = 0
+    for _ in range(220):
+        tbody_rows = page.locator(".k2table-group .k2table .tbody .tr")
+        try:
+            n = tbody_rows.count()
+        except Exception:
+            n = 0
+        for i in range(n):
+            row = tbody_rows.nth(i)
+            c0 = row.locator('.td[role="cell"]').first
+            if c0.count() == 0:
+                continue
+            raw = (c0.inner_text() or "").strip()
+            if " ".join(raw.split()) == want:
+                row.scroll_into_view_if_needed()
+                return row
+        top = _otp_table_scroll_step(page)
+        page.wait_for_timeout(100)
+        if top == prev_top:
+            stall += 1
+            if stall >= 8:
+                break
+        else:
+            stall = 0
+        prev_top = top
+    return None
+
+
+def _read_logs_from_otp_row(page, row) -> str:
+    """点击行内 Logs 按钮，读取弹层/展开区中的 .logtext，再 ESC 关闭。"""
+    row.scroll_into_view_if_needed()
+    page.wait_for_timeout(200)
+    btn = row.get_by_role("button", name=re.compile(r"^\s*Logs\s*$", re.I))
+    if btn.count() == 0:
+        btn = row.locator("button.k2button, button.btn").filter(
+            has_text=re.compile(r"Logs", re.I)
+        )
+    if btn.count() == 0:
+        return "(No Logs button in row)"
+    btn.first.click(timeout=15_000)
+    page.wait_for_timeout(500)
+    try:
+        page.wait_for_selector(
+            ".modal.show .logtext, [role='dialog'] .logtext, .popover .logtext, .logtext",
+            timeout=10_000,
+        )
+    except PlaywrightTimeout:
+        pass
+
+    chunks: list[str] = []
+
+    def _collect_from(locator):
+        try:
+            m = locator.count()
+        except Exception:
+            return
+        for j in range(min(m, 80)):
+            t = (locator.nth(j).inner_text() or "").strip()
+            if t:
+                chunks.append(t)
+
+    for sel in (
+        ".modal.show .logtext",
+        "[role='dialog'] .logtext",
+        ".modal .logtext",
+        ".popover .logtext",
+        ".offcanvas .logtext",
+    ):
+        loc = page.locator(sel)
+        if loc.count() > 0:
+            _collect_from(loc)
+            if chunks:
+                break
+
+    if not chunks:
+        lt = row.locator(".logtext")
+        if lt.count() > 0:
+            _collect_from(lt)
+
+    if not chunks:
+        lt2 = page.locator("div.logtext:visible")
+        if lt2.count() > 0:
+            _collect_from(lt2)
+
+    body = "\n".join(chunks).strip()
+
+    for _ in range(3):
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(200)
+    try:
+        close = page.locator(
+            ".modal.show [aria-label='Close'], .modal.show .btn-close, "
+            ".modal.show button.close"
+        )
+        if close.count() > 0:
+            close.first.click(timeout=3_000)
+            page.wait_for_timeout(150)
+    except Exception:
+        pass
+
+    return body or "(empty logs)"
+
+
+def format_otp_log_summary_for_player(page, player_id: str, detail_rows: list) -> str:
     """
-    Summary when filtering by a single Player ID (Status / Provider left unset).
-    English output per product example.
+    Per-player OTP report: each row shows Message ID, Status & Provider line
+    (count = number of rows in this search with same Status/Provider pair),
+    then full Logs panel text from the Logs button.
+    detail_rows: [msg_id, player_id, status, provider_status, time] from _parse_otp_table.
     """
     pid = (player_id or "").strip()
-    merged = Counter()
-    for (st, pv), n in counter.items():
-        su = (st or "").strip().upper()
-        pu = (pv or "").strip().upper()
-        merged[(su, pu)] += n
-
     lines = [f"As checked OTP logs for player {pid}:"]
-    both_n = merged.get(("SUCCESS", "SUCCESS"), 0)
-    lines.append(f"Both SUCCESS : {both_n}")
-    for (st, pv), n in sorted(merged.items(), key=lambda x: (x[0][0], x[0][1])):
-        if st == "SUCCESS" and pv == "SUCCESS":
-            continue
-        lines.append(f"Status: {st}, Provider Status: {pv} : {n}")
-    return "\n".join(lines)
+
+    items = [x for x in (detail_rows or []) if isinstance(x, (list, tuple)) and len(x) >= 5]
+    if not items:
+        lines.append("(No rows)")
+        return "\n".join(lines)
+
+    bucket_counts = Counter()
+    for it in items:
+        st = (it[2] or "").strip()
+        pv = (it[3] or "").strip()
+        su, pu = st.upper(), pv.upper()
+        bucket_counts[(su, pu)] += 1
+
+    blocks: list[str] = []
+    for it in items:
+        msg_id, _ply, st, pv, _tm = it[0], it[1], it[2], it[3], it[4]
+        st_s = (st or "").strip()
+        pv_s = (pv or "").strip()
+        cnt = bucket_counts[(st_s.upper(), pv_s.upper())]
+        mid = " ".join(str(msg_id).split())
+
+        row = _locate_otp_row_by_message_id(page, mid)
+        if row is None:
+            log_body = f"(Could not open Logs: row not found for Message ID {mid!r})"
+        else:
+            try:
+                log_body = _read_logs_from_otp_row(page, row)
+            except Exception as e:
+                log_body = f"(Logs read failed: {e})"
+
+        blocks.append(
+            f"Message ID : {mid}\n"
+            f"Status {st_s} & Provider Status {pv_s} : {cnt}\n"
+            f"Logs :\n"
+            f"{log_body}"
+        )
+
+    return lines[0] + "\n\n" + "\n\n".join(blocks)
 
 
 def run_otp_login(headless=False, player_id=None):
@@ -1042,7 +1217,7 @@ def run_otp_login(headless=False, player_id=None):
                     print("→ 点击 Search")
                     _click_search_messages(page)
                     counter, detail_rows = _wait_parse_after_player_search(page, i == 0)
-                    block = format_otp_log_summary_for_player(counter, pid)
+                    block = format_otp_log_summary_for_player(page, pid, detail_rows)
                     summary_blocks.append(block)
                     print(block)
                 summary = "\n\n".join(summary_blocks)
