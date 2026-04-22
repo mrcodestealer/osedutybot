@@ -195,6 +195,24 @@ def run_amountloss_check(chat_id, date_str=None):
                 print(f"[Amount Loss] failed after {AMOUNT_LOSS_MAX_ATTEMPTS} attempts: {e!r}")
 
 
+def run_smsfail_check(chat_id):
+    """Background: SMS gateway OTP log scrape (otpsmslog.run_otp_login), send English summary to chat."""
+    try:
+        from otpsmslog import run_otp_login
+    except ImportError as e:
+        send_message(
+            chat_id,
+            f"❌ Cannot load otpsmslog (install playwright, etc.): {e}",
+        )
+        return
+    try:
+        result = run_otp_login(headless=True)
+        send_message(chat_id, result)
+    except Exception as e:
+        send_message(chat_id, f"❌ SMS OTP log check failed: {str(e)}")
+        print(f"[SMS fail] error: {e!r}")
+
+
 def scheduled_amountloss_check():
     """
     每日 9:00：在 DUTY_CHAT_ID 群 @TARGET_USER_OPEN_ID，
@@ -1216,6 +1234,10 @@ def lark_webhook():
             send_message(chat_id, "⏳ Checking Amount Loss，please wait...")
             threading.Thread(target=run_amountloss_check, args=(chat_id, date_param), daemon=True).start()
             return jsonify({"success": True})
+    elif clean_text.lower().startswith("/smsfail"):
+        send_message(chat_id, "⏳ Running SMS gateway OTP log check, please wait...")
+        threading.Thread(target=run_smsfail_check, args=(chat_id,), daemon=True).start()
+        return jsonify({"success": True})
     elif clean_text.lower().startswith('/pid'):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
