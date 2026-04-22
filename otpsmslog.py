@@ -1,5 +1,5 @@
 """
-OTP / SMS 相关：自动登录 SMS Gateway CP，进入 Messages，筛选 OTP 并统计 SUCCESS/FAILED
+OTP / SMS 相关：自动登录 SMS Gateway CP，进入 Messages，筛选 OTP 并统计 SUCCESS / FAILED / PENDING
 
 站点: https://sms-web.platform10.me/
 
@@ -39,10 +39,15 @@ MESSAGES_NAV_TIMEOUT_MS = 25_000
 CHROMIUM_ARGS = ["--disable-blink-features=AutomationControlled"]
 
 
-def _status_or_provider_is_failed(st: str, pv: str) -> bool:
+# Status / Provider Status values that should appear in the “attention” breakdown (not only SUCCESS).
+_ATTENTION_STATUS_VALUES = frozenset({"FAILED", "PENDING"})
+
+
+def _status_or_provider_needs_attention(st: str, pv: str) -> bool:
+    """True if Status or Provider Status is FAILED or PENDING (case-insensitive)."""
     s = (st or "").strip().upper()
     p = (pv or "").strip().upper()
-    return s == "FAILED" or p == "FAILED"
+    return s in _ATTENTION_STATUS_VALUES or p in _ATTENTION_STATUS_VALUES
 
 
 def _fill_otp_field(page, code: str):
@@ -552,11 +557,157 @@ def _fill_message_filter(page, text: str):
     msg.fill(text)
 
 
+def _modal_overlay_blocking(page) -> bool:
+    """True when an overlay or Message logs k2modal is visible and likely blocking filter clicks."""
+    return page.evaluate(
+        r"""() => {
+            function visible(el) {
+                if (!el) return false;
+                const st = window.getComputedStyle(el);
+                if (st.display === 'none' || st.visibility === 'hidden') return false;
+                const r = el.getBoundingClientRect();
+                return r.width > 10 && r.height > 10;
+            }
+            const modalOv = document.querySelector('#modal .overlay');
+            if (visible(modalOv)) return true;
+            const km = document.querySelector('.k2modal.sm, .k2modal');
+            if (visible(km)) {
+                const t = (km.textContent || '').toLowerCase();
+                if (t.includes('message logs') || km.querySelector('.proposal-logs'))
+                    return true;
+            }
+            const ov = document.querySelector('div.overlay');
+            if (visible(ov) && document.querySelector('.k2modal')) return true;
+            return false;
+        }"""
+    )
+
+
+def _k2_message_logs_modal(page):
+    """Visible Message logs k2modal (title or .proposal-logs)."""
+    by_title = page.locator(".k2modal").filter(
+        has=page.locator("h4.k2modal-title", has_text=re.compile(r"message\s+logs", re.I))
+    )
+    if by_title.count() > 0:
+        return by_title.first
+    by_body = page.locator(".k2modal:visible").filter(has=page.locator(".proposal-logs"))
+    if by_body.count() > 0:
+        return by_body.first
+    return page.locator(".k2modal").filter(has=page.locator(".proposal-logs")).first
+
+
+def _close_k2_message_logs_modal(page) -> bool:
+    """
+    Message logs 弹窗必须点 footer 的 Close，否则会留 overlay 挡住筛选。
+    Returns True if a Close click was attempted on the Message logs k2modal.
+    """
+    try:
+        modal = _k2_message_logs_modal(page)
+        if modal.count() == 0:
+            return False
+        if not modal.is_visible():
+            return False
+    except Exception:
+        return False
+    close_btn = modal.locator(".k2modal-footer button").filter(
+        has_text=re.compile(r"^\s*Close\s*$", re.I)
+    )
+    if close_btn.count() == 0:
+        close_btn = modal.get_by_role("button", name=re.compile(r"^\s*Close\s*$", re.I))
+    if close_btn.count() == 0:
+        return False
+    try:
+        close_btn.first.scroll_into_view_if_needed()
+        close_btn.first.click(timeout=10_000)
+    except Exception:
+        try:
+            close_btn.first.click(timeout=5_000, force=True)
+        except Exception:
+            return False
+    page.wait_for_timeout(400)
+    try:
+        modal.wait_for(state="hidden", timeout=10_000)
+    except Exception:
+        pass
+    return True
+
+
+def _dismiss_blocking_modal(page) -> None:
+    """
+    Close / neutralize full-screen #modal overlay so filter inputs are clickable again.
+    Logs 弹层若未完全关闭，会挡住 Player ID 等筛选项（多玩家第二次搜索常见）。
+    """
+    for _ in range(28):
+        _close_k2_message_logs_modal(page)
+        if not _modal_overlay_blocking(page):
+            return
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(120)
+        try:
+            page.locator("#modal .overlay").first.click(timeout=2_000, force=True)
+        except Exception:
+            pass
+        for sel in (
+            "#modal [aria-label='Close']",
+            "#modal .btn-close",
+            "#modal button.close",
+            "#modal .modal-header button",
+        ):
+            try:
+                b = page.locator(sel)
+                if b.count() > 0 and b.first.is_visible():
+                    b.first.click(timeout=2_000, force=True)
+                    page.wait_for_timeout(150)
+            except Exception:
+                continue
+    page.wait_for_timeout(200)
+    # Last resort: stop overlay from receiving hits (keeps DOM; React state may still think open)
+    page.evaluate(
+        r"""() => {
+            const m = document.getElementById('modal');
+            if (!m) return;
+            const ov = m.querySelector('.overlay');
+            if (ov) {
+                ov.style.pointerEvents = 'none';
+                ov.style.display = 'none';
+            }
+            m.style.pointerEvents = 'none';
+        }"""
+    )
+
+
+def _fill_input_value_no_overlay(loc, value: str, *, label_for_log: str) -> None:
+    """Fill a text filter without requiring a successful click (modal overlay safe)."""
+    loc.wait_for(state="attached", timeout=15_000)
+    try:
+        loc.fill("", force=True, timeout=15_000)
+        loc.fill(value, force=True, timeout=15_000)
+    except Exception:
+        loc.evaluate(
+            """(el, v) => {
+                el.value = v;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            }""",
+            value,
+        )
+    print(f"→ {label_for_log} filled: {value!r}")
+
+
 def _fill_player_id_filter(page, text: str):
-    """Message 列表筛选项 Player ID（creatable 文本框）。"""
+    """Message 列表筛选项 Player ID（#textplayerId / name=playerId）；先关 modal 再填，避免 overlay 挡点击。"""
     want = (text or "").strip()
     if not want:
         return
+    _dismiss_blocking_modal(page)
+
+    by_id = page.locator("#textplayerId, input[name='playerId']")
+    if by_id.count() > 0:
+        _fill_input_value_no_overlay(
+            by_id.first, want, label_for_log="Player ID filter"
+        )
+        return
+
     form = page.locator("form.table-filter-container")
     items = form.locator("div.table-filter-item")
     try:
@@ -575,21 +726,15 @@ def _fill_player_id_filter(page, text: str):
             ).first
             if inp.count():
                 inp.wait_for(state="visible", timeout=15_000)
-                inp.click()
-                inp.fill("")
-                inp.fill(want)
-                print(f"→ Player ID filter filled: {want!r}")
+                _fill_input_value_no_overlay(inp, want, label_for_log="Player ID filter")
                 return
     ph = form.locator(
         'input[placeholder*="Player ID" i], input[placeholder*="Player" i]'
     )
     if ph.count() > 0:
-        p = ph.first
-        p.wait_for(state="visible", timeout=15_000)
-        p.click()
-        p.fill("")
-        p.fill(want)
-        print(f"→ Player ID filter filled (placeholder): {want!r}")
+        _fill_input_value_no_overlay(
+            ph.first, want, label_for_log="Player ID filter (placeholder)"
+        )
         return
     raise RuntimeError("Player ID filter input not found on Message page")
 
@@ -822,7 +967,8 @@ def _parse_otp_table(page):
 
 def format_otp_log_summary(counter: Counter, detail_rows=None) -> str:
     """
-    Lark / bot output: English only. FAILED rows grouped by Player ID with time range and count.
+    Lark / bot output: English only. Rows where Status or Provider Status is FAILED or PENDING,
+    grouped by Player ID with time range and count.
     """
     lines = ["As checked OTP logs:"]
     if not counter:
@@ -831,7 +977,7 @@ def format_otp_log_summary(counter: Counter, detail_rows=None) -> str:
         for (st, pv), n in sorted(counter.items(), key=lambda x: (x[0][0], x[0][1])):
             lines.append(f"Status: {st}, Provider Status: {pv}, Counts: {n}")
 
-    failed_rows = []
+    attention_rows = []
     if detail_rows:
         for item in detail_rows:
             if len(item) >= 5:
@@ -842,16 +988,16 @@ def format_otp_log_summary(counter: Counter, detail_rows=None) -> str:
                 tm = item[3] if len(item) > 3 else ""
             else:
                 continue
-            if _status_or_provider_is_failed(st, pv):
-                failed_rows.append((pid, st, pv, tm))
+            if _status_or_provider_needs_attention(st, pv):
+                attention_rows.append((pid, st, pv, tm))
 
     lines.append("")
-    lines.append("Player ID (FAILED only):")
-    if not failed_rows:
-        lines.append("(No FAILED records)")
+    lines.append("Player ID (FAILED or PENDING):")
+    if not attention_rows:
+        lines.append("(No FAILED or PENDING records)")
     else:
         by_player = defaultdict(list)
-        for pid, st, pv, tm in failed_rows:
+        for pid, st, pv, tm in attention_rows:
             key = (pid or "").strip() or "(no player id)"
             by_player[key].append((st, pv, tm))
 
@@ -938,7 +1084,7 @@ def _locate_otp_row_by_message_id(page, message_id: str):
 
 
 def _read_logs_from_otp_row(page, row) -> str:
-    """点击行内 Logs 按钮，读取弹层/展开区中的 .logtext，再 ESC 关闭。"""
+    """点击 Logs → 读 k2modal「Message logs」(.proposal-logs) → 必须点 footer Close 再关 overlay。"""
     row.scroll_into_view_if_needed()
     page.wait_for_timeout(200)
     btn = row.get_by_role("button", name=re.compile(r"^\s*Logs\s*$", re.I))
@@ -950,10 +1096,13 @@ def _read_logs_from_otp_row(page, row) -> str:
         return "(No Logs button in row)"
     btn.first.click(timeout=15_000)
     page.wait_for_timeout(500)
+
+    body = ""
     try:
         page.wait_for_selector(
-            ".modal.show .logtext, [role='dialog'] .logtext, .popover .logtext, .logtext",
-            timeout=10_000,
+            ".k2modal .proposal-logs, .k2modal .k2modal-body, "
+            ".modal.show .logtext, [role='dialog'] .logtext, .logtext",
+            timeout=12_000,
         )
     except PlaywrightTimeout:
         pass
@@ -970,18 +1119,41 @@ def _read_logs_from_otp_row(page, row) -> str:
             if t:
                 chunks.append(t)
 
-    for sel in (
-        ".modal.show .logtext",
-        "[role='dialog'] .logtext",
-        ".modal .logtext",
-        ".popover .logtext",
-        ".offcanvas .logtext",
-    ):
-        loc = page.locator(sel)
-        if loc.count() > 0:
-            _collect_from(loc)
-            if chunks:
-                break
+    try:
+        km = _k2_message_logs_modal(page)
+        if km.count() > 0 and km.is_visible():
+            prop = km.locator(".proposal-logs")
+            if prop.count() > 0:
+                t = (prop.first.inner_text() or "").strip()
+                if t:
+                    chunks.append(t)
+            if not chunks:
+                logs_div = km.locator(".k2modal-body .log, .k2modal-body .logtext")
+                if logs_div.count() > 0:
+                    _collect_from(logs_div)
+            if not chunks:
+                bod = km.locator(".k2modal-body")
+                if bod.count() > 0:
+                    t = (bod.first.inner_text() or "").strip()
+                    if t:
+                        chunks.append(t)
+    except Exception:
+        pass
+
+    if not chunks:
+        for sel in (
+            ".k2modal .logtext",
+            ".modal.show .logtext",
+            "[role='dialog'] .logtext",
+            ".modal .logtext",
+            ".popover .logtext",
+            ".offcanvas .logtext",
+        ):
+            loc = page.locator(sel)
+            if loc.count() > 0:
+                _collect_from(loc)
+                if chunks:
+                    break
 
     if not chunks:
         lt = row.locator(".logtext")
@@ -995,20 +1167,23 @@ def _read_logs_from_otp_row(page, row) -> str:
 
     body = "\n".join(chunks).strip()
 
-    for _ in range(3):
-        page.keyboard.press("Escape")
-        page.wait_for_timeout(200)
-    try:
-        close = page.locator(
-            ".modal.show [aria-label='Close'], .modal.show .btn-close, "
-            ".modal.show button.close"
-        )
-        if close.count() > 0:
-            close.first.click(timeout=3_000)
-            page.wait_for_timeout(150)
-    except Exception:
-        pass
+    # CP：Message logs 在 .k2modal 内，必须点 footer「Close」，否则 overlay 挡下一玩家筛选
+    if not _close_k2_message_logs_modal(page):
+        for _ in range(3):
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(200)
+        try:
+            close = page.locator(
+                ".modal.show [aria-label='Close'], .modal.show .btn-close, "
+                ".modal.show button.close"
+            )
+            if close.count() > 0:
+                close.first.click(timeout=3_000)
+                page.wait_for_timeout(150)
+        except Exception:
+            pass
 
+    _dismiss_blocking_modal(page)
     return body or "(empty logs)"
 
 
