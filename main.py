@@ -198,7 +198,7 @@ def run_amountloss_check(chat_id, date_str=None):
 def scheduled_amountloss_check():
     """
     每日 9:00：在 DUTY_CHAT_ID 群 @TARGET_USER_OPEN_ID，
-    文案格式：As checked amount loss show 0 records / Search time: 0.029 seconds
+    文案格式：As checked today amount loss show 0 records / Search time: 0.029 seconds
     （数字与耗时来自 amountloss.fetch_fpms_data 实时结果）
     """
     target_chat_id = DUTY_CHAT_ID
