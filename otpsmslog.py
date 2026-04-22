@@ -549,6 +549,48 @@ def _fill_message_filter(page, text: str):
     msg.fill(text)
 
 
+def _fill_player_id_filter(page, text: str):
+    """Message 列表筛选项 Player ID（creatable 文本框）。"""
+    want = (text or "").strip()
+    if not want:
+        return
+    form = page.locator("form.table-filter-container")
+    items = form.locator("div.table-filter-item")
+    try:
+        n = items.count()
+    except Exception:
+        n = 0
+    for i in range(n):
+        item = items.nth(i)
+        lab = item.locator("span.label").first
+        if lab.count() == 0:
+            continue
+        raw = (lab.inner_text() or "").strip().lower()
+        if "player" in raw and "id" in raw:
+            inp = item.locator(
+                "input[type='text'], input.custom-form-input, input.parent-input"
+            ).first
+            if inp.count():
+                inp.wait_for(state="visible", timeout=15_000)
+                inp.click()
+                inp.fill("")
+                inp.fill(want)
+                print(f"→ Player ID filter filled: {want!r}")
+                return
+    ph = form.locator(
+        'input[placeholder*="Player ID" i], input[placeholder*="Player" i]'
+    )
+    if ph.count() > 0:
+        p = ph.first
+        p.wait_for(state="visible", timeout=15_000)
+        p.click()
+        p.fill("")
+        p.fill(want)
+        print(f"→ Player ID filter filled (placeholder): {want!r}")
+        return
+    raise RuntimeError("Player ID filter input not found on Message page")
+
+
 def _set_rows_per_page_max(page):
     """分页下拉选最大条数（如 1000/page），便于一页看清。"""
     pag = None
@@ -766,8 +808,30 @@ def format_otp_log_summary(counter: Counter, detail_rows=None) -> str:
     return "\n".join(lines)
 
 
-def run_otp_login(headless=False):
-    """登录 SMS 网关，进入 Messages，按条件查询 OTP 并返回统计文案。"""
+def format_otp_log_summary_for_player(counter: Counter, player_id: str) -> str:
+    """
+    Summary when filtering by a single Player ID (Status / Provider left unset).
+    English output per product example.
+    """
+    pid = (player_id or "").strip()
+    merged = Counter()
+    for (st, pv), n in counter.items():
+        su = (st or "").strip().upper()
+        pu = (pv or "").strip().upper()
+        merged[(su, pu)] += n
+
+    lines = [f"As checked OTP logs for player {pid}:"]
+    both_n = merged.get(("SUCCESS", "SUCCESS"), 0)
+    lines.append(f"Both SUCCESS : {both_n}")
+    for (st, pv), n in sorted(merged.items(), key=lambda x: (x[0][0], x[0][1])):
+        if st == "SUCCESS" and pv == "SUCCESS":
+            continue
+        lines.append(f"Status: {st}, Provider Status: {pv} : {n}")
+    return "\n".join(lines)
+
+
+def run_otp_login(headless=False, player_id=None):
+    """登录 SMS 网关，进入 Messages，按条件查询 OTP 并返回统计文案。player_id 若给定则只填 Player ID，不选 Status / Provider Status。"""
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=headless,
@@ -881,19 +945,31 @@ def run_otp_login(headless=False):
 
             now = datetime.now()
             date_from = now - timedelta(hours=1)
-            print(
-                f"→ 筛选 Platform={DEFAULT_PLATFORM!r}，Status={FILTER_STATUS_OPTION!r}，"
-                f"Provider Status={FILTER_PROVIDER_STATUS_OPTION!r}，"
-                f"Date from={date_from.strftime(DATE_DISPLAY_FMT)}，"
-                f"Date to={now.strftime(DATE_DISPLAY_FMT)}，Message={DEFAULT_MESSAGE_FILTER!r}"
-            )
+            pid_arg = (player_id or "").strip() or None
+            if pid_arg:
+                print(
+                    f"→ Filter Platform={DEFAULT_PLATFORM!r}, Player ID={pid_arg!r}, "
+                    f"Status/Provider Status (leave empty), "
+                    f"Date from={date_from.strftime(DATE_DISPLAY_FMT)}, "
+                    f"Date to={now.strftime(DATE_DISPLAY_FMT)}, Message={DEFAULT_MESSAGE_FILTER!r}"
+                )
+            else:
+                print(
+                    f"→ 筛选 Platform={DEFAULT_PLATFORM!r}，Status={FILTER_STATUS_OPTION!r}，"
+                    f"Provider Status={FILTER_PROVIDER_STATUS_OPTION!r}，"
+                    f"Date from={date_from.strftime(DATE_DISPLAY_FMT)}，"
+                    f"Date to={now.strftime(DATE_DISPLAY_FMT)}，Message={DEFAULT_MESSAGE_FILTER!r}"
+                )
             _fill_platform(page, DEFAULT_PLATFORM)
-            _fill_multiselect_filter(page, "status", FILTER_STATUS_OPTION, "Status")
-            _fill_multiselect_filter(
-                page, "provider_status", FILTER_PROVIDER_STATUS_OPTION, "Provider Status"
-            )
+            if not pid_arg:
+                _fill_multiselect_filter(page, "status", FILTER_STATUS_OPTION, "Status")
+                _fill_multiselect_filter(
+                    page, "provider_status", FILTER_PROVIDER_STATUS_OPTION, "Provider Status"
+                )
             _fill_date_range_mmddyyyy_hhmm(page, date_from, now)
             _fill_message_filter(page, DEFAULT_MESSAGE_FILTER)
+            if pid_arg:
+                _fill_player_id_filter(page, pid_arg)
 
             print("→ 点击 Search")
             _click_search_messages(page)
@@ -909,7 +985,10 @@ def run_otp_login(headless=False):
                 print("⚠️ 未检测到数据行，仍尝试统计…")
 
             counter, detail_rows = _parse_otp_table(page)
-            summary = format_otp_log_summary(counter, detail_rows=detail_rows)
+            if pid_arg:
+                summary = format_otp_log_summary_for_player(counter, pid_arg)
+            else:
+                summary = format_otp_log_summary(counter, detail_rows=detail_rows)
             print(summary)
 
             final_url = page.url

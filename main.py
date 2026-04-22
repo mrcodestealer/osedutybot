@@ -213,6 +213,31 @@ def run_smsfail_check(chat_id):
         print(f"[SMS fail] error: {e!r}")
 
 
+def run_smscheckplayer_check(chat_id, player_id: str):
+    """Background: OTP log for one player (Status/Provider left blank in filter)."""
+    try:
+        from otpsmslog import run_otp_login
+    except ImportError as e:
+        send_message(
+            chat_id,
+            f"❌ Cannot load otpsmslog (install playwright, etc.): {e}",
+        )
+        return
+    pid = (player_id or "").strip()
+    if not pid:
+        send_message(
+            chat_id,
+            "❌ Usage: `/smscheckplayer <player_id>` e.g. `/smscheckplayer 127317237`",
+        )
+        return
+    try:
+        result = run_otp_login(headless=True, player_id=pid)
+        send_message(chat_id, result)
+    except Exception as e:
+        send_message(chat_id, f"❌ SMS player OTP log check failed: {str(e)}")
+        print(f"[SMS check player] error: {e!r}")
+
+
 def scheduled_amountloss_check():
     """
     每日 9:00：在 DUTY_CHAT_ID 群 @TARGET_USER_OPEN_ID，
@@ -1237,6 +1262,25 @@ def lark_webhook():
     elif clean_text.lower().startswith("/smsfail"):
         send_message(chat_id, "⏳ Running SMS gateway OTP log check, please wait...")
         threading.Thread(target=run_smsfail_check, args=(chat_id,), daemon=True).start()
+        return jsonify({"success": True})
+    elif clean_text.lower().startswith("/smscheckplayer"):
+        parts = clean_text.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            send_message(
+                chat_id,
+                "❌ Usage: `/smscheckplayer <player_id>` e.g. `/smscheckplayer 127317237`",
+            )
+            return jsonify({"success": True})
+        pid = parts[1].strip().split()[0]
+        send_message(
+            chat_id,
+            "⏳ Running SMS OTP log check for player, please wait...",
+        )
+        threading.Thread(
+            target=run_smscheckplayer_check,
+            args=(chat_id, pid),
+            daemon=True,
+        ).start()
         return jsonify({"success": True})
     elif clean_text.lower().startswith('/pid'):
         parts = clean_text.split(maxsplit=1)
