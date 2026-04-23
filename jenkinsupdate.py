@@ -195,6 +195,8 @@ FNT_RC_UAT_MASTER_SERVICES = [
     "script-apiserver",
 ]
 
+_FNT_RC_SERVICE_IDS_CASEFOLD = frozenset(s.casefold() for s in FNT_RC_UAT_MASTER_SERVICES)
+
 _DEFAULT_USER = "junchen"
 _DEFAULT_PASSWORD = "junchen"
 
@@ -416,6 +418,37 @@ SERVICES = [
     "settlement-server",
 ]
 
+_FPMS_SERVICE_IDS_CASEFOLD = frozenset(s.casefold() for s in SERVICES)
+
+
+def _normalize_service_query_key(tok: str) -> str:
+    """Lowercase + unify hyphens/underscores for matching user paste to Jenkins ``value``."""
+    t = (tok or "").strip()
+    t = re.sub(r"[\u2010\u2011\u2012\u2013\u2014\u2212]", "-", t)
+    t = t.replace("_", "-")
+    return t.casefold()
+
+
+def _fnt_rc_canonical_service_id(tok: str) -> str | None:
+    """Return catalog id if ``tok`` matches an FNT RC service (exact after normalize)."""
+    k = _normalize_service_query_key(tok)
+    for s in FNT_RC_UAT_MASTER_SERVICES:
+        if _normalize_service_query_key(s) == k:
+            return s
+    return None
+
+
+def _fpms_lark_is_fnt_rc_only_service_token(tok: str) -> bool:
+    """
+    True if ``tok`` names an FNT RC service that is **not** on the FPMS UAT Services list.
+
+    Used to stop FPMS flows from fuzzy-matching ``rc-client`` → ``client-apiserver``.
+    """
+    k = _normalize_service_query_key(tok)
+    if k not in _FNT_RC_SERVICE_IDS_CASEFOLD:
+        return False
+    return k not in _FPMS_SERVICE_IDS_CASEFOLD
+
 
 def _service_search_score(query: str, service: str) -> float:
     """Higher = more similar (substring boost + difflib on full name and hyphen tokens)."""
@@ -500,13 +533,18 @@ def _rank_fnt_rc_services_by_query(
     """Like ``_rank_services_by_query`` but against ``FNT_RC_UAT_MASTER_SERVICES``."""
     q_raw = (query or "").strip()
     q = q_raw.casefold()
+    qk = _normalize_service_query_key(q_raw)
     if not q:
         return []
+    exact_first = [s for s in FNT_RC_UAT_MASTER_SERVICES if _normalize_service_query_key(s) == qk]
     scored = [(_service_search_score(q_raw, s), s) for s in FNT_RC_UAT_MASTER_SERVICES]
     scored.sort(key=lambda x: (-x[0], x[1]))
     if not scored:
         return []
     if not for_menu:
+        if exact_first:
+            rest = [s for s in [x[1] for x in scored] if s not in exact_first][: max(0, limit - len(exact_first))]
+            return (exact_first + rest)[:limit]
         floor = 0.32
         strong = [s for sc, s in scored if sc >= floor][:limit]
         if strong:
@@ -516,6 +554,10 @@ def _rank_fnt_rc_services_by_query(
     best_sc, _ = scored[0]
     out: list[str] = []
     seen: set[str] = set()
+    for s in exact_first:
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
     for sc, s in scored:
         if s in seen:
             continue
@@ -3812,10 +3854,9 @@ def _fpms_lark_dispatch_fnt_rc_parameter_flow(
     tokens: list[str] = data["service_tokens"]
     resolved_ids: list[str] = []
     tokens_to_pick: list[str] = []
-    canon = {s.casefold(): s for s in FNT_RC_UAT_MASTER_SERVICES}
     for tok in tokens:
         t = (tok or "").strip()
-        hit = canon.get(t.casefold())
+        hit = _fnt_rc_canonical_service_id(t)
         if hit is not None:
             if hit not in resolved_ids:
                 resolved_ids.append(hit)
@@ -3916,6 +3957,15 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
         )
         return True
     first = tokens_to_pick[0]
+    if _fpms_lark_is_fnt_rc_only_service_token(first):
+        send(
+            chat_id,
+            f"❌ `{first}` is an **FNT RC UAT master** service, not on the **FPMS UAT branch** job list. "
+            "Your message matched the **FPMS** job — the menu would wrongly suggest names like `client-apiserver`.\n\n"
+            "Include **rc uat master** / **RC UAT** in the same `/jenkinsupdate` message so the bot selects "
+            "**FNT_UAT_SCRIPT_RUN**, then list `rc-client`, etc. Say **cancel** to clear this session.",
+        )
+        return True
     q0 = first.replace("_", "-")
     ranked0 = _rank_services_by_query(q0, limit=12, for_menu=True)
     if not ranked0:
@@ -4068,6 +4118,16 @@ def handle_lark_jenkins_update_message(
                 )
                 return True
             next_tok = sess["service_tokens"][sess["pick_index"]]
+            if str(sess.get("job_profile") or "") == "fpms" and _fpms_lark_is_fnt_rc_only_service_token(
+                next_tok
+            ):
+                _fpms_lark_clear_session(chat_id, sender_id)
+                send(
+                    chat_id,
+                    f"❌ `{next_tok}` is an **FNT RC UAT master** service, not FPMS. "
+                    "Say **cancel**, then start again with **rc uat master** in your `/jenkinsupdate` message.",
+                )
+                return True
             q = next_tok.replace("_", "-")
             if str(sess.get("job_profile") or "") == "fnt_rc":
                 nranked = _rank_fnt_rc_services_by_query(q, limit=12, for_menu=True)
