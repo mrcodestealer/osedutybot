@@ -170,6 +170,10 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
         "FPMS FNT(RC)",
         "https://jenkins.client8.me/job/FNT/job/RC-UAT-UPDATE/build?delay=0sec",
     ),
+    "fnt uat script run": (
+        "FNT UAT SCRIPT RUN",
+        "https://jenkins.client8.me/job/FNT/job/FNT_UAT_SCRIPT_RUN/build?delay=0sec",
+    ),
     "fpms nt uat branch": (
         "FPMS NT UAT BRANCH UPDATE",
         "https://jenkins.client8.me/job/FPMS_NT/view/all/job/FPMS_NT_UAT_BRANCH_UPDATE/build?delay=0sec",
@@ -186,7 +190,7 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
 
 JENKINS_UPDATE_CMD_RE = re.compile(r"/jenkinsupdate\b", re.I)
 
-# FNT ``FNT_UAT_SCRIPT_RUN`` (RC UAT master) — checkbox ``value`` / ``json`` from Jenkins
+# FNT ``RC-UAT-UPDATE`` (RC UAT master; alias ``rc uat master``) — checkbox ``value`` / ``json`` from Jenkins
 # (ECP extended-choice parameter; order matches job UI).
 FNT_RC_UAT_MASTER_SERVICES = [
     "backend-apiserver",
@@ -2934,7 +2938,7 @@ def read_fnt_rc_services_checked_values(page) -> list[str]:
 
 def select_fnt_rc_services(page, service_names: list[str]) -> None:
     """
-    Tick **Services** for FNT ``FNT_UAT_SCRIPT_RUN`` — ECP extended-choice table, not FPMS UnoChoice.
+    Tick **Services** for FNT RC jobs (``RC-UAT-UPDATE`` / ``FNT_UAT_SCRIPT_RUN``) — ECP extended-choice, not FPMS UnoChoice.
     """
     cleaned: list[str] = []
     for name in service_names:
@@ -3259,7 +3263,7 @@ def _jenkins_update_job_automation_profile(raw_urls: str) -> str | None:
     u = _jenkins_update_primary_url(raw_urls).replace("\\", "/")
     if "/job/FPMS/job/FPMS_UAT_BRANCH_UPDATE/" in u:
         return "fpms"
-    if "/job/FNT/job/FNT_UAT_SCRIPT_RUN/" in u:
+    if "/job/FNT/job/FNT_UAT_SCRIPT_RUN/" in u or "/job/FNT/job/RC-UAT-UPDATE/" in u:
         return "fnt_rc"
     return None
 
@@ -4055,7 +4059,7 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
             f"❌ `{first}` is an **FNT RC UAT master** service, not on the **FPMS UAT branch** job list. "
             "Your message matched the **FPMS** job — the menu would wrongly suggest names like `client-apiserver`.\n\n"
             "Include **rc uat master** / **RC UAT** in the same `/jenkinsupdate` message so the bot selects "
-            "**FNT_UAT_SCRIPT_RUN**, then list `rc-client`, etc. Say **cancel** to clear this session.",
+            "the **RC-UAT-UPDATE** Jenkins job, then list `rc-client`, etc. Say **cancel** to clear this session.",
         )
         return True
     q0 = first.replace("_", "-")
