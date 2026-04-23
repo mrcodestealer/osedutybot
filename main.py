@@ -827,8 +827,8 @@ def lark_webhook():
             bot_mentioned = True
             print("✅ Bot mentioned (old schema via is_mention flag)")
 
-    fpms_sess_active = jenkinsupdate.fpms_uat_has_active_lark_session(chat_id, sender_id)
-    if jenkinsupdate.handle_lark_fpms_uat_branch_message(
+    jenkins_sess_active = jenkinsupdate.jenkins_update_has_active_lark_session(chat_id, sender_id)
+    if jenkinsupdate.handle_lark_jenkins_update_message(
         chat_id,
         sender_id,
         clean_text,
@@ -838,7 +838,7 @@ def lark_webhook():
     ):
         return jsonify({"success": True})
 
-    if chat_type == "group" and not bot_mentioned and not fpms_sess_active:
+    if chat_type == "group" and not bot_mentioned and not jenkins_sess_active:
         print("⏭️ Bot not mentioned in group chat – ignoring further commands")
         return jsonify({"success": True})
 

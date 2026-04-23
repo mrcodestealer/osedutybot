@@ -107,6 +107,86 @@ BUILD_URL = (
     "https://jenkins.client8.me/job/FPMS/job/FPMS_UAT_BRANCH_UPDATE/build?delay=0sec"
 )
 
+# Lark ``/jenkinsupdate``: keyword → (short title, build URL(s); multiple lines = several links).
+JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
+    "fpms uat branch": ("FPMS UAT BRANCH UPDATE", BUILD_URL),
+    "fpms prod script": (
+        "FPMS PROD SCRIPT",
+        "https://jenkins.client8.me/job/FPMS/job/FPMS_PROD_SCRIPT_RUN/",
+    ),
+    "frontend uat1 h5": (
+        "FRONTEND UAT1 H5",
+        "https://jenkins.client8.me/job/FRONTEND/job/UAT/job/projects/job/uat-1/job/h5-uat/build?delay=0sec",
+    ),
+    "frontend uat2 h5": (
+        "FRONTEND UAT2 H5",
+        "https://jenkins.client8.me/job/FRONTEND/job/UAT/job/projects/job/uat-2/job/h5-uat/build?delay=0sec",
+    ),
+    "frontend uat3 h5": (
+        "FRONTEND UAT3 H5",
+        "https://jenkins.client8.me/job/FRONTEND/job/UAT/job/projects/job/uat-3/job/h5-uat/build?delay=0sec",
+    ),
+    "frontend uat4 h5": (
+        "FRONTEND UAT4 H5",
+        "https://jenkins.client8.me/job/FRONTEND/job/UAT/job/projects/job/uat-4/job/h5-uat/build?delay=0sec",
+    ),
+    "frontend uat1 web": (
+        "FRONTEND UAT1 WEB",
+        "https://jenkins.client8.me/job/FRONTEND/job/UAT/job/projects/job/uat-1/job/web-uat/build?delay=0sec",
+    ),
+    "frontend uat2 web": (
+        "FRONTEND UAT2 WEB",
+        "https://jenkins.client8.me/job/FRONTEND/job/UAT/job/projects/job/uat-2/job/web-uat/build?delay=0sec",
+    ),
+    "frontend uat3 web": (
+        "FRONTEND UAT3 WEB",
+        "https://jenkins.client8.me/job/FRONTEND/job/UAT/job/projects/job/uat-3/job/web-uat/build?delay=0sec",
+    ),
+    "frontend uat4 web": (
+        "FRONTEND UAT4 WEB",
+        "https://jenkins.client8.me/job/FRONTEND/job/UAT/job/projects/job/uat-4/job/web-uat/build?delay=0sec",
+    ),
+    "fpms uat fgs": (
+        "FPMS FGS",
+        "https://jenkins.client8.me/job/FGS_CLIENT/job/FGS-UAT-UPDATE/build?delay=0sec",
+    ),
+    "ccms uat fe bo": (
+        "FPMS_NT_UAT_BO_UPDATE",
+        "https://jenkins.client8.me/job/FPMS_NT/view/all/job/FPMS_NT_UAT_BO_UPDATE/build?delay=0sec",
+    ),
+    "rc uat master": (
+        "FPMS FNT(RC)",
+        "https://jenkins.client8.me/job/FNT/job/FNT_UAT_SCRIPT_RUN/build?delay=0sec",
+    ),
+    "cpms uat update": (
+        "CPMS-UAT-UPDATE",
+        "https://jenkins.client8.me/job/IGO/job/UAT/job/IGO-UAT-UPDATE/build?delay=0sec\n"
+        "https://jenkins.client8.me/job/CPMS/job/UAT/job/CPMS-UAT-UPDATE/build?delay=0sec",
+    ),
+    "igo uat script run": (
+        "IGO UAT SCRIPT RUN",
+        "https://jenkins.client8.me/job/IGO/job/UAT/job/IGO-UAT-SCRIPT-RUN/build?delay=0sec",
+    ),
+    "telesales": (
+        "CRS UAT Master(telesales)",
+        "https://jenkins.client8.me/job/FNT/job/TELESALES-UAT-UPDATE/build?delay=0sec",
+    ),
+    "fpms nt uat branch": (
+        "FPMS NT UAT BRANCH UPDATE",
+        "https://jenkins.client8.me/job/FPMS_NT/view/all/job/FPMS_NT_UAT_BRANCH_UPDATE/build?delay=0sec",
+    ),
+    "fpms nt uat master": (
+        "FPMS NT UAT MASTER UPDATE",
+        "https://jenkins.client8.me/job/FPMS_NT/view/all/job/FPMS_NT_UAT_MASTER_UPDATE/build?delay=0sec",
+    ),
+    "igo prod script": (
+        "IGO PROD SCRIPT RUN",
+        "https://jenkins.client8.me/job/IGO/job/PROD/job/IGO-PROD-SCRIPT-RUN/build?delay=0sec",
+    ),
+}
+
+JENKINS_UPDATE_CMD_RE = re.compile(r"/jenkinsupdate\b", re.I)
+
 _DEFAULT_USER = "junchen"
 _DEFAULT_PASSWORD = "junchen"
 
@@ -928,6 +1008,14 @@ def _parse_multi_indices(line: str, n_max: int) -> list[int] | None:
     return out
 
 
+def _parse_single_menu_index(line: str, n_max: int) -> int | None:
+    """Exactly one digit token in ``1..n_max`` (job picker); ``1 2`` → None."""
+    idxs = _parse_multi_indices(line, n_max)
+    if idxs is None or len(idxs) != 1:
+        return None
+    return idxs[0]
+
+
 def _stdin_stdout_interactive() -> bool:
     try:
         return bool(sys.stdin.isatty() and sys.stdout.isatty())
@@ -1065,16 +1153,23 @@ def jenkins_login_if_needed(page, username: str, password: str, timeout_ms: int 
 
 
 def open_fpms_build_with_login(
-    page, username: str, password: str, *, first_visit: bool, warmup: bool | None = None
+    page,
+    username: str,
+    password: str,
+    *,
+    first_visit: bool,
+    warmup: bool | None = None,
+    build_url: str | None = None,
 ) -> None:
     """
     ``goto`` build-with-parameters URL, login if needed, optional warm-up reload (same as a fresh run).
 
     Pass ``warmup=False`` to skip the post-login reload (e.g. ``--tick`` mode).
     """
+    url = (build_url or BUILD_URL).strip()
     if first_visit:
-        print(f"\n→ Opening {BUILD_URL}")
-    page.goto(BUILD_URL, wait_until="domcontentloaded", timeout=90_000)
+        print(f"\n→ Opening {url}")
+    page.goto(url, wait_until="domcontentloaded", timeout=90_000)
     jenkins_login_if_needed(page, username, password)
     do_warmup = _WARMUP_RELOAD if warmup is None else warmup
     if do_warmup:
@@ -2592,7 +2687,9 @@ def _click_jenkins_build_button(page) -> None:
     _safe_page_wait(page, 800)
 
 
-def _recover_services_not_found_sequence(page, username: str, password: str) -> None:
+def _recover_services_not_found_sequence(
+    page, username: str, password: str, *, build_url: str | None = None
+) -> None:
     """
     Services missing (same browser tab):
 
@@ -2613,8 +2710,9 @@ def _recover_services_not_found_sequence(page, username: str, password: str) -> 
         f"wait {w_sec:g}s, goto build URL + re-login again, then refill (your prompts are unchanged)."
     )
 
-    print(f"→ Recovery (1/2): opening {BUILD_URL}")
-    page.goto(BUILD_URL, wait_until="domcontentloaded", timeout=90_000)
+    bu = (build_url or BUILD_URL).strip()
+    print(f"→ Recovery (1/2): opening {bu}")
+    page.goto(bu, wait_until="domcontentloaded", timeout=90_000)
     _safe_page_wait(page, 900)
     jenkins_login_if_needed(page, username, password)
     page.wait_for_selector("div.jenkins-form-item", timeout=60_000)
@@ -2633,8 +2731,8 @@ def _recover_services_not_found_sequence(page, username: str, password: str) -> 
     print(f"→ Post-Build wait: {w_ms} ms ({w_sec:g} s) before re-opening parameters…")
     time.sleep(w_sec)
 
-    print(f"→ Recovery (2/2): opening {BUILD_URL} again + re-login")
-    page.goto(BUILD_URL, wait_until="domcontentloaded", timeout=90_000)
+    print(f"→ Recovery (2/2): opening {bu} again + re-login")
+    page.goto(bu, wait_until="domcontentloaded", timeout=90_000)
     _safe_page_wait(page, 900)
     jenkins_login_if_needed(page, username, password)
     page.wait_for_selector("div.jenkins-form-item", timeout=60_000)
@@ -2883,7 +2981,7 @@ def wait_review(seconds: float, *, build_was_clicked: bool = False) -> None:
     time.sleep(s)
 
 
-# ----- Lark / Chat bot: /fpmsuatbranch multi-step (service menus → summary → yes → Jenkins) -----
+# ----- Lark / Chat bot: /jenkinsupdate (job match → optional FPMS parameter flow → yes → Jenkins) -----
 _fpms_lark_sessions_lock = threading.Lock()
 _fpms_lark_sessions: dict[str, dict] = {}
 
@@ -2892,7 +2990,7 @@ def _fpms_lark_session_key(chat_id: str, sender_id: str) -> str:
     return f"{chat_id}:{sender_id}"
 
 
-def fpms_uat_has_active_lark_session(chat_id: str, sender_id: str) -> bool:
+def jenkins_update_has_active_lark_session(chat_id: str, sender_id: str) -> bool:
     with _fpms_lark_sessions_lock:
         return _fpms_lark_session_key(chat_id, sender_id) in _fpms_lark_sessions
 
@@ -2905,6 +3003,65 @@ def _fpms_lark_clear_session(chat_id: str, sender_id: str) -> None:
 def _fpms_lark_clear_session_key(session_key: str) -> None:
     with _fpms_lark_sessions_lock:
         _fpms_lark_sessions.pop(session_key, None)
+
+
+def _jenkins_update_primary_url(raw: str) -> str:
+    return (raw or "").strip().splitlines()[0].strip()
+
+
+def _jenkins_update_job_url_is_fpms_uat_branch_form(raw_urls: str) -> bool:
+    """True only for ``…/job/FPMS/job/FPMS_UAT_BRANCH_UPDATE/…`` (Playwright parameter fill)."""
+    u = _jenkins_update_primary_url(raw_urls).replace("\\", "/")
+    return "/job/FPMS/job/FPMS_UAT_BRANCH_UPDATE/" in u
+
+
+def _jenkins_update_job_score(query_text: str, alias: str) -> float:
+    q = JENKINS_UPDATE_CMD_RE.sub("", (query_text or ""), count=1).strip().casefold()
+    a = (alias or "").strip().casefold()
+    if not q or not a:
+        return 0.0
+    if a in q:
+        return 2.0 + 10.0 / (1.0 + float(q.index(a)))
+    best = difflib.SequenceMatcher(None, q, a).ratio()
+    for chunk in re.split(r"[\s:：,，;+]+", q):
+        c = chunk.strip()
+        if len(c) < 2:
+            continue
+        best = max(best, difflib.SequenceMatcher(None, c, a).ratio())
+        if a in c:
+            best = max(best, 1.3)
+    return best
+
+
+def _rank_jenkins_update_job_matches(query_text: str) -> list[tuple[str, float, str, str]]:
+    """Best-first rows: ``(alias_key, score, label, url_raw)``."""
+    scored: list[tuple[str, float, str, str]] = []
+    for alias, (label, url) in JENKINS_UPDATE_JOB_REGISTRY.items():
+        sc = _jenkins_update_job_score(query_text, alias)
+        scored.append((alias, sc, label, url))
+    scored.sort(key=lambda x: (-x[1], x[0]))
+    return scored
+
+
+def _jenkins_update_disambiguation_ties(
+    ranked: list[tuple[str, float, str, str]], *, band: float = 0.05, cap: int = 8
+) -> list[tuple[str, float, str, str]]:
+    if not ranked:
+        return []
+    best_sc = ranked[0][1]
+    if best_sc < 0.28:
+        return []
+    return [r for r in ranked if r[1] >= best_sc - band][:cap]
+
+
+def _fpms_format_jenkins_job_menu(candidates: list[tuple[str, float, str, str]]) -> str:
+    lines = [
+        "Several Jenkins jobs match your text. Reply with **one** number only (**1**–"
+        f"**{len(candidates)}**), or say **cancel**:",
+    ]
+    for i, (alias, _sc, label, _url) in enumerate(candidates, start=1):
+        lines.append(f"  {i}. **{label}** (`{alias}`)")
+    return "\n".join(lines)
 
 
 def _environment_from_bot_trigger_line(head: str) -> str | None:
@@ -2926,9 +3083,9 @@ def _environment_from_bot_trigger_line(head: str) -> str | None:
     return None
 
 
-def parse_fpms_uat_bot_block(text: str) -> dict:
+def parse_jenkins_update_fpms_bot_block(text: str) -> dict:
     """
-    Parse a Lark-pasted **multi-line** block whose first line contains ``/fpmsuatbranch``.
+    Parse a Lark-pasted **multi-line** block whose first line contains ``/jenkinsupdate``.
 
     Returns ``environment``, ``branch``, ``version``, ``service_tokens`` (raw fuzzy strings, not Jenkins ids).
     """
@@ -2937,8 +3094,8 @@ def parse_fpms_uat_bot_block(text: str) -> dict:
     if not lines:
         raise ValueError("Empty message.")
     head = lines[0]
-    if not re.search(r"/fpmsuatbranch\b", head, re.I):
-        raise ValueError("First line must include `/fpmsuatbranch`.")
+    if not JENKINS_UPDATE_CMD_RE.search(head):
+        raise ValueError("First line must include `/jenkinsupdate`.")
 
     env: str | None = _environment_from_bot_trigger_line(head)
     env_from_banner: str | None = None
@@ -3032,7 +3189,7 @@ _FPMS_PORT_IN_TOKEN_RE = re.compile(r"\b(\d{3,5})\b")
 
 def _fpms_lark_resolve_token_by_port_or_none(token: str) -> list[str] | None:
     """
-    Lark ``/fpmsuatbranch``: if a service token contains a deploy **port** (3–5 digits in
+    Lark ``/jenkinsupdate`` FPMS flow: if a service token contains a deploy **port** (3–5 digits in
     ``SERVICE_PORT_TO_ID``), map by port and skip the fuzzy menu for that line.
 
     Returns:
@@ -3112,7 +3269,7 @@ def _fpms_lark_verification_card_json(
     )
     footer_bad = (
         "⚠️ At least one line shows **❌**. **Build** stays disabled until every line is ✅. "
-        "Fix Jenkins or your config, then run `/fpmsuatbranch` again. Reply **no** here to close "
+        "Fix Jenkins or your config, then run `/jenkinsupdate` again. Reply **no** here to close "
         "without clicking **Build**."
     )
     block_a = f"📋 **Your message**\n```\n{safe}\n```"
@@ -3167,7 +3324,7 @@ def _fpms_lark_verification_plain_fallback(
     else:
         lines.append(
             "⚠️ At least one line shows **❌**. **Build** stays disabled until every line is ✅. "
-            "Fix Jenkins or your config, then run `/fpmsuatbranch` again. Reply **no** here to close "
+            "Fix Jenkins or your config, then run `/jenkinsupdate` again. Reply **no** here to close "
             "without clicking **Build**."
         )
     return "\n".join(lines)
@@ -3209,10 +3366,13 @@ def _fpms_lark_begin_jenkins_run(
     resolved: list[str],
     send,
     raw_prompt_body: str = "",
+    *,
+    jenkins_build_url: str | None = None,
 ) -> None:
     """Install ``jenkins_wait_build`` gate, post preview + start message, spawn Playwright thread."""
     cfg = _fpms_bot_build_config_block(data, resolved)
     ev = threading.Event()
+    ju = (jenkins_build_url or BUILD_URL).strip()
     with _fpms_lark_sessions_lock:
         _fpms_lark_sessions[session_key] = {
             "state": "jenkins_wait_build",
@@ -3227,7 +3387,14 @@ def _fpms_lark_begin_jenkins_run(
         + "\n\n⏳ Starting **headless** Jenkins — filling **all** parameters, running **two** on-page "
         "re-checks, then you will be asked here to click **Build** or skip. Say **cancel** anytime.",
     )
-    _fpms_lark_spawn_run(chat_id, session_key, cfg, send, raw_prompt_body=raw_prompt_body)
+    _fpms_lark_spawn_run(
+        chat_id,
+        session_key,
+        cfg,
+        send,
+        raw_prompt_body=raw_prompt_body,
+        jenkins_build_url=ju,
+    )
 
 
 def _fpms_bot_build_config_block(data: dict, resolved_ids: list[str]) -> str:
@@ -3247,8 +3414,11 @@ def _fpms_lark_spawn_run(
     send,
     *,
     raw_prompt_body: str = "",
+    jenkins_build_url: str | None = None,
 ) -> None:
     """``session_key`` must already hold ``jenkins_wait_build`` with ``build_gate_event``."""
+
+    ju = (jenkins_build_url or BUILD_URL).strip()
 
     def _job() -> None:
         try:
@@ -3264,22 +3434,129 @@ def _fpms_lark_spawn_run(
                     "send": send,
                     "timeout_sec": float(os.environ.get("FPMS_BOT_BUILD_WAIT_SEC", "7200")),
                     "prompt_echo": raw_prompt_body,
-                    "build_url": BUILD_URL,
+                    "build_url": ju,
                 },
+                jenkins_build_url=ju,
             )
         except Exception as ex:
             try:
                 send(chat_id, f"❌ FPMS Jenkins automation failed:\n```\n{ex}\n```")
             except Exception:
                 pass
-            print(f"[fpmsuatbranch bot] run failed: {ex!r}", flush=True)
+            print(f"[jenkinsupdate bot] run failed: {ex!r}", flush=True)
         finally:
             _fpms_lark_clear_session_key(session_key)
 
     threading.Thread(target=_job, name="fpms-uat-jenkins", daemon=True).start()
 
 
-def handle_lark_fpms_uat_branch_message(
+def _fpms_lark_dispatch_job_row(
+    chat_id: str,
+    session_key: str,
+    body: str,
+    row: tuple[str, float, str, str],
+    send,
+) -> bool:
+    """After a Jenkins job alias is chosen: link-only jobs vs FPMS UAT parameter automation."""
+    alias, _sc, label, url_raw = row
+    if not _jenkins_update_job_url_is_fpms_uat_branch_form(url_raw):
+        lines = [
+            f"✅ **Job:** {label}",
+            f"**Matched:** `{alias}`",
+            "",
+            "**Jenkins URL(s):**",
+        ]
+        for i, uu in enumerate([u.strip() for u in url_raw.splitlines() if u.strip()], 1):
+            lines.append(f"{i}. {uu}")
+        lines.append(
+            "\n_Only **FPMS UAT branch update** is auto-filled by this bot; use the links for other jobs._"
+        )
+        send(chat_id, "\n".join(lines))
+        return True
+    ju = _jenkins_update_primary_url(url_raw)
+    return _fpms_lark_dispatch_fpms_parameter_flow(
+        chat_id, session_key, body, ju, send
+    )
+
+
+def _fpms_lark_dispatch_fpms_parameter_flow(
+    chat_id: str,
+    session_key: str,
+    body: str,
+    jenkins_build_url: str,
+    send,
+) -> bool:
+    """Parse FPMS block, resolve services, then headless run or service pick session."""
+    try:
+        data = parse_jenkins_update_fpms_bot_block(body)
+    except Exception as ex:
+        send(
+            chat_id,
+            "❌ Could not parse `/jenkinsupdate` block. Need first line with `/jenkinsupdate update FPMS UAT`, "
+            f"then `branch:`, `version:`, `Service:` lines.\n```\n{ex}\n```",
+        )
+        return True
+    with _fpms_lark_sessions_lock:
+        prev = _fpms_lark_sessions.get(session_key)
+        if isinstance(prev, dict) and prev.get("state") == "jenkins_wait_build":
+            send(
+                chat_id,
+                "⏳ A Jenkins **Build** confirmation is already waiting for you in this chat. "
+                "Reply **yes** / **no** to that card, or say **cancel** first before starting a new run.",
+            )
+            return True
+    tokens: list[str] = data["service_tokens"]
+    resolved_ids: list[str] = []
+    tokens_to_pick: list[str] = []
+    for tok in tokens:
+        try:
+            port_ids = _fpms_lark_resolve_token_by_port_or_none(tok)
+        except ValueError as ex:
+            send(chat_id, f"❌ {ex}")
+            return True
+        if port_ids is not None:
+            for sid in port_ids:
+                if sid not in resolved_ids:
+                    resolved_ids.append(sid)
+        else:
+            tokens_to_pick.append(tok)
+    if not tokens_to_pick:
+        if not resolved_ids:
+            send(chat_id, "❌ No services parsed after resolving ports.")
+            return True
+        _fpms_lark_begin_jenkins_run(
+            chat_id,
+            session_key,
+            data,
+            resolved_ids,
+            send,
+            raw_prompt_body=body,
+            jenkins_build_url=jenkins_build_url,
+        )
+        return True
+    first = tokens_to_pick[0]
+    q0 = first.replace("_", "-")
+    ranked0 = _rank_services_by_query(q0, limit=12, for_menu=True)
+    if not ranked0:
+        send(chat_id, f"❌ No Jenkins service matches first text token `{first}`.")
+        return True
+    sess_new = {
+        "state": "pick",
+        "data": data,
+        "service_tokens": tokens_to_pick,
+        "pick_index": 0,
+        "resolved_ids": resolved_ids,
+        "current_ranked": ranked0,
+        "raw_prompt_body": body,
+        "jenkins_job_url": jenkins_build_url,
+    }
+    with _fpms_lark_sessions_lock:
+        _fpms_lark_sessions[session_key] = sess_new
+    send(chat_id, _fpms_format_service_menu_message(first, ranked0))
+    return True
+
+
+def handle_lark_jenkins_update_message(
     chat_id: str,
     sender_id: str,
     clean_text: str,
@@ -3289,11 +3566,11 @@ def handle_lark_fpms_uat_branch_message(
     allow_start: bool,
 ) -> bool:
     """
-    Multi-step FPMS UAT handler for Lark.
+    Lark ``/jenkinsupdate``: match a registered Jenkins job from keywords (or ask 1–N),
+    then either post job link(s) or run the FPMS UAT branch parameter automation.
 
     ``allow_start`` — in **group** chats, only **True** when the bot was @mentioned (first message).
-    After all service picks, a **headless** Jenkins run starts immediately; follow-up **yes** / **no**
-    is only for **Build** after on-page re-checks. **cancel** works anytime.
+    **cancel** works anytime.
 
     Returns **True** if this message was consumed (caller should stop processing).
     """
@@ -3319,9 +3596,9 @@ def handle_lark_fpms_uat_branch_message(
             # One user-facing outcome: the Playwright thread sends the final line after the gate.
             return True
         if had_other:
-            send(chat_id, "⏹️ **All `/fpmsuatbranch` steps cancelled.**")
+            send(chat_id, "⏹️ **All `/jenkinsupdate` steps cancelled.**")
         else:
-            send(chat_id, "ℹ️ No active `/fpmsuatbranch` session to cancel.")
+            send(chat_id, "ℹ️ No active `/jenkinsupdate` session to cancel.")
         return True
 
     with _fpms_lark_sessions_lock:
@@ -3329,10 +3606,28 @@ def handle_lark_fpms_uat_branch_message(
 
     if sess is not None:
         st = sess.get("state")
+        if st == "choose_job":
+            cands = sess.get("job_candidates")
+            pending = str(sess.get("pending_body") or "")
+            if not isinstance(cands, list) or not cands or not pending:
+                _fpms_lark_clear_session(chat_id, sender_id)
+                send(chat_id, "Session error — start again with `/jenkinsupdate`.")
+                return True
+            idx = _parse_single_menu_index(clean_text.strip(), len(cands))
+            if idx is None:
+                send(
+                    chat_id,
+                    f"Reply with **one** number **1**–**{len(cands)}** only, or say **cancel**.",
+                )
+                return True
+            row = cands[idx - 1]
+            with _fpms_lark_sessions_lock:
+                _fpms_lark_sessions.pop(key, None)
+            return _fpms_lark_dispatch_job_row(chat_id, key, pending, row, send)
         if st == "jenkins_wait_build":
             if not isinstance(sess.get("build_gate_event"), threading.Event):
                 _fpms_lark_clear_session(chat_id, sender_id)
-                send(chat_id, "Session error — start again with `/fpmsuatbranch`.")
+                send(chat_id, "Session error — start again with `/jenkinsupdate`.")
                 return True
             if low in ("yes", "y"):
                 with _fpms_lark_sessions_lock:
@@ -3377,8 +3672,15 @@ def handle_lark_fpms_uat_branch_message(
                 data = sess["data"]
                 resolved_ids: list[str] = sess["resolved_ids"]
                 raw_pb = str(sess.get("raw_prompt_body") or "")
+                ju = str(sess.get("jenkins_job_url") or BUILD_URL).strip() or BUILD_URL
                 _fpms_lark_begin_jenkins_run(
-                    chat_id, key, data, resolved_ids, send, raw_prompt_body=raw_pb
+                    chat_id,
+                    key,
+                    data,
+                    resolved_ids,
+                    send,
+                    raw_prompt_body=raw_pb,
+                    jenkins_build_url=ju,
                 )
                 return True
             next_tok = sess["service_tokens"][sess["pick_index"]]
@@ -3395,10 +3697,10 @@ def handle_lark_fpms_uat_branch_message(
             return True
 
         _fpms_lark_clear_session(chat_id, sender_id)
-        send(chat_id, "⚠️ Internal session state was reset. Start again with `/fpmsuatbranch`.")
+        send(chat_id, "⚠️ Internal session state was reset. Start again with `/jenkinsupdate`.")
         return True
 
-    if not re.search(r"/fpmsuatbranch\b", clean_text, re.I):
+    if not JENKINS_UPDATE_CMD_RE.search(clean_text or ""):
         return False
     if not allow_start:
         return False
@@ -3407,16 +3709,6 @@ def handle_lark_fpms_uat_branch_message(
     for pat in (r"@_user_\d+", r"<[^>]+>"):
         body = re.sub(pat, "", body)
     body = body.replace("\r\n", "\n").strip()
-
-    try:
-        data = parse_fpms_uat_bot_block(body)
-    except Exception as ex:
-        send(
-            chat_id,
-            "❌ Could not parse `/fpmsuatbranch` block. Need first line with `/fpmsuatbranch update FPMS UAT`, "
-            f"then `branch:`, `version:`, `Service:` lines.\n```\n{ex}\n```",
-        )
-        return True
 
     with _fpms_lark_sessions_lock:
         prev = _fpms_lark_sessions.get(key)
@@ -3428,52 +3720,32 @@ def handle_lark_fpms_uat_branch_message(
             )
             return True
 
-    tokens: list[str] = data["service_tokens"]
-    resolved_ids: list[str] = []
-    tokens_to_pick: list[str] = []
-    for tok in tokens:
-        try:
-            port_ids = _fpms_lark_resolve_token_by_port_or_none(tok)
-        except ValueError as ex:
-            send(chat_id, f"❌ {ex}")
-            return True
-        if port_ids is not None:
-            for sid in port_ids:
-                if sid not in resolved_ids:
-                    resolved_ids.append(sid)
-        else:
-            tokens_to_pick.append(tok)
-
-    if not tokens_to_pick:
-        if not resolved_ids:
-            send(chat_id, "❌ No services parsed after resolving ports.")
-            return True
-        _fpms_lark_begin_jenkins_run(
-            chat_id, key, data, resolved_ids, send, raw_prompt_body=body
+    ranked = _rank_jenkins_update_job_matches(body)
+    ties = _jenkins_update_disambiguation_ties(ranked)
+    if not ties:
+        sample = ", ".join(sorted(JENKINS_UPDATE_JOB_REGISTRY.keys())[:14])
+        send(
+            chat_id,
+            "❌ Could not match your text to a Jenkins job. Use a known keyword in the message "
+            f"(e.g. **fpms uat branch**, **frontend uat1 h5**). Aliases include: {sample}, …",
         )
         return True
-
-    first = tokens_to_pick[0]
-    q0 = first.replace("_", "-")
-    ranked0 = _rank_services_by_query(q0, limit=12, for_menu=True)
-    if not ranked0:
-        send(chat_id, f"❌ No Jenkins service matches first text token `{first}`.")
+    if len(ties) > 1:
+        with _fpms_lark_sessions_lock:
+            _fpms_lark_sessions[key] = {
+                "state": "choose_job",
+                "job_candidates": ties,
+                "pending_body": body,
+            }
+        send(chat_id, _fpms_format_jenkins_job_menu(ties))
         return True
+    return _fpms_lark_dispatch_job_row(chat_id, key, body, ties[0], send)
 
-    sess_new = {
-        "state": "pick",
-        "data": data,
-        "service_tokens": tokens_to_pick,
-        "pick_index": 0,
-        "resolved_ids": resolved_ids,
-        "current_ranked": ranked0,
-        "raw_prompt_body": body,
-    }
-    with _fpms_lark_sessions_lock:
-        _fpms_lark_sessions[key] = sess_new
 
-    send(chat_id, _fpms_format_service_menu_message(first, ranked0))
-    return True
+# Backward-compatible names (older imports / docs).
+handle_lark_fpms_uat_branch_message = handle_lark_jenkins_update_message
+fpms_uat_has_active_lark_session = jenkins_update_has_active_lark_session
+parse_fpms_uat_bot_block = parse_jenkins_update_fpms_bot_block
 
 
 def _playwright_browser_context_and_page(
@@ -3612,6 +3884,7 @@ def run(
     config_block: str | None = None,
     user_data_dir: str | None = None,
     bot_lark_gate: dict | None = None,
+    jenkins_build_url: str | None = None,
 ) -> None:
     if config_block:
         environment, services, branch, version = parse_fpms_config_block(config_block)
@@ -3660,8 +3933,13 @@ def run(
             user_data_dir=user_data_dir,
         )
         try:
+            ju = (jenkins_build_url or "").strip()
+            if not ju and bot_lark_gate:
+                ju = str(bot_lark_gate.get("build_url") or "").strip()
+            if not ju:
+                ju = BUILD_URL
             print("\n→ Single browser session (post-login warm-up reload: **off**).")
-            open_fpms_build_with_login(page, user, pw, first_visit=True, warmup=False)
+            open_fpms_build_with_login(page, user, pw, first_visit=True, warmup=False, build_url=ju)
             page.wait_for_selector("div.jenkins-form-item", timeout=60_000)
             _safe_page_wait(page, _MS_FORM_READY)
             print(
@@ -3690,7 +3968,7 @@ def run(
                     "in-tab recovery: goto build URL → re-login → Refresh pipeline → Build → "
                     f"wait {_MS_POST_BUILD_RECOVER_WAIT_MS/1000:g}s → goto build URL → re-login → refill…"
                 )
-                _recover_services_not_found_sequence(page, user, pw)
+                _recover_services_not_found_sequence(page, user, pw, build_url=ju)
                 try:
                     if environment_tick_done and not services_tick_done:
                         print(
