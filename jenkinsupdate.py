@@ -89,6 +89,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import json
 import os
 import re
 import sys
@@ -3050,8 +3051,123 @@ def _fpms_format_config_preview(data: dict, resolved: list[str]) -> str:
     return "\n".join(lines)
 
 
+def _fpms_lark_safe_code_fence(s: str) -> str:
+    return (s or "").replace("```", "'''").strip()
+
+
+def _fpms_lark_verification_card_json(
+    *,
+    prompt_echo: str,
+    verify_lines: list[str],
+    ok_all: bool,
+    build_url: str,
+) -> str:
+    """Lark ``msg_type=interactive`` payload: JSON string of the card."""
+    safe = _fpms_lark_safe_code_fence(prompt_echo) or "(empty)"
+    md_checks = "\n".join(verify_lines)
+    footer_ok = (
+        "✅ All lines above are **OK**. Reply **yes** in this chat to click **Build** in Jenkins, "
+        "or **no** to skip **Build**."
+    )
+    footer_bad = (
+        "⚠️ At least one line shows **❌**. **Build** stays disabled until every line is ✅. "
+        "Fix Jenkins or your config, then run `/fpmsuatbranch` again. Reply **no** here to close "
+        "without clicking **Build**."
+    )
+    block_a = f"📋 **Your message**\n```\n{safe}\n```"
+    block_b = (
+        f"🔗 **Jenkins**\n[{build_url}]({build_url})\n\n"
+        f"🧪 **Form filled and re-check**\n{md_checks}\n\n"
+        f"{footer_ok if ok_all else footer_bad}"
+    )
+    card: dict = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "green" if ok_all else "orange",
+            "title": {
+                "tag": "plain_text",
+                "content": "FPMS UAT — form filled & re-check",
+            },
+        },
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": block_a}},
+            {"tag": "hr"},
+            {"tag": "div", "text": {"tag": "lark_md", "content": block_b}},
+        ],
+    }
+    return json.dumps(card, ensure_ascii=False)
+
+
+def _fpms_lark_verification_plain_fallback(
+    *,
+    prompt_echo: str,
+    verify_lines: list[str],
+    ok_all: bool,
+    build_url: str,
+) -> str:
+    safe = _fpms_lark_safe_code_fence(prompt_echo) or "(empty)"
+    lines = [
+        "📋 **Your message**",
+        "```",
+        safe,
+        "```",
+        "",
+        f"🔗 **Jenkins (build page):** {build_url}",
+        "",
+        "🧪 **Form filled and re-check**",
+        *verify_lines,
+        "",
+    ]
+    if ok_all:
+        lines.append(
+            "✅ All lines above are **OK**. Reply **yes** in this chat to click **Build** in Jenkins, "
+            "or **no** to skip **Build**."
+        )
+    else:
+        lines.append(
+            "⚠️ At least one line shows **❌**. **Build** stays disabled until every line is ✅. "
+            "Fix Jenkins or your config, then run `/fpmsuatbranch` again. Reply **no** here to close "
+            "without clicking **Build**."
+        )
+    return "\n".join(lines)
+
+
+def _fpms_lark_send_verification_summary(
+    send,
+    chat_id: str,
+    *,
+    prompt_echo: str,
+    verify_lines: list[str],
+    ok_all: bool,
+    build_url: str,
+) -> None:
+    card = _fpms_lark_verification_card_json(
+        prompt_echo=prompt_echo,
+        verify_lines=verify_lines,
+        ok_all=ok_all,
+        build_url=build_url,
+    )
+    try:
+        send(chat_id, card, msg_type="interactive")
+    except TypeError:
+        send(
+            chat_id,
+            _fpms_lark_verification_plain_fallback(
+                prompt_echo=prompt_echo,
+                verify_lines=verify_lines,
+                ok_all=ok_all,
+                build_url=build_url,
+            ),
+        )
+
+
 def _fpms_lark_begin_jenkins_run(
-    chat_id: str, session_key: str, data: dict, resolved: list[str], send
+    chat_id: str,
+    session_key: str,
+    data: dict,
+    resolved: list[str],
+    send,
+    raw_prompt_body: str = "",
 ) -> None:
     """Install ``jenkins_wait_build`` gate, post preview + start message, spawn Playwright thread."""
     cfg = _fpms_bot_build_config_block(data, resolved)
@@ -3061,6 +3177,7 @@ def _fpms_lark_begin_jenkins_run(
             "state": "jenkins_wait_build",
             "build_gate_event": ev,
             "approve_build": None,
+            "lark_cancel": False,
         }
     preview = _fpms_format_config_preview(data, resolved)
     send(
@@ -3069,7 +3186,7 @@ def _fpms_lark_begin_jenkins_run(
         + "\n\n⏳ Starting **headless** Jenkins — filling **all** parameters, running **two** on-page "
         "re-checks, then you will be asked here to click **Build** or skip. Say **cancel** anytime.",
     )
-    _fpms_lark_spawn_run(chat_id, session_key, cfg, send)
+    _fpms_lark_spawn_run(chat_id, session_key, cfg, send, raw_prompt_body=raw_prompt_body)
 
 
 def _fpms_bot_build_config_block(data: dict, resolved_ids: list[str]) -> str:
@@ -3082,7 +3199,14 @@ def _fpms_bot_build_config_block(data: dict, resolved_ids: list[str]) -> str:
     )
 
 
-def _fpms_lark_spawn_run(chat_id: str, session_key: str, config_block: str, send) -> None:
+def _fpms_lark_spawn_run(
+    chat_id: str,
+    session_key: str,
+    config_block: str,
+    send,
+    *,
+    raw_prompt_body: str = "",
+) -> None:
     """``session_key`` must already hold ``jenkins_wait_build`` with ``build_gate_event``."""
 
     def _job() -> None:
@@ -3098,6 +3222,8 @@ def _fpms_lark_spawn_run(chat_id: str, session_key: str, config_block: str, send
                     "chat_id": chat_id,
                     "send": send,
                     "timeout_sec": float(os.environ.get("FPMS_BOT_BUILD_WAIT_SEC", "7200")),
+                    "prompt_echo": raw_prompt_body,
+                    "build_url": BUILD_URL,
                 },
             )
         except Exception as ex:
@@ -3141,6 +3267,7 @@ def handle_lark_fpms_uat_branch_message(
             if isinstance(s, dict) and s.get("state") == "jenkins_wait_build":
                 ev = s.get("build_gate_event")
                 if isinstance(ev, threading.Event):
+                    s["lark_cancel"] = True
                     s["approve_build"] = False
                     ev.set()
                 released_build_wait = True
@@ -3148,10 +3275,7 @@ def handle_lark_fpms_uat_branch_message(
                 had_other = True
                 _fpms_lark_sessions.pop(key, None)
         if released_build_wait:
-            send(
-                chat_id,
-                "⏹️ **Cancelled.** The Jenkins session will skip **Build** and close.",
-            )
+            # One user-facing outcome: the Playwright thread sends the final line after the gate.
             return True
         if had_other:
             send(chat_id, "⏹️ **All `/fpmsuatbranch` steps cancelled.**")
@@ -3211,7 +3335,10 @@ def handle_lark_fpms_uat_branch_message(
             if sess["pick_index"] >= len(sess["service_tokens"]):
                 data = sess["data"]
                 resolved_ids: list[str] = sess["resolved_ids"]
-                _fpms_lark_begin_jenkins_run(chat_id, key, data, resolved_ids, send)
+                raw_pb = str(sess.get("raw_prompt_body") or "")
+                _fpms_lark_begin_jenkins_run(
+                    chat_id, key, data, resolved_ids, send, raw_prompt_body=raw_pb
+                )
                 return True
             next_tok = sess["service_tokens"][sess["pick_index"]]
             q = next_tok.replace("_", "-")
@@ -3250,6 +3377,16 @@ def handle_lark_fpms_uat_branch_message(
         )
         return True
 
+    with _fpms_lark_sessions_lock:
+        prev = _fpms_lark_sessions.get(key)
+        if isinstance(prev, dict) and prev.get("state") == "jenkins_wait_build":
+            send(
+                chat_id,
+                "⏳ A Jenkins **Build** confirmation is already waiting for you in this chat. "
+                "Reply **yes** / **no** to that card, or say **cancel** first before starting a new run.",
+            )
+            return True
+
     tokens: list[str] = data["service_tokens"]
     first = tokens[0]
     q0 = first.replace("_", "-")
@@ -3265,6 +3402,7 @@ def handle_lark_fpms_uat_branch_message(
         "pick_index": 0,
         "resolved_ids": [],
         "current_ranked": ranked0,
+        "raw_prompt_body": body,
     }
     with _fpms_lark_sessions_lock:
         _fpms_lark_sessions[key] = sess_new
@@ -3553,25 +3691,16 @@ def run(
                 cid = str(bot_lark_gate["chat_id"])
                 send = bot_lark_gate["send"]
                 to = float(bot_lark_gate.get("timeout_sec", 7200))
-                body = (
-                    "**Form filled — on-page verification (1st pass)**\n"
-                    + "\n".join(lines_first)
-                    + "\n\n**Second re-check**\n"
-                    + "\n".join(verify_lines)
-                    + "\n\n"
+                build_url = str(bot_lark_gate.get("build_url") or BUILD_URL)
+                prompt_echo = str(bot_lark_gate.get("prompt_echo") or "")
+                _fpms_lark_send_verification_summary(
+                    send,
+                    cid,
+                    prompt_echo=prompt_echo,
+                    verify_lines=verify_lines,
+                    ok_all=ok_all,
+                    build_url=build_url,
                 )
-                if ok_all:
-                    body += (
-                        "All lines above are **OK** (✅). Reply **yes** in this chat to click **Build** in Jenkins, "
-                        "or **no** to skip **Build**."
-                    )
-                else:
-                    body += (
-                        "At least one line shows **❌**. **Build** will only be available after every line is ✅. "
-                        "Fix the parameters in the Jenkins form (or adjust your config), then run `/fpmsuatbranch` again. "
-                        "Reply **no** here to close this session without clicking **Build**."
-                    )
-                send(cid, body)
                 with _fpms_lark_sessions_lock:
                     gate = _fpms_lark_sessions.get(sk)
                     ev = gate.get("build_gate_event") if isinstance(gate, dict) else None
@@ -3597,7 +3726,18 @@ def run(
                             )
                     else:
                         build_clicked = False
-                        send(cid, "**Build** skipped (you replied **no** or cancelled).")
+                        with _fpms_lark_sessions_lock:
+                            gate_after = _fpms_lark_sessions.get(sk, {})
+                            cancelled = bool(
+                                isinstance(gate_after, dict) and gate_after.get("lark_cancel")
+                            )
+                        if cancelled:
+                            send(
+                                cid,
+                                "⏹️ **Cancelled.** **Build** skipped; the Jenkins session will close.",
+                            )
+                        else:
+                            send(cid, "**Build** skipped (you replied **no**).")
             elif prompt_yes_to_click_build(
                 page, environment, services, branch, version
             ):
