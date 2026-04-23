@@ -955,7 +955,7 @@ def _prompt_service_ids_for_config_text_token(
     """
     print(
         f"\n→ Service text {token!r} — near matches (best first). Pick one or more: **1**, **2**, "
-        "**1 2 3**, or **1,2,3** (中文：输入编号，可多选):",
+        "**1 2 3**, or **1,2,3**:",
         flush=True,
     )
     for k, name in enumerate(ranked, start=1):
@@ -2901,6 +2901,11 @@ def _fpms_lark_clear_session(chat_id: str, sender_id: str) -> None:
         _fpms_lark_sessions.pop(_fpms_lark_session_key(chat_id, sender_id), None)
 
 
+def _fpms_lark_clear_session_key(session_key: str) -> None:
+    with _fpms_lark_sessions_lock:
+        _fpms_lark_sessions.pop(session_key, None)
+
+
 def _environment_from_bot_trigger_line(head: str) -> str | None:
     """Infer ``fpms-uat*-branch`` from the first line (``… update FPMS UAT2`` / ``UAT`` …)."""
     hint = _environment_hint_from_banner(head)
@@ -3023,8 +3028,8 @@ def parse_fpms_uat_bot_block(text: str) -> dict:
 
 def _fpms_format_service_menu_message(token: str, ranked: list[str]) -> str:
     lines = [
-        f"→ Service text `{token}` — near matches (best first). Pick one or more: **1**, **2**, "
-        "**1 2 3**, or **1,2,3** (中文：输入编号，可多选):",
+        f"Service text `{token}` — near matches (best first). Pick one or more: **1**, **2**, "
+        "**1 2 3**, or **1,2,3**:",
     ]
     for i, name in enumerate(ranked, start=1):
         lines.append(f"  {i}. {name}")
@@ -3033,20 +3038,20 @@ def _fpms_format_service_menu_message(token: str, ranked: list[str]) -> str:
 
 def _fpms_format_summary_message(data: dict, resolved: list[str]) -> str:
     lines = [
-        "**FPMS UAT branch update — please re-check everything**",
+        "**FPMS UAT branch update — summary (please read before continuing)**",
         f"- **Environment:** `{data['environment']}`",
         f"- **Branch:** `{data['branch']}`",
         f"- **Version:** `{data['version']}`",
-        "- **Services (resolved Jenkins ids):**",
+        "- **Services (resolved Jenkins checkbox ids):**",
     ]
     for i, sid in enumerate(resolved, start=1):
         lines.append(f"  {i}. `{sid}`")
     lines.append("")
     lines.append(
-        "Reply **yes** to open Jenkins (headless), fill the form, re-verify on the page, and click **Build** "
-        "if all checks pass. Reply **no** to stop without running. Say **cancel** anytime to abort the whole flow."
+        "Reply **yes** to start a **headless** Jenkins session: the bot will **fill the entire form**, "
+        "run a **second on-page re-check**, then ask you again in this chat whether to click **Build**. "
+        "Reply **no** to stop here. Say **cancel** anytime to abort."
     )
-    lines.append("中文：回复 **yes** 执行并尝试点 Build；**no** 不跑；任意阶段 **cancel** 取消。")
     return "\n".join(lines)
 
 
@@ -3060,16 +3065,23 @@ def _fpms_bot_build_config_block(data: dict, resolved_ids: list[str]) -> str:
     )
 
 
-def _fpms_lark_spawn_run(chat_id: str, config_block: str, send) -> None:
+def _fpms_lark_spawn_run(chat_id: str, session_key: str, config_block: str, send) -> None:
+    """``session_key`` must already hold ``jenkins_wait_build`` with ``build_gate_event``."""
+
     def _job() -> None:
         try:
             run(
-                review_seconds=float(os.environ.get("FPMS_BOT_REVIEW_SECONDS", "8")),
+                review_seconds=float(os.environ.get("FPMS_BOT_REVIEW_SECONDS", "12")),
                 headless=True,
                 browser=os.environ.get("FPMS_PLAYWRIGHT_BROWSER", "chromium"),
                 config_block=config_block,
                 user_data_dir=(os.environ.get("FPMS_PLAYWRIGHT_USER_DATA_DIR") or "").strip() or None,
-                bot_mode=True,
+                bot_lark_gate={
+                    "session_key": session_key,
+                    "chat_id": chat_id,
+                    "send": send,
+                    "timeout_sec": float(os.environ.get("FPMS_BOT_BUILD_WAIT_SEC", "7200")),
+                },
             )
         except Exception as ex:
             try:
@@ -3077,11 +3089,8 @@ def _fpms_lark_spawn_run(chat_id: str, config_block: str, send) -> None:
             except Exception:
                 pass
             print(f"[fpmsuatbranch bot] run failed: {ex!r}", flush=True)
-        else:
-            try:
-                send(chat_id, "✅ FPMS UAT branch job finished (Build clicked if verification was all ✅).")
-            except Exception:
-                pass
+        finally:
+            _fpms_lark_clear_session_key(session_key)
 
     threading.Thread(target=_job, name="fpms-uat-jenkins", daemon=True).start()
 
@@ -3107,14 +3116,29 @@ def handle_lark_fpms_uat_branch_message(
     low = (clean_text or "").strip().casefold()
 
     if low == "cancel":
+        released_build_wait = False
+        had_other = False
         with _fpms_lark_sessions_lock:
-            had = key in _fpms_lark_sessions
-            if had:
+            s = _fpms_lark_sessions.get(key)
+            if isinstance(s, dict) and s.get("state") == "jenkins_wait_build":
+                ev = s.get("build_gate_event")
+                if isinstance(ev, threading.Event):
+                    s["approve_build"] = False
+                    ev.set()
+                released_build_wait = True
+            elif key in _fpms_lark_sessions:
+                had_other = True
                 _fpms_lark_sessions.pop(key, None)
-        if had:
-            send(chat_id, "⏹️ **All FPMS /fpmsuatbranch process cancelled.** / 已全部取消。")
+        if released_build_wait:
+            send(
+                chat_id,
+                "⏹️ **Cancelled.** The Jenkins session will skip **Build** and close.",
+            )
+            return True
+        if had_other:
+            send(chat_id, "⏹️ **All `/fpmsuatbranch` steps cancelled.**")
         else:
-            send(chat_id, "ℹ️ No active `/fpmsuatbranch` session to cancel. / 当前没有进行中的 FPMS 流程。")
+            send(chat_id, "ℹ️ No active `/fpmsuatbranch` session to cancel.")
         return True
 
     with _fpms_lark_sessions_lock:
@@ -3122,26 +3146,61 @@ def handle_lark_fpms_uat_branch_message(
 
     if sess is not None:
         st = sess.get("state")
+        if st == "jenkins_wait_build":
+            if not isinstance(sess.get("build_gate_event"), threading.Event):
+                _fpms_lark_clear_session(chat_id, sender_id)
+                send(chat_id, "Session error — start again with `/fpmsuatbranch`.")
+                return True
+            if low in ("yes", "y"):
+                with _fpms_lark_sessions_lock:
+                    sg = _fpms_lark_sessions.get(key)
+                    if isinstance(sg, dict) and sg.get("state") == "jenkins_wait_build":
+                        sg["approve_build"] = True
+                        ev2 = sg.get("build_gate_event")
+                        if isinstance(ev2, threading.Event):
+                            ev2.set()
+                return True
+            if low in ("no", "n"):
+                with _fpms_lark_sessions_lock:
+                    sg = _fpms_lark_sessions.get(key)
+                    if isinstance(sg, dict) and sg.get("state") == "jenkins_wait_build":
+                        sg["approve_build"] = False
+                        ev2 = sg.get("build_gate_event")
+                        if isinstance(ev2, threading.Event):
+                            ev2.set()
+                return True
+            send(
+                chat_id,
+                "Reply **yes** to click **Build** in Jenkins, or **no** to skip **Build** (browser will close after).",
+            )
+            return True
+
         if st == "confirm":
             if low in ("no", "n"):
                 _fpms_lark_clear_session(chat_id, sender_id)
-                send(chat_id, "ℹ️ Stopped — **Build** will not be run. / 已停止，不会执行 Jenkins。")
+                send(chat_id, "Stopped — Jenkins will not be opened.")
                 return True
             if low in ("yes", "y"):
                 data = sess["data"]
                 resolved: list[str] = sess["resolved_ids"]
-                _fpms_lark_clear_session(chat_id, sender_id)
                 cfg = _fpms_bot_build_config_block(data, resolved)
+                ev = threading.Event()
+                with _fpms_lark_sessions_lock:
+                    _fpms_lark_sessions[key] = {
+                        "state": "jenkins_wait_build",
+                        "build_gate_event": ev,
+                        "approve_build": None,
+                    }
                 send(
                     chat_id,
-                    "⏳ Starting Jenkins (headless) — filling form, re-checking the page, "
-                    "then clicking **Build** only if every check is ✅…",
+                    "⏳ Starting **headless** Jenkins — filling **all** parameters, running a **second on-page "
+                    "re-check**, then I will ask here again before clicking **Build**.",
                 )
-                _fpms_lark_spawn_run(chat_id, cfg, send)
+                _fpms_lark_spawn_run(chat_id, key, cfg, send)
                 return True
             send(
                 chat_id,
-                "Please reply **yes** to run Jenkins + **Build**, **no** to stop, or **cancel**.",
+                "Reply **yes** to open Jenkins and fill the form, **no** to stop, or **cancel**.",
             )
             return True
 
@@ -3361,7 +3420,7 @@ def run(
     browser: str = "chromium",
     config_block: str | None = None,
     user_data_dir: str | None = None,
-    bot_mode: bool = False,
+    bot_lark_gate: dict | None = None,
 ) -> None:
     if config_block:
         environment, services, branch, version = parse_fpms_config_block(config_block)
@@ -3474,26 +3533,83 @@ def run(
             fill_text_parameter(page, "Version", version)
 
             _safe_page_wait(page, max(0, _MS_POST_FILL_VERIFY))
-            ok_all, verify_lines = verify_fpms_parameters_display(
-                page, environment, services, branch, version
-            )
-            print("\n→ ===== Parameter re-check (page vs your choices) =====")
-            for ln in verify_lines:
-                print(f"    {ln}")
-            print("→ =====================================================\n")
+            if bot_lark_gate is not None:
+                ok_first, lines_first = verify_fpms_parameters_display(
+                    page, environment, services, branch, version
+                )
+                print("\n→ ===== First parameter re-check (page vs your choices) =====")
+                for ln in lines_first:
+                    print(f"    {ln}")
+                _safe_page_wait(page, max(250, min(800, _MS_POST_FILL_VERIFY)))
+                ok_second, verify_lines = verify_fpms_parameters_display(
+                    page, environment, services, branch, version
+                )
+                print("\n→ ===== Second parameter re-check (page vs your choices) =====")
+                for ln in verify_lines:
+                    print(f"    {ln}")
+                print("→ =====================================================\n")
+                ok_all = ok_first and ok_second
+            else:
+                ok_all, verify_lines = verify_fpms_parameters_display(
+                    page, environment, services, branch, version
+                )
+                lines_first = verify_lines
+                print("\n→ ===== Parameter re-check (page vs your choices) =====")
+                for ln in verify_lines:
+                    print(f"    {ln}")
+                print("→ =====================================================\n")
 
             build_clicked = False
-            if bot_mode:
-                if not ok_all:
-                    msg = (
-                        "Jenkins parameter re-check has ❌ — **Build** not clicked (bot_mode).\n"
-                        "页面核对仍有 ❌，未点击 Build。"
+            if bot_lark_gate is not None:
+                sk = str(bot_lark_gate["session_key"])
+                cid = str(bot_lark_gate["chat_id"])
+                send = bot_lark_gate["send"]
+                to = float(bot_lark_gate.get("timeout_sec", 7200))
+                body = (
+                    "**Form filled — on-page verification (1st pass)**\n"
+                    + "\n".join(lines_first)
+                    + "\n\n**Second re-check**\n"
+                    + "\n".join(verify_lines)
+                    + "\n\n"
+                )
+                if ok_all:
+                    body += (
+                        "All lines above are **OK** (✅). Reply **yes** in this chat to click **Build** in Jenkins, "
+                        "or **no** to skip **Build**."
                     )
-                    print(f"❌ {msg}", file=sys.stderr)
-                    raise RuntimeError(msg)
-                _click_jenkins_build_button(page)
-                build_clicked = True
-                print("→ **Build** clicked (bot_mode; parameters submitted to Jenkins).")
+                else:
+                    body += (
+                        "At least one line shows **❌**. **Build** will only be available after every line is ✅. "
+                        "Fix the parameters in the Jenkins form (or adjust your config), then run `/fpmsuatbranch` again. "
+                        "Reply **no** here to close this session without clicking **Build**."
+                    )
+                send(cid, body)
+                with _fpms_lark_sessions_lock:
+                    gate = _fpms_lark_sessions.get(sk)
+                    ev = gate.get("build_gate_event") if isinstance(gate, dict) else None
+                if not isinstance(ev, threading.Event):
+                    raise RuntimeError("Lost Lark build gate event (session_key).")
+                if not ev.wait(timeout=to):
+                    send(cid, "Timed out waiting for **yes** / **no**. **Build** skipped.")
+                    build_clicked = False
+                else:
+                    with _fpms_lark_sessions_lock:
+                        approved = _fpms_lark_sessions.get(sk, {}).get("approve_build")
+                    if approved is True:
+                        if ok_all:
+                            _click_jenkins_build_button(page)
+                            build_clicked = True
+                            print("→ **Build** clicked (Lark-approved).")
+                            send(cid, "**Build** clicked in Jenkins.")
+                        else:
+                            build_clicked = False
+                            send(
+                                cid,
+                                "**Build** was NOT clicked — verification still has ❌. Fix the job in Jenkins if needed.",
+                            )
+                    else:
+                        build_clicked = False
+                        send(cid, "**Build** skipped (you replied **no** or cancelled).")
             elif prompt_yes_to_click_build(
                 page, environment, services, branch, version
             ):
@@ -3508,8 +3624,8 @@ def run(
             print(
                 "\n→ Review period finished. The script will not click anything else on Jenkins."
             )
-            if bot_mode:
-                print("→ bot_mode: closing browser after review (no stdin hold).")
+            if bot_lark_gate is not None:
+                print("→ Lark bot session: closing browser after review.")
             else:
                 print(
                     "→ Browser stays open — use Jenkins as you need, then press **Ctrl+C** here to exit "
