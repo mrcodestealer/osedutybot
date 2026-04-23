@@ -3027,6 +3027,47 @@ def parse_fpms_uat_bot_block(text: str) -> dict:
     }
 
 
+_FPMS_PORT_IN_TOKEN_RE = re.compile(r"\b(\d{3,5})\b")
+
+
+def _fpms_lark_resolve_token_by_port_or_none(token: str) -> list[str] | None:
+    """
+    Lark ``/fpmsuatbranch``: if a service token contains a deploy **port** (3–5 digits in
+    ``SERVICE_PORT_TO_ID``), map by port and skip the fuzzy menu for that line.
+
+    Returns:
+        - ``list`` of Jenkins service ids (possibly multiple ports in one token), or
+        - ``None`` when the token has **no** 3–5 digit group → caller uses text fuzzy match.
+
+    Raises:
+        ``ValueError`` if the token contains digit group(s) but at least one is not a known port.
+    """
+    t = (token or "").strip()
+    if not t:
+        return None
+    matches = list(_FPMS_PORT_IN_TOKEN_RE.finditer(t))
+    if not matches:
+        return None
+    unknown: list[int] = []
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in matches:
+        port = int(m.group(1))
+        sid = SERVICE_PORT_TO_ID.get(port)
+        if sid is None:
+            unknown.append(port)
+        elif sid not in seen:
+            seen.add(sid)
+            out.append(sid)
+    if unknown:
+        sample = ", ".join(str(p) for p in sorted(SERVICE_PORT_TO_ID)[:28])
+        raise ValueError(
+            f"Unknown port(s) {unknown} in service line {token!r}. "
+            f"Known deploy ports include: {sample}, …"
+        )
+    return out
+
+
 def _fpms_format_service_menu_message(token: str, ranked: list[str]) -> str:
     lines = [
         f"Service text `{token}` — near matches (best first). Pick one or more: **1**, **2**, "
@@ -3388,19 +3429,43 @@ def handle_lark_fpms_uat_branch_message(
             return True
 
     tokens: list[str] = data["service_tokens"]
-    first = tokens[0]
+    resolved_ids: list[str] = []
+    tokens_to_pick: list[str] = []
+    for tok in tokens:
+        try:
+            port_ids = _fpms_lark_resolve_token_by_port_or_none(tok)
+        except ValueError as ex:
+            send(chat_id, f"❌ {ex}")
+            return True
+        if port_ids is not None:
+            for sid in port_ids:
+                if sid not in resolved_ids:
+                    resolved_ids.append(sid)
+        else:
+            tokens_to_pick.append(tok)
+
+    if not tokens_to_pick:
+        if not resolved_ids:
+            send(chat_id, "❌ No services parsed after resolving ports.")
+            return True
+        _fpms_lark_begin_jenkins_run(
+            chat_id, key, data, resolved_ids, send, raw_prompt_body=body
+        )
+        return True
+
+    first = tokens_to_pick[0]
     q0 = first.replace("_", "-")
     ranked0 = _rank_services_by_query(q0, limit=12, for_menu=True)
     if not ranked0:
-        send(chat_id, f"❌ No Jenkins service matches first token `{first}`.")
+        send(chat_id, f"❌ No Jenkins service matches first text token `{first}`.")
         return True
 
     sess_new = {
         "state": "pick",
         "data": data,
-        "service_tokens": tokens,
+        "service_tokens": tokens_to_pick,
         "pick_index": 0,
-        "resolved_ids": [],
+        "resolved_ids": resolved_ids,
         "current_ranked": ranked0,
         "raw_prompt_body": body,
     }
