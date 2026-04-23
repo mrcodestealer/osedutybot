@@ -156,11 +156,10 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
     ),
     "rc uat master": (
         "FPMS FNT(RC)",
-        "https://jenkins.client8.me/job/FNT/job/FNT_UAT_SCRIPT_RUN/build?delay=0sec",
+        "https://jenkins.client8.me/job/FNT/job/RC-UAT-UPDATE/build?delay=0sec",
     ),
     "cpms uat update": (
         "CPMS-UAT-UPDATE",
-        "https://jenkins.client8.me/job/IGO/job/UAT/job/IGO-UAT-UPDATE/build?delay=0sec\n"
         "https://jenkins.client8.me/job/CPMS/job/UAT/job/CPMS-UAT-UPDATE/build?delay=0sec",
     ),
     "igo uat script run": (
@@ -187,13 +186,17 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
 
 JENKINS_UPDATE_CMD_RE = re.compile(r"/jenkinsupdate\b", re.I)
 
-# FNT ``FNT_UAT_SCRIPT_RUN`` (RC UAT master) — Services checkbox ``value`` / label tokens for Lark fuzzy pick.
+# FNT ``FNT_UAT_SCRIPT_RUN`` (RC UAT master) — checkbox ``value`` / ``json`` from Jenkins
+# (ECP extended-choice parameter; order matches job UI).
 FNT_RC_UAT_MASTER_SERVICES = [
-    "rc-client",
     "backend-apiserver",
-    "scheduler-depwith",
+    "rc-apiserver",
+    "rc-client",
     "risk-analysis-rollout",
     "risk-analysis-worker",
+    "risk-analysis-worker-inactive-player-snapshot",
+    "scheduler-depwith",
+    "script-apiserver",
 ]
 
 _DEFAULT_USER = "junchen"
