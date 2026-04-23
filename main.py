@@ -53,7 +53,7 @@ import ecsre
 import update
 import otpp1
 import amountloss
-import fpmsuatbranch
+import jenkinsupdate
 
 # ================= CONFIGURATION =================
 APP_ID = os.getenv("APP_ID")
@@ -827,8 +827,8 @@ def lark_webhook():
             bot_mentioned = True
             print("✅ Bot mentioned (old schema via is_mention flag)")
 
-    fpms_sess_active = fpmsuatbranch.fpms_uat_has_active_lark_session(chat_id, sender_id)
-    if fpmsuatbranch.handle_lark_fpms_uat_branch_message(
+    fpms_sess_active = jenkinsupdate.fpms_uat_has_active_lark_session(chat_id, sender_id)
+    if jenkinsupdate.handle_lark_fpms_uat_branch_message(
         chat_id,
         sender_id,
         clean_text,
