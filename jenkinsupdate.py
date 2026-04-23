@@ -391,8 +391,8 @@ ENVIRONMENTS = [
     "fpms-uat5-branch",
 ]
 
-# Checkbox ``value`` / label text (same order as Jenkins job UI)
-SERVICES = [
+# Checkbox ``value`` / label text for **FPMS UAT branch update** job only (same order as Jenkins UI).
+FPMS_UAT_BRANCH_SERVICES = [
     "check-rest-server",
     "client-apiserver",
     "exrestful-apiserver",
@@ -422,7 +422,10 @@ SERVICES = [
     "settlement-server",
 ]
 
-_FPMS_SERVICE_IDS_CASEFOLD = frozenset(s.casefold() for s in SERVICES)
+# Backward-compatible name (prefer ``FPMS_UAT_BRANCH_SERVICES`` in new code).
+SERVICES = FPMS_UAT_BRANCH_SERVICES
+
+_FPMS_SERVICE_IDS_CASEFOLD = frozenset(s.casefold() for s in FPMS_UAT_BRANCH_SERVICES)
 
 
 def _normalize_service_query_key(tok: str) -> str:
@@ -484,7 +487,7 @@ def _rank_services_by_query(query: str, limit: int = 12, *, for_menu: bool = Fal
     if not q:
         return []
 
-    scored = [(_service_search_score(q_raw, s), s) for s in SERVICES]
+    scored = [(_service_search_score(q_raw, s), s) for s in FPMS_UAT_BRANCH_SERVICES]
     scored.sort(key=lambda x: (-x[0], x[1]))
     if not scored:
         return []
@@ -588,7 +591,7 @@ def _rank_fnt_rc_services_by_query(
     return out if out else [scored[0][1]]
 
 
-# Deploy / listener port → Jenkins Services checkbox ``value`` (same strings as ``SERVICES``).
+# Deploy / listener port → Jenkins Services checkbox ``value`` (same strings as ``FPMS_UAT_BRANCH_SERVICES``).
 # Use ``python3 updateJenkins.py --paste-config`` (or ``--config-file``) with lines like ``7300 - fg_exrestful``.
 # ``8000`` maps to ``check-rest-server`` (alias ``check-server-status``). ``9998`` → ``schedule-server2``.
 SERVICE_PORT_TO_ID: dict[int, str] = {
@@ -616,9 +619,9 @@ SERVICE_PORT_TO_ID: dict[int, str] = {
     9999: "schedule-server",
 }
 for _port, _svc in SERVICE_PORT_TO_ID.items():
-    if _svc not in SERVICES:
+    if _svc not in FPMS_UAT_BRANCH_SERVICES:
         raise RuntimeError(
-            f"SERVICE_PORT_TO_ID port {_port} maps to {_svc!r} which is not in SERVICES — fix the table."
+            f"SERVICE_PORT_TO_ID port {_port} maps to {_svc!r} which is not in FPMS_UAT_BRANCH_SERVICES — fix the table."
         )
 
 
@@ -737,7 +740,7 @@ def _service_ids_from_service_block_lines(lines: list[str]) -> list[str]:
                     "in the same comma-separated list (e.g. ``MGNT_API,1,2``)."
                 )
             q = tok.replace("_", "-")
-            ranked = _rank_services_by_query(q, limit=min(30, len(SERVICES)))
+            ranked = _rank_services_by_query(q, limit=min(30, len(FPMS_UAT_BRANCH_SERVICES)))
             if not ranked:
                 raise ConfigBlockError(f"No Jenkins service matches token {tok!r}.")
             j = i + 1
@@ -2901,6 +2904,75 @@ def read_services_checked_values(page) -> list[str]:
     return [normalize_parameter_text(str(x)) for x in out if str(x).strip()]
 
 
+def read_fnt_rc_services_checked_values(page) -> list[str]:
+    """Checked service ids under **Services** for FNT ECP extended-choice (``tbl_ecp_choice-parameter-*``)."""
+    out = page.evaluate(
+        r"""() => {
+            const items = document.querySelectorAll("div.jenkins-form-item");
+            for (const item of items) {
+                const lab = item.querySelector(".jenkins-form-label");
+                if (!lab) continue;
+                const t = (lab.textContent || "").replace(/\s+/g, " ").trim();
+                if (!/^Services$/i.test(t)) continue;
+                const acc = [];
+                for (const el of item.querySelectorAll(
+                    'div[id^="tbl_ecp_choice-parameter"] input[type="checkbox"]'
+                )) {
+                    if (!el.checked) continue;
+                    const v = (el.getAttribute("value") || el.getAttribute("json") || "").trim();
+                    if (v) acc.push(v);
+                }
+                return acc;
+            }
+            return [];
+        }"""
+    )
+    if not isinstance(out, list):
+        return []
+    return [normalize_parameter_text(str(x)) for x in out if str(x).strip()]
+
+
+def select_fnt_rc_services(page, service_names: list[str]) -> None:
+    """
+    Tick **Services** for FNT ``FNT_UAT_SCRIPT_RUN`` — ECP extended-choice table, not FPMS UnoChoice.
+    """
+    cleaned: list[str] = []
+    for name in service_names:
+        n = (name or "").strip()
+        if not re.match(r"^[\w.-]+$", n):
+            raise ValueError(f"Invalid service name: {n!r}")
+        cleaned.append(n)
+    row = _form_row(page, "Services")
+    row.wait_for(state="visible", timeout=30_000)
+    root = row.locator('div[id^="tbl_ecp_choice-parameter"]')
+    try:
+        root.first.wait_for(state="visible", timeout=45_000)
+    except PlaywrightTimeout as ex:
+        raise ServicesListGoneError(
+            "FNT RC Services (ECP table) not visible — wrong job page or Jenkins UI changed."
+        ) from ex
+    gap = min(120, _MS_BETWEEN_SERVICES) if _FPMS_FAST_FILL_ACTIVE else _MS_BETWEEN_SERVICES
+    for n in cleaned:
+        cb = root.locator(
+            f'input[type="checkbox"][value="{n}"], input[type="checkbox"][json="{n}"]'
+        ).first
+        try:
+            cb.wait_for(state="attached", timeout=25_000)
+        except PlaywrightTimeout as ex:
+            raise ServiceNotDetectedError(
+                f"FNT RC: no Services checkbox for {n!r} (value/json must match Jenkins)."
+            ) from ex
+        try:
+            if not cb.is_checked():
+                cb.scroll_into_view_if_needed()
+                _safe_page_wait(page, 80)
+                cb.click(timeout=15_000)
+        except Exception as ex:
+            raise ServiceNotDetectedError(f"FNT RC: could not tick {n!r}: {ex!r}") from ex
+        print(f"→ FNT RC service ticked: {n!r}")
+        _safe_page_wait(page, gap)
+
+
 def _read_services_checked_values_wide(page) -> list[str]:
     """
     Checked service ids under the whole **Services** ``jenkins-form-item`` (not only ``.dynamic_checkbox``).
@@ -3046,7 +3118,7 @@ def verify_fnt_rc_parameters_display(
     lines: list[str] = []
     ok_all = True
     try:
-        got_svc = sorted(set(read_services_checked_values(page)))
+        got_svc = sorted(set(read_fnt_rc_services_checked_values(page)))
     except Exception as ex:
         got_svc = []
         lines.append(f"❌ Services — read failed: {ex!r}")
@@ -3192,6 +3264,15 @@ def _jenkins_update_job_automation_profile(raw_urls: str) -> str | None:
     return None
 
 
+def _jenkins_update_first_non_empty_line(body: str) -> str:
+    """First non-empty line (headline before ``Branch:`` / ``Services:`` blocks)."""
+    for line in (body or "").splitlines():
+        t = line.strip()
+        if t:
+            return t
+    return (body or "").strip()
+
+
 def _jenkins_update_job_score(query_text: str, alias: str) -> float:
     q = JENKINS_UPDATE_CMD_RE.sub("", (query_text or ""), count=1).strip().casefold()
     a = (alias or "").strip().casefold()
@@ -3232,12 +3313,19 @@ def _jenkins_update_disambiguation_ties(
 
 
 def _fpms_format_jenkins_job_menu(candidates: list[tuple[str, float, str, str]]) -> str:
-    lines = [
-        "Several Jenkins jobs match your text. Reply with **one** number only (**1**–"
-        f"**{len(candidates)}**), or say **cancel**:",
-    ]
-    for i, (alias, _sc, label, _url) in enumerate(candidates, start=1):
-        lines.append(f"  {i}. **{label}** (`{alias}`)")
+    n = len(candidates)
+    if n == 1:
+        lines = [
+            "Pick the Jenkins job below (reply **1** only, or say **cancel**):",
+        ]
+    else:
+        lines = [
+            "Several Jenkins jobs match your text. Reply with **one** number only (**1**–"
+            f"**{n}**), or say **cancel**:",
+        ]
+    for i, (alias, _sc, label, url_raw) in enumerate(candidates, start=1):
+        u0 = _jenkins_update_primary_url(url_raw)
+        lines.append(f"  {i}. **{label}** — `{alias}` — {u0}")
     return "\n".join(lines)
 
 
@@ -4171,8 +4259,14 @@ def handle_lark_jenkins_update_message(
             )
             return True
 
-    ranked = _rank_jenkins_update_job_matches(body)
-    ties = _jenkins_update_disambiguation_ties(ranked)
+    head_line = _jenkins_update_first_non_empty_line(body)
+    ranked_h = _rank_jenkins_update_job_matches(head_line)
+    ties_h = _jenkins_update_disambiguation_ties(ranked_h, band=0.08)
+    if ties_h:
+        ranked, ties = ranked_h, ties_h
+    else:
+        ranked = _rank_jenkins_update_job_matches(body)
+        ties = _jenkins_update_disambiguation_ties(ranked, band=0.05)
     if not ties:
         sample = ", ".join(sorted(JENKINS_UPDATE_JOB_REGISTRY.keys())[:14])
         send(
@@ -4181,7 +4275,9 @@ def handle_lark_jenkins_update_message(
             f"(e.g. **fpms uat branch**, **frontend uat1 h5**). Aliases include: {sample}, …",
         )
         return True
-    if len(ties) > 1:
+    prof0 = _jenkins_update_job_automation_profile(ties[0][3])
+    need_menu = (len(ties) > 1) or (len(ties) == 1 and prof0 == "fnt_rc")
+    if need_menu:
         with _fpms_lark_sessions_lock:
             _fpms_lark_sessions[key] = {
                 "state": "choose_job",
@@ -4425,11 +4521,18 @@ def run(
             # FNT RC UAT master: no Environment row — Services only before Branch/Version.
             environment_tick_done = False
             services_tick_done = False
+
+            def _apply_services_selection() -> None:
+                if skip_env:
+                    select_fnt_rc_services(page, services)
+                else:
+                    select_services(page, services)
+
             try:
                 if not skip_env:
                     select_environment(page, environment)
                 environment_tick_done = True
-                select_services(page, services)
+                _apply_services_selection()
                 services_tick_done = True
             except (
                 ServiceNotDetectedError,
@@ -4445,7 +4548,7 @@ def run(
                 _recover_services_not_found_sequence(page, user, pw, build_url=ju)
                 try:
                     if skip_env:
-                        select_services(page, services)
+                        _apply_services_selection()
                         services_tick_done = True
                     elif environment_tick_done and not services_tick_done:
                         print(
@@ -4455,13 +4558,13 @@ def run(
                             "  中文：Environment 已选好，recovery 不再重复切换环境（避免 Services 被刷掉），只重试勾选 Services。",
                             flush=True,
                         )
-                        select_services(page, services)
+                        _apply_services_selection()
                         services_tick_done = True
                     else:
                         if not skip_env:
                             select_environment(page, environment)
                             environment_tick_done = True
-                        select_services(page, services)
+                        _apply_services_selection()
                         services_tick_done = True
                 except (
                     ServiceNotDetectedError,
