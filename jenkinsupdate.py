@@ -154,10 +154,6 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
         "FPMS_NT_UAT_BO_UPDATE",
         "https://jenkins.client8.me/job/FPMS_NT/view/all/job/FPMS_NT_UAT_BO_UPDATE/build?delay=0sec",
     ),
-    "rc uat master": (
-        "FPMS FNT(RC)",
-        "https://jenkins.client8.me/job/FNT/job/RC-UAT-UPDATE/build?delay=0sec",
-    ),
     "cpms uat update": (
         "CPMS-UAT-UPDATE",
         "https://jenkins.client8.me/job/CPMS/job/UAT/job/CPMS-UAT-UPDATE/build?delay=0sec",
