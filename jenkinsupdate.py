@@ -168,7 +168,7 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
     ),
     "rc uat master": (
         "FPMS FNT(RC)",
-        "https://jenkins.client8.me/job/FNT/job/FNT_UAT_SCRIPT_RUN/build?delay=0sec",
+        "https://jenkins.client8.me/job/FNT/job/RC-UAT-UPDATE/build?delay=0sec",
     ),
     "fpms nt uat branch": (
         "FPMS NT UAT BRANCH UPDATE",
