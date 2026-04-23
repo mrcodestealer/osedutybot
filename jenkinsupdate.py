@@ -333,6 +333,37 @@ _SERVICES_UI_EMPTY_OK = os.environ.get("FPMS_SERVICES_UI_EMPTY_OK", "1").strip()
     "no",
 )
 
+
+def _jenkins_update_all_stapler_name() -> str:
+    """
+    Jenkins hidden field ``input[name="name"][value=…]`` for the “update all services” checkbox.
+
+    Override when your job uses a different parameter id (all jobs in this script default to the same).
+    Env: ``JENKINS_UPDATE_ALL_STAPLER_NAME`` (default ``Update_All_Services``).
+    """
+    n = (os.environ.get("JENKINS_UPDATE_ALL_STAPLER_NAME") or "").strip()
+    return n if n else "Update_All_Services"
+
+
+def _service_lines_mean_update_all(service_lines: list[str]) -> bool:
+    """
+    True when the ``services:`` section is **only** a single keyword meaning “tick update-all / every service”
+    (e.g. ``services: all`` or ``services:\\n  all``), not a service name.
+    """
+    toks: list[str] = []
+    for raw in service_lines or []:
+        line = _normalize_config_colons(raw).strip()
+        if not line or line.lstrip().startswith("#"):
+            continue
+        for part in re.split(r"[,，;]+", line):
+            t = part.strip()
+            if t:
+                toks.append(t)
+    if len(toks) != 1:
+        return False
+    return toks[0].casefold() in ("all", "*", "every", "全部", "__all__")
+
+
 # Default: apply ``_ensure_fast_fill_mode`` at import unless ``FPMS_STABLE_FILL=1`` (conservative pacing).
 _FPMS_FAST_FILL_NOTE_SHOWN = False
 # When true: aggressive service ticks + shorter post-click settles (set only by ``_ensure_fast_fill_mode``).
@@ -875,7 +906,7 @@ _KEY_LINE_RE = re.compile(
 )
 
 
-def parse_fpms_config_block(text: str) -> tuple[str, list[str], str, str]:
+def parse_fpms_config_block(text: str) -> tuple[str, list[str], str, str, bool]:
     """
     Parse a pasted block (``branch:``, ``version:``, ``Service(s):``, ``environment:``).
 
@@ -892,8 +923,12 @@ def parse_fpms_config_block(text: str) -> tuple[str, list[str], str, str]:
     * **services** — comma-separated **ports** (``3000``), **fuzzy names** (``MGNT_API_server``), or
       ``name,1,2`` to pick ranks without a menu. On a **TTY**, a bare fuzzy **name** opens a numbered
       near-match list (type ``1`` / ``1 2 3``); ``FPMS_CONFIG_SERVICE_TEXT_AUTO=1`` forces auto top match.
+      Use **only** ``all`` (or ``*``, ``every``, ``全部``) under ``services:`` to mean **Update_All_Services**
+      (same as ``--allservice``); returned service list is empty and the fifth tuple value is ``True``.
     * **environment** — optional; else from banner ``UAT`` / ``UAT2`` …, else ``FPMS_DEFAULT_ENVIRONMENT``
       or ``fpms-uat-branch``.
+
+    Returns ``(environment, services, branch, version, update_all_services)``.
     """
     raw_lines = [_normalize_config_colons(L) for L in (text or "").splitlines()]
     lines = [L.strip() for L in raw_lines if L.strip() != ""]
@@ -995,7 +1030,18 @@ def parse_fpms_config_block(text: str) -> tuple[str, list[str], str, str]:
             "Missing services: section or no service payload (ports or names, e.g. 3000 or MGNT_API_server)."
         )
 
-    services = _service_ids_from_service_block_lines(service_lines)
+    if _service_lines_mean_update_all(service_lines):
+        print(
+            "→ Parsed ``services:`` as **update all** (keyword only) — will tick **"
+            + _jenkins_update_all_stapler_name()
+            + "**; no per-service ids.\n",
+            flush=True,
+        )
+        services = []
+        update_all = True
+    else:
+        services = _service_ids_from_service_block_lines(service_lines)
+        update_all = False
     if env is None:
         if env_from_banner is not None:
             env = env_from_banner
@@ -1011,7 +1057,7 @@ def parse_fpms_config_block(text: str) -> tuple[str, list[str], str, str]:
                 "(set environment: …, a title like ``Update FPMS UAT2 Branch``, or FPMS_DEFAULT_ENVIRONMENT)."
             )
 
-    return env, services, branch, version
+    return env, services, branch, version, update_all
 
 
 def read_multiline_config_paste() -> str:
@@ -1026,6 +1072,7 @@ def read_multiline_config_paste() -> str:
         "  version: 3.2.128g\n"
         "  services:\n"
         "  7300 - fg_exrestful\n"
+        "  or:  services: all   (tick Jenkins “update all services” — FPMS / FNT / SMS blocks)\n"
         "  or:  service: 3000, 9000, 9280\n"
         "  or:  Update FPMS UAT2 Branch  (selects environment fpms-uat2-branch)\n"
         "       service: MGNT_API_server, mgnt_web\n"
@@ -1239,10 +1286,17 @@ def _prompt_service_ids_for_config_text_token(
         return chosen
 
 
-def prompt_services() -> list[str]:
+def prompt_services() -> tuple[list[str], bool]:
+    """
+    Interactive FPMS service selection.
+
+    Returns ``(service_ids, update_all)``. Typing **all** / **\\*** / **全部** (alone, before any pick)
+    means tick the Jenkins update-all checkbox instead of individual services.
+    """
     print(
         '\nWhat services? (can be multiple 1 2 or 1,2 — type a name to search, '
-        'then choose number(s); type **end** to finish this step)'
+        'then choose number(s); type **all** to update every service via the job checkbox; '
+        'type **end** to finish this step)'
     )
     selected: list[str] = []
     seen: set[str] = set()
@@ -1255,12 +1309,20 @@ def prompt_services() -> list[str]:
             print("  Type a search string, numbers from the last list, or **end**.")
             continue
 
+        if low in ("all", "*", "every", "全部") and not selected and last_matches is None:
+            print(
+                f"→ **{low}** — will tick **{_jenkins_update_all_stapler_name()}** "
+                "in Jenkins (no per-service checklist).\n",
+                flush=True,
+            )
+            return [], True
+
         if low == "end":
             if not selected:
                 print("  Pick at least one service (search → numbers) before **end**.")
                 continue
             print(f"→ Selected: {', '.join(selected)}")
-            return selected
+            return selected, False
 
         idxs = _parse_multi_indices(raw, len(last_matches) if last_matches else 0)
         if last_matches and idxs is not None:
@@ -2615,21 +2677,41 @@ def _form_row_label_regex(page, pattern: re.Pattern[str]):
     ).first
 
 
-def _refresh_pipeline_checkbox_locator(page):
+def _stapler_boolean_checkbox_locator(page, stapler_name: str):
     """
-    Checkbox inside ``div[name="parameter"]`` that contains the hidden Stapler field
-    ``name=Refresh pipeline`` → ``input[type="checkbox"][name="value"]``.
+    Checkbox inside ``div[name="parameter"]`` for a Jenkins boolean / choice checkbox whose
+    hidden Stapler field is ``input[name="name"][value="<stapler_name>"]``.
     """
     return (
         page.locator('div[name="parameter"]')
         .filter(
             has=page.locator(
-                'input[type="hidden"][name="name"][value="Refresh pipeline"]'
+                f'input[type="hidden"][name="name"][value="{stapler_name}"]'
             )
         )
         .locator('input[type="checkbox"][name="value"]')
         .first
     )
+
+
+def _refresh_pipeline_checkbox_locator(page):
+    """Hidden ``Refresh pipeline`` + ``input[type="checkbox"][name="value"]``."""
+    return _stapler_boolean_checkbox_locator(page, "Refresh pipeline")
+
+
+def _read_stapler_boolean_checkbox_checked(page, stapler_name: str) -> bool:
+    """Best-effort read of a Stapler-style boolean checkbox (same locator family as ticking)."""
+    cb = _stapler_boolean_checkbox_locator(page, stapler_name)
+    if cb.count() == 0:
+        return False
+    try:
+        if cb.is_checked():
+            return True
+        return bool(
+            cb.evaluate("el => !!(el && el.type === 'checkbox' && el.checked)")
+        )
+    except Exception:
+        return False
 
 
 def _verify_refresh_pipeline_checked(page) -> bool:
@@ -2674,22 +2756,34 @@ def _wait_refresh_pipeline_help_idle(page, *, timeout_ms: int) -> None:
         pass
 
 
-def _tick_checkbox_playwright_then_js(cb, *, how: str) -> bool:
+def _tick_checkbox_playwright_then_js(
+    cb,
+    *,
+    how: str,
+    log_label: str = "Refresh pipeline",
+    try_label_attach_previous: bool = True,
+    label_click_regex: re.Pattern[str] | None = None,
+) -> bool:
     """
-    ``scroll_into_view_if_needed``, ``check()``, then ``force``, label click, JS ``checked`` + events.
+    ``scroll_into_view_if_needed``, ``check()``, then ``force``, optional label click, JS ``checked`` + events.
+
+    When ``try_label_attach_previous`` is True, tries ``label.attach-previous`` with ``label_click_regex``
+    (default: Refresh pipeline). Set ``try_label_attach_previous=False`` for parameters without that label.
     """
+    if try_label_attach_previous and label_click_regex is None:
+        label_click_regex = re.compile(r"^\s*refresh\s+pipeline\s*$", re.I)
     cb.wait_for(state="attached", timeout=20_000)
     try:
         cb.scroll_into_view_if_needed(timeout=10_000)
     except Exception:
         pass
     if cb.is_checked():
-        print(f"→ Refresh pipeline already checked ({how}).")
+        print(f"→ {log_label} already checked ({how}).")
         return True
 
     def _ok(detail: str) -> bool:
         if cb.is_checked():
-            print(f"→ Checked Refresh pipeline ({how}, {detail}).")
+            print(f"→ Checked {log_label} ({how}, {detail}).")
             return True
         return False
 
@@ -2704,18 +2798,17 @@ def _tick_checkbox_playwright_then_js(cb, *, how: str) -> bool:
         except Exception:
             pass
 
-    try:
-        wrap = cb.locator("xpath=..")
-        if wrap.count() > 0:
-            lab = wrap.locator("label.attach-previous").filter(
-                has_text=re.compile(r"^\s*refresh\s+pipeline\s*$", re.I)
-            )
-            if lab.count() > 0:
-                lab.first.click(timeout=8_000)
-                if _ok("label click"):
-                    return True
-    except Exception:
-        pass
+    if try_label_attach_previous and label_click_regex is not None:
+        try:
+            wrap = cb.locator("xpath=..")
+            if wrap.count() > 0:
+                lab = wrap.locator("label.attach-previous").filter(has_text=label_click_regex)
+                if lab.count() > 0:
+                    lab.first.click(timeout=8_000)
+                    if _ok("label click"):
+                        return True
+        except Exception:
+            pass
 
     try:
         mode = cb.evaluate(
@@ -2826,6 +2919,74 @@ def _tick_refresh_pipeline_checkbox(page) -> bool:
 
     print(
         "⚠️ Refresh pipeline: found controls but checkbox stayed unchecked after all strategies.",
+        file=sys.stderr,
+    )
+    return False
+
+
+def _tick_update_all_services_checkbox(page) -> bool:
+    """
+    Tick the Jenkins **update all services** boolean (Active Choices / Stapler hidden ``name`` + checkbox).
+
+    Hidden field value defaults to ``Update_All_Services``; override with ``JENKINS_UPDATE_ALL_STAPLER_NAME``.
+    Uses the same ``div[name="parameter"]`` pattern as **Refresh pipeline**; falls back to the
+    ``jenkins-form-item`` row when the primary locator fails.
+    """
+    extra = int(os.environ.get("FPMS_TICK_UPDATE_ALL_SETTLE_MS", "800"))
+    _safe_page_wait(page, max(0, extra))
+    st = _jenkins_update_all_stapler_name()
+
+    cb = _stapler_boolean_checkbox_locator(page, st)
+    try:
+        cb.wait_for(state="attached", timeout=25_000)
+        if _tick_checkbox_playwright_then_js(
+            cb,
+            how='div[name="parameter"]',
+            log_label=st,
+            try_label_attach_previous=False,
+        ):
+            return True
+    except PlaywrightTimeout:
+        pass
+    except Exception as ex:
+        print(f"⚠️ {st!r} (update-all) primary locator: {ex!r}", file=sys.stderr)
+
+    try:
+        row = _form_row_label_regex(
+            page, re.compile(r"update[_\s]all[_\s]services", re.I)
+        )
+        row.wait_for(state="attached", timeout=8_000)
+        inner = row.locator(
+            'span.jenkins-checkbox input[type="checkbox"], '
+            'input[type="checkbox"][name="value"]'
+        ).first
+        if inner.count() > 0 and _tick_checkbox_playwright_then_js(
+            inner,
+            how="jenkins-form-item (label pattern)",
+            log_label=st,
+            try_label_attach_previous=False,
+        ):
+            return True
+    except Exception as ex:
+        print(f"⚠️ {st!r} (update-all) row fallback: {ex!r}", file=sys.stderr)
+
+    for lab in (st, "Update_All_Services", "Update All Services"):
+        try:
+            r = _form_row(page, lab).first
+            r.wait_for(state="visible", timeout=4_000)
+            inner = r.locator("input[type=checkbox]").first
+            if inner.count() > 0 and _tick_checkbox_playwright_then_js(
+                inner,
+                how=f"form label {lab!r}",
+                log_label=st,
+                try_label_attach_previous=False,
+            ):
+                return True
+        except Exception:
+            continue
+
+    print(
+        f"❌ {st!r}: update-all checkbox not found or stayed unchecked after all strategies.",
         file=sys.stderr,
     )
     return False
@@ -3093,10 +3254,15 @@ def verify_fpms_parameters_display(
     services_expected: list[str],
     branch_expected: str,
     version_expected: str,
+    *,
+    update_all_services: bool = False,
 ) -> tuple[bool, list[str]]:
     """
     Re-read Environment, Services, Branch, Version from the page and compare to intended values.
     Returns ``(all_ok, lines)`` for terminal display (leading emoji ✅ / ❌).
+
+    When ``update_all_services`` is True, the Services line checks **Update_All_Services** only
+    (the per-service checkbox list is not compared to ``services_expected``).
     """
     want_env = normalize_parameter_text(environment)
     want_br = normalize_parameter_text(branch_expected)
@@ -3119,31 +3285,42 @@ def verify_fpms_parameters_display(
     em = "✅" if env_ok else "❌"
     lines.append(f"{em} Environment — page: {got_env!r} — expected: {want_env!r}")
 
-    try:
-        got_svc = sorted(set(read_services_checked_values(page)))
-    except Exception as ex:
-        got_svc = []
-        lines.append(f"❌ Services — read failed: {ex!r}")
-        ok_all = False
-    else:
-        svc_ok = got_svc == want_svc
+    if update_all_services:
+        st_name = _jenkins_update_all_stapler_name()
+        u_all = _read_stapler_boolean_checkbox_checked(page, st_name)
+        svc_ok = u_all
         ok_all = ok_all and svc_ok
         em = "✅" if svc_ok else "❌"
-        if svc_ok:
-            lines.append(
-                f"{em} Services — {len(want_svc)} checked on page, matches: {', '.join(want_svc)}"
-            )
+        lines.append(
+            f"{em} Services — {st_name} is **{'checked' if u_all else 'not checked'}** "
+            "(per-service list not verified in this mode)"
+        )
+    else:
+        try:
+            got_svc = sorted(set(read_services_checked_values(page)))
+        except Exception as ex:
+            got_svc = []
+            lines.append(f"❌ Services — read failed: {ex!r}")
+            ok_all = False
         else:
-            missing = [x for x in want_svc if x not in got_svc]
-            extra = [x for x in got_svc if x not in want_svc]
-            lines.append(
-                f"{em} Services — page checked ({len(got_svc)}): {', '.join(got_svc) or '(none)'} "
-                f"| expected: {', '.join(want_svc)}"
-            )
-            if missing:
-                lines.append(f"   … missing on page: {', '.join(missing)}")
-            if extra:
-                lines.append(f"   … extra on page: {', '.join(extra)}")
+            svc_ok = got_svc == want_svc
+            ok_all = ok_all and svc_ok
+            em = "✅" if svc_ok else "❌"
+            if svc_ok:
+                lines.append(
+                    f"{em} Services — {len(want_svc)} checked on page, matches: {', '.join(want_svc)}"
+                )
+            else:
+                missing = [x for x in want_svc if x not in got_svc]
+                extra = [x for x in got_svc if x not in want_svc]
+                lines.append(
+                    f"{em} Services — page checked ({len(got_svc)}): {', '.join(got_svc) or '(none)'} "
+                    f"| expected: {', '.join(want_svc)}"
+                )
+                if missing:
+                    lines.append(f"   … missing on page: {', '.join(missing)}")
+                if extra:
+                    lines.append(f"   … extra on page: {', '.join(extra)}")
 
     try:
         got_br = read_text_parameter_value(page, "Branch")
@@ -3175,8 +3352,10 @@ def verify_fnt_rc_parameters_display(
     services_expected: list[str],
     branch_expected: str,
     version_expected: str,
+    *,
+    update_all_services: bool = False,
 ) -> tuple[bool, list[str]]:
-    """Re-read Services, Branch, Version (no Environment) for FNT RC UAT master job."""
+    """Re-read Services, Branch, Version (no Environment) for FNT RC / SMS-style ECP jobs."""
     want_br = normalize_parameter_text(branch_expected)
     want_ver = normalize_parameter_text(version_expected)
     want_svc = sorted(
@@ -3184,31 +3363,42 @@ def verify_fnt_rc_parameters_display(
     )
     lines: list[str] = []
     ok_all = True
-    try:
-        got_svc = sorted(set(read_fnt_rc_services_checked_values(page)))
-    except Exception as ex:
-        got_svc = []
-        lines.append(f"❌ Services — read failed: {ex!r}")
-        ok_all = False
-    else:
-        svc_ok = got_svc == want_svc
+    if update_all_services:
+        st_name = _jenkins_update_all_stapler_name()
+        u_all = _read_stapler_boolean_checkbox_checked(page, st_name)
+        svc_ok = u_all
         ok_all = ok_all and svc_ok
         em = "✅" if svc_ok else "❌"
-        if svc_ok:
-            lines.append(
-                f"{em} Services — {len(want_svc)} checked on page, matches: {', '.join(want_svc)}"
-            )
+        lines.append(
+            f"{em} Services — {st_name} is **{'checked' if u_all else 'not checked'}** "
+            "(per-service list not verified in this mode)"
+        )
+    else:
+        try:
+            got_svc = sorted(set(read_fnt_rc_services_checked_values(page)))
+        except Exception as ex:
+            got_svc = []
+            lines.append(f"❌ Services — read failed: {ex!r}")
+            ok_all = False
         else:
-            missing = [x for x in want_svc if x not in got_svc]
-            extra = [x for x in got_svc if x not in want_svc]
-            lines.append(
-                f"{em} Services — page checked ({len(got_svc)}): {', '.join(got_svc) or '(none)'} "
-                f"| expected: {', '.join(want_svc)}"
-            )
-            if missing:
-                lines.append(f"   … missing on page: {', '.join(missing)}")
-            if extra:
-                lines.append(f"   … extra on page: {', '.join(extra)}")
+            svc_ok = got_svc == want_svc
+            ok_all = ok_all and svc_ok
+            em = "✅" if svc_ok else "❌"
+            if svc_ok:
+                lines.append(
+                    f"{em} Services — {len(want_svc)} checked on page, matches: {', '.join(want_svc)}"
+                )
+            else:
+                missing = [x for x in want_svc if x not in got_svc]
+                extra = [x for x in got_svc if x not in want_svc]
+                lines.append(
+                    f"{em} Services — page checked ({len(got_svc)}): {', '.join(got_svc) or '(none)'} "
+                    f"| expected: {', '.join(want_svc)}"
+                )
+                if missing:
+                    lines.append(f"   … missing on page: {', '.join(missing)}")
+                if extra:
+                    lines.append(f"   … extra on page: {', '.join(extra)}")
     try:
         got_br = read_text_parameter_value(page, "Branch")
     except Exception as ex:
@@ -3238,6 +3428,8 @@ def prompt_yes_to_click_build(
     services: list[str],
     branch: str,
     version: str,
+    *,
+    update_all_services: bool = False,
 ) -> bool:
     """
     Ask **yes** / **no** in the terminal. **yes** is accepted only after a fresh re-read shows all ✅
@@ -3256,7 +3448,12 @@ def prompt_yes_to_click_build(
             return False
         if raw in ("yes", "y"):
             ok, lines = verify_fpms_parameters_display(
-                page, environment, services, branch, version
+                page,
+                environment,
+                services,
+                branch,
+                version,
+                update_all_services=update_all_services,
             )
             print("\n→ Re-check before Build:")
             for ln in lines:
@@ -3422,7 +3619,8 @@ def parse_jenkins_update_fpms_bot_block(text: str) -> dict:
     """
     Parse a Lark-pasted **multi-line** block whose first line contains ``/jenkinsupdate``.
 
-    Returns ``environment``, ``branch``, ``version``, ``service_tokens`` (raw fuzzy strings, not Jenkins ids).
+    Returns ``environment``, ``branch``, ``version``, ``service_tokens`` (raw fuzzy strings, not Jenkins ids),
+    and optionally ``update_all_services`` when the block is ``services:`` **only** ``all`` / ``*`` / ``every`` / ``全部``.
     """
     raw_lines = [_normalize_config_colons(L) for L in (text or "").splitlines()]
     lines = [L.strip() for L in raw_lines if L.strip() != ""]
@@ -3494,6 +3692,21 @@ def parse_jenkins_update_fpms_bot_block(text: str) -> dict:
         raise ValueError("Missing branch: or version: in the block.")
     if not service_lines:
         raise ValueError("Missing services (no lines under Service(s):).")
+
+    if _service_lines_mean_update_all(service_lines):
+        if env is None:
+            env = env_from_banner
+        if env is None:
+            env = normalize_parameter_text(os.environ.get("FPMS_DEFAULT_ENVIRONMENT", "fpms-uat-branch"))
+            if env not in ENVIRONMENTS:
+                env = ENVIRONMENTS[0]
+        return {
+            "environment": env,
+            "branch": branch,
+            "version": version,
+            "service_tokens": [],
+            "update_all_services": True,
+        }
 
     tokens: list[str] = []
     for raw in service_lines:
@@ -3586,6 +3799,14 @@ def parse_fnt_rc_uat_master_bot_block(text: str) -> dict:
         raise ValueError("Missing branch: or version: in the block.")
     if not service_lines:
         raise ValueError("Missing services (no lines under Service(s):).")
+    if _service_lines_mean_update_all(service_lines):
+        return {
+            "_job_kind": "fnt_rc",
+            "branch": branch,
+            "version": version,
+            "service_tokens": [],
+            "update_all_services": True,
+        }
     tokens: list[str] = []
     for raw in service_lines:
         for part in re.split(r"[,，;]+", raw):
@@ -3603,7 +3824,10 @@ def parse_fnt_rc_uat_master_bot_block(text: str) -> dict:
 
 
 def _fnt_rc_bot_build_config_block(data: dict, resolved_ids: list[str]) -> str:
-    svc_lines = "\n".join(resolved_ids)
+    if data.get("update_all_services"):
+        svc_lines = "all"
+    else:
+        svc_lines = "\n".join(resolved_ids)
     return (
         "FNT_RC_UAT_MASTER_V1\n"
         f"branch: {data['branch']}\n"
@@ -3612,8 +3836,12 @@ def _fnt_rc_bot_build_config_block(data: dict, resolved_ids: list[str]) -> str:
     )
 
 
-def parse_fnt_rc_run_config_block(text: str) -> tuple[list[str], str, str]:
-    """Parse internal ``FNT_RC_UAT_MASTER_V1`` block passed to ``run()``."""
+def parse_fnt_rc_run_config_block(text: str) -> tuple[list[str], str, str, bool]:
+    """Parse internal ``FNT_RC_UAT_MASTER_V1`` block passed to ``run()``.
+
+    Returns ``(services, branch, version, update_all_services)``. If ``services:`` is only ``all``
+    (or ``*`` / ``every`` / ``全部``), ``services`` is empty and ``update_all_services`` is ``True``.
+    """
     raw_lines = [_normalize_config_colons(L) for L in (text or "").splitlines()]
     lines = [L.strip() for L in raw_lines if L.strip() != ""]
     if not lines or not lines[0].upper().startswith("FNT_RC_UAT_MASTER_V1"):
@@ -3655,6 +3883,14 @@ def parse_fnt_rc_run_config_block(text: str) -> tuple[list[str], str, str]:
         raise ConfigBlockError("FNT RC config: missing branch: or version:.")
     if not service_lines:
         raise ConfigBlockError("FNT RC config: missing services: lines.")
+    if _service_lines_mean_update_all(service_lines):
+        print(
+            "→ FNT RC: ``services:`` is **update all** only — will tick **"
+            + _jenkins_update_all_stapler_name()
+            + "**.\n",
+            flush=True,
+        )
+        return [], branch, version, True
     out: list[str] = []
     for raw in service_lines:
         for part in re.split(r"[,，;]+", raw):
@@ -3663,7 +3899,7 @@ def parse_fnt_rc_run_config_block(text: str) -> tuple[list[str], str, str]:
                 out.append(t)
     if not out:
         raise ConfigBlockError("FNT RC config: no service ids parsed.")
-    return out, branch, version
+    return out, branch, version, False
 
 
 def parse_sms_uat_update_bot_block(text: str) -> dict:
@@ -3733,6 +3969,14 @@ def parse_sms_uat_update_bot_block(text: str) -> dict:
         raise ValueError("Missing branch: or version: in the block.")
     if not service_lines:
         raise ValueError("Missing services (no lines under Service(s):).")
+    if _service_lines_mean_update_all(service_lines):
+        return {
+            "_job_kind": "sms_uat",
+            "branch": branch,
+            "version": version,
+            "service_tokens": [],
+            "update_all_services": True,
+        }
     tokens: list[str] = []
     for raw in service_lines:
         for part in re.split(r"[,，;]+", raw):
@@ -3750,7 +3994,10 @@ def parse_sms_uat_update_bot_block(text: str) -> dict:
 
 
 def _sms_uat_bot_build_config_block(data: dict, resolved_ids: list[str]) -> str:
-    svc_lines = "\n".join(resolved_ids)
+    if data.get("update_all_services"):
+        svc_lines = "all"
+    else:
+        svc_lines = "\n".join(resolved_ids)
     return (
         "SMS_UAT_UPDATE_V1\n"
         f"branch: {data['branch']}\n"
@@ -3759,8 +4006,12 @@ def _sms_uat_bot_build_config_block(data: dict, resolved_ids: list[str]) -> str:
     )
 
 
-def parse_sms_uat_run_config_block(text: str) -> tuple[list[str], str, str]:
-    """Parse internal ``SMS_UAT_UPDATE_V1`` block passed to ``run()``."""
+def parse_sms_uat_run_config_block(text: str) -> tuple[list[str], str, str, bool]:
+    """Parse internal ``SMS_UAT_UPDATE_V1`` block passed to ``run()``.
+
+    Returns ``(services, branch, version, update_all_services)``. ``services: all`` (alone) sets
+    ``update_all_services`` and returns an empty ``services`` list.
+    """
     raw_lines = [_normalize_config_colons(L) for L in (text or "").splitlines()]
     lines = [L.strip() for L in raw_lines if L.strip() != ""]
     if not lines or not lines[0].upper().startswith("SMS_UAT_UPDATE_V1"):
@@ -3802,6 +4053,14 @@ def parse_sms_uat_run_config_block(text: str) -> tuple[list[str], str, str]:
         raise ConfigBlockError("SMS UAT config: missing branch: or version:.")
     if not service_lines:
         raise ConfigBlockError("SMS UAT config: missing services: lines.")
+    if _service_lines_mean_update_all(service_lines):
+        print(
+            "→ SMS UAT: ``services:`` is **update all** only — will tick **"
+            + _jenkins_update_all_stapler_name()
+            + "**.\n",
+            flush=True,
+        )
+        return [], branch, version, True
     out: list[str] = []
     for raw in service_lines:
         for part in re.split(r"[,，;]+", raw):
@@ -3810,7 +4069,7 @@ def parse_sms_uat_run_config_block(text: str) -> tuple[list[str], str, str]:
                 out.append(t)
     if not out:
         raise ConfigBlockError("SMS UAT config: no service ids parsed.")
-    return out, branch, version
+    return out, branch, version, False
 
 
 _FPMS_PORT_IN_TOKEN_RE = re.compile(r"\b(\d{3,5})\b")
@@ -4056,7 +4315,10 @@ def _fpms_lark_begin_jenkins_run(
 
 
 def _fpms_bot_build_config_block(data: dict, resolved_ids: list[str]) -> str:
-    svc_lines = "\n".join(resolved_ids)
+    if data.get("update_all_services"):
+        svc_lines = "all"
+    else:
+        svc_lines = "\n".join(resolved_ids)
     return (
         f"environment: {data['environment']}\n"
         f"branch: {data['branch']}\n"
@@ -4088,6 +4350,7 @@ def _fpms_lark_spawn_run(
                 browser=os.environ.get("FPMS_PLAYWRIGHT_BROWSER", "chromium"),
                 config_block=config_block,
                 user_data_dir=(os.environ.get("FPMS_PLAYWRIGHT_USER_DATA_DIR") or "").strip() or None,
+                update_all_services=False,
                 bot_lark_gate={
                     "session_key": session_key,
                     "chat_id": chat_id,
@@ -4178,6 +4441,18 @@ def _fpms_lark_dispatch_fnt_rc_parameter_flow(
             )
             return True
     tokens: list[str] = data["service_tokens"]
+    if data.get("update_all_services"):
+        _fpms_lark_begin_jenkins_run(
+            chat_id,
+            session_key,
+            data,
+            [],
+            send,
+            raw_prompt_body=body,
+            jenkins_build_url=jenkins_build_url,
+            job_profile="fnt_rc",
+        )
+        return True
     resolved_ids: list[str] = []
     tokens_to_pick: list[str] = []
     for tok in tokens:
@@ -4253,6 +4528,18 @@ def _fpms_lark_dispatch_sms_uat_parameter_flow(
             )
             return True
     tokens: list[str] = data["service_tokens"]
+    if data.get("update_all_services"):
+        _fpms_lark_begin_jenkins_run(
+            chat_id,
+            session_key,
+            data,
+            [],
+            send,
+            raw_prompt_body=body,
+            jenkins_build_url=jenkins_build_url,
+            job_profile="sms_uat",
+        )
+        return True
     resolved_ids: list[str] = []
     tokens_to_pick: list[str] = []
     for tok in tokens:
@@ -4328,6 +4615,18 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
             )
             return True
     tokens: list[str] = data["service_tokens"]
+    if data.get("update_all_services"):
+        _fpms_lark_begin_jenkins_run(
+            chat_id,
+            session_key,
+            data,
+            [],
+            send,
+            raw_prompt_body=body,
+            jenkins_build_url=jenkins_build_url,
+            job_profile="fpms",
+        )
+        return True
     resolved_ids: list[str] = []
     tokens_to_pick: list[str] = []
     for tok in tokens:
@@ -4784,6 +5083,7 @@ def run(
     bot_lark_gate: dict | None = None,
     jenkins_build_url: str | None = None,
     job_profile: str | None = None,
+    update_all_services: bool = False,
 ) -> None:
     jp_g = (job_profile or "").strip()
     if not jp_g and bot_lark_gate:
@@ -4791,40 +5091,78 @@ def run(
     jp = jp_g or "fpms"
     skip_env = jp in ("fnt_rc", "sms_uat")
 
+    parsed_update_all = False
     if config_block:
         cl = (config_block or "").lstrip()
         if cl.upper().startswith("FNT_RC_UAT_MASTER_V1"):
-            services, branch, version = parse_fnt_rc_run_config_block(config_block)
+            services, branch, version, parsed_update_all = parse_fnt_rc_run_config_block(config_block)
             environment = ""
+            svc_note = (
+                f"update-all ({_jenkins_update_all_stapler_name()})"
+                if parsed_update_all
+                else ", ".join(services)
+            )
             print(
                 "\n→ Parsed FNT RC UAT master config block:\n"
                 f"    branch:      {branch!r}\n"
                 f"    version:     {version!r}\n"
-                f"    services ({len(services)}): {', '.join(services)}\n"
+                f"    services ({len(services) if not parsed_update_all else 'all'}): {svc_note}\n"
             )
         elif cl.upper().startswith("SMS_UAT_UPDATE_V1"):
-            services, branch, version = parse_sms_uat_run_config_block(config_block)
+            services, branch, version, parsed_update_all = parse_sms_uat_run_config_block(config_block)
             environment = ""
+            svc_note = (
+                f"update-all ({_jenkins_update_all_stapler_name()})"
+                if parsed_update_all
+                else ", ".join(services)
+            )
             print(
                 "\n→ Parsed SMS UAT update config block:\n"
                 f"    branch:      {branch!r}\n"
                 f"    version:     {version!r}\n"
-                f"    services ({len(services)}): {', '.join(services)}\n"
+                f"    services ({len(services) if not parsed_update_all else 'all'}): {svc_note}\n"
             )
         else:
-            environment, services, branch, version = parse_fpms_config_block(config_block)
+            environment, services, branch, version, parsed_update_all = parse_fpms_config_block(
+                config_block
+            )
+            svc_note = (
+                f"update-all ({_jenkins_update_all_stapler_name()})"
+                if parsed_update_all
+                else ", ".join(services)
+            )
             print(
                 "\n→ Parsed config block:\n"
                 f"    environment: {environment}\n"
                 f"    branch:      {branch!r}\n"
                 f"    version:     {version!r}\n"
-                f"    services ({len(services)}): {', '.join(services)}\n"
+                f"    services ({len(services) if not parsed_update_all else 'all'}): {svc_note}\n"
             )
     else:
         environment = prompt_environment()
-        services = prompt_services()
+        prompted_update_all = False
+        if update_all_services:
+            services = []
+            print(
+                "\n→ **Update all services** mode: skipping the interactive Services menu; "
+                f"the script will tick **{_jenkins_update_all_stapler_name()}** after Environment.\n"
+                "  中文：已启用“更新全部服务”——跳过逐项选 Services；登录后在浏览器里勾选对应全选框。\n",
+                flush=True,
+            )
+        else:
+            services, prompted_update_all = prompt_services()
         branch = normalize_parameter_text(prompt_text("What branch?"))
         version = normalize_parameter_text(prompt_text("What Version?"))
+        parsed_update_all = parsed_update_all or prompted_update_all
+
+    update_all_services = bool(update_all_services) or parsed_update_all
+
+    if update_all_services and services:
+        print(
+            f"→ **Update-all** mode: ignoring {len(services)} configured / picked service id(s); "
+            f"only **{_jenkins_update_all_stapler_name()}** will be ticked.\n",
+            flush=True,
+        )
 
     user, pw = _credentials()
 
@@ -4888,11 +5226,24 @@ def run(
                 else:
                     select_services(page, services)
 
+            def _apply_services_or_update_all_phase() -> None:
+                if update_all_services:
+                    if not _tick_update_all_services_checkbox(page):
+                        raise RuntimeError(
+                            f"{_jenkins_update_all_stapler_name()}: checkbox not found or could not be checked."
+                        )
+                    print(
+                        f"→ **{_jenkins_update_all_stapler_name()}** checked — skipped individual Services checkboxes.",
+                        flush=True,
+                    )
+                    return
+                _apply_services_selection()
+
             try:
                 if not skip_env:
                     select_environment(page, environment)
                 environment_tick_done = True
-                _apply_services_selection()
+                _apply_services_or_update_all_phase()
                 services_tick_done = True
             except (
                 ServiceNotDetectedError,
@@ -4908,7 +5259,7 @@ def run(
                 _recover_services_not_found_sequence(page, user, pw, build_url=ju)
                 try:
                     if skip_env:
-                        _apply_services_selection()
+                        _apply_services_or_update_all_phase()
                         services_tick_done = True
                     elif environment_tick_done and not services_tick_done:
                         print(
@@ -4918,13 +5269,13 @@ def run(
                             "  中文：Environment 已选好，recovery 不再重复切换环境（避免 Services 被刷掉），只重试勾选 Services。",
                             flush=True,
                         )
-                        _apply_services_selection()
+                        _apply_services_or_update_all_phase()
                         services_tick_done = True
                     else:
                         if not skip_env:
                             select_environment(page, environment)
                             environment_tick_done = True
-                        _apply_services_selection()
+                        _apply_services_or_update_all_phase()
                         services_tick_done = True
                 except (
                     ServiceNotDetectedError,
@@ -4946,11 +5297,20 @@ def run(
             if bot_lark_gate is not None:
                 if skip_env:
                     ok_first, lines_first = verify_fnt_rc_parameters_display(
-                        page, services, branch, version
+                        page,
+                        services,
+                        branch,
+                        version,
+                        update_all_services=update_all_services,
                     )
                 else:
                     ok_first, lines_first = verify_fpms_parameters_display(
-                        page, environment, services, branch, version
+                        page,
+                        environment,
+                        services,
+                        branch,
+                        version,
+                        update_all_services=update_all_services,
                     )
                 print("\n→ ===== First parameter re-check (page vs your choices) =====")
                 for ln in lines_first:
@@ -4958,11 +5318,20 @@ def run(
                 _safe_page_wait(page, max(250, min(800, _MS_POST_FILL_VERIFY)))
                 if skip_env:
                     ok_second, verify_lines = verify_fnt_rc_parameters_display(
-                        page, services, branch, version
+                        page,
+                        services,
+                        branch,
+                        version,
+                        update_all_services=update_all_services,
                     )
                 else:
                     ok_second, verify_lines = verify_fpms_parameters_display(
-                        page, environment, services, branch, version
+                        page,
+                        environment,
+                        services,
+                        branch,
+                        version,
+                        update_all_services=update_all_services,
                     )
                 print("\n→ ===== Second parameter re-check (page vs your choices) =====")
                 for ln in verify_lines:
@@ -4972,11 +5341,20 @@ def run(
             else:
                 if skip_env:
                     ok_all, verify_lines = verify_fnt_rc_parameters_display(
-                        page, services, branch, version
+                        page,
+                        services,
+                        branch,
+                        version,
+                        update_all_services=update_all_services,
                     )
                 else:
                     ok_all, verify_lines = verify_fpms_parameters_display(
-                        page, environment, services, branch, version
+                        page,
+                        environment,
+                        services,
+                        branch,
+                        version,
+                        update_all_services=update_all_services,
                     )
                 lines_first = verify_lines
                 print("\n→ ===== Parameter re-check (page vs your choices) =====")
@@ -5044,7 +5422,12 @@ def run(
                     flush=True,
                 )
             elif prompt_yes_to_click_build(
-                page, environment, services, branch, version
+                page,
+                environment,
+                services,
+                branch,
+                version,
+                update_all_services=update_all_services,
             ):
                 _click_jenkins_build_button(page)
                 build_clicked = True
@@ -5113,6 +5496,16 @@ Slower / more stable Jenkins UI: ``FPMS_STABLE_FILL=1 %(prog)s …``
         help="Seconds to AFK after yes/no + optional Build (default: 90); no further UI clicks",
     )
     ap.add_argument("--headless", action="store_true", help="Headless browser (not recommended)")
+    ap.add_argument(
+        "--allservice",
+        action="store_true",
+        help=(
+            "Tick the Jenkins **update-all-services** checkbox (hidden name default: Update_All_Services), "
+            "skip per-service checkboxes — FPMS, FNT RC, and SMS UAT jobs. Same effect as ``services: all`` "
+            "(only that token) in a config block. "
+            "After yes/no and optional Build, ``--review-seconds`` still applies (default 90s AFK)."
+        ),
+    )
     ap.add_argument(
         "--tick",
         action="store_true",
@@ -5237,6 +5630,7 @@ Slower / more stable Jenkins UI: ``FPMS_STABLE_FILL=1 %(prog)s …``
             browser=args.browser,
             config_block=config_block,
             user_data_dir=_udd,
+            update_all_services=args.allservice,
         )
     except Exception as ex:
         print(f"❌ {ex}", file=sys.stderr)
