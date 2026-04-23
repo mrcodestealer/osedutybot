@@ -166,6 +166,10 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
         "CRS UAT Master(telesales)",
         "https://jenkins.client8.me/job/FNT/job/TELESALES-UAT-UPDATE/build?delay=0sec",
     ),
+    "rc uat master": (
+        "FPMS FNT(RC)",
+        "https://jenkins.client8.me/job/FNT/job/FNT_UAT_SCRIPT_RUN/build?delay=0sec",
+    ),
     "fpms nt uat branch": (
         "FPMS NT UAT BRANCH UPDATE",
         "https://jenkins.client8.me/job/FPMS_NT/view/all/job/FPMS_NT_UAT_BRANCH_UPDATE/build?delay=0sec",
