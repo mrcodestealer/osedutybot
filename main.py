@@ -53,6 +53,7 @@ import ecsre
 import update
 import otpp1
 import amountloss
+import fpmsuatbranch
 
 # ================= CONFIGURATION =================
 APP_ID = os.getenv("APP_ID")
@@ -807,7 +808,8 @@ def lark_webhook():
             send_message(chat_id, p1_reply)
         return jsonify({"success": True})
 
-    # ================= 群组提及检查（仅用于后续命令） =================
+    # ================= 群组 @bot（后续命令需要提及；FPMS 多步会话中跟帖可不 @） =================
+    bot_mentioned = chat_type != "group"
     if chat_type == "group":
         bot_mentioned = False
         for mention in mentions:
@@ -824,9 +826,21 @@ def lark_webhook():
         if not bot_mentioned and is_mention_old:
             bot_mentioned = True
             print("✅ Bot mentioned (old schema via is_mention flag)")
-        if not bot_mentioned:
-            print("⏭️ Bot not mentioned in group chat – ignoring further commands")
-            return jsonify({"success": True})
+
+    fpms_sess_active = fpmsuatbranch.fpms_uat_has_active_lark_session(chat_id, sender_id)
+    if fpmsuatbranch.handle_lark_fpms_uat_branch_message(
+        chat_id,
+        sender_id,
+        clean_text,
+        original_text,
+        send_message,
+        allow_start=bot_mentioned,
+    ):
+        return jsonify({"success": True})
+
+    if chat_type == "group" and not bot_mentioned and not fpms_sess_active:
+        print("⏭️ Bot not mentioned in group chat – ignoring further commands")
+        return jsonify({"success": True})
 
     # 初始化回复变量
     reply = ""
