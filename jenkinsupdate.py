@@ -95,6 +95,7 @@ import re
 import sys
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
 from playwright.sync_api import (
@@ -174,6 +175,10 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
         "FNT UAT SCRIPT RUN",
         "https://jenkins.client8.me/job/FNT/job/FNT_UAT_SCRIPT_RUN/build?delay=0sec",
     ),
+    "sms uat update": (
+        "SMS UAT UPDATE",
+        "https://jenkins.client8.me/job/SMS/job/UAT/job/SMS-UAT-UPDATE/build?delay=0sec",
+    ),
     "fpms nt uat branch": (
         "FPMS NT UAT BRANCH UPDATE",
         "https://jenkins.client8.me/job/FPMS_NT/view/all/job/FPMS_NT_UAT_BRANCH_UPDATE/build?delay=0sec",
@@ -204,6 +209,27 @@ FNT_RC_UAT_MASTER_SERVICES = [
 ]
 
 _FNT_RC_SERVICE_IDS_CASEFOLD = frozenset(s.casefold() for s in FNT_RC_UAT_MASTER_SERVICES)
+
+# SMS ``SMS-UAT-UPDATE`` (alias ``sms uat update``) — same ECP **Services** widget as FNT RC jobs.
+SMS_UAT_UPDATE_SERVICES = [
+    "dlr-server",
+    "email-scheduler",
+    "scheduler-sms-aliyun",
+    "scheduler-sms-all",
+    "scheduler-sms-marketing",
+    "scheduler-sms-marketing-aliyun",
+    "scheduler-sms-marketingbalancer",
+    "scheduler-sms-otpbalancer",
+    "scheduler-sms-pldt",
+    "scheduler-sms-smpp",
+    "sms-api",
+    "sms-cron",
+    "sms-lark-ops-agent",
+    "sms-public-api",
+    "sms-web",
+]
+
+_SMS_UAT_SERVICE_IDS_CASEFOLD = frozenset(s.casefold() for s in SMS_UAT_UPDATE_SERVICES)
 
 _DEFAULT_USER = "junchen"
 _DEFAULT_PASSWORD = "junchen"
@@ -461,6 +487,23 @@ def _fpms_lark_is_fnt_rc_only_service_token(tok: str) -> bool:
     return k not in _FPMS_SERVICE_IDS_CASEFOLD
 
 
+def _sms_uat_canonical_service_id(tok: str) -> str | None:
+    """Return catalog id if ``tok`` matches an SMS UAT update service (exact after normalize)."""
+    k = _normalize_service_query_key(tok)
+    for s in SMS_UAT_UPDATE_SERVICES:
+        if _normalize_service_query_key(s) == k:
+            return s
+    return None
+
+
+def _fpms_lark_is_sms_uat_only_service_token(tok: str) -> bool:
+    """True if ``tok`` is an SMS UAT service id but **not** on the FPMS UAT Services list."""
+    k = _normalize_service_query_key(tok)
+    if k not in _SMS_UAT_SERVICE_IDS_CASEFOLD:
+        return False
+    return k not in _FPMS_SERVICE_IDS_CASEFOLD
+
+
 def _service_search_score(query: str, service: str) -> float:
     """Higher = more similar (substring boost + difflib on full name and hyphen tokens)."""
     q = query.strip().casefold()
@@ -538,17 +581,21 @@ def _rank_services_by_query(query: str, limit: int = 12, *, for_menu: bool = Fal
     return out if out else [scored[0][1]]
 
 
-def _rank_fnt_rc_services_by_query(
-    query: str, limit: int = 12, *, for_menu: bool = False
+def _rank_catalog_services_by_query(
+    catalog: Sequence[str],
+    query: str,
+    limit: int = 12,
+    *,
+    for_menu: bool = False,
 ) -> list[str]:
-    """Like ``_rank_services_by_query`` but against ``FNT_RC_UAT_MASTER_SERVICES``."""
+    """Fuzzy rank against a fixed Jenkins checkbox id list (ECP / extended-choice jobs)."""
     q_raw = (query or "").strip()
     q = q_raw.casefold()
     qk = _normalize_service_query_key(q_raw)
     if not q:
         return []
-    exact_first = [s for s in FNT_RC_UAT_MASTER_SERVICES if _normalize_service_query_key(s) == qk]
-    scored = [(_service_search_score(q_raw, s), s) for s in FNT_RC_UAT_MASTER_SERVICES]
+    exact_first = [s for s in catalog if _normalize_service_query_key(s) == qk]
+    scored = [(_service_search_score(q_raw, s), s) for s in catalog]
     scored.sort(key=lambda x: (-x[0], x[1]))
     if not scored:
         return []
@@ -593,6 +640,22 @@ def _rank_fnt_rc_services_by_query(
         seen.add(s)
         out.append(s)
     return out if out else [scored[0][1]]
+
+
+def _rank_fnt_rc_services_by_query(
+    query: str, limit: int = 12, *, for_menu: bool = False
+) -> list[str]:
+    """Like ``_rank_services_by_query`` but against ``FNT_RC_UAT_MASTER_SERVICES``."""
+    return _rank_catalog_services_by_query(
+        FNT_RC_UAT_MASTER_SERVICES, query, limit, for_menu=for_menu
+    )
+
+
+def _rank_sms_uat_services_by_query(
+    query: str, limit: int = 12, *, for_menu: bool = False
+) -> list[str]:
+    """Like ``_rank_services_by_query`` but against ``SMS_UAT_UPDATE_SERVICES``."""
+    return _rank_catalog_services_by_query(SMS_UAT_UPDATE_SERVICES, query, limit, for_menu=for_menu)
 
 
 # Deploy / listener port → Jenkins Services checkbox ``value`` (same strings as ``FPMS_UAT_BRANCH_SERVICES``).
@@ -3258,13 +3321,16 @@ def _jenkins_update_job_automation_profile(raw_urls: str) -> str | None:
     """
     Which automated fill path applies to this Jenkins URL (first line if several).
 
-    Returns ``\"fpms\"`` | ``\"fnt_rc\"`` or ``None`` (link-only in Lark).
+    Returns ``\"fpms\"`` | ``\"fnt_rc\"`` | ``\"sms_uat\"`` or ``None`` (link-only in Lark).
     """
     u = _jenkins_update_primary_url(raw_urls).replace("\\", "/")
-    if "/job/FPMS/job/FPMS_UAT_BRANCH_UPDATE/" in u:
+    ul = u.casefold()
+    if "/job/fpms/job/fpms_uat_branch_update/" in ul:
         return "fpms"
-    if "/job/FNT/job/FNT_UAT_SCRIPT_RUN/" in u or "/job/FNT/job/RC-UAT-UPDATE/" in u:
+    if "/job/fnt/job/fnt_uat_script_run/" in ul or "/job/fnt/job/rc-uat-update/" in ul:
         return "fnt_rc"
+    if "/job/sms/job/uat/job/sms-uat-update/" in ul:
+        return "sms_uat"
     return None
 
 
@@ -3600,6 +3666,153 @@ def parse_fnt_rc_run_config_block(text: str) -> tuple[list[str], str, str]:
     return out, branch, version
 
 
+def parse_sms_uat_update_bot_block(text: str) -> dict:
+    """
+    Lark block for **SMS UAT update**: ``/jenkinsupdate`` … then ``Branch:`` / ``Version:`` /
+    ``Services:`` (no Environment) — same shape as FNT RC ECP jobs.
+    """
+    raw_lines = [_normalize_config_colons(L) for L in (text or "").splitlines()]
+    lines = [L.strip() for L in raw_lines if L.strip() != ""]
+    if not lines:
+        raise ValueError("Empty message.")
+    head = lines[0]
+    if not JENKINS_UPDATE_CMD_RE.search(head):
+        raise ValueError("First line must include `/jenkinsupdate`.")
+    branch: str | None = None
+    version: str | None = None
+    service_lines: list[str] = []
+    last_key: str | None = None
+    port_head = re.compile(r"^\d{3,5}\b")
+
+    for line in lines[1:]:
+        m = _KEY_LINE_RE.match(line)
+        if m:
+            key = m.group("key").lower()
+            if key == "service":
+                key = "services"
+            rest = (m.group("rest") or "").strip()
+            last_key = key
+            if key == "environment":
+                continue
+            elif key == "branch":
+                branch = _branch_from_config_block(rest)
+                if not branch:
+                    raise ValueError("branch: is empty.")
+            elif key == "version":
+                version = _version_from_config_block(rest)
+                if not version:
+                    raise ValueError("version: is empty.")
+            elif key == "services":
+                if rest:
+                    service_lines.append(rest)
+            else:
+                raise ValueError(f"Unknown key: {line!r}")
+            continue
+        if last_key == "services":
+            if port_head.match(line):
+                service_lines.append(line)
+            elif (
+                re.search(r"[a-zA-Z_]", line)
+                and len(line) < 200
+                and not re.match(r"^\s*update\b", line, re.I)
+            ):
+                service_lines.append(line)
+            elif re.match(r"^\s*email\b", line, re.I):
+                continue
+            elif re.match(r"^\s*update\b", line, re.I):
+                continue
+            elif line.lstrip().startswith("#"):
+                continue
+            continue
+        if last_key is None:
+            if re.match(r"^\s*email\b", line, re.I):
+                continue
+            continue
+
+    if branch is None or version is None:
+        raise ValueError("Missing branch: or version: in the block.")
+    if not service_lines:
+        raise ValueError("Missing services (no lines under Service(s):).")
+    tokens: list[str] = []
+    for raw in service_lines:
+        for part in re.split(r"[,，;]+", raw):
+            t = part.strip()
+            if t:
+                tokens.append(t)
+    if not tokens:
+        raise ValueError("No service name tokens parsed.")
+    return {
+        "_job_kind": "sms_uat",
+        "branch": branch,
+        "version": version,
+        "service_tokens": tokens,
+    }
+
+
+def _sms_uat_bot_build_config_block(data: dict, resolved_ids: list[str]) -> str:
+    svc_lines = "\n".join(resolved_ids)
+    return (
+        "SMS_UAT_UPDATE_V1\n"
+        f"branch: {data['branch']}\n"
+        f"version: {data['version']}\n"
+        f"services:\n{svc_lines}\n"
+    )
+
+
+def parse_sms_uat_run_config_block(text: str) -> tuple[list[str], str, str]:
+    """Parse internal ``SMS_UAT_UPDATE_V1`` block passed to ``run()``."""
+    raw_lines = [_normalize_config_colons(L) for L in (text or "").splitlines()]
+    lines = [L.strip() for L in raw_lines if L.strip() != ""]
+    if not lines or not lines[0].upper().startswith("SMS_UAT_UPDATE_V1"):
+        raise ConfigBlockError("Internal SMS UAT config must start with SMS_UAT_UPDATE_V1.")
+    branch: str | None = None
+    version: str | None = None
+    service_lines: list[str] = []
+    last_key: str | None = None
+    port_head = re.compile(r"^\d{3,5}\b")
+    for line in lines[1:]:
+        m = _KEY_LINE_RE.match(line)
+        if m:
+            key = m.group("key").lower()
+            if key == "service":
+                key = "services"
+            rest = (m.group("rest") or "").strip()
+            last_key = key
+            if key == "branch":
+                branch = _branch_from_config_block(rest)
+            elif key == "version":
+                version = _version_from_config_block(rest)
+            elif key == "services":
+                if rest:
+                    service_lines.append(rest)
+            elif key == "environment":
+                continue
+            else:
+                raise ConfigBlockError(f"Unknown key: {line!r}")
+            continue
+        if last_key == "services":
+            if port_head.match(line):
+                service_lines.append(line)
+            elif re.search(r"[a-zA-Z_]", line) and len(line) < 200:
+                service_lines.append(line)
+            continue
+        if last_key is None:
+            continue
+    if branch is None or version is None:
+        raise ConfigBlockError("SMS UAT config: missing branch: or version:.")
+    if not service_lines:
+        raise ConfigBlockError("SMS UAT config: missing services: lines.")
+    out: list[str] = []
+    for raw in service_lines:
+        for part in re.split(r"[,，;]+", raw):
+            t = part.strip()
+            if t:
+                out.append(t)
+    if not out:
+        raise ConfigBlockError("SMS UAT config: no service ids parsed.")
+    return out, branch, version
+
+
 _FPMS_PORT_IN_TOKEN_RE = re.compile(r"\b(\d{3,5})\b")
 
 
@@ -3653,9 +3866,20 @@ def _fpms_format_service_menu_message(token: str, ranked: list[str]) -> str:
 
 def _fpms_format_config_preview(data: dict, resolved: list[str]) -> str:
     """Read-only preview (no confirmation step) before the headless Jenkins run starts."""
-    if str(data.get("_job_kind") or "") == "fnt_rc":
+    jk = str(data.get("_job_kind") or "")
+    if jk == "fnt_rc":
         lines = [
             "**Configuration (FNT RC UAT master — from your message)**",
+            f"- **Branch:** `{data['branch']}`",
+            f"- **Version:** `{data['version']}`",
+            "- **Services (Jenkins checkbox ids):**",
+        ]
+        for i, sid in enumerate(resolved, start=1):
+            lines.append(f"  {i}. `{sid}`")
+        return "\n".join(lines)
+    if jk == "sms_uat":
+        lines = [
+            "**Configuration (SMS UAT update — from your message)**",
             f"- **Branch:** `{data['branch']}`",
             f"- **Version:** `{data['version']}`",
             "- **Services (Jenkins checkbox ids):**",
@@ -3800,6 +4024,8 @@ def _fpms_lark_begin_jenkins_run(
     jp = (job_profile or "fpms").strip() or "fpms"
     if jp == "fnt_rc":
         cfg = _fnt_rc_bot_build_config_block(data, resolved)
+    elif jp == "sms_uat":
+        cfg = _sms_uat_bot_build_config_block(data, resolved)
     else:
         cfg = _fpms_bot_build_config_block(data, resolved)
     ev = threading.Event()
@@ -3906,14 +4132,18 @@ def _fpms_lark_dispatch_job_row(
         for i, uu in enumerate([u.strip() for u in url_raw.splitlines() if u.strip()], 1):
             lines.append(f"{i}. {uu}")
         lines.append(
-            "\n_Only **FPMS UAT branch update** and **FNT RC UAT master** are auto-filled by this bot; "
-            "use the links for other jobs._"
+            "\n_Only **FPMS UAT branch update**, **FNT RC** / **FNT script** ECP jobs, and **SMS UAT update** "
+            "are auto-filled by this bot; use the links for other jobs._"
         )
         send(chat_id, "\n".join(lines))
         return True
     ju = _jenkins_update_primary_url(url_raw)
     if prof == "fnt_rc":
         return _fpms_lark_dispatch_fnt_rc_parameter_flow(
+            chat_id, session_key, body, ju, send
+        )
+    if prof == "sms_uat":
+        return _fpms_lark_dispatch_sms_uat_parameter_flow(
             chat_id, session_key, body, ju, send
         )
     return _fpms_lark_dispatch_fpms_parameter_flow(
@@ -3996,6 +4226,81 @@ def _fpms_lark_dispatch_fnt_rc_parameter_flow(
     return True
 
 
+def _fpms_lark_dispatch_sms_uat_parameter_flow(
+    chat_id: str,
+    session_key: str,
+    body: str,
+    jenkins_build_url: str,
+    send,
+) -> bool:
+    """Parse SMS UAT block; fuzzy-pick services from ``SMS_UAT_UPDATE_SERVICES``; then headless run."""
+    try:
+        data = parse_sms_uat_update_bot_block(body)
+    except Exception as ex:
+        send(
+            chat_id,
+            "❌ Could not parse SMS UAT block. Need `/jenkinsupdate` then `Branch:`, `Version:`, "
+            f"`Service(s):` lines.\n```\n{ex}\n```",
+        )
+        return True
+    with _fpms_lark_sessions_lock:
+        prev = _fpms_lark_sessions.get(session_key)
+        if isinstance(prev, dict) and prev.get("state") == "jenkins_wait_build":
+            send(
+                chat_id,
+                "⏳ A Jenkins **Build** confirmation is already waiting for you in this chat. "
+                "Reply **yes** / **no** to that card, or say **cancel** first before starting a new run.",
+            )
+            return True
+    tokens: list[str] = data["service_tokens"]
+    resolved_ids: list[str] = []
+    tokens_to_pick: list[str] = []
+    for tok in tokens:
+        t = (tok or "").strip()
+        hit = _sms_uat_canonical_service_id(t)
+        if hit is not None:
+            if hit not in resolved_ids:
+                resolved_ids.append(hit)
+        else:
+            tokens_to_pick.append(tok)
+    if not tokens_to_pick:
+        if not resolved_ids:
+            send(chat_id, "❌ No SMS UAT services parsed.")
+            return True
+        _fpms_lark_begin_jenkins_run(
+            chat_id,
+            session_key,
+            data,
+            resolved_ids,
+            send,
+            raw_prompt_body=body,
+            jenkins_build_url=jenkins_build_url,
+            job_profile="sms_uat",
+        )
+        return True
+    first = tokens_to_pick[0]
+    q0 = first.replace("_", "-")
+    ranked0 = _rank_sms_uat_services_by_query(q0, limit=12, for_menu=True)
+    if not ranked0:
+        send(chat_id, f"❌ No SMS UAT service matches first text token `{first}`.")
+        return True
+    sess_new = {
+        "state": "pick",
+        "job_profile": "sms_uat",
+        "data": data,
+        "service_tokens": tokens_to_pick,
+        "pick_index": 0,
+        "resolved_ids": resolved_ids,
+        "current_ranked": ranked0,
+        "raw_prompt_body": body,
+        "jenkins_job_url": jenkins_build_url,
+    }
+    with _fpms_lark_sessions_lock:
+        _fpms_lark_sessions[session_key] = sess_new
+    send(chat_id, _fpms_format_service_menu_message(first, ranked0))
+    return True
+
+
 def _fpms_lark_dispatch_fpms_parameter_flow(
     chat_id: str,
     session_key: str,
@@ -4060,6 +4365,15 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
             "Your message matched the **FPMS** job — the menu would wrongly suggest names like `client-apiserver`.\n\n"
             "Include **rc uat master** / **RC UAT** in the same `/jenkinsupdate` message so the bot selects "
             "the **RC-UAT-UPDATE** Jenkins job, then list `rc-client`, etc. Say **cancel** to clear this session.",
+        )
+        return True
+    if _fpms_lark_is_sms_uat_only_service_token(first):
+        send(
+            chat_id,
+            f"❌ `{first}` is an **SMS UAT update** service, not on the **FPMS UAT branch** job list. "
+            "Your message matched the **FPMS** job.\n\n"
+            "Include **sms uat update** in the same `/jenkinsupdate` message so the bot selects **SMS-UAT-UPDATE**, "
+            "then list services (e.g. `sms-api`). Say **cancel** to clear this session.",
         )
         return True
     q0 = first.replace("_", "-")
@@ -4214,9 +4528,8 @@ def handle_lark_jenkins_update_message(
                 )
                 return True
             next_tok = sess["service_tokens"][sess["pick_index"]]
-            if str(sess.get("job_profile") or "") == "fpms" and _fpms_lark_is_fnt_rc_only_service_token(
-                next_tok
-            ):
+            jp_sess = str(sess.get("job_profile") or "fpms").strip() or "fpms"
+            if jp_sess == "fpms" and _fpms_lark_is_fnt_rc_only_service_token(next_tok):
                 _fpms_lark_clear_session(chat_id, sender_id)
                 send(
                     chat_id,
@@ -4224,9 +4537,43 @@ def handle_lark_jenkins_update_message(
                     "Say **cancel**, then start again with **rc uat master** in your `/jenkinsupdate` message.",
                 )
                 return True
+            if jp_sess == "fpms" and _fpms_lark_is_sms_uat_only_service_token(next_tok):
+                _fpms_lark_clear_session(chat_id, sender_id)
+                send(
+                    chat_id,
+                    f"❌ `{next_tok}` is an **SMS UAT update** service, not FPMS. "
+                    "Say **cancel**, then start again with **sms uat update** in your `/jenkinsupdate` message.",
+                )
+                return True
+            if (
+                jp_sess == "fnt_rc"
+                and _sms_uat_canonical_service_id(next_tok) is not None
+                and _fnt_rc_canonical_service_id(next_tok) is None
+            ):
+                _fpms_lark_clear_session(chat_id, sender_id)
+                send(
+                    chat_id,
+                    f"❌ `{next_tok}` is an **SMS UAT** service, not on the **FNT RC** job list. "
+                    "Say **cancel**, then start again with **sms uat update** for **SMS-UAT-UPDATE**.",
+                )
+                return True
+            if (
+                jp_sess == "sms_uat"
+                and _fnt_rc_canonical_service_id(next_tok) is not None
+                and _sms_uat_canonical_service_id(next_tok) is None
+            ):
+                _fpms_lark_clear_session(chat_id, sender_id)
+                send(
+                    chat_id,
+                    f"❌ `{next_tok}` is an **FNT RC** service, not on the **SMS UAT** job list. "
+                    "Say **cancel**, then start again with **rc uat master** / **fnt uat script run**.",
+                )
+                return True
             q = next_tok.replace("_", "-")
-            if str(sess.get("job_profile") or "") == "fnt_rc":
+            if jp_sess == "fnt_rc":
                 nranked = _rank_fnt_rc_services_by_query(q, limit=12, for_menu=True)
+            elif jp_sess == "sms_uat":
+                nranked = _rank_sms_uat_services_by_query(q, limit=12, for_menu=True)
             else:
                 nranked = _rank_services_by_query(q, limit=12, for_menu=True)
             if not nranked:
@@ -4280,7 +4627,7 @@ def handle_lark_jenkins_update_message(
         )
         return True
     prof0 = _jenkins_update_job_automation_profile(ties[0][3])
-    need_menu = (len(ties) > 1) or (len(ties) == 1 and prof0 == "fnt_rc")
+    need_menu = (len(ties) > 1) or (len(ties) == 1 and prof0 in ("fnt_rc", "sms_uat"))
     if need_menu:
         with _fpms_lark_sessions_lock:
             _fpms_lark_sessions[key] = {
@@ -4442,7 +4789,7 @@ def run(
     if not jp_g and bot_lark_gate:
         jp_g = str(bot_lark_gate.get("job_profile") or "").strip()
     jp = jp_g or "fpms"
-    skip_env = jp == "fnt_rc"
+    skip_env = jp in ("fnt_rc", "sms_uat")
 
     if config_block:
         cl = (config_block or "").lstrip()
@@ -4451,6 +4798,15 @@ def run(
             environment = ""
             print(
                 "\n→ Parsed FNT RC UAT master config block:\n"
+                f"    branch:      {branch!r}\n"
+                f"    version:     {version!r}\n"
+                f"    services ({len(services)}): {', '.join(services)}\n"
+            )
+        elif cl.upper().startswith("SMS_UAT_UPDATE_V1"):
+            services, branch, version = parse_sms_uat_run_config_block(config_block)
+            environment = ""
+            print(
+                "\n→ Parsed SMS UAT update config block:\n"
                 f"    branch:      {branch!r}\n"
                 f"    version:     {version!r}\n"
                 f"    services ({len(services)}): {', '.join(services)}\n"
@@ -4683,8 +5039,8 @@ def run(
                             send(cid, "**Build** skipped (you replied **no**).")
             elif skip_env:
                 print(
-                    "→ FNT RC job: interactive **yes** to Build is only wired for the Lark bot; "
-                    "skipping Build in this session.",
+                    "→ ECP job (no Environment — FNT RC / SMS UAT): interactive **yes** to Build is only wired "
+                    "for the Lark bot; skipping Build in this session.",
                     flush=True,
                 )
             elif prompt_yes_to_click_build(
