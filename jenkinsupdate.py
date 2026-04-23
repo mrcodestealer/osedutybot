@@ -187,6 +187,15 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
 
 JENKINS_UPDATE_CMD_RE = re.compile(r"/jenkinsupdate\b", re.I)
 
+# FNT ``FNT_UAT_SCRIPT_RUN`` (RC UAT master) — Services checkbox ``value`` / label tokens for Lark fuzzy pick.
+FNT_RC_UAT_MASTER_SERVICES = [
+    "rc-client",
+    "backend-apiserver",
+    "scheduler-depwith",
+    "risk-analysis-rollout",
+    "risk-analysis-worker",
+]
+
 _DEFAULT_USER = "junchen"
 _DEFAULT_PASSWORD = "junchen"
 
@@ -483,6 +492,54 @@ def _rank_services_by_query(query: str, limit: int = 12, *, for_menu: bool = Fal
         seen.add(s)
         out.append(s)
 
+    return out if out else [scored[0][1]]
+
+
+def _rank_fnt_rc_services_by_query(
+    query: str, limit: int = 12, *, for_menu: bool = False
+) -> list[str]:
+    """Like ``_rank_services_by_query`` but against ``FNT_RC_UAT_MASTER_SERVICES``."""
+    q_raw = (query or "").strip()
+    q = q_raw.casefold()
+    if not q:
+        return []
+    scored = [(_service_search_score(q_raw, s), s) for s in FNT_RC_UAT_MASTER_SERVICES]
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    if not scored:
+        return []
+    if not for_menu:
+        floor = 0.32
+        strong = [s for sc, s in scored if sc >= floor][:limit]
+        if strong:
+            return strong
+        return [s for _, s in scored[:limit]]
+    cap = min(limit, 10)
+    best_sc, _ = scored[0]
+    out: list[str] = []
+    seen: set[str] = set()
+    for sc, s in scored:
+        if s in seen:
+            continue
+        if len(out) >= cap:
+            break
+        if q in s.casefold():
+            seen.add(s)
+            out.append(s)
+    for sc, s in scored:
+        if s in seen:
+            continue
+        if len(out) >= cap:
+            break
+        if best_sc > 5.0:
+            need = 0.70
+        elif best_sc >= 1.35:
+            need = max(0.58, min(0.82, best_sc * 0.28))
+        else:
+            need = max(0.46, best_sc - 0.11)
+        if sc < need:
+            continue
+        seen.add(s)
+        out.append(s)
     return out if out else [scored[0][1]]
 
 
@@ -2929,6 +2986,68 @@ def verify_fpms_parameters_display(
     return ok_all, lines
 
 
+def verify_fnt_rc_parameters_display(
+    page,
+    services_expected: list[str],
+    branch_expected: str,
+    version_expected: str,
+) -> tuple[bool, list[str]]:
+    """Re-read Services, Branch, Version (no Environment) for FNT RC UAT master job."""
+    want_br = normalize_parameter_text(branch_expected)
+    want_ver = normalize_parameter_text(version_expected)
+    want_svc = sorted(
+        {normalize_parameter_text(s) for s in (services_expected or []) if normalize_parameter_text(s)}
+    )
+    lines: list[str] = []
+    ok_all = True
+    try:
+        got_svc = sorted(set(read_services_checked_values(page)))
+    except Exception as ex:
+        got_svc = []
+        lines.append(f"❌ Services — read failed: {ex!r}")
+        ok_all = False
+    else:
+        svc_ok = got_svc == want_svc
+        ok_all = ok_all and svc_ok
+        em = "✅" if svc_ok else "❌"
+        if svc_ok:
+            lines.append(
+                f"{em} Services — {len(want_svc)} checked on page, matches: {', '.join(want_svc)}"
+            )
+        else:
+            missing = [x for x in want_svc if x not in got_svc]
+            extra = [x for x in got_svc if x not in want_svc]
+            lines.append(
+                f"{em} Services — page checked ({len(got_svc)}): {', '.join(got_svc) or '(none)'} "
+                f"| expected: {', '.join(want_svc)}"
+            )
+            if missing:
+                lines.append(f"   … missing on page: {', '.join(missing)}")
+            if extra:
+                lines.append(f"   … extra on page: {', '.join(extra)}")
+    try:
+        got_br = read_text_parameter_value(page, "Branch")
+    except Exception as ex:
+        got_br = f"(read failed: {ex})"
+        br_ok = False
+    else:
+        br_ok = got_br.casefold() == want_br.casefold()
+    ok_all = ok_all and br_ok
+    em = "✅" if br_ok else "❌"
+    lines.append(f"{em} Branch — page: {got_br!r} — expected: {want_br!r}")
+    try:
+        got_ver = read_text_parameter_value(page, "Version")
+    except Exception as ex:
+        got_ver = f"(read failed: {ex})"
+        ver_ok = False
+    else:
+        ver_ok = got_ver == want_ver
+    ok_all = ok_all and ver_ok
+    em = "✅" if ver_ok else "❌"
+    lines.append(f"{em} Version — page: {got_ver!r} — expected: {want_ver!r}")
+    return ok_all, lines
+
+
 def prompt_yes_to_click_build(
     page,
     environment: str,
@@ -3011,8 +3130,21 @@ def _jenkins_update_primary_url(raw: str) -> str:
 
 def _jenkins_update_job_url_is_fpms_uat_branch_form(raw_urls: str) -> bool:
     """True only for ``…/job/FPMS/job/FPMS_UAT_BRANCH_UPDATE/…`` (Playwright parameter fill)."""
+    return _jenkins_update_job_automation_profile(raw_urls) == "fpms"
+
+
+def _jenkins_update_job_automation_profile(raw_urls: str) -> str | None:
+    """
+    Which automated fill path applies to this Jenkins URL (first line if several).
+
+    Returns ``\"fpms\"`` | ``\"fnt_rc\"`` or ``None`` (link-only in Lark).
+    """
     u = _jenkins_update_primary_url(raw_urls).replace("\\", "/")
-    return "/job/FPMS/job/FPMS_UAT_BRANCH_UPDATE/" in u
+    if "/job/FPMS/job/FPMS_UAT_BRANCH_UPDATE/" in u:
+        return "fpms"
+    if "/job/FNT/job/FNT_UAT_SCRIPT_RUN/" in u:
+        return "fnt_rc"
+    return None
 
 
 def _jenkins_update_job_score(query_text: str, alias: str) -> float:
@@ -3184,6 +3316,153 @@ def parse_jenkins_update_fpms_bot_block(text: str) -> dict:
     }
 
 
+def parse_fnt_rc_uat_master_bot_block(text: str) -> dict:
+    """
+    Lark block for **FNT UAT script run** (RC UAT master): ``/jenkinsupdate`` … then
+    ``Branch:`` / ``Version:`` / ``Services:`` (no Environment).
+    """
+    raw_lines = [_normalize_config_colons(L) for L in (text or "").splitlines()]
+    lines = [L.strip() for L in raw_lines if L.strip() != ""]
+    if not lines:
+        raise ValueError("Empty message.")
+    head = lines[0]
+    if not JENKINS_UPDATE_CMD_RE.search(head):
+        raise ValueError("First line must include `/jenkinsupdate`.")
+    branch: str | None = None
+    version: str | None = None
+    service_lines: list[str] = []
+    last_key: str | None = None
+    port_head = re.compile(r"^\d{3,5}\b")
+
+    for line in lines[1:]:
+        m = _KEY_LINE_RE.match(line)
+        if m:
+            key = m.group("key").lower()
+            if key == "service":
+                key = "services"
+            rest = (m.group("rest") or "").strip()
+            last_key = key
+            if key == "environment":
+                continue
+            elif key == "branch":
+                branch = _branch_from_config_block(rest)
+                if not branch:
+                    raise ValueError("branch: is empty.")
+            elif key == "version":
+                version = _version_from_config_block(rest)
+                if not version:
+                    raise ValueError("version: is empty.")
+            elif key == "services":
+                if rest:
+                    service_lines.append(rest)
+            else:
+                raise ValueError(f"Unknown key: {line!r}")
+            continue
+        if last_key == "services":
+            if port_head.match(line):
+                service_lines.append(line)
+            elif (
+                re.search(r"[a-zA-Z_]", line)
+                and len(line) < 200
+                and not re.match(r"^\s*update\b", line, re.I)
+            ):
+                service_lines.append(line)
+            elif re.match(r"^\s*email\b", line, re.I):
+                continue
+            elif re.match(r"^\s*update\b", line, re.I):
+                continue
+            elif line.lstrip().startswith("#"):
+                continue
+            continue
+        if last_key is None:
+            if re.match(r"^\s*email\b", line, re.I):
+                continue
+            continue
+
+    if branch is None or version is None:
+        raise ValueError("Missing branch: or version: in the block.")
+    if not service_lines:
+        raise ValueError("Missing services (no lines under Service(s):).")
+    tokens: list[str] = []
+    for raw in service_lines:
+        for part in re.split(r"[,，;]+", raw):
+            t = part.strip()
+            if t:
+                tokens.append(t)
+    if not tokens:
+        raise ValueError("No service name tokens parsed.")
+    return {
+        "_job_kind": "fnt_rc",
+        "branch": branch,
+        "version": version,
+        "service_tokens": tokens,
+    }
+
+
+def _fnt_rc_bot_build_config_block(data: dict, resolved_ids: list[str]) -> str:
+    svc_lines = "\n".join(resolved_ids)
+    return (
+        "FNT_RC_UAT_MASTER_V1\n"
+        f"branch: {data['branch']}\n"
+        f"version: {data['version']}\n"
+        f"services:\n{svc_lines}\n"
+    )
+
+
+def parse_fnt_rc_run_config_block(text: str) -> tuple[list[str], str, str]:
+    """Parse internal ``FNT_RC_UAT_MASTER_V1`` block passed to ``run()``."""
+    raw_lines = [_normalize_config_colons(L) for L in (text or "").splitlines()]
+    lines = [L.strip() for L in raw_lines if L.strip() != ""]
+    if not lines or not lines[0].upper().startswith("FNT_RC_UAT_MASTER_V1"):
+        raise ConfigBlockError("Internal FNT RC config must start with FNT_RC_UAT_MASTER_V1.")
+    branch: str | None = None
+    version: str | None = None
+    service_lines: list[str] = []
+    last_key: str | None = None
+    port_head = re.compile(r"^\d{3,5}\b")
+    for line in lines[1:]:
+        m = _KEY_LINE_RE.match(line)
+        if m:
+            key = m.group("key").lower()
+            if key == "service":
+                key = "services"
+            rest = (m.group("rest") or "").strip()
+            last_key = key
+            if key == "branch":
+                branch = _branch_from_config_block(rest)
+            elif key == "version":
+                version = _version_from_config_block(rest)
+            elif key == "services":
+                if rest:
+                    service_lines.append(rest)
+            elif key == "environment":
+                continue
+            else:
+                raise ConfigBlockError(f"Unknown key: {line!r}")
+            continue
+        if last_key == "services":
+            if port_head.match(line):
+                service_lines.append(line)
+            elif re.search(r"[a-zA-Z_]", line) and len(line) < 200:
+                service_lines.append(line)
+            continue
+        if last_key is None:
+            continue
+    if branch is None or version is None:
+        raise ConfigBlockError("FNT RC config: missing branch: or version:.")
+    if not service_lines:
+        raise ConfigBlockError("FNT RC config: missing services: lines.")
+    out: list[str] = []
+    for raw in service_lines:
+        for part in re.split(r"[,，;]+", raw):
+            t = part.strip()
+            if t:
+                out.append(t)
+    if not out:
+        raise ConfigBlockError("FNT RC config: no service ids parsed.")
+    return out, branch, version
+
+
 _FPMS_PORT_IN_TOKEN_RE = re.compile(r"\b(\d{3,5})\b")
 
 
@@ -3237,6 +3516,16 @@ def _fpms_format_service_menu_message(token: str, ranked: list[str]) -> str:
 
 def _fpms_format_config_preview(data: dict, resolved: list[str]) -> str:
     """Read-only preview (no confirmation step) before the headless Jenkins run starts."""
+    if str(data.get("_job_kind") or "") == "fnt_rc":
+        lines = [
+            "**Configuration (FNT RC UAT master — from your message)**",
+            f"- **Branch:** `{data['branch']}`",
+            f"- **Version:** `{data['version']}`",
+            "- **Services (Jenkins checkbox ids):**",
+        ]
+        for i, sid in enumerate(resolved, start=1):
+            lines.append(f"  {i}. `{sid}`")
+        return "\n".join(lines)
     lines = [
         "**Configuration (from your message)**",
         f"- **Environment:** `{data['environment']}`",
@@ -3368,9 +3657,14 @@ def _fpms_lark_begin_jenkins_run(
     raw_prompt_body: str = "",
     *,
     jenkins_build_url: str | None = None,
+    job_profile: str = "fpms",
 ) -> None:
     """Install ``jenkins_wait_build`` gate, post preview + start message, spawn Playwright thread."""
-    cfg = _fpms_bot_build_config_block(data, resolved)
+    jp = (job_profile or "fpms").strip() or "fpms"
+    if jp == "fnt_rc":
+        cfg = _fnt_rc_bot_build_config_block(data, resolved)
+    else:
+        cfg = _fpms_bot_build_config_block(data, resolved)
     ev = threading.Event()
     ju = (jenkins_build_url or BUILD_URL).strip()
     with _fpms_lark_sessions_lock:
@@ -3394,6 +3688,7 @@ def _fpms_lark_begin_jenkins_run(
         send,
         raw_prompt_body=raw_prompt_body,
         jenkins_build_url=ju,
+        job_profile=jp,
     )
 
 
@@ -3415,10 +3710,12 @@ def _fpms_lark_spawn_run(
     *,
     raw_prompt_body: str = "",
     jenkins_build_url: str | None = None,
+    job_profile: str = "fpms",
 ) -> None:
     """``session_key`` must already hold ``jenkins_wait_build`` with ``build_gate_event``."""
 
     ju = (jenkins_build_url or BUILD_URL).strip()
+    jp = (job_profile or "fpms").strip() or "fpms"
 
     def _job() -> None:
         try:
@@ -3435,8 +3732,10 @@ def _fpms_lark_spawn_run(
                     "timeout_sec": float(os.environ.get("FPMS_BOT_BUILD_WAIT_SEC", "7200")),
                     "prompt_echo": raw_prompt_body,
                     "build_url": ju,
+                    "job_profile": jp,
                 },
                 jenkins_build_url=ju,
+                job_profile=jp,
             )
         except Exception as ex:
             try:
@@ -3457,9 +3756,10 @@ def _fpms_lark_dispatch_job_row(
     row: tuple[str, float, str, str],
     send,
 ) -> bool:
-    """After a Jenkins job alias is chosen: link-only jobs vs FPMS UAT parameter automation."""
+    """After a Jenkins job alias is chosen: link-only jobs vs automated parameter jobs."""
     alias, _sc, label, url_raw = row
-    if not _jenkins_update_job_url_is_fpms_uat_branch_form(url_raw):
+    prof = _jenkins_update_job_automation_profile(url_raw)
+    if prof is None:
         lines = [
             f"✅ **Job:** {label}",
             f"**Matched:** `{alias}`",
@@ -3469,14 +3769,95 @@ def _fpms_lark_dispatch_job_row(
         for i, uu in enumerate([u.strip() for u in url_raw.splitlines() if u.strip()], 1):
             lines.append(f"{i}. {uu}")
         lines.append(
-            "\n_Only **FPMS UAT branch update** is auto-filled by this bot; use the links for other jobs._"
+            "\n_Only **FPMS UAT branch update** and **FNT RC UAT master** are auto-filled by this bot; "
+            "use the links for other jobs._"
         )
         send(chat_id, "\n".join(lines))
         return True
     ju = _jenkins_update_primary_url(url_raw)
+    if prof == "fnt_rc":
+        return _fpms_lark_dispatch_fnt_rc_parameter_flow(
+            chat_id, session_key, body, ju, send
+        )
     return _fpms_lark_dispatch_fpms_parameter_flow(
         chat_id, session_key, body, ju, send
     )
+
+
+def _fpms_lark_dispatch_fnt_rc_parameter_flow(
+    chat_id: str,
+    session_key: str,
+    body: str,
+    jenkins_build_url: str,
+    send,
+) -> bool:
+    """Parse FNT RC block; fuzzy-pick services from ``FNT_RC_UAT_MASTER_SERVICES``; then headless run."""
+    try:
+        data = parse_fnt_rc_uat_master_bot_block(body)
+    except Exception as ex:
+        send(
+            chat_id,
+            "❌ Could not parse FNT RC block. Need `/jenkinsupdate` then `Branch:`, `Version:`, "
+            f"`Service(s):` lines.\n```\n{ex}\n```",
+        )
+        return True
+    with _fpms_lark_sessions_lock:
+        prev = _fpms_lark_sessions.get(session_key)
+        if isinstance(prev, dict) and prev.get("state") == "jenkins_wait_build":
+            send(
+                chat_id,
+                "⏳ A Jenkins **Build** confirmation is already waiting for you in this chat. "
+                "Reply **yes** / **no** to that card, or say **cancel** first before starting a new run.",
+            )
+            return True
+    tokens: list[str] = data["service_tokens"]
+    resolved_ids: list[str] = []
+    tokens_to_pick: list[str] = []
+    canon = {s.casefold(): s for s in FNT_RC_UAT_MASTER_SERVICES}
+    for tok in tokens:
+        t = (tok or "").strip()
+        hit = canon.get(t.casefold())
+        if hit is not None:
+            if hit not in resolved_ids:
+                resolved_ids.append(hit)
+        else:
+            tokens_to_pick.append(tok)
+    if not tokens_to_pick:
+        if not resolved_ids:
+            send(chat_id, "❌ No RC services parsed.")
+            return True
+        _fpms_lark_begin_jenkins_run(
+            chat_id,
+            session_key,
+            data,
+            resolved_ids,
+            send,
+            raw_prompt_body=body,
+            jenkins_build_url=jenkins_build_url,
+            job_profile="fnt_rc",
+        )
+        return True
+    first = tokens_to_pick[0]
+    q0 = first.replace("_", "-")
+    ranked0 = _rank_fnt_rc_services_by_query(q0, limit=12, for_menu=True)
+    if not ranked0:
+        send(chat_id, f"❌ No RC service matches first text token `{first}`.")
+        return True
+    sess_new = {
+        "state": "pick",
+        "job_profile": "fnt_rc",
+        "data": data,
+        "service_tokens": tokens_to_pick,
+        "pick_index": 0,
+        "resolved_ids": resolved_ids,
+        "current_ranked": ranked0,
+        "raw_prompt_body": body,
+        "jenkins_job_url": jenkins_build_url,
+    }
+    with _fpms_lark_sessions_lock:
+        _fpms_lark_sessions[session_key] = sess_new
+    send(chat_id, _fpms_format_service_menu_message(first, ranked0))
+    return True
 
 
 def _fpms_lark_dispatch_fpms_parameter_flow(
@@ -3532,6 +3913,7 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
             send,
             raw_prompt_body=body,
             jenkins_build_url=jenkins_build_url,
+            job_profile="fpms",
         )
         return True
     first = tokens_to_pick[0]
@@ -3542,6 +3924,7 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
         return True
     sess_new = {
         "state": "pick",
+        "job_profile": "fpms",
         "data": data,
         "service_tokens": tokens_to_pick,
         "pick_index": 0,
@@ -3673,6 +4056,7 @@ def handle_lark_jenkins_update_message(
                 resolved_ids: list[str] = sess["resolved_ids"]
                 raw_pb = str(sess.get("raw_prompt_body") or "")
                 ju = str(sess.get("jenkins_job_url") or BUILD_URL).strip() or BUILD_URL
+                jp = str(sess.get("job_profile") or "fpms").strip() or "fpms"
                 _fpms_lark_begin_jenkins_run(
                     chat_id,
                     key,
@@ -3681,11 +4065,15 @@ def handle_lark_jenkins_update_message(
                     send,
                     raw_prompt_body=raw_pb,
                     jenkins_build_url=ju,
+                    job_profile=jp,
                 )
                 return True
             next_tok = sess["service_tokens"][sess["pick_index"]]
             q = next_tok.replace("_", "-")
-            nranked = _rank_services_by_query(q, limit=12, for_menu=True)
+            if str(sess.get("job_profile") or "") == "fnt_rc":
+                nranked = _rank_fnt_rc_services_by_query(q, limit=12, for_menu=True)
+            else:
+                nranked = _rank_services_by_query(q, limit=12, for_menu=True)
             if not nranked:
                 _fpms_lark_clear_session(chat_id, sender_id)
                 send(chat_id, f"❌ No Jenkins service matches `{next_tok}`. Cancelled.")
@@ -3885,16 +4273,34 @@ def run(
     user_data_dir: str | None = None,
     bot_lark_gate: dict | None = None,
     jenkins_build_url: str | None = None,
+    job_profile: str | None = None,
 ) -> None:
+    jp_g = (job_profile or "").strip()
+    if not jp_g and bot_lark_gate:
+        jp_g = str(bot_lark_gate.get("job_profile") or "").strip()
+    jp = jp_g or "fpms"
+    skip_env = jp == "fnt_rc"
+
     if config_block:
-        environment, services, branch, version = parse_fpms_config_block(config_block)
-        print(
-            "\n→ Parsed config block:\n"
-            f"    environment: {environment}\n"
-            f"    branch:      {branch!r}\n"
-            f"    version:     {version!r}\n"
-            f"    services ({len(services)}): {', '.join(services)}\n"
-        )
+        cl = (config_block or "").lstrip()
+        if cl.upper().startswith("FNT_RC_UAT_MASTER_V1"):
+            services, branch, version = parse_fnt_rc_run_config_block(config_block)
+            environment = ""
+            print(
+                "\n→ Parsed FNT RC UAT master config block:\n"
+                f"    branch:      {branch!r}\n"
+                f"    version:     {version!r}\n"
+                f"    services ({len(services)}): {', '.join(services)}\n"
+            )
+        else:
+            environment, services, branch, version = parse_fpms_config_block(config_block)
+            print(
+                "\n→ Parsed config block:\n"
+                f"    environment: {environment}\n"
+                f"    branch:      {branch!r}\n"
+                f"    version:     {version!r}\n"
+                f"    services ({len(services)}): {', '.join(services)}\n"
+            )
     else:
         environment = prompt_environment()
         services = prompt_services()
@@ -3944,16 +4350,21 @@ def run(
             _safe_page_wait(page, _MS_FORM_READY)
             print(
                 f"→ Post-login: waiting {_MS_POST_LOGIN_BEFORE_FORM} ms before "
-                "Environment / Services / Branch…"
+                + (
+                    "Services / Branch / Version…"
+                    if skip_env
+                    else "Environment / Services / Branch…"
+                )
             )
             _safe_page_wait(page, _MS_POST_LOGIN_BEFORE_FORM)
 
-            # UnoChoice rebuilds Services when Environment changes — pick **Environment first**, then
-            # tick Services once so selections are not wiped by a later env ``select_option``.
+            # FPMS: UnoChoice rebuilds Services when Environment changes — Environment first, then Services.
+            # FNT RC UAT master: no Environment row — Services only before Branch/Version.
             environment_tick_done = False
             services_tick_done = False
             try:
-                select_environment(page, environment)
+                if not skip_env:
+                    select_environment(page, environment)
                 environment_tick_done = True
                 select_services(page, services)
                 services_tick_done = True
@@ -3970,7 +4381,10 @@ def run(
                 )
                 _recover_services_not_found_sequence(page, user, pw, build_url=ju)
                 try:
-                    if environment_tick_done and not services_tick_done:
+                    if skip_env:
+                        select_services(page, services)
+                        services_tick_done = True
+                    elif environment_tick_done and not services_tick_done:
                         print(
                             "→ Recovery retry: **Environment** is already set — skipping a second "
                             "``select_environment`` (it would clear/rebuild Services in UnoChoice); "
@@ -3981,8 +4395,9 @@ def run(
                         select_services(page, services)
                         services_tick_done = True
                     else:
-                        select_environment(page, environment)
-                        environment_tick_done = True
+                        if not skip_env:
+                            select_environment(page, environment)
+                            environment_tick_done = True
                         select_services(page, services)
                         services_tick_done = True
                 except (
@@ -4003,25 +4418,40 @@ def run(
 
             _safe_page_wait(page, max(0, _MS_POST_FILL_VERIFY))
             if bot_lark_gate is not None:
-                ok_first, lines_first = verify_fpms_parameters_display(
-                    page, environment, services, branch, version
-                )
+                if skip_env:
+                    ok_first, lines_first = verify_fnt_rc_parameters_display(
+                        page, services, branch, version
+                    )
+                else:
+                    ok_first, lines_first = verify_fpms_parameters_display(
+                        page, environment, services, branch, version
+                    )
                 print("\n→ ===== First parameter re-check (page vs your choices) =====")
                 for ln in lines_first:
                     print(f"    {ln}")
                 _safe_page_wait(page, max(250, min(800, _MS_POST_FILL_VERIFY)))
-                ok_second, verify_lines = verify_fpms_parameters_display(
-                    page, environment, services, branch, version
-                )
+                if skip_env:
+                    ok_second, verify_lines = verify_fnt_rc_parameters_display(
+                        page, services, branch, version
+                    )
+                else:
+                    ok_second, verify_lines = verify_fpms_parameters_display(
+                        page, environment, services, branch, version
+                    )
                 print("\n→ ===== Second parameter re-check (page vs your choices) =====")
                 for ln in verify_lines:
                     print(f"    {ln}")
                 print("→ =====================================================\n")
                 ok_all = ok_first and ok_second
             else:
-                ok_all, verify_lines = verify_fpms_parameters_display(
-                    page, environment, services, branch, version
-                )
+                if skip_env:
+                    ok_all, verify_lines = verify_fnt_rc_parameters_display(
+                        page, services, branch, version
+                    )
+                else:
+                    ok_all, verify_lines = verify_fpms_parameters_display(
+                        page, environment, services, branch, version
+                    )
                 lines_first = verify_lines
                 print("\n→ ===== Parameter re-check (page vs your choices) =====")
                 for ln in verify_lines:
@@ -4081,6 +4511,12 @@ def run(
                             )
                         else:
                             send(cid, "**Build** skipped (you replied **no**).")
+            elif skip_env:
+                print(
+                    "→ FNT RC job: interactive **yes** to Build is only wired for the Lark bot; "
+                    "skipping Build in this session.",
+                    flush=True,
+                )
             elif prompt_yes_to_click_build(
                 page, environment, services, branch, version
             ):
