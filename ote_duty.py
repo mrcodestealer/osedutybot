@@ -30,6 +30,7 @@ TARGET_DUTY = [
     {"display": "Shie Ni", "lookup": "Shie Ni"},
     {"display": "Kwang Ming", "lookup": "Kwang Ming"},
     {"display": "Xinyee", "lookup": "Xinyee"},
+    {"display": "Jeno", "lookup": "Jeno"},
 ]
 
 # Month name to number mapping (full and abbreviated)
