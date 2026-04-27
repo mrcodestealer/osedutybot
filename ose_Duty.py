@@ -25,8 +25,8 @@ LEAVE_SHEET_ID = os.getenv("OSE_LEAVE_SHEET_ID")
 
 # Target names as they appear in column A (case‑insensitive start‑match)
 TARGET_NAMES = [
-    "Louie", "Bryan Peh", "Eduard James", "Chrisjames", "Augustine Siyew",
-    "Man Chung", "JanRei", "Katleen", "Lynette", "Chun Chee",
+    "Louie", "Bryan Peh", "Eduard James", "Chrisjames", "Augustine Si yew",
+    "Man Chung", "Jan Rei", "Katleen", "Lynette", "Chun Chee",
     "Renzel", "Jun Chen", "Kenneth", "Jewel", "Justine Miguel",
     "Kheng Kwan", "Kris Ng"
 ]
