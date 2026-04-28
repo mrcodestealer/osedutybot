@@ -901,7 +901,9 @@ def _service_ids_from_service_block_lines(lines: list[str]) -> list[str]:
 
 
 _KEY_LINE_RE = re.compile(
-    r"^(?P<key>environment|branch|version|services?)\s*:\s*(?P<rest>.*)$",
+    r"^(?:[>\-\*\u2022]\s*)*"
+    r"(?:`+|\*{1,2})?(?P<key>environment|branch|version|services?)(?:`+|\*{1,2})?"
+    r"\s*:\s*(?P<rest>.*)$",
     re.IGNORECASE,
 )
 
@@ -3794,6 +3796,24 @@ def parse_fnt_rc_uat_master_bot_block(text: str) -> dict:
             if re.match(r"^\s*email\b", line, re.I):
                 continue
             continue
+
+    # Lark 某些消息体会把多行压扁成一行；补一轮 inline key:value 解析。
+    if branch is None or version is None or not service_lines:
+        flat = " ".join(lines)
+        if branch is None:
+            m_b = re.search(r"\bbranch\s*:\s*([^\s,;`]+)", flat, re.I)
+            if m_b:
+                branch = _branch_from_config_block(m_b.group(1))
+        if version is None:
+            m_v = re.search(r"\bversion\s*:\s*([^\s,;`]+)", flat, re.I)
+            if m_v:
+                version = _version_from_config_block(m_v.group(1))
+        if not service_lines:
+            m_s = re.search(r"\bservices?\s*:\s*(.+)$", flat, re.I)
+            if m_s:
+                rest = (m_s.group(1) or "").strip()
+                if rest:
+                    service_lines.append(rest)
 
     if branch is None or version is None:
         raise ValueError("Missing branch: or version: in the block.")
