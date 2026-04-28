@@ -41,11 +41,10 @@ DESKTOP_UA = (
 #
 # 方式 A — 控制台「获取临时凭证」三件套：ALIYUN_SLS_ACCESS_KEY_ID / _SECRET / _SECURITY_TOKEN
 #
-# 方式 B — AssumeRole（ECS 常见）：实例 RAM 角色 → STS AssumeRole → 目标账号下有 SLS 读权限的角色。
-#   目标角色（读日志）：acs:ram::5754739415144793:role/sls-platform-readonly
-#     写 ALIYUN_SLS_ASSUME_ROLE_ARN=上述 ARN
-#     或 ALIYUN_SLS_ASSUME_TARGET_ACCOUNT_ID=5754739415144793 + ALIYUN_SLS_ASSUME_TARGET_ROLE_NAME=sls-platform-readonly
-#   调用方（在 ECS 上）：OSE-ECS-Read-Monitor-sls 的临时 AK（走元数据，无需长期密钥）
+# 方式 B — STS AssumeRole 后再调 SLS API 读 Error log（日志在 SLS，鉴权走 STS，不矛盾）。
+#   目标角色（读 SLS）：默认可省略，仅配 ALIYUN_ECS_RAM_ROLE_NAME 时用 ECS_DEFAULT_ASSUME_ROLE_READ_SLS_ARN
+#     或显式 ALIYUN_SLS_ASSUME_ROLE_ARN 或 TARGET_ACCOUNT_ID + TARGET_ROLE_NAME
+#   调用方（在 ECS 上）：实例 RAM 角色 OSE-ECS-Read-Monitor-sls 的临时 AK（元数据）
 #     ALIYUN_ECS_RAM_ROLE_NAME=OSE-ECS-Read-Monitor-sls
 #   调用方（本机调试）：RAM 用户长期 AK
 #     ALIYUN_ASSUME_ACCESS_KEY_ID / ALIYUN_ASSUME_ACCESS_KEY_SECRET（或 ALIYUN_ACCESS_KEY_*）
@@ -53,6 +52,10 @@ DESKTOP_UA = (
 SLS_DEFAULT_ENDPOINT = "ap-southeast-1.log.aliyuncs.com"
 SLS_DEFAULT_PROJECT = "platform-prod-aliyun-logs"
 SLS_DEFAULT_LOGSTORE = "platform-fpms-prod"
+# ECS 仅设置 ALIYUN_ECS_RAM_ROLE_NAME、未单独写 ARN 时：AssumeRole 目标（STS → 扮演该角色 → 再调 SLS API 读日志）
+ECS_DEFAULT_ASSUME_ROLE_READ_SLS_ARN = (
+    "acs:ram::5754739415144793:role/sls-platform-readonly"
+)
 # Start Time 前后各 4 分钟，与控制台示例 Apr 15 05:14:01 ~ 05:22:01（中心 05:18:01）一致
 SLS_WINDOW_MINUTES = 4
 
@@ -113,7 +116,7 @@ def _env_first(*names: str) -> str:
 
 
 def _sls_assume_role_arn() -> str:
-    """若配置了 AssumeRole，返回要扮演的 RAM Role ARN（一般为跨账号 sls-platform-readonly）；否则空字符串。"""
+    """若配置了 AssumeRole，返回 STS AssumeRole 的目标 RAM Role ARN；否则空字符串。"""
     arn = _env_first("ALIYUN_SLS_ASSUME_ROLE_ARN", "ALIYUN_ASSUME_ROLE_ARN")
     if arn:
         return arn
@@ -128,6 +131,9 @@ def _sls_assume_role_arn() -> str:
     )
     if account and role:
         return f"acs:ram::{account}:role/{role}"
+    # 已配 ECS 实例 RAM 角色（调用方）但未写目标 ARN：使用默认跨账号读日志角色
+    if _env_first("ALIYUN_ECS_RAM_ROLE_NAME"):
+        return ECS_DEFAULT_ASSUME_ROLE_READ_SLS_ARN
     return ""
 
 
@@ -266,13 +272,14 @@ def _sls_credentials_or_raise():
     )
     if not ak or not secret:
         raise ValueError(
-            "checklog 需要阿里云凭证，任选其一：\n"
-            "  A) ECS AssumeRole：目标 ALIYUN_SLS_ASSUME_ROLE_ARN=acs:ram::5754739415144793:role/sls-platform-readonly"
-            "（或 TARGET_ACCOUNT_ID + TARGET_ROLE_NAME）"
-            " + 调用方 ALIYUN_ECS_RAM_ROLE_NAME=OSE-ECS-Read-Monitor-sls；需 pip install aliyun-python-sdk-sts\n"
-            "  B) 本机 AssumeRole：同上目标 ARN + ALIYUN_ASSUME_ACCESS_KEY_ID/SECRET（RAM 用户可 Assume 该角色）\n"
-            "  C) 控制台「获取临时凭证」：ALIYUN_SLS_ACCESS_KEY_ID / _SECRET / _SECURITY_TOKEN\n"
-            "  或在 amountloss.py 同目录 amountloss.sls.env / .env 中配置（勿提交 Git）。"
+            "checklog：Error log 在阿里云「日志服务 SLS」里，脚本先拿 STS 临时密钥再调 SLS API；不是「不用 STS」。\n"
+            "任选其一：\n"
+            "  A) ECS：ALIYUN_ECS_RAM_ROLE_NAME=OSE-ECS-Read-Monitor-sls（实例角色→元数据 STS），"
+            "目标角色默认可不写（脚本 assume 到 sls-platform-readonly）；"
+            "pip install aliyun-python-sdk-sts；systemd 请用 EnvironmentFile 注入变量。\n"
+            "  B) 本机 AssumeRole：ALIYUN_ASSUME_ACCESS_KEY_ID/SECRET + ALIYUN_SLS_ASSUME_ROLE_ARN（或 TARGET_*）。\n"
+            "  C) 控制台临时凭证：ALIYUN_SLS_ACCESS_KEY_ID / _SECRET / _SECURITY_TOKEN。\n"
+            "  或在 amountloss 同目录 .env / amountloss.sls.env（勿提交 Git）。"
         )
     return ak, secret, token or None
 
@@ -284,15 +291,25 @@ def _sls_msg_is_error_candidate(msg: str) -> bool:
     return ("platformCreditLostFix" in msg) and ("null" in msg.lower())
 
 
+def _ensure_aliyun_log_sdk():
+    """checklog 依赖 aliyun.log；失败时抛出 ValueError（含当前解释器路径，便于与 pip 环境对齐）。"""
+    try:
+        import aliyun.log  # noqa: F401
+    except ImportError as e:
+        py = sys.executable
+        raise ValueError(
+            "checklog 需要安装 aliyun-log-python-sdk（import aliyun.log 失败）。\n"
+            "当前运行中的 Python: %s\n"
+            "请对该解释器安装: \"%s\" -m pip install aliyun-log-python-sdk\n"
+            "若在终端 pip install 成功仍报错，通常是 systemd/cron 用了别的 python，请改 ExecStart 或在该 python 上安装。"
+            % (py, py)
+        ) from e
+
+
 def _sls_fetch_error_msgs_for_row(transfer_id, center_dt):
     # type: (str, datetime) -> List[str]
-    """按控制台查询语法与时间窗拉取，再筛 platformCreditLostFix + null。"""
-    try:
-        from aliyun.log import GetLogsRequest, LogClient
-    except ImportError as e:
-        raise ImportError(
-            "请安装: pip install aliyun-log-python-sdk"
-        ) from e
+    """按控制台查询语法与时间窗拉取，再筛 platformCreditLostFix + null。（调用前应先 _ensure_aliyun_log_sdk）"""
+    from aliyun.log import GetLogsRequest, LogClient
 
     ak, secret, token = _sls_credentials_or_raise()
     endpoint = _env_first("ALIYUN_SLS_ENDPOINT") or SLS_DEFAULT_ENDPOINT
@@ -346,6 +363,7 @@ def _attach_sls_error_logs(filter_headers, filter_rows):
         '检索式与控制台一致："<id> and \\"null null\\""；'
         "保留 msg 中含 platformCreditLostFix 且含 null 的记录。"
     )
+    _ensure_aliyun_log_sdk()
     for row in filter_rows:
         tid = row[idx_tid].strip() if idx_tid < len(row) else ""
         st = row[idx_st] if idx_st < len(row) else ""
