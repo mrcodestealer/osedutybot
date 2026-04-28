@@ -24,6 +24,14 @@ SHEET_ID = os.getenv("EMERGENCY_SHEET")
 DEBUG = False
 FUZZY_THRESHOLD = 0.65
 
+ROLE_PAIR_ORDER = [
+    ("1st", "1st_pm", "1st_go"),
+    ("2nd", "2nd_pm", "2nd_go"),
+    ("3rd", "3rd_pm", "3rd_go"),
+    ("4th", None, "4th_go"),
+]
+
+
 def debug_print(*args, **kwargs):
     if DEBUG:
         print("[DEBUG]", *args, file=sys.stderr)
@@ -232,43 +240,131 @@ def fuzzy_match_games(games_contacts, target_game):
     best_ratio = matches[0][0]
     return [(name, contacts) for ratio, name, contacts in matches if ratio >= best_ratio - 0.1]
 
-def format_output(games_contacts, target_game=None):
+
+def _filter_games_contacts(games_contacts, target_game=None):
     if target_game:
         matches = fuzzy_match_games(games_contacts, target_game)
         if not matches:
-            return f"No game found matching '{target_game}'"
+            return None, f"No game found matching '{target_game}'"
         games_contacts = matches
     if not games_contacts:
-        return "No games found."
+        return None, "No games found."
+    return games_contacts, None
+
+
+def _contact_entries(contact):
+    if not isinstance(contact, dict):
+        return []
+    name = (contact.get("name") or "").strip()
+    phone = (contact.get("phone") or "").strip()
+    if not name:
+        return []
+    name_lines = [x.strip() for x in name.split("\n") if x.strip()]
+    phone_lines = [x.strip() for x in phone.split("\n")] if phone else []
+    max_len = max(len(name_lines), len(phone_lines) if phone_lines else 0)
+    if max_len <= 0:
+        return []
+    if len(name_lines) < max_len:
+        name_lines.extend([""] * (max_len - len(name_lines)))
+    if len(phone_lines) < max_len:
+        phone_lines.extend([""] * (max_len - len(phone_lines)))
+    out = []
+    for i in range(max_len):
+        n = name_lines[i].strip()
+        p = phone_lines[i].strip() if i < len(phone_lines) else ""
+        if n:
+            out.append((n, p))
+    return out
+
+
+def _build_role_pair_lines(contacts):
+    lines = []
+    for level, pm_key, go_key in ROLE_PAIR_ORDER:
+        pm_entries = _contact_entries(contacts.get(pm_key, {})) if pm_key else []
+        go_entries = _contact_entries(contacts.get(go_key, {})) if go_key else []
+        row_cnt = max(len(pm_entries), len(go_entries))
+        if row_cnt <= 0:
+            continue
+        lines.append(f"  🧩 {level} Lineup")
+        for i in range(row_cnt):
+            if pm_key:
+                if i < len(pm_entries):
+                    pm_name, pm_phone = pm_entries[i]
+                    lines.append(
+                        f"    👔 Product Manager: {pm_name} (📞 {pm_phone if pm_phone else 'N/A'})"
+                    )
+                elif i == 0:
+                    lines.append("    👔 Product Manager: N/A (📞 N/A)")
+            if go_key:
+                if i < len(go_entries):
+                    go_name, go_phone = go_entries[i]
+                    lines.append(
+                        f"    🎮 Game Operation: {go_name} (📞 {go_phone if go_phone else 'N/A'})"
+                    )
+                elif i == 0:
+                    lines.append("    🎮 Game Operation: N/A (📞 N/A)")
+        lines.append("")
+    return lines
+
+
+def format_output(games_contacts, target_game=None):
+    games_contacts, err = _filter_games_contacts(games_contacts, target_game)
+    if err:
+        return err
     lines = []
     for game_name, contacts in games_contacts:
         lines.append(f"🎮 {game_name}")
-        order = ['1st_pm', '1st_go', '2nd_pm', '2nd_go', '3rd_pm', '3rd_go', '4th_go']
-        for key in order:
-            if key in contacts:
-                name = contacts[key]['name']
-                phone = contacts[key]['phone']
-                label = contacts[key]['label']
-                if name:
-                    # Handle multi-line names and phones
-                    name_lines = name.split('\n')
-                    phone_lines = phone.split('\n')
-                    # Ensure same number of lines
-                    max_lines = max(len(name_lines), len(phone_lines))
-                    if len(name_lines) < max_lines:
-                        name_lines.extend([''] * (max_lines - len(name_lines)))
-                    if len(phone_lines) < max_lines:
-                        phone_lines.extend([''] * (max_lines - len(phone_lines)))
-                    for i in range(max_lines):
-                        n = name_lines[i].strip()
-                        p = phone_lines[i].strip()
-                        if n:
-                            if i == 0:
-                                lines.append(f"  {label}: {n} (📞 {p if p else 'N/A'})")
-                            else:
-                                lines.append(f"    {n} (📞 {p if p else 'N/A'})")
+        lines.extend(_build_role_pair_lines(contacts))
         lines.append("")
     return "\n".join(lines)
+
+
+def format_output_card(games_contacts, target_game=None):
+    games_contacts, err = _filter_games_contacts(games_contacts, target_game)
+    if err:
+        return None, err
+    elements = []
+    for idx, (game_name, contacts) in enumerate(games_contacts):
+        if idx:
+            elements.append({"tag": "hr"})
+        lines = [f"🎮 **{game_name}**"]
+        for level, pm_key, go_key in ROLE_PAIR_ORDER:
+            pm_entries = _contact_entries(contacts.get(pm_key, {})) if pm_key else []
+            go_entries = _contact_entries(contacts.get(go_key, {})) if go_key else []
+            row_cnt = max(len(pm_entries), len(go_entries))
+            if row_cnt <= 0:
+                continue
+            lines.append("")
+            lines.append(f"🧩 **{level} Lineup**")
+            for i in range(row_cnt):
+                if pm_key:
+                    if i < len(pm_entries):
+                        pm_name, pm_phone = pm_entries[i]
+                        lines.append(
+                            f"👔 Product Manager: **{pm_name}** (📞 {pm_phone if pm_phone else 'N/A'})"
+                        )
+                    elif i == 0:
+                        lines.append("👔 Product Manager: **N/A** (📞 N/A)")
+                if go_key:
+                    if i < len(go_entries):
+                        go_name, go_phone = go_entries[i]
+                        lines.append(
+                            f"🎮 Game Operation: **{go_name}** (📞 {go_phone if go_phone else 'N/A'})"
+                        )
+                    elif i == 0:
+                        lines.append("🎮 Game Operation: **N/A** (📞 N/A)")
+        elements.append(
+            {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}}
+        )
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": "Emergency Contacts"},
+        },
+        "elements": elements or [{"tag": "div", "text": {"tag": "plain_text", "content": "No games found."}}],
+    }
+    return card, None
 
 def get_game_owners(target_game=None):
     """
@@ -486,6 +582,14 @@ def get_responsible_games(target_game=None):
 
 def get_emergency_contacts(target_game=None):
     """Main function to fetch and return emergency contacts."""
+    payload = get_emergency_contacts_payload(target_game)
+    if isinstance(payload, dict):
+        return payload.get("text") or "No output."
+    return str(payload)
+
+
+def get_emergency_contacts_payload(target_game=None):
+    """Main function to fetch emergency contacts as text + optional Lark card."""
     try:
         token = get_tenant_access_token()
         debug_print("Token obtained")
@@ -534,12 +638,14 @@ def get_emergency_contacts(target_game=None):
                 break
 
         if not games_contacts:
-            return "No games found."
+            return {"text": "No games found.", "lark_card": None}
 
-        return format_output(games_contacts, target_game)
+        text = format_output(games_contacts, target_game)
+        card, _err = format_output_card(games_contacts, target_game)
+        return {"text": text, "lark_card": card}
 
     except Exception as e:
-        return f"Error: {e}"
+        return {"text": f"Error: {e}", "lark_card": None}
     
 def debug_responsible_games():
     """Print all game names found under the '负责游戏' marker (for debugging)."""

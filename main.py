@@ -1163,8 +1163,14 @@ def lark_webhook():
         return jsonify({"success": True})
     elif cmd == '/ec':
         game_name = cmd_parts[1] if len(cmd_parts) > 1 else None
-        reply = emergency.get_emergency_contacts(game_name)
-        send_message(chat_id, reply)
+        result = emergency.get_emergency_contacts_payload(game_name)
+        if isinstance(result, dict) and result.get("lark_card"):
+            card_json = json.dumps(result["lark_card"])
+            resp = send_message(chat_id, card_json, msg_type="interactive")
+            if resp.get("code") != 0:
+                send_message(chat_id, result.get("text") or str(result))
+        else:
+            send_message(chat_id, result.get("text") if isinstance(result, dict) else str(result))
         return jsonify({"success": True})
     elif clean_text == '/cashout':
         reply = f'the player has been get back his credit. @On-Duty-OSM-Lavie(Podium1) kindly manual cashout the credit and reboot the machine. After that, @Xavier (CS OSM) kindly unset and test the machine thanks'
