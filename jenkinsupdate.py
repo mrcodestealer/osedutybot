@@ -3524,7 +3524,12 @@ def verify_fpms_prod_script_parameters_display(
     else:
         cmd_ok = got_cmd == want_cmd
     ok_all = ok_all and cmd_ok
-    lines.append(f"{'✅' if cmd_ok else '❌'} Command — page: {got_cmd!r} — expected: {want_cmd!r}")
+    em = "✅" if cmd_ok else "❌"
+    lines.append(
+        f"{em} Command\n\n"
+        f"Page: {got_cmd!r}\n\n"
+        f"Expected: {want_cmd!r}"
+    )
     return ok_all, lines
 
 
@@ -5034,6 +5039,7 @@ def handle_lark_jenkins_update_message(
             if isinstance(s, dict) and s.get("state") == "jenkins_wait_build":
                 ev = s.get("build_gate_event")
                 if isinstance(ev, threading.Event):
+                    s["state"] = "jenkins_cancelled"
                     s["lark_cancel"] = True
                     s["approve_build"] = False
                     ev.set()
@@ -5121,6 +5127,9 @@ def handle_lark_jenkins_update_message(
                 chat_id,
                 "Reply **yes** to click **Build** in Jenkins, or **no** to skip **Build** (browser will close after).",
             )
+            return True
+        if st == "jenkins_cancelled":
+            # Build gate already cancelled; keep quiet until worker thread closes and clears session.
             return True
 
         if st == "pick":
