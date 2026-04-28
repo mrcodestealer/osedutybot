@@ -312,7 +312,7 @@ def get_week_summary_from_data(week_start, values, target_rows):
         # Find lookup name for this display name
         lookup_name = next((t["lookup"] for t in TARGET_DUTY if t["display"] == name), name)
         phone = get_phone_from_dutylist(lookup_name)
-        lines.append(f"• {name} 📞 {phone})")
+        lines.append(f"• {name} 📞 {phone}")
     return "\n".join(lines)
 
 def get_three_weeks_summary():
