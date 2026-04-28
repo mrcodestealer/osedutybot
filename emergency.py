@@ -335,7 +335,7 @@ def format_output_card(games_contacts, target_game=None):
             if row_cnt <= 0:
                 continue
             lines.append("")
-            lines.append(f"🧩 **{level} Lineup**")
+            lines.append(f"🧩 **{level} Product Manager & Game Operation**")
             for i in range(row_cnt):
                 if pm_key:
                     if i < len(pm_entries):
