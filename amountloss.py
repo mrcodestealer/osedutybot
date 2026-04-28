@@ -793,6 +793,69 @@ def _al_batch_update_ranges(token, spreadsheet_token, value_ranges):
     return
 
 
+def _al_batch_sheet_requests(token, spreadsheet_token, requests_payload):
+    # type: (str, str, list) -> None
+    """
+    调用 sheets_batch_update（如 copyPaste）做“复制含格式”。
+    row/col index 均为 0-based，end 为开区间。
+    """
+    if not requests_payload:
+        return
+    url = (
+        "https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/%s/sheets_batch_update"
+        % spreadsheet_token
+    )
+    resp = requests.post(
+        url,
+        headers={
+            "Authorization": "Bearer %s" % token,
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        json={"requests": requests_payload},
+        timeout=120,
+    )
+    result = resp.json()
+    if result.get("code") != 0:
+        raise ValueError("sheets_batch_update 失败: %s" % result)
+
+
+def _al_copy_paste_rows_with_style(
+    token,
+    spreadsheet_token,
+    sheet_id,
+    src_row_start_1based,
+    src_row_end_1based,
+    dst_row_start_1based,
+    dst_row_end_1based,
+    ncol,
+):
+    # type: (str, str, str, int, int, int, int, int) -> None
+    """
+    copyPaste 一段行到目标行，尽量保留格式/背景/边框（PASTE_NORMAL）。
+    """
+    req = {
+        "copyPaste": {
+            "source": {
+                "sheetId": sheet_id,
+                "startRowIndex": int(src_row_start_1based - 1),
+                "endRowIndex": int(src_row_end_1based),
+                "startColumnIndex": 0,
+                "endColumnIndex": int(ncol),
+            },
+            "destination": {
+                "sheetId": sheet_id,
+                "startRowIndex": int(dst_row_start_1based - 1),
+                "endRowIndex": int(dst_row_end_1based),
+                "startColumnIndex": 0,
+                "endColumnIndex": int(ncol),
+            },
+            "pasteType": "PASTE_NORMAL",
+            "pasteOrientation": "NORMAL",
+        }
+    }
+    _al_batch_sheet_requests(token, spreadsheet_token, [req])
+
+
 def _al_pad_row(row, width):
     # type: (list, int) -> list
     r = [row[i] if i < len(row) else "" for i in range(width)]
@@ -925,7 +988,6 @@ def amount_loss_sync_to_lark_sheet(
 
     ncol = _al_sheet_column_count(token, spreadsheet_token, sheet_id)
     nrow = _al_sheet_row_count(token, spreadsheet_token, sheet_id)
-    end_l = _al_col_num_to_letter(ncol)
 
     two_days = date.today() - timedelta(days=2)
     yesterday = date.today() - timedelta(days=1)
@@ -945,14 +1007,18 @@ def amount_loss_sync_to_lark_sheet(
         )
 
     if total_n == 0:
-        tpl234 = _al_get_range(token, spreadsheet_token, sheet_id, "A2:%s4" % end_l)
-        while len(tpl234) < 3:
-            tpl234.append([])
-        tpl234 = [_al_pad_row(r, ncol) for r in tpl234[:3]]
         base = anchor + 4
-        rng = "%s%d:%s%d" % ("A", base, end_l, base + 2)
-        payload = [{"range": "%s!%s" % (sheet_id, rng), "values": tpl234}]
-        _al_batch_update_ranges(token, spreadsheet_token, payload)
+        # 先整行复制模板 2~4 到目标区，保留背景色/样式
+        _al_copy_paste_rows_with_style(
+            token,
+            spreadsheet_token,
+            sheet_id,
+            2,
+            4,
+            base,
+            base + 2,
+            ncol,
+        )
         only_a = "%s%d:%s%d" % ("A", base, "A", base)
         _al_batch_update_ranges(
             token,
@@ -965,24 +1031,37 @@ def amount_loss_sync_to_lark_sheet(
         )
         return missing_note
 
-    tpl23 = _al_get_range(token, spreadsheet_token, sheet_id, "A2:%s3" % end_l)
-    while len(tpl23) < 2:
-        tpl23.append([])
-    tpl23 = [_al_pad_row(r, ncol) for r in tpl23[:2]]
-
     base = anchor + 4
     row_h = base + 2
     row_d0 = base + 3
+
+    # 先复制模板行样式：2~3 -> base~base+1；3 -> header 行；4 -> 数据起始区域
+    _al_copy_paste_rows_with_style(
+        token,
+        spreadsheet_token,
+        sheet_id,
+        2,
+        3,
+        base,
+        base + 1,
+        ncol,
+    )
+    _al_copy_paste_rows_with_style(
+        token,
+        spreadsheet_token,
+        sheet_id,
+        3,
+        3,
+        row_h,
+        row_h,
+        ncol,
+    )
 
     hdr_row_vals = FPMS_SYNC_COLUMNS[:]
     if eh and er and "Error log" in eh:
         hdr_row_vals.append("Error log")
 
     ranges_batch = []
-    r2 = "%s%d:%s%d" % ("A", base, end_l, base)
-    r3 = "%s%d:%s%d" % ("A", base + 1, end_l, base + 1)
-    ranges_batch.append({"range": "%s!%s" % (sheet_id, r2), "values": [tpl23[0]]})
-    ranges_batch.append({"range": "%s!%s" % (sheet_id, r3), "values": [tpl23[1]]})
 
     el = _al_col_num_to_letter(5)
     end_seg_l = _al_col_num_to_letter(5 + len(hdr_row_vals) - 1)
@@ -1006,6 +1085,17 @@ def amount_loss_sync_to_lark_sheet(
         data_rows.append(vals)
 
     if data_rows:
+        # 用模板第 4 行样式铺满数据区（若目标多行，服务端会按目的区域粘贴）
+        _al_copy_paste_rows_with_style(
+            token,
+            spreadsheet_token,
+            sheet_id,
+            4,
+            4,
+            row_d0,
+            row_d0 + len(data_rows) - 1,
+            ncol,
+        )
         dr = "%s%d:%s%d" % (el, row_d0, end_seg_l, row_d0 + len(data_rows) - 1)
         ranges_batch.append({"range": "%s!%s" % (sheet_id, dr), "values": data_rows})
 
