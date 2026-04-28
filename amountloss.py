@@ -439,14 +439,15 @@ def _scrape_credit_lost_proposal_table(page):
     )
 
 
-def _print_table(headers, rows):
+def _table_to_string(headers, rows):
+    """与 _print_table 相同排版，供 main/Lark 返回正文（非仅 stdout）。"""
     if not headers:
-        print("（无表头）")
-        return
+        return "（无表头）"
     widths = [len(h) for h in headers]
     for r in rows:
         for i, c in enumerate(r):
             if i < len(widths):
+                c = str(c) if c is not None else ""
                 widths[i] = max(widths[i], len(c))
     sep = " | "
 
@@ -454,14 +455,22 @@ def _print_table(headers, rows):
         parts = []
         for i, h in enumerate(headers):
             cell = cells[i] if i < len(cells) else ""
+            cell = str(cell) if cell is not None else ""
             parts.append(cell.ljust(widths[i]))
         return sep.join(parts)
 
-    print(fmt_row(headers))
-    print(sep.join("-" * w for w in widths))
+    lines = [
+        fmt_row(headers),
+        sep.join("-" * w for w in widths),
+    ]
     for r in rows:
-        print(fmt_row(r))
-    print(f"共 {len(rows)} 行，{len(headers)} 列。")
+        lines.append(fmt_row(r))
+    lines.append("共 %d 行，%d 列。" % (len(rows), len(headers)))
+    return "\n".join(lines)
+
+
+def _print_table(headers, rows):
+    print(_table_to_string(headers, rows))
 
 
 def _header_col_index(headers, *needles):
@@ -642,7 +651,7 @@ def fetch_fpms_data(
     filterdata: 为 True 时同样拉表，再按 In/Out Live 备注过滤、30 分钟窗口去重、拆 Transfer ID 后打印精简表。
     checklog: 为 True 时同样拉表并做 filter，再调用阿里云 SLS API（非浏览器）按每行查询 Error log；
       凭证：控制台 STS 三件套，或 RAM 用户 AK + ALIYUN_SLS_ASSUME_ROLE_ARN（AssumeRole，见文件顶部注释）。
-    返回: 一行摘要字符串，例如 Total 0 records / Search time: 0.205 seconds
+    返回: 摘要行；若 getdata/filterdata/checklog 则在同一字符串内追加对应章节（与终端打印一致），供 main.py 发往 Lark。
     """
     _ = save_state  # 保留与旧版 fpms_fetcher 相同的调用约定
     with sync_playwright() as p:
@@ -834,6 +843,7 @@ def fetch_fpms_data(
             total_text = total_label.text_content().strip()
             summary = _amount_loss_result_summary(page, total_text)
             print(f"📊 {summary}")
+            result_chunks = [summary]
 
             if getdata or filterdata or checklog:
                 print("📄 设置 Length Per Page = 1000 并移开焦点…")
@@ -850,6 +860,10 @@ def fetch_fpms_data(
                         "\n===== CREDIT_LOST_FIX_PROPOSAL 明细（scrollHead 列名 / scrollBody 数据）====="
                     )
                     _print_table(headers, rows)
+                    detail_title = (
+                        "===== CREDIT_LOST_FIX_PROPOSAL 明细（scrollHead 列名 / scrollBody 数据）====="
+                    )
+                    result_chunks.extend(["", detail_title, _table_to_string(headers, rows)])
                 if filterdata or checklog:
                     try:
                         fh, fr = _filter_credit_lost_table(headers, rows)
@@ -858,18 +872,29 @@ def fetch_fpms_data(
                                 "\n===== FILTERED（Account / Amount / Start Time / Transfer Name / Transfer ID）====="
                             )
                             _print_table(fh, fr)
+                            result_chunks.extend(
+                                [
+                                    "",
+                                    "===== FILTERED（Account / Amount / Start Time / Transfer Name / Transfer ID）=====",
+                                    _table_to_string(fh, fr),
+                                ]
+                            )
                         if checklog:
                             _load_sls_env_files()
-                            print(
-                                "\n===== CHECKLOG（SLS Error log；project="
-                                f"{_env_first('ALIYUN_SLS_PROJECT') or SLS_DEFAULT_PROJECT}）====="
+                            proj = _env_first("ALIYUN_SLS_PROJECT") or SLS_DEFAULT_PROJECT
+                            chk_title = (
+                                "===== CHECKLOG（SLS Error log；project=%s）=====" % (proj,)
                             )
+                            print("\n" + chk_title)
                             eh, er = _attach_sls_error_logs(fh, fr)
                             _print_table(eh, er)
+                            result_chunks.extend(["", chk_title, _table_to_string(eh, er)])
                     except ValueError as ve:
-                        print(f"⚠️ filterdata/checklog: {ve}")
+                        warn = "⚠️ filterdata/checklog: %s" % (ve,)
+                        print(warn)
+                        result_chunks.extend(["", warn])
 
-            return summary
+            return "\n".join(result_chunks)
 
         except Exception as e:
             print(f"❌ 脚本执行出错: {e}")
