@@ -728,8 +728,15 @@ class ConfigBlockError(ValueError):
 
 
 def _normalize_config_colons(s: str) -> str:
-    """ASCII colon + trim; map fullwidth colon (U+FF1A) to ``:``."""
-    t = (s or "").replace("\uff1a", ":").strip()
+    """ASCII colon + trim; map fullwidth colon and strip common list-bullet prefixes."""
+    t = (s or "").replace("\uff1a", ":").replace("\u200b", "").strip()
+    # Lark/IM often injects bullet prefixes (e.g. • · 🔹 - >) before key lines.
+    # Strip them early so ``Branch:`` / ``Version:`` / ``Services:`` still match.
+    t = re.sub(
+        r"^\s*(?:[-*>]|[•·\u2022\u00b7\u30fb\u25cf\u25cb\u25aa\u25ab]|[🔹🔸🔵])+[\s\u00a0]*",
+        "",
+        t,
+    )
     return t
 
 
