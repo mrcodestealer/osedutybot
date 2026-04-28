@@ -831,10 +831,15 @@ def _fpms_row_product_to_remarks(fp_headers, cells):
 
 
 def _amount_loss_parse_total_records(summary_block):
-    first = (summary_block or "").split("\n")[0].strip()
-    m = re.search(r"Total\s+(\d+)\s+records?", first, re.I)
-    if m:
-        return int(m.group(1))
+    """从返回正文任意行前若干行解析 FPMS Total N records。"""
+    text = summary_block or ""
+    for line in text.split("\n")[:15]:
+        line = line.strip()
+        if not line:
+            continue
+        m = re.search(r"Total\s+(\d+)\s+records?", line, re.I)
+        if m:
+            return int(m.group(1))
     return -1
 
 
@@ -857,6 +862,10 @@ def amount_loss_sync_to_lark_sheet(
     """
     spreadsheet_token = (_env_first("AMOUNT_LOSS_SPREADSHEET_TOKEN") or "").strip()
     if not spreadsheet_token:
+        print(
+            "⚠️ Lark Amount Loss：未写入表格 — 未设置 AMOUNT_LOSS_SPREADSHEET_TOKEN "
+            "（需在 .env 填表格 token，来自「在浏览器打开表格」的 URL，不是 wiki 页面链接）。"
+        )
         return
     sheet_id = (_env_first("AMOUNT_LOSS_SHEET_ID") or "").strip()
     title_year = datetime.now().year
@@ -864,9 +873,17 @@ def amount_loss_sync_to_lark_sheet(
 
     total_n = _amount_loss_parse_total_records(summary_block)
     if total_n < 0:
-        print("⚠️ Lark sync：无法解析 Total records，跳过")
+        snippet = (summary_block or "")[:240].replace("\n", " ")
+        print(
+            "⚠️ Lark Amount Loss：无法从正文解析 Total … records，跳过同步。正文开头：%r"
+            % snippet
+        )
         return
 
+    print(
+        "📎 Lark Amount Loss：开始同步（Total=%s；找 A 列锚点=两天前 DD/MM/YY）"
+        % total_n
+    )
     token = _al_lark_tenant_token()
     if not sheet_id:
         sheet_id = _al_find_sheet_id_by_title(token, spreadsheet_token, want_title)
