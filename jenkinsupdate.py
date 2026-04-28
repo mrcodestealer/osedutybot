@@ -1132,10 +1132,17 @@ def _extract_keyed_value(
         rf"^\s*(?:`+|\*{{1,2}})?(?:{key_alt})(?:`+|\*{{1,2}})?\s*[:=]\s*(?P<v>.*?)\s*$",
         re.I,
     )
+    def _trim_before_next_key(v: str) -> str:
+        vv = normalize_parameter_text(v)
+        if not vv or not stop_alt:
+            return vv
+        parts = re.split(rf"\s+\b(?:{stop_alt})\b\s*[:=]", vv, maxsplit=1, flags=re.I)
+        return normalize_parameter_text(parts[0] if parts else vv)
+
     for raw in text.splitlines():
         m = line_re.match((raw or "").strip())
         if m:
-            v = normalize_parameter_text(m.group("v") or "")
+            v = _trim_before_next_key(m.group("v") or "")
             if v:
                 return v
 
@@ -1148,7 +1155,7 @@ def _extract_keyed_value(
     m2 = inline_re.search(text)
     if not m2:
         return None
-    v2 = normalize_parameter_text(m2.group("v") or "")
+    v2 = _trim_before_next_key(m2.group("v") or "")
     return v2 or None
 
 
@@ -1167,6 +1174,17 @@ def _bi_repo_canonical(token: str) -> str:
     return t.strip("-")
 
 
+def _find_ds_or_bi_repo_token(text: str) -> str | None:
+    """First token like ``ds-xxx`` / ``bi-xxx`` from mixed free text."""
+    if not text:
+        return None
+    m = re.search(r"\b((?:ds|bi)-[a-z0-9][a-z0-9._/-]*)\b", text, re.I)
+    if not m:
+        return None
+    tok = normalize_parameter_text(m.group(1) or "")
+    return tok or None
+
+
 def parse_bi_api_update_message_block(text: str) -> tuple[str, str, str]:
     """
     Parse free text (chat paste / one-line command) for BI-API-UPDATE fields:
@@ -1178,6 +1196,8 @@ def parse_bi_api_update_message_block(text: str) -> tuple[str, str, str]:
     keys_all = (
         "repository",
         "repo",
+        "service",
+        "services",
         "environment",
         "env",
         "source_branch",
@@ -1186,9 +1206,11 @@ def parse_bi_api_update_message_block(text: str) -> tuple[str, str, str]:
     )
     repo = _extract_keyed_value(
         body,
-        ("repository", "repo"),
+        ("repository", "repo", "service", "services"),
         stop_keys=keys_all,
     )
+    if not repo:
+        repo = _find_ds_or_bi_repo_token(body)
     env = _extract_keyed_value(
         body,
         ("environment", "env"),
@@ -1200,18 +1222,26 @@ def parse_bi_api_update_message_block(text: str) -> tuple[str, str, str]:
         stop_keys=keys_all,
     )
     if not repo:
-        raise ConfigBlockError("Missing repository: for BI-API-UPDATE.")
+        raise ConfigBlockError(
+            "Missing repository/services for BI-API-UPDATE (use ds-... or bi-... token)."
+        )
     if not env:
         raise ConfigBlockError("Missing env: / environment: for BI-API-UPDATE.")
     if not branch:
         raise ConfigBlockError("Missing branch: / source_branch: for BI-API-UPDATE.")
+    repo_norm = normalize_parameter_text(repo)
+    repo_low = repo_norm.casefold()
+    if not (repo_low.startswith("ds-") or repo_low.startswith("bi-")):
+        raise ConfigBlockError(
+            f"Repository/service {repo_norm!r} must start with ds- or bi- for BI-API-UPDATE shortcut."
+        )
     env_norm = normalize_parameter_text(env).casefold()
     branch_norm = normalize_parameter_text(branch)
     if not env_norm:
         raise ConfigBlockError("environment value is empty.")
     if not branch_norm:
         raise ConfigBlockError("source branch value is empty.")
-    return normalize_parameter_text(repo), env_norm, branch_norm
+    return repo_norm, env_norm, branch_norm
 
 
 def parse_bi_api_update_config_block(text: str) -> tuple[str, str, str]:
@@ -3311,6 +3341,80 @@ def read_choice_parameter_value(page, label: str) -> str:
     return normalize_parameter_text(str(v) if v is not None else "")
 
 
+def _rank_bi_repository_options(
+    want_value: str, options: list[tuple[str, str]]
+) -> list[tuple[str, str, float]]:
+    want_raw = normalize_parameter_text(want_value)
+    want_cf = want_raw.casefold()
+    want_can = _bi_repo_canonical(want_raw)
+    ranked: list[tuple[str, str, float]] = []
+    for ov, ot in options:
+        ov_cf = ov.casefold()
+        ot_cf = ot.casefold()
+        ov_can = _bi_repo_canonical(ov)
+        ot_can = _bi_repo_canonical(ot)
+        if ov_cf == want_cf or ot_cf == want_cf:
+            sc = 10.0
+        elif want_can and (ov_can == want_can or ot_can == want_can):
+            sc = 8.0
+        else:
+            sc = max(
+                difflib.SequenceMatcher(None, want_can, ov_can).ratio(),
+                difflib.SequenceMatcher(None, want_can, ot_can).ratio(),
+                difflib.SequenceMatcher(None, want_cf, ov_cf).ratio(),
+                difflib.SequenceMatcher(None, want_cf, ot_cf).ratio(),
+            )
+        ranked.append((ov, ot, sc))
+    ranked.sort(key=lambda x: (-x[2], x[0]))
+    return ranked
+
+
+def _choose_bi_repository_option_value(
+    want_value: str, options: list[tuple[str, str]]
+) -> str:
+    """
+    Resolve BI REPOSITORY option:
+      - exact value/text match → direct
+      - otherwise show near matches and let user choose (TTY), or auto-pick top in non-interactive mode.
+    """
+    want = normalize_parameter_text(want_value)
+    if not want:
+        raise ValueError("REPOSITORY: requested value is empty.")
+    for ov, ot in options:
+        if ov.casefold() == want.casefold() or ot.casefold() == want.casefold():
+            return ov
+    ranked = _rank_bi_repository_options(want, options)
+    if not ranked:
+        raise ValueError("REPOSITORY: no options available on Jenkins page.")
+    top = ranked[: min(8, len(ranked))]
+    if not _stdin_stdout_interactive():
+        pick = top[0][0]
+        print(
+            "⚠️ REPOSITORY is not an exact match; non-interactive mode auto-picked nearest "
+            f"{pick!r} for input {want!r}."
+        )
+        return pick
+    print(
+        "\nREPOSITORY did not match exactly. Choose the closest Jenkins option:"
+        f"\nInput: {want!r}"
+    )
+    for i, (ov, ot, _sc) in enumerate(top, start=1):
+        show = f"{ov} ({ot})" if ot and ot != ov else ov
+        print(f"  {i}. {show}")
+    n = len(top)
+    while True:
+        raw = input(f"> Pick one number 1-{n} (or type 'cancel'): ").strip()
+        if raw.casefold() in ("cancel", "c", "q", "quit", "exit"):
+            raise RuntimeError("Cancelled while choosing BI REPOSITORY option.")
+        idx = _parse_single_menu_index(raw, n)
+        if idx is None:
+            print(f"  Enter one number from 1 to {n}, or type cancel.")
+            continue
+        pick = top[idx - 1][0]
+        print(f"  → Selected repository option: {pick}")
+        return pick
+
+
 def select_choice_parameter_by_value(
     page,
     label: str,
@@ -3941,7 +4045,8 @@ def _jenkins_update_job_automation_profile(raw_urls: str) -> str | None:
     """
     Which automated fill path applies to this Jenkins URL (first line if several).
 
-    Returns ``\"fpms\"`` | ``\"fnt_rc\"`` | ``\"sms_uat\"`` | ``\"fpms_prod_script\"`` or ``None``.
+    Returns ``\"fpms\"`` | ``\"fnt_rc\"`` | ``\"sms_uat\"`` | ``\"fpms_prod_script\"`` |
+    ``\"bi_api_update\"`` or ``None``.
     """
     u = _jenkins_update_primary_url(raw_urls).replace("\\", "/")
     ul = u.casefold()
@@ -3953,6 +4058,8 @@ def _jenkins_update_job_automation_profile(raw_urls: str) -> str | None:
         return "sms_uat"
     if "/job/fpms/job/fpms_prod_script_run/" in ul:
         return "fpms_prod_script"
+    if "/job/bi-go/job/bi-api-update/" in ul:
+        return "bi_api_update"
     return None
 
 
@@ -4436,6 +4543,37 @@ def parse_sms_uat_update_bot_block(text: str) -> dict:
     }
 
 
+def parse_bi_api_update_bot_block(text: str) -> dict:
+    """
+    Parse Lark block for BI-API-UPDATE:
+      /jenkinsupdate ...
+      repository/services: ds-... or bi-...
+      env/environment: ...
+      branch/source_branch: ...
+    """
+    raw = _normalize_config_colons((text or "").replace("\r\n", "\n")).strip()
+    if not raw:
+        raise ValueError("Empty message.")
+    lines = [L.strip() for L in raw.splitlines() if L.strip()]
+    if not lines or not JENKINS_UPDATE_CMD_RE.search(lines[0]):
+        raise ValueError("First line must include `/jenkinsupdate`.")
+    repo, env, branch = parse_bi_api_update_message_block(raw)
+    return {
+        "_job_kind": "bi_api_update",
+        "repository": repo,
+        "environment": env,
+        "source_branch": branch,
+    }
+
+
+def _bi_api_update_bot_build_config_block(data: dict) -> str:
+    return _bi_api_update_build_config_block(
+        str(data.get("repository") or ""),
+        str(data.get("environment") or ""),
+        str(data.get("source_branch") or ""),
+    )
+
+
 def _sms_uat_bot_build_config_block(data: dict, resolved_ids: list[str]) -> str:
     if data.get("update_all_services"):
         svc_lines = "all"
@@ -4686,6 +4824,15 @@ def _fpms_format_config_preview(data: dict, resolved: list[str]) -> str:
                 f"- **Command:** `{data['command']}`",
             ]
         )
+    if jk == "bi_api_update":
+        return "\n".join(
+            [
+                "**Configuration (BI API UPDATE — from your message)**",
+                f"- **Repository:** `{data['repository']}`",
+                f"- **Environment:** `{data['environment']}`",
+                f"- **Source Branch:** `{data['source_branch']}`",
+            ]
+        )
     lines = [
         "**Configuration (from your message)**",
         f"- **Environment:** `{data['environment']}`",
@@ -4735,6 +4882,8 @@ def _fpms_lark_verification_card_json(
         title_text = "SMS UAT UPDATE — form filled & re-check"
     elif jp == "fpms_prod_script":
         title_text = "FPMS PROD SCRIPT RUN — form filled & re-check"
+    elif jp == "bi_api_update":
+        title_text = "BI API UPDATE — form filled & re-check"
     else:
         title_text = "FPMS UAT — form filled & re-check"
 
@@ -4771,6 +4920,8 @@ def _fpms_lark_verification_plain_fallback(
         head = "SMS UAT UPDATE — form filled & re-check"
     elif jp == "fpms_prod_script":
         head = "FPMS PROD SCRIPT RUN — form filled & re-check"
+    elif jp == "bi_api_update":
+        head = "BI API UPDATE — form filled & re-check"
     else:
         head = "FPMS UAT — form filled & re-check"
     safe = _fpms_lark_safe_code_fence(prompt_echo) or "(empty)"
@@ -4853,6 +5004,8 @@ def _fpms_lark_begin_jenkins_run(
         cfg = _sms_uat_bot_build_config_block(data, resolved)
     elif jp == "fpms_prod_script":
         cfg = _fpms_prod_script_bot_build_config_block(data)
+    elif jp == "bi_api_update":
+        cfg = _bi_api_update_bot_build_config_block(data)
     else:
         cfg = _fpms_bot_build_config_block(data, resolved)
     ev = threading.Event()
@@ -4979,6 +5132,10 @@ def _fpms_lark_dispatch_job_row(
         )
     if prof == "fpms_prod_script":
         return _fpms_lark_dispatch_fpms_prod_script_parameter_flow(
+            chat_id, session_key, body, ju, send
+        )
+    if prof == "bi_api_update":
+        return _fpms_lark_dispatch_bi_api_update_parameter_flow(
             chat_id, session_key, body, ju, send
         )
     return _fpms_lark_dispatch_fpms_parameter_flow(
@@ -5315,6 +5472,46 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
     return True
 
 
+def _fpms_lark_dispatch_bi_api_update_parameter_flow(
+    chat_id: str,
+    session_key: str,
+    body: str,
+    jenkins_build_url: str,
+    send,
+) -> bool:
+    """Parse BI API UPDATE block from `/jenkinsupdate`, then run headless Jenkins fill."""
+    try:
+        data = parse_bi_api_update_bot_block(body)
+    except Exception as ex:
+        send(
+            chat_id,
+            "❌ Could not parse BI API UPDATE block. Need `/jenkinsupdate` plus "
+            "`repository:` (or `services:`) with `ds-`/`bi-`, `env:`, and `branch:`.\n"
+            f"```\n{ex}\n```",
+        )
+        return True
+    with _fpms_lark_sessions_lock:
+        prev = _fpms_lark_sessions.get(session_key)
+        if isinstance(prev, dict) and prev.get("state") == "jenkins_wait_build":
+            send(
+                chat_id,
+                "⏳ A Jenkins **Build** confirmation is already waiting for you in this chat. "
+                "Reply **yes** / **no** to that card, or say **cancel** first before starting a new run.",
+            )
+            return True
+    _fpms_lark_begin_jenkins_run(
+        chat_id,
+        session_key,
+        data,
+        [],
+        send,
+        raw_prompt_body=body,
+        jenkins_build_url=jenkins_build_url,
+        job_profile="bi_api_update",
+    )
+    return True
+
+
 def handle_lark_jenkins_update_message(
     chat_id: str,
     sender_id: str,
@@ -5549,6 +5746,22 @@ def handle_lark_jenkins_update_message(
             key,
             body,
             FPMS_PROD_SCRIPT_BUILD_URL,
+            send,
+        )
+
+    # BI API UPDATE shortcut:
+    # if the same /jenkinsupdate message already contains ds-/bi- repository (or services) + env + branch,
+    # skip generic alias matching and dispatch directly to BI-API-UPDATE.
+    try:
+        _repo_bi, _env_bi, _branch_bi = parse_bi_api_update_message_block(body)
+    except Exception:
+        pass
+    else:
+        return _fpms_lark_dispatch_bi_api_update_parameter_flow(
+            chat_id,
+            key,
+            body,
+            BI_API_UPDATE_BUILD_URL,
             send,
         )
 
@@ -5935,12 +6148,15 @@ def run(
                 _apply_services_selection()
 
             if is_bi_api_update:
+                repo_option_value = _choose_bi_repository_option_value(
+                    repository, _read_select_options(page, "REPOSITORY")
+                )
                 select_choice_parameter_by_value(
                     page,
                     "REPOSITORY",
-                    repository,
-                    normalize_for_match=_bi_repo_canonical,
+                    repo_option_value,
                 )
+                repository = repo_option_value
                 select_choice_parameter_by_value(page, "ENVIRONMENT", environment)
                 fill_text_parameter(page, "SOURCE_BRANCH", branch)
             elif is_prod_script:
