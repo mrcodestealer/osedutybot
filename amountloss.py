@@ -488,6 +488,90 @@ def _table_to_string(headers, rows):
     return "\n".join(lines)
 
 
+def _table_to_tsv(headers, rows):
+    """TSV for direct paste into sheets (tab-separated, one row per line)."""
+    def _cell(v):
+        s = "" if v is None else str(v)
+        s = s.replace("\t", " ").replace("\r", " ").replace("\n", " | ")
+        return s
+
+    lines = ["\t".join(_cell(h) for h in headers)]
+    for r in rows:
+        cells = [(r[i] if i < len(r) else "") for i in range(len(headers))]
+        lines.append("\t".join(_cell(c) for c in cells))
+    return "\n".join(lines)
+
+
+def _amountloss_checklog_card(summary, project, headers, rows):
+    """Build Lark interactive card for CHECKLOG only."""
+    idx_account = _header_col_index(headers, "Account")
+    idx_amount = _header_col_index(headers, "Amount")
+    idx_start = _header_col_index(headers, "Start Time")
+    idx_tname = _header_col_index(headers, "Transfer Name")
+    idx_tid = _header_col_index(headers, "Transfer ID")
+    idx_err = _header_col_index(headers, "Error log")
+
+    def _col(r, idx):
+        if idx is None or idx < 0 or idx >= len(r):
+            return ""
+        return (r[idx] or "").strip()
+
+    elements = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": (
+                    f"📊 **{summary}**\n\n"
+                    f"===== CHECKLOG（SLS Error log；project={project}）====="
+                ),
+            },
+        }
+    ]
+    for i, r in enumerate(rows):
+        if i:
+            elements.append({"tag": "hr"})
+        account = _col(r, idx_account)
+        amount = _col(r, idx_amount)
+        st = _col(r, idx_start)
+        tname = _col(r, idx_tname)
+        tid = _col(r, idx_tid)
+        elog = _col(r, idx_err) or "(No Error log)"
+        elements.append(
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": (
+                        f"🧾 **Account:** `{account}`\n"
+                        f"💰 **Amount:** `{amount}`\n"
+                        f"🕒 **Start Time:** `{st}`\n"
+                        f"🏷️ **Transfer Name:** `{tname}`\n"
+                        f"🆔 **Transfer ID:** `{tid}`"
+                    ),
+                },
+            }
+        )
+        elements.append(
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "plain_text",
+                    "content": f"📋 Error log\n{elog}",
+                },
+            }
+        )
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "orange",
+            "title": {"tag": "plain_text", "content": "Amount Loss CHECKLOG"},
+        },
+        "elements": elements,
+    }
+    return card
+
+
 def _print_table(headers, rows):
     print(_table_to_string(headers, rows))
 
@@ -1261,7 +1345,7 @@ def fetch_fpms_data(
                         fh, fr, full_cell_rows = _filter_credit_lost_table(headers, rows)
                         sync_fp_headers = headers
                         sync_full_cell_rows = full_cell_rows
-                        if filterdata:
+                        if filterdata and not checklog:
                             print(
                                 "\n===== FILTERED（Account / Amount / Start Time / Transfer Name / Transfer ID）====="
                             )
@@ -1284,6 +1368,32 @@ def fetch_fpms_data(
                             sync_eh, sync_er = eh, er
                             _print_table(eh, er)
                             result_chunks.extend(["", chk_title, _table_to_string(eh, er)])
+                            out = "\n".join(result_chunks)
+                            sheet_tsv = _table_to_tsv(eh, er)
+                            card = _amountloss_checklog_card(summary, proj, eh, er)
+                            out = (
+                                out
+                                + "\n\n📋 Copy for Sheet (TSV):\n"
+                                + "```text\n"
+                                + sheet_tsv
+                                + "\n```"
+                            )
+                            try:
+                                if sync_fp_headers is not None:
+                                    sync_note = amount_loss_sync_to_lark_sheet(
+                                        out,
+                                        sync_fp_headers,
+                                        sync_full_cell_rows or [],
+                                        sync_eh,
+                                        sync_er,
+                                    )
+                                    if sync_note:
+                                        out = "%s\n\n%s" % (sync_note, out)
+                            except Exception as sync_ex:
+                                warn_sync = "⚠️ Lark Amount Loss 表格同步失败: %s" % sync_ex
+                                print(warn_sync)
+                                out = "%s\n\n%s" % (warn_sync, out)
+                            return {"text": out, "lark_card": card, "sheet_tsv": sheet_tsv}
                     except ValueError as ve:
                         warn = "⚠️ filterdata/checklog: %s" % (ve,)
                         print(warn)
@@ -1339,5 +1449,8 @@ if __name__ == "__main__":
         checklog=checklog,
     )
     print("\n===== 结果 =====")
-    print(out)
+    if isinstance(out, dict):
+        print(out.get("text") or str(out))
+    else:
+        print(out)
 

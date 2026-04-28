@@ -190,7 +190,19 @@ def run_amountloss_check(chat_id, date_str=None):
                 filterdata=True,
                 checklog=True,
             )
-            send_message(chat_id, result)
+            if isinstance(result, dict) and result.get("lark_card"):
+                card_json = json.dumps(result["lark_card"])
+                resp = send_message(chat_id, card_json, msg_type="interactive")
+                if resp.get("code") != 0:
+                    send_message(chat_id, result.get("text") or str(result))
+                tsv = (result.get("sheet_tsv") or "").strip()
+                if tsv:
+                    send_message(
+                        chat_id,
+                        "📋 Copy for Sheet (TSV)\n```text\n" + tsv + "\n```",
+                    )
+            else:
+                send_message(chat_id, result if isinstance(result, str) else str(result))
             return
         except Exception as e:
             if attempt < AMOUNT_LOSS_MAX_ATTEMPTS:
@@ -1295,14 +1307,15 @@ def lark_webhook():
                 reply = "❌ No user mentioned correctly. Use `/secret1 @user` (mention the user)."
         send_message(chat_id, reply)
         return jsonify({"success": True})
-    elif clean_text.lower().startswith('/al'):
-            # 等价 python3 amountloss.py --filterdata [DD/MM] --checklog（/al 不传日期则用脚本默认窗）
+    elif re.match(r"^/al(?:\s+\d{1,2}/\d{1,2})?\s*$", clean_text.lower()):
+            # /al or /al DD/MM: only reply with the CLI command hint.
             parts = clean_text.split()
-            date_param = None
             if len(parts) > 1:
-                date_param = parts[1]  # 如 "16/04"
-            send_message(chat_id, "⏳ Checking Amount Loss，please wait...")
-            threading.Thread(target=run_amountloss_check, args=(chat_id, date_param), daemon=True).start()
+                date_param = parts[1].strip()
+                reply = f"python3 amountloss.py --checklog {date_param}"
+            else:
+                reply = "python3 amountloss.py --checklog"
+            send_message(chat_id, reply)
             return jsonify({"success": True})
     elif clean_text.lower().startswith("/smsfail"):
         send_message(chat_id, "⏳ Running SMS gateway OTP log check, please wait...")
