@@ -27,7 +27,7 @@ DUTY_LIST_PATH = "dutyList.csv"          # CSV file: name,team,phone
 
 # Team members (as they appear in column A) and their CSV‑lookup names
 TARGET_DUTY = [
-    {"display": "YY", "lookup": "Yu Yang"},
+    {"display": "Yu Yang", "lookup": "Yu Yang"},
     {"display": "Aaron", "lookup": "Aaron Wong"},
     {"display": "Joseph", "lookup": "Joseph"},
     {"display": "Albert", "lookup": "Albert"},
