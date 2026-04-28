@@ -107,6 +107,9 @@ from playwright.sync_api import (
 BUILD_URL = (
     "https://jenkins.client8.me/job/FPMS/job/FPMS_UAT_BRANCH_UPDATE/build?delay=0sec"
 )
+BI_API_UPDATE_BUILD_URL = (
+    "https://jenkins.client8.me/job/BI-GO/job/BI-API-UPDATE/build?delay=0sec"
+)
 
 # Lark ``/jenkinsupdate``: keyword → (short title, build URL(s); multiple lines = several links).
 JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
@@ -1108,6 +1111,127 @@ def parse_fpms_config_block(text: str) -> tuple[str, list[str], str, str, bool]:
             )
 
     return env, services, branch, version, update_all
+
+
+def _extract_keyed_value(
+    text: str,
+    keys: Sequence[str],
+    *,
+    stop_keys: Sequence[str],
+) -> str | None:
+    """
+    Extract one keyed value from mixed text, handling both:
+      1) dedicated lines, e.g. ``repository: ds-superjackpot-api``
+      2) inline blocks, e.g. ``... repository: ds-superjackpot-api env: prod ...``
+    """
+    if not text:
+        return None
+    key_alt = "|".join(re.escape(k) for k in keys)
+    stop_alt = "|".join(re.escape(k) for k in stop_keys if k not in keys)
+    line_re = re.compile(
+        rf"^\s*(?:`+|\*{{1,2}})?(?:{key_alt})(?:`+|\*{{1,2}})?\s*[:=]\s*(?P<v>.*?)\s*$",
+        re.I,
+    )
+    for raw in text.splitlines():
+        m = line_re.match((raw or "").strip())
+        if m:
+            v = normalize_parameter_text(m.group("v") or "")
+            if v:
+                return v
+
+    if not stop_alt:
+        stop_alt = key_alt
+    inline_re = re.compile(
+        rf"\b(?:{key_alt})\b\s*[:=]\s*(?P<v>.+?)(?=(?:\s+\b(?:{stop_alt})\b\s*[:=])|$)",
+        re.I | re.S,
+    )
+    m2 = inline_re.search(text)
+    if not m2:
+        return None
+    v2 = normalize_parameter_text(m2.group("v") or "")
+    return v2 or None
+
+
+def _bi_repo_canonical(token: str) -> str:
+    t = normalize_parameter_text(token).casefold()
+    t = t.replace("_", "-").replace("/", "-")
+    t = re.sub(r"\s+", "-", t)
+    t = re.sub(r"[^a-z0-9-]+", "-", t)
+    t = re.sub(r"-{2,}", "-", t).strip("-")
+    if t.startswith("ds-"):
+        t = t[3:]
+    if t.startswith("bi-"):
+        t = t[3:]
+    if t.endswith("-api"):
+        t = t[:-4]
+    return t.strip("-")
+
+
+def parse_bi_api_update_message_block(text: str) -> tuple[str, str, str]:
+    """
+    Parse free text (chat paste / one-line command) for BI-API-UPDATE fields:
+    ``repository``, ``env``/``environment``, ``branch``/``source_branch``.
+    """
+    body = (text or "").strip()
+    if not body:
+        raise ConfigBlockError("BI-API-UPDATE text is empty.")
+    keys_all = (
+        "repository",
+        "repo",
+        "environment",
+        "env",
+        "source_branch",
+        "source branch",
+        "branch",
+    )
+    repo = _extract_keyed_value(
+        body,
+        ("repository", "repo"),
+        stop_keys=keys_all,
+    )
+    env = _extract_keyed_value(
+        body,
+        ("environment", "env"),
+        stop_keys=keys_all,
+    )
+    branch = _extract_keyed_value(
+        body,
+        ("source_branch", "source branch", "branch"),
+        stop_keys=keys_all,
+    )
+    if not repo:
+        raise ConfigBlockError("Missing repository: for BI-API-UPDATE.")
+    if not env:
+        raise ConfigBlockError("Missing env: / environment: for BI-API-UPDATE.")
+    if not branch:
+        raise ConfigBlockError("Missing branch: / source_branch: for BI-API-UPDATE.")
+    env_norm = normalize_parameter_text(env).casefold()
+    branch_norm = normalize_parameter_text(branch)
+    if not env_norm:
+        raise ConfigBlockError("environment value is empty.")
+    if not branch_norm:
+        raise ConfigBlockError("source branch value is empty.")
+    return normalize_parameter_text(repo), env_norm, branch_norm
+
+
+def parse_bi_api_update_config_block(text: str) -> tuple[str, str, str]:
+    """Parse internal ``BI_API_UPDATE_V1`` block passed to ``run()``."""
+    body = (text or "").strip()
+    if not body:
+        raise ConfigBlockError("BI_API_UPDATE_V1 config is empty.")
+    lines = body.splitlines()
+    if not lines or lines[0].strip().upper() != "BI_API_UPDATE_V1":
+        raise ConfigBlockError("Missing BI_API_UPDATE_V1 header.")
+    return parse_bi_api_update_message_block("\n".join(lines[1:]))
+
+
+def _bi_api_update_build_config_block(repository: str, environment: str, source_branch: str) -> str:
+    return (
+        "BI_API_UPDATE_V1\n"
+        f"repository: {normalize_parameter_text(repository)}\n"
+        f"environment: {normalize_parameter_text(environment).casefold()}\n"
+        f"source_branch: {normalize_parameter_text(source_branch)}\n"
+    )
 
 
 def read_multiline_config_paste() -> str:
@@ -3148,24 +3272,32 @@ def fill_text_parameter(page, label: str, value: str) -> None:
     print(f"→ {label} filled in browser: {value!r}")
 
 
-def select_environment_by_value(page, env_value: str) -> None:
-    """Select Environment by option value (works for fpms-prod single-option jobs too)."""
-    want = normalize_parameter_text(env_value)
-    row = _form_row(page, "Environment")
+def _read_select_options(page, label: str) -> list[tuple[str, str]]:
+    row = _form_row(page, label)
     row.wait_for(state="visible", timeout=30_000)
-    sel = row.locator("select.jenkins-select__input").first
+    sel = row.locator("select.jenkins-select__input, select").first
     sel.wait_for(state="attached", timeout=15_000)
-    sel.select_option(value=want)
-    _safe_page_wait(page, max(120, _MS_ENV_SETTLE))
-    got = read_environment_value(page)
-    if got != want:
-        raise RuntimeError(f"Environment select mismatch: page={got!r} expected={want!r}")
-    print(f"→ Environment selected in browser: {want!r}")
+    out = sel.evaluate(
+        """el => {
+            if (!el || el.tagName !== 'SELECT') return [];
+            return Array.from(el.options || []).map(opt => [
+                ((opt && opt.value) || '').trim(),
+                ((opt && opt.textContent) || '').replace(/\\s+/g, ' ').trim(),
+            ]);
+        }"""
+    )
+    if not isinstance(out, list):
+        return []
+    rows: list[tuple[str, str]] = []
+    for it in out:
+        if isinstance(it, list) and len(it) >= 2:
+            rows.append((normalize_parameter_text(str(it[0])), normalize_parameter_text(str(it[1]))))
+    return rows
 
 
-def read_environment_value(page) -> str:
-    row = _form_row(page, "Environment")
-    sel = row.locator("select.jenkins-select__input").first
+def read_choice_parameter_value(page, label: str) -> str:
+    row = _form_row(page, label)
+    sel = row.locator("select.jenkins-select__input, select").first
     sel.wait_for(state="attached", timeout=15_000)
     v = sel.evaluate(
         """el => {
@@ -3177,6 +3309,71 @@ def read_environment_value(page) -> str:
         }"""
     )
     return normalize_parameter_text(str(v) if v is not None else "")
+
+
+def select_choice_parameter_by_value(
+    page,
+    label: str,
+    want_value: str,
+    *,
+    normalize_for_match=None,
+) -> str:
+    """
+    Select a Jenkins <select> parameter by value/text.
+    Returns the selected option value (useful when aliases are auto-mapped).
+    """
+    want = normalize_parameter_text(want_value)
+    if not want:
+        raise ValueError(f"{label}: requested value is empty.")
+    options = _read_select_options(page, label)
+    if not options:
+        raise RuntimeError(f"{label}: no options found on page.")
+
+    def _norm(v: str) -> str:
+        if normalize_for_match is None:
+            return normalize_parameter_text(v).casefold()
+        return normalize_parameter_text(str(normalize_for_match(v))).casefold()
+
+    want_cf = want.casefold()
+    want_n = _norm(want)
+    picked_value: str | None = None
+    for ov, ot in options:
+        if ov.casefold() == want_cf or ot.casefold() == want_cf:
+            picked_value = ov
+            break
+    if picked_value is None:
+        for ov, ot in options:
+            if _norm(ov) == want_n or _norm(ot) == want_n:
+                picked_value = ov
+                break
+    if picked_value is None:
+        shown = ", ".join(f"{v} ({t})" if t and t != v else v for v, t in options)
+        raise ValueError(
+            f"{label}: could not map {want_value!r} to Jenkins option. Available: {shown}"
+        )
+
+    row = _form_row(page, label)
+    row.wait_for(state="visible", timeout=30_000)
+    sel = row.locator("select.jenkins-select__input, select").first
+    sel.wait_for(state="attached", timeout=15_000)
+    sel.select_option(value=picked_value)
+    _safe_page_wait(page, max(120, _MS_ENV_SETTLE))
+    got = read_choice_parameter_value(page, label)
+    if got != picked_value:
+        raise RuntimeError(
+            f"{label} select mismatch: page={got!r} expected={picked_value!r} (from {want_value!r})"
+        )
+    print(f"→ {label} selected in browser: {got!r} (input: {want_value!r})")
+    return got
+
+
+def select_environment_by_value(page, env_value: str) -> None:
+    """Select Environment by option value (works for fpms-prod single-option jobs too)."""
+    select_choice_parameter_by_value(page, "Environment", env_value)
+
+
+def read_environment_value(page) -> str:
+    return read_choice_parameter_value(page, "Environment")
 
 
 def read_services_checked_values(page) -> list[str]:
@@ -3531,6 +3728,88 @@ def verify_fpms_prod_script_parameters_display(
         f"Expected: {want_cmd!r}"
     )
     return ok_all, lines
+
+
+def verify_bi_api_update_parameters_display(
+    page,
+    repository_expected: str,
+    environment_expected: str,
+    source_branch_expected: str,
+) -> tuple[bool, list[str]]:
+    """Re-read BI-API-UPDATE fields (REPOSITORY / ENVIRONMENT / SOURCE_BRANCH)."""
+    want_repo = normalize_parameter_text(repository_expected)
+    want_env = normalize_parameter_text(environment_expected).casefold()
+    want_branch = normalize_parameter_text(source_branch_expected)
+    lines: list[str] = []
+    ok_all = True
+
+    try:
+        got_repo = read_choice_parameter_value(page, "REPOSITORY")
+    except Exception as ex:
+        got_repo = f"(read failed: {ex})"
+        repo_ok = False
+    else:
+        repo_ok = _bi_repo_canonical(got_repo) == _bi_repo_canonical(want_repo)
+    ok_all = ok_all and repo_ok
+    lines.append(f"{'✅' if repo_ok else '❌'} Repository — page: {got_repo!r} — expected: {want_repo!r}")
+
+    try:
+        got_env = read_choice_parameter_value(page, "ENVIRONMENT")
+    except Exception as ex:
+        got_env = f"(read failed: {ex})"
+        env_ok = False
+    else:
+        env_ok = got_env.casefold() == want_env
+    ok_all = ok_all and env_ok
+    lines.append(f"{'✅' if env_ok else '❌'} Environment — page: {got_env!r} — expected: {want_env!r}")
+
+    try:
+        got_branch = read_text_parameter_value(page, "SOURCE_BRANCH")
+    except Exception as ex:
+        got_branch = f"(read failed: {ex})"
+        branch_ok = False
+    else:
+        branch_ok = got_branch.casefold() == want_branch.casefold()
+    ok_all = ok_all and branch_ok
+    lines.append(
+        f"{'✅' if branch_ok else '❌'} Source Branch — page: {got_branch!r} — expected: {want_branch!r}"
+    )
+    return ok_all, lines
+
+
+def prompt_yes_to_click_build_bi_api_update(
+    page,
+    repository: str,
+    environment: str,
+    source_branch: str,
+) -> bool:
+    """Terminal yes/no gate for BI-API-UPDATE."""
+    print(
+        "\n—— 终端核对 / Terminal ——\n"
+        "若上面全部为 ✅，输入 **yes** 后脚本会点击 Jenkins **Build**。\n"
+        "若有 ❌，请先在浏览器里改对参数，再在此输入 **yes**（会重新读页面）；输入 **no** 不点 Build。\n"
+        "EN: Type **yes** to click **Build** once every line is ✅ (re-reads the page each time). "
+        "**no** skips Build."
+    )
+    while True:
+        raw = input("> yes / no: ").strip().casefold()
+        if raw in ("no", "n"):
+            return False
+        if raw in ("yes", "y"):
+            ok, lines = verify_bi_api_update_parameters_display(
+                page, repository, environment, source_branch
+            )
+            print("\n→ Re-check before Build:")
+            for ln in lines:
+                print("  ", ln)
+            if not ok:
+                print(
+                    "  ⚠️ 仍有 ❌，未点击 Build。请修正浏览器中的参数后再输入 yes，或输入 no。\n"
+                    "  EN: Still ❌ — Build not clicked. Fix the form, then **yes** again, or **no**."
+                )
+                continue
+            return True
+        print("  Please type **yes** or **no**.")
 
 
 def prompt_yes_to_click_build(
@@ -5465,12 +5744,27 @@ def run(
     jp = jp_g or "fpms"
     skip_env = jp in ("fnt_rc", "sms_uat")
     is_prod_script = jp == "fpms_prod_script"
+    is_bi_api_update = jp == "bi_api_update"
 
     parsed_update_all = False
     command = ""
+    repository = ""
     if config_block:
         cl = (config_block or "").lstrip()
-        if cl.upper().startswith("FNT_RC_UAT_MASTER_V1"):
+        if is_bi_api_update:
+            if cl.upper().startswith("BI_API_UPDATE_V1"):
+                repository, environment, branch = parse_bi_api_update_config_block(config_block)
+            else:
+                repository, environment, branch = parse_bi_api_update_message_block(config_block)
+            services = []
+            version = ""
+            print(
+                "\n→ Parsed BI-API-UPDATE config block:\n"
+                f"    repository:  {repository!r}\n"
+                f"    environment: {environment!r}\n"
+                f"    source_branch: {branch!r}\n"
+            )
+        elif cl.upper().startswith("FNT_RC_UAT_MASTER_V1"):
             services, branch, version, parsed_update_all = parse_fnt_rc_run_config_block(config_block)
             environment = ""
             svc_note = (
@@ -5525,7 +5819,13 @@ def run(
                 f"    services ({len(services) if not parsed_update_all else 'all'}): {svc_note}\n"
             )
     else:
-        if is_prod_script:
+        if is_bi_api_update:
+            repository = normalize_parameter_text(prompt_text("What REPOSITORY?"))
+            environment = normalize_parameter_text(prompt_text("What ENVIRONMENT?")).casefold()
+            services = []
+            branch = normalize_parameter_text(prompt_text("What SOURCE_BRANCH?"))
+            version = ""
+        elif is_prod_script:
             environment = "fpms-prod"
             services = []
             branch = ""
@@ -5601,7 +5901,9 @@ def run(
             print(
                 f"→ Post-login: waiting {_MS_POST_LOGIN_BEFORE_FORM} ms before "
                 + (
-                    "Services / Branch / Version…"
+                    "REPOSITORY / ENVIRONMENT / SOURCE_BRANCH…"
+                    if is_bi_api_update
+                    else "Services / Branch / Version…"
                     if skip_env
                     else "Environment / Services / Branch…"
                 )
@@ -5632,7 +5934,16 @@ def run(
                     return
                 _apply_services_selection()
 
-            if is_prod_script:
+            if is_bi_api_update:
+                select_choice_parameter_by_value(
+                    page,
+                    "REPOSITORY",
+                    repository,
+                    normalize_for_match=_bi_repo_canonical,
+                )
+                select_choice_parameter_by_value(page, "ENVIRONMENT", environment)
+                fill_text_parameter(page, "SOURCE_BRANCH", branch)
+            elif is_prod_script:
                 # FPMS PROD SCRIPT RUN: Environment + Command only.
                 select_environment_by_value(page, environment)
                 fill_text_parameter(page, "Command", command)
@@ -5693,7 +6004,11 @@ def run(
 
             _safe_page_wait(page, max(0, _MS_POST_FILL_VERIFY))
             if bot_lark_gate is not None:
-                if is_prod_script:
+                if is_bi_api_update:
+                    ok_first, lines_first = verify_bi_api_update_parameters_display(
+                        page, repository, environment, branch
+                    )
+                elif is_prod_script:
                     ok_first, lines_first = verify_fpms_prod_script_parameters_display(
                         page, environment, command
                     )
@@ -5718,7 +6033,11 @@ def run(
                 for ln in lines_first:
                     print(f"    {ln}")
                 _safe_page_wait(page, max(250, min(800, _MS_POST_FILL_VERIFY)))
-                if is_prod_script:
+                if is_bi_api_update:
+                    ok_second, verify_lines = verify_bi_api_update_parameters_display(
+                        page, repository, environment, branch
+                    )
+                elif is_prod_script:
                     ok_second, verify_lines = verify_fpms_prod_script_parameters_display(
                         page, environment, command
                     )
@@ -5745,7 +6064,11 @@ def run(
                 print("→ =====================================================\n")
                 ok_all = ok_first and ok_second
             else:
-                if is_prod_script:
+                if is_bi_api_update:
+                    ok_all, verify_lines = verify_bi_api_update_parameters_display(
+                        page, repository, environment, branch
+                    )
+                elif is_prod_script:
                     ok_all, verify_lines = verify_fpms_prod_script_parameters_display(
                         page, environment, command
                     )
@@ -5832,6 +6155,13 @@ def run(
                     "for the Lark bot; skipping Build in this session.",
                     flush=True,
                 )
+            elif is_bi_api_update:
+                if prompt_yes_to_click_build_bi_api_update(page, repository, environment, branch):
+                    _click_jenkins_build_button(page)
+                    build_clicked = True
+                    print("→ **Build** clicked (parameters submitted to Jenkins).")
+                else:
+                    print("→ **Build** skipped (you answered **no**).")
             elif is_prod_script:
                 if prompt_yes_to_click_build_prod_script(page, environment, command):
                     _click_jenkins_build_button(page)
@@ -5895,6 +6225,10 @@ Examples (config is **not** extra words on the same shell line as the script):
 Wrong: ``%(prog)s update FPMS UAT branch`` — ``update`` / ``FPMS`` … are not valid options (use --paste-config).
 Wrong: typing ``branch:`` at the **zsh** prompt — the shell runs that as a command; it must go **inside** the paste.
 中文：整段 ``branch:`` / ``version:`` 不能跟在 ``python3 updateJenkins.py`` 同一行后面当参数；要用 ``--paste-config`` 在脚本提示后粘贴，或 ``--config-file``。
+
+BI-API-UPDATE shortcut (same-line free text) is supported:
+  %(prog)s /python3 jenkinsupdate ... repository: ds-superjackpot-api env: prod branch: main
+中文：BI-API-UPDATE 可直接在同一行带 ``repository/env/branch``，脚本会自动解析并填 Jenkins。
 
 Slower / more stable Jenkins UI: ``FPMS_STABLE_FILL=1 %(prog)s …``
 """.strip()
@@ -5966,29 +6300,44 @@ Slower / more stable Jenkins UI: ``FPMS_STABLE_FILL=1 %(prog)s …``
         help="Paste a labeled config block in the terminal; finish with an empty line",
     )
     args, unknown = ap.parse_known_args(argv)
+    cli_bi_config_block: str | None = None
     if unknown:
+        unknown_text = " ".join(str(x) for x in unknown).strip()
+        try:
+            repo_x, env_x, branch_x = parse_bi_api_update_message_block(unknown_text)
+        except ConfigBlockError:
+            print(
+                "\n❌ Unrecognized arguments: "
+                + " ".join(repr(x) if re.search(r"\s", str(x)) else str(x) for x in unknown),
+                file=sys.stderr,
+            )
+            print(
+                "\n  原因 / Why:\n"
+                "  • ``python3 updateJenkins.py`` 后面只能跟 **选项**（如 ``--paste-config``），"
+                "不能把 ``update FPMS UAT branch`` 当参数。\n"
+                "  • ``email：``、``branch:`` 等必须出现在 **--paste-config 提示之后** 的输入里，"
+                "或写在文件里用 ``--config-file``；不能写在 zsh 提示符下当独立命令（会 command not found）。\n"
+                "  • BI-API-UPDATE 例外：若同一行里带 ``repository: ... env: ... branch: ...``，会自动识别。\n",
+                file=sys.stderr,
+            )
+            print(
+                "  EN: Put ``branch:``, ``version:``, ``services:`` lines **after** you run "
+                "``python3 updateJenkins.py --paste-config`` (or use ``--config-file`` / a heredoc).\n"
+                "  BI-API-UPDATE shortcut is accepted when your same-line text contains "
+                "``repository:``, ``env:`` (or ``environment:``), and ``branch:``.\n",
+                file=sys.stderr,
+            )
+            print("  Try:  python3 updateJenkins.py --paste-config", file=sys.stderr)
+            print("  Help:  python3 updateJenkins.py -h\n", file=sys.stderr)
+            return 2
+        cli_bi_config_block = _bi_api_update_build_config_block(repo_x, env_x, branch_x)
         print(
-            "\n❌ Unrecognized arguments: "
-            + " ".join(repr(x) if re.search(r"\s", str(x)) else str(x) for x in unknown),
-            file=sys.stderr,
+            "\n→ Parsed BI-API-UPDATE free text from CLI arguments:\n"
+            f"    repository:  {repo_x!r}\n"
+            f"    environment: {env_x!r}\n"
+            f"    source_branch: {branch_x!r}\n"
+            "  (Running in headed mode by default unless you pass --headless.)"
         )
-        print(
-            "\n  原因 / Why:\n"
-            "  • ``python3 updateJenkins.py`` 后面只能跟 **选项**（如 ``--paste-config``），"
-            "不能把 ``update FPMS UAT branch`` 当参数。\n"
-            "  • ``email：``、``branch:`` 等必须出现在 **--paste-config 提示之后** 的输入里，"
-            "或写在文件里用 ``--config-file``；不能写在 zsh 提示符下当独立命令（会 command not found）。\n",
-            file=sys.stderr,
-        )
-        print(
-            "  EN: Put ``branch:``, ``version:``, ``services:`` lines **after** you run "
-            "``python3 updateJenkins.py --paste-config`` (or use ``--config-file`` / a heredoc). "
-            "Do not append random words after the script name.\n",
-            file=sys.stderr,
-        )
-        print("  Try:  python3 updateJenkins.py --paste-config", file=sys.stderr)
-        print("  Help:  python3 updateJenkins.py -h\n", file=sys.stderr)
-        return 2
 
     print(f"→ Script: {Path(__file__).resolve()}  |  cwd: {Path.cwd()}")
     _udd = (args.user_data_dir or os.environ.get("FPMS_PLAYWRIGHT_USER_DATA_DIR", "")).strip() or None
@@ -6047,10 +6396,15 @@ Slower / more stable Jenkins UI: ``FPMS_STABLE_FILL=1 %(prog)s …``
             return 1
     elif args.paste_config:
         config_block = read_multiline_config_paste()
+    elif cli_bi_config_block is not None:
+        config_block = cli_bi_config_block
 
     run_job_profile = "fpms"
     run_build_url = None
-    if args.fpmsprodscript:
+    if cli_bi_config_block is not None:
+        run_job_profile = "bi_api_update"
+        run_build_url = BI_API_UPDATE_BUILD_URL
+    elif args.fpmsprodscript:
         run_job_profile = "fpms_prod_script"
         run_build_url = FPMS_PROD_SCRIPT_BUILD_URL
         if config_block is None:
