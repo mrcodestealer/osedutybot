@@ -915,6 +915,35 @@ _KEY_LINE_RE = re.compile(
 )
 
 
+def _match_key_line_fuzzy(line: str):
+    """
+    Parse key lines robustly even with rich-text wrappers/bullets, e.g.:
+      **Branch:** master
+      1. • `Version` : v1.2.3
+      🔹 Services - risk-analysis-rollout
+    """
+    s = _normalize_config_colons(line)
+    s = re.sub(r"^\s*\d+\s*[.)]\s*", "", s)
+    m = _KEY_LINE_RE.match(s)
+    if m:
+        return m
+    # Strip markdown wrappers and retry with flexible separators (: / - / en/em dash)
+    plain = re.sub(r"[`*_]", "", s).strip()
+    return re.match(
+        r"^(?P<key>environment|branch|version|services?)\s*[:\-–—]\s*(?P<rest>.*)$",
+        plain,
+        re.IGNORECASE,
+    )
+
+
+def _clean_key_rest(rest: str) -> str:
+    t = (rest or "").strip()
+    t = re.sub(r"^\s*[:\-–—]+\s*", "", t)
+    t = re.sub(r"^(?:`+|\*{1,2})+\s*", "", t)
+    t = re.sub(r"\s*(?:`+|\*{1,2})+$", "", t)
+    return t.strip()
+
+
 def parse_fpms_config_block(text: str) -> tuple[str, list[str], str, str, bool]:
     """
     Parse a pasted block (``branch:``, ``version:``, ``Service(s):``, ``environment:``).
@@ -960,7 +989,7 @@ def parse_fpms_config_block(text: str) -> tuple[str, list[str], str, str, bool]:
         )
 
     for line in lines:
-        m = _KEY_LINE_RE.match(line)
+        m = _match_key_line_fuzzy(line)
         if m and _first_job_complete():
             print(
                 "→ First job already has branch, version, and service line(s); "
@@ -974,7 +1003,7 @@ def parse_fpms_config_block(text: str) -> tuple[str, list[str], str, str, bool]:
             key = m.group("key").lower()
             if key == "service":
                 key = "services"
-            rest = (m.group("rest") or "").strip()
+            rest = _clean_key_rest(m.group("rest") or "")
             last_key = key
 
             if key == "environment":
@@ -3648,12 +3677,12 @@ def parse_jenkins_update_fpms_bot_block(text: str) -> dict:
     port_head = re.compile(r"^\d{3,5}\b")
 
     for line in lines[1:]:
-        m = _KEY_LINE_RE.match(line)
+        m = _match_key_line_fuzzy(line)
         if m:
             key = m.group("key").lower()
             if key == "service":
                 key = "services"
-            rest = (m.group("rest") or "").strip()
+            rest = _clean_key_rest(m.group("rest") or "")
             last_key = key
             if key == "environment":
                 env = _resolve_environment_token(rest)
@@ -3760,12 +3789,12 @@ def parse_fnt_rc_uat_master_bot_block(text: str) -> dict:
     port_head = re.compile(r"^\d{3,5}\b")
 
     for line in lines[1:]:
-        m = _KEY_LINE_RE.match(line)
+        m = _match_key_line_fuzzy(line)
         if m:
             key = m.group("key").lower()
             if key == "service":
                 key = "services"
-            rest = (m.group("rest") or "").strip()
+            rest = _clean_key_rest(m.group("rest") or "")
             last_key = key
             if key == "environment":
                 continue
@@ -3879,12 +3908,12 @@ def parse_fnt_rc_run_config_block(text: str) -> tuple[list[str], str, str, bool]
     last_key: str | None = None
     port_head = re.compile(r"^\d{3,5}\b")
     for line in lines[1:]:
-        m = _KEY_LINE_RE.match(line)
+        m = _match_key_line_fuzzy(line)
         if m:
             key = m.group("key").lower()
             if key == "service":
                 key = "services"
-            rest = (m.group("rest") or "").strip()
+            rest = _clean_key_rest(m.group("rest") or "")
             last_key = key
             if key == "branch":
                 branch = _branch_from_config_block(rest)
@@ -3948,12 +3977,12 @@ def parse_sms_uat_update_bot_block(text: str) -> dict:
     port_head = re.compile(r"^\d{3,5}\b")
 
     for line in lines[1:]:
-        m = _KEY_LINE_RE.match(line)
+        m = _match_key_line_fuzzy(line)
         if m:
             key = m.group("key").lower()
             if key == "service":
                 key = "services"
-            rest = (m.group("rest") or "").strip()
+            rest = _clean_key_rest(m.group("rest") or "")
             last_key = key
             if key == "environment":
                 continue
@@ -4049,12 +4078,12 @@ def parse_sms_uat_run_config_block(text: str) -> tuple[list[str], str, str, bool
     last_key: str | None = None
     port_head = re.compile(r"^\d{3,5}\b")
     for line in lines[1:]:
-        m = _KEY_LINE_RE.match(line)
+        m = _match_key_line_fuzzy(line)
         if m:
             key = m.group("key").lower()
             if key == "service":
                 key = "services"
-            rest = (m.group("rest") or "").strip()
+            rest = _clean_key_rest(m.group("rest") or "")
             last_key = key
             if key == "branch":
                 branch = _branch_from_config_block(rest)
