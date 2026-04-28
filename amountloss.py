@@ -856,6 +856,36 @@ def _al_copy_paste_rows_with_style(
     _al_batch_sheet_requests(token, spreadsheet_token, [req])
 
 
+def _al_try_copy_paste_rows_with_style(
+    token,
+    spreadsheet_token,
+    sheet_id,
+    src_row_start_1based,
+    src_row_end_1based,
+    dst_row_start_1based,
+    dst_row_end_1based,
+    ncol,
+):
+    # type: (str, str, str, int, int, int, int, int) -> Tuple[bool, str]
+    """
+    尝试复制含样式；失败时不抛异常，返回 (False, reason) 以便降级继续写值。
+    """
+    try:
+        _al_copy_paste_rows_with_style(
+            token,
+            spreadsheet_token,
+            sheet_id,
+            src_row_start_1based,
+            src_row_end_1based,
+            dst_row_start_1based,
+            dst_row_end_1based,
+            ncol,
+        )
+        return True, ""
+    except Exception as ex:
+        return False, str(ex)
+
+
 def _al_pad_row(row, width):
     # type: (list, int) -> list
     r = [row[i] if i < len(row) else "" for i in range(width)]
@@ -1009,7 +1039,7 @@ def amount_loss_sync_to_lark_sheet(
     if total_n == 0:
         base = anchor + 4
         # 先整行复制模板 2~4 到目标区，保留背景色/样式
-        _al_copy_paste_rows_with_style(
+        style_ok, style_err = _al_try_copy_paste_rows_with_style(
             token,
             spreadsheet_token,
             sheet_id,
@@ -1019,6 +1049,14 @@ def amount_loss_sync_to_lark_sheet(
             base + 2,
             ncol,
         )
+        if not style_ok:
+            print("⚠️ Lark Amount Loss：样式复制失败，已降级为仅值写入（%s）" % style_err)
+            note = (
+                "⚠️ Lark Amount Loss：样式复制失败，已降级为仅值写入（%s）"
+                % style_err
+            )
+        else:
+            note = ""
         only_a = "%s%d:%s%d" % ("A", base, "A", base)
         _al_batch_update_ranges(
             token,
@@ -1029,14 +1067,18 @@ def amount_loss_sync_to_lark_sheet(
             "📎 Lark Amount Loss：无记录 → 已粘贴模板行 %d–%d，A%d=%s"
             % (base, base + 2, base, yesterday_ddmmyy)
         )
-        return missing_note
+        out_note = missing_note
+        if note:
+            out_note = (out_note + "\n" + note).strip()
+        return out_note
 
     base = anchor + 4
     row_h = base + 2
     row_d0 = base + 3
 
     # 先复制模板行样式：2~3 -> base~base+1；3 -> header 行；4 -> 数据起始区域
-    _al_copy_paste_rows_with_style(
+    style_notes = []
+    style_ok, style_err = _al_try_copy_paste_rows_with_style(
         token,
         spreadsheet_token,
         sheet_id,
@@ -1046,7 +1088,12 @@ def amount_loss_sync_to_lark_sheet(
         base + 1,
         ncol,
     )
-    _al_copy_paste_rows_with_style(
+    if not style_ok:
+        style_notes.append(
+            "⚠️ Lark Amount Loss：样式复制失败（模板2~3→目标）：%s；已继续值写入。"
+            % style_err
+        )
+    style_ok, style_err = _al_try_copy_paste_rows_with_style(
         token,
         spreadsheet_token,
         sheet_id,
@@ -1056,6 +1103,11 @@ def amount_loss_sync_to_lark_sheet(
         row_h,
         ncol,
     )
+    if not style_ok:
+        style_notes.append(
+            "⚠️ Lark Amount Loss：样式复制失败（模板3→表头）：%s；已继续值写入。"
+            % style_err
+        )
 
     hdr_row_vals = FPMS_SYNC_COLUMNS[:]
     if eh and er and "Error log" in eh:
@@ -1086,7 +1138,7 @@ def amount_loss_sync_to_lark_sheet(
 
     if data_rows:
         # 用模板第 4 行样式铺满数据区（若目标多行，服务端会按目的区域粘贴）
-        _al_copy_paste_rows_with_style(
+        style_ok, style_err = _al_try_copy_paste_rows_with_style(
             token,
             spreadsheet_token,
             sheet_id,
@@ -1096,6 +1148,11 @@ def amount_loss_sync_to_lark_sheet(
             row_d0 + len(data_rows) - 1,
             ncol,
         )
+        if not style_ok:
+            style_notes.append(
+                "⚠️ Lark Amount Loss：样式复制失败（模板4→数据区）：%s；已继续值写入。"
+                % style_err
+            )
         dr = "%s%d:%s%d" % (el, row_d0, end_seg_l, row_d0 + len(data_rows) - 1)
         ranges_batch.append({"range": "%s!%s" % (sheet_id, dr), "values": data_rows})
 
@@ -1105,6 +1162,10 @@ def amount_loss_sync_to_lark_sheet(
         % (total_n, base)
     )
     print(ok_note)
+    if style_notes:
+        for sn in style_notes:
+            print(sn)
+        ok_note = ok_note + "\n" + "\n".join(style_notes)
     if missing_note:
         return "%s\n%s" % (ok_note, missing_note)
     return ok_note
