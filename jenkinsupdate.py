@@ -4429,6 +4429,7 @@ def _fpms_lark_verification_card_json(
     verify_lines: list[str],
     ok_all: bool,
     build_url: str,
+    job_profile: str = "fpms",
 ) -> str:
     """Lark ``msg_type=interactive`` payload: JSON string of the card."""
     safe = _fpms_lark_safe_code_fence(prompt_echo) or "(empty)"
@@ -4448,13 +4449,23 @@ def _fpms_lark_verification_card_json(
         f"🧪 **Form filled and re-check**\n{md_checks}\n\n"
         f"{footer_ok if ok_all else footer_bad}"
     )
+    jp = (job_profile or "fpms").strip()
+    if jp == "fnt_rc":
+        title_text = "FNT RC UAT — form filled & re-check"
+    elif jp == "sms_uat":
+        title_text = "SMS UAT UPDATE — form filled & re-check"
+    elif jp == "fpms_prod_script":
+        title_text = "FPMS PROD SCRIPT RUN — form filled & re-check"
+    else:
+        title_text = "FPMS UAT — form filled & re-check"
+
     card: dict = {
         "config": {"wide_screen_mode": True},
         "header": {
             "template": "green" if ok_all else "orange",
             "title": {
                 "tag": "plain_text",
-                "content": "FPMS UAT — form filled & re-check",
+                "content": title_text,
             },
         },
         "elements": [
@@ -4472,9 +4483,21 @@ def _fpms_lark_verification_plain_fallback(
     verify_lines: list[str],
     ok_all: bool,
     build_url: str,
+    job_profile: str = "fpms",
 ) -> str:
+    jp = (job_profile or "fpms").strip()
+    if jp == "fnt_rc":
+        head = "FNT RC UAT — form filled & re-check"
+    elif jp == "sms_uat":
+        head = "SMS UAT UPDATE — form filled & re-check"
+    elif jp == "fpms_prod_script":
+        head = "FPMS PROD SCRIPT RUN — form filled & re-check"
+    else:
+        head = "FPMS UAT — form filled & re-check"
     safe = _fpms_lark_safe_code_fence(prompt_echo) or "(empty)"
     lines = [
+        f"🧾 **{head}**",
+        "",
         "📋 **Your message**",
         "```",
         safe,
@@ -4508,12 +4531,14 @@ def _fpms_lark_send_verification_summary(
     verify_lines: list[str],
     ok_all: bool,
     build_url: str,
+    job_profile: str = "fpms",
 ) -> None:
     card = _fpms_lark_verification_card_json(
         prompt_echo=prompt_echo,
         verify_lines=verify_lines,
         ok_all=ok_all,
         build_url=build_url,
+        job_profile=job_profile,
     )
     try:
         send(chat_id, card, msg_type="interactive")
@@ -4525,6 +4550,7 @@ def _fpms_lark_send_verification_summary(
                 verify_lines=verify_lines,
                 ok_all=ok_all,
                 build_url=build_url,
+                job_profile=job_profile,
             ),
         )
 
@@ -5761,6 +5787,7 @@ def run(
                     verify_lines=verify_lines,
                     ok_all=ok_all,
                     build_url=build_url,
+                    job_profile=jp,
                 )
                 with _fpms_lark_sessions_lock:
                     gate = _fpms_lark_sessions.get(sk)
