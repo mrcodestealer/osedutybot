@@ -191,9 +191,21 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
         "IGO PROD SCRIPT RUN",
         "https://jenkins.client8.me/job/IGO/job/PROD/job/IGO-PROD-SCRIPT-RUN/build?delay=0sec",
     ),
+    "fpms prod script": (
+        "FPMS PROD SCRIPT RUN",
+        "https://jenkins.client8.me/job/FPMS/job/FPMS_PROD_SCRIPT_RUN/build?delay=0sec",
+    ),
+    "fpms prod script run": (
+        "FPMS PROD SCRIPT RUN",
+        "https://jenkins.client8.me/job/FPMS/job/FPMS_PROD_SCRIPT_RUN/build?delay=0sec",
+    ),
 }
 
 JENKINS_UPDATE_CMD_RE = re.compile(r"/jenkinsupdate\b", re.I)
+FPMS_PROD_SCRIPT_FLAG_RE = re.compile(r"--fpmsprodscript\b", re.I)
+FPMS_PROD_SCRIPT_BUILD_URL = (
+    "https://jenkins.client8.me/job/FPMS/job/FPMS_PROD_SCRIPT_RUN/build?delay=0sec"
+)
 
 # FNT ``RC-UAT-UPDATE`` (RC UAT master; alias ``rc uat master``) — checkbox ``value`` / ``json`` from Jenkins
 # (ECP extended-choice parameter; order matches job UI).
@@ -3124,12 +3136,31 @@ def fill_text_parameter(page, label: str, value: str) -> None:
     value = normalize_parameter_text(value)
     row = _form_row(page, label)
     row.wait_for(state="visible", timeout=30_000)
-    inp = row.locator("input.setting-input[type='text']").first
+    inp = row.locator(
+        "input.setting-input[type='text'], "
+        "input.jenkins-input[type='text'], "
+        "input[name='value'][type='text']"
+    ).first
     inp.wait_for(state="visible", timeout=15_000)
     inp.click()
     inp.fill("")
     inp.fill(value)
     print(f"→ {label} filled in browser: {value!r}")
+
+
+def select_environment_by_value(page, env_value: str) -> None:
+    """Select Environment by option value (works for fpms-prod single-option jobs too)."""
+    want = normalize_parameter_text(env_value)
+    row = _form_row(page, "Environment")
+    row.wait_for(state="visible", timeout=30_000)
+    sel = row.locator("select.jenkins-select__input").first
+    sel.wait_for(state="attached", timeout=15_000)
+    sel.select_option(value=want)
+    _safe_page_wait(page, max(120, _MS_ENV_SETTLE))
+    got = read_environment_value(page)
+    if got != want:
+        raise RuntimeError(f"Environment select mismatch: page={got!r} expected={want!r}")
+    print(f"→ Environment selected in browser: {want!r}")
 
 
 def read_environment_value(page) -> str:
@@ -3281,7 +3312,11 @@ def _service_line_checked(page, name: str) -> bool:
 
 def read_text_parameter_value(page, label: str) -> str:
     row = _form_row(page, label)
-    inp = row.locator("input.setting-input[type='text']").first
+    inp = row.locator(
+        "input.setting-input[type='text'], "
+        "input.jenkins-input[type='text'], "
+        "input[name='value'][type='text']"
+    ).first
     inp.wait_for(state="attached", timeout=15_000)
     return normalize_parameter_text(inp.input_value() or "")
 
@@ -3460,6 +3495,39 @@ def verify_fnt_rc_parameters_display(
     return ok_all, lines
 
 
+def verify_fpms_prod_script_parameters_display(
+    page,
+    environment_expected: str,
+    command_expected: str,
+) -> tuple[bool, list[str]]:
+    """Re-read Environment + Command for FPMS PROD SCRIPT RUN."""
+    want_env = normalize_parameter_text(environment_expected)
+    want_cmd = normalize_parameter_text(command_expected)
+    lines: list[str] = []
+    ok_all = True
+
+    try:
+        got_env = read_environment_value(page)
+    except Exception as ex:
+        got_env = f"(read failed: {ex})"
+        env_ok = False
+    else:
+        env_ok = got_env == want_env
+    ok_all = ok_all and env_ok
+    lines.append(f"{'✅' if env_ok else '❌'} Environment — page: {got_env!r} — expected: {want_env!r}")
+
+    try:
+        got_cmd = read_text_parameter_value(page, "Command")
+    except Exception as ex:
+        got_cmd = f"(read failed: {ex})"
+        cmd_ok = False
+    else:
+        cmd_ok = got_cmd == want_cmd
+    ok_all = ok_all and cmd_ok
+    lines.append(f"{'✅' if cmd_ok else '❌'} Command — page: {got_cmd!r} — expected: {want_cmd!r}")
+    return ok_all, lines
+
+
 def prompt_yes_to_click_build(
     page,
     environment: str,
@@ -3500,6 +3568,39 @@ def prompt_yes_to_click_build(
                 print(
                     "  ⚠️ 仍有 ❌，未点击 Build。请修正浏览器中的参数后再输入 yes，或输入 no。\n"
                     "  EN: Still ❌ — Build not clicked. Fix the form, then **yes** again, or **no**."
+                )
+                continue
+            return True
+        print("  Please type **yes** or **no**.")
+
+
+def prompt_yes_to_click_build_prod_script(
+    page,
+    environment: str,
+    command: str,
+) -> bool:
+    """
+    Terminal yes/no gate for FPMS PROD SCRIPT RUN.
+    """
+    print(
+        "\n—— 终端核对 / Terminal ——\n"
+        "若上面全部为 ✅，输入 **yes** 后脚本会点击 Jenkins **Build**。\n"
+        "若有 ❌，请先在浏览器里改对参数，再在此输入 **yes**（会重新读页面）；输入 **no** 不点 Build。"
+    )
+    while True:
+        raw = input("> yes / no: ").strip().casefold()
+        if raw in ("no", "n"):
+            return False
+        if raw in ("yes", "y"):
+            ok, lines = verify_fpms_prod_script_parameters_display(
+                page, environment, command
+            )
+            print("\n→ Re-check before Build:")
+            for ln in lines:
+                print("  ", ln)
+            if not ok:
+                print(
+                    "  ⚠️ 仍有 ❌，未点击 Build。请修正浏览器中的参数后再输入 yes，或输入 no。"
                 )
                 continue
             return True
@@ -3556,7 +3657,7 @@ def _jenkins_update_job_automation_profile(raw_urls: str) -> str | None:
     """
     Which automated fill path applies to this Jenkins URL (first line if several).
 
-    Returns ``\"fpms\"`` | ``\"fnt_rc\"`` | ``\"sms_uat\"`` or ``None`` (link-only in Lark).
+    Returns ``\"fpms\"`` | ``\"fnt_rc\"`` | ``\"sms_uat\"`` | ``\"fpms_prod_script\"`` or ``None``.
     """
     u = _jenkins_update_primary_url(raw_urls).replace("\\", "/")
     ul = u.casefold()
@@ -3566,6 +3667,8 @@ def _jenkins_update_job_automation_profile(raw_urls: str) -> str | None:
         return "fnt_rc"
     if "/job/sms/job/uat/job/sms-uat-update/" in ul:
         return "sms_uat"
+    if "/job/fpms/job/fpms_prod_script_run/" in ul:
+        return "fpms_prod_script"
     return None
 
 
@@ -4062,6 +4165,95 @@ def _sms_uat_bot_build_config_block(data: dict, resolved_ids: list[str]) -> str:
     )
 
 
+def parse_fpms_prod_script_bot_block(text: str) -> dict:
+    """
+    Parse:
+      /jenkinsupdate --fpmsprodscript
+      Command: node ...
+    or
+      /jenkinsupdate --fpmsprodscript node ...
+    """
+    raw_lines = [_normalize_config_colons(L) for L in (text or "").splitlines()]
+    lines = [L.strip() for L in raw_lines if L.strip() != ""]
+    if not lines:
+        raise ValueError("Empty message.")
+    head = lines[0]
+    if not JENKINS_UPDATE_CMD_RE.search(head):
+        raise ValueError("First line must include `/jenkinsupdate`.")
+
+    cmd = ""
+    m_inline = re.search(
+        r"--fpmsprodscript\b\s*(?P<rest>.+)$", head, re.I
+    )
+    if m_inline:
+        cmd = (m_inline.group("rest") or "").strip()
+
+    cmd_lines: list[str] = []
+    cmd_key_re = re.compile(
+        r"^(?:[>\-\*\u2022]\s*)*(?:`+|\*{1,2})?command(?:`+|\*{1,2})?\s*[:\-–—]\s*(?P<rest>.*)$",
+        re.I,
+    )
+    for line in lines[1:]:
+        mk = cmd_key_re.match(line)
+        if mk:
+            rest = _clean_key_rest(mk.group("rest") or "")
+            if rest:
+                cmd_lines.append(rest)
+            continue
+        if cmd_lines:
+            cmd_lines.append(line)
+            continue
+        if not cmd and line:
+            cmd_lines.append(line)
+    if cmd_lines:
+        cmd = "\n".join(cmd_lines).strip()
+
+    if not cmd:
+        raise ValueError("Missing command line.")
+    if cmd != cmd.strip():
+        raise ValueError("Command has leading/trailing spaces; remove spaces at front/end.")
+    return {
+        "_job_kind": "fpms_prod_script",
+        "environment": "fpms-prod",
+        "command": cmd,
+    }
+
+
+def _fpms_prod_script_bot_build_config_block(data: dict) -> str:
+    return (
+        "FPMS_PROD_SCRIPT_RUN_V1\n"
+        f"environment: {data.get('environment') or 'fpms-prod'}\n"
+        f"command: {data['command']}\n"
+    )
+
+
+def parse_fpms_prod_script_run_config_block(text: str) -> tuple[str, str]:
+    """Parse internal ``FPMS_PROD_SCRIPT_RUN_V1`` block passed to ``run()``."""
+    raw_lines = [_normalize_config_colons(L) for L in (text or "").splitlines()]
+    lines = [L.strip() for L in raw_lines if L.strip() != ""]
+    if not lines or not lines[0].upper().startswith("FPMS_PROD_SCRIPT_RUN_V1"):
+        raise ConfigBlockError("Internal FPMS PROD SCRIPT config must start with FPMS_PROD_SCRIPT_RUN_V1.")
+    env = "fpms-prod"
+    cmd = ""
+    cmd_key_re = re.compile(r"^command\s*[:\-–—]\s*(?P<rest>.*)$", re.I)
+    for line in lines[1:]:
+        m = _match_key_line_fuzzy(line)
+        if m:
+            key = m.group("key").lower()
+            rest = _clean_key_rest(m.group("rest") or "")
+            if key == "environment":
+                env = normalize_parameter_text(rest) or "fpms-prod"
+            continue
+        cm = cmd_key_re.match(re.sub(r"[`*_]", "", line).strip())
+        if cm:
+            cmd = _clean_key_rest(cm.group("rest") or "")
+    if not cmd:
+        raise ConfigBlockError("FPMS PROD SCRIPT config: missing command: line.")
+    if cmd != cmd.strip():
+        raise ConfigBlockError("FPMS PROD SCRIPT config: command has leading/trailing spaces.")
+    return env, cmd
+
+
 def parse_sms_uat_run_config_block(text: str) -> tuple[list[str], str, str, bool]:
     """Parse internal ``SMS_UAT_UPDATE_V1`` block passed to ``run()``.
 
@@ -4202,6 +4394,14 @@ def _fpms_format_config_preview(data: dict, resolved: list[str]) -> str:
         for i, sid in enumerate(resolved, start=1):
             lines.append(f"  {i}. `{sid}`")
         return "\n".join(lines)
+    if jk == "fpms_prod_script":
+        return "\n".join(
+            [
+                "**Configuration (FPMS PROD SCRIPT RUN — from your message)**",
+                f"- **Environment:** `{data.get('environment') or 'fpms-prod'}`",
+                f"- **Command:** `{data['command']}`",
+            ]
+        )
     lines = [
         "**Configuration (from your message)**",
         f"- **Environment:** `{data['environment']}`",
@@ -4341,6 +4541,8 @@ def _fpms_lark_begin_jenkins_run(
         cfg = _fnt_rc_bot_build_config_block(data, resolved)
     elif jp == "sms_uat":
         cfg = _sms_uat_bot_build_config_block(data, resolved)
+    elif jp == "fpms_prod_script":
+        cfg = _fpms_prod_script_bot_build_config_block(data)
     else:
         cfg = _fpms_bot_build_config_block(data, resolved)
     ev = threading.Event()
@@ -4451,7 +4653,7 @@ def _fpms_lark_dispatch_job_row(
         for i, uu in enumerate([u.strip() for u in url_raw.splitlines() if u.strip()], 1):
             lines.append(f"{i}. {uu}")
         lines.append(
-            "\n_Only **FPMS UAT branch update**, **FNT RC** / **FNT script** ECP jobs, and **SMS UAT update** "
+            "\n_Only **FPMS UAT branch update**, **FPMS PROD SCRIPT RUN**, **FNT RC** / **FNT script** ECP jobs, and **SMS UAT update** "
             "are auto-filled by this bot; use the links for other jobs._"
         )
         send(chat_id, "\n".join(lines))
@@ -4465,9 +4667,51 @@ def _fpms_lark_dispatch_job_row(
         return _fpms_lark_dispatch_sms_uat_parameter_flow(
             chat_id, session_key, body, ju, send
         )
+    if prof == "fpms_prod_script":
+        return _fpms_lark_dispatch_fpms_prod_script_parameter_flow(
+            chat_id, session_key, body, ju, send
+        )
     return _fpms_lark_dispatch_fpms_parameter_flow(
         chat_id, session_key, body, ju, send
     )
+
+
+def _fpms_lark_dispatch_fpms_prod_script_parameter_flow(
+    chat_id: str,
+    session_key: str,
+    body: str,
+    jenkins_build_url: str,
+    send,
+) -> bool:
+    """Parse FPMS PROD SCRIPT block; ask follow-up command block if missing; then headless run."""
+    try:
+        data = parse_fpms_prod_script_bot_block(body)
+    except Exception as ex:
+        with _fpms_lark_sessions_lock:
+            _fpms_lark_sessions[session_key] = {
+                "state": "fpms_prod_script_need_command",
+                "jenkins_job_url": jenkins_build_url,
+            }
+        send(
+            chat_id,
+            "❌ Could not parse FPMS PROD script block.\n```\n%s\n```\n"
+            "请直接再发一次（可不带 `/jenkinsupdate`）：\n"
+            "Command: node Server/dataPatch/scriptModule.js \"createTestUserFG.js\" \"true\" \"50\" \"1\" \"999\" \"888888\" \"fangting01\" \"2000000\" \"639018101\" \"0\" \"false\" \"false\""
+            % ex,
+        )
+        return True
+
+    _fpms_lark_begin_jenkins_run(
+        chat_id,
+        session_key,
+        data,
+        [],
+        send,
+        raw_prompt_body=body,
+        jenkins_build_url=jenkins_build_url,
+        job_profile="fpms_prod_script",
+    )
+    return True
 
 
 def _fpms_lark_dispatch_fnt_rc_parameter_flow(
@@ -4811,6 +5055,16 @@ def handle_lark_jenkins_update_message(
 
     if sess is not None:
         st = sess.get("state")
+        if st == "fpms_prod_script_need_command":
+            body2 = (original_text or clean_text or "").replace("\r\n", "\n").strip()
+            if not JENKINS_UPDATE_CMD_RE.search(body2):
+                body2 = "/jenkinsupdate --fpmsprodscript\n" + body2
+            ju = str(sess.get("jenkins_job_url") or FPMS_PROD_SCRIPT_BUILD_URL).strip() or FPMS_PROD_SCRIPT_BUILD_URL
+            with _fpms_lark_sessions_lock:
+                _fpms_lark_sessions.pop(key, None)
+            return _fpms_lark_dispatch_fpms_prod_script_parameter_flow(
+                chat_id, key, body2, ju, send
+            )
         if st == "fnt_rc_need_block":
             # 允许用户只发 branch/version/services，不强制再写 /jenkinsupdate
             body2 = (original_text or clean_text or "").replace("\r\n", "\n").strip()
@@ -4973,6 +5227,16 @@ def handle_lark_jenkins_update_message(
     for pat in (r"@_user_\d+", r"<[^>]+>"):
         body = re.sub(pat, "", body)
     body = body.replace("\r\n", "\n").strip()
+
+    # Explicit shortcut: /jenkinsupdate --fpmsprodscript ...
+    if FPMS_PROD_SCRIPT_FLAG_RE.search(body):
+        return _fpms_lark_dispatch_fpms_prod_script_parameter_flow(
+            chat_id,
+            key,
+            body,
+            FPMS_PROD_SCRIPT_BUILD_URL,
+            send,
+        )
 
     with _fpms_lark_sessions_lock:
         prev = _fpms_lark_sessions.get(key)
@@ -5165,8 +5429,10 @@ def run(
         jp_g = str(bot_lark_gate.get("job_profile") or "").strip()
     jp = jp_g or "fpms"
     skip_env = jp in ("fnt_rc", "sms_uat")
+    is_prod_script = jp == "fpms_prod_script"
 
     parsed_update_all = False
+    command = ""
     if config_block:
         cl = (config_block or "").lstrip()
         if cl.upper().startswith("FNT_RC_UAT_MASTER_V1"):
@@ -5197,6 +5463,16 @@ def run(
                 f"    version:     {version!r}\n"
                 f"    services ({len(services) if not parsed_update_all else 'all'}): {svc_note}\n"
             )
+        elif cl.upper().startswith("FPMS_PROD_SCRIPT_RUN_V1"):
+            environment, command = parse_fpms_prod_script_run_config_block(config_block)
+            services = []
+            branch = ""
+            version = ""
+            print(
+                "\n→ Parsed FPMS PROD SCRIPT config block:\n"
+                f"    environment: {environment!r}\n"
+                f"    command:     {command!r}\n"
+            )
         else:
             environment, services, branch, version, parsed_update_all = parse_fpms_config_block(
                 config_block
@@ -5214,21 +5490,28 @@ def run(
                 f"    services ({len(services) if not parsed_update_all else 'all'}): {svc_note}\n"
             )
     else:
-        environment = prompt_environment()
-        prompted_update_all = False
-        if update_all_services:
+        if is_prod_script:
+            environment = "fpms-prod"
             services = []
-            print(
-                "\n→ **Update all services** mode: skipping the interactive Services menu; "
-                f"the script will tick **{_jenkins_update_all_stapler_name()}** after Environment.\n"
-                "  中文：已启用“更新全部服务”——跳过逐项选 Services；登录后在浏览器里勾选对应全选框。\n",
-                flush=True,
-            )
+            branch = ""
+            version = ""
+            command = normalize_parameter_text(prompt_text("What Command?"))
         else:
-            services, prompted_update_all = prompt_services()
-        branch = normalize_parameter_text(prompt_text("What branch?"))
-        version = normalize_parameter_text(prompt_text("What Version?"))
-        parsed_update_all = parsed_update_all or prompted_update_all
+            environment = prompt_environment()
+            prompted_update_all = False
+            if update_all_services:
+                services = []
+                print(
+                    "\n→ **Update all services** mode: skipping the interactive Services menu; "
+                    f"the script will tick **{_jenkins_update_all_stapler_name()}** after Environment.\n"
+                    "  中文：已启用“更新全部服务”——跳过逐项选 Services；登录后在浏览器里勾选对应全选框。\n",
+                    flush=True,
+                )
+            else:
+                services, prompted_update_all = prompt_services()
+            branch = normalize_parameter_text(prompt_text("What branch?"))
+            version = normalize_parameter_text(prompt_text("What Version?"))
+            parsed_update_all = parsed_update_all or prompted_update_all
 
     update_all_services = bool(update_all_services) or parsed_update_all
 
@@ -5314,63 +5597,72 @@ def run(
                     return
                 _apply_services_selection()
 
-            try:
-                if not skip_env:
-                    select_environment(page, environment)
-                environment_tick_done = True
-                _apply_services_or_update_all_phase()
-                services_tick_done = True
-            except (
-                ServiceNotDetectedError,
-                ServicesListGoneError,
-                PlaywrightTimeout,
-                PlaywrightError,
-            ) as e:
-                print(
-                    f"\n→ First Environment/Services attempt failed ({e!r}); "
-                    "in-tab recovery: goto build URL → re-login → Refresh pipeline → Build → "
-                    f"wait {_MS_POST_BUILD_RECOVER_WAIT_MS/1000:g}s → goto build URL → re-login → refill…"
-                )
-                _recover_services_not_found_sequence(page, user, pw, build_url=ju)
+            if is_prod_script:
+                # FPMS PROD SCRIPT RUN: Environment + Command only.
+                select_environment_by_value(page, environment)
+                fill_text_parameter(page, "Command", command)
+            else:
                 try:
-                    if skip_env:
-                        _apply_services_or_update_all_phase()
-                        services_tick_done = True
-                    elif environment_tick_done and not services_tick_done:
-                        print(
-                            "→ Recovery retry: **Environment** is already set — skipping a second "
-                            "``select_environment`` (it would clear/rebuild Services in UnoChoice); "
-                            "only re-running ``select_services``.\n"
-                            "  中文：Environment 已选好，recovery 不再重复切换环境（避免 Services 被刷掉），只重试勾选 Services。",
-                            flush=True,
-                        )
-                        _apply_services_or_update_all_phase()
-                        services_tick_done = True
-                    else:
-                        if not skip_env:
-                            select_environment(page, environment)
-                            environment_tick_done = True
-                        _apply_services_or_update_all_phase()
-                        services_tick_done = True
+                    if not skip_env:
+                        select_environment(page, environment)
+                    environment_tick_done = True
+                    _apply_services_or_update_all_phase()
+                    services_tick_done = True
                 except (
                     ServiceNotDetectedError,
                     ServicesListGoneError,
                     PlaywrightTimeout,
                     PlaywrightError,
-                ) as e2:
-                    msg = (
-                        "Services 找不到：recovery（Refresh pipeline + Build + 再登录）后重新填表仍失败。\n"
-                        "Services still not found after recovery and refill."
+                ) as e:
+                    print(
+                        f"\n→ First Environment/Services attempt failed ({e!r}); "
+                        "in-tab recovery: goto build URL → re-login → Refresh pipeline → Build → "
+                        f"wait {_MS_POST_BUILD_RECOVER_WAIT_MS/1000:g}s → goto build URL → re-login → refill…"
                     )
-                    print(f"❌ {msg}", file=sys.stderr)
-                    raise RuntimeError(msg) from e2
+                    _recover_services_not_found_sequence(page, user, pw, build_url=ju)
+                    try:
+                        if skip_env:
+                            _apply_services_or_update_all_phase()
+                            services_tick_done = True
+                        elif environment_tick_done and not services_tick_done:
+                            print(
+                                "→ Recovery retry: **Environment** is already set — skipping a second "
+                                "``select_environment`` (it would clear/rebuild Services in UnoChoice); "
+                                "only re-running ``select_services``.\n"
+                                "  中文：Environment 已选好，recovery 不再重复切换环境（避免 Services 被刷掉），只重试勾选 Services。",
+                                flush=True,
+                            )
+                            _apply_services_or_update_all_phase()
+                            services_tick_done = True
+                        else:
+                            if not skip_env:
+                                select_environment(page, environment)
+                                environment_tick_done = True
+                            _apply_services_or_update_all_phase()
+                            services_tick_done = True
+                    except (
+                        ServiceNotDetectedError,
+                        ServicesListGoneError,
+                        PlaywrightTimeout,
+                        PlaywrightError,
+                    ) as e2:
+                        msg = (
+                            "Services 找不到：recovery（Refresh pipeline + Build + 再登录）后重新填表仍失败。\n"
+                            "Services still not found after recovery and refill."
+                        )
+                        print(f"❌ {msg}", file=sys.stderr)
+                        raise RuntimeError(msg) from e2
 
-            fill_text_parameter(page, "Branch", branch)
-            fill_text_parameter(page, "Version", version)
+                fill_text_parameter(page, "Branch", branch)
+                fill_text_parameter(page, "Version", version)
 
             _safe_page_wait(page, max(0, _MS_POST_FILL_VERIFY))
             if bot_lark_gate is not None:
-                if skip_env:
+                if is_prod_script:
+                    ok_first, lines_first = verify_fpms_prod_script_parameters_display(
+                        page, environment, command
+                    )
+                elif skip_env:
                     ok_first, lines_first = verify_fnt_rc_parameters_display(
                         page,
                         services,
@@ -5391,7 +5683,11 @@ def run(
                 for ln in lines_first:
                     print(f"    {ln}")
                 _safe_page_wait(page, max(250, min(800, _MS_POST_FILL_VERIFY)))
-                if skip_env:
+                if is_prod_script:
+                    ok_second, verify_lines = verify_fpms_prod_script_parameters_display(
+                        page, environment, command
+                    )
+                elif skip_env:
                     ok_second, verify_lines = verify_fnt_rc_parameters_display(
                         page,
                         services,
@@ -5414,7 +5710,11 @@ def run(
                 print("→ =====================================================\n")
                 ok_all = ok_first and ok_second
             else:
-                if skip_env:
+                if is_prod_script:
+                    ok_all, verify_lines = verify_fpms_prod_script_parameters_display(
+                        page, environment, command
+                    )
+                elif skip_env:
                     ok_all, verify_lines = verify_fnt_rc_parameters_display(
                         page,
                         services,
@@ -5496,6 +5796,13 @@ def run(
                     "for the Lark bot; skipping Build in this session.",
                     flush=True,
                 )
+            elif is_prod_script:
+                if prompt_yes_to_click_build_prod_script(page, environment, command):
+                    _click_jenkins_build_button(page)
+                    build_clicked = True
+                    print("→ **Build** clicked (parameters submitted to Jenkins).")
+                else:
+                    print("→ **Build** skipped (you answered **no**).")
             elif prompt_yes_to_click_build(
                 page,
                 environment,
@@ -5585,6 +5892,13 @@ Slower / more stable Jenkins UI: ``FPMS_STABLE_FILL=1 %(prog)s …``
         "--tick",
         action="store_true",
         help="Only open build page, sign in, tick Refresh pipeline; no prompts / no other fields / no Build",
+    )
+    ap.add_argument(
+        "--fpmsprodscript",
+        action="store_true",
+        help=(
+            "FPMS PROD SCRIPT RUN flow: fill Environment=fpms-prod + Command, re-check twice, then yes/no to Build."
+        ),
     )
     _raw_br = os.environ.get("FPMS_PLAYWRIGHT_BROWSER", "").strip().lower()
     _br_default = _raw_br if _raw_br in ("chromium", "firefox") else "chromium"
@@ -5698,6 +6012,42 @@ Slower / more stable Jenkins UI: ``FPMS_STABLE_FILL=1 %(prog)s …``
     elif args.paste_config:
         config_block = read_multiline_config_paste()
 
+    run_job_profile = "fpms"
+    run_build_url = None
+    if args.fpmsprodscript:
+        run_job_profile = "fpms_prod_script"
+        run_build_url = FPMS_PROD_SCRIPT_BUILD_URL
+        if config_block is None:
+            cmd = normalize_parameter_text(
+                prompt_text(
+                    "What Command? (must not have leading/trailing spaces)"
+                )
+            )
+            if cmd != cmd.strip() or not cmd:
+                print(
+                    "❌ Command cannot be empty and must not start/end with spaces.",
+                    file=sys.stderr,
+                )
+                return 1
+            config_block = (
+                "FPMS_PROD_SCRIPT_RUN_V1\n"
+                "environment: fpms-prod\n"
+                f"command: {cmd}\n"
+            )
+        elif not str(config_block).lstrip().upper().startswith("FPMS_PROD_SCRIPT_RUN_V1"):
+            # Allow users to provide plain "Command: ..." style in --paste-config / --config-file.
+            try:
+                data = parse_fpms_prod_script_bot_block(
+                    "/jenkinsupdate --fpmsprodscript\n" + str(config_block)
+                )
+                config_block = _fpms_prod_script_bot_build_config_block(data)
+            except Exception as ex:
+                print(
+                    f"❌ Invalid prod script config: {ex}",
+                    file=sys.stderr,
+                )
+                return 1
+
     try:
         run(
             review_seconds=args.review_seconds,
@@ -5706,6 +6056,8 @@ Slower / more stable Jenkins UI: ``FPMS_STABLE_FILL=1 %(prog)s …``
             config_block=config_block,
             user_data_dir=_udd,
             update_all_services=args.allservice,
+            jenkins_build_url=run_build_url,
+            job_profile=run_job_profile,
         )
     except Exception as ex:
         print(f"❌ {ex}", file=sys.stderr)
