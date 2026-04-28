@@ -4445,10 +4445,18 @@ def _fpms_lark_dispatch_fnt_rc_parameter_flow(
     try:
         data = parse_fnt_rc_uat_master_bot_block(body)
     except Exception as ex:
+        # Lark 某些场景下 pending_body 可能只剩首行（/jenkinsupdate…），此处改为进入“补配置”状态而非直接失败终止。
+        with _fpms_lark_sessions_lock:
+            _fpms_lark_sessions[session_key] = {
+                "state": "fnt_rc_need_block",
+                "jenkins_job_url": jenkins_build_url,
+            }
         send(
             chat_id,
             "❌ Could not parse FNT RC block. Need `/jenkinsupdate` then `Branch:`, `Version:`, "
-            f"`Service(s):` lines.\n```\n{ex}\n```",
+            f"`Service(s):` lines.\n```\n{ex}\n```\n"
+            "请直接再发一次（可不带 `/jenkinsupdate`）：\n"
+            "Branch: master\nVersion: v1.10.35\nServices:\nrisk-analysis-rollout",
         )
         return True
     with _fpms_lark_sessions_lock:
@@ -4767,6 +4775,17 @@ def handle_lark_jenkins_update_message(
 
     if sess is not None:
         st = sess.get("state")
+        if st == "fnt_rc_need_block":
+            # 允许用户只发 branch/version/services，不强制再写 /jenkinsupdate
+            body2 = (original_text or clean_text or "").replace("\r\n", "\n").strip()
+            if not JENKINS_UPDATE_CMD_RE.search(body2):
+                body2 = "/jenkinsupdate\n" + body2
+            ju = str(sess.get("jenkins_job_url") or BUILD_URL).strip() or BUILD_URL
+            with _fpms_lark_sessions_lock:
+                _fpms_lark_sessions.pop(key, None)
+            return _fpms_lark_dispatch_fnt_rc_parameter_flow(
+                chat_id, key, body2, ju, send
+            )
         if st == "choose_job":
             cands = sess.get("job_candidates")
             pending = str(sess.get("pending_body") or "")
