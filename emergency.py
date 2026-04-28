@@ -285,7 +285,7 @@ def _build_role_pair_lines(contacts):
         row_cnt = max(len(pm_entries), len(go_entries))
         if row_cnt <= 0:
             continue
-        lines.append(f"  🧩 {level} Lineup")
+        lines.append(f"  🧩 {level} Product Manager & Game Operation")
         for i in range(row_cnt):
             if pm_key:
                 if i < len(pm_entries):
