@@ -889,6 +889,12 @@ def _al_try_copy_paste_rows_with_style(
         return False, str(ex)
 
 
+def _al_style_copy_enabled():
+    # type: () -> bool
+    enabled = (_env_first("AMOUNT_LOSS_ENABLE_STYLE_COPY") or "").strip().lower()
+    return enabled in ("1", "true", "yes", "on")
+
+
 def _al_pad_row(row, width):
     # type: (list, int) -> list
     r = [row[i] if i < len(row) else "" for i in range(width)]
@@ -1015,6 +1021,11 @@ def amount_loss_sync_to_lark_sheet(
         "📎 Lark Amount Loss：开始同步（Total=%s；找 A 列锚点=两天前 DD/MM/YY）"
         % total_n
     )
+    style_mode_note = (
+        "ℹ️ Lark Amount Loss：Style copy %s"
+        % ("ON" if _al_style_copy_enabled() else "OFF (value-only)")
+    )
+    print(style_mode_note)
     token = _al_lark_tenant_token()
     if not sheet_id:
         sheet_id = _al_find_sheet_id_by_title(token, spreadsheet_token, want_title)
@@ -1076,6 +1087,7 @@ def amount_loss_sync_to_lark_sheet(
         out_note = missing_note
         if note:
             out_note = (out_note + "\n" + note).strip()
+        out_note = (style_mode_note + "\n" + out_note).strip()
         return out_note
 
     base = anchor + 4
@@ -1175,6 +1187,7 @@ def amount_loss_sync_to_lark_sheet(
         for sn in style_notes:
             print(sn)
         ok_note = ok_note + "\n" + "\n".join(style_notes)
+    ok_note = style_mode_note + "\n" + ok_note
     if missing_note:
         return "%s\n%s" % (ok_note, missing_note)
     return ok_note
