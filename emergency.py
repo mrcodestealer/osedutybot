@@ -360,7 +360,7 @@ def format_output_card(games_contacts, target_game=None):
         "config": {"wide_screen_mode": True},
         "header": {
             "template": "blue",
-            "title": {"tag": "plain_text", "content": "Emergency Contacts"},
+            "title": {"tag": "plain_text", "content": "GAME Emergency Contacts"},
         },
         "elements": elements or [{"tag": "div", "text": {"tag": "plain_text", "content": "No games found."}}],
     }
