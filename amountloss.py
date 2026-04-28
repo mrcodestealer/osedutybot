@@ -15,9 +15,10 @@ import platform
 import pyotp
 import re
 import sys
-from datetime import datetime, timedelta
-from typing import List, Optional, Tuple
+from datetime import date, datetime, timedelta
+from typing import Any, List, Optional, Tuple
 
+import requests
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
 LOGIN_URL = "https://mgnt-webserver.casinoplus.top/"
@@ -573,11 +574,12 @@ def _split_remarks_transfer_id(remarks):
 
 
 def _filter_credit_lost_table(headers, rows):
-    # type: (list, list) -> Tuple[list, list]
+    # type: (list, list) -> Tuple[list, list, list]
     """
     仅 Account / Amount (PHP) / Start Time / Remarks；
     备注以 Transfer-InLive / Transfer-OutLive 分两路，各自按天时间内升序后做 30 分钟窗口去重；
     备注拆 Transfer Name + Transfer ID；最终行序：全部 In（时间升序）再接全部 Out（时间升序）。
+    第三项 full_cell_rows：与输出 fr 行对齐的 FPMS 原始宽表行（供 Lark E–O 写入）。
     """
     h_acc = _header_col_index(headers, "Account", "account")
     h_amt = _header_col_index(headers, "Amount (PHP)", "amount (php)", "amount")
@@ -596,7 +598,7 @@ def _filter_credit_lost_table(headers, rows):
         raise ValueError("表头缺少列: " + ", ".join(missing) + f"；实际表头={headers!r}")
 
     slim = []
-    for cells in rows:
+    for ri, cells in enumerate(rows):
         if h_rm >= len(cells):
             continue
         acc = cells[h_acc].strip() if h_acc < len(cells) else ""
@@ -609,6 +611,7 @@ def _filter_credit_lost_table(headers, rows):
                 "Amount (PHP)": amt,
                 "Start Time": st,
                 "Remarks": rm,
+                "_ri": ri,
             }
         )
 
@@ -648,7 +651,312 @@ def _filter_credit_lost_table(headers, rows):
         combined.append(
             [r["Account"], r["Amount (PHP)"], r["Start Time"], name, tid]
         )
-    return out_headers, combined
+    full_indices = [int(r["_ri"]) for r in in_f] + [int(r["_ri"]) for r in out_f]
+    full_cell_rows = [list(rows[i]) for i in full_indices]
+    return out_headers, combined, full_cell_rows
+
+
+# ----- Lark wiki / spreadsheet sync（Amount Loss YYYY） -----
+FPMS_SYNC_COLUMNS = [
+    "Product",
+    "Proposal ID",
+    "Creator",
+    "Input Device",
+    "Proposal Type",
+    "Sub Type",
+    "Proposal Status",
+    "Account",
+    "Amount (PHP)",
+    "Start Time",
+    "Remarks",
+]
+
+
+def _al_col_num_to_letter(n):
+    # type: (int) -> str
+    """1-based column index → Excel column letters（A=1）。"""
+    if n < 1:
+        return "A"
+    s = ""
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def _al_cell_plain(cell):
+    # type: (Any) -> str
+    if cell is None:
+        return ""
+    if isinstance(cell, (str, int, float)):
+        return str(cell).strip()
+    if isinstance(cell, dict):
+        if cell.get("text"):
+            return str(cell["text"]).strip()
+        if cell.get("link"):
+            return str(cell["link"]).strip()
+        return str(cell).strip()
+    if isinstance(cell, list):
+        parts = []
+        for part in cell:
+            if isinstance(part, dict):
+                parts.append(str(part.get("text") or part.get("link") or ""))
+            else:
+                parts.append(str(part))
+        return "".join(parts).strip()
+    return str(cell).strip()
+
+
+def _al_lark_tenant_token():
+    app_id = _env_first("APP_ID")
+    app_secret = _env_first("APP_SECRET")
+    if not app_id or not app_secret:
+        raise ValueError("Lark sync 需要 APP_ID / APP_SECRET（与 main 机器人相同）")
+    url = "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal"
+    resp = requests.post(
+        url,
+        headers={"Content-Type": "application/json"},
+        json={"app_id": app_id, "app_secret": app_secret},
+        timeout=30,
+    )
+    result = resp.json()
+    if result.get("code") != 0:
+        raise ValueError("tenant_access_token 失败: %s" % result)
+    return result["tenant_access_token"]
+
+
+def _al_sheet_metainfo(token, spreadsheet_token):
+    url = "https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/%s/metainfo" % spreadsheet_token
+    resp = requests.get(url, headers={"Authorization": "Bearer %s" % token}, timeout=60)
+    result = resp.json()
+    if result.get("code") != 0:
+        raise ValueError("spreadsheet metainfo 失败: %s" % result)
+    return result.get("data", {}).get("sheets", []) or []
+
+
+def _al_find_sheet_id_by_title(token, spreadsheet_token, want_title):
+    want = (want_title or "").strip().lower()
+    for sh in _al_sheet_metainfo(token, spreadsheet_token):
+        title = (sh.get("title") or "").strip()
+        if title.lower() == want:
+            sid = sh.get("sheetId")
+            if sid:
+                return sid
+    raise ValueError("未找到子表标题 %r（请确认 wiki 里当年 sheet 名为 Amount Loss YYYY）" % want_title)
+
+
+def _al_sheet_column_count(token, spreadsheet_token, sheet_id):
+    for sh in _al_sheet_metainfo(token, spreadsheet_token):
+        if sh.get("sheetId") == sheet_id:
+            return int(sh.get("columnCount") or 26)
+    return 26
+
+
+def _al_sheet_row_count(token, spreadsheet_token, sheet_id):
+    for sh in _al_sheet_metainfo(token, spreadsheet_token):
+        if sh.get("sheetId") == sheet_id:
+            return int(sh.get("rowCount") or 3000)
+    return 3000
+
+
+def _al_get_range(token, spreadsheet_token, sheet_id, range_suffix):
+    url = (
+        "https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/%s/values/%s!%s?valueRenderOption=FormattedValue"
+        % (spreadsheet_token, sheet_id, range_suffix)
+    )
+    resp = requests.get(url, headers={"Authorization": "Bearer %s" % token}, timeout=120)
+    result = resp.json()
+    if result.get("code") != 0:
+        raise ValueError("读取表格失败 %s: %s" % (range_suffix, result))
+    return result.get("data", {}).get("valueRange", {}).get("values") or []
+
+
+def _al_batch_update_ranges(token, spreadsheet_token, value_ranges):
+    # type: (str, str, list) -> None
+    """value_ranges: [{"range": "sheetId!A1:B2", "values": [[...]]}, ...]"""
+    url = (
+        "https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/%s/values_batch_update"
+        % spreadsheet_token
+    )
+    resp = requests.post(
+        url,
+        headers={
+            "Authorization": "Bearer %s" % token,
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        json={"valueRanges": value_ranges},
+        timeout=120,
+    )
+    result = resp.json()
+    if result.get("code") != 0:
+        raise ValueError("写入表格失败: %s" % result)
+    return
+
+
+def _al_pad_row(row, width):
+    # type: (list, int) -> list
+    r = [row[i] if i < len(row) else "" for i in range(width)]
+    return r
+
+
+def _al_find_anchor_row_col_a(col_a_values, target_dd_mm_yy):
+    """col_a_values: get_range A1:A{n} 的结果（二维数组）。返回 1-based 行号。"""
+    tgt = (target_dd_mm_yy or "").strip()
+    for i, row in enumerate(col_a_values):
+        if not row:
+            continue
+        if _al_cell_plain(row[0]).strip() == tgt:
+            return i + 1
+    return None
+
+
+def _fpms_row_product_to_remarks(fp_headers, cells):
+    """按 FPMS_SYNC_COLUMNS 从宽表行取值。"""
+    norm = [(h or "").replace("\n", " ").strip().lower() for h in fp_headers]
+    out = []
+    for name in FPMS_SYNC_COLUMNS:
+        nl = name.lower()
+        idx = None
+        for i, h in enumerate(norm):
+            if not h:
+                continue
+            if nl == h or nl in h or h in nl:
+                idx = i
+                break
+        val = ""
+        if idx is not None and idx < len(cells):
+            val = _al_cell_plain(cells[idx])
+        out.append(val)
+    return out
+
+
+def _amount_loss_parse_total_records(summary_block):
+    first = (summary_block or "").split("\n")[0].strip()
+    m = re.search(r"Total\s+(\d+)\s+records?", first, re.I)
+    if m:
+        return int(m.group(1))
+    return -1
+
+
+def _amount_loss_fmt_dd_mm_yy(d):
+    # type: (date) -> str
+    return d.strftime("%d/%m/%y")
+
+
+def amount_loss_sync_to_lark_sheet(
+    summary_block,
+    fp_headers,
+    full_cell_rows,
+    eh,
+    er,
+):
+    """
+    在 FPMS 查询结束后写入 Lark 电子表格「Amount Loss YYYY」。
+    需环境变量 AMOUNT_LOSS_SPREADSHEET_TOKEN；可选 AMOUNT_LOSS_SHEET_ID（否则按标题查找）。
+    wiki 示例: https://casinoplus.sg.larksuite.com/wiki/...?sheet=ixOcBO → token 取「关联表格」真实 spreadsheet token。
+    """
+    spreadsheet_token = (_env_first("AMOUNT_LOSS_SPREADSHEET_TOKEN") or "").strip()
+    if not spreadsheet_token:
+        return
+    sheet_id = (_env_first("AMOUNT_LOSS_SHEET_ID") or "").strip()
+    title_year = datetime.now().year
+    want_title = "Amount Loss %s" % title_year
+
+    total_n = _amount_loss_parse_total_records(summary_block)
+    if total_n < 0:
+        print("⚠️ Lark sync：无法解析 Total records，跳过")
+        return
+
+    token = _al_lark_tenant_token()
+    if not sheet_id:
+        sheet_id = _al_find_sheet_id_by_title(token, spreadsheet_token, want_title)
+
+    ncol = _al_sheet_column_count(token, spreadsheet_token, sheet_id)
+    nrow = _al_sheet_row_count(token, spreadsheet_token, sheet_id)
+    end_l = _al_col_num_to_letter(ncol)
+
+    two_days = date.today() - timedelta(days=2)
+    yesterday = date.today() - timedelta(days=1)
+    marker_ddmmyy = _amount_loss_fmt_dd_mm_yy(two_days)
+    yesterday_ddmmyy = _amount_loss_fmt_dd_mm_yy(yesterday)
+
+    col_a = _al_get_range(token, spreadsheet_token, sheet_id, "A1:A%d" % nrow)
+    anchor = _al_find_anchor_row_col_a(col_a, marker_ddmmyy)
+    if anchor is None:
+        raise ValueError(
+            "Lark sync：A 列未找到两日前的日期 %s（DD/MM/YY）" % marker_ddmmyy
+        )
+
+    if total_n == 0:
+        tpl234 = _al_get_range(token, spreadsheet_token, sheet_id, "A2:%s4" % end_l)
+        while len(tpl234) < 3:
+            tpl234.append([])
+        tpl234 = [_al_pad_row(r, ncol) for r in tpl234[:3]]
+        base = anchor + 4
+        rng = "%s%d:%s%d" % ("A", base, end_l, base + 2)
+        payload = [{"range": "%s!%s" % (sheet_id, rng), "values": tpl234}]
+        _al_batch_update_ranges(token, spreadsheet_token, payload)
+        only_a = "%s%d:%s%d" % ("A", base, "A", base)
+        _al_batch_update_ranges(
+            token,
+            spreadsheet_token,
+            [{"range": "%s!%s" % (sheet_id, only_a), "values": [[yesterday_ddmmyy]]}],
+        )
+        print(
+            "📎 Lark Amount Loss：无记录 → 已粘贴模板行 %d–%d，A%d=%s"
+            % (base, base + 2, base, yesterday_ddmmyy)
+        )
+        return
+
+    tpl23 = _al_get_range(token, spreadsheet_token, sheet_id, "A2:%s3" % end_l)
+    while len(tpl23) < 2:
+        tpl23.append([])
+    tpl23 = [_al_pad_row(r, ncol) for r in tpl23[:2]]
+
+    base = anchor + 4
+    row_h = base + 2
+    row_d0 = base + 3
+
+    hdr_row_vals = FPMS_SYNC_COLUMNS[:]
+    if eh and er and "Error log" in eh:
+        hdr_row_vals.append("Error log")
+
+    ranges_batch = []
+    r2 = "%s%d:%s%d" % ("A", base, end_l, base)
+    r3 = "%s%d:%s%d" % ("A", base + 1, end_l, base + 1)
+    ranges_batch.append({"range": "%s!%s" % (sheet_id, r2), "values": [tpl23[0]]})
+    ranges_batch.append({"range": "%s!%s" % (sheet_id, r3), "values": [tpl23[1]]})
+
+    el = _al_col_num_to_letter(5)
+    end_seg_l = _al_col_num_to_letter(5 + len(hdr_row_vals) - 1)
+    hdr_range = "%s%d:%s%d" % (el, row_h, end_seg_l, row_h)
+    ranges_batch.append({"range": "%s!%s" % (sheet_id, hdr_range), "values": [hdr_row_vals]})
+
+    data_rows = []
+    err_col_idx = None
+    if eh and er and "Error log" in eh:
+        try:
+            err_col_idx = eh.index("Error log")
+        except ValueError:
+            err_col_idx = None
+
+    for i, cells in enumerate(full_cell_rows):
+        vals = _fpms_row_product_to_remarks(fp_headers, cells)
+        if err_col_idx is not None and er and i < len(er):
+            erow = er[i]
+            extra = _al_cell_plain(erow[err_col_idx]) if err_col_idx < len(erow) else ""
+            vals.append(extra)
+        data_rows.append(vals)
+
+    if data_rows:
+        dr = "%s%d:%s%d" % (el, row_d0, end_seg_l, row_d0 + len(data_rows) - 1)
+        ranges_batch.append({"range": "%s!%s" % (sheet_id, dr), "values": data_rows})
+
+    _al_batch_update_ranges(token, spreadsheet_token, ranges_batch)
+    print(
+        "📎 Lark Amount Loss：%d 条记录 → 已写入自第 %d 行（含表头列）"
+        % (total_n, base)
+    )
 
 
 def fetch_fpms_data(
@@ -670,6 +978,7 @@ def fetch_fpms_data(
     checklog: 为 True 时同样拉表并做 filter，再调用阿里云 SLS API（非浏览器）按每行查询 Error log；
       凭证：控制台 STS 三件套，或 RAM 用户 AK + ALIYUN_SLS_ASSUME_ROLE_ARN（AssumeRole，见文件顶部注释）。
     返回: 摘要行；若 getdata/filterdata/checklog 则在同一字符串内追加对应章节（与终端打印一致），供 main.py 发往 Lark。
+    若设置 AMOUNT_LOSS_SPREADSHEET_TOKEN，且在 filterdata/checklog 流程成功解析 FPMS 表后，会写入 wiki 关联表格子表「Amount Loss YYYY」（详见 amount_loss_sync_to_lark_sheet）。
     """
     _ = save_state  # 保留与旧版 fpms_fetcher 相同的调用约定
     with sync_playwright() as p:
@@ -862,6 +1171,10 @@ def fetch_fpms_data(
             summary = _amount_loss_result_summary(page, total_text)
             print(f"📊 {summary}")
             result_chunks = [summary]
+            sync_fp_headers = None
+            sync_full_cell_rows = None
+            sync_eh = None
+            sync_er = None
 
             if getdata or filterdata or checklog:
                 print("📄 设置 Length Per Page = 1000 并移开焦点…")
@@ -884,7 +1197,9 @@ def fetch_fpms_data(
                     result_chunks.extend(["", detail_title, _table_to_string(headers, rows)])
                 if filterdata or checklog:
                     try:
-                        fh, fr = _filter_credit_lost_table(headers, rows)
+                        fh, fr, full_cell_rows = _filter_credit_lost_table(headers, rows)
+                        sync_fp_headers = headers
+                        sync_full_cell_rows = full_cell_rows
                         if filterdata:
                             print(
                                 "\n===== FILTERED（Account / Amount / Start Time / Transfer Name / Transfer ID）====="
@@ -905,6 +1220,7 @@ def fetch_fpms_data(
                             )
                             print("\n" + chk_title)
                             eh, er = _attach_sls_error_logs(fh, fr)
+                            sync_eh, sync_er = eh, er
                             _print_table(eh, er)
                             result_chunks.extend(["", chk_title, _table_to_string(eh, er)])
                     except ValueError as ve:
@@ -912,7 +1228,19 @@ def fetch_fpms_data(
                         print(warn)
                         result_chunks.extend(["", warn])
 
-            return "\n".join(result_chunks)
+            out = "\n".join(result_chunks)
+            try:
+                if sync_fp_headers is not None:
+                    amount_loss_sync_to_lark_sheet(
+                        out,
+                        sync_fp_headers,
+                        sync_full_cell_rows or [],
+                        sync_eh,
+                        sync_er,
+                    )
+            except Exception as sync_ex:
+                print("⚠️ Lark Amount Loss 表格同步: %s" % sync_ex)
+            return out
 
         except Exception as e:
             print(f"❌ 脚本执行出错: {e}")
