@@ -195,11 +195,17 @@ def run_amountloss_check(chat_id, date_str=None):
                 resp = send_message(chat_id, card_json, msg_type="interactive")
                 if resp.get("code") != 0:
                     send_message(chat_id, result.get("text") or str(result))
-                tsv = (result.get("sheet_tsv") or "").strip()
-                if tsv:
+                tsv_all = (result.get("sheet_tsv_all") or "").strip()
+                tsv_game = (result.get("sheet_tsv_game") or "").strip()
+                if tsv_all:
                     send_message(
                         chat_id,
-                        "📋 Copy for Sheet (TSV)\n```text\n" + tsv + "\n```",
+                        "📋 Copy for Sheet (TSV) — ALL Amount Loss\n```text\n" + tsv_all + "\n```",
+                    )
+                if tsv_game:
+                    send_message(
+                        chat_id,
+                        "📋 Copy for Sheet (TSV) — By Game\n```text\n" + tsv_game + "\n```",
                     )
             else:
                 send_message(chat_id, result if isinstance(result, str) else str(result))

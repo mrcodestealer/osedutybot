@@ -502,6 +502,47 @@ def _table_to_tsv(headers, rows):
     return "\n".join(lines)
 
 
+def _extract_game_from_transfer_name(transfer_name: str) -> str:
+    """
+    Example:
+      Transfer-InLive SlotsAmount Lost  -> Live Slots
+    """
+    raw = (transfer_name or "").strip()
+    if not raw:
+        return ""
+    # Remove prefix/suffix markers (case-insensitive, tolerant to spaces).
+    t = re.sub(r"^\s*transfer[\s\-]*in\s*", "", raw, flags=re.I)
+    t = re.sub(r"\s*amount\s*lost\s*$", "", t, flags=re.I)
+    t = re.sub(r"\s+", " ", t).strip(" -_")
+    return t
+
+
+def _build_checklog_copy_tsvs(headers, rows):
+    """Return (all_tsv, by_game_tsv) for sheet paste."""
+    idx_tname = _header_col_index(headers, "Transfer Name")
+    # Both outputs hide original "Transfer Name" column.
+    keep_idx = [i for i, h in enumerate(headers) if i != idx_tname]
+    all_headers = [headers[i] for i in keep_idx]
+    all_rows = []
+    for r in rows:
+        all_rows.append([(r[i] if i < len(r) else "") for i in keep_idx])
+    all_tsv = _table_to_tsv(all_headers, all_rows)
+
+    # By game: derive game name from Transfer Name, no Transfer Name column.
+    by_game_headers = ["Game"] + all_headers
+    by_game_rows = []
+    for r in rows:
+        tname = ""
+        if idx_tname is not None and idx_tname >= 0 and idx_tname < len(r):
+            tname = r[idx_tname]
+        game = _extract_game_from_transfer_name(tname)
+        base = [(r[i] if i < len(r) else "") for i in keep_idx]
+        by_game_rows.append([game or "Unknown"] + base)
+    by_game_rows.sort(key=lambda x: (str(x[0]).casefold(), str(x[1]).casefold() if len(x) > 1 else ""))
+    by_game_tsv = _table_to_tsv(by_game_headers, by_game_rows)
+    return all_tsv, by_game_tsv
+
+
 def _amountloss_checklog_card(summary, project, headers, rows):
     """Build Lark interactive card for CHECKLOG only."""
     idx_account = _header_col_index(headers, "Account")
@@ -1369,13 +1410,17 @@ def fetch_fpms_data(
                             _print_table(eh, er)
                             result_chunks.extend(["", chk_title, _table_to_string(eh, er)])
                             out = "\n".join(result_chunks)
-                            sheet_tsv = _table_to_tsv(eh, er)
+                            sheet_tsv_all, sheet_tsv_game = _build_checklog_copy_tsvs(eh, er)
                             card = _amountloss_checklog_card(summary, proj, eh, er)
                             out = (
                                 out
-                                + "\n\n📋 Copy for Sheet (TSV):\n"
+                                + "\n\n📋 Copy for Sheet (TSV) — ALL Amount Loss:\n"
                                 + "```text\n"
-                                + sheet_tsv
+                                + sheet_tsv_all
+                                + "\n```"
+                                + "\n\n📋 Copy for Sheet (TSV) — By Game:\n"
+                                + "```text\n"
+                                + sheet_tsv_game
                                 + "\n```"
                             )
                             try:
@@ -1393,7 +1438,12 @@ def fetch_fpms_data(
                                 warn_sync = "⚠️ Lark Amount Loss 表格同步失败: %s" % sync_ex
                                 print(warn_sync)
                                 out = "%s\n\n%s" % (warn_sync, out)
-                            return {"text": out, "lark_card": card, "sheet_tsv": sheet_tsv}
+                            return {
+                                "text": out,
+                                "lark_card": card,
+                                "sheet_tsv_all": sheet_tsv_all,
+                                "sheet_tsv_game": sheet_tsv_game,
+                            }
                     except ValueError as ve:
                         warn = "⚠️ filterdata/checklog: %s" % (ve,)
                         print(warn)
