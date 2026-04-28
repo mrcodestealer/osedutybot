@@ -895,11 +895,12 @@ def amount_loss_sync_to_lark_sheet(
     """
     spreadsheet_token = (_env_first("AMOUNT_LOSS_SPREADSHEET_TOKEN") or "").strip()
     if not spreadsheet_token:
-        print(
+        note = (
             "⚠️ Lark Amount Loss：未写入表格 — 未设置 AMOUNT_LOSS_SPREADSHEET_TOKEN "
             "（需在 .env 填表格 token，来自「在浏览器打开表格」的 URL，不是 wiki 页面链接）。"
         )
-        return ""
+        print(note)
+        return note
     sheet_id = (_env_first("AMOUNT_LOSS_SHEET_ID") or "").strip()
     title_year = datetime.now().year
     want_title = "Amount Loss %s" % title_year
@@ -907,11 +908,12 @@ def amount_loss_sync_to_lark_sheet(
     total_n = _amount_loss_parse_total_records(summary_block)
     if total_n < 0:
         snippet = (summary_block or "")[:240].replace("\n", " ")
-        print(
+        note = (
             "⚠️ Lark Amount Loss：无法从正文解析 Total … records，跳过同步。正文开头：%r"
             % snippet
         )
-        return ""
+        print(note)
+        return note
 
     print(
         "📎 Lark Amount Loss：开始同步（Total=%s；找 A 列锚点=两天前 DD/MM/YY）"
@@ -932,7 +934,7 @@ def amount_loss_sync_to_lark_sheet(
 
     col_a = _al_get_range(token, spreadsheet_token, sheet_id, "A1:A%d" % nrow)
     missing_days = _amount_loss_detect_missing_days_this_month(col_a)
-    missing_note = ""
+    missing_note = "✅ Amount Loss 本月 A 列无缺失日期"
     if missing_days:
         missing_note = "⚠️ Amount Loss 本月 A 列缺失日期: %s" % ", ".join(missing_days)
         print("⚠️ Lark Amount Loss：检测到缺失日期 -> %s" % ", ".join(missing_days))
@@ -1298,9 +1300,11 @@ def fetch_fpms_data(
                         sync_er,
                     )
                     if sync_note:
-                        out = "%s\n\n%s" % (out, sync_note)
+                        out = "%s\n\n%s" % (sync_note, out)
             except Exception as sync_ex:
-                print("⚠️ Lark Amount Loss 表格同步: %s" % sync_ex)
+                warn_sync = "⚠️ Lark Amount Loss 表格同步失败: %s" % sync_ex
+                print(warn_sync)
+                out = "%s\n\n%s" % (warn_sync, out)
             return out
 
         except Exception as e:
