@@ -870,6 +870,9 @@ def _al_try_copy_paste_rows_with_style(
     """
     尝试复制含样式；失败时不抛异常，返回 (False, reason) 以便降级继续写值。
     """
+    enabled = (_env_first("AMOUNT_LOSS_ENABLE_STYLE_COPY") or "").strip().lower()
+    if enabled not in ("1", "true", "yes", "on"):
+        return False, "style copy disabled (set AMOUNT_LOSS_ENABLE_STYLE_COPY=1 to force try)"
     try:
         _al_copy_paste_rows_with_style(
             token,
@@ -1050,11 +1053,14 @@ def amount_loss_sync_to_lark_sheet(
             ncol,
         )
         if not style_ok:
-            print("⚠️ Lark Amount Loss：样式复制失败，已降级为仅值写入（%s）" % style_err)
-            note = (
-                "⚠️ Lark Amount Loss：样式复制失败，已降级为仅值写入（%s）"
-                % style_err
-            )
+            if "style copy disabled" in style_err:
+                note = ""
+            else:
+                print("⚠️ Lark Amount Loss：样式复制失败，已降级为仅值写入（%s）" % style_err)
+                note = (
+                    "⚠️ Lark Amount Loss：样式复制失败，已降级为仅值写入（%s）"
+                    % style_err
+                )
         else:
             note = ""
         only_a = "%s%d:%s%d" % ("A", base, "A", base)
@@ -1089,10 +1095,11 @@ def amount_loss_sync_to_lark_sheet(
         ncol,
     )
     if not style_ok:
-        style_notes.append(
-            "⚠️ Lark Amount Loss：样式复制失败（模板2~3→目标）：%s；已继续值写入。"
-            % style_err
-        )
+        if "style copy disabled" not in style_err:
+            style_notes.append(
+                "⚠️ Lark Amount Loss：样式复制失败（模板2~3→目标）：%s；已继续值写入。"
+                % style_err
+            )
     style_ok, style_err = _al_try_copy_paste_rows_with_style(
         token,
         spreadsheet_token,
@@ -1104,10 +1111,11 @@ def amount_loss_sync_to_lark_sheet(
         ncol,
     )
     if not style_ok:
-        style_notes.append(
-            "⚠️ Lark Amount Loss：样式复制失败（模板3→表头）：%s；已继续值写入。"
-            % style_err
-        )
+        if "style copy disabled" not in style_err:
+            style_notes.append(
+                "⚠️ Lark Amount Loss：样式复制失败（模板3→表头）：%s；已继续值写入。"
+                % style_err
+            )
 
     hdr_row_vals = FPMS_SYNC_COLUMNS[:]
     if eh and er and "Error log" in eh:
@@ -1149,10 +1157,11 @@ def amount_loss_sync_to_lark_sheet(
             ncol,
         )
         if not style_ok:
-            style_notes.append(
-                "⚠️ Lark Amount Loss：样式复制失败（模板4→数据区）：%s；已继续值写入。"
-                % style_err
-            )
+            if "style copy disabled" not in style_err:
+                style_notes.append(
+                    "⚠️ Lark Amount Loss：样式复制失败（模板4→数据区）：%s；已继续值写入。"
+                    % style_err
+                )
         dr = "%s%d:%s%d" % (el, row_d0, end_seg_l, row_d0 + len(data_rows) - 1)
         ranges_batch.append({"range": "%s!%s" % (sheet_id, dr), "values": data_rows})
 
