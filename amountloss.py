@@ -848,6 +848,39 @@ def _amount_loss_fmt_dd_mm_yy(d):
     return d.strftime("%d/%m/%y")
 
 
+def _amount_loss_detect_missing_days_this_month(col_a_values):
+    # type: (list) -> List[str]
+    """
+    从 A 列内容检测「本月 1 号到昨天」缺失的 DD/MM/YY 日期。
+    """
+    today = date.today()
+    first = date(today.year, today.month, 1)
+    last = today - timedelta(days=1)
+    if last < first:
+        return []
+    present = set()
+    for row in col_a_values or []:
+        if not row:
+            continue
+        raw = _al_cell_plain(row[0]).strip()
+        if not raw:
+            continue
+        try:
+            d = datetime.strptime(raw, "%d/%m/%y").date()
+        except ValueError:
+            continue
+        if d.year == today.year and d.month == today.month:
+            present.add(raw)
+    missing = []
+    cur = first
+    while cur <= last:
+        s = _amount_loss_fmt_dd_mm_yy(cur)
+        if s not in present:
+            missing.append(s)
+        cur += timedelta(days=1)
+    return missing
+
+
 def amount_loss_sync_to_lark_sheet(
     summary_block,
     fp_headers,
@@ -866,7 +899,7 @@ def amount_loss_sync_to_lark_sheet(
             "⚠️ Lark Amount Loss：未写入表格 — 未设置 AMOUNT_LOSS_SPREADSHEET_TOKEN "
             "（需在 .env 填表格 token，来自「在浏览器打开表格」的 URL，不是 wiki 页面链接）。"
         )
-        return
+        return ""
     sheet_id = (_env_first("AMOUNT_LOSS_SHEET_ID") or "").strip()
     title_year = datetime.now().year
     want_title = "Amount Loss %s" % title_year
@@ -878,7 +911,7 @@ def amount_loss_sync_to_lark_sheet(
             "⚠️ Lark Amount Loss：无法从正文解析 Total … records，跳过同步。正文开头：%r"
             % snippet
         )
-        return
+        return ""
 
     print(
         "📎 Lark Amount Loss：开始同步（Total=%s；找 A 列锚点=两天前 DD/MM/YY）"
@@ -898,6 +931,11 @@ def amount_loss_sync_to_lark_sheet(
     yesterday_ddmmyy = _amount_loss_fmt_dd_mm_yy(yesterday)
 
     col_a = _al_get_range(token, spreadsheet_token, sheet_id, "A1:A%d" % nrow)
+    missing_days = _amount_loss_detect_missing_days_this_month(col_a)
+    missing_note = ""
+    if missing_days:
+        missing_note = "⚠️ Amount Loss 本月 A 列缺失日期: %s" % ", ".join(missing_days)
+        print("⚠️ Lark Amount Loss：检测到缺失日期 -> %s" % ", ".join(missing_days))
     anchor = _al_find_anchor_row_col_a(col_a, marker_ddmmyy)
     if anchor is None:
         raise ValueError(
@@ -923,7 +961,7 @@ def amount_loss_sync_to_lark_sheet(
             "📎 Lark Amount Loss：无记录 → 已粘贴模板行 %d–%d，A%d=%s"
             % (base, base + 2, base, yesterday_ddmmyy)
         )
-        return
+        return missing_note
 
     tpl23 = _al_get_range(token, spreadsheet_token, sheet_id, "A2:%s3" % end_l)
     while len(tpl23) < 2:
@@ -970,10 +1008,14 @@ def amount_loss_sync_to_lark_sheet(
         ranges_batch.append({"range": "%s!%s" % (sheet_id, dr), "values": data_rows})
 
     _al_batch_update_ranges(token, spreadsheet_token, ranges_batch)
-    print(
+    ok_note = (
         "📎 Lark Amount Loss：%d 条记录 → 已写入自第 %d 行（含表头列）"
         % (total_n, base)
     )
+    print(ok_note)
+    if missing_note:
+        return "%s\n%s" % (ok_note, missing_note)
+    return ok_note
 
 
 def fetch_fpms_data(
@@ -1248,13 +1290,15 @@ def fetch_fpms_data(
             out = "\n".join(result_chunks)
             try:
                 if sync_fp_headers is not None:
-                    amount_loss_sync_to_lark_sheet(
+                    sync_note = amount_loss_sync_to_lark_sheet(
                         out,
                         sync_fp_headers,
                         sync_full_cell_rows or [],
                         sync_eh,
                         sync_er,
                     )
+                    if sync_note:
+                        out = "%s\n\n%s" % (out, sync_note)
             except Exception as sync_ex:
                 print("⚠️ Lark Amount Loss 表格同步: %s" % sync_ex)
             return out
