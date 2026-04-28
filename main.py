@@ -200,12 +200,12 @@ def run_amountloss_check(chat_id, date_str=None):
                 if tsv_all:
                     send_message(
                         chat_id,
-                        "📋 Copy for Sheet (TSV) — ALL Amount Loss\n```text\n" + tsv_all + "\n```",
+                        "📋 Copy for Sheet — python3 amountloss.py --getdata\n```text\n" + tsv_all + "\n```",
                     )
                 if tsv_game:
                     send_message(
                         chat_id,
-                        "📋 Copy for Sheet (TSV) — By Game\n```text\n" + tsv_game + "\n```",
+                        "📋 Copy for Sheet — By Game\n```text\n" + tsv_game + "\n```",
                     )
             else:
                 send_message(chat_id, result if isinstance(result, str) else str(result))

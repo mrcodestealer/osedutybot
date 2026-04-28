@@ -517,30 +517,44 @@ def _extract_game_from_transfer_name(transfer_name: str) -> str:
     return t
 
 
-def _build_checklog_copy_tsvs(headers, rows):
-    """Return (all_tsv, by_game_tsv) for sheet paste."""
+def _build_by_game_copy_text(headers, rows):
+    """
+    Group rows by game heading, then output data rows only (no header row).
+    Columns fixed as:
+      Account | Amount (PHP) | Start Time | Transfer Name | Transfer ID | Error log
+    """
+    idx_account = _header_col_index(headers, "Account")
+    idx_amount = _header_col_index(headers, "Amount (PHP)", "Amount")
+    idx_start = _header_col_index(headers, "Start Time")
     idx_tname = _header_col_index(headers, "Transfer Name")
-    # Both outputs hide original "Transfer Name" column.
-    keep_idx = [i for i, h in enumerate(headers) if i != idx_tname]
-    all_headers = [headers[i] for i in keep_idx]
-    all_rows = []
-    for r in rows:
-        all_rows.append([(r[i] if i < len(r) else "") for i in keep_idx])
-    all_tsv = _table_to_tsv(all_headers, all_rows)
+    idx_tid = _header_col_index(headers, "Transfer ID")
+    idx_err = _header_col_index(headers, "Error log")
 
-    # By game: derive game name from Transfer Name, no Transfer Name column.
-    by_game_headers = ["Game"] + all_headers
-    by_game_rows = []
+    def _col(r, idx):
+        if idx is None or idx < 0 or idx >= len(r):
+            return ""
+        return (r[idx] or "").replace("\t", " ").replace("\r", " ").replace("\n", " | ").strip()
+
+    buckets = {}  # game -> list[row_str]
     for r in rows:
-        tname = ""
-        if idx_tname is not None and idx_tname >= 0 and idx_tname < len(r):
-            tname = r[idx_tname]
-        game = _extract_game_from_transfer_name(tname)
-        base = [(r[i] if i < len(r) else "") for i in keep_idx]
-        by_game_rows.append([game or "Unknown"] + base)
-    by_game_rows.sort(key=lambda x: (str(x[0]).casefold(), str(x[1]).casefold() if len(x) > 1 else ""))
-    by_game_tsv = _table_to_tsv(by_game_headers, by_game_rows)
-    return all_tsv, by_game_tsv
+        tname = _col(r, idx_tname)
+        game = _extract_game_from_transfer_name(tname) or "Unknown"
+        row_vals = [
+            _col(r, idx_account),
+            _col(r, idx_amount),
+            _col(r, idx_start),
+            tname,
+            _col(r, idx_tid),
+            _col(r, idx_err),
+        ]
+        buckets.setdefault(game, []).append("\t".join(row_vals))
+
+    lines = []
+    for game in sorted(buckets.keys(), key=lambda x: x.casefold()):
+        lines.append(f"[{game}]")
+        lines.extend(buckets[game])
+        lines.append("")
+    return "\n".join(lines).strip()
 
 
 def _amountloss_checklog_card(summary, project, headers, rows):
@@ -1410,15 +1424,16 @@ def fetch_fpms_data(
                             _print_table(eh, er)
                             result_chunks.extend(["", chk_title, _table_to_string(eh, er)])
                             out = "\n".join(result_chunks)
-                            sheet_tsv_all, sheet_tsv_game = _build_checklog_copy_tsvs(eh, er)
+                            sheet_tsv_all = _table_to_tsv(headers, rows)
+                            sheet_tsv_game = _build_by_game_copy_text(eh, er)
                             card = _amountloss_checklog_card(summary, proj, eh, er)
                             out = (
                                 out
-                                + "\n\n📋 Copy for Sheet (TSV) — ALL Amount Loss:\n"
+                                + "\n\n📋 Copy for Sheet — python3 amountloss.py --getdata:\n"
                                 + "```text\n"
                                 + sheet_tsv_all
                                 + "\n```"
-                                + "\n\n📋 Copy for Sheet (TSV) — By Game:\n"
+                                + "\n\n📋 Copy for Sheet — By Game:\n"
                                 + "```text\n"
                                 + sheet_tsv_game
                                 + "\n```"
