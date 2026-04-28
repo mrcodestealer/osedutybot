@@ -184,7 +184,12 @@ def run_amountloss_check(chat_id, date_str=None):
 
     for attempt in range(1, AMOUNT_LOSS_MAX_ATTEMPTS + 1):
         try:
-            result = fetch_fpms_data(headless=True, target_date_str=date_str)
+            result = fetch_fpms_data(
+                headless=True,
+                target_date_str=date_str,
+                filterdata=True,
+                checklog=True,
+            )
             send_message(chat_id, result)
             return
         except Exception as e:
@@ -1285,7 +1290,7 @@ def lark_webhook():
         send_message(chat_id, reply)
         return jsonify({"success": True})
     elif clean_text.lower().startswith('/al'):
-            # /al → 昨天 00:00 ~ 今天 00:00；/al DD/MM → 该日 00:00 ~ 次日 00:00（见 amountloss.fetch_fpms_data）
+            # 等价 python3 amountloss.py --filterdata [DD/MM] --checklog（/al 不传日期则用脚本默认窗）
             parts = clean_text.split()
             date_param = None
             if len(parts) > 1:
