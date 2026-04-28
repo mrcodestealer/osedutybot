@@ -1308,14 +1308,11 @@ def lark_webhook():
         send_message(chat_id, reply)
         return jsonify({"success": True})
     elif re.match(r"^/al(?:\s+\d{1,2}/\d{1,2})?\s*$", clean_text.lower()):
-            # /al or /al DD/MM: only reply with the CLI command hint.
+            # /al or /al DD/MM: run Amount Loss checklog flow in background, return interactive card + TSV.
             parts = clean_text.split()
-            if len(parts) > 1:
-                date_param = parts[1].strip()
-                reply = f"python3 amountloss.py --checklog {date_param}"
-            else:
-                reply = "python3 amountloss.py --checklog"
-            send_message(chat_id, reply)
+            date_param = parts[1].strip() if len(parts) > 1 else None
+            send_message(chat_id, "⏳ Checking Amount Loss (CHECKLOG), please wait...")
+            threading.Thread(target=run_amountloss_check, args=(chat_id, date_param), daemon=True).start()
             return jsonify({"success": True})
     elif clean_text.lower().startswith("/smsfail"):
         send_message(chat_id, "⏳ Running SMS gateway OTP log check, please wait...")
