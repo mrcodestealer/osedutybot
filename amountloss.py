@@ -16,6 +16,8 @@ import pyotp
 import re
 import sys
 from datetime import datetime, timedelta
+from typing import List, Optional, Tuple
+
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
 LOGIN_URL = "https://mgnt-webserver.casinoplus.top/"
@@ -129,14 +131,16 @@ def _sls_assume_role_arn() -> str:
     return ""
 
 
-def _sls_assume_caller_ak_sk() -> tuple[str, str]:
+def _sls_assume_caller_ak_sk():
+    # type: () -> Tuple[str, str]
     """调用 STS AssumeRole 的 RAM 用户长期 AK（本机调试；ECS 上优先用 ALIYUN_ECS_RAM_ROLE_NAME）。"""
     ak = _env_first("ALIYUN_ASSUME_ACCESS_KEY_ID", "ALIYUN_ACCESS_KEY_ID")
     sk = _env_first("ALIYUN_ASSUME_ACCESS_KEY_SECRET", "ALIYUN_ACCESS_KEY_SECRET")
     return ak, sk
 
 
-def _ecs_ram_security_credentials_or_raise(role_name: str) -> tuple[str, str, str]:
+def _ecs_ram_security_credentials_or_raise(role_name):
+    # type: (str) -> Tuple[str, str, str]
     """从 ECS 元数据拉取绑定在该实例上的 RAM 角色临时凭证（仅 ECS 内网可用）。"""
     import urllib.error
     import urllib.request
@@ -164,7 +168,8 @@ def _ecs_ram_security_credentials_or_raise(role_name: str) -> tuple[str, str, st
     return ak, sk, token
 
 
-def _sls_assume_caller_triple_or_raise() -> tuple[str, str, str | None]:
+def _sls_assume_caller_triple_or_raise():
+    # type: () -> Tuple[str, str, Optional[str]]
     """AssumeRole 调用方：(ak, sk, token)；token 非空时表示用 STS 临时身份（ECS 实例角色）。"""
     ecs_role = _env_first("ALIYUN_ECS_RAM_ROLE_NAME")
     if ecs_role:
@@ -175,11 +180,12 @@ def _sls_assume_caller_triple_or_raise() -> tuple[str, str, str | None]:
 
 
 def _sls_credentials_via_assume_role(
-    role_arn: str,
-    caller_ak: str,
-    caller_sk: str,
-    caller_token: str | None = None,
-) -> tuple[str, str, str]:
+    role_arn,
+    caller_ak,
+    caller_sk,
+    caller_token=None,
+):
+    # type: (str, str, str, Optional[str]) -> Tuple[str, str, str]
     try:
         from aliyunsdkcore.auth.credentials import StsTokenCredential
         from aliyunsdkcore.client import AcsClient
@@ -278,7 +284,8 @@ def _sls_msg_is_error_candidate(msg: str) -> bool:
     return ("platformCreditLostFix" in msg) and ("null" in msg.lower())
 
 
-def _sls_fetch_error_msgs_for_row(transfer_id: str, center_dt: datetime) -> list[str]:
+def _sls_fetch_error_msgs_for_row(transfer_id, center_dt):
+    # type: (str, datetime) -> List[str]
     """按控制台查询语法与时间窗拉取，再筛 platformCreditLostFix + null。"""
     try:
         from aliyun.log import GetLogsRequest, LogClient
@@ -312,7 +319,7 @@ def _sls_fetch_error_msgs_for_row(transfer_id: str, center_dt: datetime) -> list
         reverse=False,
     )
     resp = client.get_logs(req)
-    out: list[str] = []
+    out = []  # type: List[str]
     for log in resp.get_logs():
         contents = log.get_contents() or {}
         msg = contents.get("msg")
@@ -323,7 +330,8 @@ def _sls_fetch_error_msgs_for_row(transfer_id: str, center_dt: datetime) -> list
     return out
 
 
-def _attach_sls_error_logs(filter_headers: list, filter_rows: list) -> tuple[list, list]:
+def _attach_sls_error_logs(filter_headers, filter_rows):
+    # type: (list, list) -> Tuple[list, list]
     """在 FILTERED 表后追加列 Error log。"""
     try:
         idx_tid = filter_headers.index("Transfer ID")
@@ -521,7 +529,8 @@ def _filter_30min_non_overlapping(sorted_rows: list, time_key: str) -> list:
     return out
 
 
-def _split_remarks_transfer_id(remarks: str) -> tuple[str, str]:
+def _split_remarks_transfer_id(remarks):
+    # type: (str) -> Tuple[str, str]
     """按 ' Transfer ID' 拆成名称与 ID（ID 可为数字串）。"""
     r = (remarks or "").strip()
     marker = " Transfer ID"
@@ -536,7 +545,8 @@ def _split_remarks_transfer_id(remarks: str) -> tuple[str, str]:
     return r, ""
 
 
-def _filter_credit_lost_table(headers: list, rows: list) -> tuple[list, list]:
+def _filter_credit_lost_table(headers, rows):
+    # type: (list, list) -> Tuple[list, list]
     """
     仅 Account / Amount (PHP) / Start Time / Remarks；
     备注以 Transfer-InLive / Transfer-OutLive 分两路，各自按天时间内升序后做 30 分钟窗口去重；
