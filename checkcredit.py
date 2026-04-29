@@ -607,6 +607,28 @@ def select_top2_overall(merged: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(merged, key=lambda r: int(r.get("max_line_idx", -1)), reverse=True)[:2]
 
 
+def build_np_followup_payload(
+    top2_any: list[dict[str, Any]],
+    machine_display: str,
+    td: date,
+) -> dict[str, Any]:
+    """Latest 2 in-log players for `/npthirdhttp` (always returned; list may be empty)."""
+    players: list[dict[str, str]] = []
+    for r in top2_any[:2]:
+        lc = r.get("latest_credit") or {}
+        players.append(
+            {
+                "user_id": str(r["user_id"]),
+                "time_short": (lc.get("time_short") or "").strip(),
+            }
+        )
+    return {
+        "machine_display": machine_display,
+        "target_date": td.isoformat(),
+        "latest_two_players": players,
+    }
+
+
 def pick_latest_error_uid(merged: list[dict[str, Any]]) -> tuple[str | None, int]:
     """Single player whose newest error line appears latest in the log."""
     best_uid: str | None = None
@@ -991,16 +1013,9 @@ def run_finderror(
 
     report = format_dual_terminal_report(top2_any, top2_err, machine_display, td)
     plain = f"{header}\n\n{report}" if header else report
-    try:
-        from np_backend_third_http import np_followup_meta
-
-        np_payload = np_followup_meta(top2_any, machine_display, td)
-    except ImportError:
-        np_payload = None
-
     return {
         "text": plain,
-        "np_followup": np_payload,
+        "np_followup": build_np_followup_payload(top2_any, machine_display, td),
         "lark_card": build_latest_two_overall_lark_card(
             top2_any,
             machine_display=machine_display,

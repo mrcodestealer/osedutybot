@@ -316,27 +316,33 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
             send_message(chat_id, text if text else "(no output)")
 
         np = out.get("np_followup")
-        if isinstance(np, dict) and np.get("latest_two_players"):
+        if isinstance(np, dict):
             _set_checkcredit_np_pending(chat_id, np)
             guide_lines = [
-                "**NP backend — Log Third Http Req (screenshot)**",
-                "Choose a User ID from **latest 2 in log** above, then run:",
-                "`/npthirdhttp <player_id>` — uses log date and **±10 minutes** around last credit time.",
+                "**Which player ID do you want to check on NP (Log Third Http Req)?**",
                 "",
-                "Examples:",
+                "Reply with **`/npthirdhttp <player_id>`** — search window uses this log **date** and **±10 minutes** around that player’s last credit time.",
+                "",
             ]
-            for i, p in enumerate(np["latest_two_players"], 1):
-                ts = p.get("time_short") or "n/a"
-                guide_lines.append(f"{i}) `/npthirdhttp {p['user_id']}` _(credit time `{ts}`)_")
-            guide_lines.append("")
-            guide_lines.append(
-                "Override (no prior `/checkcreditdate` session): "
-                "`/npthirdhttp <player_id> YYYY-MM-DD HH:MM:SS.mmm`"
-            )
-            guide_lines.append("")
-            guide_lines.append(
-                "Set credentials in `.env`: `NP_BACKEND_USER`, `NP_BACKEND_PASSWORD` "
-                "(optional: `NP_BACKEND_BASE`, `NP_BACKEND_WINDOW_MINUTES`)."
+            players = np.get("latest_two_players") or []
+            if players:
+                guide_lines.append("Suggested IDs from **latest 2 in log** (same as card 1 above):")
+                for i, p in enumerate(players, 1):
+                    ts = p.get("time_short") or "n/a"
+                    guide_lines.append(f"{i}) **`{p['user_id']}`** — credit time `{ts}`")
+                    guide_lines.append(f"   → `/npthirdhttp {p['user_id']}`")
+            else:
+                guide_lines.append(
+                    "_No player blocks found in this log — use:_ "
+                    "`/npthirdhttp <player_id> YYYY-MM-DD HH:MM:SS.mmm`"
+                )
+            guide_lines.extend(
+                [
+                    "",
+                    "Manual override (no session): `/npthirdhttp <player_id> YYYY-MM-DD HH:MM:SS.mmm`",
+                    "",
+                    "Requires `.env`: `NP_BACKEND_USER`, `NP_BACKEND_PASSWORD`.",
+                ]
             )
             send_message(chat_id, "\n".join(guide_lines))
     except Exception as e:
