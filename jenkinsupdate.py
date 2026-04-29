@@ -1636,6 +1636,92 @@ def jenkins_login_if_needed(page, username: str, password: str, timeout_ms: int 
     _safe_page_wait(page, _MS_AFTER_LOGIN)
 
 
+def _jenkins_build_form_url_candidates(url: str) -> list[str]:
+    """
+    Build-parameters URL candidates for a Jenkins job URL.
+
+    Some aliases may point to a job root page instead of the form page; this helper
+    adds ``/build?delay=0sec`` and ``/buildWithParameters`` fallbacks.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return []
+
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(u: str) -> None:
+        uu = (u or "").strip()
+        if not uu or uu in seen:
+            return
+        seen.add(uu)
+        out.append(uu)
+
+    _add(raw)
+    base_q = raw.split("?", 1)[0].rstrip("/")
+    low = base_q.casefold()
+
+    if low.endswith("/buildwithparameters"):
+        root = base_q[: -len("/buildWithParameters")].rstrip("/")
+        _add(root + "/build?delay=0sec")
+    elif low.endswith("/build"):
+        root = base_q[: -len("/build")].rstrip("/")
+        _add(root + "/buildWithParameters")
+        _add(root + "/build?delay=0sec")
+    elif "/build?" in raw.casefold():
+        root = raw[: raw.casefold().find("/build?")].rstrip("/")
+        _add(root + "/buildWithParameters")
+    else:
+        root = base_q
+        _add(root + "/build?delay=0sec")
+        _add(root + "/buildWithParameters")
+
+    return out
+
+
+def _ensure_jenkins_parameters_form_visible(
+    page,
+    username: str,
+    password: str,
+    *,
+    preferred_url: str,
+    timeout_ms: int = 60_000,
+) -> None:
+    """
+    Ensure ``div.jenkins-form-item`` is visible; if not, retry likely parameter URLs.
+    """
+    form_sel = "div.jenkins-form-item"
+    try:
+        page.wait_for_selector(form_sel, timeout=min(12_000, timeout_ms))
+        return
+    except PlaywrightTimeout:
+        pass
+
+    candidates: list[str] = []
+    for src in ((page.url or "").strip(), preferred_url):
+        for u in _jenkins_build_form_url_candidates(src):
+            if u not in candidates:
+                candidates.append(u)
+
+    for u in candidates:
+        cur = (page.url or "").strip()
+        if cur and cur.rstrip("/") == u.rstrip("/"):
+            continue
+        print(f"→ Parameters form not visible; trying build URL fallback: {u}")
+        try:
+            page.goto(u, wait_until="domcontentloaded", timeout=90_000)
+            jenkins_login_if_needed(page, username, password)
+            page.wait_for_selector(form_sel, timeout=min(20_000, timeout_ms))
+            return
+        except Exception:
+            continue
+
+    raise RuntimeError(
+        "Jenkins parameters form not visible after login and build URL fallbacks. "
+        f"Tried: {', '.join(candidates) if candidates else preferred_url}"
+    )
+
+
 def open_fpms_build_with_login(
     page,
     username: str,
@@ -1666,6 +1752,13 @@ def open_fpms_build_with_login(
         w = _MS_WARMUP_POST_RELOAD if first_visit else _MS_WARMUP_POST_RELOGIN
         _safe_page_wait(page, w)
         jenkins_login_if_needed(page, username, password)
+    _ensure_jenkins_parameters_form_visible(
+        page,
+        username,
+        password,
+        preferred_url=url,
+        timeout_ms=60_000,
+    )
 
 
 def _service_checkbox_in_dom(page, value: str) -> bool:
