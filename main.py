@@ -426,7 +426,11 @@ def _np_run_screenshot_worker(
         if r.get("code") != 0:
             send_message(chat_id, f"❌ Failed to send image: {r}")
     except Exception as e:
-        send_message(chat_id, f"❌ {backend_tag} third-http screenshot failed: {e}")
+        tip = (
+            "\n💡 Visible browser: set NP_BACKEND_HEADED=1 or WF_THIRD_HTTP_HEADED=1 in .env, "
+            "restart Duty Bot, retry. On Linux set DISPLAY (or use Xvfb) or Chromium cannot show a window."
+        )
+        send_message(chat_id, f"❌ {backend_tag} third-http screenshot failed: {e}{tip}")
         print(f"[npthirdhttp] error: {e!r}")
     finally:
         if path and os.path.isfile(path):

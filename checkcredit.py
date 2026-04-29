@@ -24,7 +24,8 @@ Env (optional):
   NP backend (screenshot_np_recharge_detail — Duty Bot /npthirdhttp):
   NP_BACKEND_BASE (default https://backend-np.osmplay.com), NP_BACKEND_USER, NP_BACKEND_PASSWORD
   NP_BACKEND_WINDOW_MINUTES (default 10), NP_BACKEND_MAX_PAGES (default 20, table pagination)
-  NP_BACKEND_HEADLESS / NP_BACKEND_HEADED
+  NP_BACKEND_HEADLESS / NP_BACKEND_HEADED (or **WF_THIRD_HTTP_HEADED** / **THIRD_HTTP_PLAYWRIGHT_HEADED**
+  — same effect: visible Chromium for Log Third Http screenshots on Linux servers that default to headless).
   If **Machine** looks Winford (folder / label **starts with ``WF``** e.g. ``WF8123``, ``WF8173``;
   ``winford`` in the text; or ``NWR8173`` from digits-only OSS ``NWR{n}`` for that cabinet), Log Third
   Http uses Winford instead of NP:
@@ -1680,10 +1681,23 @@ def _np_try_screenshot_matching_detail(
     return False
 
 
+def _np_truthy_env(*names: str) -> bool:
+    for name in names:
+        v = (os.environ.get(name) or "").strip().lower()
+        if v in ("1", "true", "yes", "on"):
+            return True
+    return False
+
+
 def _np_backend_playwright_headless() -> bool:
-    if os.environ.get("NP_BACKEND_HEADED", "").strip().lower() in ("1", "true", "yes"):
+    """Prefer visible window when any *HEADED* env is set (NP / WF / generic alias for Duty Bot debug)."""
+    if _np_truthy_env(
+        "NP_BACKEND_HEADED",
+        "WF_THIRD_HTTP_HEADED",
+        "THIRD_HTTP_PLAYWRIGHT_HEADED",
+    ):
         return False
-    if os.environ.get("NP_BACKEND_HEADLESS", "").strip().lower() in ("1", "true", "yes"):
+    if os.environ.get("NP_BACKEND_HEADLESS", "").strip().lower() in ("1", "true", "yes", "on"):
         return True
     if sys.platform == "linux" and not (os.environ.get("DISPLAY") or "").strip():
         return True
