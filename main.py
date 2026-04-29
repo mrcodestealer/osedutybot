@@ -352,6 +352,7 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
                     choices,
                     target_date_iso=str(np.get("target_date") or ""),
                     machine_display=str(np.get("machine_display") or ""),
+                    third_http_backend=str(np.get("third_http_backend") or "NP"),
                 )
                 card_json = json.dumps(np_card)
                 resp_np = send_message(chat_id, card_json, msg_type="interactive")
@@ -359,9 +360,12 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
                     lines = []
                     _td = str(np.get("target_date") or "").strip()
                     _md = str(np.get("machine_display") or "").strip()
+                    _be = str(np.get("third_http_backend") or "NP").strip().upper()
+                    if _be not in ("NP", "WF", "DHS"):
+                        _be = "NP"
                     if _td or _md:
                         lines.append(
-                            f"Log date (NP/WF): `{_td or '?'}` · Machine: `{_md or '?'}`"
+                            f"Log date ({_be} window): `{_td or '?'}` · Machine: `{_md or '?'}`"
                         )
                     for i, ch in enumerate(choices):
                         uid = ch.get("user_id", "")
@@ -374,8 +378,11 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
                 lines = []
                 _td = str(np.get("target_date") or "").strip()
                 _md = str(np.get("machine_display") or "").strip()
+                _be = str(np.get("third_http_backend") or "NP").strip().upper()
+                if _be not in ("NP", "WF", "DHS"):
+                    _be = "NP"
                 if _td or _md:
-                    lines.append(f"Log date (NP/WF): `{_td or '?'}` · Machine: `{_md or '?'}`")
+                    lines.append(f"Log date ({_be} window): `{_td or '?'}` · Machine: `{_md or '?'}`")
                 for i, ch in enumerate(choices):
                     uid = ch.get("user_id", "")
                     cr = ch.get("credit", "n/a")
@@ -397,7 +404,7 @@ def _np_run_screenshot_worker(
     expected_credit: Optional[float] = None,
     machine_display: Optional[str] = None,
 ) -> None:
-    """NP/WF Log Third Http Req → `recharge` Detail screenshot. Always **headless** here (no DISPLAY on servers)."""
+    """NP / WF / DHS Log Third Http → `recharge` Detail screenshot. Always **headless** (no DISPLAY on servers)."""
     try:
         import checkcredit
 
@@ -411,12 +418,9 @@ def _np_run_screenshot_worker(
             "❌ checkcredit.screenshot_np_recharge_detail missing — deploy the latest `checkcredit.py`.",
         )
         return
-    use_wf = bool(
-        getattr(checkcredit, "_np_use_winford_log_backend", lambda _: False)(
-            (machine_display or "").strip() or None
-        )
+    backend_tag = getattr(checkcredit, "_np_log_backend_tag", lambda _: "NP")(
+        (machine_display or "").strip() or None
     )
-    backend_tag = "WF" if use_wf else "NP"
     send_message(
         chat_id,
         f"⏳ {backend_tag} backend (Playwright): login → Log Third Http Req → recharge → Detail screenshot…",

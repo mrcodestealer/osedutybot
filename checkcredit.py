@@ -29,17 +29,17 @@ Env (optional):
   NP_BACKEND_HEADLESS / NP_BACKEND_HEADED (or **WF_THIRD_HTTP_HEADED** / **THIRD_HTTP_PLAYWRIGHT_HEADED**
   — visible Chromium when ``headed=None``). **Duty Bot** calls ``screenshot_np_recharge_detail(..., headed=False)``
   so server screenshots are always headless; use CLI ``--checkuser`` / ``--pause`` for a visible window.
-  If **Machine** looks Winford (folder / label **starts with ``WF``** e.g. ``WF8123``, ``WF8173``;
-  ``winford`` in the text; or ``NWR8173`` from digits-only OSS ``NWR{n}`` for that cabinet), Log Third
-  Http uses Winford instead of NP:
-  ``https://backend-winford.osmplay.com`` with user/password ``omduty1`` (override via
-  ``WF_BACKEND_USER`` / ``WF_BACKEND_PASSWORD``).
+  If **Machine** looks Winford (folder / label **starts with ``WF``** … or ``NWR8173`` OSS alias),
+  Log Third Http uses ``https://backend-winford.osmplay.com`` + ``WF_BACKEND_USER`` /
+  ``WF_BACKEND_PASSWORD`` (defaults ``omduty1``).
+  If **Machine** label starts with ``DHS`` (e.g. ``DHS3178``), uses ``https://backend-dhs.osmplay.com``
+  + ``DHS_BACKEND_USER`` / ``DHS_BACKEND_PASSWORD``.
 
   NP debug — **visible Chromium** (not headless), same logic as Duty Bot ``/npthirdhttp``::
     python3 checkcredit.py --checkuser --player-id 132594948 --date 2026-04-27 \\
       --time 23:55:12.092 --machine-substr 2074 --credit 1352 --pause
-    Add ``--machine-display WF8173`` when testing Winford NP from CLI (after ``/checkcreditdate`` the
-    bot passes machine from context automatically).
+    Add ``--machine-display WF8173`` or ``--machine-display DHS3178`` when testing Winford/DHS from CLI
+    (Duty Bot passes machine from ``/checkcreditdate`` context automatically).
   Use ``--pause`` to leave the window open until you press Enter in the terminal.
   Do **not** set ``NP_BACKEND_HEADLESS=1`` when you want to watch the browser.
 
@@ -723,15 +723,19 @@ def build_np_choice_lark_card(
     *,
     target_date_iso: str = "",
     machine_display: str = "",
+    third_http_backend: str = "NP",
 ) -> dict[str, Any]:
-    """Lark card: context line (log date + machine for NP/WF window) + four numbered lines (reply 1–4)."""
+    """Lark card: log date line (NP / WF / DHS window) + machine + four numbered lines (reply 1–4)."""
     lines: list[str] = []
     td = (target_date_iso or "").strip()
     md = (machine_display or "").strip()
+    be = (third_http_backend or "NP").strip().upper()
+    if be not in ("NP", "WF", "DHS"):
+        be = "NP"
     if td or md:
         bits: list[str] = []
         if td:
-            bits.append(f"**Log date (NP/WF window):** `{td}`")
+            bits.append(f"**Log date ({be} window):** `{td}`")
         if md:
             bits.append(f"**Machine:** `{md}`")
         lines.append(" · ".join(bits))
@@ -807,6 +811,7 @@ def build_np_followup_payload(
         "machine_display": machine_display,
         "machine_match_substr": machine_match_substr_from_display(machine_display),
         "target_date": td.isoformat(),
+        "third_http_backend": _np_log_backend_tag(machine_display),
         "latest_two_players": latest_two_players,
         "np_choices": np_choices,
     }
@@ -1235,6 +1240,19 @@ def _np_backend_env_cred() -> tuple[str, str]:
 
 
 _WINFORD_NP_BASE = "https://backend-winford.osmplay.com".rstrip("/")
+_DHS_BACKEND_BASE = "https://backend-dhs.osmplay.com".rstrip("/")
+
+
+def _np_use_dhs_log_backend(machine_display: str | None) -> bool:
+    """DHS cabinet — folder / last path segment starts with ``DHS`` (e.g. ``DHS3178``, ``DHS8173``)."""
+    raw = (machine_display or "").strip()
+    if not raw:
+        return False
+    seg = raw.replace("\\", "/").rstrip("/").split("/")[-1].strip()
+    if seg and re.match(r"(?i)DHS", seg):
+        return True
+    alnum = re.sub(r"[^A-Za-z0-9]", "", raw).upper()
+    return bool(alnum.startswith("DHS"))
 
 
 def _np_use_winford_log_backend(machine_display: str | None) -> bool:
@@ -1260,14 +1278,29 @@ def _np_use_winford_log_backend(machine_display: str | None) -> bool:
     return False
 
 
+def _np_log_backend_tag(machine_display: str | None) -> str:
+    """Short label for Lark / Duty Bot: ``DHS``, ``WF``, or ``NP``."""
+    if _np_use_dhs_log_backend(machine_display):
+        return "DHS"
+    if _np_use_winford_log_backend(machine_display):
+        return "WF"
+    return "NP"
+
+
 def _np_resolve_backend(machine_display: str | None) -> tuple[str, str, str]:
     """
     (base_url, username, password) for Log Third Http Req.
 
-    Winford cabinet (machine label / path segment starting with **WF**, ``winford`` in name, or ``NWR8173`` OSS alias)
-    → ``backend-winford.osmplay.com`` + ``WF_BACKEND_USER`` / ``WF_BACKEND_PASSWORD`` (default ``omduty1``).
-    Otherwise → ``NP_BACKEND_BASE`` / env NP credentials.
+    **DHS** (machine label ``DHS*``) → ``backend-dhs.osmplay.com`` + ``DHS_BACKEND_USER`` /
+    ``DHS_BACKEND_PASSWORD``.
+    **Winford** (``WF*``, ``winford``, ``NWR8173`` OSS alias) → ``backend-winford`` + ``WF_BACKEND_*``
+    (default ``omduty1``).
+    Otherwise → ``NP_BACKEND_BASE`` / ``NP_BACKEND_USER`` / ``NP_BACKEND_PASSWORD``.
     """
+    if _np_use_dhs_log_backend(machine_display):
+        u = (os.environ.get("DHS_BACKEND_USER") or "").strip()
+        p = (os.environ.get("DHS_BACKEND_PASSWORD") or "").strip()
+        return _DHS_BACKEND_BASE, u, p
     if _np_use_winford_log_backend(machine_display):
         u = (os.environ.get("WF_BACKEND_USER") or "omduty1").strip() or "omduty1"
         p = (os.environ.get("WF_BACKEND_PASSWORD") or "omduty1").strip() or "omduty1"
@@ -1763,16 +1796,20 @@ def screenshot_np_recharge_detail(
     digits,
     ``amount`` > 0, and ``amount`` matches latest credit — **header Request Time is not used to
     reject** (avoids closing valid dialogs when UI text differs slightly from log seconds).
-    ``machine_display``: LogNavigator / OSS folder label (e.g. ``WF8123``, ``NWR8173`` from digits-only
-    ``NWR{n}``) — Winford routing uses ``_np_use_winford_log_backend``; login from ``WF_BACKEND_*``.
+    ``machine_display``: LogNavigator / OSS folder label (``DHS*`` → DHS backend + ``DHS_BACKEND_*``;
+    ``WF*`` / ``NWR8173`` → Winford + ``WF_BACKEND_*``; else NP + ``NP_BACKEND_*``).
 
     ``headed``: ``True`` = always show browser; ``False`` = force headless; ``None`` = env / platform default.
 
     Returns path to a temporary PNG (caller should delete).
     """
     base, user, pw = _np_resolve_backend(machine_display)
-    _log_http_backend_tag = "WF" if _np_use_winford_log_backend(machine_display) else "NP"
+    _log_http_backend_tag = _np_log_backend_tag(machine_display)
     if not user or not pw:
+        if _log_http_backend_tag == "DHS":
+            raise RuntimeError(
+                "Set DHS_BACKEND_USER and DHS_BACKEND_PASSWORD in the environment for DHS Log Third Http."
+            )
         raise RuntimeError(
             "Set NP_BACKEND_USER and NP_BACKEND_PASSWORD in the environment "
             "(not required for Winford (WF* / NWR8173 alias) — defaults omduty1 unless WF_BACKEND_* is set)."
