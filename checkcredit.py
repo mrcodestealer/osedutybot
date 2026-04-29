@@ -37,11 +37,13 @@ Env (optional):
   If **Machine** label starts with ``NCH`` (e.g. ``NCH1171``), uses ``https://backend-nc.osmplay.com``;
   login prefers ``NCH_BACKEND_USER`` / ``NCH_BACKEND_PASSWORD``, else falls back to ``NP_BACKEND_*``
   (same duty account on multiple backends).
+  If **Machine** label starts with ``TBP`` (e.g. ``TBP8641``), uses ``https://backend-tbp.osmplay.com``
+  + ``TBP_BACKEND_USER`` / ``TBP_BACKEND_PASSWORD``.
 
   NP debug — **visible Chromium** (not headless), same logic as Duty Bot ``/npthirdhttp``::
     python3 checkcredit.py --checkuser --player-id 132594948 --date 2026-04-27 \\
       --time 23:55:12.092 --machine-substr 2074 --credit 1352 --pause
-    Add ``--machine-display WF8173`` / ``DHS3178`` / ``NCH1171`` when testing non-NP backends from CLI
+    Add ``--machine-display WF8173`` / ``DHS3178`` / ``NCH1171`` / ``TBP8641`` when testing non-NP backends from CLI
     (Duty Bot passes machine from ``/checkcreditdate`` context automatically).
   Use ``--pause`` to leave the window open until you press Enter in the terminal.
   Do **not** set ``NP_BACKEND_HEADLESS=1`` when you want to watch the browser.
@@ -728,12 +730,12 @@ def build_np_choice_lark_card(
     machine_display: str = "",
     third_http_backend: str = "NP",
 ) -> dict[str, Any]:
-    """Lark card: title + log date (NP / WF / DHS / NCH window) + machine + numbered player lines."""
+    """Lark card: title + log date (NP / WF / DHS / NCH / TBP window) + machine + numbered player lines."""
     lines: list[str] = []
     td = (target_date_iso or "").strip()
     md = (machine_display or "").strip()
     be = (third_http_backend or "NP").strip().upper()
-    if be not in ("NP", "WF", "DHS", "NCH"):
+    if be not in ("NP", "WF", "DHS", "NCH", "TBP"):
         be = "NP"
     if td or md:
         bits: list[str] = []
@@ -1246,6 +1248,7 @@ def _np_backend_env_cred() -> tuple[str, str]:
 _WINFORD_NP_BASE = "https://backend-winford.osmplay.com".rstrip("/")
 _DHS_BACKEND_BASE = "https://backend-dhs.osmplay.com".rstrip("/")
 _NCH_BACKEND_BASE = "https://backend-nc.osmplay.com".rstrip("/")
+_TBP_BACKEND_BASE = "https://backend-tbp.osmplay.com".rstrip("/")
 
 
 def _np_use_dhs_log_backend(machine_display: str | None) -> bool:
@@ -1272,6 +1275,18 @@ def _np_use_nch_log_backend(machine_display: str | None) -> bool:
     return bool(alnum.startswith("NCH"))
 
 
+def _np_use_tbp_log_backend(machine_display: str | None) -> bool:
+    """TBP cabinet — folder / last path segment starts with ``TBP`` (e.g. ``TBP8641``)."""
+    raw = (machine_display or "").strip()
+    if not raw:
+        return False
+    seg = raw.replace("\\", "/").rstrip("/").split("/")[-1].strip()
+    if seg and re.match(r"(?i)TBP", seg):
+        return True
+    alnum = re.sub(r"[^A-Za-z0-9]", "", raw).upper()
+    return bool(alnum.startswith("TBP"))
+
+
 def _np_use_winford_log_backend(machine_display: str | None) -> bool:
     """
     Use Winford ``backend-winford`` Log Third Http instead of NP.
@@ -1296,11 +1311,13 @@ def _np_use_winford_log_backend(machine_display: str | None) -> bool:
 
 
 def _np_log_backend_tag(machine_display: str | None) -> str:
-    """Short label for Lark / Duty Bot: ``DHS``, ``NCH``, ``WF``, or ``NP``."""
+    """Short label for Lark / Duty Bot: ``DHS``, ``NCH``, ``TBP``, ``WF``, or ``NP``."""
     if _np_use_dhs_log_backend(machine_display):
         return "DHS"
     if _np_use_nch_log_backend(machine_display):
         return "NCH"
+    if _np_use_tbp_log_backend(machine_display):
+        return "TBP"
     if _np_use_winford_log_backend(machine_display):
         return "WF"
     return "NP"
@@ -1312,6 +1329,7 @@ def _np_resolve_backend(machine_display: str | None) -> tuple[str, str, str]:
 
     **DHS** (machine label ``DHS*``) → ``backend-dhs.osmplay.com`` + ``DHS_BACKEND_*`` (else ``NP_BACKEND_*``).
     **NCH** (machine label ``NCH*``) → ``backend-nc.osmplay.com`` + ``NCH_BACKEND_*`` (else ``NP_BACKEND_*``).
+    **TBP** (machine label ``TBP*``) → ``backend-tbp.osmplay.com`` + ``TBP_BACKEND_*``.
     **Winford** (``WF*``, ``winford``, ``NWR8173`` OSS alias) → ``backend-winford`` + ``WF_BACKEND_*``
     (default ``omduty1``).
     Otherwise → ``NP_BACKEND_BASE`` / ``NP_BACKEND_USER`` / ``NP_BACKEND_PASSWORD``.
@@ -1326,6 +1344,10 @@ def _np_resolve_backend(machine_display: str | None) -> tuple[str, str, str]:
         u = (os.environ.get("NCH_BACKEND_USER") or nu).strip()
         p = (os.environ.get("NCH_BACKEND_PASSWORD") or npw).strip()
         return _NCH_BACKEND_BASE, u, p
+    if _np_use_tbp_log_backend(machine_display):
+        u = (os.environ.get("TBP_BACKEND_USER") or "").strip()
+        p = (os.environ.get("TBP_BACKEND_PASSWORD") or "").strip()
+        return _TBP_BACKEND_BASE, u, p
     if _np_use_winford_log_backend(machine_display):
         u = (os.environ.get("WF_BACKEND_USER") or "omduty1").strip() or "omduty1"
         p = (os.environ.get("WF_BACKEND_PASSWORD") or "omduty1").strip() or "omduty1"
@@ -1837,7 +1859,7 @@ def screenshot_np_recharge_detail(
     ``expected_credit`` is set and **> 0**, also require ``amount`` > 0 and within 0.05 of that credit
     (non-positive ``expected_credit`` is ignored — same as ``None``). **Header Request Time is not
     used to reject** (avoids closing valid dialogs when UI text differs slightly from log seconds).
-    ``machine_display``: LogNavigator / OSS folder label (``DHS*`` / ``NCH*`` → respective backend;
+    ``machine_display``: LogNavigator / OSS folder label (``DHS*`` / ``NCH*`` / ``TBP*`` → respective backend;
     creds fall back to ``NP_BACKEND_*`` when ``DHS_BACKEND_*`` / ``NCH_BACKEND_*`` unset).
     ``WF*`` / ``NWR8173`` → Winford + ``WF_BACKEND_*``; else NP + ``NP_BACKEND_*``.
 
@@ -1857,6 +1879,11 @@ def screenshot_np_recharge_detail(
             raise RuntimeError(
                 "Missing credentials for NCH Log Third Http: set NCH_BACKEND_USER / NCH_BACKEND_PASSWORD "
                 "or NP_BACKEND_USER / NP_BACKEND_PASSWORD in `.env` (loaded from the Chatbox folder), then restart Duty Bot."
+            )
+        if _log_http_backend_tag == "TBP":
+            raise RuntimeError(
+                "Missing credentials for TBP Log Third Http: set TBP_BACKEND_USER / TBP_BACKEND_PASSWORD "
+                "in `.env` (loaded from the Chatbox folder), then restart Duty Bot."
             )
         raise RuntimeError(
             "Set NP_BACKEND_USER and NP_BACKEND_PASSWORD in the environment "
@@ -2126,7 +2153,8 @@ def main(argv: list[str] | None = None) -> int:
         metavar="NAME",
         help=(
             "With --checkuser: machine label (e.g. WF8123 / DHS3178 / NCH1171) to pick backend "
-            "route — matches Duty Bot context"
+            "route — supports TBP8641 as TBP backend too; "
+            "matches Duty Bot context"
         ),
     )
     args = ap.parse_args(argv)
