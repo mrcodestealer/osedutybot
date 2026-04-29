@@ -1306,66 +1306,68 @@ def _np_parse_machine_amount_from_request_blob(blob: str) -> tuple[str | None, f
     return mid, amt
 
 
-def _np_request_has_machine_substr(machine_substr: str | None, req_blob: str, mid: str | None) -> bool:
-    """Match digits in JSON machineId, reference, URL, etc."""
+def _np_machine_id_contains_substr(machine_substr: str | None, machine_id_value: str | None) -> bool:
+    """``machineId`` JSON value must contain the log machine digits (e.g. ``2074`` in ``4182-BIGFULINK-2074``)."""
     ms = (machine_substr or "").strip()
     if not ms:
         return True
-    blob = req_blob or ""
-    if ms in blob:
-        return True
-    if mid and ms in mid:
-        return True
-    return False
+    mid = (machine_id_value or "").strip()
+    return ms in mid
 
 
-def _np_detail_matches_machine_credit(
+def _np_detail_matches_credit_and_machine_id(
     req_blob: str,
     machine_substr: str | None,
     expected_credit: float | None,
 ) -> bool:
+    """
+    Request JSON: ``machineId`` contains machine digits; ``amount`` > 0 and matches latest credit when set.
+    """
     mid, amt = _np_parse_machine_amount_from_request_blob(req_blob)
     if mid is None or amt is None:
         return False
-    if not _np_request_has_machine_substr(machine_substr, req_blob, mid):
+    if not _np_machine_id_contains_substr(machine_substr, mid):
         return False
     if expected_credit is not None:
         if amt <= 0:
             return False
-        if abs(amt - expected_credit) > 0.05:
+        if abs(amt - float(expected_credit)) > 0.05:
             return False
     return True
 
 
-def _np_detail_matches_machine_positive_amount(req_blob: str, machine_substr: str | None) -> bool:
-    """machine digits appear somewhere in request JSON text; amount > 0."""
-    mid, amt = _np_parse_machine_amount_from_request_blob(req_blob)
-    if amt is None:
-        return False
-    if not _np_request_has_machine_substr(machine_substr, req_blob, mid):
-        return False
-    return amt > 0
+def _np_detail_minute_matches_log(full_txt: str, date_iso: str, target_dt: datetime) -> bool:
+    """Detail dialog timestamp(s) fall in the same calendar minute as log credit time."""
+    hdr_dt = _np_parse_detail_header_request_time(full_txt)
+    if hdr_dt is not None and _np_same_calendar_minute(hdr_dt, target_dt):
+        return True
+    return _np_detail_dialog_any_time_same_minute(full_txt, date_iso, target_dt)
 
 
-def _np_detail_matches_machine_same_minute_loose(
-    req_blob: str,
-    machine_substr: str | None,
-    expected_credit: float | None,
-) -> bool:
-    """
-    Same-minute path when positive credit row is missing: machine substring in JSON text,
-    and amount is positive OR |amount| ≈ log credit (sign / rounding).
-    """
-    mid, amt = _np_parse_machine_amount_from_request_blob(req_blob)
-    if amt is None:
-        return False
-    if not _np_request_has_machine_substr(machine_substr, req_blob, mid):
-        return False
-    if amt > 0:
-        return True
-    if expected_credit is not None and abs(abs(amt) - float(expected_credit)) <= 1.0:
-        return True
-    return False
+def _np_indices_table_same_minute(
+    page,
+    rows,
+    ordered_indices: list[int],
+    date_iso: str,
+    time_short: str,
+) -> list[int]:
+    """Row indices whose table Request/Response time is in the same HH:MM as log credit (closest first)."""
+    target_dt = _np_combine_date_and_credit_time(date_iso, time_short)
+    cols = _np_log_third_http_header_columns(page)
+    scored: list[tuple[float, int]] = []
+    for i in ordered_indices:
+        row = rows.nth(i)
+        req_dt, resp_dt = _np_row_req_resp_times(row, date_iso, cols)
+        best_dist = float("inf")
+        hit = False
+        for dt in (req_dt, resp_dt):
+            if dt is not None and _np_same_calendar_minute(dt, target_dt):
+                hit = True
+                best_dist = min(best_dist, abs((dt - target_dt).total_seconds()))
+        if hit:
+            scored.append((best_dist, i))
+    scored.sort(key=lambda x: (x[0], x[1]))
+    return [i for _, i in scored]
 
 
 def _np_same_calendar_minute(a: datetime, b: datetime) -> bool:
@@ -1417,35 +1419,6 @@ def _np_detail_dialog_any_time_same_minute(full_text: str, date_iso: str, target
     return False
 
 
-def _np_reorder_indices_same_minute_first(
-    page,
-    rows,
-    ordered_indices: list[int],
-    date_iso: str,
-    time_short: str,
-) -> list[int]:
-    """Try table rows whose Request/Response time falls in the same HH:MM as log credit first."""
-    target_dt = _np_combine_date_and_credit_time(date_iso, time_short)
-    cols = _np_log_third_http_header_columns(page)
-    same_min: list[tuple[float, int]] = []
-    rest: list[int] = []
-    for i in ordered_indices:
-        row = rows.nth(i)
-        req_dt, resp_dt = _np_row_req_resp_times(row, date_iso, cols)
-        best_dist = float("inf")
-        hit = False
-        for dt in (req_dt, resp_dt):
-            if dt is not None and _np_same_calendar_minute(dt, target_dt):
-                hit = True
-                best_dist = min(best_dist, abs((dt - target_dt).total_seconds()))
-        if hit:
-            same_min.append((best_dist, i))
-        else:
-            rest.append(i)
-    same_min.sort(key=lambda x: (x[0], x[1]))
-    return [i for _, i in same_min] + rest
-
-
 def _np_close_np_detail_dialog(page) -> None:
     hdr = page.locator(
         ".el-dialog.details-dialog .el-dialog__headerbtn, "
@@ -1475,10 +1448,9 @@ def _np_try_screenshot_matching_detail(
     timeout_ms: int,
 ) -> bool:
     """
-    Open recharge rows until Detail matches:
-    1) Strict: machineId + amount ≈ log credit.
-    2) Same-minute fallback: Detail header Request Time same HH:MM as log credit, and
-       machineId + positive amount (NP amount may differ from log credit).
+    For each candidate row: Detail must be in the **same minute** as log credit time; Request JSON
+    ``machineId`` must contain the machine digits (e.g. ``2074``); ``amount`` must be **positive**
+    and match **latest credit** when provided.
     """
     ms = (machine_substr or "").strip()
     need = bool(ms) or expected_credit is not None
@@ -1497,26 +1469,12 @@ def _np_try_screenshot_matching_detail(
         page.wait_for_timeout(450)
         full_txt = dlg_sel.inner_text() or ""
         blob = _np_detail_request_section(full_txt)
-        if _np_detail_matches_machine_credit(blob, machine_substr, expected_credit):
+        if not _np_detail_minute_matches_log(full_txt, date_iso, target_dt):
+            _np_close_np_detail_dialog(page)
+            continue
+        if _np_detail_matches_credit_and_machine_id(blob, machine_substr, expected_credit):
             dlg_sel.screenshot(path=out_path, animations="disabled")
             return True
-        # Same calendar minute as log: machine substring anywhere in request JSON + positive amount
-        if ms and expected_credit is not None:
-            hdr_dt = _np_parse_detail_header_request_time(full_txt)
-            minute_ok = False
-            if hdr_dt and _np_same_calendar_minute(hdr_dt, target_dt):
-                minute_ok = True
-            if not minute_ok:
-                minute_ok = _np_detail_dialog_any_time_same_minute(full_txt, date_iso, target_dt)
-            if minute_ok:
-                if _np_detail_matches_machine_positive_amount(blob, machine_substr):
-                    dlg_sel.screenshot(path=out_path, animations="disabled")
-                    return True
-                if _np_detail_matches_machine_same_minute_loose(
-                    blob, machine_substr, expected_credit
-                ):
-                    dlg_sel.screenshot(path=out_path, animations="disabled")
-                    return True
         _np_close_np_detail_dialog(page)
 
     return False
@@ -1542,11 +1500,11 @@ def screenshot_np_recharge_detail(
     expected_credit: float | None = None,
 ) -> str:
     """
-    Login to NP backend, open Log Third Http Req, set date range ±NP_BACKEND_WINDOW_MINUTES
-    around last-credit time, filter UserId, Search, then open `recharge` rows in time-match order.
-    If ``machine_substr`` / ``expected_credit`` are set (from checkcredit), skip rows whose Request
-    Data has wrong ``machineId`` or non-positive / wrong ``amount`` (e.g. -1352 vs credit 1352).
-    Otherwise screenshot the best time-matched row only.
+    Login to NP backend, open Log Third Http Req, set date range ±NP_BACKEND_WINDOW_MINUTES,
+    filter UserId, Search, then scan recharge rows (prefer rows whose table time is in the **same
+    minute** as log credit). Detail screenshot only when the dialog is in that minute and Request
+    JSON has ``machineId`` containing the machine digits (e.g. ``2074``), ``amount`` > 0, and
+    ``amount`` matches latest credit when provided.
     Returns path to a temporary PNG (caller should delete).
     """
     user, pw = _np_backend_env_cred()
@@ -1660,7 +1618,8 @@ def screenshot_np_recharge_detail(
             if not ordered:
                 raise RuntimeError('No table row with Event Type "recharge" for this UserId/time window.')
 
-            ordered = _np_reorder_indices_same_minute_first(page, rows, ordered, date_iso, time_short)
+            same_min_rows = _np_indices_table_same_minute(page, rows, ordered, date_iso, time_short)
+            to_scan = same_min_rows if same_min_rows else ordered
 
             ms = (machine_substr or "").strip()
             need_detail_match = bool(ms) or expected_credit is not None
@@ -1669,7 +1628,7 @@ def screenshot_np_recharge_detail(
                 ok = _np_try_screenshot_matching_detail(
                     page,
                     rows,
-                    ordered,
+                    to_scan,
                     date_iso=date_iso,
                     time_short=time_short,
                     machine_substr=machine_substr,
@@ -1679,9 +1638,9 @@ def screenshot_np_recharge_detail(
                 )
                 if not ok:
                     raise RuntimeError(
-                        "No NP Detail row matched machine + credit, nor same-minute (HH:MM) fallback "
-                        f"(machine contains `{ms or '…'}`, log credit ≈ `{expected_credit}`). "
-                        "Try widening NP_BACKEND_WINDOW_MINUTES or check another recharge row."
+                        "No NP Detail in the same calendar minute with Request JSON "
+                        f"`machineId` containing `{ms or '…'}`, positive `amount`, and amount matching latest credit "
+                        f"`{expected_credit}`. Try widening NP_BACKEND_WINDOW_MINUTES."
                     )
             else:
                 pick_i = ordered[0]
