@@ -1103,6 +1103,148 @@ def _np_window_strings(date_iso: str, time_short: str) -> tuple[str, str]:
     return _np_format_element_datetime(lo), _np_format_element_datetime(hi)
 
 
+def _np_parse_cell_datetime(text: str, date_iso: str) -> datetime | None:
+    """Parse Request/Response time from a table cell (full datetime or time-only)."""
+    text = (text or "").strip().replace("\n", " ")
+    if not text:
+        return None
+    m = re.search(
+        r"(?P<d>\d{4}-\d{2}-\d{2})\s+(?P<t>\d{2}:\d{2}:\d{2})(?:\.(?P<ms>\d{1,6}))?",
+        text,
+    )
+    if m:
+        d = m.group("d")
+        t = m.group("t")
+        ms = (m.group("ms") or "").strip()
+        base = datetime.strptime(f"{d} {t}", "%Y-%m-%d %H:%M:%S")
+        if ms:
+            ms3 = (ms + "000")[:3]
+            micro = int(ms3) * 1000
+            return base.replace(microsecond=micro)
+        return base
+    m = re.search(r"\b(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\b", text)
+    if m:
+        return _np_combine_date_and_credit_time(date_iso, m.group(1))
+    return None
+
+
+def _np_log_third_http_header_columns(page) -> dict[str, int]:
+    """Map header label → column index for Log Third Http Req table."""
+    out: dict[str, int] = {}
+    ths = page.locator(".el-table__header-wrapper thead tr th")
+    if ths.count() == 0:
+        ths = page.locator(".el-table__header thead tr th")
+    n = ths.count()
+    for i in range(n):
+        raw = (ths.nth(i).inner_text() or "").strip().lower()
+        h = " ".join(raw.split())
+        if "request" in h and "time" in h:
+            out["request"] = i
+        elif "response" in h and "time" in h:
+            out["response"] = i
+        elif "event" in h and "type" in h:
+            out["event"] = i
+    return out
+
+
+def _np_row_req_resp_times(
+    row,
+    date_iso: str,
+    cols: dict[str, int],
+) -> tuple[datetime | None, datetime | None]:
+    """Read request/response datetimes from a data row; fallback: first two times in row."""
+    tds = row.locator("td")
+    n = tds.count()
+    req_i = cols.get("request")
+    resp_i = cols.get("response")
+    req_dt: datetime | None = None
+    resp_dt: datetime | None = None
+    if req_i is not None and req_i < n:
+        req_dt = _np_parse_cell_datetime((tds.nth(req_i).inner_text() or ""), date_iso)
+    if resp_i is not None and resp_i < n:
+        resp_dt = _np_parse_cell_datetime((tds.nth(resp_i).inner_text() or ""), date_iso)
+    if req_dt is not None or resp_dt is not None:
+        return req_dt, resp_dt
+    found: list[datetime] = []
+    for j in range(n):
+        dt = _np_parse_cell_datetime((tds.nth(j).inner_text() or ""), date_iso)
+        if dt is not None:
+            found.append(dt)
+    if len(found) >= 2:
+        return found[0], found[1]
+    if len(found) == 1:
+        return found[0], None
+    return None, None
+
+
+def _np_row_time_distance_to_target(
+    req_dt: datetime | None,
+    resp_dt: datetime | None,
+    target_dt: datetime,
+) -> float | None:
+    """Smallest |dt - target| among request and response; None if no times."""
+    deltas: list[float] = []
+    if req_dt is not None:
+        deltas.append(abs((req_dt - target_dt).total_seconds()))
+    if resp_dt is not None:
+        deltas.append(abs((resp_dt - target_dt).total_seconds()))
+    if not deltas:
+        return None
+    return min(deltas)
+
+
+def _np_pick_recharge_row_for_credit_time(
+    page,
+    rows,
+    n: int,
+    date_iso: str,
+    time_short: str,
+) -> int | None:
+    """
+    Among Event Type == recharge rows, pick the one whose Request Time or Response Time
+    is closest to the log credit time (match 23:55:12… first).
+    """
+    cols = _np_log_third_http_header_columns(page)
+    ev_i = cols.get("event", 2)
+    target_dt = _np_combine_date_and_credit_time(date_iso, time_short)
+
+    best_idx: int | None = None
+    best_dist: float | None = None
+
+    for i in range(n):
+        row = rows.nth(i)
+        tds = row.locator("td")
+        tc = tds.count()
+        if tc == 0:
+            continue
+        is_recharge = False
+        if tc > ev_i:
+            et_txt = (tds.nth(ev_i).inner_text() or "").strip().lower()
+            is_recharge = et_txt == "recharge"
+        if not is_recharge:
+            for j in range(tc):
+                if (tds.nth(j).inner_text() or "").strip().lower() == "recharge":
+                    is_recharge = True
+                    break
+        if not is_recharge:
+            continue
+
+        req_dt, resp_dt = _np_row_req_resp_times(row, date_iso, cols)
+        dist = _np_row_time_distance_to_target(req_dt, resp_dt, target_dt)
+
+        if dist is None:
+            if best_idx is None:
+                best_idx = i
+                best_dist = None
+            continue
+
+        if best_dist is None or dist < best_dist:
+            best_dist = dist
+            best_idx = i
+
+    return best_idx
+
+
 def _np_backend_playwright_headless() -> bool:
     if os.environ.get("NP_BACKEND_HEADED", "").strip().lower() in ("1", "true", "yes"):
         return False
@@ -1122,7 +1264,8 @@ def screenshot_np_recharge_detail(
 ) -> str:
     """
     Login to NP backend, open Log Third Http Req, set date range ±NP_BACKEND_WINDOW_MINUTES
-    around last-credit time, filter UserId, Search, first Event Type 'recharge' row → Detail screenshot.
+    around last-credit time, filter UserId, Search, pick Event Type 'recharge' row whose Request Time
+    or Response Time is closest to the log credit time → Detail screenshot.
     Returns path to a temporary PNG (caller should delete).
     """
     user, pw = _np_backend_env_cred()
@@ -1232,22 +1375,14 @@ def screenshot_np_recharge_detail(
             page.locator(".el-table__body tbody").wait_for(state="visible", timeout=timeout_ms)
             rows = page.locator(".el-table__body tr.el-table__row")
             n = rows.count()
-            picked = False
-            for i in range(n):
-                row = rows.nth(i)
-                et_cell = row.locator("td").nth(2)
-                if not et_cell.count():
-                    continue
-                txt = (et_cell.inner_text() or "").strip().lower()
-                if txt == "recharge":
-                    link = row.get_by_text("Show Details", exact=False)
-                    link.scroll_into_view_if_needed()
-                    link.click()
-                    picked = True
-                    break
-
-            if not picked:
+            pick_i = _np_pick_recharge_row_for_credit_time(page, rows, n, date_iso, time_short)
+            if pick_i is None:
                 raise RuntimeError('No table row with Event Type "recharge" for this UserId/time window.')
+
+            row = rows.nth(pick_i)
+            link = row.get_by_text("Show Details", exact=False)
+            link.scroll_into_view_if_needed()
+            link.click()
 
             dlg = page.locator(".el-dialog.details-dialog, div[role='dialog'].details-dialog").first
             dlg.wait_for(state="visible", timeout=timeout_ms)

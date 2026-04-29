@@ -332,22 +332,15 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
                 "",
                 f"Machine: `{md}`  ·  Date: `{ds}`",
                 "",
-                "Reply with **1**, **2**, **3**, or **4** only (same order as card 1 = latest 2 in log, card 2 = latest 2 with error):",
+                "Reply with **1**, **2**, **3**, or **4** only:",
                 "",
             ]
             if choices:
-                labels = (
-                    "first card, latest in log — 1st player",
-                    "first card, latest in log — 2nd player",
-                    "second card, with error — 1st player",
-                    "second card, with error — 2nd player",
-                )
                 for i, ch in enumerate(choices):
-                    lab = labels[i] if i < len(labels) else ""
                     uid = ch.get("user_id", "")
                     cr = ch.get("credit", "n/a")
                     ts = ch.get("time_short") or "n/a"
-                    guide_lines.append(f"{i + 1}) User ID `{uid}` — last credit `{cr}` @ `{ts}`  _({lab})_")
+                    guide_lines.append(f"{i + 1}) User ID `{uid}` — last credit `{cr}` @ `{ts}`")
             else:
                 guide_lines.append("_No players in this run — use `/npthirdhttp <player_id> YYYY-MM-DD HH:MM:SS.mmm` if needed._")
             guide_lines.extend(
