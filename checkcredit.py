@@ -15,6 +15,10 @@ Env (optional):
     https://oss-osm-log.osmplay.com/MINIPC/{machine}/logic/{date}.log
   OSS_MACHINE_FOLDER_TEMPLATE — when --finderror is digits-only (default NWR{n}, e.g. 2074 → NWR2074)
   CHECKCREDIT_USE_OSS — set to 1/true so callers (e.g. main.py bot) use OSS without --oss
+  CHECKCREDIT_HEADLESS=1 — force headless Chromium (for Linux servers without X11)
+  CHECKCREDIT_HEADED=1 — force headed window (needs DISPLAY; macOS/Windows OK)
+
+  On Linux, if $DISPLAY is unset, LogNavigator mode uses headless automatically.
 
 Requires: playwright (+ chromium) for LogNavigator; requests for OSS.
 """
@@ -23,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 import re
 import sys
 from datetime import date, datetime
@@ -40,6 +45,20 @@ DEFAULT_OSS_TEMPLATE = os.environ.get(
 
 def _env_truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _playwright_headless() -> bool:
+    """
+    Headed Chromium needs a display on Linux. Servers (no $DISPLAY) must use headless.
+    CHECKCREDIT_HEADLESS=1 → always headless; CHECKCREDIT_HEADED=1 → always headed.
+    """
+    if _env_truthy("CHECKCREDIT_HEADLESS"):
+        return True
+    if _env_truthy("CHECKCREDIT_HEADED"):
+        return False
+    if sys.platform == "linux" and not (os.environ.get("DISPLAY") or "").strip():
+        return True
+    return False
 
 
 def resolve_oss_machine_folder(machine_query: str) -> str:
@@ -493,7 +512,7 @@ def run_finderror(
     """
     source:
       - \"oss\" — GET log from OSM_LOG_OSS_TEMPLATE (no browser).
-      - \"navigator\" — LogNavigator UI + tail (headed Chromium).
+      - \"navigator\" — LogNavigator UI + tail (Chromium; headless on Linux without DISPLAY).
     """
     td = target_date or date.today()
     parsed: list[dict[str, Any]] = []
@@ -505,8 +524,9 @@ def run_finderror(
     else:
         from playwright.sync_api import sync_playwright
 
+        headless = _playwright_headless()
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=False)
+            browser = p.chromium.launch(headless=headless)
             try:
                 context = browser.new_context(
                     ignore_https_errors=True,
