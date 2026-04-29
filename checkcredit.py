@@ -411,6 +411,8 @@ def parse_user_blocks_full(log_text: str) -> list[dict[str, Any]]:
     """
     Split by extra1/extra2/extra3 userid markers; lines until the next marker belong to that player.
     Every block included (errors may be empty). Error lines carry line_idx for ordering.
+    Multi-line log records: timestamp on the first line is carried to following lines (no leading time)
+    so reduce_num / successJson on `extra:` continuation lines get the correct time.
     """
     raw = log_text.splitlines()
     blocks: list[tuple[str, list[tuple[int, str]]]] = []
@@ -437,23 +439,29 @@ def parse_user_blocks_full(log_text: str) -> list[dict[str, Any]]:
         best_coin: dict[str, Any] | None = None
         best_reduce: dict[str, Any] | None = None
         block_max_line = max((ln for ln, _ in blines), default=-1)
+        rolling_ts = ""
         for line_idx, line in blines:
+            tp = _line_time_prefix(line)
+            if tp:
+                rolling_ts = tp
             sc = _parse_success_cur_coin(line)
             if sc:
                 val, tshort = sc
+                eff_ts = (tshort or rolling_ts).strip()
                 best_coin = {
                     "line_idx": line_idx,
                     "value": val,
-                    "time_short": tshort,
+                    "time_short": eff_ts,
                     "source": "cur_coin",
                 }
             rn = _parse_reduce_num_credit(line)
             if rn:
                 val, tshort = rn
+                eff_ts = (tshort or rolling_ts).strip()
                 best_reduce = {
                     "line_idx": line_idx,
                     "value": val,
-                    "time_short": tshort,
+                    "time_short": eff_ts,
                     "source": "reduce_num",
                 }
             em = err_re.search(line)
@@ -466,7 +474,7 @@ def parse_user_blocks_full(log_text: str) -> list[dict[str, Any]]:
             if ec <= 0:
                 continue
             tm = re.match(r"^(\d{2}:\d{2}:\d{2}\.\d{3})", line)
-            time_part = tm.group(1) if tm else ""
+            time_part = tm.group(1) if tm else rolling_ts
             json_like = line
             if "|" in line:
                 parts = line.split("|", 2)
