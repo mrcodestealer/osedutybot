@@ -453,10 +453,16 @@ def parse_user_blocks_for_errors(log_text: str) -> list[dict[str, Any]]:
     return out
 
 
-def format_finderror_report_terminal(payload: list[dict[str, Any]]) -> str:
-    """Plain terminal output; merge rows that share the same User ID."""
+def _error_line_time_key(err: dict[str, Any]) -> str:
+    """Sort key HH:MM:SS.mmm — missing sorts as earliest."""
+    t = (err.get("time") or "").strip()
+    return t if t else "00:00:00.000"
+
+
+def merge_finderror_by_user(payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge blocks by user_id; error lines per user sorted by time descending (latest → earlier)."""
     if not payload:
-        return "✅ No error > 0 found in scanned user blocks (extra1: userid).\n"
+        return []
 
     order: list[str] = []
     by_uid: dict[str, list[dict[str, Any]]] = {}
@@ -473,30 +479,101 @@ def format_finderror_report_terminal(payload: list[dict[str, Any]]) -> str:
             if old is None or lc["line_idx"] > old["line_idx"]:
                 credit_by_uid[uid] = lc
 
-    blocks: list[str] = []
+    merged: list[dict[str, Any]] = []
     for uid in order:
-        errs = by_uid[uid]
+        errs = by_uid[uid][:]
+        errs.sort(key=_error_line_time_key, reverse=True)
+        row: dict[str, Any] = {"user_id": uid, "errors": errs}
+        if uid in credit_by_uid:
+            row["latest_credit"] = credit_by_uid[uid]
+        merged.append(row)
+    return merged
+
+
+def format_finderror_terminal_from_merged(merged: list[dict[str, Any]]) -> str:
+    """Plain terminal text from merged rows (same order as card)."""
+    if not merged:
+        return "✅ No error > 0 found in scanned user blocks (extra1: userid).\n"
+
+    blocks: list[str] = []
+    for row in merged:
+        uid = row["user_id"]
+        errs = row["errors"]
         n = len(errs)
-        lines_body = "\n".join(
-            e.get("full_line") or e.get("snippet") or "" for e in errs
-        )
+        lines_body = "\n".join(e.get("full_line") or e.get("snippet") or "" for e in errs)
         lc_line = ""
-        cr = credit_by_uid.get(uid)
+        cr = row.get("latest_credit")
         if cr:
             ts = cr.get("time_short") or ""
             val = cr["value"]
-            if ts:
-                lc_line = f"💰 Latest credit : {val} at {ts}\n"
-            else:
-                lc_line = f"💰 Latest credit : {val}\n"
+            lc_line = (
+                f"💰 Latest credit : {val} at {ts}\n"
+                if ts
+                else f"💰 Latest credit : {val}\n"
+            )
         blocks.append(
             f"🔔 User ID : {uid}\n"
             f"⚠️ Error detected count : {n}\n"
             f"{lc_line}"
-            f"📋 Error found List :\n"
+            f"📋 Error found List (latest → earlier) :\n"
             f"{lines_body}"
         )
     return "\n\n".join(blocks) + "\n"
+
+
+def build_finderror_lark_card(merged: list[dict[str, Any]]) -> dict[str, Any]:
+    """Lark interactive card: one block per player, hr between players; errors latest → earlier."""
+    elements: list[dict[str, Any]] = []
+    if not merged:
+        elements.append(
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": "✅ No `error` > 0 found in scanned user blocks (`extra1: userid`).",
+                },
+            }
+        )
+    else:
+        n_users = len(merged)
+        for i, row in enumerate(merged):
+            uid = row["user_id"]
+            errs = row["errors"]
+            n = len(errs)
+            lines_body = "\n".join(e.get("full_line") or e.get("snippet") or "" for e in errs)
+            lc_md = ""
+            cr = row.get("latest_credit")
+            if cr:
+                ts = cr.get("time_short") or ""
+                val = cr["value"]
+                lc_md = (
+                    f"💰 **Latest credit :** `{val}` **at** `{ts}`\n"
+                    if ts
+                    else f"💰 **Latest credit :** `{val}`\n"
+                )
+            body = (
+                f"🔔 **User ID :** `{uid}`\n"
+                f"⚠️ **Error detected count :** {n}\n"
+                f"{lc_md}"
+                f"📋 **Error found List**（latest → earlier）\n```\n{lines_body}\n```"
+            )
+            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": body}})
+            if i < n_users - 1:
+                elements.append({"tag": "hr"})
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "orange",
+            "title": {"tag": "plain_text", "content": "checkcredit — find error"},
+        },
+        "elements": elements,
+    }
+
+
+def format_finderror_report_terminal(payload: list[dict[str, Any]]) -> str:
+    """Plain terminal output (merge + sort); kept for callers that only need text."""
+    return format_finderror_terminal_from_merged(merge_finderror_by_user(payload))
 
 
 def run_finderror(
@@ -558,9 +635,13 @@ def run_finderror(
                 browser.close()
 
     header = "\n".join(text_parts)
-    report = format_finderror_report_terminal(parsed)
+    merged = merge_finderror_by_user(parsed)
+    report = format_finderror_terminal_from_merged(merged)
     plain = f"{header}\n\n{report}" if header else report
-    return {"text": plain}
+    return {
+        "text": plain,
+        "lark_card": build_finderror_lark_card(merged),
+    }
 
 
 def main(argv: list[str] | None = None) -> int:

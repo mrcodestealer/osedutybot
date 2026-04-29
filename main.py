@@ -297,7 +297,14 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
             source="oss" if use_oss else "navigator",
         )
         text = (out.get("text") or "").strip()
-        send_message(chat_id, text if text else "(no output)")
+        card = out.get("lark_card")
+        if isinstance(card, dict):
+            card_json = json.dumps(card)
+            resp = send_message(chat_id, card_json, msg_type="interactive")
+            if resp.get("code") != 0:
+                send_message(chat_id, text if text else "(no output)")
+        else:
+            send_message(chat_id, text if text else "(no output)")
     except Exception as e:
         send_message(chat_id, f"❌ checkcredit failed: {e}")
         print(f"[checkcredit] error: {e!r}")
