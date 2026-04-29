@@ -586,53 +586,156 @@ def _row_display_times(row: dict[str, Any]) -> tuple[str, str]:
     return ct, et
 
 
-def build_compare_lark_card(
+def _player_detail_block(
+    row: dict[str, Any],
+    machine_display: str,
+    *,
+    error_log_mode: str,
+) -> str:
+    """error_log_mode: 'if_any' only append log when errors exist; 'always' always show log section. Lark markdown."""
+    ct, et = _row_display_times(row)
+    uid = row["user_id"]
+    cr = row.get("latest_credit")
+    if cr:
+        ts = (cr.get("time_short") or "").strip()
+        val = cr["value"]
+        credit_s = f"`{val}` @ `{ts}`" if ts else f"`{val}`"
+    else:
+        credit_s = "*(none)*"
+    time_s = ct or et or "*(n/a)*"
+    errs = row.get("errors") or []
+    lines_body = "\n".join(e.get("full_line") or e.get("snippet") or "" for e in errs)
+    log_md = _truncate_log(lines_body) if lines_body else ""
+
+    parts = [
+        "---",
+        f"🕐 **Time:** `{time_s}`",
+        f"🖥 **Machine:** `{machine_display}`",
+        f"🆔 **User ID:** `{uid}`",
+        f"💰 **Last credit:** {credit_s}",
+    ]
+    if error_log_mode == "always":
+        inner = log_md if log_md else "(no error lines)"
+        parts.append("📋 **Error log:**")
+        parts.append(f"```\n{inner}\n```")
+    elif log_md:
+        parts.append("📋 **Error log:**")
+        parts.append(f"```\n{log_md}\n```")
+    return "\n".join(parts)
+
+
+def build_latest_two_overall_lark_card(
+    rows: list[dict[str, Any]],
+    *,
+    machine_display: str,
+    target_date: date,
+) -> dict[str, Any]:
+    """Latest 2 players by log order (may have zero errors): time, uid, last credit, error log if any."""
+    dstr = target_date.isoformat()
+    elements: list[dict[str, Any]] = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"**Machine:** `{machine_display}`  ·  **Date:** `{dstr}`",
+            },
+        }
+    ]
+    slice_rows = rows[:2]
+    if not slice_rows:
+        elements.append(
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": "No user blocks found (`extra1: userid`).",
+                },
+            }
+        )
+    else:
+        body = "\n".join(_player_detail_block(r, machine_display, error_log_mode="if_any") for r in slice_rows)
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": body}})
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "wathet",
+            "title": {"tag": "plain_text", "content": "checkcredit — latest 2 players (log order, any)"},
+        },
+        "elements": elements,
+    }
+
+
+def build_latest_two_error_lark_card(
+    rows: list[dict[str, Any]],
+    *,
+    machine_display: str,
+    target_date: date,
+) -> dict[str, Any]:
+    """Latest 2 players that have error > 0: time, uid, last credit, error log."""
+    dstr = target_date.isoformat()
+    elements: list[dict[str, Any]] = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"**Machine:** `{machine_display}`  ·  **Date:** `{dstr}`",
+            },
+        }
+    ]
+    slice_rows = rows[:2]
+    if not slice_rows:
+        elements.append(
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": "No `error` > 0 in scanned user blocks.",
+                },
+            }
+        )
+    else:
+        body = "\n".join(_player_detail_block(r, machine_display, error_log_mode="always") for r in slice_rows)
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": body}})
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "orange",
+            "title": {"tag": "plain_text", "content": "checkcredit — latest 2 players (with error)"},
+        },
+        "elements": elements,
+    }
+
+
+def build_same_latest_players_card(
     *,
     machine_display: str,
     target_date: date,
     latest_err_uid: str | None,
     latest_any_uid: str | None,
     same_uid: bool,
-    top2_overall: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Compare: last player with any error vs last player in log (any activity)."""
+    """Whether the last player in the log and the last player with an error are the same uid."""
     dstr = target_date.isoformat()
-    le = f"`{latest_err_uid}`" if latest_err_uid else "*(none)*"
-    la = f"`{latest_any_uid}`" if latest_any_uid else "*(none)*"
+    le = latest_err_uid or "*(none)*"
+    la = latest_any_uid or "*(none)*"
     if not latest_err_uid:
-        same_md = (
-            "ℹ️ **No error > 0 in log** — “latest with error” is N/A; see latest-in-log only."
-        )
+        same_line = 'No error > 0 in log — cannot compare "last with error" to "last in log".'
     elif same_uid and latest_err_uid and latest_any_uid:
-        same_md = (
-            "✅ **Same player ID:** latest error line and latest log activity refer to this uid."
-        )
+        same_line = "Same player: last activity in log and last error line refer to this user ID."
     else:
-        same_md = "ℹ️ **Different:** latest error player ≠ latest-in-log player."
-    lines_top2: list[str] = []
-    for r in top2_overall[:2]:
-        uid = r["user_id"]
-        cr = r.get("latest_credit")
-        if cr:
-            ts = (cr.get("time_short") or "").strip()
-            val = cr["value"]
-            lines_top2.append(f"- `{uid}` → credit `{val}` @ `{ts}`" if ts else f"- `{uid}` → credit `{val}`")
-        else:
-            lines_top2.append(f"- `{uid}` → *(no credit line)*")
-    top2_md = "\n".join(lines_top2) if lines_top2 else "*(no players)*"
+        same_line = "Different: last player in log ≠ last player with error."
     body = (
-        f"🖥 **Machine:** `{machine_display}`\n"
-        f"📅 **Date:** `{dstr}`\n\n"
-        f"📌 **Latest 2 players in log (by line order) + latest credit:**\n{top2_md}\n\n"
-        f"🔴 **Latest player WITH error:** {le}\n"
-        f"📍 **Latest player in log (any activity):** {la}\n\n"
-        f"{same_md}"
+        f"**Machine:** `{machine_display}`\n"
+        f"**Date:** `{dstr}`\n\n"
+        f"**Last player with error — User ID:** `{le}`\n"
+        f"**Last player in log (any) — User ID:** `{la}`\n\n"
+        f"{same_line}"
     )
     return {
         "config": {"wide_screen_mode": True},
         "header": {
             "template": "blue",
-            "title": {"tag": "plain_text", "content": "checkcredit — latest error vs latest in log"},
+            "title": {"tag": "plain_text", "content": "checkcredit — same last player?"},
         },
         "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": body}}],
     }
@@ -643,60 +746,6 @@ def _truncate_log(text: str, limit: int = 1800) -> str:
     if len(t) <= limit:
         return t
     return t[: limit - 20] + "\n… (truncated)"
-
-
-def build_candidates_lark_card(
-    merged: list[dict[str, Any]],
-    candidate_uids: list[str],
-    *,
-    machine_display: str,
-    target_date: date,
-) -> dict[str, Any]:
-    """Union candidates: time, machine, uid, credit, error count, logs."""
-    by_uid = {r["user_id"]: r for r in merged}
-    dstr = target_date.isoformat()
-    elements: list[dict[str, Any]] = [
-        {
-            "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": (
-                    f"🖥 **Machine:** `{machine_display}`  ·  📅 **Date:** `{dstr}`\n"
-                    f"**Possible players to inspect** (from latest-2 error ∪ latest-2 in log)"
-                ),
-            },
-        }
-    ]
-    for uid in candidate_uids:
-        row = by_uid.get(uid)
-        if not row:
-            continue
-        ct, et = _row_display_times(row)
-        errs = row.get("errors") or []
-        nerr = len(errs)
-        cr = row.get("latest_credit")
-        credit_s = f"`{cr['value']}` @ `{ct}`" if cr else "*(no successJson credit)*"
-        time_s = ct or et or "*(n/a)*"
-        lines_body = "\n".join(e.get("full_line") or e.get("snippet") or "" for e in errs)
-        log_md = _truncate_log(lines_body) if lines_body else "*(no errors)*"
-        block = (
-            f"---\n"
-            f"🕐 **Time (credit or error):** {time_s}\n"
-            f"🖥 **Machine:** `{machine_display}`\n"
-            f"🆔 **Player ID:** `{uid}`\n"
-            f"💰 **Latest credit:** {credit_s}\n"
-            f"⚠️ **Error count:** {nerr}\n"
-            f"📋 **Error log:**\n```\n{log_md}\n```"
-        )
-        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": block}})
-    return {
-        "config": {"wide_screen_mode": True},
-        "header": {
-            "template": "wathet",
-            "title": {"tag": "plain_text", "content": "checkcredit — investigation candidates"},
-        },
-        "elements": elements,
-    }
 
 
 def format_finderror_terminal_from_merged(merged: list[dict[str, Any]]) -> str:
@@ -730,58 +779,63 @@ def format_finderror_terminal_from_merged(merged: list[dict[str, Any]]) -> str:
     return "\n\n".join(blocks) + "\n"
 
 
-def build_finderror_lark_card(
-    merged: list[dict[str, Any]],
+def _plain_player_block(
+    row: dict[str, Any],
+    machine_display: str,
     *,
-    title: str = "checkcredit — find error",
-) -> dict[str, Any]:
-    """Lark interactive card: one block per player; hr between players."""
-    elements: list[dict[str, Any]] = []
-    if not merged:
-        elements.append(
-            {
-                "tag": "div",
-                "text": {
-                    "tag": "lark_md",
-                    "content": "✅ No `error` > 0 found in scanned user blocks (`extra1: userid`).",
-                },
-            }
-        )
+    error_log_mode: str,
+) -> str:
+    ct, et = _row_display_times(row)
+    uid = row["user_id"]
+    cr = row.get("latest_credit")
+    if cr:
+        ts = (cr.get("time_short") or "").strip()
+        val = cr["value"]
+        credit_s = f"{val} @ {ts}" if ts else str(val)
     else:
-        n_users = len(merged)
-        for i, row in enumerate(merged):
-            uid = row["user_id"]
-            errs = row["errors"]
-            n = len(errs)
-            lines_body = "\n".join(e.get("full_line") or e.get("snippet") or "" for e in errs)
-            lc_md = ""
-            cr = row.get("latest_credit")
-            if cr:
-                ts = cr.get("time_short") or ""
-                val = cr["value"]
-                lc_md = (
-                    f"💰 **Latest credit :** `{val}` **at** `{ts}`\n"
-                    if ts
-                    else f"💰 **Latest credit :** `{val}`\n"
-                )
-            body = (
-                f"🔔 **User ID :** `{uid}`\n"
-                f"⚠️ **Error detected count :** {n}\n"
-                f"{lc_md}"
-                f"📋 **Error found List**\n```\n{lines_body}\n```"
-            )
-            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": body}})
-            if i < n_users - 1:
-                elements.append({"tag": "hr"})
+        credit_s = "(none)"
+    time_s = ct or et or "(n/a)"
+    errs = row.get("errors") or []
+    lines_body = "\n".join(e.get("full_line") or e.get("snippet") or "" for e in errs)
+    lines = [
+        f"Time: {time_s}",
+        f"Machine: {machine_display}",
+        f"User ID: {uid}",
+        f"Last credit: {credit_s}",
+    ]
+    if error_log_mode == "always":
+        lines.append("Error log:")
+        lines.append(lines_body if lines_body else "(no error lines)")
+    elif lines_body.strip():
+        lines.append("Error log:")
+        lines.append(lines_body)
+    return "\n".join(lines)
 
-    return {
-        "config": {"wide_screen_mode": True},
-        "header": {
-            "template": "orange",
-            "title": {"tag": "plain_text", "content": title},
-        },
-        "elements": elements,
-    }
+
+def format_dual_terminal_report(
+    top2_any: list[dict[str, Any]],
+    top2_err: list[dict[str, Any]],
+    machine_display: str,
+    target_date: date,
+) -> str:
+    """Plain text mirroring card order: latest-2 any, then latest-2 with error."""
+    dstr = target_date.isoformat()
+    sec1 = (
+        "\n\n".join(_plain_player_block(r, machine_display, error_log_mode="if_any") for r in top2_any[:2])
+        if top2_any
+        else "(no players)"
+    )
+    sec2 = (
+        "\n\n".join(_plain_player_block(r, machine_display, error_log_mode="always") for r in top2_err[:2])
+        if top2_err
+        else "(no players with error)"
+    )
+    return (
+        f"--- Latest 2 players (log order, any) — Machine: {machine_display} Date: {dstr} ---\n"
+        f"{sec1}\n\n"
+        f"--- Latest 2 players (with error) ---\n"
+        f"{sec2}\n"
+    )
 
 
 def format_finderror_report_terminal(payload: list[dict[str, Any]]) -> str:
@@ -858,40 +912,26 @@ def run_finderror(
     la_uid, _la_line = pick_latest_any_uid(merged)
     same_uid = bool(le_uid and la_uid and le_uid == la_uid)
 
-    cand_uids: list[str] = []
-    seen: set[str] = set()
-    for r in top2_err:
-        u = r["user_id"]
-        if u not in seen:
-            seen.add(u)
-            cand_uids.append(u)
-    for r in top2_any:
-        u = r["user_id"]
-        if u not in seen:
-            seen.add(u)
-            cand_uids.append(u)
-
-    report = format_finderror_terminal_from_merged(top2_err)
+    report = format_dual_terminal_report(top2_any, top2_err, machine_display, td)
     plain = f"{header}\n\n{report}" if header else report
     return {
         "text": plain,
-        "lark_card": build_finderror_lark_card(
-            top2_err,
-            title="checkcredit — errors (latest 2 players with error)",
+        "lark_card": build_latest_two_overall_lark_card(
+            top2_any,
+            machine_display=machine_display,
+            target_date=td,
         ),
-        "lark_card_summary": build_compare_lark_card(
+        "lark_card_summary": build_latest_two_error_lark_card(
+            top2_err,
+            machine_display=machine_display,
+            target_date=td,
+        ),
+        "lark_card_candidates": build_same_latest_players_card(
             machine_display=machine_display,
             target_date=td,
             latest_err_uid=le_uid,
             latest_any_uid=la_uid,
             same_uid=same_uid,
-            top2_overall=top2_any,
-        ),
-        "lark_card_candidates": build_candidates_lark_card(
-            merged,
-            cand_uids,
-            machine_display=machine_display,
-            target_date=td,
         ),
     }
 
