@@ -1,13 +1,19 @@
 import json
 import re
+import sys
 import threading
 import requests
 import time
 import os
 from dotenv import load_dotenv
 
+# Resolve imports from this repo regardless of process cwd (systemd, gunicorn, etc.)
+_CHBOX_DIR = os.path.dirname(os.path.abspath(__file__))
+if _CHBOX_DIR not in sys.path:
+    sys.path.insert(0, _CHBOX_DIR)
+
 # Load .env from the project directory (works under systemd when CWD is not the app folder)
-load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+load_dotenv(os.path.join(_CHBOX_DIR, ".env"))
 
 from flask import Flask, request, jsonify
 from datetime import datetime, timedelta
@@ -353,9 +359,17 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
 def run_np_third_http_job(chat_id: str, argv: list[str]):
     """Background: NP Log Third Http Req → first `recharge` row → Detail dialog screenshot."""
     try:
-        from np_backend_third_http import screenshot_np_recharge_detail
+        import checkcredit
+
+        screenshot_np_recharge_detail = checkcredit.screenshot_np_recharge_detail
     except ImportError as e:
-        send_message(chat_id, f"❌ np_backend_third_http not available: {e}")
+        send_message(chat_id, f"❌ Cannot load checkcredit module: {e}")
+        return
+    except AttributeError:
+        send_message(
+            chat_id,
+            "❌ checkcredit.screenshot_np_recharge_detail missing — deploy the latest `checkcredit.py`.",
+        )
         return
     if not argv:
         send_message(

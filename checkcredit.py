@@ -20,6 +20,10 @@ Env (optional):
 
   On Linux, if $DISPLAY is unset, LogNavigator mode uses headless automatically.
 
+  NP backend (screenshot_np_recharge_detail — Duty Bot /npthirdhttp):
+  NP_BACKEND_BASE (default https://backend-np.osmplay.com), NP_BACKEND_USER, NP_BACKEND_PASSWORD
+  NP_BACKEND_WINDOW_MINUTES (default 10), NP_BACKEND_HEADLESS / NP_BACKEND_HEADED
+
 Requires: playwright (+ chromium) for LogNavigator; requests for OSS.
 """
 
@@ -29,7 +33,8 @@ import argparse
 import os
 import re
 import sys
-from datetime import date, datetime
+import tempfile
+from datetime import date, datetime, timedelta
 from typing import Any
 
 DEFAULT_BASE = os.environ.get("LOG_NAVIGATOR_BASE", "https://lognavigator.cliveslot.com").rstrip("/")
@@ -1034,6 +1039,170 @@ def run_finderror(
             same_uid=same_uid,
         ),
     }
+
+
+# ----- NP backend — Log Third Http Req (Duty Bot /npthirdhttp) -----
+NP_BACKEND_DEFAULT_BASE = os.environ.get("NP_BACKEND_BASE", "https://backend-np.osmplay.com").rstrip("/")
+NP_BACKEND_WINDOW_MINUTES = int(os.environ.get("NP_BACKEND_WINDOW_MINUTES", "10"))
+
+
+def _np_backend_env_cred() -> tuple[str, str]:
+    u = (os.environ.get("NP_BACKEND_USER") or "").strip()
+    p = (os.environ.get("NP_BACKEND_PASSWORD") or "").strip()
+    return u, p
+
+
+def _np_combine_date_and_credit_time(date_iso: str, time_short: str) -> datetime:
+    """date_iso YYYY-MM-DD; time_short like 23:55:12.092 or 23:55:12."""
+    t = (time_short or "").strip()
+    if not t:
+        raise ValueError("empty credit time")
+    parts = t.split(".")
+    hms = parts[0]
+    micro = 0
+    if len(parts) > 1 and re.match(r"^\d+", parts[1]):
+        ms = parts[1][:3].ljust(3, "0")
+        micro = int(ms) * 1000  # milliseconds → microseconds
+    dt_s = f"{date_iso} {hms}"
+    d = datetime.strptime(dt_s, "%Y-%m-%d %H:%M:%S")
+    return d.replace(microsecond=micro)
+
+
+def _np_format_element_datetime(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _np_window_strings(date_iso: str, time_short: str) -> tuple[str, str]:
+    mid = _np_combine_date_and_credit_time(date_iso, time_short)
+    lo = mid - timedelta(minutes=NP_BACKEND_WINDOW_MINUTES)
+    hi = mid + timedelta(minutes=NP_BACKEND_WINDOW_MINUTES)
+    return _np_format_element_datetime(lo), _np_format_element_datetime(hi)
+
+
+def _np_backend_playwright_headless() -> bool:
+    if os.environ.get("NP_BACKEND_HEADED", "").strip().lower() in ("1", "true", "yes"):
+        return False
+    if os.environ.get("NP_BACKEND_HEADLESS", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    if sys.platform == "linux" and not (os.environ.get("DISPLAY") or "").strip():
+        return True
+    return False
+
+
+def screenshot_np_recharge_detail(
+    player_id: str,
+    date_iso: str,
+    time_short: str,
+    *,
+    timeout_ms: int = 120_000,
+) -> str:
+    """
+    Login to NP backend, open Log Third Http Req, set date range ±NP_BACKEND_WINDOW_MINUTES
+    around last-credit time, filter UserId, Search, first Event Type 'recharge' row → Detail screenshot.
+    Returns path to a temporary PNG (caller should delete).
+    """
+    user, pw = _np_backend_env_cred()
+    if not user or not pw:
+        raise RuntimeError("Set NP_BACKEND_USER and NP_BACKEND_PASSWORD in the environment.")
+
+    start_s, end_s = _np_window_strings(date_iso, time_short)
+    base = NP_BACKEND_DEFAULT_BASE
+    login_url = f"{base}/login?redirect=%2Flog%2FlogThirdHttpReq"
+    log_url = f"{base}/log/logThirdHttpReq"
+
+    from playwright.sync_api import sync_playwright
+
+    headless = _np_backend_playwright_headless()
+    out_fd, out_path = tempfile.mkstemp(suffix=".png", prefix="np_third_http_")
+    os.close(out_fd)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=headless)
+        try:
+            context = browser.new_context(
+                viewport={"width": 1600, "height": 900},
+                ignore_https_errors=True,
+            )
+            page = context.new_page()
+            page.set_default_timeout(timeout_ms)
+
+            page.goto(login_url, wait_until="domcontentloaded")
+            page.wait_for_timeout(800)
+
+            pwd_box = page.locator('input[type="password"]').first
+            pwd_box.wait_for(state="visible", timeout=min(30_000, timeout_ms))
+            form = pwd_box.locator("xpath=ancestor::form[1]")
+            if form.count():
+                tin = form.locator(
+                    'input[type="text"], input:not([type]), input[type="tel"], input[type="email"]'
+                ).first
+                tin.fill(user)
+            else:
+                page.locator('input[type="text"]').first.fill(user)
+            pwd_box.fill(pw)
+
+            login_btn = page.get_by_role("button", name=re.compile(r"login|sign in|log in", re.I))
+            if login_btn.count():
+                login_btn.first.click()
+            else:
+                page.locator('button[type="submit"], button.el-button--primary').first.click()
+
+            page.wait_for_timeout(2000)
+            if "/log/logThirdHttpReq" not in (page.url or ""):
+                page.goto(log_url, wait_until="domcontentloaded")
+
+            page.wait_for_selector(".filter-container", timeout=timeout_ms)
+
+            dinputs = page.locator(".filter-container .data-content .ssdate input.el-input__inner")
+            if dinputs.count() >= 2:
+                dinputs.nth(0).click()
+                dinputs.nth(0).fill("")
+                dinputs.nth(0).fill(start_s)
+                page.keyboard.press("Enter")
+                dinputs.nth(1).click()
+                dinputs.nth(1).fill("")
+                dinputs.nth(1).fill(end_s)
+                page.keyboard.press("Enter")
+            else:
+                raise RuntimeError("Could not find date range inputs on Log Third Http Req page.")
+
+            uid_in = page.locator(".filter-container .el-form-item").filter(has_text="UserId").locator(
+                "input.el-input__inner"
+            ).first
+            uid_in.fill("")
+            uid_in.fill(str(player_id).strip())
+
+            page.get_by_role("button", name=re.compile(r"^Search$")).click()
+            page.wait_for_timeout(2500)
+
+            page.locator(".el-table__body tbody").wait_for(state="visible", timeout=timeout_ms)
+            rows = page.locator(".el-table__body tr.el-table__row")
+            n = rows.count()
+            picked = False
+            for i in range(n):
+                row = rows.nth(i)
+                et_cell = row.locator("td").nth(2)
+                if not et_cell.count():
+                    continue
+                txt = (et_cell.inner_text() or "").strip().lower()
+                if txt == "recharge":
+                    link = row.get_by_text("Show Details", exact=False)
+                    link.scroll_into_view_if_needed()
+                    link.click()
+                    picked = True
+                    break
+
+            if not picked:
+                raise RuntimeError('No table row with Event Type "recharge" for this UserId/time window.')
+
+            dlg = page.locator(".el-dialog.details-dialog, div[role='dialog'].details-dialog").first
+            dlg.wait_for(state="visible", timeout=timeout_ms)
+            page.wait_for_timeout(600)
+            dlg.screenshot(path=out_path, animations="disabled")
+        finally:
+            browser.close()
+
+    return out_path
 
 
 def main(argv: list[str] | None = None) -> int:
