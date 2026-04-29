@@ -728,7 +728,7 @@ def build_np_choice_lark_card(
     machine_display: str = "",
     third_http_backend: str = "NP",
 ) -> dict[str, Any]:
-    """Lark card: log date line (NP / WF / DHS / NCH window) + machine + four numbered lines."""
+    """Lark card: title + log date (NP / WF / DHS / NCH window) + machine + numbered player lines."""
     lines: list[str] = []
     td = (target_date_iso or "").strip()
     md = (machine_display or "").strip()
@@ -738,11 +738,11 @@ def build_np_choice_lark_card(
     if td or md:
         bits: list[str] = []
         if td:
-            bits.append(f"**Log date ({be} window):** `{td}`")
+            bits.append(f"Log date ({be} window): `{td}`")
         if md:
-            bits.append(f"**Machine:** `{md}`")
+            bits.append(f"Machine: `{md}`")
         lines.append(" · ".join(bits))
-        lines.append("_Screenshot uses the log date above + each line’s credit time._")
+        lines.append("Screenshot uses the log date above + each line's credit time.")
         lines.append("")
     for i, ch in enumerate(np_choices):
         uid = ch.get("user_id", "")
@@ -750,11 +750,12 @@ def build_np_choice_lark_card(
         ts = ch.get("time_short") or "n/a"
         lines.append(f"{i + 1}) User ID `{uid}` — last credit `{cr}` @ `{ts}`")
     content = "\n".join(lines) if lines else "_No players._"
+    title = "Kindly choose one of the player(Just type number without tag)"
     return {
         "config": {"wide_screen_mode": True},
         "header": {
             "template": "blue",
-            "title": {"tag": "plain_text", "content": "\u200b"},
+            "title": {"tag": "plain_text", "content": title},
         },
         "elements": [
             {
