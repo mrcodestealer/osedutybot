@@ -277,6 +277,30 @@ def run_smscheckplayer_check(chat_id, player_id: str):
         print(f"[SMS check player] error: {e!r}")
 
 
+def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
+    """Background: same as `python3 checkcredit.py --finderror <digits> --date YYYY-MM-DD`."""
+    try:
+        import checkcredit
+    except ImportError as e:
+        send_message(chat_id, f"❌ Cannot load checkcredit module: {e}")
+        return
+    try:
+        td = datetime.strptime(date_str.strip(), "%Y-%m-%d").date()
+        out = checkcredit.run_finderror(
+            str(machine_query).strip(),
+            target_date=td,
+            timeout_ms=max(15_000, 90_000),
+            base=checkcredit.DEFAULT_BASE,
+            user=checkcredit.DEFAULT_USER,
+            pw=checkcredit.DEFAULT_PASS,
+        )
+        text = (out.get("text") or "").strip()
+        send_message(chat_id, text if text else "(no output)")
+    except Exception as e:
+        send_message(chat_id, f"❌ checkcredit failed: {e}")
+        print(f"[checkcredit] error: {e!r}")
+
+
 def scheduled_amountloss_check():
     """
     每日 9:00：在 DUTY_CHAT_ID 群 @TARGET_USER_OPEN_ID，
@@ -1320,6 +1344,36 @@ def lark_webhook():
             send_message(chat_id, "⏳ Checking Amount Loss (CHECKLOG), please wait...")
             threading.Thread(target=run_amountloss_check, args=(chat_id, date_param), daemon=True).start()
             return jsonify({"success": True})
+    elif clean_text.lower().startswith("/checkcreditdate"):
+        parts = clean_text.split()
+        if len(parts) < 3:
+            send_message(
+                chat_id,
+                "❌ Usage: `/checkcreditdate <machine_digits> YYYY-MM-DD`\n"
+                "Example: `/checkcreditdate 2074 2026-04-27`\n"
+                "(same as `python3 checkcredit.py --finderror 2074 --date 2026-04-27`)",
+            )
+            return jsonify({"success": True})
+        machine_q = parts[1].strip()
+        date_arg = parts[2].strip()
+        try:
+            datetime.strptime(date_arg, "%Y-%m-%d")
+        except ValueError:
+            send_message(
+                chat_id,
+                "❌ Date must be `YYYY-MM-DD` (e.g. `2026-04-27`).",
+            )
+            return jsonify({"success": True})
+        send_message(
+            chat_id,
+            "⏳ Running LogNavigator checkcredit (`--finderror`), browser may take a while — please wait...",
+        )
+        threading.Thread(
+            target=run_checkcredit_finderror,
+            args=(chat_id, machine_q, date_arg),
+            daemon=True,
+        ).start()
+        return jsonify({"success": True})
     elif clean_text.lower().startswith("/smsfail"):
         send_message(chat_id, "⏳ Running SMS gateway OTP log check, please wait...")
         threading.Thread(target=run_smsfail_check, args=(chat_id,), daemon=True).start()
