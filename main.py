@@ -381,6 +381,7 @@ def _np_run_screenshot_worker(
     *,
     machine_substr: Optional[str] = None,
     expected_credit: Optional[float] = None,
+    machine_display: Optional[str] = None,
 ) -> None:
     """NP Log Third Http Req → `recharge` Detail screenshot (machineId + positive amount when provided)."""
     try:
@@ -409,6 +410,7 @@ def _np_run_screenshot_worker(
             timeout_ms=120_000,
             machine_substr=machine_substr,
             expected_credit=expected_credit,
+            machine_display=machine_display,
         )
         key = upload_image_lark(path)
         if not key:
@@ -452,6 +454,7 @@ def run_np_third_http_by_choice(chat_id: str, choice_idx: int) -> None:
             exp = float(str(ch.get("credit")).strip())
         except ValueError:
             exp = None
+    md = (pend.get("machine_display") or "").strip() or None
     _np_run_screenshot_worker(
         chat_id,
         uid,
@@ -459,6 +462,7 @@ def run_np_third_http_by_choice(chat_id: str, choice_idx: int) -> None:
         time_short,
         machine_substr=ms,
         expected_credit=exp,
+        machine_display=md,
     )
 
 
@@ -536,7 +540,9 @@ def run_np_third_http_job(chat_id: str, argv: list[str]):
     assert date_iso is not None and time_short is not None
     ms = None
     exp = None
+    md: Optional[str] = None
     if pend:
+        md = (pend.get("machine_display") or "").strip() or None
         ms = (pend.get("machine_match_substr") or "").strip() or None
         for ch in pend.get("np_choices") or []:
             if str(ch.get("user_id")) == str(uid):
@@ -554,6 +560,7 @@ def run_np_third_http_job(chat_id: str, argv: list[str]):
         time_short,
         machine_substr=ms,
         expected_credit=exp,
+        machine_display=md,
     )
 
 

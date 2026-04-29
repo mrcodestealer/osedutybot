@@ -25,10 +25,15 @@ Env (optional):
   NP_BACKEND_BASE (default https://backend-np.osmplay.com), NP_BACKEND_USER, NP_BACKEND_PASSWORD
   NP_BACKEND_WINDOW_MINUTES (default 10), NP_BACKEND_MAX_PAGES (default 20, table pagination)
   NP_BACKEND_HEADLESS / NP_BACKEND_HEADED
+  If **Machine** matches ``WF8173`` (word in display string), NP uses Winford instead:
+  ``https://backend-winford.osmplay.com`` with user/password ``omduty1`` (override via
+  ``WF_BACKEND_USER`` / ``WF_BACKEND_PASSWORD``).
 
   NP debug — **visible Chromium** (not headless), same logic as Duty Bot ``/npthirdhttp``::
     python3 checkcredit.py --checkuser --player-id 132594948 --date 2026-04-27 \\
       --time 23:55:12.092 --machine-substr 2074 --credit 1352 --pause
+    Add ``--machine-display WF8173`` when testing Winford NP from CLI (after ``/checkcreditdate`` the
+    bot passes machine from context automatically).
   Use ``--pause`` to leave the window open until you press Enter in the terminal.
   Do **not** set ``NP_BACKEND_HEADLESS=1`` when you want to watch the browser.
 
@@ -1207,6 +1212,31 @@ def _np_backend_env_cred() -> tuple[str, str]:
     return u, p
 
 
+_WINFORD_NP_BASE = "https://backend-winford.osmplay.com".rstrip("/")
+
+
+def _np_machine_is_wf8173(machine_display: str | None) -> bool:
+    """Winford machine tag in LogNavigator / checkcredit machine line (e.g. ``Machine: WF8173``)."""
+    if not (machine_display or "").strip():
+        return False
+    return bool(re.search(r"\bWF8173\b", machine_display, re.I))
+
+
+def _np_resolve_backend(machine_display: str | None) -> tuple[str, str, str]:
+    """
+    (base_url, username, password) for Log Third Http Req.
+
+    Winford ``WF8173`` → ``backend-winford.osmplay.com`` + duty login (defaults ``omduty1``;
+    override with ``WF_BACKEND_USER`` / ``WF_BACKEND_PASSWORD``).
+    Otherwise → ``NP_BACKEND_BASE`` / env NP credentials.
+    """
+    if _np_machine_is_wf8173(machine_display):
+        u = (os.environ.get("WF_BACKEND_USER") or "omduty1").strip() or "omduty1"
+        p = (os.environ.get("WF_BACKEND_PASSWORD") or "omduty1").strip() or "omduty1"
+        return _WINFORD_NP_BASE, u, p
+    return NP_BACKEND_DEFAULT_BASE, *_np_backend_env_cred()
+
+
 def _np_combine_date_and_credit_time(date_iso: str, time_short: str) -> datetime:
     """date_iso YYYY-MM-DD; time_short like 23:55:12.092 or 23:55:12."""
     t = (time_short or "").strip()
@@ -1650,6 +1680,7 @@ def screenshot_np_recharge_detail(
     timeout_ms: int = 120_000,
     machine_substr: str | None = None,
     expected_credit: float | None = None,
+    machine_display: str | None = None,
     headed: bool | None = None,
     pause_for_input: bool = False,
 ) -> str:
@@ -1660,16 +1691,21 @@ def screenshot_np_recharge_detail(
     digits,
     ``amount`` > 0, and ``amount`` matches latest credit — **header Request Time is not used to
     reject** (avoids closing valid dialogs when UI text differs slightly from log seconds).
+    ``machine_display``: LogNavigator machine string (e.g. ``WF8173``) — when it contains ``WF8173``,
+    uses Winford backend; login from ``WF_BACKEND_USER`` / ``WF_BACKEND_PASSWORD`` (default ``omduty1``).
+
     ``headed``: ``True`` = always show browser; ``False`` = force headless; ``None`` = env / platform default.
 
     Returns path to a temporary PNG (caller should delete).
     """
-    user, pw = _np_backend_env_cred()
+    base, user, pw = _np_resolve_backend(machine_display)
     if not user or not pw:
-        raise RuntimeError("Set NP_BACKEND_USER and NP_BACKEND_PASSWORD in the environment.")
+        raise RuntimeError(
+            "Set NP_BACKEND_USER and NP_BACKEND_PASSWORD in the environment "
+            "(not required for Winford WF8173 — defaults omduty1 unless WF_BACKEND_* is set)."
+        )
 
     start_s, end_s = _np_window_strings(date_iso, time_short)
-    base = NP_BACKEND_DEFAULT_BASE
     login_url = f"{base}/login?redirect=%2Flog%2FlogThirdHttpReq"
     log_url = f"{base}/log/logThirdHttpReq"
 
@@ -1906,6 +1942,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="With --checkuser: wait for Enter before closing browser",
     )
+    ap.add_argument(
+        "--machine-display",
+        default="",
+        metavar="NAME",
+        help="With --checkuser: machine label (e.g. WF8173) to pick NP backend — matches Duty Bot context",
+    )
     args = ap.parse_args(argv)
 
     if getattr(args, "checkuser", False):
@@ -1924,6 +1966,7 @@ def main(argv: list[str] | None = None) -> int:
             print("❌ --date must be YYYY-MM-DD", file=sys.stderr)
             return 2
         ms = (args.machine_substr or "").strip() or None
+        md = (getattr(args, "machine_display", None) or "").strip() or None
         try:
             out_png = screenshot_np_recharge_detail(
                 str(args.player_id).strip(),
@@ -1932,6 +1975,7 @@ def main(argv: list[str] | None = None) -> int:
                 timeout_ms=max(60_000, args.timeout_ms),
                 machine_substr=ms,
                 expected_credit=args.credit,
+                machine_display=md,
                 headed=True,
                 pause_for_input=bool(args.pause),
             )
