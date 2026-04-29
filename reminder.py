@@ -153,6 +153,27 @@ def _normalize_sheet_date(raw: str) -> str:
     return _parse_sheet_date(raw).strftime("%Y/%m/%d")
 
 
+def _parse_sheet_date_field(raw) -> date:
+    """
+    Parse date from sheet field values.
+    Supports:
+    - int/float milliseconds timestamp (Datetime field)
+    - date-like strings (YYYY/MM/DD, YYYY-MM-DD, MM/DD, DD/MM)
+    """
+    if isinstance(raw, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(raw) / 1000.0).date()
+        except Exception as e:
+            raise ValueError(f"Invalid datetime timestamp `{raw}`: {e}") from e
+    return _parse_sheet_date(str(raw or "").strip())
+
+
+def _sheet_date_to_timestamp_ms(d: date) -> int:
+    """Lark Bitable Datetime field value (milliseconds)."""
+    dt = datetime.combine(d, datetime.min.time())
+    return int(dt.timestamp() * 1000)
+
+
 def _normalize_sheet_time(raw: str) -> str:
     s = (raw or "").strip().upper().replace(" ", "")
     m = re.match(r"^(\d{1,2}):(\d{2})(AM|PM)$", s)
@@ -226,15 +247,15 @@ def _normalize_sheet_rows(records: list[dict]) -> list[dict]:
         fields = rec.get("fields") or {}
         rid = str(rec.get("record_id") or "").strip()
         sid = str(fields.get(REMINDER_FIELD_ID) or "").strip()
-        start_raw = str(fields.get(REMINDER_FIELD_START) or "").strip()
-        end_raw = str(fields.get(REMINDER_FIELD_END) or "").strip()
+        start_raw = fields.get(REMINDER_FIELD_START)
+        end_raw = fields.get(REMINDER_FIELD_END)
         time_raw = str(fields.get(REMINDER_FIELD_TIME) or "").strip()
         reason = str(fields.get(REMINDER_FIELD_REASON) or "").strip()
-        if not (rid and sid and start_raw and end_raw and time_raw and reason):
+        if not (rid and sid and start_raw is not None and end_raw is not None and time_raw and reason):
             continue
         try:
-            start_d = _parse_sheet_date(start_raw)
-            end_d = _parse_sheet_date(end_raw)
+            start_d = _parse_sheet_date_field(start_raw)
+            end_d = _parse_sheet_date_field(end_raw)
             time_n = _normalize_sheet_time(time_raw)
         except Exception:
             continue
@@ -401,8 +422,8 @@ def add_sheet_reminder(
 
     fields = {
         REMINDER_FIELD_ID: new_id,
-        REMINDER_FIELD_START: start_s,
-        REMINDER_FIELD_END: end_s,
+        REMINDER_FIELD_START: _sheet_date_to_timestamp_ms(start_d),
+        REMINDER_FIELD_END: _sheet_date_to_timestamp_ms(end_d),
         REMINDER_FIELD_TIME: time_s,
         REMINDER_FIELD_REASON: reason_n,
     }
