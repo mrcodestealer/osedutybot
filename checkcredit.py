@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 import re
 import sys
 from datetime import date, datetime
@@ -385,9 +384,10 @@ def _parse_success_cur_coin(line: str) -> tuple[float, str] | None:
     return (val, tshort)
 
 
-def parse_user_blocks_for_errors(log_text: str) -> list[dict[str, Any]]:
+def parse_user_blocks_full(log_text: str) -> list[dict[str, Any]]:
     """
-    Split by extra1 userid markers; within each block collect lines where JSON-ish payload has error > 0.
+    Split by extra1 userid markers; every block included (errors may be empty).
+    Error lines carry line_idx for ordering.
     """
     raw = log_text.splitlines()
     blocks: list[tuple[str, list[tuple[int, str]]]] = []
@@ -412,6 +412,7 @@ def parse_user_blocks_for_errors(log_text: str) -> list[dict[str, Any]]:
     for uid, blines in blocks:
         findings: list[dict[str, Any]] = []
         latest_credit: dict[str, Any] | None = None
+        block_max_line = max((ln for ln, _ in blines), default=-1)
         for line_idx, line in blines:
             sc = _parse_success_cur_coin(line)
             if sc:
@@ -443,14 +444,23 @@ def parse_user_blocks_for_errors(log_text: str) -> list[dict[str, Any]]:
                     "error_count": ec,
                     "snippet": json_like[:800],
                     "full_line": line.rstrip(),
+                    "line_idx": line_idx,
                 }
             )
-        if findings:
-            row: dict[str, Any] = {"user_id": uid, "errors": findings}
-            if latest_credit:
-                row["latest_credit"] = latest_credit
-            out.append(row)
+        row: dict[str, Any] = {
+            "user_id": uid,
+            "errors": findings,
+            "block_max_line": block_max_line,
+        }
+        if latest_credit:
+            row["latest_credit"] = latest_credit
+        out.append(row)
     return out
+
+
+def parse_user_blocks_for_errors(log_text: str) -> list[dict[str, Any]]:
+    """Backward compat: only blocks that have at least one error > 0."""
+    return [b for b in parse_user_blocks_full(log_text) if b.get("errors")]
 
 
 def _error_line_time_key(err: dict[str, Any]) -> str:
@@ -472,36 +482,219 @@ def _sort_players_latest_credit_first(merged: list[dict[str, Any]]) -> None:
     merged.sort(key=key, reverse=True)
 
 
-def merge_finderror_by_user(payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Merge blocks by user_id; error lines per user by time descending; players ordered latest-credit first."""
+def _block_contribution_max_line(blk: dict[str, Any]) -> int:
+    mx = -1
+    for e in blk.get("errors") or []:
+        mx = max(mx, int(e.get("line_idx", -1)))
+    lc = blk.get("latest_credit")
+    if lc:
+        mx = max(mx, int(lc.get("line_idx", -1)))
+    bm = blk.get("block_max_line")
+    if bm is not None:
+        mx = max(mx, int(bm))
+    return mx
+
+
+def merge_players_full(payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge blocks by user_id; track max_line_idx (last line index in log for this player)."""
     if not payload:
         return []
 
     order: list[str] = []
-    by_uid: dict[str, list[dict[str, Any]]] = {}
-    credit_by_uid: dict[str, dict[str, Any]] = {}
+    by_uid: dict[str, dict[str, Any]] = {}
     for blk in payload:
         uid = blk["user_id"]
         if uid not in by_uid:
             order.append(uid)
-            by_uid[uid] = []
-        by_uid[uid].extend(blk["errors"])
+            by_uid[uid] = {"errors": [], "latest_credit": None, "max_line_idx": -1}
+        by_uid[uid]["errors"].extend(blk.get("errors") or [])
         lc = blk.get("latest_credit")
         if lc:
-            old = credit_by_uid.get(uid)
+            old = by_uid[uid]["latest_credit"]
             if old is None or lc["line_idx"] > old["line_idx"]:
-                credit_by_uid[uid] = lc
+                by_uid[uid]["latest_credit"] = lc
+        by_uid[uid]["max_line_idx"] = max(
+            by_uid[uid]["max_line_idx"],
+            _block_contribution_max_line(blk),
+        )
 
     merged: list[dict[str, Any]] = []
     for uid in order:
-        errs = by_uid[uid][:]
+        errs = by_uid[uid]["errors"][:]
         errs.sort(key=_error_line_time_key, reverse=True)
-        row: dict[str, Any] = {"user_id": uid, "errors": errs}
-        if uid in credit_by_uid:
-            row["latest_credit"] = credit_by_uid[uid]
-        merged.append(row)
+        merged.append(
+            {
+                "user_id": uid,
+                "errors": errs,
+                "latest_credit": by_uid[uid]["latest_credit"],
+                "max_line_idx": by_uid[uid]["max_line_idx"],
+            }
+        )
+    return merged
+
+
+def merge_finderror_by_user(payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge + legacy sort: players with latest_credit first, then by max error time."""
+    merged = merge_players_full(payload)
     _sort_players_latest_credit_first(merged)
     return merged
+
+
+def _latest_error_line_idx(row: dict[str, Any]) -> int:
+    return max((int(e["line_idx"]) for e in (row.get("errors") or [])), default=-1)
+
+
+def select_top2_error_players(merged: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Top 2 players by most recent error line (log line index)."""
+    with_err = [r for r in merged if r.get("errors")]
+    with_err.sort(key=_latest_error_line_idx, reverse=True)
+    return with_err[:2]
+
+
+def select_top2_overall(merged: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Top 2 players by last activity in log (max_line_idx)."""
+    return sorted(merged, key=lambda r: int(r.get("max_line_idx", -1)), reverse=True)[:2]
+
+
+def pick_latest_error_uid(merged: list[dict[str, Any]]) -> tuple[str | None, int]:
+    """Single player whose newest error line appears latest in the log."""
+    best_uid: str | None = None
+    best_line = -1
+    for r in merged:
+        for e in r.get("errors") or []:
+            li = int(e.get("line_idx", -1))
+            if li > best_line:
+                best_line = li
+                best_uid = r["user_id"]
+    return best_uid, best_line
+
+
+def pick_latest_any_uid(merged: list[dict[str, Any]]) -> tuple[str | None, int]:
+    """Player whose log lines extend furthest (last line index overall)."""
+    if not merged:
+        return None, -1
+    best = max(merged, key=lambda r: int(r.get("max_line_idx", -1)))
+    return best["user_id"], int(best.get("max_line_idx", -1))
+
+
+def _row_display_times(row: dict[str, Any]) -> tuple[str, str]:
+    """(credit_time_or_empty, last_error_time_or_empty) for markdown."""
+    cr = row.get("latest_credit")
+    ct = (cr.get("time_short") or "").strip() if cr else ""
+    errs = row.get("errors") or []
+    et = (errs[0].get("time") or "").strip() if errs else ""
+    return ct, et
+
+
+def build_compare_lark_card(
+    *,
+    machine_display: str,
+    target_date: date,
+    latest_err_uid: str | None,
+    latest_any_uid: str | None,
+    same_uid: bool,
+    top2_overall: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Compare: last player with any error vs last player in log (any activity)."""
+    dstr = target_date.isoformat()
+    le = f"`{latest_err_uid}`" if latest_err_uid else "*(none / 无)*"
+    la = f"`{latest_any_uid}`" if latest_any_uid else "*(none / 无)*"
+    if not latest_err_uid:
+        same_md = "ℹ️ **No error > 0 in log / 无错误行** — “latest with error” is N/A; see latest-in-log only."
+    elif same_uid and latest_err_uid and latest_any_uid:
+        same_md = (
+            "✅ **Same player ID / 同一玩家:** latest error line and latest log activity refer to this uid."
+        )
+    else:
+        same_md = "ℹ️ **Different / 不同:** latest error player ≠ latest-in-log player."
+    lines_top2: list[str] = []
+    for r in top2_overall[:2]:
+        uid = r["user_id"]
+        cr = r.get("latest_credit")
+        if cr:
+            ts = (cr.get("time_short") or "").strip()
+            val = cr["value"]
+            lines_top2.append(f"- `{uid}` → credit `{val}` @ `{ts}`" if ts else f"- `{uid}` → credit `{val}`")
+        else:
+            lines_top2.append(f"- `{uid}` → *(no credit line / 无余额行)*")
+    top2_md = "\n".join(lines_top2) if lines_top2 else "*(no players / 无)*"
+    body = (
+        f"🖥 **Machine / 机台:** `{machine_display}`\n"
+        f"📅 **Date / 日期:** `{dstr}`\n\n"
+        f"📌 **Latest 2 players in log (by line order) / 日志中最近 2 名玩家 + 最新 credit:**\n{top2_md}\n\n"
+        f"🔴 **Latest player WITH error / 最近一笔有误差的玩家:** {le}\n"
+        f"📍 **Latest player in log (any) / 日志中最新的玩家:** {la}\n\n"
+        f"{same_md}"
+    )
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": "checkcredit — latest error vs latest in log"},
+        },
+        "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": body}}],
+    }
+
+
+def _truncate_log(text: str, limit: int = 1800) -> str:
+    t = (text or "").strip()
+    if len(t) <= limit:
+        return t
+    return t[: limit - 20] + "\n… (truncated)"
+
+
+def build_candidates_lark_card(
+    merged: list[dict[str, Any]],
+    candidate_uids: list[str],
+    *,
+    machine_display: str,
+    target_date: date,
+) -> dict[str, Any]:
+    """Union candidates: time, machine, uid, credit, error count, logs."""
+    by_uid = {r["user_id"]: r for r in merged}
+    dstr = target_date.isoformat()
+    elements: list[dict[str, Any]] = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": (
+                    f"🖥 **Machine / 机台:** `{machine_display}`  ·  📅 **Date / 日期:** `{dstr}`\n"
+                    f"**Possible players to inspect / 待查玩家** (from latest-2 error ∪ latest-2 in log)"
+                ),
+            },
+        }
+    ]
+    for uid in candidate_uids:
+        row = by_uid.get(uid)
+        if not row:
+            continue
+        ct, et = _row_display_times(row)
+        errs = row.get("errors") or []
+        nerr = len(errs)
+        cr = row.get("latest_credit")
+        credit_s = f"`{cr['value']}` @ `{ct}`" if cr else "*(no successJson credit / 无)*"
+        time_s = ct or et or "*(n/a)*"
+        lines_body = "\n".join(e.get("full_line") or e.get("snippet") or "" for e in errs)
+        log_md = _truncate_log(lines_body) if lines_body else "*(no errors / 无错误行)*"
+        block = (
+            f"---\n"
+            f"🕐 **Time (credit or error) / 时间:** {time_s}\n"
+            f"🖥 **Machine / 机台:** `{machine_display}`\n"
+            f"🆔 **Player ID / 玩家:** `{uid}`\n"
+            f"💰 **Latest credit / 最新余额:** {credit_s}\n"
+            f"⚠️ **Error count / 错误次数:** {nerr}\n"
+            f"📋 **Error log / 错误日志:**\n```\n{log_md}\n```"
+        )
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": block}})
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "wathet",
+            "title": {"tag": "plain_text", "content": "checkcredit — investigation candidates"},
+        },
+        "elements": elements,
+    }
 
 
 def format_finderror_terminal_from_merged(merged: list[dict[str, Any]]) -> str:
@@ -535,8 +728,12 @@ def format_finderror_terminal_from_merged(merged: list[dict[str, Any]]) -> str:
     return "\n\n".join(blocks) + "\n"
 
 
-def build_finderror_lark_card(merged: list[dict[str, Any]]) -> dict[str, Any]:
-    """Lark interactive card: one block per player (latest credit player first), hr between players."""
+def build_finderror_lark_card(
+    merged: list[dict[str, Any]],
+    *,
+    title: str = "checkcredit — find error",
+) -> dict[str, Any]:
+    """Lark interactive card: one block per player; hr between players."""
     elements: list[dict[str, Any]] = []
     if not merged:
         elements.append(
@@ -579,7 +776,7 @@ def build_finderror_lark_card(merged: list[dict[str, Any]]) -> dict[str, Any]:
         "config": {"wide_screen_mode": True},
         "header": {
             "template": "orange",
-            "title": {"tag": "plain_text", "content": "checkcredit — find error"},
+            "title": {"tag": "plain_text", "content": title},
         },
         "elements": elements,
     }
@@ -608,10 +805,12 @@ def run_finderror(
     td = target_date or date.today()
     parsed: list[dict[str, Any]] = []
     text_parts: list[str] = []
+    machine_display = (machine_query or "").strip()
 
     if source == "oss":
         log_body, text_parts = fetch_log_via_oss(machine_query, td, timeout_sec=max(30.0, timeout_ms / 1000.0))
-        parsed = parse_user_blocks_for_errors(log_body)
+        machine_display = resolve_oss_machine_folder(machine_query)
+        parsed = parse_user_blocks_full(log_body)
     else:
         from playwright.sync_api import sync_playwright
 
@@ -631,6 +830,7 @@ def run_finderror(
                 lognavigator_login(page, base, user, pw, timeout_ms=timeout_ms)
 
                 chosen = select_machine_by_number(page, machine_query, timeout_ms=timeout_ms)
+                machine_display = (chosen or "").strip() or machine_display
                 text_parts.append(f"→ Machine selected: {chosen}")
                 wait_for_logs_file_browser(page, timeout_ms=timeout_ms)
 
@@ -642,19 +842,55 @@ def run_finderror(
                 pre.wait_for(state="attached", timeout=timeout_ms)
                 log_body = pre.inner_text() or ""
 
-                parsed = parse_user_blocks_for_errors(log_body)
+                parsed = parse_user_blocks_full(log_body)
 
                 text_parts.append(f"→ Date file: {td.isoformat()}")
             finally:
                 browser.close()
 
     header = "\n".join(text_parts)
-    merged = merge_finderror_by_user(parsed)
-    report = format_finderror_terminal_from_merged(merged)
+    merged = merge_players_full(parsed)
+    top2_err = select_top2_error_players(merged)
+    top2_any = select_top2_overall(merged)
+    le_uid, _le_line = pick_latest_error_uid(merged)
+    la_uid, _la_line = pick_latest_any_uid(merged)
+    same_uid = bool(le_uid and la_uid and le_uid == la_uid)
+
+    cand_uids: list[str] = []
+    seen: set[str] = set()
+    for r in top2_err:
+        u = r["user_id"]
+        if u not in seen:
+            seen.add(u)
+            cand_uids.append(u)
+    for r in top2_any:
+        u = r["user_id"]
+        if u not in seen:
+            seen.add(u)
+            cand_uids.append(u)
+
+    report = format_finderror_terminal_from_merged(top2_err)
     plain = f"{header}\n\n{report}" if header else report
     return {
         "text": plain,
-        "lark_card": build_finderror_lark_card(merged),
+        "lark_card": build_finderror_lark_card(
+            top2_err,
+            title="checkcredit — errors (latest 2 players with error)",
+        ),
+        "lark_card_summary": build_compare_lark_card(
+            machine_display=machine_display,
+            target_date=td,
+            latest_err_uid=le_uid,
+            latest_any_uid=la_uid,
+            same_uid=same_uid,
+            top2_overall=top2_any,
+        ),
+        "lark_card_candidates": build_candidates_lark_card(
+            merged,
+            cand_uids,
+            machine_display=machine_display,
+            target_date=td,
+        ),
     }
 
 

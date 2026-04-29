@@ -297,11 +297,20 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
             source="oss" if use_oss else "navigator",
         )
         text = (out.get("text") or "").strip()
-        card = out.get("lark_card")
-        if isinstance(card, dict):
-            card_json = json.dumps(card)
-            resp = send_message(chat_id, card_json, msg_type="interactive")
-            if resp.get("code") != 0:
+        cards: list[dict] = []
+        for key in ("lark_card", "lark_card_summary", "lark_card_candidates"):
+            c = out.get(key)
+            if isinstance(c, dict):
+                cards.append(c)
+        if cards:
+            card_failed = False
+            for card in cards:
+                card_json = json.dumps(card)
+                resp = send_message(chat_id, card_json, msg_type="interactive")
+                if resp.get("code") != 0:
+                    card_failed = True
+                    break
+            if card_failed:
                 send_message(chat_id, text if text else "(no output)")
         else:
             send_message(chat_id, text if text else "(no output)")
