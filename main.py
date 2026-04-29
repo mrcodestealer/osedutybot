@@ -1727,25 +1727,28 @@ def lark_webhook():
             daemon=True,
         ).start()
         return jsonify({"success": True})
-    elif re.search(r"/checkcreditdate\b", clean_text, re.I):
-        # Anchor on `/checkcreditdate` so leading @Duty Bot / other text does not shift `split()` indices.
+    elif re.search(r"/(?:checkcreditdate|checkcredit)\b", clean_text, re.I):
+        # Longer token first in alternation so `/checkcreditdate` is not parsed as `/checkcredit` + `date`.
+        # Optional date defaults to **today** (server local) when omitted — e.g. `@Duty Bot /checkcredit 1171`.
         m_cc = re.search(
-            r"/checkcreditdate\s+(\S+)\s+(\d{4}-\d{2}-\d{2})\b",
+            r"/(checkcreditdate|checkcredit)\b\s+(\S+)(?:\s+(\d{4}-\d{2}-\d{2}))?",
             clean_text,
             re.I,
         )
         if not m_cc:
             send_message(
                 chat_id,
-                "❌ Usage: `/checkcreditdate <machine_digits> YYYY-MM-DD`\n"
-                "Example: `/checkcreditdate 2074 2026-04-27`\n"
-                "You can put `@Duty Bot` before the command; the date must be the **second** argument "
-                "after the machine id.\n"
-                "(same as `python3 checkcredit.py --finderror 2074 --date 2026-04-27`)",
+                "❌ Usage:\n"
+                "• `/checkcredit <machine>` — **today** (same as `--date` omitted in CLI)\n"
+                "• `/checkcreditdate <machine> [YYYY-MM-DD]` — optional date; omit for today\n"
+                "Examples: `@Duty Bot /checkcredit 1171` · `/checkcreditdate 2074 2026-04-27`\n"
+                "(same as `python3 checkcredit.py --finderror … --date YYYY-MM-DD`)",
             )
             return jsonify({"success": True})
-        machine_q = m_cc.group(1).strip()
-        date_arg = m_cc.group(2).strip()
+        machine_q = m_cc.group(2).strip()
+        date_arg = (m_cc.group(3) or "").strip()
+        if not date_arg:
+            date_arg = datetime.now().strftime("%Y-%m-%d")
         try:
             datetime.strptime(date_arg, "%Y-%m-%d")
         except ValueError:
