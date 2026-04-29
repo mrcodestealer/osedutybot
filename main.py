@@ -278,7 +278,7 @@ def run_smscheckplayer_check(chat_id, player_id: str):
 
 
 def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
-    """Background: same as `python3 checkcredit.py --finderror <digits> --date YYYY-MM-DD`."""
+    """Background: same as checkcredit `--finderror` + `--date`. Uses OSS HTTP if CHECKCREDIT_USE_OSS is set."""
     try:
         import checkcredit
     except ImportError as e:
@@ -286,6 +286,7 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
         return
     try:
         td = datetime.strptime(date_str.strip(), "%Y-%m-%d").date()
+        use_oss = os.getenv("CHECKCREDIT_USE_OSS", "").strip().lower() in ("1", "true", "yes", "on")
         out = checkcredit.run_finderror(
             str(machine_query).strip(),
             target_date=td,
@@ -293,6 +294,7 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
             base=checkcredit.DEFAULT_BASE,
             user=checkcredit.DEFAULT_USER,
             pw=checkcredit.DEFAULT_PASS,
+            source="oss" if use_oss else "navigator",
         )
         text = (out.get("text") or "").strip()
         send_message(chat_id, text if text else "(no output)")
@@ -1364,9 +1366,12 @@ def lark_webhook():
                 "❌ Date must be `YYYY-MM-DD` (e.g. `2026-04-27`).",
             )
             return jsonify({"success": True})
+        use_oss_wait = os.getenv("CHECKCREDIT_USE_OSS", "").strip().lower() in ("1", "true", "yes", "on")
         send_message(
             chat_id,
-            "⏳ Running LogNavigator checkcredit (`--finderror`), browser may take a while — please wait...",
+            "⏳ Running checkcredit via OSS HTTP (`--finderror`), please wait..."
+            if use_oss_wait
+            else "⏳ Running LogNavigator checkcredit (`--finderror`), browser may take a while — please wait...",
         )
         threading.Thread(
             target=run_checkcredit_finderror,

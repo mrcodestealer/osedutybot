@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 """
-LogNavigator: find user log errors (--finderror). Browser runs with a visible window.
+Find user log errors (--finderror).
 
-  python3 checkcredit.py --finderror 1300
-  python3 checkcredit.py --finderror 130 --date 2026-04-27
+  LogNavigator (browser, headed): default — drives UI like manual flow.
+  OSS (HTTP): faster, no browser — GET plain log file from object storage.
+
+  python3 checkcredit.py --finderror 2074 --date 2026-04-27
+  python3 checkcredit.py --finderror CP0231 --date 2026-02-05 --oss
 
 Env (optional):
-  CHECKCREDIT_USER / CHECKCREDIT_PASSWORD (default osm / osm123)
-  LOG_NAVIGATOR_BASE (default https://lognavigator.cliveslot.com)
+  CHECKCREDIT_USER / CHECKCREDIT_PASSWORD — LogNavigator login
+  LOG_NAVIGATOR_BASE — LogNavigator base URL
+  OSM_LOG_OSS_TEMPLATE — default:
+    https://oss-osm-log.osmplay.com/MINIPC/{machine}/logic/{date}.log
+  OSS_MACHINE_FOLDER_TEMPLATE — when --finderror is digits-only (default NWR{n}, e.g. 2074 → NWR2074)
+  CHECKCREDIT_USE_OSS — set to 1/true so callers (e.g. main.py bot) use OSS without --oss
 
-Requires: pip install playwright && playwright install chromium
+Requires: playwright (+ chromium) for LogNavigator; requests for OSS.
 """
 
 from __future__ import annotations
@@ -24,6 +31,56 @@ from typing import Any
 DEFAULT_BASE = os.environ.get("LOG_NAVIGATOR_BASE", "https://lognavigator.cliveslot.com").rstrip("/")
 DEFAULT_USER = os.environ.get("CHECKCREDIT_USER", "osm")
 DEFAULT_PASS = os.environ.get("CHECKCREDIT_PASSWORD", "osm123")
+
+DEFAULT_OSS_TEMPLATE = os.environ.get(
+    "OSM_LOG_OSS_TEMPLATE",
+    "https://oss-osm-log.osmplay.com/MINIPC/{machine}/logic/{date}.log",
+)
+
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def resolve_oss_machine_folder(machine_query: str) -> str:
+    """OSS path segment: digits-only → OSS_MACHINE_FOLDER_TEMPLATE (default NWR{n}); else use as-is (e.g. CP0231)."""
+    q = (machine_query or "").strip()
+    if not q:
+        raise ValueError("empty machine query")
+    if q.isdigit():
+        tpl = os.environ.get("OSS_MACHINE_FOLDER_TEMPLATE", "NWR{n}")
+        return tpl.format(n=q)
+    return q
+
+
+def fetch_log_via_oss(machine_query: str, td: date, *, timeout_sec: float = 120.0) -> tuple[str, list[str]]:
+    """HTTP GET log text from OSS URL built from OSM_LOG_OSS_TEMPLATE."""
+    try:
+        import requests
+    except ImportError as e:
+        raise RuntimeError("OSS mode requires `requests` (pip install requests)") from e
+
+    folder = resolve_oss_machine_folder(machine_query)
+    tpl = os.environ.get("OSM_LOG_OSS_TEMPLATE", DEFAULT_OSS_TEMPLATE)
+    url = tpl.format(machine=folder, date=td.isoformat())
+    r = requests.get(
+        url,
+        timeout=timeout_sec,
+        headers={"User-Agent": "checkcredit/1.0 (OSS)"},
+    )
+    if r.status_code == 404:
+        raise RuntimeError(f"OSS log not found (404): {url}")
+    r.raise_for_status()
+    text = r.text
+    if not text:
+        raise RuntimeError(f"OSS returned empty body: {url}")
+    meta = [
+        "→ Source: OSS (HTTP GET)",
+        f"→ URL: {url}",
+        f"→ Machine folder: {folder}",
+        f"→ Date file: {td.isoformat()}",
+    ]
+    return text, meta
 
 
 # ----- machine option matching -----
@@ -417,44 +474,54 @@ def run_finderror(
     base: str,
     user: str,
     pw: str,
+    source: str = "navigator",
 ) -> dict[str, Any]:
-    from playwright.sync_api import sync_playwright
-
+    """
+    source:
+      - \"oss\" — GET log from OSM_LOG_OSS_TEMPLATE (no browser).
+      - \"navigator\" — LogNavigator UI + tail (headed Chromium).
+    """
     td = target_date or date.today()
-    text_parts: list[str] = []
     parsed: list[dict[str, Any]] = []
+    text_parts: list[str] = []
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
-        try:
-            context = browser.new_context(
-                ignore_https_errors=True,
-                viewport={"width": 1400, "height": 900},
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-                ),
-            )
-            page = context.new_page()
-            lognavigator_login(page, base, user, pw, timeout_ms=timeout_ms)
+    if source == "oss":
+        log_body, text_parts = fetch_log_via_oss(machine_query, td, timeout_sec=max(30.0, timeout_ms / 1000.0))
+        parsed = parse_user_blocks_for_errors(log_body)
+    else:
+        from playwright.sync_api import sync_playwright
 
-            chosen = select_machine_by_number(page, machine_query, timeout_ms=timeout_ms)
-            text_parts.append(f"→ Machine selected: {chosen}")
-            wait_for_logs_file_browser(page, timeout_ms=timeout_ms)
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=False)
+            try:
+                context = browser.new_context(
+                    ignore_https_errors=True,
+                    viewport={"width": 1400, "height": 900},
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                    ),
+                )
+                page = context.new_page()
+                lognavigator_login(page, base, user, pw, timeout_ms=timeout_ms)
 
-            navigate_to_logic_folder(page, timeout_ms=timeout_ms)
-            click_log_file_for_date(page, td, timeout_ms=timeout_ms)
-            bump_tail_and_execute(page, timeout_ms=timeout_ms)
+                chosen = select_machine_by_number(page, machine_query, timeout_ms=timeout_ms)
+                text_parts.append(f"→ Machine selected: {chosen}")
+                wait_for_logs_file_browser(page, timeout_ms=timeout_ms)
 
-            pre = page.locator("section[role='results'] pre, pre.nofloat").first
-            pre.wait_for(state="attached", timeout=timeout_ms)
-            log_body = pre.inner_text() or ""
+                navigate_to_logic_folder(page, timeout_ms=timeout_ms)
+                click_log_file_for_date(page, td, timeout_ms=timeout_ms)
+                bump_tail_and_execute(page, timeout_ms=timeout_ms)
 
-            parsed = parse_user_blocks_for_errors(log_body)
+                pre = page.locator("section[role='results'] pre, pre.nofloat").first
+                pre.wait_for(state="attached", timeout=timeout_ms)
+                log_body = pre.inner_text() or ""
 
-            text_parts.append(f"→ Date file: {td.isoformat()}")
-        finally:
-            browser.close()
+                parsed = parse_user_blocks_for_errors(log_body)
+
+                text_parts.append(f"→ Date file: {td.isoformat()}")
+            finally:
+                browser.close()
 
     header = "\n".join(text_parts)
     report = format_finderror_report_terminal(parsed)
@@ -472,6 +539,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Log file date (default: today)",
     )
     ap.add_argument("--base-url", default=DEFAULT_BASE, help="LogNavigator base URL")
+    ap.add_argument(
+        "--oss",
+        action="store_true",
+        help="Fetch log via OSS HTTP (OSM_LOG_OSS_TEMPLATE) instead of LogNavigator browser",
+    )
     args = ap.parse_args(argv)
 
     if args.finderror:
@@ -482,6 +554,7 @@ def main(argv: list[str] | None = None) -> int:
             except ValueError:
                 print("❌ --date must be YYYY-MM-DD", file=sys.stderr)
                 return 2
+        use_oss = bool(args.oss) or _env_truthy("CHECKCREDIT_USE_OSS")
         try:
             out = run_finderror(
                 str(args.finderror).strip(),
@@ -490,6 +563,7 @@ def main(argv: list[str] | None = None) -> int:
                 base=args.base_url.rstrip("/"),
                 user=DEFAULT_USER,
                 pw=DEFAULT_PASS,
+                source="oss" if use_oss else "navigator",
             )
         except Exception as e:
             print(f"❌ {e}", file=sys.stderr)
@@ -499,7 +573,9 @@ def main(argv: list[str] | None = None) -> int:
 
     ap.print_help()
     print(
-        "\nExample:\n  python3 checkcredit.py --finderror 2074 --date 2026-04-27\n",
+        "\nExamples:\n"
+        "  python3 checkcredit.py --finderror 2074 --date 2026-04-27\n"
+        "  python3 checkcredit.py --finderror CP0231 --date 2026-02-05 --oss\n",
         file=sys.stderr,
     )
     return 2
