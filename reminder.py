@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import re
 from datetime import datetime, timedelta
 import functools
@@ -126,14 +128,24 @@ def _reminder_sheet_enabled() -> bool:
 
 def _parse_sheet_date(raw: str) -> date:
     s = (raw or "").strip()
-    for fmt in ("%Y/%m/%d", "%Y-%m-%d", "%m/%d"):
+    for fmt in ("%Y/%m/%d", "%Y-%m-%d"):
         try:
             d = datetime.strptime(s, fmt).date()
-            if fmt == "%m/%d":
-                return d.replace(year=date.today().year)
             return d
         except ValueError:
             continue
+    m = re.match(r"^(\d{1,2})/(\d{1,2})$", s)
+    if m:
+        a = int(m.group(1))
+        b = int(m.group(2))
+        y = date.today().year
+        # Prefer MM/DD when unambiguous by command docs, but accept DD/MM too.
+        if a > 12 and 1 <= b <= 12:
+            return date(y, b, a)  # DD/MM
+        if b > 12 and 1 <= a <= 12:
+            return date(y, a, b)  # MM/DD
+        if 1 <= a <= 12 and 1 <= b <= 12:
+            return date(y, a, b)  # default MM/DD when ambiguous
     raise ValueError(f"Invalid date `{raw}`. Use YYYY/MM/DD (or MM/DD for current year).")
 
 
