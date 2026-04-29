@@ -190,6 +190,10 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
         "FPMS NT UAT MASTER UPDATE",
         "https://jenkins.client8.me/job/FPMS_NT/view/all/job/FPMS_NT_UAT_MASTER_UPDATE/build?delay=0sec",
     ),
+    "fpms uat master": (
+        "FPMS NT UAT MASTER UPDATE",
+        "https://jenkins.client8.me/job/FPMS_NT/view/all/job/FPMS_NT_UAT_MASTER_UPDATE/build?delay=0sec",
+    ),
     "igo prod script": (
         "IGO PROD SCRIPT RUN",
         "https://jenkins.client8.me/job/IGO/job/PROD/job/IGO-PROD-SCRIPT-RUN/build?delay=0sec",
@@ -465,6 +469,9 @@ ENVIRONMENTS = [
     "fpms-uat3-branch",
     "fpms-uat4-branch",
     "fpms-uat5-branch",
+    "fpms-nt-uat-master",
+    "fpms-nt-uat2-master",
+    "fpms-nt-uat3-master",
 ]
 
 # Checkbox ``value`` / label text for **FPMS UAT branch update** job only (same order as Jenkins UI).
@@ -496,6 +503,36 @@ FPMS_UAT_BRANCH_SERVICES = [
     "settlement-report",
     "settlement-schedule",
     "settlement-server",
+    # FPMS_NT_UAT_MASTER_UPDATE services:
+    "admin-rollout",
+    "auth-rollout",
+    "card-rollout",
+    "ccms-rollout",
+    "ccms-rust-rollout",
+    "ccms-scheduler",
+    "fpms-internal-rollout",
+    "live-draw-event-scheduler",
+    "livechat-rest-rollout",
+    "livechat-rollout",
+    "livechat-scheduler",
+    "packet-consumer",
+    "packet-main-probability-rollout",
+    "packet-rollout",
+    "payment-rollout",
+    "player-rollout",
+    "player-scheduler",
+    "promotion-rollout",
+    "promotion-scheduler",
+    "proposal-rollout",
+    "provider-rollout",
+    "push-rollout",
+    "recommend-rollout",
+    "recommend-scheduler",
+    "risk-control-rollout",
+    "rulex-rollout",
+    "social-engagement-rollout",
+    "user-engagement-rollout",
+    "user-engagement-scheduler",
 ]
 
 # Backward-compatible name (prefer ``FPMS_UAT_BRANCH_SERVICES`` in new code).
@@ -786,7 +823,7 @@ def _resolve_environment_token(raw: str) -> str:
     if not hits:
         raise ConfigBlockError(
             f"Unknown environment {raw!r}. Use one of: {', '.join(ENVIRONMENTS)} "
-            "or a number 1–5 (same order as the interactive menu)."
+            f"or a number 1–{len(ENVIRONMENTS)} (same order as the interactive menu)."
         )
     raise ConfigBlockError(
         f"Ambiguous environment {raw!r}; matches: {', '.join(hits)}. "
@@ -801,6 +838,12 @@ def _environment_hint_from_banner(line: str) -> str | None:
     Checks ``UAT5`` … ``UAT2`` before plain ``UAT`` so ``UAT2`` is not swallowed as ``UAT``.
     """
     s = line.casefold().replace("_", " ")
+    # FPMS NT UAT MASTER jobs (same fill flow, different env values).
+    if (
+        re.search(r"\bfpms[\s-]*nt[\s-]*uat[\s-]*master\b", s)
+        or re.search(r"\bfpms[\s-]*uat[\s-]*master\b", s)
+    ):
+        return "fpms-nt-uat-master"
     if re.search(r"\bfpms[\s-]*uat\s*5\b", s) or re.search(r"\buat\s*5\b", s):
         return "fpms-uat5-branch"
     if re.search(r"\bfpms[\s-]*uat\s*4\b", s) or re.search(r"\buat\s*4\b", s):
@@ -4052,6 +4095,8 @@ def _jenkins_update_job_automation_profile(raw_urls: str) -> str | None:
     ul = u.casefold()
     if "/job/fpms/job/fpms_uat_branch_update/" in ul:
         return "fpms"
+    if "/job/fpms_nt/view/all/job/fpms_nt_uat_master_update/" in ul:
+        return "fpms"
     if "/job/fnt/job/fnt_uat_script_run/" in ul or "/job/fnt/job/rc-uat-update/" in ul:
         return "fnt_rc"
     if "/job/sms/job/uat/job/sms-uat-update/" in ul:
@@ -4134,6 +4179,11 @@ def _environment_from_bot_trigger_line(head: str) -> str | None:
     if hint:
         return hint
     s = head.casefold().replace("_", " ")
+    if (
+        re.search(r"\bfpms[\s-]*nt[\s-]*uat[\s-]*master\b", s)
+        or re.search(r"\bfpms[\s-]*uat[\s-]*master\b", s)
+    ):
+        return "fpms-nt-uat-master"
     if re.search(r"\buat\s*5\b", s) or "uat5" in s.replace(" ", ""):
         return "fpms-uat5-branch"
     if re.search(r"\buat\s*4\b", s) or "uat4" in s.replace(" ", ""):
@@ -5116,7 +5166,7 @@ def _fpms_lark_dispatch_job_row(
         for i, uu in enumerate([u.strip() for u in url_raw.splitlines() if u.strip()], 1):
             lines.append(f"{i}. {uu}")
         lines.append(
-            "\n_Only **FPMS UAT branch update**, **FPMS PROD SCRIPT RUN**, **FNT RC** / **FNT script** ECP jobs, and **SMS UAT update** "
+            "\n_Only **FPMS UAT branch / NT UAT master update**, **FPMS PROD SCRIPT RUN**, **FNT RC** / **FNT script** ECP jobs, and **SMS UAT update** "
             "are auto-filled by this bot; use the links for other jobs._"
         )
         send(chat_id, "\n".join(lines))
