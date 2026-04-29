@@ -16,7 +16,7 @@ import sys
 from typing import Any
 
 VERIFY_URLS = (
-    "http://lognavigator.funosm.net/lognavigator/logs/DHS3193/list",
+    "https://lognavigator.cliveslot.com/lognavigator/logs/DHS3050/list",
     "https://backend-nc.osmplay.com/log/logThirdHttpReq",
 )
 
