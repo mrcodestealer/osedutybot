@@ -459,8 +459,21 @@ def _error_line_time_key(err: dict[str, Any]) -> str:
     return t if t else "00:00:00.000"
 
 
+def _sort_players_latest_credit_first(merged: list[dict[str, Any]]) -> None:
+    """In-place: players with latest_credit first (higher log line_idx = newer); rest by max error time."""
+    def key(row: dict[str, Any]) -> tuple:
+        lc = row.get("latest_credit")
+        if lc:
+            return (1, int(lc["line_idx"]))
+        errs = row.get("errors") or []
+        mt = max((_error_line_time_key(e) for e in errs), default="00:00:00.000")
+        return (0, mt)
+
+    merged.sort(key=key, reverse=True)
+
+
 def merge_finderror_by_user(payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Merge blocks by user_id; error lines per user sorted by time descending (latest → earlier)."""
+    """Merge blocks by user_id; error lines per user by time descending; players ordered latest-credit first."""
     if not payload:
         return []
 
@@ -487,6 +500,7 @@ def merge_finderror_by_user(payload: list[dict[str, Any]]) -> list[dict[str, Any
         if uid in credit_by_uid:
             row["latest_credit"] = credit_by_uid[uid]
         merged.append(row)
+    _sort_players_latest_credit_first(merged)
     return merged
 
 
@@ -515,14 +529,14 @@ def format_finderror_terminal_from_merged(merged: list[dict[str, Any]]) -> str:
             f"🔔 User ID : {uid}\n"
             f"⚠️ Error detected count : {n}\n"
             f"{lc_line}"
-            f"📋 Error found List (latest → earlier) :\n"
+            f"📋 Error found List :\n"
             f"{lines_body}"
         )
     return "\n\n".join(blocks) + "\n"
 
 
 def build_finderror_lark_card(merged: list[dict[str, Any]]) -> dict[str, Any]:
-    """Lark interactive card: one block per player, hr between players; errors latest → earlier."""
+    """Lark interactive card: one block per player (latest credit player first), hr between players."""
     elements: list[dict[str, Any]] = []
     if not merged:
         elements.append(
@@ -555,7 +569,7 @@ def build_finderror_lark_card(merged: list[dict[str, Any]]) -> dict[str, Any]:
                 f"🔔 **User ID :** `{uid}`\n"
                 f"⚠️ **Error detected count :** {n}\n"
                 f"{lc_md}"
-                f"📋 **Error found List**（latest → earlier）\n```\n{lines_body}\n```"
+                f"📋 **Error found List**\n```\n{lines_body}\n```"
             )
             elements.append({"tag": "div", "text": {"tag": "lark_md", "content": body}})
             if i < n_users - 1:
