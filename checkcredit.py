@@ -1325,6 +1325,78 @@ def _np_detail_matches_machine_credit(
     return True
 
 
+def _np_detail_matches_machine_positive_amount(req_blob: str, machine_substr: str | None) -> bool:
+    """machineId contains substr and Request JSON amount > 0 (ignore exact credit match)."""
+    mid, amt = _np_parse_machine_amount_from_request_blob(req_blob)
+    if mid is None or amt is None:
+        return False
+    ms = (machine_substr or "").strip()
+    if ms and ms not in mid:
+        return False
+    return amt > 0
+
+
+def _np_same_calendar_minute(a: datetime, b: datetime) -> bool:
+    return (
+        a.year == b.year
+        and a.month == b.month
+        and a.day == b.day
+        and a.hour == b.hour
+        and a.minute == b.minute
+    )
+
+
+def _np_parse_detail_header_request_time(full_text: str) -> datetime | None:
+    """Parse `Request Time:` line from NP Detail dialog."""
+    if not full_text:
+        return None
+    m = re.search(
+        r"Request\s*Time:\s*(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?",
+        full_text,
+        re.I,
+    )
+    if not m:
+        return None
+    d = m.group(1)
+    t = m.group(2)
+    ms = (m.group(3) or "").strip()
+    base = datetime.strptime(f"{d} {t}", "%Y-%m-%d %H:%M:%S")
+    if ms:
+        ms3 = (ms + "000")[:3]
+        micro = int(ms3) * 1000
+        return base.replace(microsecond=micro)
+    return base
+
+
+def _np_reorder_indices_same_minute_first(
+    page,
+    rows,
+    ordered_indices: list[int],
+    date_iso: str,
+    time_short: str,
+) -> list[int]:
+    """Try table rows whose Request/Response time falls in the same HH:MM as log credit first."""
+    target_dt = _np_combine_date_and_credit_time(date_iso, time_short)
+    cols = _np_log_third_http_header_columns(page)
+    same_min: list[tuple[float, int]] = []
+    rest: list[int] = []
+    for i in ordered_indices:
+        row = rows.nth(i)
+        req_dt, resp_dt = _np_row_req_resp_times(row, date_iso, cols)
+        best_dist = float("inf")
+        hit = False
+        for dt in (req_dt, resp_dt):
+            if dt is not None and _np_same_calendar_minute(dt, target_dt):
+                hit = True
+                best_dist = min(best_dist, abs((dt - target_dt).total_seconds()))
+        if hit:
+            same_min.append((best_dist, i))
+        else:
+            rest.append(i)
+    same_min.sort(key=lambda x: (x[0], x[1]))
+    return [i for _, i in same_min] + rest
+
+
 def _np_close_np_detail_dialog(page) -> None:
     hdr = page.locator(
         ".el-dialog.details-dialog .el-dialog__headerbtn, "
@@ -1346,17 +1418,25 @@ def _np_try_screenshot_matching_detail(
     rows,
     ordered_indices: list[int],
     *,
+    date_iso: str,
+    time_short: str,
     machine_substr: str | None,
     expected_credit: float | None,
     out_path: str,
     timeout_ms: int,
 ) -> bool:
-    """Open recharge rows in time order until Detail Request matches machineId + positive amount."""
+    """
+    Open recharge rows until Detail matches:
+    1) Strict: machineId + amount ≈ log credit.
+    2) Same-minute fallback: Detail header Request Time same HH:MM as log credit, and
+       machineId + positive amount (NP amount may differ from log credit).
+    """
     ms = (machine_substr or "").strip()
     need = bool(ms) or expected_credit is not None
     if not need:
         return False
 
+    target_dt = _np_combine_date_and_credit_time(date_iso, time_short)
     dlg_sel = page.locator(".el-dialog.details-dialog, div[role='dialog'].details-dialog").first
 
     for pick_i in ordered_indices:
@@ -1366,10 +1446,18 @@ def _np_try_screenshot_matching_detail(
         link.click()
         dlg_sel.wait_for(state="visible", timeout=timeout_ms)
         page.wait_for_timeout(450)
-        blob = _np_detail_request_section(dlg_sel.inner_text() or "")
+        full_txt = dlg_sel.inner_text() or ""
+        blob = _np_detail_request_section(full_txt)
         if _np_detail_matches_machine_credit(blob, machine_substr, expected_credit):
             dlg_sel.screenshot(path=out_path, animations="disabled")
             return True
+        # Same calendar minute as log (e.g. all traffic within 23:23.*): machine + positive amount only
+        if ms and expected_credit is not None:
+            hdr_dt = _np_parse_detail_header_request_time(full_txt)
+            if hdr_dt and _np_same_calendar_minute(hdr_dt, target_dt):
+                if _np_detail_matches_machine_positive_amount(blob, machine_substr):
+                    dlg_sel.screenshot(path=out_path, animations="disabled")
+                    return True
         _np_close_np_detail_dialog(page)
 
     return False
@@ -1513,6 +1601,8 @@ def screenshot_np_recharge_detail(
             if not ordered:
                 raise RuntimeError('No table row with Event Type "recharge" for this UserId/time window.')
 
+            ordered = _np_reorder_indices_same_minute_first(page, rows, ordered, date_iso, time_short)
+
             ms = (machine_substr or "").strip()
             need_detail_match = bool(ms) or expected_credit is not None
 
@@ -1521,6 +1611,8 @@ def screenshot_np_recharge_detail(
                     page,
                     rows,
                     ordered,
+                    date_iso=date_iso,
+                    time_short=time_short,
                     machine_substr=machine_substr,
                     expected_credit=expected_credit,
                     out_path=out_path,
@@ -1528,9 +1620,9 @@ def screenshot_np_recharge_detail(
                 )
                 if not ok:
                     raise RuntimeError(
-                        "No NP Detail row matched last credit + machine "
-                        f"(machine contains `{ms or '…'}`, amount ≈ `{expected_credit}`). "
-                        "Try widening time or check another recharge row."
+                        "No NP Detail row matched machine + credit, nor same-minute (HH:MM) fallback "
+                        f"(machine contains `{ms or '…'}`, log credit ≈ `{expected_credit}`). "
+                        "Try widening NP_BACKEND_WINDOW_MINUTES or check another recharge row."
                     )
             else:
                 pick_i = ordered[0]
