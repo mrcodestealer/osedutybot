@@ -1579,13 +1579,30 @@ def _np_machine_id_contains_substr(machine_substr: str | None, machine_id_value:
     return ms in mid
 
 
+def _np_expected_credit_for_match(expected_credit: float | None) -> float | None:
+    """
+    Lark / log lines sometimes yield ``0`` or unparsed credit → ``0.0``. Matching that against
+    Request ``amount`` > 0 is impossible; treat non-positive values like "no amount filter".
+    """
+    if expected_credit is None:
+        return None
+    try:
+        v = float(expected_credit)
+    except (TypeError, ValueError):
+        return None
+    if v <= 0:
+        return None
+    return v
+
+
 def _np_detail_matches_credit_and_machine_id(
     req_blob: str,
     machine_substr: str | None,
     expected_credit: float | None,
 ) -> bool:
     """
-    Request JSON: ``machineId`` contains machine digits; ``amount`` > 0 and matches latest credit when set.
+    Request JSON: ``machineId`` contains machine digits; when ``expected_credit`` is not ``None``,
+    ``amount`` > 0 and matches within 0.05.
     """
     mid, amt = _np_parse_machine_amount_from_request_blob(req_blob)
     if mid is None or amt is None:
@@ -1815,11 +1832,10 @@ def screenshot_np_recharge_detail(
     """
     Login to NP backend, open Log Third Http Req, set date range ±NP_BACKEND_WINDOW_MINUTES,
     filter UserId, Search, then scan recharge rows (same-minute rows first, then **all** other recharge
-    rows so headless / table-parse quirks do not skip a match). Accept a Detail when Request JSON has
-    ``machineId`` containing the machine
-    digits,
-    ``amount`` > 0, and ``amount`` matches latest credit — **header Request Time is not used to
-    reject** (avoids closing valid dialogs when UI text differs slightly from log seconds).
+    rows so headless / table-parse quirks do not skip a match).     Accept a Detail when Request JSON has ``machineId`` containing the machine digits; when
+    ``expected_credit`` is set and **> 0**, also require ``amount`` > 0 and within 0.05 of that credit
+    (non-positive ``expected_credit`` is ignored — same as ``None``). **Header Request Time is not
+    used to reject** (avoids closing valid dialogs when UI text differs slightly from log seconds).
     ``machine_display``: LogNavigator / OSS folder label (``DHS*`` / ``NCH*`` → respective backend;
     creds fall back to ``NP_BACKEND_*`` when ``DHS_BACKEND_*`` / ``NCH_BACKEND_*`` unset).
     ``WF*`` / ``NWR8173`` → Winford + ``WF_BACKEND_*``; else NP + ``NP_BACKEND_*``.
@@ -1960,7 +1976,8 @@ def screenshot_np_recharge_detail(
             page.wait_for_timeout(post_search_ms)
 
             ms = (machine_substr or "").strip()
-            need_detail_match = bool(ms) or expected_credit is not None
+            exp_match = _np_expected_credit_for_match(expected_credit)
+            need_detail_match = bool(ms) or exp_match is not None
 
             if need_detail_match:
                 matched = False
@@ -1979,7 +1996,7 @@ def screenshot_np_recharge_detail(
                             rows,
                             to_scan,
                             machine_substr=machine_substr,
-                            expected_credit=expected_credit,
+                            expected_credit=exp_match,
                             out_path=out_path,
                             timeout_ms=timeout_ms,
                             dialog_settle_ms=dialog_settle_ms,
@@ -1992,10 +2009,18 @@ def screenshot_np_recharge_detail(
                     _np_click_pagination_next(page, timeout_ms=timeout_ms)
 
                 if not matched:
+                    bits: list[str] = []
+                    if ms:
+                        bits.append(f"`machineId` containing `{ms}`")
+                    if exp_match is not None:
+                        bits.append(f"positive `amount` within 0.05 of `{exp_match}`")
+                    elif ms:
+                        bits.append(
+                            "latest credit was 0 or unset — only `machineId` is matched, not `amount`"
+                        )
+                    crit = "; ".join(bits) if bits else "expected filters"
                     raise RuntimeError(
-                        f"No {_log_http_backend_tag} Detail on pages 1–"
-                        f"{NP_BACKEND_MAX_PAGES} with Request JSON `machineId` containing `{ms or '…'}`, "
-                        f"positive `amount`, and amount matching `{expected_credit}`. "
+                        f"No {_log_http_backend_tag} Detail on pages 1–{NP_BACKEND_MAX_PAGES} with {crit}. "
                         "Increase NP_BACKEND_MAX_PAGES or NP_BACKEND_WINDOW_MINUTES."
                     )
             else:
