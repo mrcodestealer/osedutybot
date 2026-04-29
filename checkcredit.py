@@ -1717,6 +1717,7 @@ def screenshot_np_recharge_detail(
     Returns path to a temporary PNG (caller should delete).
     """
     base, user, pw = _np_resolve_backend(machine_display)
+    _log_http_backend_tag = "WF" if _np_use_winford_log_backend(machine_display) else "NP"
     if not user or not pw:
         raise RuntimeError(
             "Set NP_BACKEND_USER and NP_BACKEND_PASSWORD in the environment "
@@ -1860,7 +1861,7 @@ def screenshot_np_recharge_detail(
 
                 if not matched:
                     raise RuntimeError(
-                        "No NP Detail on pages 1–"
+                        f"No {_log_http_backend_tag} Detail on pages 1–"
                         f"{NP_BACKEND_MAX_PAGES} with Request JSON `machineId` containing `{ms or '…'}`, "
                         f"positive `amount`, and amount matching `{expected_credit}`. "
                         "Increase NP_BACKEND_MAX_PAGES or NP_BACKEND_WINDOW_MINUTES."
@@ -1888,7 +1889,8 @@ def screenshot_np_recharge_detail(
         finally:
             if pause_for_input:
                 print(
-                    "[checkcredit] NP browser left open — watch the window; press Enter here to close…",
+                    f"[checkcredit] {_log_http_backend_tag} browser left open — watch the window; "
+                    "press Enter here to close…",
                     flush=True,
                 )
                 try:

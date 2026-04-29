@@ -397,9 +397,15 @@ def _np_run_screenshot_worker(
             "❌ checkcredit.screenshot_np_recharge_detail missing — deploy the latest `checkcredit.py`.",
         )
         return
+    use_wf = bool(
+        getattr(checkcredit, "_np_use_winford_log_backend", lambda _: False)(
+            (machine_display or "").strip() or None
+        )
+    )
+    backend_tag = "WF" if use_wf else "NP"
     send_message(
         chat_id,
-        "⏳ NP backend (Playwright): login → Log Third Http Req → recharge → Detail screenshot…",
+        f"⏳ {backend_tag} backend (Playwright): login → Log Third Http Req → recharge → Detail screenshot…",
     )
     path = None
     try:
@@ -420,7 +426,7 @@ def _np_run_screenshot_worker(
         if r.get("code") != 0:
             send_message(chat_id, f"❌ Failed to send image: {r}")
     except Exception as e:
-        send_message(chat_id, f"❌ NP third-http screenshot failed: {e}")
+        send_message(chat_id, f"❌ {backend_tag} third-http screenshot failed: {e}")
         print(f"[npthirdhttp] error: {e!r}")
     finally:
         if path and os.path.isfile(path):
