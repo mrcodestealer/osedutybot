@@ -614,23 +614,47 @@ def select_top2_overall(merged: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def build_np_followup_payload(
     top2_any: list[dict[str, Any]],
+    top2_err: list[dict[str, Any]],
     machine_display: str,
     td: date,
 ) -> dict[str, Any]:
-    """Latest 2 in-log players for `/npthirdhttp` (always returned; list may be empty)."""
-    players: list[dict[str, str]] = []
+    """
+    Cards 1–2: latest 2 in log; cards 3–4: latest 2 with error.
+    np_choices index 0..3 → user picks 1–4 in chat.
+    """
+    def _row_choice(r: dict[str, Any], source: str) -> dict[str, Any]:
+        lc = r.get("latest_credit") or {}
+        val = lc.get("value")
+        credit_s = str(val) if val is not None else "n/a"
+        return {
+            "user_id": str(r["user_id"]),
+            "time_short": (lc.get("time_short") or "").strip(),
+            "credit": credit_s,
+            "source": source,
+        }
+
+    np_choices: list[dict[str, Any]] = []
+    for r in top2_any[:2]:
+        np_choices.append(_row_choice(r, "latest_in_log"))
+    for r in top2_err[:2]:
+        np_choices.append(_row_choice(r, "with_error"))
+    np_choices = np_choices[:4]
+
+    latest_two_players: list[dict[str, str]] = []
     for r in top2_any[:2]:
         lc = r.get("latest_credit") or {}
-        players.append(
+        latest_two_players.append(
             {
                 "user_id": str(r["user_id"]),
                 "time_short": (lc.get("time_short") or "").strip(),
             }
         )
+
     return {
         "machine_display": machine_display,
         "target_date": td.isoformat(),
-        "latest_two_players": players,
+        "latest_two_players": latest_two_players,
+        "np_choices": np_choices,
     }
 
 
@@ -1020,7 +1044,7 @@ def run_finderror(
     plain = f"{header}\n\n{report}" if header else report
     return {
         "text": plain,
-        "np_followup": build_np_followup_payload(top2_any, machine_display, td),
+        "np_followup": build_np_followup_payload(top2_any, top2_err, machine_display, td),
         "lark_card": build_latest_two_overall_lark_card(
             top2_any,
             machine_display=machine_display,
