@@ -304,7 +304,13 @@ def _normalize_sheet_rows(records: list[dict]) -> list[dict]:
     return rows
 
 
-def _sheet_rows_card(rows: list[dict], *, title: str, target_user_id: str | None = None) -> dict:
+def _sheet_rows_card(
+    rows: list[dict],
+    *,
+    title: str,
+    target_user_id: str | None = None,
+    include_id: bool = False,
+) -> dict:
     lines = []
     if target_user_id:
         lines.append(f'<at user_id="{target_user_id}">User</at>')
@@ -312,17 +318,17 @@ def _sheet_rows_card(rows: list[dict], *, title: str, target_user_id: str | None
     if not rows:
         lines.append("No reminder records found.")
     else:
-        for r in rows:
+        for idx, r in enumerate(rows):
+            id_line = f"🆔 **ID:** `{r['id']}`\n" if include_id else ""
             lines.append(
-                f"🆔 **ID:** `{r['id']}`\n"
+                f"{id_line}"
                 f"📅 **Start Time:** `{r['start_date'].strftime('%Y/%m/%d')}`\n"
                 f"📅 **End Time:** `{r['end_date'].strftime('%Y/%m/%d')}`\n"
                 f"⏰ **Time:** `{r['time']}`\n"
                 f"📝 **Reason:** {r['reason']}"
             )
-            lines.append("---")
-        if lines and lines[-1] == "---":
-            lines.pop()
+            if idx < len(rows) - 1:
+                lines.append("")
     return {
         "config": {"wide_screen_mode": True},
         "header": {"template": "blue", "title": {"tag": "plain_text", "content": title}},
@@ -340,6 +346,8 @@ def _send_daily_sheet_reminder(
     today = date.today()
     if not (row["start_date"] <= today <= row["end_date"]):
         return
+    # Ensure real mention highlight in chat before the card.
+    send_func(chat_id, f'<at user_id="{target_user_id}">User</at> ⏰ Daily Reminder')
     card = {
         "config": {"wide_screen_mode": True},
         "header": {"template": "orange", "title": {"tag": "plain_text", "content": "⏰ Daily Reminder"}},
@@ -349,7 +357,6 @@ def _send_daily_sheet_reminder(
                 "text": {
                     "tag": "lark_md",
                     "content": (
-                        f'<at user_id="{target_user_id}">User</at>\n'
                         f"📅 **Start Time:** `{row['start_date'].strftime('%Y/%m/%d')}`\n"
                         f"📅 **End Time:** `{row['end_date'].strftime('%Y/%m/%d')}`\n"
                         f"⏰ **Time:** `{row['time']}`\n"
@@ -549,5 +556,6 @@ def send_sheet_reminder_list_card(*, send_func, chat_id: str, get_token_func) ->
     card = _sheet_rows_card(
         rows,
         title="📋 Reminder List",
+        include_id=True,
     )
     send_func(chat_id, json.dumps(card), msg_type="interactive")
