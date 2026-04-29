@@ -58,8 +58,29 @@ import ecsre
 
 import update
 import otpp1
-import amountloss
-import jenkinsupdate
+
+# amountloss / jenkinsupdate pull playwright — avoid top-level import so startup survives flaky browsers.
+
+_jenkins_mod = None  # None = not loaded yet; False = import failed
+
+
+def _get_jenkinsupdate():
+    """Return jenkinsupdate module or None if import failed (logged once)."""
+    global _jenkins_mod
+    if _jenkins_mod is False:
+        return None
+    if _jenkins_mod is not None:
+        return _jenkins_mod
+    try:
+        import jenkinsupdate as ju
+
+        _jenkins_mod = ju
+        return ju
+    except Exception as e:
+        print(f"[jenkinsupdate] lazy import failed (FPMS /jenkins flows disabled): {e!r}")
+        _jenkins_mod = False
+        return None
+
 
 # ================= CONFIGURATION =================
 APP_ID = os.getenv("APP_ID")
@@ -1170,8 +1191,11 @@ def lark_webhook():
             bot_mentioned = True
             print("✅ Bot mentioned (old schema via is_mention flag)")
 
-    jenkins_sess_active = jenkinsupdate.jenkins_update_has_active_lark_session(chat_id, sender_id)
-    if jenkinsupdate.handle_lark_jenkins_update_message(
+    ju = _get_jenkinsupdate()
+    jenkins_sess_active = (
+        ju.jenkins_update_has_active_lark_session(chat_id, sender_id) if ju else False
+    )
+    if ju and ju.handle_lark_jenkins_update_message(
         chat_id,
         sender_id,
         clean_text,
@@ -1803,4 +1827,10 @@ atexit.register(lambda: scheduler.shutdown())
 send_restart_ready()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    import traceback
+
+    try:
+        app.run(host="0.0.0.0", port=5000, debug=False)
+    except OSError as e:
+        traceback.print_exc()
+        raise SystemExit(f"Flask bind failed (port 5000 in use or permission?): {e}") from e
