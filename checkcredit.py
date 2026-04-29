@@ -34,8 +34,9 @@ Env (optional):
   ``WF_BACKEND_PASSWORD`` (defaults ``omduty1``).
   If **Machine** label starts with ``DHS`` (e.g. ``DHS3178``), uses ``https://backend-dhs.osmplay.com``
   + ``DHS_BACKEND_USER`` / ``DHS_BACKEND_PASSWORD``.
-  If **Machine** label starts with ``NCH`` (e.g. ``NCH1171``), uses ``https://backend-nc.osmplay.com``
-  + ``NCH_BACKEND_USER`` / ``NCH_BACKEND_PASSWORD``.
+  If **Machine** label starts with ``NCH`` (e.g. ``NCH1171``), uses ``https://backend-nc.osmplay.com``;
+  login prefers ``NCH_BACKEND_USER`` / ``NCH_BACKEND_PASSWORD``, else falls back to ``NP_BACKEND_*``
+  (same duty account on multiple backends).
 
   NP debug — **visible Chromium** (not headless), same logic as Duty Bot ``/npthirdhttp``::
     python3 checkcredit.py --checkuser --player-id 132594948 --date 2026-04-27 \\
@@ -1308,21 +1309,21 @@ def _np_resolve_backend(machine_display: str | None) -> tuple[str, str, str]:
     """
     (base_url, username, password) for Log Third Http Req.
 
-    **DHS** (machine label ``DHS*``) → ``backend-dhs.osmplay.com`` + ``DHS_BACKEND_USER`` /
-    ``DHS_BACKEND_PASSWORD``.
-    **NCH** (machine label ``NCH*``) → ``backend-nc.osmplay.com`` + ``NCH_BACKEND_USER`` /
-    ``NCH_BACKEND_PASSWORD``.
+    **DHS** (machine label ``DHS*``) → ``backend-dhs.osmplay.com`` + ``DHS_BACKEND_*`` (else ``NP_BACKEND_*``).
+    **NCH** (machine label ``NCH*``) → ``backend-nc.osmplay.com`` + ``NCH_BACKEND_*`` (else ``NP_BACKEND_*``).
     **Winford** (``WF*``, ``winford``, ``NWR8173`` OSS alias) → ``backend-winford`` + ``WF_BACKEND_*``
     (default ``omduty1``).
     Otherwise → ``NP_BACKEND_BASE`` / ``NP_BACKEND_USER`` / ``NP_BACKEND_PASSWORD``.
     """
     if _np_use_dhs_log_backend(machine_display):
-        u = (os.environ.get("DHS_BACKEND_USER") or "").strip()
-        p = (os.environ.get("DHS_BACKEND_PASSWORD") or "").strip()
+        nu, npw = _np_backend_env_cred()
+        u = (os.environ.get("DHS_BACKEND_USER") or nu).strip()
+        p = (os.environ.get("DHS_BACKEND_PASSWORD") or npw).strip()
         return _DHS_BACKEND_BASE, u, p
     if _np_use_nch_log_backend(machine_display):
-        u = (os.environ.get("NCH_BACKEND_USER") or "").strip()
-        p = (os.environ.get("NCH_BACKEND_PASSWORD") or "").strip()
+        nu, npw = _np_backend_env_cred()
+        u = (os.environ.get("NCH_BACKEND_USER") or nu).strip()
+        p = (os.environ.get("NCH_BACKEND_PASSWORD") or npw).strip()
         return _NCH_BACKEND_BASE, u, p
     if _np_use_winford_log_backend(machine_display):
         u = (os.environ.get("WF_BACKEND_USER") or "omduty1").strip() or "omduty1"
@@ -1819,8 +1820,9 @@ def screenshot_np_recharge_detail(
     digits,
     ``amount`` > 0, and ``amount`` matches latest credit — **header Request Time is not used to
     reject** (avoids closing valid dialogs when UI text differs slightly from log seconds).
-    ``machine_display``: LogNavigator / OSS folder label (``DHS*`` → DHS backend + ``DHS_BACKEND_*``;
-    ``WF*`` / ``NWR8173`` → Winford + ``WF_BACKEND_*``; else NP + ``NP_BACKEND_*``).
+    ``machine_display``: LogNavigator / OSS folder label (``DHS*`` / ``NCH*`` → respective backend;
+    creds fall back to ``NP_BACKEND_*`` when ``DHS_BACKEND_*`` / ``NCH_BACKEND_*`` unset).
+    ``WF*`` / ``NWR8173`` → Winford + ``WF_BACKEND_*``; else NP + ``NP_BACKEND_*``.
 
     ``headed``: ``True`` = always show browser; ``False`` = force headless; ``None`` = env / platform default.
 
@@ -1831,11 +1833,13 @@ def screenshot_np_recharge_detail(
     if not user or not pw:
         if _log_http_backend_tag == "DHS":
             raise RuntimeError(
-                "Set DHS_BACKEND_USER and DHS_BACKEND_PASSWORD in the environment for DHS Log Third Http."
+                "Missing credentials for DHS Log Third Http: set DHS_BACKEND_USER / DHS_BACKEND_PASSWORD "
+                "or NP_BACKEND_USER / NP_BACKEND_PASSWORD in `.env` (loaded from the Chatbox folder), then restart Duty Bot."
             )
         if _log_http_backend_tag == "NCH":
             raise RuntimeError(
-                "Set NCH_BACKEND_USER and NCH_BACKEND_PASSWORD in the environment for NCH Log Third Http."
+                "Missing credentials for NCH Log Third Http: set NCH_BACKEND_USER / NCH_BACKEND_PASSWORD "
+                "or NP_BACKEND_USER / NP_BACKEND_PASSWORD in `.env` (loaded from the Chatbox folder), then restart Duty Bot."
             )
         raise RuntimeError(
             "Set NP_BACKEND_USER and NP_BACKEND_PASSWORD in the environment "
