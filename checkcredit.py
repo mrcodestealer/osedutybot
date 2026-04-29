@@ -429,12 +429,54 @@ def _parse_reduce_num_credit(line: str) -> tuple[float, str] | None:
     return (val, tshort)
 
 
+_ENTER_TIMEOUT = re.compile(
+    r"enter\s+game\s+time\s*out|errorJson\s*\{[^}]*time\s*out|['\"]desc['\"]\s*:\s*['\"]time\s*out['\"]",
+    re.I,
+)
+
+
+def _block_has_enter_game_timeout(blines: list[tuple[int, str]]) -> bool:
+    """AFT / enter-game flow failed after pending (e.g. ``enter game time out``, ``desc: time out``)."""
+    for _, line in blines:
+        if _ENTER_TIMEOUT.search(line):
+            return True
+    return False
+
+
+def _parse_enter_game_credit(line: str) -> tuple[float, str] | None:
+    """
+    ``httpaft:enter_game add_num:…,target:…`` — intended credit for AFT enter-game.
+    Prefer ``target`` (float); else ``add_num``.
+    """
+    low = line.lower()
+    if "enter_game" not in low:
+        return None
+    if "add_num" not in line and "target" not in low:
+        return None
+    mt = re.search(r"target\s*:\s*(-?\d+(?:\.\d+)?)", line, re.I)
+    ma = re.search(r"add_num\s*:\s*(-?\d+(?:\.\d+)?)", line, re.I)
+    raw = mt.group(1) if mt else (ma.group(1) if ma else None)
+    if raw is None:
+        return None
+    try:
+        val = float(raw)
+    except ValueError:
+        return None
+    tshort = _line_time_prefix(line)
+    return (val, tshort)
+
+
 def parse_user_blocks_full(log_text: str) -> list[dict[str, Any]]:
     """
     Split by extra1/extra2/extra3 userid markers; lines until the next marker belong to that player.
     Every block included (errors may be empty). Error lines carry line_idx for ordering.
     Multi-line log records: timestamp on the first line is carried to following lines (no leading time)
     so reduce_num / successJson on `extra:` continuation lines get the correct time.
+
+    **Enter-game AFT timeout:** if the block contains ``enter game time out`` / ``errorJson`` time-out
+    etc., ``latest_credit`` is taken from the last ``httpaft:enter_game`` line that includes
+    ``add_num`` / ``target`` (prefer ``target``), e.g. ``target:20265.0``, instead of leaving n/a when
+    there is no ``successJson`` ``cur_coin``.
     """
     raw = log_text.splitlines()
     blocks: list[tuple[str, list[tuple[int, str]]]] = []
@@ -460,6 +502,7 @@ def parse_user_blocks_full(log_text: str) -> list[dict[str, Any]]:
         findings: list[dict[str, Any]] = []
         best_coin: dict[str, Any] | None = None
         best_reduce: dict[str, Any] | None = None
+        best_enter: dict[str, Any] | None = None
         block_max_line = max((ln for ln, _ in blines), default=-1)
         rolling_ts = ""
         for line_idx, line in blines:
@@ -485,6 +528,16 @@ def parse_user_blocks_full(log_text: str) -> list[dict[str, Any]]:
                     "value": val,
                     "time_short": eff_ts,
                     "source": "reduce_num",
+                }
+            eg = _parse_enter_game_credit(line)
+            if eg:
+                val, tshort = eg
+                eff_ts = (tshort or rolling_ts).strip()
+                best_enter = {
+                    "line_idx": line_idx,
+                    "value": val,
+                    "time_short": eff_ts,
+                    "source": "enter_game_target",
                 }
             em = err_re.search(line)
             if not em:
@@ -516,7 +569,17 @@ def parse_user_blocks_full(log_text: str) -> list[dict[str, Any]]:
             "errors": findings,
             "block_max_line": block_max_line,
         }
-        latest_credit: dict[str, Any] | None = best_coin if best_coin is not None else best_reduce
+        has_enter_timeout = _block_has_enter_game_timeout(blines)
+        if has_enter_timeout and best_enter is not None:
+            latest_credit: dict[str, Any] | None = best_enter
+        elif best_coin is not None:
+            latest_credit = best_coin
+        elif best_reduce is not None:
+            latest_credit = best_reduce
+        elif best_enter is not None:
+            latest_credit = best_enter
+        else:
+            latest_credit = None
         if latest_credit:
             row["latest_credit"] = latest_credit
         out.append(row)
@@ -575,12 +638,19 @@ def merge_players_full(payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "errors": [],
                 "_lc_coin": None,
                 "_lc_reduce": None,
+                "_lc_enter": None,
                 "max_line_idx": -1,
             }
         by_uid[uid]["errors"].extend(blk.get("errors") or [])
         lc = blk.get("latest_credit")
         if lc:
-            slot = "_lc_reduce" if lc.get("source") == "reduce_num" else "_lc_coin"
+            src = (lc.get("source") or "").strip()
+            if src == "reduce_num":
+                slot = "_lc_reduce"
+            elif src == "enter_game_target":
+                slot = "_lc_enter"
+            else:
+                slot = "_lc_coin"
             old = by_uid[uid][slot]
             if old is None or int(lc["line_idx"]) > int(old["line_idx"]):
                 by_uid[uid][slot] = lc
@@ -594,7 +664,9 @@ def merge_players_full(payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
         errs = by_uid[uid]["errors"][:]
         errs.sort(key=_error_line_time_key, reverse=True)
         d = by_uid[uid]
-        lc_final = d["_lc_coin"] if d["_lc_coin"] is not None else d["_lc_reduce"]
+        lc_cands = [d["_lc_coin"], d["_lc_reduce"], d["_lc_enter"]]
+        lc_cands = [c for c in lc_cands if c is not None]
+        lc_final = max(lc_cands, key=lambda x: int(x["line_idx"])) if lc_cands else None
         merged.append(
             {
                 "user_id": uid,
