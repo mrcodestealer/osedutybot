@@ -191,8 +191,8 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
         "https://jenkins.client8.me/job/FPMS_NT/view/all/job/FPMS_NT_UAT_MASTER_UPDATE/build?delay=0sec",
     ),
     "fpms uat master": (
-        "FPMS NT UAT MASTER UPDATE",
-        "https://jenkins.client8.me/job/FPMS_NT/view/all/job/FPMS_NT_UAT_MASTER_UPDATE/build?delay=0sec",
+        "FPMS UAT MASTER UPDATE",
+        "https://jenkins.client8.me/job/FPMS/view/FPMS-UAT/job/FPMS_UAT_MASTER_UPDATE/",
     ),
     "igo prod script": (
         "IGO PROD SCRIPT RUN",
@@ -469,6 +469,9 @@ ENVIRONMENTS = [
     "fpms-uat3-branch",
     "fpms-uat4-branch",
     "fpms-uat5-branch",
+    "fpms-uat-master",
+    "fpms-uat2-master",
+    "fpms-uat3-master",
     "fpms-nt-uat-master",
     "fpms-nt-uat2-master",
     "fpms-nt-uat3-master",
@@ -839,11 +842,11 @@ def _environment_hint_from_banner(line: str) -> str | None:
     """
     s = line.casefold().replace("_", " ")
     # FPMS NT UAT MASTER jobs (same fill flow, different env values).
-    if (
-        re.search(r"\bfpms[\s-]*nt[\s-]*uat[\s-]*master\b", s)
-        or re.search(r"\bfpms[\s-]*uat[\s-]*master\b", s)
-    ):
+    if re.search(r"\bfpms[\s-]*nt[\s-]*uat[\s-]*master\b", s):
         return "fpms-nt-uat-master"
+    # FPMS UAT MASTER jobs.
+    if re.search(r"\bfpms[\s-]*uat[\s-]*master\b", s):
+        return "fpms-uat-master"
     if re.search(r"\bfpms[\s-]*uat\s*5\b", s) or re.search(r"\buat\s*5\b", s):
         return "fpms-uat5-branch"
     if re.search(r"\bfpms[\s-]*uat\s*4\b", s) or re.search(r"\buat\s*4\b", s):
@@ -4095,6 +4098,8 @@ def _jenkins_update_job_automation_profile(raw_urls: str) -> str | None:
     ul = u.casefold()
     if "/job/fpms/job/fpms_uat_branch_update/" in ul:
         return "fpms"
+    if "/job/fpms/view/fpms-uat/job/fpms_uat_master_update/" in ul:
+        return "fpms"
     if "/job/fpms_nt/view/all/job/fpms_nt_uat_master_update/" in ul:
         return "fpms"
     if "/job/fnt/job/fnt_uat_script_run/" in ul or "/job/fnt/job/rc-uat-update/" in ul:
@@ -4179,11 +4184,10 @@ def _environment_from_bot_trigger_line(head: str) -> str | None:
     if hint:
         return hint
     s = head.casefold().replace("_", " ")
-    if (
-        re.search(r"\bfpms[\s-]*nt[\s-]*uat[\s-]*master\b", s)
-        or re.search(r"\bfpms[\s-]*uat[\s-]*master\b", s)
-    ):
+    if re.search(r"\bfpms[\s-]*nt[\s-]*uat[\s-]*master\b", s):
         return "fpms-nt-uat-master"
+    if re.search(r"\bfpms[\s-]*uat[\s-]*master\b", s):
+        return "fpms-uat-master"
     if re.search(r"\buat\s*5\b", s) or "uat5" in s.replace(" ", ""):
         return "fpms-uat5-branch"
     if re.search(r"\buat\s*4\b", s) or "uat4" in s.replace(" ", ""):
