@@ -1195,8 +1195,38 @@ def screenshot_np_recharge_detail(
             ).first
             uid_in.fill("")
             uid_in.fill(str(player_id).strip())
+            page.wait_for_timeout(400)
 
-            page.get_by_role("button", name=re.compile(r"^Search$")).click()
+            # Search label varies (EN / CN / Element Plus inner span); strict "^Search$" often fails.
+            def _click_np_search() -> None:
+                attempts = [
+                    page.locator(".filter-container button, .filter-container .el-button").filter(
+                        has_text=re.compile(r"Search|查询", re.I)
+                    ),
+                    page.get_by_role("button", name=re.compile(r"search|查询", re.I)),
+                    page.locator('button.el-button--primary').filter(
+                        has_text=re.compile(r"Search|查询|search", re.I)
+                    ),
+                    page.locator("button").filter(has_text=re.compile(r"^Search$")),
+                ]
+                last_err: Exception | None = None
+                for loc in attempts:
+                    try:
+                        if loc.count() == 0:
+                            continue
+                        btn = loc.first
+                        btn.wait_for(state="visible", timeout=min(30_000, timeout_ms))
+                        btn.click(timeout=min(60_000, timeout_ms))
+                        return
+                    except Exception as e:
+                        last_err = e
+                        continue
+                raise RuntimeError(
+                    "Could not find or click the Search button on Log Third Http Req "
+                    f"(UI may have changed). Last error: {last_err!r}"
+                )
+
+            _click_np_search()
             page.wait_for_timeout(2500)
 
             page.locator(".el-table__body tbody").wait_for(state="visible", timeout=timeout_ms)

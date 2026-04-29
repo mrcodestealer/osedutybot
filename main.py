@@ -1100,6 +1100,20 @@ def lark_webhook():
             send_message(chat_id, p1_reply)
         return jsonify({"success": True})
 
+    # Reply **1**–**4** after `/checkcreditdate` NP prompt — works in group **without** @bot
+    stripped_choice = clean_text.strip()
+    if stripped_choice in ("1", "2", "3", "4"):
+        pend_np = _get_checkcredit_np_pending(chat_id)
+        choices_np = (pend_np or {}).get("np_choices") or []
+        idx_np = int(stripped_choice)
+        if pend_np and 1 <= idx_np <= len(choices_np):
+            threading.Thread(
+                target=run_np_third_http_by_choice,
+                args=(chat_id, idx_np),
+                daemon=True,
+            ).start()
+            return jsonify({"success": True})
+
     # ================= 群组 @bot（后续命令需要提及；FPMS 多步会话中跟帖可不 @） =================
     bot_mentioned = chat_type != "group"
     if chat_type == "group":
@@ -1133,20 +1147,6 @@ def lark_webhook():
     if chat_type == "group" and not bot_mentioned and not jenkins_sess_active:
         print("⏭️ Bot not mentioned in group chat – ignoring further commands")
         return jsonify({"success": True})
-
-    # Reply **1**–**4** after `/checkcreditdate` NP prompt (before memory game steals "1")
-    stripped_choice = clean_text.strip()
-    if stripped_choice in ("1", "2", "3", "4"):
-        pend_np = _get_checkcredit_np_pending(chat_id)
-        choices_np = (pend_np or {}).get("np_choices") or []
-        idx_np = int(stripped_choice)
-        if pend_np and 1 <= idx_np <= len(choices_np):
-            threading.Thread(
-                target=run_np_third_http_by_choice,
-                args=(chat_id, idx_np),
-                daemon=True,
-            ).start()
-            return jsonify({"success": True})
 
     # 初始化回复变量
     reply = ""
