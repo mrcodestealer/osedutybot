@@ -25,7 +25,9 @@ Env (optional):
   NP_BACKEND_BASE (default https://backend-np.osmplay.com), NP_BACKEND_USER, NP_BACKEND_PASSWORD
   NP_BACKEND_WINDOW_MINUTES (default 10), NP_BACKEND_MAX_PAGES (default 20, table pagination)
   NP_BACKEND_HEADLESS / NP_BACKEND_HEADED
-  If **Machine** matches ``WF8173`` (word in display string), NP uses Winford instead:
+  If **Machine** looks Winford (folder / label **starts with ``WF``** e.g. ``WF8123``, ``WF8173``;
+  ``winford`` in the text; or ``NWR8173`` from digits-only OSS ``NWR{n}`` for that cabinet), Log Third
+  Http uses Winford instead of NP:
   ``https://backend-winford.osmplay.com`` with user/password ``omduty1`` (override via
   ``WF_BACKEND_USER`` / ``WF_BACKEND_PASSWORD``).
 
@@ -1215,22 +1217,38 @@ def _np_backend_env_cred() -> tuple[str, str]:
 _WINFORD_NP_BASE = "https://backend-winford.osmplay.com".rstrip("/")
 
 
-def _np_machine_is_wf8173(machine_display: str | None) -> bool:
-    """Winford machine tag in LogNavigator / checkcredit machine line (e.g. ``Machine: WF8173``)."""
-    if not (machine_display or "").strip():
+def _np_use_winford_log_backend(machine_display: str | None) -> bool:
+    """
+    Use Winford ``backend-winford`` Log Third Http instead of NP.
+
+    - Any **folder / last path segment** starting with ``WF`` (case-insensitive), e.g. ``WF8123``,
+      ``WF8173``, ``MINIPC/WF8123``.
+    - ``winford`` anywhere in the machine string.
+    - ``NWR8173`` (alnum or substring): digits-only query ``8173`` → default OSS template ``NWR{n}``.
+    """
+    raw = (machine_display or "").strip()
+    if not raw:
         return False
-    return bool(re.search(r"\bWF8173\b", machine_display, re.I))
+    if re.search(r"(?i)winford", raw):
+        return True
+    seg = raw.replace("\\", "/").rstrip("/").split("/")[-1].strip()
+    if seg and re.match(r"(?i)WF", seg):
+        return True
+    alnum = re.sub(r"[^A-Za-z0-9]", "", raw).upper()
+    if alnum and (alnum == "NWR8173" or "NWR8173" in alnum):
+        return True
+    return False
 
 
 def _np_resolve_backend(machine_display: str | None) -> tuple[str, str, str]:
     """
     (base_url, username, password) for Log Third Http Req.
 
-    Winford ``WF8173`` → ``backend-winford.osmplay.com`` + duty login (defaults ``omduty1``;
-    override with ``WF_BACKEND_USER`` / ``WF_BACKEND_PASSWORD``).
+    Winford cabinet (machine label / path segment starting with **WF**, ``winford`` in name, or ``NWR8173`` OSS alias)
+    → ``backend-winford.osmplay.com`` + ``WF_BACKEND_USER`` / ``WF_BACKEND_PASSWORD`` (default ``omduty1``).
     Otherwise → ``NP_BACKEND_BASE`` / env NP credentials.
     """
-    if _np_machine_is_wf8173(machine_display):
+    if _np_use_winford_log_backend(machine_display):
         u = (os.environ.get("WF_BACKEND_USER") or "omduty1").strip() or "omduty1"
         p = (os.environ.get("WF_BACKEND_PASSWORD") or "omduty1").strip() or "omduty1"
         return _WINFORD_NP_BASE, u, p
@@ -1691,8 +1709,8 @@ def screenshot_np_recharge_detail(
     digits,
     ``amount`` > 0, and ``amount`` matches latest credit — **header Request Time is not used to
     reject** (avoids closing valid dialogs when UI text differs slightly from log seconds).
-    ``machine_display``: LogNavigator machine string (e.g. ``WF8173``) — when it contains ``WF8173``,
-    uses Winford backend; login from ``WF_BACKEND_USER`` / ``WF_BACKEND_PASSWORD`` (default ``omduty1``).
+    ``machine_display``: LogNavigator / OSS folder label (e.g. ``WF8123``, ``NWR8173`` from digits-only
+    ``NWR{n}``) — Winford routing uses ``_np_use_winford_log_backend``; login from ``WF_BACKEND_*``.
 
     ``headed``: ``True`` = always show browser; ``False`` = force headless; ``None`` = env / platform default.
 
@@ -1702,7 +1720,7 @@ def screenshot_np_recharge_detail(
     if not user or not pw:
         raise RuntimeError(
             "Set NP_BACKEND_USER and NP_BACKEND_PASSWORD in the environment "
-            "(not required for Winford WF8173 — defaults omduty1 unless WF_BACKEND_* is set)."
+            "(not required for Winford (WF* / NWR8173 alias) — defaults omduty1 unless WF_BACKEND_* is set)."
         )
 
     start_s, end_s = _np_window_strings(date_iso, time_short)
@@ -1946,7 +1964,7 @@ def main(argv: list[str] | None = None) -> int:
         "--machine-display",
         default="",
         metavar="NAME",
-        help="With --checkuser: machine label (e.g. WF8173) to pick NP backend — matches Duty Bot context",
+        help="With --checkuser: machine label (e.g. WF8123) to pick Winford vs NP backend — matches Duty Bot context",
     )
     args = ap.parse_args(argv)
 
