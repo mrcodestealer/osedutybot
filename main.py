@@ -348,11 +348,21 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
             _set_checkcredit_np_pending(chat_id, np)
             choices = np.get("np_choices") or []
             try:
-                np_card = checkcredit.build_np_choice_lark_card(choices)
+                np_card = checkcredit.build_np_choice_lark_card(
+                    choices,
+                    target_date_iso=str(np.get("target_date") or ""),
+                    machine_display=str(np.get("machine_display") or ""),
+                )
                 card_json = json.dumps(np_card)
                 resp_np = send_message(chat_id, card_json, msg_type="interactive")
                 if resp_np.get("code") != 0:
                     lines = []
+                    _td = str(np.get("target_date") or "").strip()
+                    _md = str(np.get("machine_display") or "").strip()
+                    if _td or _md:
+                        lines.append(
+                            f"Log date (NP/WF): `{_td or '?'}` · Machine: `{_md or '?'}`"
+                        )
                     for i, ch in enumerate(choices):
                         uid = ch.get("user_id", "")
                         cr = ch.get("credit", "n/a")
@@ -362,6 +372,10 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
             except Exception as e:
                 print(f"[checkcredit] NP choice card failed: {e!r}")
                 lines = []
+                _td = str(np.get("target_date") or "").strip()
+                _md = str(np.get("machine_display") or "").strip()
+                if _td or _md:
+                    lines.append(f"Log date (NP/WF): `{_td or '?'}` · Machine: `{_md or '?'}`")
                 for i, ch in enumerate(choices):
                     uid = ch.get("user_id", "")
                     cr = ch.get("credit", "n/a")
@@ -1690,18 +1704,25 @@ def lark_webhook():
             daemon=True,
         ).start()
         return jsonify({"success": True})
-    elif clean_text.lower().startswith("/checkcreditdate"):
-        parts = clean_text.split()
-        if len(parts) < 3:
+    elif re.search(r"/checkcreditdate\b", clean_text, re.I):
+        # Anchor on `/checkcreditdate` so leading @Duty Bot / other text does not shift `split()` indices.
+        m_cc = re.search(
+            r"/checkcreditdate\s+(\S+)\s+(\d{4}-\d{2}-\d{2})\b",
+            clean_text,
+            re.I,
+        )
+        if not m_cc:
             send_message(
                 chat_id,
                 "❌ Usage: `/checkcreditdate <machine_digits> YYYY-MM-DD`\n"
                 "Example: `/checkcreditdate 2074 2026-04-27`\n"
+                "You can put `@Duty Bot` before the command; the date must be the **second** argument "
+                "after the machine id.\n"
                 "(same as `python3 checkcredit.py --finderror 2074 --date 2026-04-27`)",
             )
             return jsonify({"success": True})
-        machine_q = parts[1].strip()
-        date_arg = parts[2].strip()
+        machine_q = m_cc.group(1).strip()
+        date_arg = m_cc.group(2).strip()
         try:
             datetime.strptime(date_arg, "%Y-%m-%d")
         except ValueError:

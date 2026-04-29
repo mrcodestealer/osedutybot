@@ -715,9 +715,25 @@ def machine_match_substr_from_display(machine_display: str) -> str:
     return max(nums, key=len) if nums else ""
 
 
-def build_np_choice_lark_card(np_choices: list[dict[str, Any]]) -> dict[str, Any]:
-    """Minimal Lark card: only the four numbered lines (reply 1–4)."""
+def build_np_choice_lark_card(
+    np_choices: list[dict[str, Any]],
+    *,
+    target_date_iso: str = "",
+    machine_display: str = "",
+) -> dict[str, Any]:
+    """Lark card: context line (log date + machine for NP/WF window) + four numbered lines (reply 1–4)."""
     lines: list[str] = []
+    td = (target_date_iso or "").strip()
+    md = (machine_display or "").strip()
+    if td or md:
+        bits: list[str] = []
+        if td:
+            bits.append(f"**Log date (NP/WF window):** `{td}`")
+        if md:
+            bits.append(f"**Machine:** `{md}`")
+        lines.append(" · ".join(bits))
+        lines.append("_Screenshot uses the log date above + each line’s credit time._")
+        lines.append("")
     for i, ch in enumerate(np_choices):
         uid = ch.get("user_id", "")
         cr = ch.get("credit", "n/a")
