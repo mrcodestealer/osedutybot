@@ -357,8 +357,9 @@ def bump_tail_and_execute(page, *, timeout_ms: int) -> None:
     page.wait_for_selector("section[role='results'] pre, pre.nofloat", timeout=min(timeout_ms, 120_000))
 
 
+# New player segment: extra1 / extra2 / extra3 + userid (lines below belong to that player until the next marker).
 _USERID_START = re.compile(
-    r'extra1\s*:\s*["\']?userid\s*:\s*(\d+)',
+    r'extra[123]\s*:\s*["\']?userid\s*:\s*(\d+)',
     re.I,
 )
 _ERR_ZERO = re.compile(r"""['\"]error['\"]\s*:\s*0\b""")
@@ -408,8 +409,8 @@ def _parse_reduce_num_credit(line: str) -> tuple[float, str] | None:
 
 def parse_user_blocks_full(log_text: str) -> list[dict[str, Any]]:
     """
-    Split by extra1 userid markers; every block included (errors may be empty).
-    Error lines carry line_idx for ordering.
+    Split by extra1/extra2/extra3 userid markers; lines until the next marker belong to that player.
+    Every block included (errors may be empty). Error lines carry line_idx for ordering.
     """
     raw = log_text.splitlines()
     blocks: list[tuple[str, list[tuple[int, str]]]] = []
@@ -691,7 +692,7 @@ def build_latest_two_overall_lark_card(
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": "No user blocks found (`extra1: userid`).",
+                    "content": "No user blocks found (`extra1|extra2|extra3: userid`).",
                 },
             }
         )
@@ -794,7 +795,7 @@ def _truncate_log(text: str, limit: int = 1800) -> str:
 def format_finderror_terminal_from_merged(merged: list[dict[str, Any]]) -> str:
     """Plain terminal text from merged rows (same order as card)."""
     if not merged:
-        return "✅ No error > 0 found in scanned user blocks (extra1: userid).\n"
+        return "✅ No error > 0 found in scanned user blocks (extra1|2|3: userid).\n"
 
     blocks: list[str] = []
     for row in merged:
