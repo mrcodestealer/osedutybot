@@ -25,7 +25,8 @@ Env (optional):
   NP_BACKEND_BASE (default https://backend-np.osmplay.com), NP_BACKEND_USER, NP_BACKEND_PASSWORD
   NP_BACKEND_WINDOW_MINUTES (default 10), NP_BACKEND_MAX_PAGES (default 20, table pagination)
   NP_BACKEND_HEADLESS / NP_BACKEND_HEADED (or **WF_THIRD_HTTP_HEADED** / **THIRD_HTTP_PLAYWRIGHT_HEADED**
-  — same effect: visible Chromium for Log Third Http screenshots on Linux servers that default to headless).
+  — visible Chromium when ``headed=None``). **Duty Bot** calls ``screenshot_np_recharge_detail(..., headed=False)``
+  so server screenshots are always headless; use CLI ``--checkuser`` / ``--pause`` for a visible window.
   If **Machine** looks Winford (folder / label **starts with ``WF``** e.g. ``WF8123``, ``WF8173``;
   ``winford`` in the text; or ``NWR8173`` from digits-only OSS ``NWR{n}`` for that cabinet), Log Third
   Http uses Winford instead of NP:

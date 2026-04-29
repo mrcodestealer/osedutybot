@@ -397,7 +397,7 @@ def _np_run_screenshot_worker(
     expected_credit: Optional[float] = None,
     machine_display: Optional[str] = None,
 ) -> None:
-    """NP Log Third Http Req → `recharge` Detail screenshot (machineId + positive amount when provided)."""
+    """NP/WF Log Third Http Req → `recharge` Detail screenshot. Always **headless** here (no DISPLAY on servers)."""
     try:
         import checkcredit
 
@@ -431,6 +431,7 @@ def _np_run_screenshot_worker(
             machine_substr=machine_substr,
             expected_credit=expected_credit,
             machine_display=machine_display,
+            headed=False,
         )
         key = upload_image_lark(path)
         if not key:
@@ -441,8 +442,9 @@ def _np_run_screenshot_worker(
             send_message(chat_id, f"❌ Failed to send image: {r}")
     except Exception as e:
         tip = (
-            "\n💡 Visible browser: set NP_BACKEND_HEADED=1 or WF_THIRD_HTTP_HEADED=1 in .env, "
-            "restart Duty Bot, retry. On Linux set DISPLAY (or use Xvfb) or Chromium cannot show a window."
+            "\n💡 Duty Bot runs this screenshot **headless**. Try raising `NP_BACKEND_MAX_PAGES` / "
+            "`NP_BACKEND_WINDOW_MINUTES` in `.env`. For a **visible** Chromium window, run locally: "
+            "`python3 checkcredit.py --checkuser ... --pause`."
         )
         send_message(chat_id, f"❌ {backend_tag} third-http screenshot failed: {e}{tip}")
         print(f"[npthirdhttp] error: {e!r}")
