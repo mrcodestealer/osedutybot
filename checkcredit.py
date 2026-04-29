@@ -40,6 +40,9 @@ Env (optional):
   (same duty account on multiple backends).
   If **Machine** label starts with ``TBP`` (e.g. ``TBP8641``), uses ``https://backend-tbp.osmplay.com``
   + ``TBP_BACKEND_USER`` / ``TBP_BACKEND_PASSWORD``.
+  TBP extras: ``TBP_THIRD_HTTP_AMOUNT_SCALE`` (default ``1`` — set e.g. ``100`` if Request amounts are in cents),
+  ``TBP_THIRD_HTTP_NO_MACHINE_ONLY_FALLBACK=1`` to disable a second pass that matches **machine id only**
+  (ignores log credit vs Request amount) when the strict pass finds nothing.
 
   NP debug — **visible Chromium** (not headless), same logic as Duty Bot ``/npthirdhttp``::
     python3 checkcredit.py --checkuser --player-id 132594948 --date 2026-04-27 \\
@@ -1260,6 +1263,15 @@ _NCH_BACKEND_BASE = "https://backend-nc.osmplay.com".rstrip("/")
 _TBP_BACKEND_BASE = "https://backend-tbp.osmplay.com".rstrip("/")
 
 
+def _np_tbp_amount_scale() -> float:
+    """Divide Request JSON numeric amount by this before comparing to log credit (TBP-only caller)."""
+    try:
+        v = float(os.environ.get("TBP_THIRD_HTTP_AMOUNT_SCALE", "1").strip() or "1")
+        return v if v > 0 else 1.0
+    except ValueError:
+        return 1.0
+
+
 def _np_use_dhs_log_backend(machine_display: str | None) -> bool:
     """DHS cabinet — folder / last path segment starts with ``DHS`` (e.g. ``DHS3178``, ``DHS8173``)."""
     raw = (machine_display or "").strip()
@@ -1481,6 +1493,18 @@ def _np_row_time_distance_to_target(
     return min(deltas)
 
 
+def _np_cell_looks_like_recharge_event(cell_text: str) -> bool:
+    raw = cell_text or ""
+    t = raw.strip().lower()
+    if not t:
+        return False
+    if t == "recharge" or "recharge" in t:
+        return True
+    if "充值" in raw:
+        return True
+    return False
+
+
 def _np_row_is_recharge(rows, ev_i: int, i: int) -> bool:
     row = rows.nth(i)
     tds = row.locator("td")
@@ -1488,11 +1512,10 @@ def _np_row_is_recharge(rows, ev_i: int, i: int) -> bool:
     if tc == 0:
         return False
     if tc > ev_i:
-        et_txt = (tds.nth(ev_i).inner_text() or "").strip().lower()
-        if et_txt == "recharge":
+        if _np_cell_looks_like_recharge_event(tds.nth(ev_i).inner_text() or ""):
             return True
     for j in range(tc):
-        if (tds.nth(j).inner_text() or "").strip().lower() == "recharge":
+        if _np_cell_looks_like_recharge_event(tds.nth(j).inner_text() or ""):
             return True
     return False
 
@@ -1643,6 +1666,9 @@ def _np_parse_machine_amount_from_request_blob(blob: str) -> tuple[str | None, f
             r'"rechargeAmount"\s*:\s*(-?\d+(?:\.\d+)?)',
             r'"recharge_num"\s*:\s*(-?\d+(?:\.\d+)?)',
             r'"rechargeNum"\s*:\s*(-?\d+(?:\.\d+)?)',
+            r'"change_num"\s*:\s*(-?\d+(?:\.\d+)?)',
+            r'"changeNum"\s*:\s*(-?\d+(?:\.\d+)?)',
+            r'"cur_coin"\s*:\s*(-?\d+(?:\.\d+)?)',
             r'"money"\s*:\s*(-?\d+(?:\.\d+)?)',
             r'"totalAmount"\s*:\s*(-?\d+(?:\.\d+)?)',
         )
@@ -1679,21 +1705,37 @@ def _np_detail_matches_credit_and_machine_id(
     req_blob: str,
     machine_substr: str | None,
     expected_credit: float | None,
+    *,
+    amount_scale: float = 1.0,
 ) -> bool:
     """
     Request JSON: ``machineId`` contains machine digits; when ``expected_credit`` is not ``None``,
-    ``amount`` > 0 and matches within ``NP_BACKEND_AMOUNT_EPS`` (default 0.05).
+    ``amount`` > 0 and matches within ``NP_BACKEND_AMOUNT_EPS`` (default 0.05), after optional
+    ``amount_scale`` (TBP: ``TBP_THIRD_HTTP_AMOUNT_SCALE``).
     """
     mid, amt = _np_parse_machine_amount_from_request_blob(req_blob)
-    if mid is None or amt is None:
+    if mid is None:
         return False
     if not _np_machine_id_contains_substr(machine_substr, mid):
         return False
-    if expected_credit is not None:
-        if amt <= 0:
+    if expected_credit is None:
+        # Machine-only match (e.g. TBP fallback): accept if amount missing; reject obvious non-positive.
+        if amt is not None and amt <= 0:
             return False
-        if abs(amt - float(expected_credit)) > _np_amount_match_eps():
-            return False
+        return True
+    if amt is None:
+        return False
+    try:
+        sc = float(amount_scale)
+    except (TypeError, ValueError):
+        sc = 1.0
+    if sc <= 0:
+        sc = 1.0
+    scaled = float(amt) / sc
+    if scaled <= 0:
+        return False
+    if abs(scaled - float(expected_credit)) > _np_amount_match_eps():
+        return False
     return True
 
 
@@ -1770,6 +1812,24 @@ def _np_click_pagination_next(page, *, timeout_ms: int) -> None:
     page.wait_for_timeout(900)
 
 
+def _np_pagination_go_first_page(page, *, timeout_ms: int) -> None:
+    """Element UI: click ``btn-prev`` until disabled so a second scan starts from page 1."""
+    btn = page.locator(".el-pagination button.btn-prev").first
+    for _ in range(max(NP_BACKEND_MAX_PAGES, 30) + 5):
+        if btn.count() == 0:
+            return
+        try:
+            if btn.is_disabled():
+                return
+        except Exception:
+            return
+        try:
+            btn.click(timeout=min(15_000, timeout_ms))
+        except Exception:
+            return
+        page.wait_for_timeout(450)
+
+
 def _np_dialog_text_layers_for_match(dlg) -> str:
     """
     ``inner_text()`` can miss or fragment JSON (syntax-highlighted spans, delayed paint). Combine
@@ -1799,6 +1859,40 @@ def _np_dialog_text_layers_for_match(dlg) -> str:
     return "\n".join(chunks)
 
 
+def _np_click_row_show_details_link(row, *, timeout_ms: int) -> None:
+    """Element table action link — EN ``Show Details`` or CN ``详情`` / ``查看详情``."""
+    last_err: Exception | None = None
+    for pat in (
+        re.compile(r"Show\s*Details", re.I),
+        re.compile(r"查看详情|显示详情|^\s*详情\s*$", re.I),
+    ):
+        try:
+            loc = row.get_by_text(pat)
+            if loc.count() == 0:
+                continue
+            btn = loc.first
+            btn.scroll_into_view_if_needed()
+            btn.click(timeout=min(60_000, timeout_ms))
+            return
+        except Exception as e:
+            last_err = e
+            continue
+    try:
+        alt = row.locator("a, button").filter(
+            has_text=re.compile(r"Show\s*Details|查看详情|显示详情|详情", re.I)
+        ).first
+        if alt.count():
+            alt.scroll_into_view_if_needed()
+            alt.click(timeout=min(60_000, timeout_ms))
+            return
+    except Exception as e:
+        last_err = e
+    raise RuntimeError(
+        "Could not find or click the row detail link (Show Details / 查看详情 / 详情). "
+        f"Last error: {last_err!r}"
+    )
+
+
 def _np_close_np_detail_dialog(page) -> None:
     hdr = page.locator(
         ".el-dialog.details-dialog .el-dialog__headerbtn, "
@@ -1825,6 +1919,7 @@ def _np_try_screenshot_matching_detail(
     out_path: str,
     timeout_ms: int,
     dialog_settle_ms: int = 900,
+    amount_scale: float = 1.0,
 ) -> bool:
     """
     For each candidate row: accept when Request JSON ``machineId`` contains the machine digits and
@@ -1840,31 +1935,43 @@ def _np_try_screenshot_matching_detail(
 
     for pick_i in ordered_indices:
         row = rows.nth(pick_i)
-        link = row.get_by_text("Show Details", exact=False)
-        link.scroll_into_view_if_needed()
-        link.click()
+        _np_click_row_show_details_link(row, timeout_ms=timeout_ms)
         dlg_sel.wait_for(state="visible", timeout=timeout_ms)
         page.wait_for_timeout(max(300, dialog_settle_ms))
         try:
-            dlg_sel.get_by_text(re.compile(r"machineId|machine\s*id|amount", re.I)).first.wait_for(
-                state="visible", timeout=min(8_000, timeout_ms)
-            )
+            dlg_sel.get_by_text(
+                re.compile(
+                    r"machineId|machine\s*id|machineNo|machine_no|amount|加款|充值|金额",
+                    re.I,
+                )
+            ).first.wait_for(state="visible", timeout=min(8_000, timeout_ms))
         except Exception:
             pass
         full_txt = dlg_sel.inner_text() or ""
         layers = _np_dialog_text_layers_for_match(dlg_sel)
         blob = _np_detail_request_section(full_txt)
-        ok = _np_detail_matches_credit_and_machine_id(blob, machine_substr, expected_credit)
-        if not ok:
-            ok = _np_detail_matches_credit_and_machine_id(layers, machine_substr, expected_credit)
-        if not ok:
-            ok = _np_detail_matches_credit_and_machine_id(full_txt, machine_substr, expected_credit)
-        if not ok:
-            blob2 = _np_detail_request_section(layers)
-            ok = _np_detail_matches_credit_and_machine_id(blob2, machine_substr, expected_credit)
+        ok = _np_detail_matches_credit_and_machine_id(
+            blob, machine_substr, expected_credit, amount_scale=amount_scale
+        )
         if not ok:
             ok = _np_detail_matches_credit_and_machine_id(
-                "\n".join((blob, layers, full_txt)), machine_substr, expected_credit
+                layers, machine_substr, expected_credit, amount_scale=amount_scale
+            )
+        if not ok:
+            ok = _np_detail_matches_credit_and_machine_id(
+                full_txt, machine_substr, expected_credit, amount_scale=amount_scale
+            )
+        if not ok:
+            blob2 = _np_detail_request_section(layers)
+            ok = _np_detail_matches_credit_and_machine_id(
+                blob2, machine_substr, expected_credit, amount_scale=amount_scale
+            )
+        if not ok:
+            ok = _np_detail_matches_credit_and_machine_id(
+                "\n".join((blob, layers, full_txt)),
+                machine_substr,
+                expected_credit,
+                amount_scale=amount_scale,
             )
         if ok:
             dlg_sel.screenshot(path=out_path, animations="disabled")
@@ -2064,35 +2171,50 @@ def screenshot_np_recharge_detail(
             ms = (machine_substr or "").strip()
             exp_match = _np_expected_credit_for_match(expected_credit)
             need_detail_match = bool(ms) or exp_match is not None
+            amt_scale = _np_tbp_amount_scale() if _np_use_tbp_log_backend(machine_display) else 1.0
 
             if need_detail_match:
-                matched = False
-                for pi in range(NP_BACKEND_MAX_PAGES):
-                    page.locator(".el-table__body tbody").wait_for(state="visible", timeout=timeout_ms)
-                    rows = page.locator(".el-table__body tr.el-table__row")
-                    n = rows.count()
-                    ordered = _np_list_recharge_indices_time_ordered(page, rows, n, date_iso, time_short)
-                    if ordered:
-                        same_min_rows = _np_indices_table_same_minute(
-                            page, rows, ordered, date_iso, time_short
-                        )
-                        to_scan = _np_merge_same_minute_then_rest(same_min_rows, ordered)
-                        ok = _np_try_screenshot_matching_detail(
-                            page,
-                            rows,
-                            to_scan,
-                            machine_substr=machine_substr,
-                            expected_credit=exp_match,
-                            out_path=out_path,
-                            timeout_ms=timeout_ms,
-                            dialog_settle_ms=dialog_settle_ms,
-                        )
-                        if ok:
-                            matched = True
+                def _scan_detail_pages(exp_try: float | None) -> bool:
+                    _np_pagination_go_first_page(page, timeout_ms=timeout_ms)
+                    for _pi in range(NP_BACKEND_MAX_PAGES):
+                        page.locator(".el-table__body tbody").wait_for(state="visible", timeout=timeout_ms)
+                        rows = page.locator(".el-table__body tr.el-table__row")
+                        n = rows.count()
+                        ordered = _np_list_recharge_indices_time_ordered(page, rows, n, date_iso, time_short)
+                        if ordered:
+                            same_min_rows = _np_indices_table_same_minute(
+                                page, rows, ordered, date_iso, time_short
+                            )
+                            to_scan = _np_merge_same_minute_then_rest(same_min_rows, ordered)
+                            ok = _np_try_screenshot_matching_detail(
+                                page,
+                                rows,
+                                to_scan,
+                                machine_substr=machine_substr,
+                                expected_credit=exp_try,
+                                out_path=out_path,
+                                timeout_ms=timeout_ms,
+                                dialog_settle_ms=dialog_settle_ms,
+                                amount_scale=amt_scale,
+                            )
+                            if ok:
+                                return True
+                        if not _np_pagination_can_go_next(page):
                             break
-                    if not _np_pagination_can_go_next(page):
-                        break
-                    _np_click_pagination_next(page, timeout_ms=timeout_ms)
+                        _np_click_pagination_next(page, timeout_ms=timeout_ms)
+                    return False
+
+                matched = _scan_detail_pages(exp_match)
+                ran_tbp_machine_only = False
+                if (
+                    not matched
+                    and _log_http_backend_tag == "TBP"
+                    and ms
+                    and exp_match is not None
+                    and not _np_truthy_env("TBP_THIRD_HTTP_NO_MACHINE_ONLY_FALLBACK")
+                ):
+                    ran_tbp_machine_only = True
+                    matched = _scan_detail_pages(None)
 
                 if not matched:
                     bits: list[str] = []
@@ -2101,11 +2223,14 @@ def screenshot_np_recharge_detail(
                     if exp_match is not None:
                         bits.append(
                             f"positive `amount` within {_np_amount_match_eps()} of `{exp_match}`"
+                            + (f" (÷ `{amt_scale}` scale)" if amt_scale != 1.0 else "")
                         )
                     elif ms:
                         bits.append(
                             "latest credit was 0 or unset — only `machineId` is matched, not `amount`"
                         )
+                    if ran_tbp_machine_only:
+                        bits.append("TBP machine-only fallback (no log amount match) also found nothing")
                     crit = "; ".join(bits) if bits else "expected filters"
                     raise RuntimeError(
                         f"No {_log_http_backend_tag} Detail on pages 1–{NP_BACKEND_MAX_PAGES} with {crit}. "
@@ -2123,9 +2248,7 @@ def screenshot_np_recharge_detail(
 
                 pick_i = ordered[0]
                 row = rows.nth(pick_i)
-                link = row.get_by_text("Show Details", exact=False)
-                link.scroll_into_view_if_needed()
-                link.click()
+                _np_click_row_show_details_link(row, timeout_ms=timeout_ms)
 
                 dlg = page.locator(".el-dialog.details-dialog, div[role='dialog'].details-dialog").first
                 dlg.wait_for(state="visible", timeout=timeout_ms)
