@@ -1,6 +1,10 @@
 import re
 from datetime import datetime, timedelta
 import functools
+import json
+import os
+from datetime import date
+import requests
 from dotenv import load_dotenv
 load_dotenv()
 def parse_duration(duration_str):
@@ -102,3 +106,383 @@ def schedule_reminder_absolute(chat_id, user_id, time_str, message, scheduler, s
     # Format the time for user feedback (e.g., 08:39 PM)
     time_str_display = run_time.strftime("%I:%M %p").lstrip('0')
     return f"✅ Reminder set for {time_str_display}. I'll remind you about: {message}"
+
+
+# ================= Sheet-based daily reminders =================
+
+REMINDER_BASE_TOKEN = os.getenv("REMINDERSHEETTOKEN", "").strip()
+REMINDER_TABLE_ID = os.getenv("REMINDERSHEETID", "").strip()
+REMINDER_FIELD_ID = os.getenv("REMINDER_FIELD_ID", "ID").strip() or "ID"
+REMINDER_FIELD_START = os.getenv("REMINDER_FIELD_START", "Start Time").strip() or "Start Time"
+REMINDER_FIELD_END = os.getenv("REMINDER_FIELD_END", "End Time").strip() or "End Time"
+REMINDER_FIELD_TIME = os.getenv("REMINDER_FIELD_TIME", "Time").strip() or "Time"
+REMINDER_FIELD_REASON = os.getenv("REMINDER_FIELD_REASON", "Reason").strip() or "Reason"
+_SHEET_JOB_PREFIX = "sheet_daily_reminder::"
+
+
+def _reminder_sheet_enabled() -> bool:
+    return bool(REMINDER_BASE_TOKEN and REMINDER_TABLE_ID)
+
+
+def _parse_sheet_date(raw: str) -> date:
+    s = (raw or "").strip()
+    for fmt in ("%Y/%m/%d", "%Y-%m-%d", "%m/%d"):
+        try:
+            d = datetime.strptime(s, fmt).date()
+            if fmt == "%m/%d":
+                return d.replace(year=date.today().year)
+            return d
+        except ValueError:
+            continue
+    raise ValueError(f"Invalid date `{raw}`. Use YYYY/MM/DD (or MM/DD for current year).")
+
+
+def _normalize_sheet_date(raw: str) -> str:
+    return _parse_sheet_date(raw).strftime("%Y/%m/%d")
+
+
+def _normalize_sheet_time(raw: str) -> str:
+    s = (raw or "").strip().upper().replace(" ", "")
+    m = re.match(r"^(\d{1,2}):(\d{2})(AM|PM)$", s)
+    if m:
+        hh = int(m.group(1))
+        mm = int(m.group(2))
+        ap = m.group(3)
+        if not (1 <= hh <= 12 and 0 <= mm <= 59):
+            raise ValueError(f"Invalid time `{raw}`. Use HH:MMPM/AM, e.g. 6:30PM.")
+        return f"{hh}:{mm:02d}{ap}"
+    m = re.match(r"^(\d{1,2})(AM|PM)$", s)
+    if m:
+        hh = int(m.group(1))
+        ap = m.group(2)
+        if not (1 <= hh <= 12):
+            raise ValueError(f"Invalid time `{raw}`. Use HH:MMPM/AM, e.g. 6:30PM.")
+        return f"{hh}:00{ap}"
+    raise ValueError(f"Invalid time `{raw}`. Use HH:MMPM/AM, e.g. 6:30PM.")
+
+
+def _time_to_hour_minute(raw: str) -> tuple[int, int]:
+    s = _normalize_sheet_time(raw)
+    m = re.match(r"^(\d{1,2}):(\d{2})(AM|PM)$", s)
+    assert m
+    hh = int(m.group(1))
+    mm = int(m.group(2))
+    ap = m.group(3)
+    if ap == "AM":
+        hh24 = 0 if hh == 12 else hh
+    else:
+        hh24 = 12 if hh == 12 else hh + 12
+    return hh24, mm
+
+
+def _bitable_headers(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+
+def _bitable_records_url() -> str:
+    return f"https://open.larksuite.com/open-apis/bitable/v1/apps/{REMINDER_BASE_TOKEN}/tables/{REMINDER_TABLE_ID}/records"
+
+
+def _bitable_get_all_records(get_token_func) -> list[dict]:
+    if not _reminder_sheet_enabled():
+        raise RuntimeError("REMINDERSHEETTOKEN / REMINDERSHEETID is not set in environment.")
+    token = get_token_func()
+    if not token:
+        raise RuntimeError("Failed to get tenant access token.")
+    url = _bitable_records_url()
+    out: list[dict] = []
+    page_token = None
+    while True:
+        params = {"page_size": 200}
+        if page_token:
+            params["page_token"] = page_token
+        resp = requests.get(url, headers=_bitable_headers(token), params=params, timeout=30)
+        data = resp.json()
+        if data.get("code") != 0:
+            raise RuntimeError(f"Fetch reminder sheet failed: {data}")
+        dd = data.get("data", {})
+        out.extend(dd.get("items") or [])
+        if not dd.get("has_more"):
+            break
+        page_token = dd.get("page_token")
+    return out
+
+
+def _normalize_sheet_rows(records: list[dict]) -> list[dict]:
+    rows: list[dict] = []
+    for rec in records:
+        fields = rec.get("fields") or {}
+        rid = str(rec.get("record_id") or "").strip()
+        sid = str(fields.get(REMINDER_FIELD_ID) or "").strip()
+        start_raw = str(fields.get(REMINDER_FIELD_START) or "").strip()
+        end_raw = str(fields.get(REMINDER_FIELD_END) or "").strip()
+        time_raw = str(fields.get(REMINDER_FIELD_TIME) or "").strip()
+        reason = str(fields.get(REMINDER_FIELD_REASON) or "").strip()
+        if not (rid and sid and start_raw and end_raw and time_raw and reason):
+            continue
+        try:
+            start_d = _parse_sheet_date(start_raw)
+            end_d = _parse_sheet_date(end_raw)
+            time_n = _normalize_sheet_time(time_raw)
+        except Exception:
+            continue
+        rows.append(
+            {
+                "record_id": rid,
+                "id": sid,
+                "start_date": start_d,
+                "end_date": end_d,
+                "time": time_n,
+                "reason": reason,
+            }
+        )
+    rows.sort(key=lambda x: (x["start_date"], x["time"], x["id"]))
+    return rows
+
+
+def _sheet_rows_card(rows: list[dict], *, title: str, target_user_id: str | None = None) -> dict:
+    lines = []
+    if target_user_id:
+        lines.append(f'<at user_id="{target_user_id}">User</at>')
+        lines.append("")
+    if not rows:
+        lines.append("No reminder records found.")
+    else:
+        for r in rows:
+            lines.append(
+                f"🆔 **ID:** `{r['id']}`\n"
+                f"📅 **Start Time:** `{r['start_date'].strftime('%Y/%m/%d')}`\n"
+                f"📅 **End Time:** `{r['end_date'].strftime('%Y/%m/%d')}`\n"
+                f"⏰ **Time:** `{r['time']}`\n"
+                f"📝 **Reason:** {r['reason']}"
+            )
+            lines.append("---")
+        if lines and lines[-1] == "---":
+            lines.pop()
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "blue", "title": {"tag": "plain_text", "content": title}},
+        "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}}],
+    }
+
+
+def _send_daily_sheet_reminder(
+    send_func,
+    *,
+    chat_id: str,
+    target_user_id: str,
+    row: dict,
+) -> None:
+    today = date.today()
+    if not (row["start_date"] <= today <= row["end_date"]):
+        return
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "orange", "title": {"tag": "plain_text", "content": "⏰ Daily Reminder"}},
+        "elements": [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": (
+                        f'<at user_id="{target_user_id}">User</at>\n\n'
+                        f"🆔 **ID:** `{row['id']}`\n"
+                        f"📅 **Start Time:** `{row['start_date'].strftime('%Y/%m/%d')}`\n"
+                        f"📅 **End Time:** `{row['end_date'].strftime('%Y/%m/%d')}`\n"
+                        f"⏰ **Time:** `{row['time']}`\n"
+                        f"📝 **Reason:** {row['reason']}"
+                    ),
+                },
+            }
+        ],
+    }
+    send_func(chat_id, json.dumps(card), msg_type="interactive")
+
+
+def sync_sheet_daily_reminders(
+    *,
+    scheduler,
+    send_func,
+    get_token_func,
+    chat_id: str,
+    target_user_id: str,
+) -> tuple[int, int]:
+    """
+    Reload reminder jobs from Lark Sheet.
+    Returns (scheduled_count, total_valid_rows).
+    """
+    if not _reminder_sheet_enabled():
+        return 0, 0
+
+    for j in scheduler.get_jobs():
+        if str(j.id).startswith(_SHEET_JOB_PREFIX):
+            scheduler.remove_job(j.id)
+
+    rows = _normalize_sheet_rows(_bitable_get_all_records(get_token_func))
+    scheduled = 0
+    for row in rows:
+        hh, mm = _time_to_hour_minute(row["time"])
+        jid = f"{_SHEET_JOB_PREFIX}{row['record_id']}"
+        scheduler.add_job(
+            func=_send_daily_sheet_reminder,
+            trigger="cron",
+            hour=hh,
+            minute=mm,
+            id=jid,
+            replace_existing=True,
+            kwargs={
+                "send_func": send_func,
+                "chat_id": chat_id,
+                "target_user_id": target_user_id,
+                "row": row,
+            },
+        )
+        scheduled += 1
+    return scheduled, len(rows)
+
+
+def list_sheet_reminders(*, get_token_func) -> list[dict]:
+    if not _reminder_sheet_enabled():
+        raise RuntimeError("REMINDERSHEETTOKEN / REMINDERSHEETID is not set in environment.")
+    return _normalize_sheet_rows(_bitable_get_all_records(get_token_func))
+
+
+def add_sheet_reminder(
+    *,
+    start_raw: str,
+    end_raw: str,
+    time_raw: str,
+    reason: str,
+    get_token_func,
+    scheduler,
+    send_func,
+    chat_id: str,
+    target_user_id: str,
+) -> str:
+    if not _reminder_sheet_enabled():
+        return "❌ REMINDERSHEETTOKEN / REMINDERSHEETID is not set."
+    reason_n = (reason or "").strip()
+    if not reason_n:
+        return "❌ Reason cannot be empty."
+    try:
+        start_s = _normalize_sheet_date(start_raw)
+        end_s = _normalize_sheet_date(end_raw)
+        time_s = _normalize_sheet_time(time_raw)
+        start_d = _parse_sheet_date(start_s)
+        end_d = _parse_sheet_date(end_s)
+    except ValueError as e:
+        return f"❌ {e}"
+    if end_d < start_d:
+        return "❌ End Time cannot be earlier than Start Time."
+
+    token = get_token_func()
+    if not token:
+        return "❌ Failed to get tenant access token."
+
+    rows = _normalize_sheet_rows(_bitable_get_all_records(get_token_func))
+    max_id = 0
+    for r in rows:
+        m = re.search(r"\d+", str(r["id"]))
+        if m:
+            max_id = max(max_id, int(m.group(0)))
+    new_id = str(max_id + 1)
+
+    fields = {
+        REMINDER_FIELD_ID: new_id,
+        REMINDER_FIELD_START: start_s,
+        REMINDER_FIELD_END: end_s,
+        REMINDER_FIELD_TIME: time_s,
+        REMINDER_FIELD_REASON: reason_n,
+    }
+    resp = requests.post(
+        _bitable_records_url(),
+        headers=_bitable_headers(token),
+        json={"fields": fields},
+        timeout=30,
+    )
+    out = resp.json()
+    if out.get("code") != 0:
+        return f"❌ Add reminder to sheet failed: {out}"
+
+    sync_sheet_daily_reminders(
+        scheduler=scheduler,
+        send_func=send_func,
+        get_token_func=get_token_func,
+        chat_id=chat_id,
+        target_user_id=target_user_id,
+    )
+    card = _sheet_rows_card(
+        [
+            {
+                "record_id": out.get("data", {}).get("record", {}).get("record_id", ""),
+                "id": new_id,
+                "start_date": start_d,
+                "end_date": end_d,
+                "time": time_s,
+                "reason": reason_n,
+            }
+        ],
+        title="✅ Reminder Added",
+    )
+    send_func(chat_id, json.dumps(card), msg_type="interactive")
+    return f"✅ Added reminder ID `{new_id}`."
+
+
+def delete_sheet_reminders(
+    *,
+    ids: list[str],
+    get_token_func,
+    scheduler,
+    send_func,
+    chat_id: str,
+    target_user_id: str,
+) -> str:
+    if not _reminder_sheet_enabled():
+        return "❌ REMINDERSHEETTOKEN / REMINDERSHEETID is not set."
+    targets = [str(x).strip() for x in ids if str(x).strip()]
+    if not targets:
+        return "❌ No ID provided."
+
+    rows = list_sheet_reminders(get_token_func=get_token_func)
+    by_id = {str(r["id"]).strip(): r for r in rows}
+    missing = [x for x in targets if x not in by_id]
+    to_del = [by_id[x] for x in targets if x in by_id]
+    if not to_del:
+        return f"❌ ID not found: {', '.join(missing)}"
+
+    token = get_token_func()
+    if not token:
+        return "❌ Failed to get tenant access token."
+    base_url = _bitable_records_url().rstrip("/")
+    deleted_ids: list[str] = []
+    for row in to_del:
+        rid = row["record_id"]
+        resp = requests.delete(
+            f"{base_url}/{rid}",
+            headers=_bitable_headers(token),
+            timeout=30,
+        )
+        out = resp.json()
+        if out.get("code") == 0:
+            deleted_ids.append(str(row["id"]))
+
+    sync_sheet_daily_reminders(
+        scheduler=scheduler,
+        send_func=send_func,
+        get_token_func=get_token_func,
+        chat_id=chat_id,
+        target_user_id=target_user_id,
+    )
+    msg = f"✅ Deleted reminder ID(s): {', '.join(deleted_ids)}"
+    if missing:
+        msg += f"\n⚠️ Not found: {', '.join(missing)}"
+    return msg
+
+
+def send_sheet_reminder_list_card(*, send_func, chat_id: str, get_token_func) -> None:
+    rows = list_sheet_reminders(get_token_func=get_token_func)
+    card = _sheet_rows_card(
+        rows,
+        title="📋 Reminder List",
+    )
+    send_func(chat_id, json.dumps(card), msg_type="interactive")

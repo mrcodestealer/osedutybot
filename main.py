@@ -1870,6 +1870,61 @@ def lark_webhook():
                 reply = "❌ Invalid format. Please specify a time/duration and a message."
         send_message(chat_id, reply)
         return jsonify({"success": True})
+    elif clean_text.lower().startswith('/addreminder'):
+        parts = clean_text.split(maxsplit=4)
+        if len(parts) < 5:
+            send_message(
+                chat_id,
+                "❌ Usage: `/addreminder <start_date> <end_date> <time> <reason>`\n"
+                "Date: `YYYY/MM/DD` (or `MM/DD` for current year)\n"
+                "Time: `HH:MMPM/AM` (e.g. `6:30PM`)\n"
+                "Example: `/addreminder 2026/04/29 2026/06/06 6:30PM Just for testing`",
+            )
+            return jsonify({"success": True})
+        start_raw = parts[1].strip()
+        end_raw = parts[2].strip()
+        time_raw = parts[3].strip()
+        reason = parts[4].strip()
+        result = reminder.add_sheet_reminder(
+            start_raw=start_raw,
+            end_raw=end_raw,
+            time_raw=time_raw,
+            reason=reason,
+            get_token_func=get_tenant_access_token,
+            scheduler=scheduler,
+            send_func=send_message,
+            chat_id=chat_id,
+            target_user_id=TARGET_USER_OPEN_ID,
+        )
+        send_message(chat_id, result)
+        return jsonify({"success": True})
+    elif clean_text.lower().startswith('/deletereminder'):
+        parts = clean_text.split()
+        ids = [p.strip() for p in parts[1:] if p.strip()]
+        if not ids:
+            try:
+                reminder.send_sheet_reminder_list_card(
+                    send_func=send_message,
+                    chat_id=chat_id,
+                    get_token_func=get_tenant_access_token,
+                )
+                send_message(
+                    chat_id,
+                    "Reply with `/deletereminder <ID> [ID] [ID]` to delete multiple reminders.",
+                )
+            except Exception as e:
+                send_message(chat_id, f"❌ Failed to load reminder list: {e}")
+            return jsonify({"success": True})
+        result = reminder.delete_sheet_reminders(
+            ids=ids,
+            get_token_func=get_tenant_access_token,
+            scheduler=scheduler,
+            send_func=send_message,
+            chat_id=chat_id,
+            target_user_id=TARGET_USER_OPEN_ID,
+        )
+        send_message(chat_id, result)
+        return jsonify({"success": True})
     elif clean_text.lower() == '/restart':
         send_message(chat_id, "🔄 Restarting bot...")
         write_restart_pending(chat_id)
@@ -1891,13 +1946,47 @@ def lark_webhook():
 
 scheduler.start()
 atexit.register(lambda: scheduler.shutdown())
+# Load daily reminder jobs from Lark Sheet at startup.
+try:
+    _cnt, _total = reminder.sync_sheet_daily_reminders(
+        scheduler=scheduler,
+        send_func=send_message,
+        get_token_func=get_tenant_access_token,
+        chat_id=DUTY_CHAT_ID,
+        target_user_id=TARGET_USER_OPEN_ID,
+    )
+    print(f"✅ Reminder sheet sync loaded: {_cnt}/{_total} job(s)")
+except Exception as _e:
+    print(f"⚠️ Reminder sheet sync failed on startup: {_e!r}")
 send_restart_ready()
 
-if __name__ == "__main__":
+def _run_main_entry() -> int:
+    """
+    Same startup guard style as legacy ``run_larkbot.py``:
+    - force cwd to project root
+    - ensure root is on sys.path
+    - print full traceback to stderr on any startup/runtime crash
+    """
     import traceback
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    os.chdir(root)
+    if root not in sys.path:
+        sys.path.insert(0, root)
 
     try:
         app.run(host="0.0.0.0", port=5000, debug=False)
+        return 0
     except OSError as e:
-        traceback.print_exc()
-        raise SystemExit(f"Flask bind failed (port 5000 in use or permission?): {e}") from e
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
+        print(f"Flask bind failed (port 5000 in use or permission?): {e}", file=sys.stderr, flush=True)
+        return 1
+    except BaseException:
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(_run_main_entry())
