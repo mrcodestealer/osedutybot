@@ -959,6 +959,11 @@ def get_tenant_access_token():
 
 # ================= SCHEDULED REMINDERS =================
 TARGET_USER_OPEN_ID = "ou_d7bc33724e2d6ced4050c944c2ca5650"
+# Sheet-based daily reminders are always delivered to this group.
+REMINDER_TARGET_CHAT_ID = os.getenv(
+    "REMINDER_TARGET_CHAT_ID",
+    "oc_9de3d63fc589df6feeb9b0bee9c45b72",
+).strip() or "oc_9de3d63fc589df6feeb9b0bee9c45b72"
 
 def send_shift_reminder(chat_id, message):
     send_message(chat_id, message)
@@ -1895,8 +1900,10 @@ def lark_webhook():
             send_func=send_message,
             chat_id=chat_id,
             target_user_id=TARGET_USER_OPEN_ID,
+            schedule_chat_id=REMINDER_TARGET_CHAT_ID,
         )
-        send_message(chat_id, result)
+        if (result or "").strip():
+            send_message(chat_id, result)
         return jsonify({"success": True})
     elif clean_text.lower().startswith('/deletereminder'):
         parts = clean_text.split()
@@ -1922,6 +1929,7 @@ def lark_webhook():
             send_func=send_message,
             chat_id=chat_id,
             target_user_id=TARGET_USER_OPEN_ID,
+            schedule_chat_id=REMINDER_TARGET_CHAT_ID,
         )
         send_message(chat_id, result)
         return jsonify({"success": True})
@@ -1952,7 +1960,7 @@ try:
         scheduler=scheduler,
         send_func=send_message,
         get_token_func=get_tenant_access_token,
-        chat_id=DUTY_CHAT_ID,
+        chat_id=REMINDER_TARGET_CHAT_ID,
         target_user_id=TARGET_USER_OPEN_ID,
     )
     print(f"✅ Reminder sheet sync loaded: {_cnt}/{_total} job(s)")

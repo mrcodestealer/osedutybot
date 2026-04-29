@@ -391,6 +391,7 @@ def add_sheet_reminder(
     send_func,
     chat_id: str,
     target_user_id: str,
+    schedule_chat_id: str | None = None,
 ) -> str:
     if not _reminder_sheet_enabled():
         return "❌ REMINDERSHEETTOKEN / REMINDERSHEETID is not set."
@@ -441,7 +442,7 @@ def add_sheet_reminder(
         scheduler=scheduler,
         send_func=send_func,
         get_token_func=get_token_func,
-        chat_id=chat_id,
+        chat_id=(schedule_chat_id or chat_id),
         target_user_id=target_user_id,
     )
     card = _sheet_rows_card(
@@ -458,7 +459,7 @@ def add_sheet_reminder(
         title="✅ Reminder Added",
     )
     send_func(chat_id, json.dumps(card), msg_type="interactive")
-    return f"✅ Added reminder ID `{new_id}`."
+    return ""
 
 
 def delete_sheet_reminders(
@@ -469,6 +470,7 @@ def delete_sheet_reminders(
     send_func,
     chat_id: str,
     target_user_id: str,
+    schedule_chat_id: str | None = None,
 ) -> str:
     if not _reminder_sheet_enabled():
         return "❌ REMINDERSHEETTOKEN / REMINDERSHEETID is not set."
@@ -503,7 +505,7 @@ def delete_sheet_reminders(
         scheduler=scheduler,
         send_func=send_func,
         get_token_func=get_token_func,
-        chat_id=chat_id,
+        chat_id=(schedule_chat_id or chat_id),
         target_user_id=target_user_id,
     )
     msg = f"✅ Deleted reminder ID(s): {', '.join(deleted_ids)}"
