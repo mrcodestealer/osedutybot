@@ -9,6 +9,7 @@ Find user log errors (--finderror).
   python3 checkcredit.py --finderror CP0231 --date 2026-02-05 --oss
 
 Env (optional):
+  A ``.env`` file next to ``checkcredit.py`` is auto-loaded (``pip install python-dotenv``).
   CHECKCREDIT_USER / CHECKCREDIT_PASSWORD — LogNavigator login
   LOG_NAVIGATOR_BASE — LogNavigator base URL
   OSM_LOG_OSS_TEMPLATE — default:
@@ -25,6 +26,12 @@ Env (optional):
   NP_BACKEND_WINDOW_MINUTES (default 10), NP_BACKEND_MAX_PAGES (default 20, table pagination)
   NP_BACKEND_HEADLESS / NP_BACKEND_HEADED
 
+  NP debug — **visible Chromium** (not headless), same logic as Duty Bot ``/npthirdhttp``::
+    python3 checkcredit.py --checkuser --player-id 132594948 --date 2026-04-27 \\
+      --time 23:55:12.092 --machine-substr 2074 --credit 1352 --pause
+  Use ``--pause`` to leave the window open until you press Enter in the terminal.
+  Do **not** set ``NP_BACKEND_HEADLESS=1`` when you want to watch the browser.
+
 Requires: playwright (+ chromium) for LogNavigator; requests for OSS.
 """
 
@@ -37,6 +44,15 @@ import sys
 import tempfile
 from datetime import date, datetime, timedelta
 from typing import Any
+
+# CLI / subprocess: load `.env` from this repo so NP_BACKEND_* matches main.py (Duty Bot).
+_ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(os.path.join(_ROOT_DIR, ".env"))
+except ImportError:
+    pass
 
 DEFAULT_BASE = os.environ.get("LOG_NAVIGATOR_BASE", "https://lognavigator.cliveslot.com").rstrip("/")
 DEFAULT_USER = os.environ.get("CHECKCREDIT_USER", "osm")
@@ -1286,22 +1302,68 @@ def _np_list_recharge_indices_time_ordered(
 
 
 def _np_detail_request_section(full_text: str) -> str:
-    """Keep Request JSON only so `amount`/`machineId` are not confused with response."""
+    """
+    Keep Request JSON only so ``amount`` / ``machineId`` are not confused with response.
+
+    Do **not** trim at the first ``response data`` from the start of the dialog text: some UIs
+    flatten DOM order so **Response** appears before **Request** in ``inner_text``. In that case
+    ``full_text[:first_response]`` omits the Request block entirely and matching always fails.
+    """
     if not full_text:
         return ""
     low = full_text.lower()
-    cut = len(full_text)
-    for sep in ("response data", "响应数据", "\nresponse\n"):
-        k = low.find(sep)
-        if k != -1 and k < cut:
-            cut = k
-    return full_text[:cut]
+
+    def _first_of(labels: tuple[str, ...]) -> int:
+        best = -1
+        for lab in labels:
+            j = low.find(lab)
+            if j != -1 and (best == -1 or j < best):
+                best = j
+        return best
+
+    req_i = _first_of(("request data", "请求数据"))
+    resp_i = _first_of(("response data", "响应数据"))
+
+    if req_i != -1 and resp_i != -1:
+        if req_i < resp_i:
+            return full_text[req_i:resp_i]
+        return full_text[req_i:]
+    if req_i != -1:
+        return full_text[req_i:]
+    if resp_i != -1:
+        return full_text[:resp_i]
+    return full_text
+
+
+def _np_normalize_jsonish_quotes(s: str) -> str:
+    """NP / browser may render curly quotes or split DOM so plain regex misses."""
+    for a, b in (
+        ("\u201c", '"'),
+        ("\u201d", '"'),
+        ("\u2018", "'"),
+        ("\u2019", "'"),
+    ):
+        s = s.replace(a, b)
+    return s
 
 
 def _np_parse_machine_amount_from_request_blob(blob: str) -> tuple[str | None, float | None]:
-    m_mid = re.search(r'"machineId"\s*:\s*"([^"]*)"', blob)
-    m_amt = re.search(r'"amount"\s*:\s*(-?\d+(?:\.\d+)?)', blob)
+    if not blob:
+        return None, None
+    s = _np_normalize_jsonish_quotes(blob)
+    m_mid = re.search(r'"machineId"\s*:\s*"((?:\\.|[^"\\])*)"', s)
+    if not m_mid:
+        m_mid = re.search(r"'machineId'\s*:\s*'((?:\\.|[^'\\])*)'", s)
+    if not m_mid:
+        m_mid = re.search(r"machineId\s*:\s*\"([^\"]*)\"", s, re.I)
+    m_amt = re.search(r'"amount"\s*:\s*(-?\d+(?:\.\d+)?)', s)
+    if not m_amt:
+        m_amt = re.search(r"'amount'\s*:\s*(-?\d+(?:\.\d+)?)", s)
+    if not m_amt:
+        m_amt = re.search(r"(?<![\w])amount\s*:\s*(-?\d+(?:\.\d+)?)", s, re.I)
     mid = m_mid.group(1) if m_mid else None
+    if mid is not None:
+        mid = mid.replace("\\/", "/")
     amt: float | None = None
     if m_amt:
         try:
@@ -1341,14 +1403,6 @@ def _np_detail_matches_credit_and_machine_id(
     return True
 
 
-def _np_detail_minute_matches_log(full_txt: str, date_iso: str, target_dt: datetime) -> bool:
-    """Detail dialog timestamp(s) fall in the same calendar minute as log credit time."""
-    hdr_dt = _np_parse_detail_header_request_time(full_txt)
-    if hdr_dt is not None and _np_same_calendar_minute(hdr_dt, target_dt):
-        return True
-    return _np_detail_dialog_any_time_same_minute(full_txt, date_iso, target_dt)
-
-
 def _np_indices_table_same_minute(
     page,
     rows,
@@ -1385,45 +1439,6 @@ def _np_same_calendar_minute(a: datetime, b: datetime) -> bool:
     )
 
 
-def _np_parse_detail_header_request_time(full_text: str) -> datetime | None:
-    """Parse first `Request Time:` (or Response) line from NP Detail dialog."""
-    if not full_text:
-        return None
-    for pat in (
-        r"Request\s*Time\s*[:：]\s*(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?",
-        r"Response\s*Time\s*[:：]\s*(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?",
-        r"请求时间\s*[:：]\s*(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?",
-    ):
-        m = re.search(pat, full_text, re.I)
-        if not m:
-            continue
-        d = m.group(1)
-        t = m.group(2)
-        frac = (m.group(3) or "").strip()
-        base = datetime.strptime(f"{d} {t}", "%Y-%m-%d %H:%M:%S")
-        if frac:
-            ms3 = (frac + "000")[:3]
-            micro = int(ms3) * 1000
-            return base.replace(microsecond=micro)
-        return base
-    return None
-
-
-def _np_detail_dialog_any_time_same_minute(full_text: str, date_iso: str, target_dt: datetime) -> bool:
-    """
-    Scan dialog header/text for datetime strings (DOM may split labels).
-    True if any falls in the same calendar minute as target_dt.
-    """
-    if not full_text:
-        return False
-    head = full_text[:6000]
-    for m in re.finditer(r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?", head):
-        dt = _np_parse_cell_datetime(m.group(0), date_iso)
-        if dt is not None and _np_same_calendar_minute(dt, target_dt):
-            return True
-    return False
-
-
 def _np_pagination_can_go_next(page) -> bool:
     """Element UI ``btn-next`` when not disabled."""
     btn = page.locator(".el-pagination button.btn-next").first
@@ -1440,6 +1455,35 @@ def _np_click_pagination_next(page, *, timeout_ms: int) -> None:
     btn.wait_for(state="visible", timeout=min(15_000, timeout_ms))
     btn.click(timeout=min(30_000, timeout_ms))
     page.wait_for_timeout(900)
+
+
+def _np_dialog_text_layers_for_match(dlg) -> str:
+    """
+    ``inner_text()`` can miss or fragment JSON (syntax-highlighted spans, delayed paint). Combine
+    layers so ``machineId`` / ``amount`` still match the real Request payload.
+    """
+    chunks: list[str] = []
+    try:
+        t = dlg.inner_text() or ""
+        if t.strip():
+            chunks.append(t)
+    except Exception:
+        pass
+    try:
+        t = dlg.text_content() or ""
+        if t.strip():
+            chunks.append(t)
+    except Exception:
+        pass
+    try:
+        subs = dlg.locator("pre, textarea, code")
+        for i in range(min(subs.count(), 40)):
+            t = subs.nth(i).inner_text() or ""
+            if t.strip():
+                chunks.append(t)
+    except Exception:
+        pass
+    return "\n".join(chunks)
 
 
 def _np_close_np_detail_dialog(page) -> None:
@@ -1463,24 +1507,21 @@ def _np_try_screenshot_matching_detail(
     rows,
     ordered_indices: list[int],
     *,
-    date_iso: str,
-    time_short: str,
     machine_substr: str | None,
     expected_credit: float | None,
     out_path: str,
     timeout_ms: int,
 ) -> bool:
     """
-    For each candidate row: Detail must be in the **same minute** as log credit time; Request JSON
-    ``machineId`` must contain the machine digits (e.g. ``2074``); ``amount`` must be **positive**
-    and match **latest credit** when provided.
+    For each candidate row: accept when Request JSON ``machineId`` contains the machine digits and
+    ``amount`` matches latest credit. Uses multiple text layers — the correct row often opens first
+    but ``inner_text()`` alone may omit JSON bits; that looked like a wrong row and closed the dialog.
     """
     ms = (machine_substr or "").strip()
     need = bool(ms) or expected_credit is not None
     if not need:
         return False
 
-    target_dt = _np_combine_date_and_credit_time(date_iso, time_short)
     dlg_sel = page.locator(".el-dialog.details-dialog, div[role='dialog'].details-dialog").first
 
     for pick_i in ordered_indices:
@@ -1489,13 +1530,29 @@ def _np_try_screenshot_matching_detail(
         link.scroll_into_view_if_needed()
         link.click()
         dlg_sel.wait_for(state="visible", timeout=timeout_ms)
-        page.wait_for_timeout(450)
+        page.wait_for_timeout(900)
+        try:
+            dlg_sel.get_by_text(re.compile(r"machineId|machine\s*id|amount", re.I)).first.wait_for(
+                state="visible", timeout=min(8_000, timeout_ms)
+            )
+        except Exception:
+            pass
         full_txt = dlg_sel.inner_text() or ""
+        layers = _np_dialog_text_layers_for_match(dlg_sel)
         blob = _np_detail_request_section(full_txt)
-        if not _np_detail_minute_matches_log(full_txt, date_iso, target_dt):
-            _np_close_np_detail_dialog(page)
-            continue
-        if _np_detail_matches_credit_and_machine_id(blob, machine_substr, expected_credit):
+        ok = _np_detail_matches_credit_and_machine_id(blob, machine_substr, expected_credit)
+        if not ok:
+            ok = _np_detail_matches_credit_and_machine_id(layers, machine_substr, expected_credit)
+        if not ok:
+            ok = _np_detail_matches_credit_and_machine_id(full_txt, machine_substr, expected_credit)
+        if not ok:
+            blob2 = _np_detail_request_section(layers)
+            ok = _np_detail_matches_credit_and_machine_id(blob2, machine_substr, expected_credit)
+        if not ok:
+            ok = _np_detail_matches_credit_and_machine_id(
+                "\n".join((blob, layers, full_txt)), machine_substr, expected_credit
+            )
+        if ok:
             dlg_sel.screenshot(path=out_path, animations="disabled")
             return True
         _np_close_np_detail_dialog(page)
@@ -1521,13 +1578,18 @@ def screenshot_np_recharge_detail(
     timeout_ms: int = 120_000,
     machine_substr: str | None = None,
     expected_credit: float | None = None,
+    headed: bool | None = None,
+    pause_for_input: bool = False,
 ) -> str:
     """
     Login to NP backend, open Log Third Http Req, set date range ±NP_BACKEND_WINDOW_MINUTES,
-    filter UserId, Search, then scan recharge rows (prefer rows whose table time is in the **same
-    minute** as log credit). Detail screenshot only when the dialog is in that minute and Request
-    JSON has ``machineId`` containing the machine digits (e.g. ``2074``), ``amount`` > 0, and
-    ``amount`` matches latest credit when provided.
+    filter UserId, Search, then scan recharge rows (prefer same calendar minute as log credit when
+    table times parse). Accept a Detail when Request JSON has ``machineId`` containing the machine
+    digits,
+    ``amount`` > 0, and ``amount`` matches latest credit — **header Request Time is not used to
+    reject** (avoids closing valid dialogs when UI text differs slightly from log seconds).
+    ``headed``: ``True`` = always show browser; ``False`` = force headless; ``None`` = env / platform default.
+
     Returns path to a temporary PNG (caller should delete).
     """
     user, pw = _np_backend_env_cred()
@@ -1541,7 +1603,12 @@ def screenshot_np_recharge_detail(
 
     from playwright.sync_api import sync_playwright
 
-    headless = _np_backend_playwright_headless()
+    if headed is True:
+        headless = False
+    elif headed is False:
+        headless = True
+    else:
+        headless = _np_backend_playwright_headless()
     out_fd, out_path = tempfile.mkstemp(suffix=".png", prefix="np_third_http_")
     os.close(out_fd)
 
@@ -1653,8 +1720,6 @@ def screenshot_np_recharge_detail(
                             page,
                             rows,
                             to_scan,
-                            date_iso=date_iso,
-                            time_short=time_short,
                             machine_substr=machine_substr,
                             expected_credit=expected_credit,
                             out_path=out_path,
@@ -1670,8 +1735,8 @@ def screenshot_np_recharge_detail(
                 if not matched:
                     raise RuntimeError(
                         "No NP Detail on pages 1–"
-                        f"{NP_BACKEND_MAX_PAGES} matching same-minute time + Request JSON "
-                        f"`machineId` containing `{ms or '…'}`, positive `amount`, amount `{expected_credit}`. "
+                        f"{NP_BACKEND_MAX_PAGES} with Request JSON `machineId` containing `{ms or '…'}`, "
+                        f"positive `amount`, and amount matching `{expected_credit}`. "
                         "Increase NP_BACKEND_MAX_PAGES or NP_BACKEND_WINDOW_MINUTES."
                     )
             else:
@@ -1695,13 +1760,34 @@ def screenshot_np_recharge_detail(
                 page.wait_for_timeout(600)
                 dlg.screenshot(path=out_path, animations="disabled")
         finally:
+            if pause_for_input:
+                print(
+                    "[checkcredit] NP browser left open — watch the window; press Enter here to close…",
+                    flush=True,
+                )
+                try:
+                    input()
+                except EOFError:
+                    pass
             browser.close()
 
     return out_path
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="checkcredit — LogNavigator helpers")
+    ap = argparse.ArgumentParser(
+        description="checkcredit — LogNavigator helpers",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  python3 checkcredit.py --finderror 2074 --date 2026-04-27\n"
+            "  python3 checkcredit.py --finderror CP0231 --date 2026-02-05 --oss\n"
+            "\n"
+            "NP --checkuser (visible Chromium, headed — watch detection):\n"
+            "  python3 checkcredit.py --checkuser --player-id 132594948 --date 2026-04-27 \\\n"
+            "    --time 23:55:12.092 --machine-substr 2074 --credit 1352 --pause\n"
+        ),
+    )
     ap.add_argument("--timeout-ms", type=int, default=90_000)
     ap.add_argument("--finderror", metavar="NUMBER", help="Digits to match machine in LogNavigator Select2")
     ap.add_argument(
@@ -1715,7 +1801,73 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Fetch log via OSS HTTP (OSM_LOG_OSS_TEMPLATE) instead of LogNavigator browser",
     )
+    ap.add_argument(
+        "--checkuser",
+        action="store_true",
+        help=(
+            "NP Log Third Http Req: always use headed (visible) Chromium — same detection as "
+            "Duty Bot /npthirdhttp; requires --player-id, --date, --time"
+        ),
+    )
+    ap.add_argument("--player-id", metavar="USER_ID", help="With --checkuser")
+    ap.add_argument(
+        "--time",
+        metavar="HH:MM:SS[.mmm]",
+        dest="credit_time",
+        help="Log credit time (with --checkuser)",
+    )
+    ap.add_argument(
+        "--machine-substr",
+        default="",
+        metavar="DIGITS",
+        help="Digits inside NP machineId (e.g. 2074); empty = skip machine filter",
+    )
+    ap.add_argument(
+        "--credit",
+        type=float,
+        default=None,
+        metavar="AMOUNT",
+        help="Latest credit amount to match NP Request JSON amount (with --checkuser)",
+    )
+    ap.add_argument(
+        "--pause",
+        action="store_true",
+        help="With --checkuser: wait for Enter before closing browser",
+    )
     args = ap.parse_args(argv)
+
+    if getattr(args, "checkuser", False):
+        if args.finderror:
+            print("❌ Use either --finderror or --checkuser, not both.", file=sys.stderr)
+            return 2
+        if not args.player_id or not args.date or not getattr(args, "credit_time", None):
+            print(
+                "❌ --checkuser requires --player-id, --date YYYY-MM-DD, --time HH:MM:SS[.mmm]",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            datetime.strptime(args.date.strip(), "%Y-%m-%d")
+        except ValueError:
+            print("❌ --date must be YYYY-MM-DD", file=sys.stderr)
+            return 2
+        ms = (args.machine_substr or "").strip() or None
+        try:
+            out_png = screenshot_np_recharge_detail(
+                str(args.player_id).strip(),
+                args.date.strip(),
+                str(args.credit_time).strip(),
+                timeout_ms=max(60_000, args.timeout_ms),
+                machine_substr=ms,
+                expected_credit=args.credit,
+                headed=True,
+                pause_for_input=bool(args.pause),
+            )
+            print(out_png)
+            return 0
+        except Exception as e:
+            print(f"❌ {e}", file=sys.stderr)
+            return 1
 
     if args.finderror:
         td = None
@@ -1743,12 +1895,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     ap.print_help()
-    print(
-        "\nExamples:\n"
-        "  python3 checkcredit.py --finderror 2074 --date 2026-04-27\n"
-        "  python3 checkcredit.py --finderror CP0231 --date 2026-02-05 --oss\n",
-        file=sys.stderr,
-    )
     return 2
 
 
