@@ -241,16 +241,47 @@ def _bitable_get_all_records(get_token_func) -> list[dict]:
     return out
 
 
+def _field_text(v) -> str:
+    """
+    Flatten common Bitable field payloads to plain text.
+    Handles plain strings and rich-text arrays like:
+    [{"text":"abc","type":"text"}]
+    """
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v.strip()
+    if isinstance(v, (int, float)):
+        return str(v).strip()
+    if isinstance(v, list):
+        parts: list[str] = []
+        for item in v:
+            if isinstance(item, str):
+                t = item.strip()
+                if t:
+                    parts.append(t)
+            elif isinstance(item, dict):
+                t = str(item.get("text") or "").strip()
+                if t:
+                    parts.append(t)
+        return "".join(parts).strip()
+    if isinstance(v, dict):
+        t = str(v.get("text") or "").strip()
+        if t:
+            return t
+    return str(v).strip()
+
+
 def _normalize_sheet_rows(records: list[dict]) -> list[dict]:
     rows: list[dict] = []
     for rec in records:
         fields = rec.get("fields") or {}
         rid = str(rec.get("record_id") or "").strip()
-        sid = str(fields.get(REMINDER_FIELD_ID) or "").strip()
+        sid = _field_text(fields.get(REMINDER_FIELD_ID))
         start_raw = fields.get(REMINDER_FIELD_START)
         end_raw = fields.get(REMINDER_FIELD_END)
-        time_raw = str(fields.get(REMINDER_FIELD_TIME) or "").strip()
-        reason = str(fields.get(REMINDER_FIELD_REASON) or "").strip()
+        time_raw = _field_text(fields.get(REMINDER_FIELD_TIME))
+        reason = _field_text(fields.get(REMINDER_FIELD_REASON))
         if not (rid and sid and start_raw is not None and end_raw is not None and time_raw and reason):
             continue
         try:
@@ -318,8 +349,7 @@ def _send_daily_sheet_reminder(
                 "text": {
                     "tag": "lark_md",
                     "content": (
-                        f'<at user_id="{target_user_id}">User</at>\n\n'
-                        f"🆔 **ID:** `{row['id']}`\n"
+                        f'<at user_id="{target_user_id}">User</at>\n'
                         f"📅 **Start Time:** `{row['start_date'].strftime('%Y/%m/%d')}`\n"
                         f"📅 **End Time:** `{row['end_date'].strftime('%Y/%m/%d')}`\n"
                         f"⏰ **Time:** `{row['time']}`\n"
