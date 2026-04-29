@@ -597,16 +597,18 @@ def build_compare_lark_card(
 ) -> dict[str, Any]:
     """Compare: last player with any error vs last player in log (any activity)."""
     dstr = target_date.isoformat()
-    le = f"`{latest_err_uid}`" if latest_err_uid else "*(none / 无)*"
-    la = f"`{latest_any_uid}`" if latest_any_uid else "*(none / 无)*"
+    le = f"`{latest_err_uid}`" if latest_err_uid else "*(none)*"
+    la = f"`{latest_any_uid}`" if latest_any_uid else "*(none)*"
     if not latest_err_uid:
-        same_md = "ℹ️ **No error > 0 in log / 无错误行** — “latest with error” is N/A; see latest-in-log only."
+        same_md = (
+            "ℹ️ **No error > 0 in log** — “latest with error” is N/A; see latest-in-log only."
+        )
     elif same_uid and latest_err_uid and latest_any_uid:
         same_md = (
-            "✅ **Same player ID / 同一玩家:** latest error line and latest log activity refer to this uid."
+            "✅ **Same player ID:** latest error line and latest log activity refer to this uid."
         )
     else:
-        same_md = "ℹ️ **Different / 不同:** latest error player ≠ latest-in-log player."
+        same_md = "ℹ️ **Different:** latest error player ≠ latest-in-log player."
     lines_top2: list[str] = []
     for r in top2_overall[:2]:
         uid = r["user_id"]
@@ -616,14 +618,14 @@ def build_compare_lark_card(
             val = cr["value"]
             lines_top2.append(f"- `{uid}` → credit `{val}` @ `{ts}`" if ts else f"- `{uid}` → credit `{val}`")
         else:
-            lines_top2.append(f"- `{uid}` → *(no credit line / 无余额行)*")
-    top2_md = "\n".join(lines_top2) if lines_top2 else "*(no players / 无)*"
+            lines_top2.append(f"- `{uid}` → *(no credit line)*")
+    top2_md = "\n".join(lines_top2) if lines_top2 else "*(no players)*"
     body = (
-        f"🖥 **Machine / 机台:** `{machine_display}`\n"
-        f"📅 **Date / 日期:** `{dstr}`\n\n"
-        f"📌 **Latest 2 players in log (by line order) / 日志中最近 2 名玩家 + 最新 credit:**\n{top2_md}\n\n"
-        f"🔴 **Latest player WITH error / 最近一笔有误差的玩家:** {le}\n"
-        f"📍 **Latest player in log (any) / 日志中最新的玩家:** {la}\n\n"
+        f"🖥 **Machine:** `{machine_display}`\n"
+        f"📅 **Date:** `{dstr}`\n\n"
+        f"📌 **Latest 2 players in log (by line order) + latest credit:**\n{top2_md}\n\n"
+        f"🔴 **Latest player WITH error:** {le}\n"
+        f"📍 **Latest player in log (any activity):** {la}\n\n"
         f"{same_md}"
     )
     return {
@@ -659,8 +661,8 @@ def build_candidates_lark_card(
             "text": {
                 "tag": "lark_md",
                 "content": (
-                    f"🖥 **Machine / 机台:** `{machine_display}`  ·  📅 **Date / 日期:** `{dstr}`\n"
-                    f"**Possible players to inspect / 待查玩家** (from latest-2 error ∪ latest-2 in log)"
+                    f"🖥 **Machine:** `{machine_display}`  ·  📅 **Date:** `{dstr}`\n"
+                    f"**Possible players to inspect** (from latest-2 error ∪ latest-2 in log)"
                 ),
             },
         }
@@ -673,18 +675,18 @@ def build_candidates_lark_card(
         errs = row.get("errors") or []
         nerr = len(errs)
         cr = row.get("latest_credit")
-        credit_s = f"`{cr['value']}` @ `{ct}`" if cr else "*(no successJson credit / 无)*"
+        credit_s = f"`{cr['value']}` @ `{ct}`" if cr else "*(no successJson credit)*"
         time_s = ct or et or "*(n/a)*"
         lines_body = "\n".join(e.get("full_line") or e.get("snippet") or "" for e in errs)
-        log_md = _truncate_log(lines_body) if lines_body else "*(no errors / 无错误行)*"
+        log_md = _truncate_log(lines_body) if lines_body else "*(no errors)*"
         block = (
             f"---\n"
-            f"🕐 **Time (credit or error) / 时间:** {time_s}\n"
-            f"🖥 **Machine / 机台:** `{machine_display}`\n"
-            f"🆔 **Player ID / 玩家:** `{uid}`\n"
-            f"💰 **Latest credit / 最新余额:** {credit_s}\n"
-            f"⚠️ **Error count / 错误次数:** {nerr}\n"
-            f"📋 **Error log / 错误日志:**\n```\n{log_md}\n```"
+            f"🕐 **Time (credit or error):** {time_s}\n"
+            f"🖥 **Machine:** `{machine_display}`\n"
+            f"🆔 **Player ID:** `{uid}`\n"
+            f"💰 **Latest credit:** {credit_s}\n"
+            f"⚠️ **Error count:** {nerr}\n"
+            f"📋 **Error log:**\n```\n{log_md}\n```"
         )
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": block}})
     return {
