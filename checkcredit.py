@@ -34,11 +34,13 @@ Env (optional):
   ``WF_BACKEND_PASSWORD`` (defaults ``omduty1``).
   If **Machine** label starts with ``DHS`` (e.g. ``DHS3178``), uses ``https://backend-dhs.osmplay.com``
   + ``DHS_BACKEND_USER`` / ``DHS_BACKEND_PASSWORD``.
+  If **Machine** label starts with ``NCH`` (e.g. ``NCH1171``), uses ``https://backend-nc.osmplay.com``
+  + ``NCH_BACKEND_USER`` / ``NCH_BACKEND_PASSWORD``.
 
   NP debug — **visible Chromium** (not headless), same logic as Duty Bot ``/npthirdhttp``::
     python3 checkcredit.py --checkuser --player-id 132594948 --date 2026-04-27 \\
       --time 23:55:12.092 --machine-substr 2074 --credit 1352 --pause
-    Add ``--machine-display WF8173`` or ``--machine-display DHS3178`` when testing Winford/DHS from CLI
+    Add ``--machine-display WF8173`` / ``DHS3178`` / ``NCH1171`` when testing non-NP backends from CLI
     (Duty Bot passes machine from ``/checkcreditdate`` context automatically).
   Use ``--pause`` to leave the window open until you press Enter in the terminal.
   Do **not** set ``NP_BACKEND_HEADLESS=1`` when you want to watch the browser.
@@ -725,12 +727,12 @@ def build_np_choice_lark_card(
     machine_display: str = "",
     third_http_backend: str = "NP",
 ) -> dict[str, Any]:
-    """Lark card: log date line (NP / WF / DHS window) + machine + four numbered lines (reply 1–4)."""
+    """Lark card: log date line (NP / WF / DHS / NCH window) + machine + four numbered lines."""
     lines: list[str] = []
     td = (target_date_iso or "").strip()
     md = (machine_display or "").strip()
     be = (third_http_backend or "NP").strip().upper()
-    if be not in ("NP", "WF", "DHS"):
+    if be not in ("NP", "WF", "DHS", "NCH"):
         be = "NP"
     if td or md:
         bits: list[str] = []
@@ -1241,6 +1243,7 @@ def _np_backend_env_cred() -> tuple[str, str]:
 
 _WINFORD_NP_BASE = "https://backend-winford.osmplay.com".rstrip("/")
 _DHS_BACKEND_BASE = "https://backend-dhs.osmplay.com".rstrip("/")
+_NCH_BACKEND_BASE = "https://backend-nc.osmplay.com".rstrip("/")
 
 
 def _np_use_dhs_log_backend(machine_display: str | None) -> bool:
@@ -1253,6 +1256,18 @@ def _np_use_dhs_log_backend(machine_display: str | None) -> bool:
         return True
     alnum = re.sub(r"[^A-Za-z0-9]", "", raw).upper()
     return bool(alnum.startswith("DHS"))
+
+
+def _np_use_nch_log_backend(machine_display: str | None) -> bool:
+    """NCH cabinet — folder / last path segment starts with ``NCH`` (e.g. ``NCH1171``)."""
+    raw = (machine_display or "").strip()
+    if not raw:
+        return False
+    seg = raw.replace("\\", "/").rstrip("/").split("/")[-1].strip()
+    if seg and re.match(r"(?i)NCH", seg):
+        return True
+    alnum = re.sub(r"[^A-Za-z0-9]", "", raw).upper()
+    return bool(alnum.startswith("NCH"))
 
 
 def _np_use_winford_log_backend(machine_display: str | None) -> bool:
@@ -1279,9 +1294,11 @@ def _np_use_winford_log_backend(machine_display: str | None) -> bool:
 
 
 def _np_log_backend_tag(machine_display: str | None) -> str:
-    """Short label for Lark / Duty Bot: ``DHS``, ``WF``, or ``NP``."""
+    """Short label for Lark / Duty Bot: ``DHS``, ``NCH``, ``WF``, or ``NP``."""
     if _np_use_dhs_log_backend(machine_display):
         return "DHS"
+    if _np_use_nch_log_backend(machine_display):
+        return "NCH"
     if _np_use_winford_log_backend(machine_display):
         return "WF"
     return "NP"
@@ -1293,6 +1310,8 @@ def _np_resolve_backend(machine_display: str | None) -> tuple[str, str, str]:
 
     **DHS** (machine label ``DHS*``) → ``backend-dhs.osmplay.com`` + ``DHS_BACKEND_USER`` /
     ``DHS_BACKEND_PASSWORD``.
+    **NCH** (machine label ``NCH*``) → ``backend-nc.osmplay.com`` + ``NCH_BACKEND_USER`` /
+    ``NCH_BACKEND_PASSWORD``.
     **Winford** (``WF*``, ``winford``, ``NWR8173`` OSS alias) → ``backend-winford`` + ``WF_BACKEND_*``
     (default ``omduty1``).
     Otherwise → ``NP_BACKEND_BASE`` / ``NP_BACKEND_USER`` / ``NP_BACKEND_PASSWORD``.
@@ -1301,6 +1320,10 @@ def _np_resolve_backend(machine_display: str | None) -> tuple[str, str, str]:
         u = (os.environ.get("DHS_BACKEND_USER") or "").strip()
         p = (os.environ.get("DHS_BACKEND_PASSWORD") or "").strip()
         return _DHS_BACKEND_BASE, u, p
+    if _np_use_nch_log_backend(machine_display):
+        u = (os.environ.get("NCH_BACKEND_USER") or "").strip()
+        p = (os.environ.get("NCH_BACKEND_PASSWORD") or "").strip()
+        return _NCH_BACKEND_BASE, u, p
     if _np_use_winford_log_backend(machine_display):
         u = (os.environ.get("WF_BACKEND_USER") or "omduty1").strip() or "omduty1"
         p = (os.environ.get("WF_BACKEND_PASSWORD") or "omduty1").strip() or "omduty1"
@@ -1810,6 +1833,10 @@ def screenshot_np_recharge_detail(
             raise RuntimeError(
                 "Set DHS_BACKEND_USER and DHS_BACKEND_PASSWORD in the environment for DHS Log Third Http."
             )
+        if _log_http_backend_tag == "NCH":
+            raise RuntimeError(
+                "Set NCH_BACKEND_USER and NCH_BACKEND_PASSWORD in the environment for NCH Log Third Http."
+            )
         raise RuntimeError(
             "Set NP_BACKEND_USER and NP_BACKEND_PASSWORD in the environment "
             "(not required for Winford (WF* / NWR8173 alias) — defaults omduty1 unless WF_BACKEND_* is set)."
@@ -2067,7 +2094,10 @@ def main(argv: list[str] | None = None) -> int:
         "--machine-display",
         default="",
         metavar="NAME",
-        help="With --checkuser: machine label (e.g. WF8123) to pick Winford vs NP backend — matches Duty Bot context",
+        help=(
+            "With --checkuser: machine label (e.g. WF8123 / DHS3178 / NCH1171) to pick backend "
+            "route — matches Duty Bot context"
+        ),
     )
     args = ap.parse_args(argv)
 
