@@ -43,14 +43,14 @@ def _env_truthy(name: str) -> bool:
 
 
 def resolve_oss_machine_folder(machine_query: str) -> str:
-    """OSS path segment: digits-only → OSS_MACHINE_FOLDER_TEMPLATE (default NWR{n}); else use as-is (e.g. CP0231)."""
+    """OSS path segment: digits-only → OSS_MACHINE_FOLDER_TEMPLATE (default NWR{n}); else folder name (uppercase, e.g. nch2074 → NCH2074)."""
     q = (machine_query or "").strip()
     if not q:
         raise ValueError("empty machine query")
     if q.isdigit():
         tpl = os.environ.get("OSS_MACHINE_FOLDER_TEMPLATE", "NWR{n}")
         return tpl.format(n=q)
-    return q
+    return q.upper()
 
 
 def fetch_log_via_oss(machine_query: str, td: date, *, timeout_sec: float = 120.0) -> tuple[str, list[str]]:
@@ -84,23 +84,37 @@ def fetch_log_via_oss(machine_query: str, td: date, *, timeout_sec: float = 120.
 
 
 # ----- machine option matching -----
+def _machine_query_alnum_upper(s: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "", (s or "")).upper()
+
+
 def option_matches_machine_query(option_text: str, query: str) -> bool:
     """
-    Match Select2 option label to user digits, e.g.:
-      query "1300" -> NCH1300 (digit group 1300)
-      query "130"  -> NCH0130 or NCH130 (int 130), not NCH1300 (1300)
-    Any digit run whose int value equals int(query) counts.
+    Match Select2 option label to user query:
+      - All digits: any digit group whose int equals int(query) (130 vs 1300 rules).
+      - Else (e.g. nch2074, NCH2074, CP0231): case-insensitive alphanumeric match;
+        also matches suffix on labels like LUCKYLINK-NCH1327 when query is NCH1327.
     """
     q = (query or "").strip()
-    if not q.isdigit():
+    if not q:
         return False
-    qv = int(q)
-    for m in re.finditer(r"\d+", option_text):
-        try:
-            if int(m.group(0)) == qv:
-                return True
-        except ValueError:
-            continue
+    if q.isdigit():
+        qv = int(q)
+        for m in re.finditer(r"\d+", option_text):
+            try:
+                if int(m.group(0)) == qv:
+                    return True
+            except ValueError:
+                continue
+        return False
+    qn = _machine_query_alnum_upper(q)
+    if not qn:
+        return False
+    on = _machine_query_alnum_upper(option_text)
+    if on == qn:
+        return True
+    if len(qn) >= 4 and on.endswith(qn):
+        return True
     return False
 
 
@@ -204,8 +218,8 @@ def select_machine_by_number(page, machine_query: str, *, timeout_ms: int = 30_0
 
     if not candidates:
         raise RuntimeError(
-            f"No machine option matches digits {machine_query!r}. "
-            "Try full machine id (e.g. 2074 for NWR2074)."
+            f"No machine option matches query {machine_query!r}. "
+            "Try digits only (e.g. 2074) or full id (e.g. NCH2074, nch2074)."
         )
 
     chosen_label = candidates[0][0]
