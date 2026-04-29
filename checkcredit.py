@@ -612,6 +612,36 @@ def select_top2_overall(merged: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(merged, key=lambda r: int(r.get("max_line_idx", -1)), reverse=True)[:2]
 
 
+def machine_match_substr_from_display(machine_display: str) -> str:
+    """Digits substring to match NP `machineId` (e.g. NWR2074 → `2074`)."""
+    nums = re.findall(r"\d+", machine_display or "")
+    return max(nums, key=len) if nums else ""
+
+
+def build_np_choice_lark_card(np_choices: list[dict[str, Any]]) -> dict[str, Any]:
+    """Minimal Lark card: only the four numbered lines (reply 1–4)."""
+    lines: list[str] = []
+    for i, ch in enumerate(np_choices):
+        uid = ch.get("user_id", "")
+        cr = ch.get("credit", "n/a")
+        ts = ch.get("time_short") or "n/a"
+        lines.append(f"{i + 1}) User ID `{uid}` — last credit `{cr}` @ `{ts}`")
+    content = "\n".join(lines) if lines else "_No players._"
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": "\u200b"},
+        },
+        "elements": [
+            {
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": content},
+            },
+        ],
+    }
+
+
 def build_np_followup_payload(
     top2_any: list[dict[str, Any]],
     top2_err: list[dict[str, Any]],
@@ -626,10 +656,17 @@ def build_np_followup_payload(
         lc = r.get("latest_credit") or {}
         val = lc.get("value")
         credit_s = str(val) if val is not None else "n/a"
+        credit_val: float | None = None
+        if val is not None:
+            try:
+                credit_val = float(val)
+            except (TypeError, ValueError):
+                credit_val = None
         return {
             "user_id": str(r["user_id"]),
             "time_short": (lc.get("time_short") or "").strip(),
             "credit": credit_s,
+            "credit_value": credit_val,
             "source": source,
         }
 
@@ -652,6 +689,7 @@ def build_np_followup_payload(
 
     return {
         "machine_display": machine_display,
+        "machine_match_substr": machine_match_substr_from_display(machine_display),
         "target_date": td.isoformat(),
         "latest_two_players": latest_two_players,
         "np_choices": np_choices,
@@ -1193,56 +1231,148 @@ def _np_row_time_distance_to_target(
     return min(deltas)
 
 
-def _np_pick_recharge_row_for_credit_time(
+def _np_row_is_recharge(rows, ev_i: int, i: int) -> bool:
+    row = rows.nth(i)
+    tds = row.locator("td")
+    tc = tds.count()
+    if tc == 0:
+        return False
+    if tc > ev_i:
+        et_txt = (tds.nth(ev_i).inner_text() or "").strip().lower()
+        if et_txt == "recharge":
+            return True
+    for j in range(tc):
+        if (tds.nth(j).inner_text() or "").strip().lower() == "recharge":
+            return True
+    return False
+
+
+def _np_list_recharge_indices_time_ordered(
     page,
     rows,
     n: int,
     date_iso: str,
     time_short: str,
-) -> int | None:
+) -> list[int]:
     """
-    Among Event Type == recharge rows, pick the one whose Request Time or Response Time
-    is closest to the log credit time (match 23:55:12… first).
+    All Event Type == recharge rows, ordered by smallest distance from Request/Response time
+    to log credit time (best match first; rows without parseable times last).
     """
     cols = _np_log_third_http_header_columns(page)
     ev_i = cols.get("event", 2)
     target_dt = _np_combine_date_and_credit_time(date_iso, time_short)
 
-    best_idx: int | None = None
-    best_dist: float | None = None
+    scored: list[tuple[float, int]] = []
+    no_time_fallback: list[int] = []
 
     for i in range(n):
+        if not _np_row_is_recharge(rows, ev_i, i):
+            continue
         row = rows.nth(i)
-        tds = row.locator("td")
-        tc = tds.count()
-        if tc == 0:
-            continue
-        is_recharge = False
-        if tc > ev_i:
-            et_txt = (tds.nth(ev_i).inner_text() or "").strip().lower()
-            is_recharge = et_txt == "recharge"
-        if not is_recharge:
-            for j in range(tc):
-                if (tds.nth(j).inner_text() or "").strip().lower() == "recharge":
-                    is_recharge = True
-                    break
-        if not is_recharge:
-            continue
-
         req_dt, resp_dt = _np_row_req_resp_times(row, date_iso, cols)
         dist = _np_row_time_distance_to_target(req_dt, resp_dt, target_dt)
-
         if dist is None:
-            if best_idx is None:
-                best_idx = i
-                best_dist = None
-            continue
+            no_time_fallback.append(i)
+        else:
+            scored.append((dist, i))
 
-        if best_dist is None or dist < best_dist:
-            best_dist = dist
-            best_idx = i
+    scored.sort(key=lambda x: (x[0], x[1]))
+    return [idx for _, idx in scored] + no_time_fallback
 
-    return best_idx
+
+def _np_detail_request_section(full_text: str) -> str:
+    """Keep Request JSON only so `amount`/`machineId` are not confused with response."""
+    if not full_text:
+        return ""
+    low = full_text.lower()
+    cut = len(full_text)
+    for sep in ("response data", "响应数据", "\nresponse\n"):
+        k = low.find(sep)
+        if k != -1 and k < cut:
+            cut = k
+    return full_text[:cut]
+
+
+def _np_parse_machine_amount_from_request_blob(blob: str) -> tuple[str | None, float | None]:
+    m_mid = re.search(r'"machineId"\s*:\s*"([^"]*)"', blob)
+    m_amt = re.search(r'"amount"\s*:\s*(-?\d+(?:\.\d+)?)', blob)
+    mid = m_mid.group(1) if m_mid else None
+    amt: float | None = None
+    if m_amt:
+        try:
+            amt = float(m_amt.group(1))
+        except ValueError:
+            amt = None
+    return mid, amt
+
+
+def _np_detail_matches_machine_credit(
+    req_blob: str,
+    machine_substr: str | None,
+    expected_credit: float | None,
+) -> bool:
+    mid, amt = _np_parse_machine_amount_from_request_blob(req_blob)
+    if mid is None or amt is None:
+        return False
+    ms = (machine_substr or "").strip()
+    if ms and ms not in mid:
+        return False
+    if expected_credit is not None:
+        if amt <= 0:
+            return False
+        if abs(amt - expected_credit) > 0.05:
+            return False
+    return True
+
+
+def _np_close_np_detail_dialog(page) -> None:
+    hdr = page.locator(
+        ".el-dialog.details-dialog .el-dialog__headerbtn, "
+        ".el-dialog.details-dialog .el-dialog__close, "
+        "div[role='dialog'].details-dialog .el-dialog__headerbtn"
+    ).first
+    try:
+        if hdr.count():
+            hdr.click(timeout=5_000)
+        else:
+            page.keyboard.press("Escape")
+    except Exception:
+        page.keyboard.press("Escape")
+    page.wait_for_timeout(450)
+
+
+def _np_try_screenshot_matching_detail(
+    page,
+    rows,
+    ordered_indices: list[int],
+    *,
+    machine_substr: str | None,
+    expected_credit: float | None,
+    out_path: str,
+    timeout_ms: int,
+) -> bool:
+    """Open recharge rows in time order until Detail Request matches machineId + positive amount."""
+    ms = (machine_substr or "").strip()
+    need = bool(ms) or expected_credit is not None
+    if not need:
+        return False
+
+    dlg_sel = page.locator(".el-dialog.details-dialog, div[role='dialog'].details-dialog").first
+
+    for pick_i in ordered_indices:
+        row = rows.nth(pick_i)
+        link = row.get_by_text("Show Details", exact=False)
+        link.scroll_into_view_if_needed()
+        link.click()
+        dlg_sel.wait_for(state="visible", timeout=timeout_ms)
+        page.wait_for_timeout(450)
+        blob = _np_detail_request_section(dlg_sel.inner_text() or "")
+        if _np_detail_matches_machine_credit(blob, machine_substr, expected_credit):
+            dlg_sel.screenshot(path=out_path, animations="disabled")
+            return True
+        _np_close_np_detail_dialog(page)
+
+    return False
 
 
 def _np_backend_playwright_headless() -> bool:
@@ -1261,11 +1391,15 @@ def screenshot_np_recharge_detail(
     time_short: str,
     *,
     timeout_ms: int = 120_000,
+    machine_substr: str | None = None,
+    expected_credit: float | None = None,
 ) -> str:
     """
     Login to NP backend, open Log Third Http Req, set date range ±NP_BACKEND_WINDOW_MINUTES
-    around last-credit time, filter UserId, Search, pick Event Type 'recharge' row whose Request Time
-    or Response Time is closest to the log credit time → Detail screenshot.
+    around last-credit time, filter UserId, Search, then open `recharge` rows in time-match order.
+    If ``machine_substr`` / ``expected_credit`` are set (from checkcredit), skip rows whose Request
+    Data has wrong ``machineId`` or non-positive / wrong ``amount`` (e.g. -1352 vs credit 1352).
+    Otherwise screenshot the best time-matched row only.
     Returns path to a temporary PNG (caller should delete).
     """
     user, pw = _np_backend_env_cred()
@@ -1375,19 +1509,40 @@ def screenshot_np_recharge_detail(
             page.locator(".el-table__body tbody").wait_for(state="visible", timeout=timeout_ms)
             rows = page.locator(".el-table__body tr.el-table__row")
             n = rows.count()
-            pick_i = _np_pick_recharge_row_for_credit_time(page, rows, n, date_iso, time_short)
-            if pick_i is None:
+            ordered = _np_list_recharge_indices_time_ordered(page, rows, n, date_iso, time_short)
+            if not ordered:
                 raise RuntimeError('No table row with Event Type "recharge" for this UserId/time window.')
 
-            row = rows.nth(pick_i)
-            link = row.get_by_text("Show Details", exact=False)
-            link.scroll_into_view_if_needed()
-            link.click()
+            ms = (machine_substr or "").strip()
+            need_detail_match = bool(ms) or expected_credit is not None
 
-            dlg = page.locator(".el-dialog.details-dialog, div[role='dialog'].details-dialog").first
-            dlg.wait_for(state="visible", timeout=timeout_ms)
-            page.wait_for_timeout(600)
-            dlg.screenshot(path=out_path, animations="disabled")
+            if need_detail_match:
+                ok = _np_try_screenshot_matching_detail(
+                    page,
+                    rows,
+                    ordered,
+                    machine_substr=machine_substr,
+                    expected_credit=expected_credit,
+                    out_path=out_path,
+                    timeout_ms=timeout_ms,
+                )
+                if not ok:
+                    raise RuntimeError(
+                        "No NP Detail row matched last credit + machine "
+                        f"(machine contains `{ms or '…'}`, amount ≈ `{expected_credit}`). "
+                        "Try widening time or check another recharge row."
+                    )
+            else:
+                pick_i = ordered[0]
+                row = rows.nth(pick_i)
+                link = row.get_by_text("Show Details", exact=False)
+                link.scroll_into_view_if_needed()
+                link.click()
+
+                dlg = page.locator(".el-dialog.details-dialog, div[role='dialog'].details-dialog").first
+                dlg.wait_for(state="visible", timeout=timeout_ms)
+                page.wait_for_timeout(600)
+                dlg.screenshot(path=out_path, animations="disabled")
         finally:
             browser.close()
 

@@ -284,7 +284,7 @@ def run_smscheckplayer_check(chat_id, player_id: str):
 
 
 def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
-    """Background: same as checkcredit `--finderror` + `--date`. Uses OSS HTTP if CHECKCREDIT_USE_OSS is set."""
+    """Background: same as checkcredit + `--date`. Uses OSS HTTP if CHECKCREDIT_USE_OSS is set."""
     try:
         import checkcredit
     except ImportError as e:
@@ -324,41 +324,43 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
         np = out.get("np_followup")
         if isinstance(np, dict):
             _set_checkcredit_np_pending(chat_id, np)
-            md = (np.get("machine_display") or "").strip()
-            ds = (np.get("target_date") or "").strip()
             choices = np.get("np_choices") or []
-            guide_lines = [
-                "**What user do you want to check on NP (Log Third Http Req)?**",
-                "",
-                f"Machine: `{md}`  ·  Date: `{ds}`",
-                "",
-                "Reply with **1**, **2**, **3**, or **4** only:",
-                "",
-            ]
-            if choices:
+            try:
+                np_card = checkcredit.build_np_choice_lark_card(choices)
+                card_json = json.dumps(np_card)
+                resp_np = send_message(chat_id, card_json, msg_type="interactive")
+                if resp_np.get("code") != 0:
+                    lines = []
+                    for i, ch in enumerate(choices):
+                        uid = ch.get("user_id", "")
+                        cr = ch.get("credit", "n/a")
+                        ts = ch.get("time_short") or "n/a"
+                        lines.append(f"{i + 1}) User ID `{uid}` — last credit `{cr}` @ `{ts}`")
+                    send_message(chat_id, "\n".join(lines) if lines else "(no NP choices)")
+            except Exception as e:
+                print(f"[checkcredit] NP choice card failed: {e!r}")
+                lines = []
                 for i, ch in enumerate(choices):
                     uid = ch.get("user_id", "")
                     cr = ch.get("credit", "n/a")
                     ts = ch.get("time_short") or "n/a"
-                    guide_lines.append(f"{i + 1}) User ID `{uid}` — last credit `{cr}` @ `{ts}`")
-            else:
-                guide_lines.append("_No players in this run — use `/npthirdhttp <player_id> YYYY-MM-DD HH:MM:SS.mmm` if needed._")
-            guide_lines.extend(
-                [
-                    "",
-                    "_(Optional: `/npthirdhttp <player_id>` after this checkcredit, or full date/time override.)_",
-                    "",
-                    "Requires `.env`: `NP_BACKEND_USER`, `NP_BACKEND_PASSWORD`.",
-                ]
-            )
-            send_message(chat_id, "\n".join(guide_lines))
+                    lines.append(f"{i + 1}) User ID `{uid}` — last credit `{cr}` @ `{ts}`")
+                send_message(chat_id, "\n".join(lines) if lines else "(no NP choices)")
     except Exception as e:
         send_message(chat_id, f"❌ checkcredit failed: {e}")
         print(f"[checkcredit] error: {e!r}")
 
 
-def _np_run_screenshot_worker(chat_id: str, uid: str, date_iso: str, time_short: str) -> None:
-    """NP Log Third Http Req → first `recharge` row → Detail dialog screenshot."""
+def _np_run_screenshot_worker(
+    chat_id: str,
+    uid: str,
+    date_iso: str,
+    time_short: str,
+    *,
+    machine_substr: str | None = None,
+    expected_credit: float | None = None,
+) -> None:
+    """NP Log Third Http Req → `recharge` Detail screenshot (machineId + positive amount when provided)."""
     try:
         import checkcredit
 
@@ -378,7 +380,14 @@ def _np_run_screenshot_worker(chat_id: str, uid: str, date_iso: str, time_short:
     )
     path = None
     try:
-        path = screenshot_np_recharge_detail(uid, date_iso, time_short, timeout_ms=120_000)
+        path = screenshot_np_recharge_detail(
+            uid,
+            date_iso,
+            time_short,
+            timeout_ms=120_000,
+            machine_substr=machine_substr,
+            expected_credit=expected_credit,
+        )
         key = upload_image_lark(path)
         if not key:
             send_message(chat_id, "❌ Failed to upload screenshot to Lark.")
@@ -414,7 +423,21 @@ def run_np_third_http_by_choice(chat_id: str, choice_idx: int) -> None:
     if not uid or not date_iso or not time_short:
         send_message(chat_id, "❌ Pending NP choice is incomplete — use `/npthirdhttp …` with full date/time.")
         return
-    _np_run_screenshot_worker(chat_id, uid, date_iso, time_short)
+    ms = (pend.get("machine_match_substr") or "").strip() or None
+    exp = ch.get("credit_value")
+    if exp is None and ch.get("credit") not in (None, "", "n/a"):
+        try:
+            exp = float(str(ch.get("credit")).strip())
+        except ValueError:
+            exp = None
+    _np_run_screenshot_worker(
+        chat_id,
+        uid,
+        date_iso,
+        time_short,
+        machine_substr=ms,
+        expected_credit=exp,
+    )
 
 
 def run_np_third_http_job(chat_id: str, argv: list[str]):
@@ -441,6 +464,7 @@ def run_np_third_http_job(chat_id: str, argv: list[str]):
     uid = argv[0].strip()
     date_iso: str | None = None
     time_short: str | None = None
+    pend = None
     if len(argv) == 2:
         send_message(
             chat_id,
@@ -488,7 +512,27 @@ def run_np_third_http_job(chat_id: str, argv: list[str]):
             return
 
     assert date_iso is not None and time_short is not None
-    _np_run_screenshot_worker(chat_id, uid, date_iso, time_short)
+    ms = None
+    exp = None
+    if pend:
+        ms = (pend.get("machine_match_substr") or "").strip() or None
+        for ch in pend.get("np_choices") or []:
+            if str(ch.get("user_id")) == str(uid):
+                exp = ch.get("credit_value")
+                if exp is None and ch.get("credit") not in (None, "", "n/a"):
+                    try:
+                        exp = float(str(ch.get("credit")).strip())
+                    except ValueError:
+                        exp = None
+                break
+    _np_run_screenshot_worker(
+        chat_id,
+        uid,
+        date_iso,
+        time_short,
+        machine_substr=ms,
+        expected_credit=exp,
+    )
 
 
 def scheduled_amountloss_check():
@@ -1627,9 +1671,9 @@ def lark_webhook():
         use_oss_wait = os.getenv("CHECKCREDIT_USE_OSS", "").strip().lower() in ("1", "true", "yes", "on")
         send_message(
             chat_id,
-            "⏳ Running checkcredit via OSS HTTP (`--finderror`), please wait..."
+            "⏳ Running checkcredit via OSS HTTP , please wait..."
             if use_oss_wait
-            else "⏳ Running LogNavigator checkcredit (`--finderror`), browser may take a while — please wait...",
+            else "⏳ Running LogNavigator checkcredit, browser may take a while — please wait...",
         )
         threading.Thread(
             target=run_checkcredit_finderror,
