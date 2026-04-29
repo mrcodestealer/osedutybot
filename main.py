@@ -1415,7 +1415,6 @@ def lark_webhook():
         results = cpms_duty.get_cpms_three_days()
         formatted = cpms_duty.format_output(results)
         send_message(chat_id, formatted)
-        send_message(chat_id, "FYI Wailoon - onleave 2026-04-04 to 2026-04-17")
         return jsonify({"success": True})
     elif clean_text.lower().startswith('/cpmscheck'):
         parts = clean_text.split()
