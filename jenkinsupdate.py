@@ -4804,7 +4804,10 @@ def parse_fpms_prod_script_run_config_block(text: str) -> tuple[str, str]:
         raise ConfigBlockError("Internal FPMS PROD SCRIPT config must start with FPMS_PROD_SCRIPT_RUN_V1.")
     env = "fpms-prod"
     cmd = ""
-    cmd_key_re = re.compile(r"^command\s*[:\-–—]\s*(?P<rest>.*)$", re.I)
+    cmd_key_re = re.compile(
+        r"^(?:[>\-\*\u2022]\s*)*(?:`+|\*{1,2})?command(?:`+|\*{1,2})?\s*[:\-–—]\s*(?P<rest>.*)$",
+        re.I,
+    )
     for line in lines[1:]:
         m = _match_key_line_fuzzy(line)
         if m:
@@ -4813,7 +4816,7 @@ def parse_fpms_prod_script_run_config_block(text: str) -> tuple[str, str]:
             if key == "environment":
                 env = normalize_parameter_text(rest) or "fpms-prod"
             continue
-        cm = cmd_key_re.match(re.sub(r"[`*_]", "", line).strip())
+        cm = cmd_key_re.match(line.strip())
         if cm:
             cmd = _clean_key_rest(cm.group("rest") or "")
     if not cmd:
