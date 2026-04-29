@@ -23,7 +23,9 @@ Env (optional):
 
   NP backend (screenshot_np_recharge_detail — Duty Bot /npthirdhttp):
   NP_BACKEND_BASE (default https://backend-np.osmplay.com), NP_BACKEND_USER, NP_BACKEND_PASSWORD
-  NP_BACKEND_WINDOW_MINUTES (default 10), NP_BACKEND_MAX_PAGES (default 20, table pagination)
+  NP_BACKEND_WINDOW_MINUTES (default 10), NP_BACKEND_MAX_PAGES (default 20, table pagination).
+  Headless tuning: ``NP_BACKEND_HEADLESS_POST_SEARCH_MS`` (default 5500 after Search),
+  ``NP_BACKEND_POST_SEARCH_MS``, ``NP_BACKEND_DIALOG_SETTLE_MS`` (ms wait before reading Detail JSON).
   NP_BACKEND_HEADLESS / NP_BACKEND_HEADED (or **WF_THIRD_HTTP_HEADED** / **THIRD_HTTP_PLAYWRIGHT_HEADED**
   — visible Chromium when ``headed=None``). **Duty Bot** calls ``screenshot_np_recharge_detail(..., headed=False)``
   so server screenshots are always headless; use CLI ``--checkuser`` / ``--pause`` for a visible window.
@@ -1567,6 +1569,25 @@ def _np_indices_table_same_minute(
     return [i for _, i in scored]
 
 
+def _np_merge_same_minute_then_rest(same_minute: list[int], ordered: list[int]) -> list[int]:
+    """
+    Prefer same-calendar-minute table rows first, then every other recharge index in ``ordered``.
+    If we only scanned ``same_minute``, rows with unparseable or off-minute table times were never
+    opened — common on headless / dense tables; CLI on Mac often still hit the right row first by luck.
+    """
+    seen: set[int] = set()
+    out: list[int] = []
+    for i in same_minute:
+        if i not in seen:
+            seen.add(i)
+            out.append(i)
+    for i in ordered:
+        if i not in seen:
+            seen.add(i)
+            out.append(i)
+    return out
+
+
 def _np_same_calendar_minute(a: datetime, b: datetime) -> bool:
     return (
         a.year == b.year
@@ -1649,6 +1670,7 @@ def _np_try_screenshot_matching_detail(
     expected_credit: float | None,
     out_path: str,
     timeout_ms: int,
+    dialog_settle_ms: int = 900,
 ) -> bool:
     """
     For each candidate row: accept when Request JSON ``machineId`` contains the machine digits and
@@ -1668,7 +1690,7 @@ def _np_try_screenshot_matching_detail(
         link.scroll_into_view_if_needed()
         link.click()
         dlg_sel.wait_for(state="visible", timeout=timeout_ms)
-        page.wait_for_timeout(900)
+        page.wait_for_timeout(max(300, dialog_settle_ms))
         try:
             dlg_sel.get_by_text(re.compile(r"machineId|machine\s*id|amount", re.I)).first.wait_for(
                 state="visible", timeout=min(8_000, timeout_ms)
@@ -1735,8 +1757,9 @@ def screenshot_np_recharge_detail(
 ) -> str:
     """
     Login to NP backend, open Log Third Http Req, set date range ±NP_BACKEND_WINDOW_MINUTES,
-    filter UserId, Search, then scan recharge rows (prefer same calendar minute as log credit when
-    table times parse). Accept a Detail when Request JSON has ``machineId`` containing the machine
+    filter UserId, Search, then scan recharge rows (same-minute rows first, then **all** other recharge
+    rows so headless / table-parse quirks do not skip a match). Accept a Detail when Request JSON has
+    ``machineId`` containing the machine
     digits,
     ``amount`` > 0, and ``amount`` matches latest credit — **header Request Time is not used to
     reject** (avoids closing valid dialogs when UI text differs slightly from log seconds).
@@ -1767,6 +1790,15 @@ def screenshot_np_recharge_detail(
         headless = True
     else:
         headless = _np_backend_playwright_headless()
+    post_search_ms = int(os.environ.get("NP_BACKEND_POST_SEARCH_MS", "2500").strip() or "2500")
+    if headless:
+        post_search_ms = max(
+            post_search_ms,
+            int(os.environ.get("NP_BACKEND_HEADLESS_POST_SEARCH_MS", "5500").strip() or "5500"),
+        )
+    dialog_settle_ms = int(os.environ.get("NP_BACKEND_DIALOG_SETTLE_MS", "0").strip() or "0")
+    if dialog_settle_ms <= 0:
+        dialog_settle_ms = 1500 if headless else 900
     out_fd, out_path = tempfile.mkstemp(suffix=".png", prefix="np_third_http_")
     os.close(out_fd)
 
@@ -1857,7 +1889,7 @@ def screenshot_np_recharge_detail(
                 )
 
             _click_np_search()
-            page.wait_for_timeout(2500)
+            page.wait_for_timeout(post_search_ms)
 
             ms = (machine_substr or "").strip()
             need_detail_match = bool(ms) or expected_credit is not None
@@ -1873,7 +1905,7 @@ def screenshot_np_recharge_detail(
                         same_min_rows = _np_indices_table_same_minute(
                             page, rows, ordered, date_iso, time_short
                         )
-                        to_scan = same_min_rows if same_min_rows else ordered
+                        to_scan = _np_merge_same_minute_then_rest(same_min_rows, ordered)
                         ok = _np_try_screenshot_matching_detail(
                             page,
                             rows,
@@ -1882,6 +1914,7 @@ def screenshot_np_recharge_detail(
                             expected_credit=expected_credit,
                             out_path=out_path,
                             timeout_ms=timeout_ms,
+                            dialog_settle_ms=dialog_settle_ms,
                         )
                         if ok:
                             matched = True

@@ -446,6 +446,13 @@ def _np_run_screenshot_worker(
             "`NP_BACKEND_WINDOW_MINUTES` in `.env`. For a **visible** Chromium window, run locally: "
             "`python3 checkcredit.py --checkuser ... --pause`."
         )
+        print(
+            "[npthirdhttp] screenshot context "
+            f"uid={uid!r} date={date_iso!r} time={time_short!r} "
+            f"machine_substr={machine_substr!r} credit={expected_credit!r} "
+            f"machine_display={machine_display!r}",
+            flush=True,
+        )
         send_message(chat_id, f"❌ {backend_tag} third-http screenshot failed: {e}{tip}")
         print(f"[npthirdhttp] error: {e!r}")
     finally:
@@ -475,6 +482,11 @@ def run_np_third_http_by_choice(chat_id: str, choice_idx: int) -> None:
         return
     ms = (pend.get("machine_match_substr") or "").strip() or None
     exp = ch.get("credit_value")
+    if exp is not None:
+        try:
+            exp = float(exp)
+        except (TypeError, ValueError):
+            exp = None
     if exp is None and ch.get("credit") not in (None, "", "n/a"):
         try:
             exp = float(str(ch.get("credit")).strip())
@@ -573,6 +585,11 @@ def run_np_third_http_job(chat_id: str, argv: list[str]):
         for ch in pend.get("np_choices") or []:
             if str(ch.get("user_id")) == str(uid):
                 exp = ch.get("credit_value")
+                if exp is not None:
+                    try:
+                        exp = float(exp)
+                    except (TypeError, ValueError):
+                        exp = None
                 if exp is None and ch.get("credit") not in (None, "", "n/a"):
                     try:
                         exp = float(str(ch.get("credit")).strip())
