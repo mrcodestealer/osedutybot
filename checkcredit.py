@@ -1306,6 +1306,19 @@ def _np_parse_machine_amount_from_request_blob(blob: str) -> tuple[str | None, f
     return mid, amt
 
 
+def _np_request_has_machine_substr(machine_substr: str | None, req_blob: str, mid: str | None) -> bool:
+    """Match digits in JSON machineId, reference, URL, etc."""
+    ms = (machine_substr or "").strip()
+    if not ms:
+        return True
+    blob = req_blob or ""
+    if ms in blob:
+        return True
+    if mid and ms in mid:
+        return True
+    return False
+
+
 def _np_detail_matches_machine_credit(
     req_blob: str,
     machine_substr: str | None,
@@ -1314,8 +1327,7 @@ def _np_detail_matches_machine_credit(
     mid, amt = _np_parse_machine_amount_from_request_blob(req_blob)
     if mid is None or amt is None:
         return False
-    ms = (machine_substr or "").strip()
-    if ms and ms not in mid:
+    if not _np_request_has_machine_substr(machine_substr, req_blob, mid):
         return False
     if expected_credit is not None:
         if amt <= 0:
@@ -1326,14 +1338,34 @@ def _np_detail_matches_machine_credit(
 
 
 def _np_detail_matches_machine_positive_amount(req_blob: str, machine_substr: str | None) -> bool:
-    """machineId contains substr and Request JSON amount > 0 (ignore exact credit match)."""
+    """machine digits appear somewhere in request JSON text; amount > 0."""
     mid, amt = _np_parse_machine_amount_from_request_blob(req_blob)
-    if mid is None or amt is None:
+    if amt is None:
         return False
-    ms = (machine_substr or "").strip()
-    if ms and ms not in mid:
+    if not _np_request_has_machine_substr(machine_substr, req_blob, mid):
         return False
     return amt > 0
+
+
+def _np_detail_matches_machine_same_minute_loose(
+    req_blob: str,
+    machine_substr: str | None,
+    expected_credit: float | None,
+) -> bool:
+    """
+    Same-minute path when positive credit row is missing: machine substring in JSON text,
+    and amount is positive OR |amount| ≈ log credit (sign / rounding).
+    """
+    mid, amt = _np_parse_machine_amount_from_request_blob(req_blob)
+    if amt is None:
+        return False
+    if not _np_request_has_machine_substr(machine_substr, req_blob, mid):
+        return False
+    if amt > 0:
+        return True
+    if expected_credit is not None and abs(abs(amt) - float(expected_credit)) <= 1.0:
+        return True
+    return False
 
 
 def _np_same_calendar_minute(a: datetime, b: datetime) -> bool:
@@ -1347,25 +1379,42 @@ def _np_same_calendar_minute(a: datetime, b: datetime) -> bool:
 
 
 def _np_parse_detail_header_request_time(full_text: str) -> datetime | None:
-    """Parse `Request Time:` line from NP Detail dialog."""
+    """Parse first `Request Time:` (or Response) line from NP Detail dialog."""
     if not full_text:
         return None
-    m = re.search(
-        r"Request\s*Time:\s*(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?",
-        full_text,
-        re.I,
-    )
-    if not m:
-        return None
-    d = m.group(1)
-    t = m.group(2)
-    ms = (m.group(3) or "").strip()
-    base = datetime.strptime(f"{d} {t}", "%Y-%m-%d %H:%M:%S")
-    if ms:
-        ms3 = (ms + "000")[:3]
-        micro = int(ms3) * 1000
-        return base.replace(microsecond=micro)
-    return base
+    for pat in (
+        r"Request\s*Time\s*[:：]\s*(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?",
+        r"Response\s*Time\s*[:：]\s*(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?",
+        r"请求时间\s*[:：]\s*(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?",
+    ):
+        m = re.search(pat, full_text, re.I)
+        if not m:
+            continue
+        d = m.group(1)
+        t = m.group(2)
+        frac = (m.group(3) or "").strip()
+        base = datetime.strptime(f"{d} {t}", "%Y-%m-%d %H:%M:%S")
+        if frac:
+            ms3 = (frac + "000")[:3]
+            micro = int(ms3) * 1000
+            return base.replace(microsecond=micro)
+        return base
+    return None
+
+
+def _np_detail_dialog_any_time_same_minute(full_text: str, date_iso: str, target_dt: datetime) -> bool:
+    """
+    Scan dialog header/text for datetime strings (DOM may split labels).
+    True if any falls in the same calendar minute as target_dt.
+    """
+    if not full_text:
+        return False
+    head = full_text[:6000]
+    for m in re.finditer(r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?", head):
+        dt = _np_parse_cell_datetime(m.group(0), date_iso)
+        if dt is not None and _np_same_calendar_minute(dt, target_dt):
+            return True
+    return False
 
 
 def _np_reorder_indices_same_minute_first(
@@ -1451,11 +1500,21 @@ def _np_try_screenshot_matching_detail(
         if _np_detail_matches_machine_credit(blob, machine_substr, expected_credit):
             dlg_sel.screenshot(path=out_path, animations="disabled")
             return True
-        # Same calendar minute as log (e.g. all traffic within 23:23.*): machine + positive amount only
+        # Same calendar minute as log: machine substring anywhere in request JSON + positive amount
         if ms and expected_credit is not None:
             hdr_dt = _np_parse_detail_header_request_time(full_txt)
+            minute_ok = False
             if hdr_dt and _np_same_calendar_minute(hdr_dt, target_dt):
+                minute_ok = True
+            if not minute_ok:
+                minute_ok = _np_detail_dialog_any_time_same_minute(full_txt, date_iso, target_dt)
+            if minute_ok:
                 if _np_detail_matches_machine_positive_amount(blob, machine_substr):
+                    dlg_sel.screenshot(path=out_path, animations="disabled")
+                    return True
+                if _np_detail_matches_machine_same_minute_loose(
+                    blob, machine_substr, expected_credit
+                ):
                     dlg_sel.screenshot(path=out_path, animations="disabled")
                     return True
         _np_close_np_detail_dialog(page)
