@@ -363,11 +363,17 @@ _USERID_START = re.compile(
 )
 _ERR_ZERO = re.compile(r"""['\"]error['\"]\s*:\s*0\b""")
 _CUR_COIN = re.compile(r"""['\"]cur_coin['\"]\s*:\s*([\d.]+)""")
-_LINE_TIME_HMS = re.compile(r"^(\d{2}:\d{2}:\d{2})")
+_REDUCE_NUM = re.compile(r"""['\"]reduce_num['\"]\s*:\s*([\d.]+)""")
+_LINE_TIME_PREFIX = re.compile(r"^(\d{2}:\d{2}:\d{2}(?:\.\d{3})?)")
+
+
+def _line_time_prefix(line: str) -> str:
+    m = _LINE_TIME_PREFIX.match(line.strip())
+    return m.group(1) if m else ""
 
 
 def _parse_success_cur_coin(line: str) -> tuple[float, str] | None:
-    """Last successJson line with cur_coin and error 0 in a userid block — caller keeps last match."""
+    """successJson line with cur_coin and error 0 — caller picks last match per block."""
     if "successJson" not in line:
         return None
     if not _ERR_ZERO.search(line):
@@ -379,8 +385,24 @@ def _parse_success_cur_coin(line: str) -> tuple[float, str] | None:
         val = float(m.group(1))
     except ValueError:
         return None
-    tm = _LINE_TIME_HMS.match(line.strip())
-    tshort = tm.group(1) if tm else ""
+    tshort = _line_time_prefix(line)
+    return (val, tshort)
+
+
+def _parse_reduce_num_credit(line: str) -> tuple[float, str] | None:
+    """When cur_coin is absent: extra/JSON line with reduce_num and error 0 (e.g. bet/settle extra)."""
+    if "reduce_num" not in line:
+        return None
+    if not _ERR_ZERO.search(line):
+        return None
+    m = _REDUCE_NUM.search(line)
+    if not m:
+        return None
+    try:
+        val = float(m.group(1))
+    except ValueError:
+        return None
+    tshort = _line_time_prefix(line)
     return (val, tshort)
 
 
@@ -411,16 +433,27 @@ def parse_user_blocks_full(log_text: str) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for uid, blines in blocks:
         findings: list[dict[str, Any]] = []
-        latest_credit: dict[str, Any] | None = None
+        best_coin: dict[str, Any] | None = None
+        best_reduce: dict[str, Any] | None = None
         block_max_line = max((ln for ln, _ in blines), default=-1)
         for line_idx, line in blines:
             sc = _parse_success_cur_coin(line)
             if sc:
                 val, tshort = sc
-                latest_credit = {
+                best_coin = {
                     "line_idx": line_idx,
                     "value": val,
                     "time_short": tshort,
+                    "source": "cur_coin",
+                }
+            rn = _parse_reduce_num_credit(line)
+            if rn:
+                val, tshort = rn
+                best_reduce = {
+                    "line_idx": line_idx,
+                    "value": val,
+                    "time_short": tshort,
+                    "source": "reduce_num",
                 }
             em = err_re.search(line)
             if not em:
@@ -452,6 +485,7 @@ def parse_user_blocks_full(log_text: str) -> list[dict[str, Any]]:
             "errors": findings,
             "block_max_line": block_max_line,
         }
+        latest_credit: dict[str, Any] | None = best_coin if best_coin is not None else best_reduce
         if latest_credit:
             row["latest_credit"] = latest_credit
         out.append(row)
@@ -506,13 +540,19 @@ def merge_players_full(payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
         uid = blk["user_id"]
         if uid not in by_uid:
             order.append(uid)
-            by_uid[uid] = {"errors": [], "latest_credit": None, "max_line_idx": -1}
+            by_uid[uid] = {
+                "errors": [],
+                "_lc_coin": None,
+                "_lc_reduce": None,
+                "max_line_idx": -1,
+            }
         by_uid[uid]["errors"].extend(blk.get("errors") or [])
         lc = blk.get("latest_credit")
         if lc:
-            old = by_uid[uid]["latest_credit"]
-            if old is None or lc["line_idx"] > old["line_idx"]:
-                by_uid[uid]["latest_credit"] = lc
+            slot = "_lc_reduce" if lc.get("source") == "reduce_num" else "_lc_coin"
+            old = by_uid[uid][slot]
+            if old is None or int(lc["line_idx"]) > int(old["line_idx"]):
+                by_uid[uid][slot] = lc
         by_uid[uid]["max_line_idx"] = max(
             by_uid[uid]["max_line_idx"],
             _block_contribution_max_line(blk),
@@ -522,12 +562,14 @@ def merge_players_full(payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for uid in order:
         errs = by_uid[uid]["errors"][:]
         errs.sort(key=_error_line_time_key, reverse=True)
+        d = by_uid[uid]
+        lc_final = d["_lc_coin"] if d["_lc_coin"] is not None else d["_lc_reduce"]
         merged.append(
             {
                 "user_id": uid,
                 "errors": errs,
-                "latest_credit": by_uid[uid]["latest_credit"],
-                "max_line_idx": by_uid[uid]["max_line_idx"],
+                "latest_credit": lc_final,
+                "max_line_idx": d["max_line_idx"],
             }
         )
     return merged
@@ -599,7 +641,8 @@ def _player_detail_block(
     if cr:
         ts = (cr.get("time_short") or "").strip()
         val = cr["value"]
-        credit_s = f"`{val}` @ `{ts}`" if ts else f"`{val}`"
+        rn_note = " *(reduce_num)*" if cr.get("source") == "reduce_num" else ""
+        credit_s = (f"`{val}` @ `{ts}`{rn_note}" if ts else f"`{val}`{rn_note}")
     else:
         credit_s = "*(none)*"
     time_s = ct or et or "*(n/a)*"
@@ -764,10 +807,11 @@ def format_finderror_terminal_from_merged(merged: list[dict[str, Any]]) -> str:
         if cr:
             ts = cr.get("time_short") or ""
             val = cr["value"]
+            rn_note = " (reduce_num)" if cr.get("source") == "reduce_num" else ""
             lc_line = (
-                f"💰 Latest credit : {val} at {ts}\n"
+                f"💰 Latest credit : {val} at {ts}{rn_note}\n"
                 if ts
-                else f"💰 Latest credit : {val}\n"
+                else f"💰 Latest credit : {val}{rn_note}\n"
             )
         blocks.append(
             f"🔔 User ID : {uid}\n"
@@ -791,7 +835,8 @@ def _plain_player_block(
     if cr:
         ts = (cr.get("time_short") or "").strip()
         val = cr["value"]
-        credit_s = f"{val} @ {ts}" if ts else str(val)
+        rn_note = " (reduce_num)" if cr.get("source") == "reduce_num" else ""
+        credit_s = f"{val} @ {ts}{rn_note}" if ts else f"{val}{rn_note}"
     else:
         credit_s = "(none)"
     time_s = ct or et or "(n/a)"
