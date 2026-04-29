@@ -23,7 +23,8 @@ Env (optional):
 
   NP backend (screenshot_np_recharge_detail — Duty Bot /npthirdhttp):
   NP_BACKEND_BASE (default https://backend-np.osmplay.com), NP_BACKEND_USER, NP_BACKEND_PASSWORD
-  NP_BACKEND_WINDOW_MINUTES (default 10), NP_BACKEND_MAX_PAGES (default 20, table pagination).
+  NP_BACKEND_WINDOW_MINUTES (default 10), NP_BACKEND_MAX_PAGES (default 20, table pagination),
+  NP_BACKEND_AMOUNT_EPS (default 0.05) — max |Request amount − log credit| when matching Detail rows.
   Headless tuning: ``NP_BACKEND_HEADLESS_POST_SEARCH_MS`` (default 5500 after Search),
   ``NP_BACKEND_POST_SEARCH_MS``, ``NP_BACKEND_DIALOG_SETTLE_MS`` (ms wait before reading Detail JSON).
   NP_BACKEND_HEADLESS / NP_BACKEND_HEADED (or **WF_THIRD_HTTP_HEADED** / **THIRD_HTTP_PLAYWRIGHT_HEADED**
@@ -1239,6 +1240,14 @@ except ValueError:
     NP_BACKEND_MAX_PAGES = 20
 
 
+def _np_amount_match_eps() -> float:
+    """Max |request_amount − log_credit| to accept (some backends round differently). Default 0.05."""
+    try:
+        return max(0.0, float(os.environ.get("NP_BACKEND_AMOUNT_EPS", "0.05").strip() or "0.05"))
+    except ValueError:
+        return 0.05
+
+
 def _np_backend_env_cred() -> tuple[str, str]:
     u = (os.environ.get("NP_BACKEND_USER") or "").strip()
     p = (os.environ.get("NP_BACKEND_PASSWORD") or "").strip()
@@ -1568,28 +1577,76 @@ def _np_normalize_jsonish_quotes(s: str) -> str:
 
 
 def _np_parse_machine_amount_from_request_blob(blob: str) -> tuple[str | None, float | None]:
+    """
+    Best-effort Request JSON fields across NP / NCH / DHS / TBP / WF style payloads.
+    Some cabinets use ``machineNo`` / ``add_num`` instead of ``machineId`` / ``amount``.
+    """
     if not blob:
         return None, None
     s = _np_normalize_jsonish_quotes(blob)
-    m_mid = re.search(r'"machineId"\s*:\s*"((?:\\.|[^"\\])*)"', s)
-    if not m_mid:
-        m_mid = re.search(r"'machineId'\s*:\s*'((?:\\.|[^'\\])*)'", s)
-    if not m_mid:
-        m_mid = re.search(r"machineId\s*:\s*\"([^\"]*)\"", s, re.I)
-    m_amt = re.search(r'"amount"\s*:\s*(-?\d+(?:\.\d+)?)', s)
-    if not m_amt:
-        m_amt = re.search(r"'amount'\s*:\s*(-?\d+(?:\.\d+)?)", s)
-    if not m_amt:
-        m_amt = re.search(r"(?<![\w])amount\s*:\s*(-?\d+(?:\.\d+)?)", s, re.I)
-    mid = m_mid.group(1) if m_mid else None
-    if mid is not None:
-        mid = mid.replace("\\/", "/")
-    amt: float | None = None
-    if m_amt:
-        try:
-            amt = float(m_amt.group(1))
-        except ValueError:
-            amt = None
+
+    def _first_str_group(patterns: tuple[str, ...]) -> str | None:
+        for pat in patterns:
+            m = re.search(pat, s, re.I | re.DOTALL)
+            if not m:
+                continue
+            raw = m.group(1)
+            if raw is None:
+                continue
+            t = str(raw).strip()
+            if t:
+                return t.replace("\\/", "/")
+        return None
+
+    def _first_float_group(patterns: tuple[str, ...]) -> float | None:
+        for pat in patterns:
+            m = re.search(pat, s, re.I)
+            if not m:
+                continue
+            try:
+                return float(m.group(1))
+            except (ValueError, IndexError):
+                continue
+        return None
+
+    # machine id: string-valued keys first, then numeric machineId
+    mid = _first_str_group(
+        (
+            r'"machineId"\s*:\s*"((?:\\.|[^"\\])*)"',
+            r"'machineId'\s*:\s*'((?:\\.|[^'\\])*)'",
+            r"machineId\s*:\s*\"([^\"]*)\"",
+            r'"machineNo"\s*:\s*"((?:\\.|[^"\\])*)"',
+            r"'machineNo'\s*:\s*'((?:\\.|[^'\\])*)'",
+            r'"machine_no"\s*:\s*"((?:\\.|[^"\\])*)"',
+            r'"machineCode"\s*:\s*"((?:\\.|[^"\\])*)"',
+            r'"assetId"\s*:\s*"((?:\\.|[^"\\])*)"',
+            r'"cabinetId"\s*:\s*"((?:\\.|[^"\\])*)"',
+            r'"cabinet_id"\s*:\s*"((?:\\.|[^"\\])*)"',
+        )
+    )
+    if mid is None:
+        m_num = re.search(r'"machineId"\s*:\s*(\d+)\b', s)
+        if m_num:
+            mid = m_num.group(1).strip()
+
+    amt = _first_float_group(
+        (
+            r'"amount"\s*:\s*(-?\d+(?:\.\d+)?)',
+            r"'amount'\s*:\s*(-?\d+(?:\.\d+)?)",
+            r'(?<![\w.])amount\s*:\s*(-?\d+(?:\.\d+)?)',
+            r'"amount"\s*:\s*"(-?\d+(?:\.\d+)?)"',
+            r'"add_num"\s*:\s*(-?\d+(?:\.\d+)?)',
+            r'"addNum"\s*:\s*(-?\d+(?:\.\d+)?)',
+            r"'add_num'\s*:\s*(-?\d+(?:\.\d+)?)",
+            r'"credit"\s*:\s*(-?\d+(?:\.\d+)?)',
+            r'"creditAmount"\s*:\s*(-?\d+(?:\.\d+)?)',
+            r'"rechargeAmount"\s*:\s*(-?\d+(?:\.\d+)?)',
+            r'"recharge_num"\s*:\s*(-?\d+(?:\.\d+)?)',
+            r'"rechargeNum"\s*:\s*(-?\d+(?:\.\d+)?)',
+            r'"money"\s*:\s*(-?\d+(?:\.\d+)?)',
+            r'"totalAmount"\s*:\s*(-?\d+(?:\.\d+)?)',
+        )
+    )
     return mid, amt
 
 
@@ -1625,7 +1682,7 @@ def _np_detail_matches_credit_and_machine_id(
 ) -> bool:
     """
     Request JSON: ``machineId`` contains machine digits; when ``expected_credit`` is not ``None``,
-    ``amount`` > 0 and matches within 0.05.
+    ``amount`` > 0 and matches within ``NP_BACKEND_AMOUNT_EPS`` (default 0.05).
     """
     mid, amt = _np_parse_machine_amount_from_request_blob(req_blob)
     if mid is None or amt is None:
@@ -1635,7 +1692,7 @@ def _np_detail_matches_credit_and_machine_id(
     if expected_credit is not None:
         if amt <= 0:
             return False
-        if abs(amt - float(expected_credit)) > 0.05:
+        if abs(amt - float(expected_credit)) > _np_amount_match_eps():
             return False
     return True
 
@@ -1856,7 +1913,8 @@ def screenshot_np_recharge_detail(
     Login to NP backend, open Log Third Http Req, set date range ±NP_BACKEND_WINDOW_MINUTES,
     filter UserId, Search, then scan recharge rows (same-minute rows first, then **all** other recharge
     rows so headless / table-parse quirks do not skip a match).     Accept a Detail when Request JSON has ``machineId`` containing the machine digits; when
-    ``expected_credit`` is set and **> 0**, also require ``amount`` > 0 and within 0.05 of that credit
+    ``expected_credit`` is set and **> 0**, also require ``amount`` > 0 and within ``NP_BACKEND_AMOUNT_EPS``
+    of that credit (default 0.05).
     (non-positive ``expected_credit`` is ignored — same as ``None``). **Header Request Time is not
     used to reject** (avoids closing valid dialogs when UI text differs slightly from log seconds).
     ``machine_display``: LogNavigator / OSS folder label (``DHS*`` / ``NCH*`` / ``TBP*`` → respective backend;
@@ -2041,7 +2099,9 @@ def screenshot_np_recharge_detail(
                     if ms:
                         bits.append(f"`machineId` containing `{ms}`")
                     if exp_match is not None:
-                        bits.append(f"positive `amount` within 0.05 of `{exp_match}`")
+                        bits.append(
+                            f"positive `amount` within {_np_amount_match_eps()} of `{exp_match}`"
+                        )
                     elif ms:
                         bits.append(
                             "latest credit was 0 or unset — only `machineId` is matched, not `amount`"

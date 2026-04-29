@@ -447,8 +447,8 @@ def _np_run_screenshot_worker(
     except Exception as e:
         tip = (
             "\n💡 Duty Bot runs this screenshot **headless**. Try raising `NP_BACKEND_MAX_PAGES` / "
-            "`NP_BACKEND_WINDOW_MINUTES` in `.env`. For a **visible** Chromium window, run locally: "
-            "`python3 checkcredit.py --checkuser ... --pause`."
+            "`NP_BACKEND_WINDOW_MINUTES`, or widen `NP_BACKEND_AMOUNT_EPS` (default `0.05`) in `.env`. "
+            "For a **visible** Chromium window, run locally: `python3 checkcredit.py --checkuser ... --pause`."
         )
         print(
             "[npthirdhttp] screenshot context "
