@@ -659,21 +659,20 @@ def _player_detail_block(
     lines_body = "\n".join(e.get("full_line") or e.get("snippet") or "" for e in errs)
     log_md = _truncate_log(lines_body) if lines_body else ""
 
-    parts = [
-        "---",
-        f"🕐 **Time:** `{time_s}`",
-        f"🖥 **Machine:** `{machine_display}`",
-        f"🆔 **User ID:** `{uid}`",
-        f"💰 **Last credit:** {credit_s}",
-    ]
+    head = "\n".join(
+        [
+            f"🕐 **Time:** `{time_s}`",
+            f"🖥 **Machine:** `{machine_display}`",
+            f"🆔 **User ID:** `{uid}`",
+            f"💰 **Last credit:** {credit_s}",
+        ]
+    )
     if error_log_mode == "always":
         inner = log_md if log_md else "(no error lines)"
-        parts.append("📋 **Error log:**")
-        parts.append(f"```\n{inner}\n```")
-    elif log_md:
-        parts.append("📋 **Error log:**")
-        parts.append(f"```\n{log_md}\n```")
-    return "\n".join(parts)
+        return f"{head}\n\n📋 **Error log:**\n{inner}"
+    if log_md:
+        return f"{head}\n\n📋 **Error log:**\n{log_md}"
+    return head
 
 
 def build_latest_two_overall_lark_card(
@@ -705,8 +704,18 @@ def build_latest_two_overall_lark_card(
             }
         )
     else:
-        body = "\n".join(_player_detail_block(r, machine_display, error_log_mode="if_any") for r in slice_rows)
-        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": body}})
+        for i, r in enumerate(slice_rows):
+            if i > 0:
+                elements.append({"tag": "hr"})
+            elements.append(
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": _player_detail_block(r, machine_display, error_log_mode="if_any"),
+                    },
+                }
+            )
     return {
         "config": {"wide_screen_mode": True},
         "header": {
@@ -746,8 +755,18 @@ def build_latest_two_error_lark_card(
             }
         )
     else:
-        body = "\n".join(_player_detail_block(r, machine_display, error_log_mode="always") for r in slice_rows)
-        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": body}})
+        for i, r in enumerate(slice_rows):
+            if i > 0:
+                elements.append({"tag": "hr"})
+            elements.append(
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": _player_detail_block(r, machine_display, error_log_mode="always"),
+                    },
+                }
+            )
     return {
         "config": {"wide_screen_mode": True},
         "header": {
@@ -875,12 +894,16 @@ def format_dual_terminal_report(
     """Plain text mirroring card order: latest-2 any, then latest-2 with error."""
     dstr = target_date.isoformat()
     sec1 = (
-        "\n\n".join(_plain_player_block(r, machine_display, error_log_mode="if_any") for r in top2_any[:2])
+        "\n\n---\n\n".join(
+            _plain_player_block(r, machine_display, error_log_mode="if_any") for r in top2_any[:2]
+        )
         if top2_any
         else "(no players)"
     )
     sec2 = (
-        "\n\n".join(_plain_player_block(r, machine_display, error_log_mode="always") for r in top2_err[:2])
+        "\n\n---\n\n".join(
+            _plain_player_block(r, machine_display, error_log_mode="always") for r in top2_err[:2]
+        )
         if top2_err
         else "(no players with error)"
     )
