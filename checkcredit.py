@@ -22,7 +22,8 @@ Env (optional):
 
   NP backend (screenshot_np_recharge_detail — Duty Bot /npthirdhttp):
   NP_BACKEND_BASE (default https://backend-np.osmplay.com), NP_BACKEND_USER, NP_BACKEND_PASSWORD
-  NP_BACKEND_WINDOW_MINUTES (default 10), NP_BACKEND_HEADLESS / NP_BACKEND_HEADED
+  NP_BACKEND_WINDOW_MINUTES (default 10), NP_BACKEND_MAX_PAGES (default 20, table pagination)
+  NP_BACKEND_HEADLESS / NP_BACKEND_HEADED
 
 Requires: playwright (+ chromium) for LogNavigator; requests for OSS.
 """
@@ -1106,6 +1107,10 @@ def run_finderror(
 # ----- NP backend — Log Third Http Req (Duty Bot /npthirdhttp) -----
 NP_BACKEND_DEFAULT_BASE = os.environ.get("NP_BACKEND_BASE", "https://backend-np.osmplay.com").rstrip("/")
 NP_BACKEND_WINDOW_MINUTES = int(os.environ.get("NP_BACKEND_WINDOW_MINUTES", "10"))
+try:
+    NP_BACKEND_MAX_PAGES = max(1, int(os.environ.get("NP_BACKEND_MAX_PAGES", "20").strip() or "20"))
+except ValueError:
+    NP_BACKEND_MAX_PAGES = 20
 
 
 def _np_backend_env_cred() -> tuple[str, str]:
@@ -1419,6 +1424,24 @@ def _np_detail_dialog_any_time_same_minute(full_text: str, date_iso: str, target
     return False
 
 
+def _np_pagination_can_go_next(page) -> bool:
+    """Element UI ``btn-next`` when not disabled."""
+    btn = page.locator(".el-pagination button.btn-next").first
+    if btn.count() == 0:
+        return False
+    try:
+        return not btn.is_disabled()
+    except Exception:
+        return False
+
+
+def _np_click_pagination_next(page, *, timeout_ms: int) -> None:
+    btn = page.locator(".el-pagination button.btn-next").first
+    btn.wait_for(state="visible", timeout=min(15_000, timeout_ms))
+    btn.click(timeout=min(30_000, timeout_ms))
+    page.wait_for_timeout(900)
+
+
 def _np_close_np_detail_dialog(page) -> None:
     hdr = page.locator(
         ".el-dialog.details-dialog .el-dialog__headerbtn, "
@@ -1611,38 +1634,56 @@ def screenshot_np_recharge_detail(
             _click_np_search()
             page.wait_for_timeout(2500)
 
-            page.locator(".el-table__body tbody").wait_for(state="visible", timeout=timeout_ms)
-            rows = page.locator(".el-table__body tr.el-table__row")
-            n = rows.count()
-            ordered = _np_list_recharge_indices_time_ordered(page, rows, n, date_iso, time_short)
-            if not ordered:
-                raise RuntimeError('No table row with Event Type "recharge" for this UserId/time window.')
-
-            same_min_rows = _np_indices_table_same_minute(page, rows, ordered, date_iso, time_short)
-            to_scan = same_min_rows if same_min_rows else ordered
-
             ms = (machine_substr or "").strip()
             need_detail_match = bool(ms) or expected_credit is not None
 
             if need_detail_match:
-                ok = _np_try_screenshot_matching_detail(
-                    page,
-                    rows,
-                    to_scan,
-                    date_iso=date_iso,
-                    time_short=time_short,
-                    machine_substr=machine_substr,
-                    expected_credit=expected_credit,
-                    out_path=out_path,
-                    timeout_ms=timeout_ms,
-                )
-                if not ok:
+                matched = False
+                for pi in range(NP_BACKEND_MAX_PAGES):
+                    page.locator(".el-table__body tbody").wait_for(state="visible", timeout=timeout_ms)
+                    rows = page.locator(".el-table__body tr.el-table__row")
+                    n = rows.count()
+                    ordered = _np_list_recharge_indices_time_ordered(page, rows, n, date_iso, time_short)
+                    if ordered:
+                        same_min_rows = _np_indices_table_same_minute(
+                            page, rows, ordered, date_iso, time_short
+                        )
+                        to_scan = same_min_rows if same_min_rows else ordered
+                        ok = _np_try_screenshot_matching_detail(
+                            page,
+                            rows,
+                            to_scan,
+                            date_iso=date_iso,
+                            time_short=time_short,
+                            machine_substr=machine_substr,
+                            expected_credit=expected_credit,
+                            out_path=out_path,
+                            timeout_ms=timeout_ms,
+                        )
+                        if ok:
+                            matched = True
+                            break
+                    if not _np_pagination_can_go_next(page):
+                        break
+                    _np_click_pagination_next(page, timeout_ms=timeout_ms)
+
+                if not matched:
                     raise RuntimeError(
-                        "No NP Detail in the same calendar minute with Request JSON "
-                        f"`machineId` containing `{ms or '…'}`, positive `amount`, and amount matching latest credit "
-                        f"`{expected_credit}`. Try widening NP_BACKEND_WINDOW_MINUTES."
+                        "No NP Detail on pages 1–"
+                        f"{NP_BACKEND_MAX_PAGES} matching same-minute time + Request JSON "
+                        f"`machineId` containing `{ms or '…'}`, positive `amount`, amount `{expected_credit}`. "
+                        "Increase NP_BACKEND_MAX_PAGES or NP_BACKEND_WINDOW_MINUTES."
                     )
             else:
+                page.locator(".el-table__body tbody").wait_for(state="visible", timeout=timeout_ms)
+                rows = page.locator(".el-table__body tr.el-table__row")
+                n = rows.count()
+                ordered = _np_list_recharge_indices_time_ordered(page, rows, n, date_iso, time_short)
+                if not ordered:
+                    raise RuntimeError(
+                        'No table row with Event Type "recharge" for this UserId/time window.'
+                    )
+
                 pick_i = ordered[0]
                 row = rows.nth(pick_i)
                 link = row.get_by_text("Show Details", exact=False)
