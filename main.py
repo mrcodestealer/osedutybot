@@ -2,6 +2,7 @@ import json
 import re
 import sys
 import threading
+from typing import Optional
 import requests
 import time
 import os
@@ -378,8 +379,8 @@ def _np_run_screenshot_worker(
     date_iso: str,
     time_short: str,
     *,
-    machine_substr: str | None = None,
-    expected_credit: float | None = None,
+    machine_substr: Optional[str] = None,
+    expected_credit: Optional[float] = None,
 ) -> None:
     """NP Log Third Http Req → `recharge` Detail screenshot (machineId + positive amount when provided)."""
     try:
@@ -483,8 +484,8 @@ def run_np_third_http_job(chat_id: str, argv: list[str]):
         )
         return
     uid = argv[0].strip()
-    date_iso: str | None = None
-    time_short: str | None = None
+    date_iso: Optional[str] = None
+    time_short: Optional[str] = None
     pend = None
     if len(argv) == 2:
         send_message(
