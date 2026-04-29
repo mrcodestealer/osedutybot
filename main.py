@@ -314,9 +314,116 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
                 send_message(chat_id, text if text else "(no output)")
         else:
             send_message(chat_id, text if text else "(no output)")
+
+        np = out.get("np_followup")
+        if isinstance(np, dict) and np.get("latest_two_players"):
+            _set_checkcredit_np_pending(chat_id, np)
+            guide_lines = [
+                "**NP backend — Log Third Http Req (screenshot)**",
+                "Choose a User ID from **latest 2 in log** above, then run:",
+                "`/npthirdhttp <player_id>` — uses log date and **±10 minutes** around last credit time.",
+                "",
+                "Examples:",
+            ]
+            for i, p in enumerate(np["latest_two_players"], 1):
+                ts = p.get("time_short") or "n/a"
+                guide_lines.append(f"{i}) `/npthirdhttp {p['user_id']}` _(credit time `{ts}`)_")
+            guide_lines.append("")
+            guide_lines.append(
+                "Override (no prior `/checkcreditdate` session): "
+                "`/npthirdhttp <player_id> YYYY-MM-DD HH:MM:SS.mmm`"
+            )
+            guide_lines.append("")
+            guide_lines.append(
+                "Set credentials in `.env`: `NP_BACKEND_USER`, `NP_BACKEND_PASSWORD` "
+                "(optional: `NP_BACKEND_BASE`, `NP_BACKEND_WINDOW_MINUTES`)."
+            )
+            send_message(chat_id, "\n".join(guide_lines))
     except Exception as e:
         send_message(chat_id, f"❌ checkcredit failed: {e}")
         print(f"[checkcredit] error: {e!r}")
+
+
+def run_np_third_http_job(chat_id: str, argv: list[str]):
+    """Background: NP Log Third Http Req → first `recharge` row → Detail dialog screenshot."""
+    try:
+        from np_backend_third_http import screenshot_np_recharge_detail
+    except ImportError as e:
+        send_message(chat_id, f"❌ np_backend_third_http not available: {e}")
+        return
+    if not argv:
+        send_message(
+            chat_id,
+            "❌ Usage: `/npthirdhttp <player_id>` — or `/npthirdhttp <player_id> YYYY-MM-DD HH:MM:SS.mmm`",
+        )
+        return
+    uid = argv[0].strip()
+    date_iso: str | None = None
+    time_short: str | None = None
+    if len(argv) == 2:
+        send_message(
+            chat_id,
+            "❌ Use `/npthirdhttp <player_id>` after checkcredit, "
+            "or full `/npthirdhttp <player_id> YYYY-MM-DD HH:MM:SS.mmm` (three parts).",
+        )
+        return
+    if len(argv) >= 3:
+        date_iso = argv[1].strip()
+        time_short = argv[2].strip()
+        try:
+            datetime.strptime(date_iso, "%Y-%m-%d")
+        except ValueError:
+            send_message(chat_id, "❌ Date must be `YYYY-MM-DD`.")
+            return
+        if not time_short:
+            send_message(chat_id, "❌ Missing time (HH:MM:SS or HH:MM:SS.mmm).")
+            return
+    else:
+        pend = _get_checkcredit_np_pending(chat_id)
+        if not pend:
+            send_message(
+                chat_id,
+                "❌ No pending `/checkcreditdate` context in this chat. "
+                "Run checkcredit first, or use `/npthirdhttp <player_id> YYYY-MM-DD HH:MM:SS.mmm`.",
+            )
+            return
+        date_iso = pend["target_date"]
+        time_short = ""
+        for p in pend.get("latest_two_players", []):
+            if str(p.get("user_id")) == str(uid):
+                time_short = (p.get("time_short") or "").strip()
+                break
+        if not time_short:
+            send_message(
+                chat_id,
+                f"❌ User ID `{uid}` not in the last checkcredit top-2 list. "
+                f"Use: `/npthirdhttp {uid} YYYY-MM-DD HH:MM:SS.mmm`",
+            )
+            return
+
+    send_message(
+        chat_id,
+        "⏳ NP backend (Playwright): login → Log Third Http Req → recharge → Detail screenshot…",
+    )
+    path = None
+    try:
+        path = screenshot_np_recharge_detail(uid, date_iso, time_short, timeout_ms=120_000)
+        key = upload_image_lark(path)
+        if not key:
+            send_message(chat_id, "❌ Failed to upload screenshot to Lark.")
+            return
+        r = send_image_message(chat_id, key)
+        if r.get("code") != 0:
+            send_message(chat_id, f"❌ Failed to send image: {r}")
+    except Exception as e:
+        send_message(chat_id, f"❌ NP third-http screenshot failed: {e}")
+        print(f"[npthirdhttp] error: {e!r}")
+    finally:
+        if path and os.path.isfile(path):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
 
 def scheduled_amountloss_check():
@@ -595,6 +702,54 @@ def upload_file_to_drive(file_path):
     else:
         print(f"❌ Drive upload failed: {result}")
         return None
+
+
+def upload_image_lark(image_path: str):
+    """Upload PNG/JPEG for im/v1/messages msg_type=image; returns image_key or None."""
+    token = get_tenant_access_token()
+    url = "https://open.larksuite.com/open-apis/im/v1/images"
+    headers = {"Authorization": f"Bearer {token}"}
+    with open(image_path, "rb") as f:
+        files = {"image": (os.path.basename(image_path), f, "image/png")}
+        data = {"image_type": "message"}
+        resp = requests.post(url, headers=headers, files=files, data=data)
+    result = resp.json()
+    if result.get("code") == 0:
+        return result.get("data", {}).get("image_key")
+    print(f"❌ Lark image upload failed: {result}")
+    return None
+
+
+def send_image_message(chat_id, image_key: str):
+    token = get_tenant_access_token()
+    url = "https://open.larksuite.com/open-apis/im/v1/messages"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    payload = {
+        "receive_id": chat_id,
+        "msg_type": "image",
+        "content": json.dumps({"image_key": image_key}),
+        "user_id": BOT_OPEN_ID,
+    }
+    params = {"receive_id_type": "chat_id"}
+    return requests.post(url, headers=headers, params=params, json=payload).json()
+
+
+# Last `/checkcreditdate` result in this chat — used by `/npthirdhttp` for date + credit time window.
+CHECKCREDIT_NP_PENDING = {}
+
+
+def _set_checkcredit_np_pending(chat_id: str, payload: dict) -> None:
+    CHECKCREDIT_NP_PENDING[chat_id] = {"payload": payload, "ts": time.time()}
+
+
+def _get_checkcredit_np_pending(chat_id: str, max_age_sec: float = 3600.0):
+    ent = CHECKCREDIT_NP_PENDING.get(chat_id)
+    if not ent:
+        return None
+    if time.time() - ent["ts"] > max_age_sec:
+        del CHECKCREDIT_NP_PENDING[chat_id]
+        return None
+    return ent["payload"]
 
 _CAT_FILE_TOKEN = None
 def get_cat_file_token():
@@ -1362,6 +1517,14 @@ def lark_webhook():
             send_message(chat_id, "⏳ Checking Amount Loss (CHECKLOG), please wait...")
             threading.Thread(target=run_amountloss_check, args=(chat_id, date_param), daemon=True).start()
             return jsonify({"success": True})
+    elif clean_text.lower().startswith("/npthirdhttp"):
+        parts = clean_text.split()
+        threading.Thread(
+            target=run_np_third_http_job,
+            args=(chat_id, parts[1:]),
+            daemon=True,
+        ).start()
+        return jsonify({"success": True})
     elif clean_text.lower().startswith("/checkcreditdate"):
         parts = clean_text.split()
         if len(parts) < 3:

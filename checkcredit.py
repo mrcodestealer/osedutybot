@@ -991,8 +991,16 @@ def run_finderror(
 
     report = format_dual_terminal_report(top2_any, top2_err, machine_display, td)
     plain = f"{header}\n\n{report}" if header else report
+    try:
+        from np_backend_third_http import np_followup_meta
+
+        np_payload = np_followup_meta(top2_any, machine_display, td)
+    except ImportError:
+        np_payload = None
+
     return {
         "text": plain,
+        "np_followup": np_payload,
         "lark_card": build_latest_two_overall_lark_card(
             top2_any,
             machine_display=machine_display,
