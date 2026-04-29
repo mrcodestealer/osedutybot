@@ -361,7 +361,7 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
                     _td = str(np.get("target_date") or "").strip()
                     _md = str(np.get("machine_display") or "").strip()
                     _be = str(np.get("third_http_backend") or "NP").strip().upper()
-                    if _be not in ("NP", "WF", "DHS", "NCH", "MDR", "TBP"):
+                    if _be not in ("NP", "WF", "DHS", "NCH", "CP", "OSM", "MDR", "TBP"):
                         _be = "NP"
                     if _td or _md:
                         lines.append(
@@ -379,7 +379,7 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
                 _td = str(np.get("target_date") or "").strip()
                 _md = str(np.get("machine_display") or "").strip()
                 _be = str(np.get("third_http_backend") or "NP").strip().upper()
-                if _be not in ("NP", "WF", "DHS", "NCH", "MDR", "TBP"):
+                if _be not in ("NP", "WF", "DHS", "NCH", "CP", "OSM", "MDR", "TBP"):
                     _be = "NP"
                 if _td or _md:
                     lines.append(f"Log date ({_be} window): `{_td or '?'}` · Machine: `{_md or '?'}`")
@@ -404,7 +404,7 @@ def _np_run_screenshot_worker(
     expected_credit: Optional[float] = None,
     machine_display: Optional[str] = None,
 ) -> None:
-    """NP / WF / DHS / NCH / MDR / TBP Log Third Http → `recharge` Detail screenshot. Always **headless** on server."""
+    """NP / WF / DHS / NCH / CP / OSM / MDR / TBP Log Third Http → `recharge` Detail screenshot. Always **headless** on server."""
     try:
         import checkcredit
 

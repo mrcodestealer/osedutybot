@@ -38,6 +38,9 @@ Env (optional):
   If **Machine** label starts with ``NCH`` (e.g. ``NCH1171``), uses ``https://backend-nc.osmplay.com``;
   login prefers ``NCH_BACKEND_USER`` / ``NCH_BACKEND_PASSWORD``, else falls back to ``NP_BACKEND_*``
   (same duty account on multiple backends).
+  If **Machine** label starts with ``CP`` (e.g. ``CP7178``) or ``OSM`` (e.g. ``OSM7178``), uses ``https://backend.osmplay.com``
+  + ``CP_BACKEND_USER`` / ``CP_BACKEND_PASSWORD``. Login redirect lands on ``/egm/egmStatusList``; Playwright then opens
+  ``/log/logThirdHttpReq`` for the same Log Third Http / Detail screenshot flow as NP.
   If **Machine** label starts with ``MDR`` (e.g. ``MDR7178``), uses ``https://backend-midori.osmplay.com``
   (Midori; Log Third Http path same as NP: ``/log/logThirdHttpReq``; EGM status UI lives under ``/egm/``).
   Login defaults ``MDR_BACKEND_USER`` / ``MDR_BACKEND_PASSWORD`` to ``mdr-omduty`` when unset.
@@ -50,7 +53,7 @@ Env (optional):
   NP debug — **visible Chromium** (not headless), same logic as Duty Bot ``/npthirdhttp``::
     python3 checkcredit.py --checkuser --player-id 132594948 --date 2026-04-27 \\
       --time 23:55:12.092 --machine-substr 2074 --credit 1352 --pause
-    Add ``--machine-display WF8173`` / ``DHS3178`` / ``NCH1171`` / ``MDR7178`` / ``TBP8641`` when testing non-NP backends from CLI
+    Add ``--machine-display WF8173`` / ``DHS3178`` / ``NCH1171`` / ``CP7178`` / ``OSM7178`` / ``MDR7178`` / ``TBP8641`` when testing non-NP backends from CLI
     (Duty Bot passes machine from ``/checkcreditdate`` context automatically).
   Use ``--pause`` to leave the window open until you press Enter in the terminal.
   Do **not** set ``NP_BACKEND_HEADLESS=1`` when you want to watch the browser.
@@ -737,12 +740,12 @@ def build_np_choice_lark_card(
     machine_display: str = "",
     third_http_backend: str = "NP",
 ) -> dict[str, Any]:
-    """Lark card: title + log date (NP / WF / DHS / NCH / MDR / TBP window) + machine + numbered player lines."""
+    """Lark card: title + log date (NP / WF / DHS / NCH / CP / OSM / MDR / TBP window) + machine + numbered player lines."""
     lines: list[str] = []
     td = (target_date_iso or "").strip()
     md = (machine_display or "").strip()
     be = (third_http_backend or "NP").strip().upper()
-    if be not in ("NP", "WF", "DHS", "NCH", "MDR", "TBP"):
+    if be not in ("NP", "WF", "DHS", "NCH", "CP", "OSM", "MDR", "TBP"):
         be = "NP"
     if td or md:
         bits: list[str] = []
@@ -1264,6 +1267,7 @@ _WINFORD_NP_BASE = "https://backend-winford.osmplay.com".rstrip("/")
 _DHS_BACKEND_BASE = "https://backend-dhs.osmplay.com".rstrip("/")
 _NCH_BACKEND_BASE = "https://backend-nc.osmplay.com".rstrip("/")
 _TBP_BACKEND_BASE = "https://backend-tbp.osmplay.com".rstrip("/")
+_CP_BACKEND_BASE = "https://backend.osmplay.com".rstrip("/")
 _MDR_BACKEND_BASE = "https://backend-midori.osmplay.com".rstrip("/")
 _MDR_BACKEND_DEFAULT_USER = "mdr-omduty"
 _MDR_BACKEND_DEFAULT_PASSWORD = "mdr-omduty"
@@ -1300,6 +1304,35 @@ def _np_use_nch_log_backend(machine_display: str | None) -> bool:
         return True
     alnum = re.sub(r"[^A-Za-z0-9]", "", raw).upper()
     return bool(alnum.startswith("NCH"))
+
+
+def _np_use_cp_log_backend(machine_display: str | None) -> bool:
+    """CP cabinet — folder / last path segment starts with ``CP`` (e.g. ``CP7178``, ``CP0231``)."""
+    raw = (machine_display or "").strip()
+    if not raw:
+        return False
+    seg = raw.replace("\\", "/").rstrip("/").split("/")[-1].strip()
+    if seg and re.match(r"(?i)CP", seg):
+        return True
+    alnum = re.sub(r"[^A-Za-z0-9]", "", raw).upper()
+    return bool(alnum.startswith("CP"))
+
+
+def _np_use_osm_log_backend(machine_display: str | None) -> bool:
+    """OSM cabinet — folder / last path segment starts with ``OSM`` (e.g. ``OSM7178``). Same backend as ``CP*``."""
+    raw = (machine_display or "").strip()
+    if not raw:
+        return False
+    seg = raw.replace("\\", "/").rstrip("/").split("/")[-1].strip()
+    if seg and re.match(r"(?i)OSM", seg):
+        return True
+    alnum = re.sub(r"[^A-Za-z0-9]", "", raw).upper()
+    return bool(alnum.startswith("OSM"))
+
+
+def _np_use_backend_osmplay_com(machine_display: str | None) -> bool:
+    """``https://backend.osmplay.com`` — ``CP*`` or ``OSM*`` (shared ``CP_BACKEND_*`` creds and EGM login redirect)."""
+    return _np_use_cp_log_backend(machine_display) or _np_use_osm_log_backend(machine_display)
 
 
 def _np_use_mdr_log_backend(machine_display: str | None) -> bool:
@@ -1350,11 +1383,15 @@ def _np_use_winford_log_backend(machine_display: str | None) -> bool:
 
 
 def _np_log_backend_tag(machine_display: str | None) -> str:
-    """Short label for Lark / Duty Bot: ``DHS``, ``NCH``, ``MDR``, ``TBP``, ``WF``, or ``NP``."""
+    """Short label for Lark / Duty Bot: ``DHS``, ``NCH``, ``OSM``, ``CP``, ``MDR``, ``TBP``, ``WF``, or ``NP``."""
     if _np_use_dhs_log_backend(machine_display):
         return "DHS"
     if _np_use_nch_log_backend(machine_display):
         return "NCH"
+    if _np_use_osm_log_backend(machine_display):
+        return "OSM"
+    if _np_use_cp_log_backend(machine_display):
+        return "CP"
     if _np_use_mdr_log_backend(machine_display):
         return "MDR"
     if _np_use_tbp_log_backend(machine_display):
@@ -1370,6 +1407,7 @@ def _np_resolve_backend(machine_display: str | None) -> tuple[str, str, str]:
 
     **DHS** (machine label ``DHS*``) → ``backend-dhs.osmplay.com`` + ``DHS_BACKEND_*`` (else ``NP_BACKEND_*``).
     **NCH** (machine label ``NCH*``) → ``backend-nc.osmplay.com`` + ``NCH_BACKEND_*`` (else ``NP_BACKEND_*``).
+    **CP** / **OSM** (machine labels ``CP*`` / ``OSM*``) → ``backend.osmplay.com`` + ``CP_BACKEND_USER`` / ``CP_BACKEND_PASSWORD``.
     **MDR** (machine label ``MDR*``) → ``backend-midori.osmplay.com`` + ``MDR_BACKEND_*``
     (default ``mdr-omduty`` / ``mdr-omduty`` when unset).
     **TBP** (machine label ``TBP*``) → ``backend-tbp.osmplay.com`` + ``TBP_BACKEND_*``.
@@ -1387,6 +1425,10 @@ def _np_resolve_backend(machine_display: str | None) -> tuple[str, str, str]:
         u = (os.environ.get("NCH_BACKEND_USER") or nu).strip()
         p = (os.environ.get("NCH_BACKEND_PASSWORD") or npw).strip()
         return _NCH_BACKEND_BASE, u, p
+    if _np_use_backend_osmplay_com(machine_display):
+        u = (os.environ.get("CP_BACKEND_USER") or "").strip()
+        p = (os.environ.get("CP_BACKEND_PASSWORD") or "").strip()
+        return _CP_BACKEND_BASE, u, p
     if _np_use_mdr_log_backend(machine_display):
         u = (os.environ.get("MDR_BACKEND_USER") or _MDR_BACKEND_DEFAULT_USER).strip() or _MDR_BACKEND_DEFAULT_USER
         p = (os.environ.get("MDR_BACKEND_PASSWORD") or _MDR_BACKEND_DEFAULT_PASSWORD).strip() or (
@@ -1629,7 +1671,7 @@ def _np_normalize_jsonish_quotes(s: str) -> str:
 
 def _np_parse_machine_amount_from_request_blob(blob: str) -> tuple[str | None, float | None]:
     """
-    Best-effort Request JSON fields across NP / NCH / DHS / MDR / TBP / WF style payloads.
+    Best-effort Request JSON fields across NP / NCH / DHS / CP / OSM / MDR / TBP / WF style payloads.
     Some cabinets use ``machineNo`` / ``add_num`` instead of ``machineId`` / ``amount``.
     """
     if not blob:
@@ -2052,7 +2094,7 @@ def screenshot_np_recharge_detail(
     of that credit (default 0.05).
     (non-positive ``expected_credit`` is ignored — same as ``None``). **Header Request Time is not
     used to reject** (avoids closing valid dialogs when UI text differs slightly from log seconds).
-    ``machine_display``: LogNavigator / OSS folder label (``DHS*`` / ``NCH*`` / ``MDR*`` / ``TBP*`` → respective backend;
+    ``machine_display``: LogNavigator / OSS folder label (``DHS*`` / ``NCH*`` / ``CP*`` / ``OSM*`` / ``MDR*`` / ``TBP*`` → respective backend;
     creds fall back to ``NP_BACKEND_*`` when ``DHS_BACKEND_*`` / ``NCH_BACKEND_*`` unset).
     ``WF*`` / ``NWR8173`` → Winford + ``WF_BACKEND_*``; else NP + ``NP_BACKEND_*``.
 
@@ -2078,13 +2120,21 @@ def screenshot_np_recharge_detail(
                 "Missing credentials for TBP Log Third Http: set TBP_BACKEND_USER / TBP_BACKEND_PASSWORD "
                 "in `.env` (loaded from the Chatbox folder), then restart Duty Bot."
             )
+        if _log_http_backend_tag in ("CP", "OSM"):
+            raise RuntimeError(
+                "Missing credentials for CP/OSM Log Third Http: set CP_BACKEND_USER / CP_BACKEND_PASSWORD "
+                "in `.env` (loaded from the Chatbox folder), then restart Duty Bot."
+            )
         raise RuntimeError(
             "Set NP_BACKEND_USER and NP_BACKEND_PASSWORD in the environment "
             "(not required for Winford (WF* / NWR8173 alias) — defaults omduty1 unless WF_BACKEND_* is set)."
         )
 
     start_s, end_s = _np_window_strings(date_iso, time_short)
-    login_url = f"{base}/login?redirect=%2Flog%2FlogThirdHttpReq"
+    if _np_use_backend_osmplay_com(machine_display):
+        login_url = f"{base}/login?redirect=%2Fegm%2FegmStatusList"
+    else:
+        login_url = f"{base}/login?redirect=%2Flog%2FlogThirdHttpReq"
     log_url = f"{base}/log/logThirdHttpReq"
 
     from playwright.sync_api import sync_playwright
