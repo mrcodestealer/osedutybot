@@ -1259,8 +1259,10 @@ def _lark_resolve_card_action(data):
     if not isinstance(data, dict):
         return None
     hdr = data.get("header") if isinstance(data.get("header"), dict) else {}
-    et = (hdr.get("event_type") or "").strip()
-    eid = hdr.get("event_id")
+    et = _lark_header_event_type(data)
+    eid = hdr.get("event_id") if isinstance(hdr, dict) else None
+    if eid is None:
+        eid = data.get("event_id")
     ev = data.get("event") if isinstance(data.get("event"), dict) else {}
 
     named = et in ("card.action.trigger", "card.action.trigger_v1")
@@ -1294,8 +1296,44 @@ def _lark_resolve_card_action(data):
     return (chat_id, sender_id, val, eid)
 
 
-@app.route("/webhook/event", methods=["POST"])
+def _lark_payload_has_card_button_action(data):
+    # type: (object) -> bool
+    """True when decrypted body looks like ``card.action.trigger`` / button tap (even if ``header`` is odd)."""
+    if not isinstance(data, dict):
+        return False
+    ev = data.get("event")
+    if not isinstance(ev, dict):
+        return False
+    act = ev.get("action")
+    return isinstance(act, dict) and act.get("tag") == "button"
+
+
+def _lark_header_event_type(data):
+    # type: (object) -> str
+    """``header.event_type``, or rare top-level ``event_type`` (some gateway proxies strip nested keys)."""
+    if isinstance(data, dict):
+        h = data.get("header")
+        if isinstance(h, dict):
+            et = h.get("event_type")
+            if et is not None:
+                return str(et).strip()
+        et2 = data.get("event_type")
+        if et2 is not None:
+            return str(et2).strip()
+    return ""
+
+
+@app.route("/webhook/event", methods=["POST", "GET"])
 def lark_webhook():
+    if request.method == "GET":
+        return jsonify(
+            {
+                "ok": True,
+                "service": "lark_webhook",
+                "detail": "Feishu/Lark must POST JSON to this URL for events and card callbacks.",
+            }
+        )
+
     raw_in = _lark_safe_parse_json_body(request)
     if raw_in is None:
         return jsonify({"error": "invalid json"}), 400
@@ -1321,11 +1359,7 @@ def lark_webhook():
         )
         return jsonify({"error": "Invalid token"}), 403
 
-    hdr_et = (
-        ((data.get("header") or {}).get("event_type") or "").strip()
-        if isinstance(data.get("header"), dict)
-        else ""
-    )
+    hdr_et = _lark_header_event_type(data)
 
     # ``card.action.trigger``: MUST respond within **3s** with HTTP 200 and body ``{}`` or ``toast``/``card``.
     # Never return ``{"success": true}`` here — Feishu treats that as an invalid card callback and shows
@@ -1371,6 +1405,14 @@ def lark_webhook():
                     pass
 
         threading.Thread(target=_run_jenkins_card_action, daemon=True).start()
+        return _lark_http_card_callback_ok()
+
+    # Resolver missed but body clearly has a card button action — never fall through to ``success: true``.
+    if card_resolved is None and _lark_payload_has_card_button_action(data):
+        print(
+            "[lark] card-like button payload but resolver returned None — ACK 200 {} (check Lark payload format)",
+            flush=True,
+        )
         return _lark_http_card_callback_ok()
 
     sender_id = None
@@ -2233,7 +2275,7 @@ def _register_lark_webhook_duplicate_paths():
         path = raw.strip()
         if not path or path.rstrip("/") == "/webhook/event":
             continue
-        app.add_url_rule(path, "lark_webhook_extra_%d" % i, lark_webhook, methods=["POST"])
+        app.add_url_rule(path, "lark_webhook_extra_%d" % i, lark_webhook, methods=["POST", "GET"])
         print("[lark] Extra webhook POST route registered: %s" % path, flush=True)
 
 
