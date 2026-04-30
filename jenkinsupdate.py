@@ -4311,6 +4311,7 @@ def _fpms_lark_v2_column_set_button_row(
     return {
         "tag": "column_set",
         "flex_mode": "flow",
+        "background_style": "default",
         "horizontal_spacing": "6px",
         "columns": columns,
     }
@@ -5162,7 +5163,9 @@ def _fpms_lark_verification_card_json(
                 {"tag": "div", "text": {"tag": "lark_md", "content": block_a}},
                 {"tag": "hr"},
                 {"tag": "div", "text": {"tag": "lark_md", "content": block_b}},
-                _fpms_lark_v2_column_set_button_row([yes_btn, no_btn]),
+                # Stacked buttons (avoids some clients failing on column_set in narrow layouts)
+                yes_btn,
+                no_btn,
             ],
         },
     }

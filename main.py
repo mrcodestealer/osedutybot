@@ -849,11 +849,12 @@ def send_message(chat_id, text, msg_type="text", mentions=None):
         content = text if isinstance(text, str) else json.dumps(text)
     else:
         content = json.dumps({"text": text})
+    # Lark `POST /im/v1/messages` request body is only receive_id + msg_type + content (+ optional uuid).
+    # Do not send undocumented fields — stray keys have caused odd interactive-card behavior in the wild.
     body = {
         "receive_id": chat_id,
         "msg_type": msg_type,
         "content": content,
-        "user_id": BOT_OPEN_ID
     }
     if mentions:
         body["mentions"] = mentions
@@ -869,7 +870,6 @@ def send_file(chat_id, file_token):
         "receive_id": chat_id,
         "msg_type": "file",
         "content": json.dumps({"file_key": file_token}),
-        "user_id": BOT_OPEN_ID
     }
     params = {"receive_id_type": "chat_id"}
     response = requests.post(url, headers=headers, params=params, json=payload)
@@ -915,7 +915,6 @@ def send_image_message(chat_id, image_key: str):
         "receive_id": chat_id,
         "msg_type": "image",
         "content": json.dumps({"image_key": image_key}),
-        "user_id": BOT_OPEN_ID,
     }
     params = {"receive_id_type": "chat_id"}
     return requests.post(url, headers=headers, params=params, json=payload).json()
@@ -1183,24 +1182,23 @@ def _lark_http_empty_json_ok():
 def _lark_http_card_callback_ok():
     # type: () -> Response
     """
-    HTTP 200 + JSON. Some Lark/Feishu clients mishandle an empty ``{}`` body and show ``code: undefined``;
-    a minimal ``toast`` matches the documented “方式二” alternate form.
-    Set ``LARK_CARD_REPLY_EMPTY_JSON=1`` to force bare ``{}``.
+    Official docs allow bare ``{}``. Default to that; some mobile builds choke on ``toast`` shape.
+    Set ``LARK_CARD_REPLY_TOAST=1`` to respond with a minimal success toast instead.
     """
-    if (os.getenv("LARK_CARD_REPLY_EMPTY_JSON") or "").strip() == "1":
-        return _lark_http_empty_json_ok()
-    body = json.dumps(
-        {
-            "toast": {
-                "type": "success",
-                "content": "OK",
-                "i18n": {"zh_cn": "已收到", "en_us": "OK"},
-            }
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    return Response(body, status=200, mimetype="application/json; charset=utf-8")
+    if (os.getenv("LARK_CARD_REPLY_TOAST") or "").strip() == "1":
+        body = json.dumps(
+            {
+                "toast": {
+                    "type": "success",
+                    "content": "OK",
+                    "i18n": {"zh_cn": "已收到", "en_us": "OK"},
+                }
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return Response(body, status=200, mimetype="application/json; charset=utf-8")
+    return _lark_http_empty_json_ok()
 
 
 def _lark_safe_parse_json_body(req):
