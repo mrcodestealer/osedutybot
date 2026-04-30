@@ -4174,11 +4174,15 @@ def _fpms_lark_session_key(chat_id: str, sender_id: str) -> str:
 
 
 def _fpms_lark_unregister_picker_sid_from_sess(sess: dict) -> None:
-    ps = str(sess.get("picker_sid") or "").strip()
-    if not ps:
-        return
+    """Remove job-picker and service-picker card ``sid`` keys from the global map."""
+    keys = (
+        str(sess.get("picker_sid") or "").strip(),
+        str(sess.get("service_pick_sid") or "").strip(),
+    )
     with _fpms_lark_picker_sid_lock:
-        _fpms_lark_picker_sid_to_session_key.pop(ps, None)
+        for ps in keys:
+            if ps:
+                _fpms_lark_picker_sid_to_session_key.pop(ps, None)
 
 
 def _fpms_lark_register_picker_sid(picker_sid: str, session_key: str) -> None:
@@ -4192,7 +4196,7 @@ def _fpms_lark_register_picker_sid(picker_sid: str, session_key: str) -> None:
 
 def resolve_jenkins_job_card_session(chat_id: str, picker_sid: object) -> tuple[str, str] | None:
     """
-    Map ``picker_sid`` from a job-picker card button to ``(chat_id, sender_id)`` for :data:`_fpms_lark_sessions`.
+    Map a card **sid** (job picker ``picker_sid`` or service picker ``service_pick_sid``) to session keys.
 
     ``chat_id`` must match the callback (same chat as the card).
     """
@@ -4489,7 +4493,8 @@ def _fpms_lark_job_choice_card_json(
     buttons: list[dict[str, object]] = []
     for i, (alias, _sc, label, url_raw) in enumerate(candidates, start=1):
         u0 = _jenkins_update_primary_url(url_raw)
-        lines_md.append(f"**{i}.** **{label}** — `{alias}` — {u0}")
+        # No ``backticks`` around alias — Lark ``lark_md`` renders them as dark code blocks.
+        lines_md.append(f"**{i}.** **{label}** — {alias} — {u0}")
         payload: dict[str, object] = {"k": "job", "i": i}
         if ps:
             payload["sid"] = ps
@@ -4544,7 +4549,7 @@ def _fpms_format_jenkins_job_menu(candidates: list[tuple[str, float, str, str]])
         ]
     for i, (alias, _sc, label, url_raw) in enumerate(candidates, start=1):
         u0 = _jenkins_update_primary_url(url_raw)
-        lines.append(f"  {i}. **{label}** — `{alias}` — {u0}")
+        lines.append(f"  {i}. **{label}** — {alias} — {u0}")
     return "\n".join(lines)
 
 
@@ -5211,13 +5216,134 @@ def _fpms_lark_resolve_token_by_port_or_none(token: str) -> list[str] | None:
 
 
 def _fpms_format_service_menu_message(token: str, ranked: list[str]) -> str:
+    """Plain-text fallback when interactive cards are unavailable (no backticks — avoids dark code styling)."""
     lines = [
-        f"Service text `{token}` — near matches (best first). Pick one or more: **1**, **2**, "
+        f"Service text **{token}** — near matches (best first). Pick one or more: **1**, **2**, "
         "**1 2 3**, or **1,2,3**:",
     ]
     for i, name in enumerate(ranked, start=1):
         lines.append(f"  {i}. {name}")
     return "\n".join(lines)
+
+
+def _fpms_lark_short_line(s: str, max_len: int = 80) -> str:
+    t = (s or "").strip()
+    if len(t) <= max_len:
+        return t
+    return t[: max(1, max_len - 1)] + "…"
+
+
+def _fpms_lark_service_pick_card_json(
+    token: str,
+    ranked: list[str],
+    service_pick_sid: str,
+    staged: list[str],
+) -> str:
+    """
+    Interactive card: stage Jenkins service rows by number, **Confirm** / **Clear** / **Cancel**
+    (callback keys ``svc`` / ``svc_go`` / ``svc_clr`` / ``svc_can``).
+    """
+    ps = (service_pick_sid or "").strip()
+    lines_md: list[str] = [
+        f"**Service search:** {_fpms_lark_short_line(token, 120)}",
+        "",
+        "Tap **1–N** below to **stage** services (any order), then **Confirm**. "
+        "You can still type numbers (e.g. **1 2**) if you prefer.",
+        "",
+    ]
+    for i, name in enumerate(ranked, start=1):
+        lines_md.append(f"**{i}.** {_fpms_lark_short_line(name, 90)}")
+    if staged:
+        lines_md.append("")
+        shown = ", ".join(_fpms_lark_short_line(x, 40) for x in staged)
+        lines_md.append(f"**Staged ({len(staged)}):** {shown}")
+    buttons: list[dict[str, object]] = []
+    for i in range(1, len(ranked) + 1):
+        pl: dict[str, object] = {"k": "svc", "i": i}
+        if ps:
+            pl["sid"] = ps
+        buttons.append(
+            _fpms_lark_v2_callback_button(
+                str(i),
+                "primary" if i == 1 else "default",
+                pl,
+                element_id=f"sv_{i}"[:20],
+            )
+        )
+    body_elements: list[dict[str, object]] = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines_md)}},
+    ]
+    for off in range(0, len(buttons), 5):
+        chunk = buttons[off : off + 5]
+        body_elements.append(_fpms_lark_v2_column_set_button_row(chunk))
+    body_elements.append({"tag": "hr"})
+    row2: list[dict[str, object]] = []
+    for label, kk, eid in (
+        ("Confirm", "svc_go", "svc_go"),
+        ("Clear", "svc_clr", "svc_clr"),
+        ("Cancel", "svc_can", "svc_can"),
+    ):
+        p2: dict[str, object] = {"k": kk}
+        if ps:
+            p2["sid"] = ps
+        row2.append(
+            _fpms_lark_v2_callback_button(label, "primary" if kk == "svc_go" else "default", p2, element_id=eid[:20])
+        )
+    body_elements.append(_fpms_lark_v2_column_set_button_row(row2))
+    card: dict[str, object] = {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "wathet",
+            "title": {"tag": "plain_text", "content": "Pick Jenkins services"},
+        },
+        "body": {"elements": body_elements},
+    }
+    return json.dumps(card, ensure_ascii=False)
+
+
+def _fpms_lark_send_service_pick_card(
+    chat_id: str,
+    session_key: str,
+    token: str,
+    ranked: list[str],
+    send,
+) -> None:
+    """Create ``service_pick_sid``, register it, store ``svc_staged``, send interactive card."""
+    sp = secrets.token_hex(16)
+    with _fpms_lark_sessions_lock:
+        sess = _fpms_lark_sessions.get(session_key)
+        if not isinstance(sess, dict):
+            return
+        sess["service_pick_sid"] = sp
+        sess["svc_staged"] = []
+        _fpms_lark_register_picker_sid(sp, session_key)
+        _fpms_lark_sessions[session_key] = sess
+    card_js = _fpms_lark_service_pick_card_json(token, ranked, sp, [])
+    try:
+        send(chat_id, card_js, msg_type="interactive")
+    except TypeError:
+        send(chat_id, _fpms_format_service_menu_message(token, ranked))
+
+
+def _fpms_lark_refresh_service_pick_card(chat_id: str, session_key: str, send) -> None:
+    """Resend the service-pick card from current session (after stage/clear)."""
+    with _fpms_lark_sessions_lock:
+        sess = _fpms_lark_sessions.get(session_key)
+        if not isinstance(sess, dict) or sess.get("state") != "pick":
+            return
+        sp = str(sess.get("service_pick_sid") or "").strip()
+        tok = sess["service_tokens"][int(sess["pick_index"])]
+        ranked = list(sess.get("current_ranked") or [])
+        staged = list(sess.get("svc_staged") or [])
+    if not sp:
+        send(chat_id, _fpms_format_service_menu_message(tok, ranked))
+        return
+    card_js = _fpms_lark_service_pick_card_json(tok, ranked, sp, staged)
+    try:
+        send(chat_id, card_js, msg_type="interactive")
+    except TypeError:
+        send(chat_id, _fpms_format_service_menu_message(tok, ranked))
 
 
 def _fpms_format_config_preview(data: dict, resolved: list[str]) -> str:
@@ -5719,7 +5845,7 @@ def _fpms_lark_dispatch_fnt_rc_parameter_flow(
     }
     with _fpms_lark_sessions_lock:
         _fpms_lark_sessions[session_key] = sess_new
-    send(chat_id, _fpms_format_service_menu_message(first, ranked0))
+    _fpms_lark_send_service_pick_card(chat_id, session_key, first, ranked0, send)
     return True
 
 
@@ -5806,7 +5932,7 @@ def _fpms_lark_dispatch_sms_uat_parameter_flow(
     }
     with _fpms_lark_sessions_lock:
         _fpms_lark_sessions[session_key] = sess_new
-    send(chat_id, _fpms_format_service_menu_message(first, ranked0))
+    _fpms_lark_send_service_pick_card(chat_id, session_key, first, ranked0, send)
     return True
 
 
@@ -5915,7 +6041,7 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
     }
     with _fpms_lark_sessions_lock:
         _fpms_lark_sessions[session_key] = sess_new
-    send(chat_id, _fpms_format_service_menu_message(first, ranked0))
+    _fpms_lark_send_service_pick_card(chat_id, session_key, first, ranked0, send)
     return True
 
 
@@ -6083,6 +6209,7 @@ def handle_lark_jenkins_update_message(
                     sg = _fpms_lark_sessions.get(key)
                     if isinstance(sg, dict) and sg.get("state") == "jenkins_wait_build":
                         sg["approve_build"] = True
+                        sg["state"] = "jenkins_post_gate"
                         ev2 = sg.get("build_gate_event")
                         if isinstance(ev2, threading.Event):
                             ev2.set()
@@ -6092,6 +6219,7 @@ def handle_lark_jenkins_update_message(
                     sg = _fpms_lark_sessions.get(key)
                     if isinstance(sg, dict) and sg.get("state") == "jenkins_wait_build":
                         sg["approve_build"] = False
+                        sg["state"] = "jenkins_post_gate"
                         ev2 = sg.get("build_gate_event")
                         if isinstance(ev2, threading.Event):
                             ev2.set()
@@ -6101,19 +6229,26 @@ def handle_lark_jenkins_update_message(
                 "**Tap YES / NO** on the card (or type **yes** / **no**) — Build vs skip **Build** (browser closes after).",
             )
             return True
+        if st == "jenkins_post_gate":
+            # YES/NO (or card tap) already submitted; worker may still be in ``wait_review`` — do not nag.
+            return True
         if st == "jenkins_cancelled":
-            # Build gate already cancelled; keep quiet until worker thread closes and clears session.
+            # User said **cancel** during ``jenkins_wait_build``; keep quiet until worker closes session.
             return True
 
         if st == "pick":
             ranked: list[str] = sess["current_ranked"]
             idxs = _parse_multi_indices(clean_text.strip(), len(ranked))
             if idxs is None:
-                send(
-                    chat_id,
-                    f"Please reply with numbers **1–{len(ranked)}** (e.g. `1` or `1 2`). Or say **cancel**.",
-                )
+                if (sess.get("service_pick_sid") or "").strip():
+                    _fpms_lark_refresh_service_pick_card(chat_id, key, send)
+                else:
+                    send(
+                        chat_id,
+                        f"Please reply with numbers **1–{len(ranked)}** (e.g. **1** or **1 2**). Or say **cancel**.",
+                    )
                 return True
+            sess["svc_staged"] = []
             picked = [ranked[i - 1] for i in idxs]
             sess.setdefault("resolved_ids", [])
             for sid in picked:
@@ -6191,9 +6326,10 @@ def handle_lark_jenkins_update_message(
                 send(chat_id, f"❌ No Jenkins service matches `{next_tok}`. Cancelled.")
                 return True
             sess["current_ranked"] = nranked
+            sess["svc_staged"] = []
             with _fpms_lark_sessions_lock:
                 _fpms_lark_sessions[key] = sess
-            send(chat_id, _fpms_format_service_menu_message(next_tok, nranked))
+            _fpms_lark_refresh_service_pick_card(chat_id, key, send)
             return True
 
         _fpms_lark_clear_session(chat_id, sender_id)
@@ -6288,6 +6424,82 @@ def handle_lark_jenkins_update_message(
     return _fpms_lark_dispatch_job_row(chat_id, key, body, ties[0], send)
 
 
+def _fpms_lark_handle_service_pick_callbacks(
+    chat_id: str,
+    sender_id: str,
+    parsed: dict[str, object],
+    send,
+) -> bool:
+    """Interactive **service pick** card: ``svc`` / ``svc_go`` / ``svc_clr`` / ``svc_can``."""
+    k = str(parsed.get("k") or "").strip().lower()
+    sk = _fpms_lark_session_key(chat_id, sender_id)
+    if k == "svc_can":
+        return handle_lark_jenkins_update_message(
+            chat_id,
+            sender_id,
+            "cancel",
+            "cancel",
+            send,
+            allow_start=True,
+        )
+    with _fpms_lark_sessions_lock:
+        sess = _fpms_lark_sessions.get(sk)
+    if not isinstance(sess, dict) or sess.get("state") != "pick":
+        return False
+    if k == "svc_clr":
+        sess["svc_staged"] = []
+        with _fpms_lark_sessions_lock:
+            _fpms_lark_sessions[sk] = sess
+        _fpms_lark_refresh_service_pick_card(chat_id, sk, send)
+        return True
+    if k == "svc_go":
+        staged = list(sess.get("svc_staged") or [])
+        ranked = list(sess.get("current_ranked") or [])
+        if not staged:
+            send(
+                chat_id,
+                "Tap one or more **numbers** on the card to stage services, then **Confirm**.",
+            )
+            return True
+        idx_parts: list[str] = []
+        for svc_id in staged:
+            if svc_id not in ranked:
+                send(chat_id, "⚠️ Staged list is out of date — pick again.")
+                sess["svc_staged"] = []
+                with _fpms_lark_sessions_lock:
+                    _fpms_lark_sessions[sk] = sess
+                _fpms_lark_refresh_service_pick_card(chat_id, sk, send)
+                return True
+            idx_parts.append(str(ranked.index(svc_id) + 1))
+        clean = " ".join(idx_parts)
+        return handle_lark_jenkins_update_message(
+            chat_id,
+            sender_id,
+            clean,
+            clean,
+            send,
+            allow_start=True,
+        )
+    if k == "svc":
+        try:
+            idx = int(str(parsed.get("i")).strip())
+        except (TypeError, ValueError):
+            return False
+        ranked = list(sess.get("current_ranked") or [])
+        if idx < 1 or idx > len(ranked):
+            return False
+        choice = ranked[idx - 1]
+        staged = list(sess.get("svc_staged") or [])
+        if choice not in staged:
+            staged.append(choice)
+        sess["svc_staged"] = staged
+        with _fpms_lark_sessions_lock:
+            _fpms_lark_sessions[sk] = sess
+        _fpms_lark_refresh_service_pick_card(chat_id, sk, send)
+        return True
+    return False
+
+
 def handle_lark_jenkins_card_action(
     chat_id: str,
     sender_id: str,
@@ -6295,7 +6507,8 @@ def handle_lark_jenkins_card_action(
     send,
 ) -> bool:
     """
-    Feishu ``card.action.trigger``: YES/NO (**k** ``wb``), job index (**k** ``job``), or Cancel (**k** ``ju_cancel``).
+    Feishu ``card.action.trigger``: YES/NO (**k** ``wb``), job index (**k** ``job``), service pick
+    (**svc** / **svc_go** / **svc_clr** / **svc_can**), or job Cancel (**k** ``ju_cancel``).
     Mirrors typed **yes** / **no** / **1** … / **cancel** in :func:`handle_lark_jenkins_update_message`.
 
     Job-picker payloads include **sid** so taps bind to the correct session even when ``operator`` ids
@@ -6310,6 +6523,9 @@ def handle_lark_jenkins_card_action(
         if resolved:
             chat_id, sender_id = resolved
     k = str(parsed.get("k") or "").strip().lower()
+    if k in ("svc", "svc_go", "svc_clr", "svc_can"):
+        if _fpms_lark_handle_service_pick_callbacks(chat_id, sender_id, parsed, send):
+            return True
     if k == "ju_cancel":
         return handle_lark_jenkins_update_message(
             chat_id,
