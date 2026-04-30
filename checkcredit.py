@@ -741,6 +741,60 @@ def machine_match_substr_from_display(machine_display: str) -> str:
     return max(nums, key=len) if nums else ""
 
 
+def _np_lark_v2_callback_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Stringify callback ``value`` scalars for Feishu card 2.0 (same idea as Jenkins cards)."""
+    out: dict[str, Any] = {}
+    for key, val in payload.items():
+        ks = str(key)
+        if isinstance(val, (dict, list)):
+            out[ks] = val
+        elif val is None:
+            out[ks] = ""
+        else:
+            out[ks] = str(val)
+    return out
+
+
+def _np_lark_v2_button(
+    label: str,
+    btn_type: str,
+    payload: dict[str, Any],
+    *,
+    element_id: str = "",
+) -> dict[str, Any]:
+    btn: dict[str, Any] = {
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": label},
+        "type": btn_type,
+        "behaviors": [{"type": "callback", "value": _np_lark_v2_callback_payload(payload)}],
+    }
+    eid = (element_id or "").strip()[:20]
+    if eid:
+        btn["element_id"] = eid
+    return btn
+
+
+def _np_lark_v2_button_row(buttons: list[dict[str, Any]]) -> dict[str, Any]:
+    columns: list[dict[str, Any]] = []
+    for b in buttons:
+        columns.append(
+            {
+                "tag": "column",
+                "width": "auto",
+                "weight": 1,
+                "vertical_align": "top",
+                "elements": [b],
+            }
+        )
+    return {
+        "tag": "column_set",
+        "flex_mode": "flow",
+        "background_style": "default",
+        "horizontal_spacing": "8px",
+        "columns": columns,
+    }
+
+
 def build_np_choice_lark_card(
     np_choices: list[dict[str, Any]],
     *,
@@ -748,7 +802,7 @@ def build_np_choice_lark_card(
     machine_display: str = "",
     third_http_backend: str = "NP",
 ) -> dict[str, Any]:
-    """Lark card: title + log date (NP / WF / DHS / NCH / CP / OSM / MDR / TBP window) + machine + numbered player lines."""
+    """Lark card 2.0: log date + machine + players; buttons **1**..**N** (N = len(choices), max 4) or type digits in chat."""
     lines: list[str] = []
     td = (target_date_iso or "").strip()
     md = (machine_display or "").strip()
@@ -770,19 +824,39 @@ def build_np_choice_lark_card(
         ts = ch.get("time_short") or "n/a"
         lines.append(f"{i + 1}) User ID `{uid}` — last credit `{cr}` @ `{ts}`")
     content = "\n".join(lines) if lines else "_No players._"
-    title = "Kindly choose one of the player(Just type number without tag)"
+    title = "Kindly choose one of the player"
+    body_elements: list[dict[str, Any]] = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": content}},
+    ]
+    n = len(np_choices)
+    if n > 0:
+        body_elements.append(
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**Tap** a number below, or type **1**–**{n}** in chat (no @).",
+                },
+            }
+        )
+        buttons = [
+            _np_lark_v2_button(
+                str(i),
+                "primary" if i == 1 else "default",
+                {"k": "np_pick", "i": i},
+                element_id=f"npcc{i}"[:20],
+            )
+            for i in range(1, n + 1)
+        ]
+        body_elements.append(_np_lark_v2_button_row(buttons))
     return {
-        "config": {"wide_screen_mode": True},
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
         "header": {
             "template": "blue",
             "title": {"tag": "plain_text", "content": title},
         },
-        "elements": [
-            {
-                "tag": "div",
-                "text": {"tag": "lark_md", "content": content},
-            },
-        ],
+        "body": {"elements": body_elements},
     }
 
 
@@ -1301,12 +1375,13 @@ def run_finderror(
 
     report = format_dual_terminal_report(top2_any, top2_err, machine_display, td)
     plain = f"{header}\n\n{report}" if header else report
+    np_followup = build_np_followup_payload(top2_any, top2_err, machine_display, td)
     return {
         "text": plain,
         "merged_players": merged_players_ordered,
         "machine_display_resolved": machine_display,
         "target_date": td,
-        "np_followup": build_np_followup_payload(top2_any, top2_err, machine_display, td),
+        "np_followup": np_followup,
         "lark_card": build_latest_two_overall_lark_card(
             top2_any,
             machine_display=machine_display,
@@ -1317,7 +1392,14 @@ def run_finderror(
             machine_display=machine_display,
             target_date=td,
         ),
-        "lark_card_candidates": build_same_latest_players_card(
+        # Third card: NP / third-HTTP player picker (buttons 1..N); fourth: same-last-player summary.
+        "lark_card_candidates": build_np_choice_lark_card(
+            np_followup["np_choices"],
+            target_date_iso=str(np_followup.get("target_date") or ""),
+            machine_display=str(np_followup.get("machine_display") or ""),
+            third_http_backend=str(np_followup.get("third_http_backend") or "NP"),
+        ),
+        "lark_card_same_player": build_same_latest_players_card(
             machine_display=machine_display,
             target_date=td,
             latest_err_uid=le_uid,

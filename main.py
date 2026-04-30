@@ -334,7 +334,12 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
         )
         text = (out.get("text") or "").strip()
         cards: list[dict] = []
-        for key in ("lark_card", "lark_card_summary", "lark_card_candidates"):
+        for key in (
+            "lark_card",
+            "lark_card_summary",
+            "lark_card_candidates",
+            "lark_card_same_player",
+        ):
             c = out.get(key)
             if isinstance(c, dict):
                 cards.append(c)
@@ -354,49 +359,6 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
         np = out.get("np_followup")
         if isinstance(np, dict):
             _set_checkcredit_np_pending(chat_id, np)
-            choices = np.get("np_choices") or []
-            try:
-                np_card = checkcredit.build_np_choice_lark_card(
-                    choices,
-                    target_date_iso=str(np.get("target_date") or ""),
-                    machine_display=str(np.get("machine_display") or ""),
-                    third_http_backend=str(np.get("third_http_backend") or "NP"),
-                )
-                card_json = json.dumps(np_card)
-                resp_np = send_message(chat_id, card_json, msg_type="interactive")
-                if resp_np.get("code") != 0:
-                    lines = []
-                    _td = str(np.get("target_date") or "").strip()
-                    _md = str(np.get("machine_display") or "").strip()
-                    _be = str(np.get("third_http_backend") or "NP").strip().upper()
-                    if _be not in ("NP", "WF", "DHS", "NCH", "CP", "OSM", "MDR", "TBP"):
-                        _be = "NP"
-                    if _td or _md:
-                        lines.append(
-                            f"Log date ({_be} window): `{_td or '?'}` · Machine: `{_md or '?'}`"
-                        )
-                    for i, ch in enumerate(choices):
-                        uid = ch.get("user_id", "")
-                        cr = ch.get("credit", "n/a")
-                        ts = ch.get("time_short") or "n/a"
-                        lines.append(f"{i + 1}) User ID `{uid}` — last credit `{cr}` @ `{ts}`")
-                    send_message(chat_id, "\n".join(lines) if lines else "(no NP choices)")
-            except Exception as e:
-                print(f"[checkcredit] NP choice card failed: {e!r}")
-                lines = []
-                _td = str(np.get("target_date") or "").strip()
-                _md = str(np.get("machine_display") or "").strip()
-                _be = str(np.get("third_http_backend") or "NP").strip().upper()
-                if _be not in ("NP", "WF", "DHS", "NCH", "CP", "OSM", "MDR", "TBP"):
-                    _be = "NP"
-                if _td or _md:
-                    lines.append(f"Log date ({_be} window): `{_td or '?'}` · Machine: `{_md or '?'}`")
-                for i, ch in enumerate(choices):
-                    uid = ch.get("user_id", "")
-                    cr = ch.get("credit", "n/a")
-                    ts = ch.get("time_short") or "n/a"
-                    lines.append(f"{i + 1}) User ID `{uid}` — last credit `{cr}` @ `{ts}`")
-                send_message(chat_id, "\n".join(lines) if lines else "(no NP choices)")
     except Exception as e:
         send_message(chat_id, f"❌ checkcredit failed: {e}")
         print(f"[checkcredit] error: {e!r}")
@@ -1784,6 +1746,20 @@ def lark_webhook():
                         print("⚠️ test_hi card: missing operator open_id", flush=True)
                         return
                     send_message(chat_id_ca, f'<at user_id="{at_id}"></at> hi')
+                    return
+                if isinstance(parsed_ca, dict) and str(parsed_ca.get("k") or "").strip().lower() == "np_pick":
+                    try:
+                        idx_np = int(parsed_ca.get("i"))
+                    except (TypeError, ValueError):
+                        return
+                    pend_np = _get_checkcredit_np_pending(chat_id_ca)
+                    choices_np = (pend_np or {}).get("np_choices") or []
+                    if pend_np and 1 <= idx_np <= len(choices_np):
+                        threading.Thread(
+                            target=run_np_third_http_by_choice,
+                            args=(chat_id_ca, idx_np),
+                            daemon=True,
+                        ).start()
                     return
                 ju = _get_jenkinsupdate()
                 if not ju:
