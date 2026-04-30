@@ -1112,7 +1112,8 @@ def _feishu_decrypt_encrypt_field(ciphertext_b64: str, encrypt_key: str) -> str:
     return raw.decode("utf-8")
 
 
-def _feishu_maybe_decrypt_webhook_payload(raw: dict | None) -> dict | None:
+def _feishu_maybe_decrypt_webhook_payload(raw):
+    # type: (Optional[Dict]) -> Optional[Dict]
     """
     When **Encrypt Key** is enabled in Feishu/Lark event subscription, POST body is
     ``{\"encrypt\": \"...\"}`` — must decrypt before ``schema`` / ``header.token`` exist.
