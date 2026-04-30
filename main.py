@@ -1088,9 +1088,68 @@ BOT_OPEN_ID = "ou_1f6596a9923a2a835918e7e2513595d5"
 processed_messages = set()
 processed_lock = threading.Lock()
 
+
+def _feishu_decrypt_encrypt_field(ciphertext_b64: str, encrypt_key: str) -> str:
+    """Decrypt Feishu ``encrypt`` field (AES-256-CBC + PKCS7), same algorithm as open-platform samples."""
+    import base64
+    import hashlib
+
+    try:
+        from Crypto.Cipher import AES
+    except ImportError as e:
+        raise ImportError("pip install pycryptodome") from e
+
+    bs = AES.block_size
+    key = hashlib.sha256(encrypt_key.encode("utf-8")).digest()
+    enc = base64.b64decode(ciphertext_b64)
+    iv = enc[:bs]
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    raw = cipher.decrypt(enc[bs:])
+    pad_len = raw[-1]
+    if pad_len < 1 or pad_len > bs:
+        raise ValueError("invalid PKCS7 padding")
+    raw = raw[:-pad_len]
+    return raw.decode("utf-8")
+
+
+def _feishu_maybe_decrypt_webhook_payload(raw: dict | None) -> dict | None:
+    """
+    When **Encrypt Key** is enabled in Feishu/Lark event subscription, POST body is
+    ``{\"encrypt\": \"...\"}`` — must decrypt before ``schema`` / ``header.token`` exist.
+    Set ``LARK_ENCRYPT_KEY`` (or ``ENCRYPT_KEY``) to the same Encrypt Key from the developer console.
+    """
+    if not isinstance(raw, dict) or "encrypt" not in raw:
+        return raw
+    ek = (
+        os.getenv("LARK_ENCRYPT_KEY")
+        or os.getenv("ENCRYPT_KEY")
+        or os.getenv("FEISHU_ENCRYPT_KEY")
+        or ""
+    ).strip()
+    if not ek:
+        print(
+            "[lark] Webhook has `encrypt` but LARK_ENCRYPT_KEY is unset — "
+            "callbacks will fail token check (set Encrypt Key from 事件订阅).",
+            flush=True,
+        )
+        return raw
+    try:
+        plain = _feishu_decrypt_encrypt_field(str(raw["encrypt"]), ek)
+        return json.loads(plain)
+    except ImportError as ex:
+        print(f"[lark] {ex} — encrypted webhooks disabled until installed.", flush=True)
+        return raw
+    except Exception as ex:
+        print(f"[lark] decrypt webhook failed: {ex!r}", flush=True)
+        return raw
+
+
 @app.route("/webhook/event", methods=["POST"])
 def lark_webhook():
-    data = request.json
+    raw_in = request.get_json(silent=True)
+    if raw_in is None:
+        return jsonify({"error": "invalid json"}), 400
+    data = _feishu_maybe_decrypt_webhook_payload(raw_in)
 
     if data.get("type") == "url_verification":
         return jsonify({"challenge": data["challenge"]})
@@ -1104,8 +1163,8 @@ def lark_webhook():
         print(f"❌ Token mismatch: expected {VERIFICATION_TOKEN}, got {token}")
         return jsonify({"error": "Invalid token"}), 403
 
-    # Feishu ``card.action.trigger``: response body must be ``{}`` or documented ``toast`` / ``card``
-    # — **not** arbitrary keys like ``{"success": true}`` (error 200672 → client shows ``code: undefined``).
+    # ``card.action.trigger``: MUST respond within **3s** with HTTP 200 and body ``{}`` or ``toast``/``card``.
+    # Run Jenkins handler in a **background thread** so Lark never times out (otherwise "Something went wrong").
     if data.get("schema") == "2.0" and data.get("header", {}).get("event_type") == "card.action.trigger":
         ev_ca = data.get("event", {})
         ctx_ca = ev_ca.get("context") or {}
@@ -1123,33 +1182,22 @@ def lark_webhook():
                 return jsonify({})
             if eid_ca:
                 processed_messages.add(eid_ca)
-        ju_ca = _get_jenkinsupdate()
-        handler_err = ""
-        if ju_ca and chat_id_ca and sender_id_ca:
+
+        def _run_jenkins_card_action() -> None:
+            ju = _get_jenkinsupdate()
+            if not ju or not chat_id_ca or not sender_id_ca:
+                return
             try:
-                ju_ca.handle_lark_jenkins_card_action(chat_id_ca, sender_id_ca, val_ca, send_message)
+                ju.handle_lark_jenkins_card_action(chat_id_ca, sender_id_ca, val_ca, send_message)
             except Exception as ex:
-                handler_err = str(ex)[:300]
-                print(f"❌ handle_lark_jenkins_card_action: {ex!r}")
-        if handler_err:
-            return jsonify(
-                {
-                    "toast": {
-                        "type": "error",
-                        "content": handler_err,
-                        "i18n": {"zh_cn": handler_err, "en_us": handler_err},
-                    }
-                }
-            )
-        return jsonify(
-            {
-                "toast": {
-                    "type": "success",
-                    "content": "OK",
-                    "i18n": {"zh_cn": "已处理", "en_us": "OK"},
-                }
-            }
-        )
+                print(f"❌ handle_lark_jenkins_card_action: {ex!r}", flush=True)
+                try:
+                    send_message(chat_id_ca, f"❌ Jenkins card action failed: {ex}")
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run_jenkins_card_action, daemon=True).start()
+        return jsonify({})
 
     sender_id = None
     if data.get("schema") == "2.0":
