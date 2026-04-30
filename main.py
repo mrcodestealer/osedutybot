@@ -358,9 +358,11 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str, mode: 
                 if callable(getattr(checkcredit, "build_np_choice_lark_card", None)):
                     np_choices = np.get("np_choices") or []
                     intro_line = ""
+                    extra_md = ""
                     if str(mode or "").strip().lower() == "error_only":
                         np_choices = np.get("np_choices_error_only") or []
                         intro_line = "Found players error"
+                        extra_md = str(np.get("machineerror_context_md") or "")
                     same_last_line = ""
                     if str(mode or "").strip().lower() != "error_only":
                         same_last_line = str(np.get("same_last_line") or "")
@@ -373,6 +375,7 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str, mode: 
                         image_key=preview_img_key,
                         intro_line=intro_line,
                         same_last_line=same_last_line,
+                        extra_md=extra_md,
                     )
             except Exception as e:
                 preview_img_err = str(e)

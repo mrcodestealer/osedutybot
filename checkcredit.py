@@ -809,6 +809,7 @@ def build_np_choice_lark_card(
     image_key: str = "",
     intro_line: str = "",
     same_last_line: str = "",
+    extra_md: str = "",
 ) -> dict[str, Any]:
     """Lark card 2.0: log date + machine + players; buttons **1**..**N** (N = len(choices), max 4) or type digits in chat."""
     lines: list[str] = []
@@ -829,6 +830,10 @@ def build_np_choice_lark_card(
     il = (intro_line or "").strip()
     if il:
         lines.append(il)
+        lines.append("")
+    ex = (extra_md or "").strip()
+    if ex:
+        lines.append(ex)
         lines.append("")
     for i, ch in enumerate(np_choices):
         uid = ch.get("user_id", "")
@@ -1328,6 +1333,36 @@ def format_finderror_report_terminal(payload: list[dict[str, Any]]) -> str:
     return format_finderror_terminal_from_merged(merge_finderror_by_user(payload))
 
 
+def _machineerror_player_md(row: dict[str, Any] | None, *, machine_display: str, title: str) -> str:
+    if not row:
+        return f"{title}\n(no data)"
+    lc = row.get("latest_credit") or {}
+    ts = (lc.get("time_short") or "").strip() or "n/a"
+    uid = str(row.get("user_id") or "n/a")
+    val = lc.get("value")
+    credit_s = "n/a" if val is None else str(val)
+    rn = " (reduce_num)" if lc.get("source") == "reduce_num" else ""
+    errs = row.get("errors") or []
+    if errs:
+        log_md = "\n".join(
+            f"- `{(e.get('full_line') or e.get('snippet') or '').strip()}`"
+            for e in errs[:6]
+            if (e.get("full_line") or e.get("snippet"))
+        ).strip()
+        if not log_md:
+            log_md = "(has error entries, but no printable lines)"
+    else:
+        log_md = "(no error lines)"
+    return (
+        f"{title}\n"
+        f"🕐 **Time:** `{ts}`\n"
+        f"🖥 **Machine:** `{machine_display}`\n"
+        f"🆔 **User ID:** `{uid}`\n"
+        f"💰 **Last credit:** `{credit_s}` @ `{ts}`{rn}\n"
+        f"📋 **Error log:**\n{log_md}"
+    )
+
+
 def run_finderror(
     machine_query: str,
     *,
@@ -1414,6 +1449,21 @@ def run_finderror(
         np_followup["same_last_line"] = same_line
         np_followup["latest_err_uid"] = le_uid or ""
         np_followup["latest_any_uid"] = la_uid or ""
+        any_row = top2_any[0] if top2_any else None
+        err_row = top2_err[0] if top2_err else None
+        np_followup["machineerror_context_md"] = (
+            _machineerror_player_md(
+                any_row,
+                machine_display=machine_display,
+                title="For player with no error",
+            )
+            + "\n\n"
+            + _machineerror_player_md(
+                err_row,
+                machine_display=machine_display,
+                title="For player with error",
+            )
+        )
     return {
         "text": plain,
         "merged_players": merged_players_ordered,

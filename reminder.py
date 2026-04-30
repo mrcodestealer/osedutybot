@@ -449,7 +449,7 @@ def _send_daily_sheet_reminder(
     send_func(chat_id, f'<at user_id="{target_user_id}">User</at> ⏰ Daily Reminder')
     card = {
         "config": {"wide_screen_mode": True},
-        "header": {"template": "orange", "title": {"tag": "plain_text", "content": "⏰ Daily Reminder"}},
+        "header": {"template": "orange", "title": {"tag": "plain_text", "content": "⏰ Reminder"}},
         "elements": [
             {
                 "tag": "div",
