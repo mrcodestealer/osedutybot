@@ -694,31 +694,43 @@ def build_add_reminder_form_card() -> dict:
                     "name": "rem_add_form",
                     "elements": [
                         {
+                            "tag": "div",
+                            "text": {"tag": "plain_text", "content": "Start Date"},
+                        },
+                        {
                             "tag": "date_picker",
                             "name": "start_date",
-                            "label": {"tag": "plain_text", "content": "Start Date"},
                             "placeholder": {"tag": "plain_text", "content": "Pick start date"},
                             "required": True,
                         },
                         {
+                            "tag": "div",
+                            "text": {"tag": "plain_text", "content": "End Date"},
+                        },
+                        {
                             "tag": "date_picker",
                             "name": "end_date",
-                            "label": {"tag": "plain_text", "content": "End Date"},
                             "placeholder": {"tag": "plain_text", "content": "Pick end date"},
                             "required": True,
                         },
                         {
+                            "tag": "div",
+                            "text": {"tag": "plain_text", "content": "Time"},
+                        },
+                        {
                             "tag": "select_static",
                             "name": "time",
-                            "label": {"tag": "plain_text", "content": "Time"},
                             "placeholder": {"tag": "plain_text", "content": "Select time"},
                             "options": time_options,
                             "required": True,
                         },
                         {
+                            "tag": "div",
+                            "text": {"tag": "plain_text", "content": "Reason"},
+                        },
+                        {
                             "tag": "input",
                             "name": "reason",
-                            "label": {"tag": "plain_text", "content": "Reason"},
                             "placeholder": {"tag": "plain_text", "content": "Kindly send graph"},
                             "required": True,
                         },
