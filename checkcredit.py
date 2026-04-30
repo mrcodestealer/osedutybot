@@ -20,6 +20,8 @@ Env (optional):
   CHECKCREDIT_USE_OSS — set to 1/true so callers (e.g. main.py bot) use OSS without --oss
   CHECKCREDIT_HEADLESS=1 — force headless Chromium (for Linux servers without X11)
   CHECKCREDIT_HEADED=1 — force headed window (needs DISPLAY; macOS/Windows OK)
+  CHECKCREDIT_ERROR_CTX_DPR — error-log screenshot sharpness (default ``2``, max ``3``): Playwright
+    ``device_scale_factor`` + Pillow font scale (Retina-like PNG).
 
   On Linux, if $DISPLAY is unset, LogNavigator mode uses headless automatically.
 
@@ -78,7 +80,7 @@ import tempfile
 import time
 import uuid
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import Any, Optional
 
 # CLI / subprocess: load `.env` from this repo so NP_BACKEND_* matches main.py (Duty Bot).
 _ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -101,6 +103,21 @@ DEFAULT_OSS_TEMPLATE = os.environ.get(
 
 def _env_truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _error_ctx_dpr() -> float:
+    """
+    Device pixel ratio for error-context log screenshots (closer to native OS screenshots).
+    - Playwright: passed as ``device_scale_factor`` (CSS layout unchanged, more physical pixels).
+    - Pillow: scales font size and padding by this factor.
+
+    Env: ``CHECKCREDIT_ERROR_CTX_DPR`` (default ``2``, max ``3``).
+    """
+    try:
+        v = float(os.environ.get("CHECKCREDIT_ERROR_CTX_DPR", "2").strip() or "2")
+    except ValueError:
+        v = 2.0
+    return max(1.0, min(3.0, v))
 
 
 def _playwright_headless() -> bool:
@@ -1502,13 +1519,13 @@ _ERROR_CTX_BG = (244, 244, 244)  # #F4F4F4
 _ERROR_CTX_FG = (0, 0, 0)
 
 
-def _load_mono_font_for_error_png():
+def _load_mono_font_for_error_png(*, font_px: int) -> Optional[Any]:
     """Monospace stack aligned with macOS log / terminal look (SF Mono / Menlo / Courier)."""
     try:
         from PIL import ImageFont
     except Exception:
         return None
-    size = 12
+    size = max(10, min(40, int(font_px)))
     candidates = [
         ("/System/Library/Fonts/Supplemental/SFMono-Regular.otf", False),
         ("/System/Library/Fonts/SFNSMono.ttf", False),
@@ -1551,12 +1568,14 @@ def _render_text_lines_png(lines: list[str], *, title: str, output_path: str) ->
     except Exception as e:
         print(f"[checkcredit] error-context PNG: PIL not available: {e!r}", flush=True)
         return False
-    font = _load_mono_font_for_error_png()
+    dpr = _error_ctx_dpr()
+    font_px = int(round(12 * dpr))
+    font = _load_mono_font_for_error_png(font_px=font_px)
     if font is None:
         print("[checkcredit] error-context PNG: could not load any font", flush=True)
         return False
     # Wide wrap so long INFO|...|extra: lines behave like a log viewer (continuations from left).
-    wrap_ch = 168
+    wrap_ch = max(80, int(168 / max(dpr, 1.0) ** 0.5))
     body_lines: list[str] = []
     for raw_ln in lines[:] if lines else ["(empty)"]:
         for part in _wrap_log_line(raw_ln, width=wrap_ch):
@@ -1565,13 +1584,14 @@ def _render_text_lines_png(lines: list[str], *, title: str, output_path: str) ->
     probe = Image.new("RGB", (10, 10), _ERROR_CTX_BG)
     draw = ImageDraw.Draw(probe)
     max_w = 0
-    line_h = 14
+    line_h = int(14 * dpr)
     for ln in all_lines:
         w, h = _measure_text(draw, ln, font)
         max_w = max(max_w, w)
-        line_h = max(line_h, h + 3)
-    pad_x, pad_y = 14, 12
-    width = min(2400, max(640, max_w + pad_x * 2))
+        line_h = max(line_h, h + max(2, int(round(3 * dpr))))
+    pad_x = int(round(14 * dpr))
+    pad_y = int(round(12 * dpr))
+    width = min(int(4800 * dpr), max(int(640 * dpr), max_w + pad_x * 2))
     height = max(120, line_h * len(all_lines) + pad_y * 2)
     try:
         img = Image.new("RGB", (width, height), _ERROR_CTX_BG)
@@ -1607,6 +1627,7 @@ def _render_error_context_playwright(lines: list[str], *, title: str, output_pat
     except Exception as e:
         print(f"[checkcredit] error-context Playwright import failed: {e!r}", flush=True)
         return False
+    dpr = _error_ctx_dpr()
     body = "\n".join(html.escape(ln or "") for ln in (lines or ["(empty)"]))
     doc = f"""<!DOCTYPE html><html><head><meta charset="utf-8"/>
 <style>
@@ -1622,13 +1643,19 @@ pre.wrap {{
   white-space:pre-wrap;
   word-break:break-word;
   border:0;
+  -webkit-font-smoothing: antialiased;
 }}
 </style></head><body><pre class="wrap">{body}</pre></body></html>"""
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
+            context = None
             try:
-                page = browser.new_page(viewport={"width": 1100, "height": 1600})
+                context = browser.new_context(
+                    viewport={"width": 1100, "height": 1600},
+                    device_scale_factor=float(dpr),
+                )
+                page = context.new_page()
                 page.set_content(doc, wait_until="domcontentloaded", timeout=timeout_ms)
                 page.locator("pre.wrap").wait_for(state="visible", timeout=10_000)
                 time.sleep(0.2)
@@ -1637,6 +1664,11 @@ pre.wrap {{
                 except Exception:
                     page.screenshot(path=output_path, full_page=True)
             finally:
+                if context is not None:
+                    try:
+                        context.close()
+                    except Exception:
+                        pass
                 browser.close()
         return os.path.isfile(output_path) and os.path.getsize(output_path) > 80
     except Exception as e:
