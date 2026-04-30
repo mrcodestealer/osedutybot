@@ -705,7 +705,7 @@ def build_add_reminder_form_card() -> dict:
                     "placeholder": {"tag": "plain_text", "content": "6:30PM"},
                 },
                 {
-                    "tag": "textarea",
+                    "tag": "input",
                     "name": "reason",
                     "label": {"tag": "plain_text", "content": "Reason"},
                     "placeholder": {"tag": "plain_text", "content": "Kindly send graph"},
