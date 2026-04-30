@@ -31,7 +31,7 @@ DEBUG = False
 
 # Name mapping: table name -> CSV name
 NAME_MAPPING = {
-    "Kelvin": "Kevin Lim",           # if "Kevin Lim" exists in CSV
+    "Kelvin Lim": "Kevin Lim",           # if "Kevin Lim" exists in CSV
     "Pin Quan": "Pin Quan",
     "Xuan You": "Sim Xuan You",
     "Winson": "Winson Hong",
