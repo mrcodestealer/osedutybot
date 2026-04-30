@@ -336,6 +336,108 @@ def _sheet_rows_card(
     }
 
 
+def _reminder_v2_callback_value(payload: dict) -> dict:
+    out = {}
+    for k, v in payload.items():
+        ks = str(k)
+        if isinstance(v, (dict, list)):
+            out[ks] = v
+        elif v is None:
+            out[ks] = ""
+        else:
+            out[ks] = str(v)
+    return out
+
+
+def _reminder_v2_callback_button(
+    label: str,
+    payload: dict,
+    *,
+    btn_type: str = "default",
+    element_id: str = "",
+) -> dict:
+    btn = {
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": label},
+        "type": btn_type,
+        "behaviors": [{"type": "callback", "value": _reminder_v2_callback_value(payload)}],
+    }
+    eid = (element_id or "").strip()[:20]
+    if eid:
+        btn["element_id"] = eid
+    return btn
+
+
+def _sheet_delete_picker_card(rows: list[dict]) -> dict:
+    def _button_row(btn: dict) -> dict:
+        return {
+            "tag": "column_set",
+            "flex_mode": "flow",
+            "background_style": "default",
+            "horizontal_spacing": "8px",
+            "columns": [
+                {
+                    "tag": "column",
+                    "width": "auto",
+                    "weight": 1,
+                    "vertical_align": "top",
+                    "elements": [btn],
+                }
+            ],
+        }
+
+    elems = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": (
+                    "Tap one button to delete that reminder.\n"
+                    "You can still type `/deletereminder <ID> [ID] [ID]` for batch delete."
+                ),
+            },
+        }
+    ]
+    if not rows:
+        elems.append({"tag": "div", "text": {"tag": "plain_text", "content": "No reminder records found."}})
+    else:
+        for i, r in enumerate(rows):
+            rid = str(r.get("id") or "").strip()
+            elems.append(
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": (
+                            f"🆔 **ID:** `{rid}`\n"
+                            f"📅 `{r['start_date'].strftime('%Y/%m/%d')}` → `{r['end_date'].strftime('%Y/%m/%d')}`\n"
+                            f"⏰ `{r['time']}`\n"
+                            f"📝 {r['reason']}"
+                        ),
+                    },
+                }
+            )
+            btn = _reminder_v2_callback_button(
+                f"🆔 ID: `{rid}`",
+                {"k": "rem_del", "id": rid},
+                btn_type="danger",
+                element_id=f"remdel_{i}"[:20],
+            )
+            elems.append(_button_row(btn))
+            if i < len(rows) - 1:
+                # visual gap between records
+                elems.append({"tag": "div", "text": {"tag": "plain_text", "content": " "}})
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": "📋 Reminder List"},
+        },
+        "body": {"elements": elems},
+    }
+
+
 def _send_daily_sheet_reminder(
     send_func,
     *,
@@ -553,9 +655,8 @@ def delete_sheet_reminders(
 
 def send_sheet_reminder_list_card(*, send_func, chat_id: str, get_token_func) -> None:
     rows = list_sheet_reminders(get_token_func=get_token_func)
-    card = _sheet_rows_card(
-        rows,
-        title="📋 Reminder List",
-        include_id=True,
-    )
-    send_func(chat_id, json.dumps(card), msg_type="interactive")
+    card = _sheet_delete_picker_card(rows)
+    resp = send_func(chat_id, json.dumps(card), msg_type="interactive")
+    if isinstance(resp, dict) and int(resp.get("code", -1)) != 0:
+        # Fallback message to surface card-delivery problems quickly.
+        send_func(chat_id, f"❌ Reminder button card failed: {resp}")
