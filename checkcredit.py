@@ -1333,9 +1333,22 @@ def format_finderror_report_terminal(payload: list[dict[str, Any]]) -> str:
     return format_finderror_terminal_from_merged(merge_finderror_by_user(payload))
 
 
-def _machineerror_player_md(row: dict[str, Any] | None, *, machine_display: str, title: str) -> str:
+def _machineerror_player_md(
+    row: dict[str, Any] | None,
+    *,
+    machine_display: str,
+    title: str,
+    force_no_error_log: bool = False,
+) -> str:
     if not row:
-        return f"{title}\n(no data)"
+        return (
+            f"{title}\n"
+            f"🕐 **Time:** `n/a`\n"
+            f"🖥 **Machine:** `{machine_display}`\n"
+            f"🆔 **User ID:** `n/a`\n"
+            f"💰 **Last credit:** `n/a` @ `n/a`\n"
+            f"📋 **Error log:**\n(no error lines)"
+        )
     lc = row.get("latest_credit") or {}
     ts = (lc.get("time_short") or "").strip() or "n/a"
     uid = str(row.get("user_id") or "n/a")
@@ -1343,7 +1356,9 @@ def _machineerror_player_md(row: dict[str, Any] | None, *, machine_display: str,
     credit_s = "n/a" if val is None else str(val)
     rn = " (reduce_num)" if lc.get("source") == "reduce_num" else ""
     errs = row.get("errors") or []
-    if errs:
+    if force_no_error_log:
+        log_md = "(no error lines)"
+    elif errs:
         log_md = "\n".join(
             f"- `{(e.get('full_line') or e.get('snippet') or '').strip()}`"
             for e in errs[:6]
@@ -1449,13 +1464,27 @@ def run_finderror(
         np_followup["same_last_line"] = same_line
         np_followup["latest_err_uid"] = le_uid or ""
         np_followup["latest_any_uid"] = la_uid or ""
-        any_row = top2_any[0] if top2_any else None
+        noerr_row = None
+        for r in merged_players_ordered:
+            if not (r.get("errors") or []):
+                noerr_row = r
+                break
         err_row = top2_err[0] if top2_err else None
+        same_player_line = (
+            "Last player out and Last player with error is same player"
+            if same_uid and le_uid and la_uid
+            else "Last player out and Last player with error is different player"
+            if le_uid and la_uid
+            else 'No error > 0 in log - cannot compare "last with error" to "last in log".'
+        )
         np_followup["machineerror_context_md"] = (
-            _machineerror_player_md(
-                any_row,
+            same_player_line
+            + "\n\n"
+            + _machineerror_player_md(
+                noerr_row,
                 machine_display=machine_display,
                 title="For player with no error",
+                force_no_error_log=True,
             )
             + "\n\n"
             + _machineerror_player_md(
