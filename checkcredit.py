@@ -2284,11 +2284,54 @@ def _np_try_screenshot_matching_detail(
                 amount_scale=amount_scale,
             )
         if ok:
-            dlg_sel.screenshot(path=out_path, animations="disabled")
+            _np_capture_detail_dialog_screenshot(
+                page,
+                dlg_sel,
+                out_path,
+                timeout_ms=timeout_ms,
+                settle_ms=dialog_settle_ms,
+            )
             return True
         _np_close_np_detail_dialog(page, dlg_sel)
 
     return False
+
+
+def _np_capture_detail_dialog_screenshot(
+    page,
+    dlg,
+    out_path: str,
+    *,
+    timeout_ms: int,
+    settle_ms: int,
+) -> None:
+    """
+    Capture the *real* Log Third Http Detail dialog as shown in browser.
+    No synthetic rendering; only wait for content/layout settle before screenshot.
+    """
+    try:
+        dlg.get_by_text(
+            re.compile(r"Request\s*Data|Response\s*Data|Request\s*Time|Api\s*Name", re.I)
+        ).first.wait_for(state="visible", timeout=min(10_000, timeout_ms))
+    except Exception:
+        pass
+    page.wait_for_timeout(max(500, settle_ms))
+    last = None
+    for _ in range(6):
+        try:
+            box = dlg.bounding_box()
+        except Exception:
+            box = None
+        if box and last:
+            dx = abs(float(box.get("x", 0)) - float(last.get("x", 0)))
+            dy = abs(float(box.get("y", 0)) - float(last.get("y", 0)))
+            dw = abs(float(box.get("width", 0)) - float(last.get("width", 0)))
+            dh = abs(float(box.get("height", 0)) - float(last.get("height", 0)))
+            if max(dx, dy, dw, dh) < 0.5:
+                break
+        last = box
+        page.wait_for_timeout(180)
+    dlg.screenshot(path=out_path, animations="disabled")
 
 
 def _np_truthy_env(*names: str) -> bool:
@@ -2380,6 +2423,7 @@ def screenshot_egm_status_window(
             context = browser.new_context(
                 viewport={"width": 1600, "height": 900},
                 ignore_https_errors=True,
+                device_scale_factor=2,
             )
             page = context.new_page()
             page.set_default_timeout(timeout_ms)
@@ -2760,8 +2804,13 @@ def screenshot_np_recharge_detail(
                     ".el-dialog.details-dialog, div[role='dialog'].details-dialog"
                 ).last
                 dlg.wait_for(state="visible", timeout=timeout_ms)
-                page.wait_for_timeout(600)
-                dlg.screenshot(path=out_path, animations="disabled")
+                _np_capture_detail_dialog_screenshot(
+                    page,
+                    dlg,
+                    out_path,
+                    timeout_ms=timeout_ms,
+                    settle_ms=600,
+                )
         finally:
             if pause_for_input:
                 if sys.stdin.isatty():
