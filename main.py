@@ -1659,18 +1659,6 @@ def lark_webhook():
             ]
         return jsonify(payload)
 
-    # One line per POST — if this never appears when you tap a card button, Feishu is not reaching this process
-    # (wrong public URL/port, nginx not proxy_pass to here, or firewall). Fix infra before debugging Python.
-    print(
-        "[lark] webhook POST len=%s path=%s ct=%s"
-        % (
-            request.content_length,
-            request.path,
-            (request.headers.get("Content-Type") or "")[:80],
-        ),
-        flush=True,
-    )
-
     raw_in = _lark_safe_parse_json_body(request)
     if raw_in is None:
         return jsonify({"error": "invalid json"}), 400
@@ -1717,6 +1705,21 @@ def lark_webhook():
         return jsonify({"error": "Invalid token"}), 403
 
     hdr_et = _lark_header_event_type(data)
+    # ``meeting_room.*`` and similar — subscribed but unhandled; ACK without logging (high volume).
+    if _lark_ack_only_event_type(hdr_et):
+        return jsonify({"success": True})
+
+    # One line per POST — if this never appears when you tap a card button, Feishu is not reaching this process
+    # (wrong public URL/port, nginx not proxy_pass to here, or firewall). Fix infra before debugging Python.
+    print(
+        "[lark] webhook POST len=%s path=%s ct=%s"
+        % (
+            request.content_length,
+            request.path,
+            (request.headers.get("Content-Type") or "")[:80],
+        ),
+        flush=True,
+    )
     # Text messages → ``im.message.receive_v1``; button taps → ``card.action.trigger`` / ``card.action.trigger_v1``.
     # If you only see the former when testing, the app is not receiving card events (subscribe + publish).
     print(
