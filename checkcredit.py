@@ -2327,7 +2327,24 @@ def _np_capture_detail_dialog_screenshot(
                 break
         last = box
         page.wait_for_timeout(180)
-    dlg.screenshot(path=out_path, animations="disabled")
+    # Match manual/original look: keep dialog in a fixed viewport and screenshot whole page.
+    try:
+        vw = int((os.environ.get("NP_THIRD_HTTP_SCREENSHOT_WIDTH") or "1024").strip() or "1024")
+    except ValueError:
+        vw = 1024
+    try:
+        vh = int((os.environ.get("NP_THIRD_HTTP_SCREENSHOT_HEIGHT") or "862").strip() or "862")
+    except ValueError:
+        vh = 862
+    vw = max(700, min(vw, 2200))
+    vh = max(500, min(vh, 2200))
+    try:
+        page.set_viewport_size({"width": vw, "height": vh})
+        page.wait_for_timeout(180)
+        page.evaluate("window.scrollTo(0, 0)")
+    except Exception:
+        pass
+    page.screenshot(path=out_path, animations="disabled")
 
 
 def _np_truthy_env(*names: str) -> bool:
