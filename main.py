@@ -1121,9 +1121,15 @@ def _feishu_decrypt_encrypt_field(ciphertext_b64: str, encrypt_key: str) -> str:
 def _feishu_maybe_decrypt_webhook_payload(raw):
     # type: (Optional[Dict]) -> Optional[Dict]
     """
-    When **Encrypt Key** is enabled in Feishu/Lark event subscription, POST body is
-    ``{\"encrypt\": \"...\"}`` — must decrypt before ``schema`` / ``header.token`` exist.
-    Set ``LARK_ENCRYPT_KEY`` (or ``ENCRYPT_KEY``) to the same Encrypt Key from the developer console.
+    **Optional.** Only needed when you turn **on** 「Encrypt Key / 加密」 under Feishu/Lark
+    **开发者后台 → 事件与回调**. Then POST bodies look like ``{\"encrypt\": \"...\"}`` and must be
+    decrypted before ``header.token`` is readable.
+
+    If encryption is **off** (default), requests are plain JSON — do **not** set ``LARK_ENCRYPT_KEY``
+    (you can omit ``ENCRYPT_KEY`` / ``FEISHU_ENCRYPT_KEY`` entirely).
+
+    When encryption **is** on, set ``LARK_ENCRYPT_KEY`` (or ``ENCRYPT_KEY``) to the same Encrypt Key
+    shown in the console, and ``pip install pycryptodome``.
     """
     if not isinstance(raw, dict) or "encrypt" not in raw:
         return raw
@@ -1135,8 +1141,9 @@ def _feishu_maybe_decrypt_webhook_payload(raw):
     ).strip()
     if not ek:
         print(
-            "[lark] Webhook has `encrypt` but LARK_ENCRYPT_KEY is unset — "
-            "callbacks will fail token check (set Encrypt Key from 事件订阅).",
+            "[lark] POST body has `encrypt` but LARK_ENCRYPT_KEY is unset — "
+            "either set it to match 事件与回调 → Encrypt Key, **or** turn off encryption there "
+            "if you did not intend to use it.",
             flush=True,
         )
         return raw
@@ -1488,8 +1495,8 @@ def lark_webhook():
 
     if isinstance(raw_in, dict) and raw_in.get("encrypt") is not None and data is raw_in:
         print(
-            "[lark] POST body is still encrypted — set LARK_ENCRYPT_KEY to the app Encrypt Key "
-            "and ensure `pip install pycryptodome` on the server.",
+            "[lark] POST body is still encrypted — set LARK_ENCRYPT_KEY (and pycryptodome), "
+            "or disable 「加密」 in 事件与回调 so Feishu sends plain JSON.",
             flush=True,
         )
         return jsonify({"error": "Invalid token"}), 403
