@@ -2408,6 +2408,14 @@ def screenshot_egm_status_window(
             search_in.fill("")
             search_in.fill(tok)
             page.keyboard.press("Enter")
+            try:
+                view_btn = page.locator(".filter-container button.el-button--small").filter(
+                    has_text=re.compile(r"View|查看", re.I)
+                ).first
+                if view_btn.count():
+                    view_btn.click(timeout=min(30_000, timeout_ms))
+            except Exception:
+                pass
             page.wait_for_timeout(1000)
 
             tbody = page.locator(".el-table__body tbody").first
@@ -2428,13 +2436,19 @@ def screenshot_egm_status_window(
             if target is None:
                 target = rows.nth(0)
 
-            # STRICT safety: only primary small button with cog icon in Operation cell.
+            # STRICT safety: in Operation column, click ONLY the 3rd button (cog).
             op_cell = target.locator("td").last
-            cog_btn = op_cell.locator("button.el-button--primary.el-button--small").filter(
-                has=op_cell.locator("i.fa.fa-cog")
-            ).first
-            if cog_btn.count() == 0:
-                raise RuntimeError("Operation cog button not found (will not click Maintenance/Kick Out).")
+            op_btns = op_cell.locator("button.el-button--small")
+            if op_btns.count() < 3:
+                raise RuntimeError("Operation column has fewer than 3 buttons; aborting for safety.")
+            b1 = (op_btns.nth(0).inner_text() or "").strip()
+            b2 = (op_btns.nth(1).inner_text() or "").strip()
+            if re.search(r"Maintenance", b1, re.I) is None or re.search(r"Kick\s*Out", b2, re.I) is None:
+                raise RuntimeError("Operation button order changed; refusing unsafe click.")
+            cog_btn = op_btns.nth(2)
+            cog_icon = cog_btn.locator("i.fa.fa-cog")
+            if cog_icon.count() == 0:
+                raise RuntimeError("3rd operation button is not cog icon; aborting.")
             bt = (cog_btn.inner_text() or "").strip()
             if re.search(r"Maintenance|Kick\s*Out", bt, re.I):
                 raise RuntimeError("Unsafe operation button resolved; aborting.")
@@ -2451,7 +2465,8 @@ def screenshot_egm_status_window(
                 if re.search(r"Hide\s*Grid", gtxt, re.I):
                     grid_btn.click(timeout=min(15_000, timeout_ms))
                     page.wait_for_timeout(350)
-            page.screenshot(path=out_path, animations="disabled")
+            # Capture only the small operation window (same as user screenshot), not whole page.
+            dlg.screenshot(path=out_path, animations="disabled")
         finally:
             browser.close()
     return out_path
