@@ -32,6 +32,8 @@ Env (optional):
   NP_BACKEND_HEADLESS / NP_BACKEND_HEADED (or **WF_THIRD_HTTP_HEADED** / **THIRD_HTTP_PLAYWRIGHT_HEADED**
   — visible Chromium when ``headed=None``). **Duty Bot** calls ``screenshot_np_recharge_detail(..., headed=False)``
   so server screenshots are always headless; use CLI ``--checkuser`` / ``--pause`` for a visible window.
+  ``NP_CHECKUSER_PAUSE_OPEN_SEC`` (default ``90``): when ``--pause`` but stdin is not a TTY, seconds to keep
+  Chromium open before ``browser.close()`` (avoids instant close on ``input()`` EOF).
   If **Machine** looks Winford (folder / label **starts with ``WF``** … or ``NWR8173`` OSS alias),
   Log Third Http uses ``https://backend-winford.osmplay.com`` + ``WF_BACKEND_USER`` /
   ``WF_BACKEND_PASSWORD`` (defaults ``omduty1``).
@@ -57,7 +59,9 @@ Env (optional):
       --time 23:55:12.092 --machine-substr 2074 --credit 1352 --pause
     Add ``--machine-display WF8173`` / ``DHS3178`` / ``NCH1171`` / ``CP7178`` / ``OSM7178`` / ``MDR7178`` / ``TBP8641`` when testing non-NP backends from CLI
     (Duty Bot passes machine from ``/checkcreditdate`` context automatically).
-  Use ``--pause`` to leave the window open until you press Enter in the terminal.
+  Use ``--pause`` to leave Chromium open until you press **Enter in this terminal** (then the script closes
+  the browser — that is intentional). If stdin is not a TTY (IDE Run / piped input), ``input()`` gets EOF and
+  the window would close immediately unless you set ``NP_CHECKUSER_PAUSE_OPEN_SEC`` (seconds to wait instead).
   Do **not** set ``NP_BACKEND_HEADLESS=1`` when you want to watch the browser.
 
 Requires: playwright (+ chromium) for LogNavigator; requests for OSS.
@@ -70,6 +74,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -801,6 +806,7 @@ def build_np_choice_lark_card(
     target_date_iso: str = "",
     machine_display: str = "",
     third_http_backend: str = "NP",
+    image_key: str = "",
 ) -> dict[str, Any]:
     """Lark card 2.0: log date + machine + players; buttons **1**..**N** (N = len(choices), max 4) or type digits in chat."""
     lines: list[str] = []
@@ -825,9 +831,17 @@ def build_np_choice_lark_card(
         lines.append(f"{i + 1}) User ID `{uid}` — last credit `{cr}` @ `{ts}`")
     content = "\n".join(lines) if lines else "_No players._"
     title = "Kindly choose one of the player"
-    body_elements: list[dict[str, Any]] = [
-        {"tag": "div", "text": {"tag": "lark_md", "content": content}},
-    ]
+    body_elements: list[dict[str, Any]] = []
+    ik = (image_key or "").strip()
+    if ik:
+        body_elements.append(
+            {
+                "tag": "img",
+                "img_key": ik,
+                "alt": {"tag": "plain_text", "content": "Machine control window"},
+            }
+        )
+    body_elements.append({"tag": "div", "text": {"tag": "lark_md", "content": content}})
     n = len(np_choices)
     if n > 0:
         body_elements.append(
@@ -1915,13 +1929,47 @@ def _np_parse_machine_amount_from_request_blob(blob: str) -> tuple[str | None, f
     return mid, amt
 
 
+def _np_machine_substr_for_log_third_http_detail(raw: str | None) -> str:
+    """
+    Value used to match Request ``machineId`` inside Log Third Http **Detail** dialogs.
+
+    Duty Bot / Lark and logs often pass cabinet labels (``DHS3189``, ``dhs3189``); JSON ``machineId``
+    is usually ``…-3189`` with ``studioId`` elsewhere. **Only digit runs** are compared to ``machineId``:
+    take the **longest** ``\\d+`` substring; on length ties, the **last** (suffix cabinet id, e.g. after
+    ``4179-…-``). If there are no digits, use the full trimmed string (letters-only match).
+    """
+    s = (raw or "").strip()
+    if not s:
+        return s
+    nums = re.findall(r"\d+", s)
+    if not nums:
+        return s
+    best = max(len(n) for n in nums)
+    longs = [n for n in nums if len(n) == best]
+    return longs[-1]
+
+
 def _np_machine_id_contains_substr(machine_substr: str | None, machine_id_value: str | None) -> bool:
-    """``machineId`` JSON value must contain the log machine digits (e.g. ``2074`` in ``4182-BIGFULINK-2074``)."""
+    """
+    Request ``machineId`` must contain the **detail-match** substring (case-insensitive).
+
+    ``machine_substr`` is normalized by :func:`_np_machine_substr_for_log_third_http_detail` so
+    ``dhs3189`` / ``DHS3189`` / ``NWR2074`` all reduce to the numeric token used inside ``machineId``
+    (``3189``, ``2074``, …). If normalization changes the string, the original ``machine_substr`` is
+    still tried as a literal fallback (non-numeric cabinet tokens in ``machineId``).
+    """
     ms = (machine_substr or "").strip()
     if not ms:
         return True
     mid = (machine_id_value or "").strip()
-    return ms in mid
+    if not mid:
+        return False
+    eff = _np_machine_substr_for_log_third_http_detail(ms)
+    if eff.casefold() in mid.casefold():
+        return True
+    if eff != ms and ms.casefold() in mid.casefold():
+        return True
+    return False
 
 
 def _np_expected_credit_for_match(expected_credit: float | None) -> float | None:
@@ -2132,19 +2180,26 @@ def _np_click_row_show_details_link(row, *, timeout_ms: int) -> None:
     )
 
 
-def _np_close_np_detail_dialog(page) -> None:
-    hdr = page.locator(
-        ".el-dialog.details-dialog .el-dialog__headerbtn, "
-        ".el-dialog.details-dialog .el-dialog__close, "
-        "div[role='dialog'].details-dialog .el-dialog__headerbtn"
-    ).first
+def _np_close_np_detail_dialog(page, dlg) -> None:
+    """
+    Close **this** detail dialog only (header X on ``dlg``).
+
+    Do **not** use a page-wide ``.first`` close + Escape: after a wrong row, Vue may leave the old
+    dialog node in the DOM (hidden) while the new Detail opens on top. ``.first`` then attaches to
+    the stale layer; Escape closes the **topmost** visible dialog — the user sees the correct
+    credit row dismissed even though the script was still discarding an older candidate.
+    """
     try:
-        if hdr.count():
-            hdr.click(timeout=5_000)
+        btn = dlg.locator(".el-dialog__headerbtn, .el-dialog__close").first
+        if btn.count():
+            btn.click(timeout=5_000)
         else:
             page.keyboard.press("Escape")
     except Exception:
-        page.keyboard.press("Escape")
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
     page.wait_for_timeout(450)
 
 
@@ -2164,17 +2219,21 @@ def _np_try_screenshot_matching_detail(
     For each candidate row: accept when Request JSON ``machineId`` contains the machine digits and
     ``amount`` matches latest credit. Uses multiple text layers — the correct row often opens first
     but ``inner_text()`` alone may omit JSON bits; that looked like a wrong row and closed the dialog.
+
+    Always bind to **.last** details-dialog after each row click so we read / screenshot the **newest**
+    modal, not a hidden stale ``.first`` node left in the DOM from a previous attempt.
     """
     ms = (machine_substr or "").strip()
     need = bool(ms) or expected_credit is not None
     if not need:
         return False
 
-    dlg_sel = page.locator(".el-dialog.details-dialog, div[role='dialog'].details-dialog").first
-
     for pick_i in ordered_indices:
         row = rows.nth(pick_i)
         _np_click_row_show_details_link(row, timeout_ms=timeout_ms)
+        dlg_sel = page.locator(
+            ".el-dialog.details-dialog, div[role='dialog'].details-dialog"
+        ).last
         dlg_sel.wait_for(state="visible", timeout=timeout_ms)
         page.wait_for_timeout(max(300, dialog_settle_ms))
         try:
@@ -2215,7 +2274,7 @@ def _np_try_screenshot_matching_detail(
         if ok:
             dlg_sel.screenshot(path=out_path, animations="disabled")
             return True
-        _np_close_np_detail_dialog(page)
+        _np_close_np_detail_dialog(page, dlg_sel)
 
     return False
 
@@ -2241,6 +2300,161 @@ def _np_backend_playwright_headless() -> bool:
     if sys.platform == "linux" and not (os.environ.get("DISPLAY") or "").strip():
         return True
     return False
+
+
+def _np_egm_machine_search_token(machine_display: str | None, machine_substr: str | None) -> str:
+    """
+    EGM Status Search input token: always prefer number-like machine id (e.g. ``MDR7066`` -> ``7066``).
+    """
+    ms = _np_machine_substr_for_log_third_http_detail(machine_substr)
+    if ms:
+        return ms
+    md = (machine_display or "").strip()
+    if md:
+        tok = _np_machine_substr_for_log_third_http_detail(md)
+        if tok:
+            return tok
+        tok2 = machine_match_substr_from_display(md)
+        if tok2:
+            return tok2
+    return ""
+
+
+def screenshot_egm_status_window(
+    *,
+    machine_display: str | None,
+    machine_substr: str | None = None,
+    timeout_ms: int = 120_000,
+    headed: bool | None = None,
+) -> str:
+    """
+    Login to backend EGM page and screenshot the operation small window safely.
+
+    Flow:
+    1) open ``/egm/egmStatusList`` (same host as resolved backend),
+    2) fill Search with machine number token,
+    3) click ONLY the 3rd operation button (primary + cog icon),
+    4) in dialog: if button shows ``Hide Grid``, click once to make it ``Show Grid``,
+    5) screenshot the whole visible window (page viewport).
+    """
+    md = (machine_display or "").strip()
+    if not md:
+        raise RuntimeError("EGM screenshot requires machine_display (do not default to NP route).")
+    base, user, pw = _np_resolve_backend(md)
+    tag = _np_log_backend_tag(md)
+    if not user or not pw:
+        raise RuntimeError(f"Missing credentials for {tag} EGM screenshot backend.")
+    tok = _np_egm_machine_search_token(md, machine_substr)
+    if not tok:
+        raise RuntimeError("Could not derive machine number token for EGM Search.")
+
+    login_url = f"{base}/login?redirect=%2Fegm%2FegmStatusList"
+    egm_url = f"{base}/egm/egmStatusList"
+    from playwright.sync_api import sync_playwright
+
+    if headed is True:
+        headless = False
+    elif headed is False:
+        headless = True
+    else:
+        headless = _np_backend_playwright_headless()
+
+    out_fd, out_path = tempfile.mkstemp(suffix=".png", prefix="np_egm_status_")
+    os.close(out_fd)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=headless)
+        try:
+            context = browser.new_context(
+                viewport={"width": 1600, "height": 900},
+                ignore_https_errors=True,
+            )
+            page = context.new_page()
+            page.set_default_timeout(timeout_ms)
+            page.goto(login_url, wait_until="domcontentloaded")
+            page.wait_for_timeout(900)
+
+            pwd_box = page.locator('input[type="password"]').first
+            pwd_box.wait_for(state="visible", timeout=min(30_000, timeout_ms))
+            form = pwd_box.locator("xpath=ancestor::form[1]")
+            if form.count():
+                tin = form.locator(
+                    'input[type="text"], input:not([type]), input[type="tel"], input[type="email"]'
+                ).first
+                tin.fill(user)
+            else:
+                page.locator('input[type="text"]').first.fill(user)
+            pwd_box.fill(pw)
+            lb = page.get_by_role("button", name=re.compile(r"login|sign in|log in", re.I))
+            if lb.count():
+                lb.first.click()
+            else:
+                page.locator('button[type="submit"], button.el-button--primary').first.click()
+
+            page.wait_for_timeout(1800)
+            if "/egm/egmStatusList" not in (page.url or ""):
+                page.goto(egm_url, wait_until="domcontentloaded")
+
+            page.wait_for_selector(".app-container, .filter-container", timeout=timeout_ms)
+            search_in = page.locator(".el-form-item").filter(has_text=re.compile(r"Search", re.I)).locator(
+                "input.el-input__inner"
+            ).first
+            if search_in.count() == 0:
+                cands = page.locator(".filter-container input.el-input__inner")
+                if cands.count() == 0:
+                    raise RuntimeError("Could not find EGM Search input.")
+                search_in = cands.last
+            search_in.click()
+            search_in.fill("")
+            search_in.fill(tok)
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(1000)
+
+            tbody = page.locator(".el-table__body tbody").first
+            tbody.wait_for(state="visible", timeout=timeout_ms)
+            rows = page.locator(".el-table__body tr.el-table__row")
+            n = rows.count()
+            if n <= 0:
+                raise RuntimeError(f"No EGM rows after Search `{tok}`.")
+
+            target = None
+            tok_cf = tok.casefold()
+            for i in range(n):
+                row = rows.nth(i)
+                row_txt = (row.inner_text() or "").casefold()
+                if tok_cf in row_txt:
+                    target = row
+                    break
+            if target is None:
+                target = rows.nth(0)
+
+            # STRICT safety: only primary small button with cog icon in Operation cell.
+            op_cell = target.locator("td").last
+            cog_btn = op_cell.locator("button.el-button--primary.el-button--small").filter(
+                has=op_cell.locator("i.fa.fa-cog")
+            ).first
+            if cog_btn.count() == 0:
+                raise RuntimeError("Operation cog button not found (will not click Maintenance/Kick Out).")
+            bt = (cog_btn.inner_text() or "").strip()
+            if re.search(r"Maintenance|Kick\s*Out", bt, re.I):
+                raise RuntimeError("Unsafe operation button resolved; aborting.")
+            cog_btn.click(timeout=min(60_000, timeout_ms))
+
+            dlg = page.locator(".el-dialog.add-floor, div[role='dialog'].add-floor").last
+            dlg.wait_for(state="visible", timeout=timeout_ms)
+            page.wait_for_timeout(1000)
+            grid_btn = dlg.locator("button.el-button--primary.el-button--mini").filter(
+                has_text=re.compile(r"Hide\s*Grid|Show\s*Grid", re.I)
+            ).first
+            if grid_btn.count():
+                gtxt = (grid_btn.inner_text() or "").strip()
+                if re.search(r"Hide\s*Grid", gtxt, re.I):
+                    grid_btn.click(timeout=min(15_000, timeout_ms))
+                    page.wait_for_timeout(350)
+            page.screenshot(path=out_path, animations="disabled")
+        finally:
+            browser.close()
+    return out_path
 
 
 def screenshot_np_recharge_detail(
@@ -2497,21 +2711,44 @@ def screenshot_np_recharge_detail(
                 row = rows.nth(pick_i)
                 _np_click_row_show_details_link(row, timeout_ms=timeout_ms)
 
-                dlg = page.locator(".el-dialog.details-dialog, div[role='dialog'].details-dialog").first
+                dlg = page.locator(
+                    ".el-dialog.details-dialog, div[role='dialog'].details-dialog"
+                ).last
                 dlg.wait_for(state="visible", timeout=timeout_ms)
                 page.wait_for_timeout(600)
                 dlg.screenshot(path=out_path, animations="disabled")
         finally:
             if pause_for_input:
-                print(
-                    f"[checkcredit] {_log_http_backend_tag} browser left open — watch the window; "
-                    "press Enter here to close…",
-                    flush=True,
-                )
-                try:
-                    input()
-                except EOFError:
-                    pass
+                if sys.stdin.isatty():
+                    print(
+                        f"[checkcredit] {_log_http_backend_tag} Chromium is still open — inspect the window.\n"
+                        "    → Press Enter **in this terminal** (not in the browser) to close Chromium.",
+                        flush=True,
+                    )
+                    try:
+                        input()
+                    except EOFError:
+                        pass
+                else:
+                    try:
+                        sec = max(
+                            1,
+                            int(
+                                (os.environ.get("NP_CHECKUSER_PAUSE_OPEN_SEC") or "90").strip() or "90"
+                            ),
+                        )
+                    except ValueError:
+                        sec = 90
+                    print(
+                        f"[checkcredit] {_log_http_backend_tag} stdin is not a TTY — "
+                        f"keeping Chromium open **{sec}s** (set NP_CHECKUSER_PAUSE_OPEN_SEC). "
+                        "Use a real terminal with --pause for Enter-to-close.",
+                        flush=True,
+                    )
+                    try:
+                        time.sleep(sec)
+                    except KeyboardInterrupt:
+                        pass
             browser.close()
 
     return out_path
@@ -2574,8 +2811,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--machine-substr",
         default="",
-        metavar="DIGITS",
-        help="Digits inside NP machineId (e.g. 2074); empty = skip machine filter",
+        metavar="SUBSTR",
+        help=(
+            "Substring for machineId in Request JSON (e.g. 2074, or 3189). "
+            "Cabinet+number e.g. dhs3189 matches machineId …-3189 (studioId is separate). "
+            "If --machine-display is omitted, DHS3178 / dhs3189 also selects the backend."
+        ),
     )
     ap.add_argument(
         "--credit",
@@ -2587,7 +2828,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--pause",
         action="store_true",
-        help="With --checkuser: wait for Enter before closing browser",
+        help=(
+            "With --checkuser: keep Chromium open until Enter **in this terminal** (then closes browser). "
+            "Non-TTY: waits NP_CHECKUSER_PAUSE_OPEN_SEC (default 90) instead of input()."
+        ),
     )
     ap.add_argument(
         "--machine-display",
@@ -2595,8 +2839,7 @@ def main(argv: list[str] | None = None) -> int:
         metavar="NAME",
         help=(
             "With --checkuser: machine label (e.g. WF8123 / DHS3178 / NCH1171) to pick backend "
-            "route — supports TBP8641 as TBP backend too; "
-            "matches Duty Bot context"
+            "(overrides routing from --machine-substr). Same as Duty Bot LogNavigator folder name."
         ),
     )
     ap.add_argument(
@@ -2655,7 +2898,8 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             print(
-                "   Add --machine-display WF8173 (or CP/OSM/MDR/TBP/…) if not using NP backend.",
+                "   Use --machine-display DHS3178 (or put the same in --machine-substr) to use DHS backend; "
+                "digits-only --machine-substr keeps NP.",
                 file=sys.stderr,
             )
             return 2
@@ -2666,7 +2910,14 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         ms = (args.machine_substr or "").strip() or None
         md = (getattr(args, "machine_display", None) or "").strip() or None
+        # Duty Bot passes folder label as machine_display; CLI users often only set --machine-substr.
+        # Use substr for routing too when it looks like DHS3178 / dhs3189 / CP0231 (digits-only → still NP).
+        if not md and ms:
+            md = ms
         try:
+            _b_base, _, _ = _np_resolve_backend(md)
+            _tag = _np_log_backend_tag(md)
+            print(f"→ Backend ({_tag}): {_b_base}", flush=True)
             out_png = screenshot_np_recharge_detail(
                 str(args.player_id).strip(),
                 args.date.strip(),

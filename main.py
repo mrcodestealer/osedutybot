@@ -333,6 +333,40 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
             source="oss" if use_oss else "navigator",
         )
         text = (out.get("text") or "").strip()
+        np = out.get("np_followup")
+        egm_img_path = None
+        egm_img_key = ""
+        if isinstance(np, dict):
+            try:
+                md = str(np.get("machine_display") or "").strip() or None
+                ms = str(np.get("machine_match_substr") or "").strip() or None
+                cap = getattr(checkcredit, "screenshot_egm_status_window", None)
+                if callable(cap) and md:
+                    egm_img_path = cap(
+                        machine_display=md,
+                        machine_substr=ms,
+                        timeout_ms=120_000,
+                        headed=False,
+                    )
+                    egm_img_key = upload_image_lark(egm_img_path) or ""
+                    if not egm_img_key:
+                        print("[checkcredit] EGM status screenshot upload failed", flush=True)
+                if callable(getattr(checkcredit, "build_np_choice_lark_card", None)):
+                    out["lark_card_candidates"] = checkcredit.build_np_choice_lark_card(
+                        np.get("np_choices") or [],
+                        target_date_iso=str(np.get("target_date") or ""),
+                        machine_display=str(np.get("machine_display") or ""),
+                        third_http_backend=str(np.get("third_http_backend") or "NP"),
+                        image_key=egm_img_key,
+                    )
+            except Exception as e:
+                print(f"[checkcredit] EGM status screenshot failed: {e!r}", flush=True)
+            finally:
+                if egm_img_path and os.path.isfile(egm_img_path):
+                    try:
+                        os.unlink(egm_img_path)
+                    except OSError:
+                        pass
         cards: list[dict] = []
         for key in (
             "lark_card",
@@ -356,7 +390,6 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
         else:
             send_message(chat_id, text if text else "(no output)")
 
-        np = out.get("np_followup")
         if isinstance(np, dict):
             _set_checkcredit_np_pending(chat_id, np)
     except Exception as e:
