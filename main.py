@@ -1332,6 +1332,44 @@ def _lark_parse_card_action_value(val):
     return None
 
 
+def _lark_form_field_text(v):
+    # type: (object) -> str
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v.strip()
+    if isinstance(v, (int, float)):
+        return str(v).strip()
+    if isinstance(v, list):
+        parts = []
+        for x in v:
+            t = _lark_form_field_text(x)
+            if t:
+                parts.append(t)
+        return " ".join(parts).strip()
+    if isinstance(v, dict):
+        for k in ("value", "text", "content", "date", "time", "datetime"):
+            t = _lark_form_field_text(v.get(k))
+            if t:
+                return t
+        # Fallback: first non-empty field value
+        for vv in v.values():
+            t = _lark_form_field_text(vv)
+            if t:
+                return t
+    return ""
+
+
+def _lark_get_card_form_field(action_obj, name):
+    # type: (object, str) -> str
+    if not isinstance(action_obj, dict):
+        return ""
+    fv = action_obj.get("form_value")
+    if not isinstance(fv, dict):
+        return ""
+    return _lark_form_field_text(fv.get(name))
+
+
 def _lark_test_card_json() -> str:
     """Minimal interactive card for ``/test`` — button triggers ``k=test_hi`` card callback."""
     card = {
@@ -1824,6 +1862,33 @@ def lark_webhook():
                         send_message(chat_id_ca, result)
                     except Exception as e:
                         send_message(chat_id_ca, f"❌ Reminder delete failed: {e}")
+                    return
+                if isinstance(parsed_ca, dict) and str(parsed_ca.get("k") or "").strip().lower() == "rem_add_submit":
+                    act_ca = ev_ca.get("action") if isinstance(ev_ca.get("action"), dict) else {}
+                    start_raw = _lark_get_card_form_field(act_ca, "start_date")
+                    end_raw = _lark_get_card_form_field(act_ca, "end_date")
+                    time_raw = _lark_get_card_form_field(act_ca, "time")
+                    reason = _lark_get_card_form_field(act_ca, "reason")
+                    if not (start_raw and end_raw and time_raw and reason):
+                        send_message(
+                            chat_id_ca,
+                            "❌ Please fill all fields: Start Date, End Date, Time, Reason.",
+                        )
+                        return
+                    result = reminder.add_sheet_reminder(
+                        start_raw=start_raw,
+                        end_raw=end_raw,
+                        time_raw=time_raw,
+                        reason=reason,
+                        get_token_func=get_tenant_access_token,
+                        scheduler=scheduler,
+                        send_func=send_message,
+                        chat_id=chat_id_ca,
+                        target_user_id=TARGET_USER_OPEN_ID,
+                        schedule_chat_id=REMINDER_TARGET_CHAT_ID,
+                    )
+                    if (result or "").strip():
+                        send_message(chat_id_ca, result)
                     return
                 ju = _get_jenkinsupdate()
                 if not ju:
@@ -2663,12 +2728,9 @@ def lark_webhook():
     elif clean_text.lower().startswith('/addreminder'):
         parts = clean_text.split(maxsplit=4)
         if len(parts) < 5:
-            send_message(
-                chat_id,
-                "❌ Usage: `/addreminder <start_date> <end_date> <time> <reason>`\n"
-                "Date: `YYYY/MM/DD` (or `MM/DD` for current year)\n"
-                "Time: `HH:MMPM/AM` (e.g. `6:30PM`)\n"
-                "Example: `/addreminder 2026/04/29 2026/06/06 6:30PM Just for testing`",
+            reminder.send_add_reminder_form_card(
+                send_func=send_message,
+                chat_id=chat_id,
             )
             return jsonify({"success": True})
         start_raw = parts[1].strip()

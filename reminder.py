@@ -657,3 +657,70 @@ def send_sheet_reminder_list_card(*, send_func, chat_id: str, get_token_func) ->
     if isinstance(resp, dict) and int(resp.get("code", -1)) != 0:
         # Fallback message to surface card-delivery problems quickly.
         send_func(chat_id, f"❌ Reminder button card failed: {resp}")
+
+
+def build_add_reminder_form_card() -> dict:
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": "➕ Add Reminder"},
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": (
+                            "Fill the form and tap **Submit**.\n"
+                            "Date: `YYYY/MM/DD` (or `MM/DD`)\n"
+                            "Time: `HH:MMPM/AM` (e.g. `6:30PM`)"
+                        ),
+                    },
+                },
+                {
+                    "tag": "input",
+                    "name": "start_date",
+                    "required": True,
+                    "label": {"tag": "plain_text", "content": "Start Date"},
+                    "placeholder": {"tag": "plain_text", "content": "2026/04/29"},
+                },
+                {
+                    "tag": "input",
+                    "name": "end_date",
+                    "required": True,
+                    "label": {"tag": "plain_text", "content": "End Date"},
+                    "placeholder": {"tag": "plain_text", "content": "2026/12/31"},
+                },
+                {
+                    "tag": "input",
+                    "name": "time",
+                    "required": True,
+                    "label": {"tag": "plain_text", "content": "Time"},
+                    "placeholder": {"tag": "plain_text", "content": "6:30PM"},
+                },
+                {
+                    "tag": "input",
+                    "name": "reason",
+                    "required": True,
+                    "label": {"tag": "plain_text", "content": "Reason"},
+                    "placeholder": {"tag": "plain_text", "content": "Kindly send graph"},
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "Submit"},
+                    "type": "primary",
+                    "behaviors": [{"type": "callback", "value": {"k": "rem_add_submit"}}],
+                },
+            ]
+        },
+    }
+
+
+def send_add_reminder_form_card(*, send_func, chat_id: str) -> None:
+    card = build_add_reminder_form_card()
+    resp = send_func(chat_id, json.dumps(card), msg_type="interactive")
+    if isinstance(resp, dict) and int(resp.get("code", -1)) != 0:
+        send_func(chat_id, f"❌ Reminder add form card failed: {resp}")
