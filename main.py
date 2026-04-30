@@ -1178,9 +1178,10 @@ def _lark_http_empty_json_ok():
 def _lark_http_card_callback_ok():
     # type: () -> Response
     """
-    Prefer Flask ``jsonify({})`` (matches official samples). Optional toast via ``LARK_CARD_REPLY_TOAST=1``.
+    Lark requires HTTP **200** within ~**3s** with body ``{}`` (or toast/card JSON).
+    Use literal ``b\"{}\"`` — minimal parsing on client; optional toast via ``LARK_CARD_REPLY_TOAST=1``.
     """
-    print("[lark] HTTP 200 card/interaction ACK body={}", flush=True)
+    print("[lark] HTTP 200 card ACK (instant)", flush=True)
     if (os.getenv("LARK_CARD_REPLY_TOAST") or "").strip() == "1":
         body = json.dumps(
             {
@@ -1194,7 +1195,11 @@ def _lark_http_card_callback_ok():
             separators=(",", ":"),
         )
         return Response(body, status=200, mimetype="application/json; charset=utf-8")
-    return jsonify({})
+    return Response(
+        b"{}",
+        status=200,
+        mimetype="application/json; charset=utf-8",
+    )
 
 
 def _lark_safe_parse_json_body(req):
@@ -1402,14 +1407,14 @@ def lark_webhook():
         chat_id_ca, sender_id_ca, val_ca, eid_ca = card_resolved
         if sender_id_ca and sender_id_ca == BOT_OPEN_ID:
             return _lark_http_card_callback_ok()
-        with processed_lock:
-            if eid_ca and eid_ca in processed_messages:
-                print(f"⏭️ Duplicate card callback {eid_ca} ignored ({hdr_et!r})", flush=True)
-                return _lark_http_card_callback_ok()
-            if eid_ca:
-                processed_messages.add(eid_ca)
-
-        def _run_jenkins_card_action() -> None:
+        # Never wait on ``processed_lock`` in this thread — Lark times out ~3s; lock contention → ``code: undefined``.
+        def _run_card_callback_worker() -> None:
+            with processed_lock:
+                if eid_ca and eid_ca in processed_messages:
+                    print(f"⏭️ Duplicate card callback {eid_ca} ignored ({hdr_et!r})", flush=True)
+                    return
+                if eid_ca:
+                    processed_messages.add(eid_ca)
             ju = _get_jenkinsupdate()
             if not ju or not chat_id_ca or not sender_id_ca:
                 print(
@@ -1427,7 +1432,7 @@ def lark_webhook():
                 except Exception:
                     pass
 
-        threading.Thread(target=_run_jenkins_card_action, daemon=True).start()
+        threading.Thread(target=_run_card_callback_worker, daemon=True).start()
         return _lark_http_card_callback_ok()
 
     # Resolver missed but body has ``event.action`` — never fall through to ``success: true``.
