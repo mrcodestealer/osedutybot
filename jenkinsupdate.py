@@ -4148,6 +4148,9 @@ def wait_review(seconds: float, *, build_was_clicked: bool = False) -> None:
 
 
 # ----- Lark / Chat bot: /jenkinsupdate (job match → optional FPMS parameter flow → yes → Jenkins) -----
+# Interactive cards use ``tag: action`` + ``tag: button``; clicks arrive as HTTP webhook
+# ``card.action.trigger`` (schema 2.0). Subscribe to that event for the app + ensure the request URL
+# matches ``/webhook/event``. Users can still type **yes** / **no** / **1** as before.
 _fpms_lark_sessions_lock = threading.Lock()
 _fpms_lark_sessions: dict[str, dict] = {}
 
@@ -4252,6 +4255,63 @@ def _jenkins_update_disambiguation_ties(
     if best_sc < 0.28:
         return []
     return [r for r in ranked if r[1] >= best_sc - band][:cap]
+
+
+def _fpms_lark_normalize_card_action_value(value: object) -> dict[str, object] | None:
+    """Feishu may send ``value`` as JSON object or string."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        try:
+            o = json.loads(s)
+            return o if isinstance(o, dict) else None
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def _fpms_lark_job_choice_card_json(candidates: list[tuple[str, float, str, str]]) -> str:
+    """Lark ``msg_type=interactive``: numbered body + one row of digit buttons (tap = pick job)."""
+    lines_md: list[str] = [
+        "Several Jenkins jobs match your text. **Tap a number** below or reply with **one** number "
+        "**1**–"
+        f"**{len(candidates)}** (or **cancel**):",
+        "",
+    ]
+    actions: list[dict[str, object]] = []
+    for i, (alias, _sc, label, url_raw) in enumerate(candidates, start=1):
+        u0 = _jenkins_update_primary_url(url_raw)
+        lines_md.append(f"**{i}.** **{label}** — `{alias}` — {u0}")
+        payload = json.dumps({"k": "job", "i": i}, ensure_ascii=False)
+        actions.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": str(i)},
+                "type": "primary" if i == 1 else "default",
+                "value": payload,
+            }
+        )
+    # Feishu: up to 5 buttons per action row (docs); split if needed
+    elements: list[dict[str, object]] = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines_md)}},
+    ]
+    for off in range(0, len(actions), 5):
+        chunk = actions[off : off + 5]
+        elements.append({"tag": "action", "actions": chunk})
+    card: dict[str, object] = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": "Jenkins job — pick one"},
+        },
+        "elements": elements,
+    }
+    return json.dumps(card, ensure_ascii=False)
 
 
 def _fpms_format_jenkins_job_menu(candidates: list[tuple[str, float, str, str]]) -> str:
@@ -5011,13 +5071,13 @@ def _fpms_lark_verification_card_json(
     safe = _fpms_lark_safe_code_fence(prompt_echo) or "(empty)"
     md_checks = "\n".join(verify_lines)
     footer_ok = (
-        "✅ All lines above are **OK**. Reply **yes** in this chat to click **Build** in Jenkins, "
-        "or **no** to skip **Build**."
+        "✅ All lines above are **OK**. Tap **YES** / **NO** below (or type **yes** / **no**) to click "
+        "**Build** in Jenkins or skip."
     )
     footer_bad = (
         "⚠️ At least one line shows **❌**. **Build** stays disabled until every line is ✅. "
-        "Fix Jenkins or your config, then run `/jenkinsupdate` again. Reply **no** here to close "
-        "without clicking **Build**."
+        "Fix Jenkins or your config, then run `/jenkinsupdate` again. Tap **NO** (or type **no**) to "
+        "close without **Build**."
     )
     block_a = f"📋 **Your message**\n```\n{safe}\n```"
     block_b = (
@@ -5037,6 +5097,8 @@ def _fpms_lark_verification_card_json(
     else:
         title_text = "FPMS UAT — form filled & re-check"
 
+    yes_pl = json.dumps({"k": "wb", "v": "y"}, ensure_ascii=False)
+    no_pl = json.dumps({"k": "wb", "v": "n"}, ensure_ascii=False)
     card: dict = {
         "config": {"wide_screen_mode": True},
         "header": {
@@ -5050,6 +5112,23 @@ def _fpms_lark_verification_card_json(
             {"tag": "div", "text": {"tag": "lark_md", "content": block_a}},
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content": block_b}},
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "YES — Build"},
+                        "type": "primary",
+                        "value": yes_pl,
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "NO — Skip"},
+                        "type": "default",
+                        "value": no_pl,
+                    },
+                ],
+            },
         ],
     }
     return json.dumps(card, ensure_ascii=False)
@@ -5362,7 +5441,7 @@ def _fpms_lark_dispatch_fnt_rc_parameter_flow(
             send(
                 chat_id,
                 "⏳ A Jenkins **Build** confirmation is already waiting for you in this chat. "
-                "Reply **yes** / **no** to that card, or say **cancel** first before starting a new run.",
+                "**Tap YES/NO** on that card (or type **yes** / **no**), or say **cancel** before starting a new run.",
             )
             return True
     tokens: list[str] = data["service_tokens"]
@@ -5449,7 +5528,7 @@ def _fpms_lark_dispatch_sms_uat_parameter_flow(
             send(
                 chat_id,
                 "⏳ A Jenkins **Build** confirmation is already waiting for you in this chat. "
-                "Reply **yes** / **no** to that card, or say **cancel** first before starting a new run.",
+                "**Tap YES/NO** on that card (or type **yes** / **no**), or say **cancel** before starting a new run.",
             )
             return True
     tokens: list[str] = data["service_tokens"]
@@ -5536,7 +5615,7 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
             send(
                 chat_id,
                 "⏳ A Jenkins **Build** confirmation is already waiting for you in this chat. "
-                "Reply **yes** / **no** to that card, or say **cancel** first before starting a new run.",
+                "**Tap YES/NO** on that card (or type **yes** / **no**), or say **cancel** before starting a new run.",
             )
             return True
     tokens: list[str] = data["service_tokens"]
@@ -5646,7 +5725,7 @@ def _fpms_lark_dispatch_bi_api_update_parameter_flow(
             send(
                 chat_id,
                 "⏳ A Jenkins **Build** confirmation is already waiting for you in this chat. "
-                "Reply **yes** / **no** to that card, or say **cancel** first before starting a new run.",
+                "**Tap YES/NO** on that card (or type **yes** / **no**), or say **cancel** before starting a new run.",
             )
             return True
     _fpms_lark_begin_jenkins_run(
@@ -5777,7 +5856,7 @@ def handle_lark_jenkins_update_message(
                 return True
             send(
                 chat_id,
-                "Reply **yes** to click **Build** in Jenkins, or **no** to skip **Build** (browser will close after).",
+                "**Tap YES / NO** on the card (or type **yes** / **no**) — Build vs skip **Build** (browser closes after).",
             )
             return True
         if st == "jenkins_cancelled":
@@ -5921,7 +6000,7 @@ def handle_lark_jenkins_update_message(
             send(
                 chat_id,
                 "⏳ A Jenkins **Build** confirmation is already waiting for you in this chat. "
-                "Reply **yes** / **no** to that card, or say **cancel** first before starting a new run.",
+                "**Tap YES/NO** on that card (or type **yes** / **no**), or say **cancel** before starting a new run.",
             )
             return True
 
@@ -5950,9 +6029,60 @@ def handle_lark_jenkins_update_message(
                 "job_candidates": ties,
                 "pending_body": body,
             }
-        send(chat_id, _fpms_format_jenkins_job_menu(ties))
+        card_js = _fpms_lark_job_choice_card_json(ties)
+        try:
+            send(chat_id, card_js, msg_type="interactive")
+        except TypeError:
+            send(chat_id, _fpms_format_jenkins_job_menu(ties))
         return True
     return _fpms_lark_dispatch_job_row(chat_id, key, body, ties[0], send)
+
+
+def handle_lark_jenkins_card_action(
+    chat_id: str,
+    sender_id: str,
+    value: object,
+    send,
+) -> bool:
+    """
+    Feishu ``card.action.trigger``: YES/NO (**k** ``wb``) or job index (**k** ``job``).
+    Mirrors typed **yes** / **no** / **1** … in :func:`handle_lark_jenkins_update_message`.
+    """
+    parsed = _fpms_lark_normalize_card_action_value(value)
+    if not parsed:
+        return False
+    k = str(parsed.get("k") or "").strip().lower()
+    if k == "wb":
+        v = str(parsed.get("v") or "").strip().lower()
+        if v == "y":
+            token = "yes"
+        elif v == "n":
+            token = "no"
+        else:
+            return False
+        return handle_lark_jenkins_update_message(
+            chat_id,
+            sender_id,
+            token,
+            token,
+            send,
+            allow_start=True,
+        )
+    if k == "job":
+        try:
+            idx = int(parsed.get("i"))
+        except (TypeError, ValueError):
+            return False
+        token = str(idx)
+        return handle_lark_jenkins_update_message(
+            chat_id,
+            sender_id,
+            token,
+            token,
+            send,
+            allow_start=True,
+        )
+    return False
 
 
 # Backward-compatible names (older imports / docs).

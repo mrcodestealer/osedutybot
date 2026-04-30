@@ -1104,6 +1104,31 @@ def lark_webhook():
         print(f"❌ Token mismatch: expected {VERIFICATION_TOKEN}, got {token}")
         return jsonify({"error": "Invalid token"}), 403
 
+    # Feishu card buttons → ``card.action.trigger`` (subscribe in app event subscriptions + same URL).
+    if data.get("schema") == "2.0" and data.get("header", {}).get("event_type") == "card.action.trigger":
+        ev_ca = data.get("event", {})
+        ctx_ca = ev_ca.get("context") or {}
+        chat_id_ca = ctx_ca.get("open_chat_id") or ctx_ca.get("chat_id")
+        op_ca = ev_ca.get("operator") or {}
+        sender_id_ca = op_ca.get("open_id")
+        val_ca = (ev_ca.get("action") or {}).get("value")
+        eid_ca = data.get("header", {}).get("event_id")
+        if sender_id_ca and sender_id_ca == BOT_OPEN_ID:
+            return jsonify({"success": True})
+        with processed_lock:
+            if eid_ca and eid_ca in processed_messages:
+                print(f"⏭️ Duplicate card.action.trigger {eid_ca} ignored")
+                return jsonify({"success": True})
+            if eid_ca:
+                processed_messages.add(eid_ca)
+        ju_ca = _get_jenkinsupdate()
+        if ju_ca and chat_id_ca and sender_id_ca:
+            try:
+                ju_ca.handle_lark_jenkins_card_action(chat_id_ca, sender_id_ca, val_ca, send_message)
+            except Exception as ex:
+                print(f"❌ handle_lark_jenkins_card_action: {ex!r}")
+        return jsonify({"success": True})
+
     sender_id = None
     if data.get("schema") == "2.0":
         event = data.get("event", {})
