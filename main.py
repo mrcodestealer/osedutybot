@@ -1603,6 +1603,21 @@ def _lark_header_event_type(data):
     return ""
 
 
+def _lark_ack_only_event_type(het: str) -> bool:
+    """
+    Subscribed in the Lark console but not implemented in this bot — still **must** HTTP 200.
+
+    Without this branch, schema-2 payloads hit the generic **Unknown webhook** path and spam logs
+    (e.g. ``meeting_room.meeting_room.status_changed_v1`` shares the same Request URL as IM events).
+    """
+    if not het:
+        return False
+    h = het.lower()
+    if h.startswith("meeting_room."):
+        return True
+    return False
+
+
 @app.route("/webhook/event", methods=["POST", "GET", "OPTIONS"])
 def lark_webhook():
     # Some proxies send OPTIONS; **405** breaks Feishu card interaction (expects HTTP 200 family on callback URL).
@@ -1862,6 +1877,8 @@ def lark_webhook():
                     pass
     else:
         het = _lark_header_event_type(data)
+        if _lark_ack_only_event_type(het):
+            return jsonify({"success": True})
         print("⚠️ Unknown webhook branch hdr_et=%r (not im.message / event_callback)" % (het,), flush=True)
         # Card callbacks need HTTP 200 + ``{}`` (or toast). **Do not** use that ACK for every schema-2.0
         # event — bot menu / approvals etc. expect ``{"success": true}`` or they show ``code: undefined``.
