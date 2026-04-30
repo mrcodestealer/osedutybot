@@ -93,6 +93,13 @@ OSE_BOT_GROUP = os.getenv("OSE_BOT_GROUP")
 
 app = Flask(__name__)
 
+if not VERIFICATION_TOKEN:
+    print(
+        "[lark] WARNING: VERIFICATION_TOKEN is unset/empty — Feishu/Lark POSTs return 403 "
+        "(copy Verification Token from 开发者后台 → 事件与回调).",
+        flush=True,
+    )
+
 RANDOM_EMOJI_CODES = [
     "GRINNING", "JOY", "WINK", "BLUSH", "YUM", "HEART_EYES", "KISSING_HEART", "SUNGLASSES",
     "THINKING_FACE", "HUGGING_FACE", "MONKEY_FACE", "DOG", "CAT", "FOX_FACE", "LION_FACE",
@@ -1135,6 +1142,8 @@ def _feishu_maybe_decrypt_webhook_payload(raw):
         return raw
     try:
         plain = _feishu_decrypt_encrypt_field(str(raw["encrypt"]), ek)
+        if plain.startswith("\ufeff"):
+            plain = plain.lstrip("\ufeff")
         return json.loads(plain)
     except ImportError as ex:
         print(f"[lark] {ex} — encrypted webhooks disabled until installed.", flush=True)
@@ -1160,12 +1169,14 @@ def _lark_extract_verification_token(data):
         return None
     h = data.get("header")
     if isinstance(h, dict):
-        t = h.get("token")
-        if t is not None:
-            return str(t).strip()
-    t2 = data.get("token")
-    if t2 is not None:
-        return str(t2).strip()
+        for key in ("token", "Token", "verification_token"):
+            t = h.get(key)
+            if t is not None:
+                return str(t).strip()
+    for key in ("token", "verification_token"):
+        t2 = data.get(key)
+        if t2 is not None:
+            return str(t2).strip()
     return None
 
 
@@ -1178,30 +1189,26 @@ def _lark_http_empty_json_ok():
 def _lark_http_card_callback_ok():
     # type: () -> Response
     """
-    Feishu ``card.action.trigger`` requires HTTP **200** within ~**3s**. Official doc allows ``{}`` or
-    ``toast``/``card``. Error **200672** = wrong response body — some clients reject bare ``{}``;
-    default to a minimal **toast** (same shape as open.feishu.cn card-callback-communication).
+    Feishu ``card.action.trigger``: HTTP **200** + JSON body within ~**3s** (doc: empty ``{}`` or ``toast``/``card``).
 
-    - ``LARK_CARD_ACK_EMPTY=1`` — respond with literal ``{}`` only (legacy).
-    - ``LARK_CARD_REPLY_TOAST=1`` — force toast (default already uses toast; kept for compatibility).
+    Default: literal ``{}`` — smallest surface for **200672** (wrong body format).
+    Set ``LARK_CARD_ACK_TOAST=1`` for a minimal success ``toast`` (ASCII-only ``content``).
     """
     print("[lark] HTTP 200 card ACK (instant)", flush=True)
-    empty_only = (os.getenv("LARK_CARD_ACK_EMPTY") or "").strip() == "1"
-    if empty_only:
-        return Response(b"{}", status=200, mimetype="application/json")
-    body = json.dumps(
-        {
-            "toast": {
-                "type": "success",
-                "content": "OK",
-                "i18n": {"zh_cn": "已收到", "en_us": "OK"},
-            }
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    # No ``charset=`` in Content-Type — matches Feishu examples; avoid 200672 edge cases.
-    return Response(body, status=200, mimetype="application/json")
+    if (os.getenv("LARK_CARD_ACK_TOAST") or "").strip() == "1":
+        body = json.dumps(
+            {
+                "toast": {
+                    "type": "success",
+                    "content": "OK",
+                    "i18n": {"en_us": "OK", "zh_cn": "OK"},
+                }
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+        return Response(body, status=200, mimetype="application/json")
+    return Response(b"{}", status=200, mimetype="application/json")
 
 
 def _lark_safe_parse_json_body(req):
@@ -1213,6 +1220,8 @@ def _lark_safe_parse_json_body(req):
     b = req.get_data(cache=False)
     if not b:
         return None
+    if b.startswith(b"\xef\xbb\xbf"):
+        b = b[3:]
     try:
         parsed = json.loads(b.decode("utf-8"))
         return parsed if isinstance(parsed, dict) else None
@@ -1351,6 +1360,11 @@ def _lark_event_body_looks_like_card_interaction(ev):
         return False
     if act.get("tag") == "button":
         return True
+    # JSON 2.0 / some builds omit ``tag``; ``name`` + ``value`` + operator/context is enough.
+    if act.get("name") and act.get("value") is not None:
+        return bool(ev.get("operator") or ev.get("context"))
+    if act.get("value") is not None and (ev.get("operator") or ev.get("context")):
+        return True
     return bool(ev.get("operator") or ev.get("context"))
 
 
@@ -1377,7 +1391,7 @@ def _lark_resolve_card_action(data):
         )
         or (
             isinstance(ev.get("action"), dict)
-            and ev.get("action", {}).get("tag") == "button"
+            and len(ev.get("action") or {}) > 0
             and (ev.get("operator") or ev.get("context"))
         )
     )
@@ -1385,7 +1399,8 @@ def _lark_resolve_card_action(data):
     legacy_shape = (
         et != "im.message.receive_v1"
         and isinstance(ev.get("action"), dict)
-        and ev.get("action", {}).get("tag") == "button"
+        and len(ev.get("action") or {}) > 0
+        and (ev.get("operator") or ev.get("context"))
         and bool(
             ev.get("open_chat_id")
             or ev.get("chat_id")
@@ -1436,8 +1451,12 @@ def _lark_header_event_type(data):
     return ""
 
 
-@app.route("/webhook/event", methods=["POST", "GET"])
+@app.route("/webhook/event", methods=["POST", "GET", "OPTIONS"])
 def lark_webhook():
+    # Some proxies send OPTIONS; **405** breaks Feishu card interaction (expects HTTP 200 family on callback URL).
+    if request.method == "OPTIONS":
+        return Response(status=204)
+
     if request.method == "GET":
         return jsonify(
             {
@@ -2438,7 +2457,7 @@ def _register_lark_webhook_duplicate_paths():
         path = raw.strip()
         if not path or path.rstrip("/") == "/webhook/event":
             continue
-        app.add_url_rule(path, "lark_webhook_extra_%d" % i, lark_webhook, methods=["POST", "GET"])
+        app.add_url_rule(path, "lark_webhook_extra_%d" % i, lark_webhook, methods=["POST", "GET", "OPTIONS"])
         print("[lark] Extra webhook POST route registered: %s" % path, flush=True)
 
 
