@@ -683,28 +683,24 @@ def build_add_reminder_form_card() -> dict:
                 {
                     "tag": "input",
                     "name": "start_date",
-                    "required": True,
                     "label": {"tag": "plain_text", "content": "Start Date"},
                     "placeholder": {"tag": "plain_text", "content": "2026/04/29"},
                 },
                 {
                     "tag": "input",
                     "name": "end_date",
-                    "required": True,
                     "label": {"tag": "plain_text", "content": "End Date"},
                     "placeholder": {"tag": "plain_text", "content": "2026/12/31"},
                 },
                 {
                     "tag": "input",
                     "name": "time",
-                    "required": True,
                     "label": {"tag": "plain_text", "content": "Time"},
                     "placeholder": {"tag": "plain_text", "content": "6:30PM"},
                 },
                 {
                     "tag": "input",
                     "name": "reason",
-                    "required": True,
                     "label": {"tag": "plain_text", "content": "Reason"},
                     "placeholder": {"tag": "plain_text", "content": "Kindly send graph"},
                 },
