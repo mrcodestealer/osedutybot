@@ -1054,7 +1054,12 @@ def get_tenant_access_token():
     return response.json().get("tenant_access_token")
 
 # ================= SCHEDULED REMINDERS =================
-TARGET_USER_OPEN_ID = "ou_d7bc33724e2d6ced4050c944c2ca5650"
+# Lark open_id for @mentions (same as reminder.py ``omduty`` / ``OMDUTY``).
+TARGET_USER_OPEN_ID = (
+    os.getenv("omduty", "").strip()
+    or os.getenv("OMDUTY", "").strip()
+    or "ou_d7bc33724e2d6ced4050c944c2ca5650"
+)
 # Sheet-based daily reminders are always delivered to this group.
 REMINDER_TARGET_CHAT_ID = os.getenv(
     "REMINDER_TARGET_CHAT_ID",

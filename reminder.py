@@ -122,6 +122,32 @@ REMINDER_FIELD_REASON = os.getenv("REMINDER_FIELD_REASON", "Reason").strip() or 
 _SHEET_JOB_PREFIX = "sheet_daily_reminder::"
 
 
+def lark_card_at_open_id(open_id: str) -> str:
+    """
+    Mention inside Lark **interactive card** ``lark_md`` / rich text.
+
+    Cards require ``<at id=open_id></at>`` (open_id is usually ``ou_…``).
+    Plain chat **text** messages often still use ``<at user_id=\"…\">display</at>`` — do not mix.
+    """
+    oid = (open_id or "").strip()
+    if not oid:
+        return ""
+    return f"<at id={oid}></at>"
+
+
+def _resolve_sheet_reminder_mention_id(explicit_user_id: str | None) -> str | None:
+    """
+    Resolve **open_id** (``ou_…``) for @ in reminder cards.
+    Prefer ``omduty`` / ``OMDUTY`` from ``.env`` so sheet reminders tag the duty account
+    without hardcoding in callers.
+    """
+    env_id = (os.getenv("omduty", "").strip() or os.getenv("OMDUTY", "").strip())
+    if env_id:
+        return env_id
+    ex = (explicit_user_id or "").strip()
+    return ex if ex else None
+
+
 def _reminder_sheet_enabled() -> bool:
     return bool(REMINDER_BASE_TOKEN and REMINDER_TABLE_ID)
 
@@ -312,8 +338,9 @@ def _sheet_rows_card(
     include_id: bool = False,
 ) -> dict:
     lines = []
-    if target_user_id:
-        lines.append(f'<at user_id="{target_user_id}">User</at>')
+    mention_id = _resolve_sheet_reminder_mention_id(target_user_id)
+    if mention_id:
+        lines.append(lark_card_at_open_id(mention_id))
         lines.append("")
     if not rows:
         lines.append("No reminder records found.")
@@ -445,6 +472,8 @@ def _send_daily_sheet_reminder(
     today = date.today()
     if not (row["start_date"] <= today <= row["end_date"]):
         return
+    mention_id = _resolve_sheet_reminder_mention_id(target_user_id)
+    at_line = (f"{lark_card_at_open_id(mention_id)}\n\n" if mention_id else "")
     card = {
         "config": {"wide_screen_mode": True},
         "header": {"template": "orange", "title": {"tag": "plain_text", "content": "⏰ Reminder"}},
@@ -454,7 +483,7 @@ def _send_daily_sheet_reminder(
                 "text": {
                     "tag": "lark_md",
                     "content": (
-                        f'<at user_id="{target_user_id}">User</at>\n\n'
+                        f"{at_line}"
                         f"📅 **Start Time:** `{row['start_date'].strftime('%Y/%m/%d')}`\n"
                         f"📅 **End Time:** `{row['end_date'].strftime('%Y/%m/%d')}`\n"
                         f"⏰ **Time:** `{row['time']}`\n"
