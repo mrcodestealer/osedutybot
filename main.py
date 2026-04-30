@@ -86,7 +86,7 @@ def _get_jenkinsupdate():
 # ================= CONFIGURATION =================
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET") 
-VERIFICATION_TOKEN = os.getenv("VERIFICATION_TOKEN")
+VERIFICATION_TOKEN = (os.getenv("VERIFICATION_TOKEN") or "").strip()
 DUTY_CHAT_ID = os.getenv("DUTY_CHAT_ID")
 LABORATORY_GROUP = os.getenv("LABORATORY_GROUP")
 OSE_BOT_GROUP = os.getenv("OSE_BOT_GROUP")
@@ -1163,19 +1163,44 @@ def _lark_extract_verification_token(data):
     if isinstance(h, dict):
         t = h.get("token")
         if t is not None:
-            return t
+            return str(t).strip()
     t2 = data.get("token")
-    return t2
+    if t2 is not None:
+        return str(t2).strip()
+    return None
 
 
 def _lark_http_empty_json_ok():
     # type: () -> Response
-    """Feishu card callbacks expect HTTP 200 with body literally ``{}`` (see handle-card-callbacks doc)."""
+    """Feishu card callbacks may use bare ``{}`` (see handle-card-callbacks doc)."""
     return Response(
         "{}",
         status=200,
         mimetype="application/json; charset=utf-8",
     )
+
+
+def _lark_http_card_callback_ok():
+    # type: () -> Response
+    """
+    HTTP 200 + JSON. Some Lark/Feishu clients mishandle an empty ``{}`` body and show ``code: undefined``;
+    a minimal ``toast`` matches the documented “方式二” alternate form.
+    Set ``LARK_CARD_REPLY_EMPTY_JSON=1`` to force bare ``{}``.
+    """
+    if (os.getenv("LARK_CARD_REPLY_EMPTY_JSON") or "").strip() == "1":
+        return _lark_http_empty_json_ok()
+    body = json.dumps(
+        {
+            "toast": {
+                "type": "success",
+                "content": "OK",
+                "i18n": {"zh_cn": "已收到", "en_us": "OK"},
+            }
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return Response(body, status=200, mimetype="application/json; charset=utf-8")
 
 
 def _lark_safe_parse_json_body(req):
@@ -1257,9 +1282,16 @@ def _lark_resolve_card_action(data):
             and (ev.get("operator") or ev.get("context"))
         )
     )
-    if not (named or heuristic):
+    ctx0 = ev.get("context") if isinstance(ev.get("context"), dict) else {}
+    legacy_shape = (
+        et != "im.message.receive_v1"
+        and isinstance(ev.get("action"), dict)
+        and ev.get("action", {}).get("tag") == "button"
+        and bool(ctx0.get("open_chat_id") or ctx0.get("chat_id"))
+    )
+    if not (named or heuristic or legacy_shape):
         return None
-    if heuristic and not named:
+    if (heuristic or legacy_shape) and not named:
         print(
             "[lark] card.action matched by payload shape (event.operator/context + event.action); "
             f"header.event_type was {et!r}",
@@ -1275,6 +1307,14 @@ def lark_webhook():
     if raw_in is None:
         return jsonify({"error": "invalid json"}), 400
     data = _feishu_maybe_decrypt_webhook_payload(raw_in)
+
+    if isinstance(raw_in, dict) and raw_in.get("encrypt") is not None and data is raw_in:
+        print(
+            "[lark] POST body is still encrypted — set LARK_ENCRYPT_KEY to the app Encrypt Key "
+            "and ensure `pip install pycryptodome` on the server.",
+            flush=True,
+        )
+        return jsonify({"error": "Invalid token"}), 403
 
     if data.get("type") == "url_verification":
         return jsonify({"challenge": data["challenge"]})
@@ -1301,11 +1341,11 @@ def lark_webhook():
     if card_resolved is not None:
         chat_id_ca, sender_id_ca, val_ca, eid_ca = card_resolved
         if sender_id_ca and sender_id_ca == BOT_OPEN_ID:
-            return _lark_http_empty_json_ok()
+            return _lark_http_card_callback_ok()
         with processed_lock:
             if eid_ca and eid_ca in processed_messages:
                 print(f"⏭️ Duplicate card callback {eid_ca} ignored ({hdr_et!r})", flush=True)
-                return _lark_http_empty_json_ok()
+                return _lark_http_card_callback_ok()
             if eid_ca:
                 processed_messages.add(eid_ca)
 
@@ -1328,7 +1368,7 @@ def lark_webhook():
                     pass
 
         threading.Thread(target=_run_jenkins_card_action, daemon=True).start()
-        return _lark_http_empty_json_ok()
+        return _lark_http_card_callback_ok()
 
     sender_id = None
     if _lark_is_schema_v2(data):
