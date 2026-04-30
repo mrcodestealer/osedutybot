@@ -904,7 +904,7 @@ def build_np_choice_lark_card(
                 "alt": {"tag": "plain_text", "content": "Machine control window"},
             }
         )
-    body_elements.append({"tag": "div", "text": {"tag": "lark_md", "content": content}})
+    # Put error-context screenshots before the long markdown so clients do not hide them below the fold.
     ex_imgs = extra_error_images or []
     for it in ex_imgs:
         ik2 = str(it.get("img_key") or "").strip()
@@ -921,6 +921,7 @@ def build_np_choice_lark_card(
                 "alt": {"tag": "plain_text", "content": title2},
             }
         )
+    body_elements.append({"tag": "div", "text": {"tag": "lark_md", "content": content}})
     n = len(np_choices)
     if n > 0:
         body_elements.append(
@@ -1148,9 +1149,8 @@ def _player_detail_block(
         credit_s = "*(none)*"
     time_s = ct or et or "*(n/a)*"
     errs = row.get("errors") or []
-    screenshot_note = ""
-    if errs:
-        screenshot_note = f"(error screenshot mode; {len(errs)} item(s))"
+    lines_body = "\n".join(e.get("full_line") or e.get("snippet") or "" for e in errs)
+    log_md = _truncate_log(lines_body) if lines_body else ""
 
     head = "\n".join(
         [
@@ -1161,10 +1161,10 @@ def _player_detail_block(
         ]
     )
     if error_log_mode == "always":
-        inner = screenshot_note if screenshot_note else "(no error lines)"
+        inner = log_md if log_md else "(no error lines)"
         return f"{head}\n\n📋 **Error log:**\n{inner}"
-    if screenshot_note:
-        return f"{head}\n\n📋 **Error log:**\n{screenshot_note}"
+    if log_md:
+        return f"{head}\n\n📋 **Error log:**\n{log_md}"
     return head
 
 
@@ -1439,8 +1439,10 @@ def _machineerror_player_md(
     if force_no_error_log:
         log_md = "(no error lines)"
     elif errs:
-        shown = min(6, len(errs))
-        log_md = f"(see {shown} screenshot(s) below; each screenshot is 4 lines above + current + 4 lines below)"
+        log_md = (
+            f"({len(errs)} error entr(y/ies) — log context screenshots appear under the machine preview "
+            "when image render + Lark upload succeed.)"
+        )
     else:
         log_md = "(no error lines)"
     return (
@@ -1453,6 +1455,55 @@ def _machineerror_player_md(
     )
 
 
+def _wrap_log_line(s: str, width: int = 118) -> list[str]:
+    """Split a long log line into fixed-width chunks for bitmap rendering."""
+    t = (s or "").replace("\r", "").replace("\t", "    ")
+    if len(t) <= width:
+        return [t] if t else [""]
+    out: list[str] = []
+    i = 0
+    while i < len(t):
+        out.append(t[i : i + width])
+        i += width
+    return out
+
+
+def _load_mono_font_for_error_png():
+    """Prefer a system monospace TTF so long / unicode log lines render reliably."""
+    try:
+        from PIL import ImageFont
+    except Exception:
+        return None
+    size = 13
+    candidates = [
+        "/System/Library/Fonts/Supplemental/Courier New.ttf",
+        "/System/Library/Fonts/Supplemental/Menlo.ttc",
+        "/Library/Fonts/Menlo.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+    ]
+    for p in candidates:
+        if os.path.isfile(p):
+            try:
+                if p.lower().endswith(".ttc"):
+                    return ImageFont.truetype(p, size, index=0)
+                return ImageFont.truetype(p, size)
+            except Exception:
+                continue
+    try:
+        return ImageFont.load_default()
+    except Exception:
+        return None
+
+
+def _measure_text(draw, text: str, font) -> tuple[int, int]:
+    try:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        return max(1, int(bbox[2] - bbox[0])), max(1, int(bbox[3] - bbox[1]))
+    except Exception:
+        return max(1, len(text) * 7), 14
+
+
 def _render_text_lines_png(lines: list[str], *, title: str, output_path: str) -> bool:
     """
     Render text lines to a PNG image.
@@ -1460,44 +1511,64 @@ def _render_text_lines_png(lines: list[str], *, title: str, output_path: str) ->
     """
     try:
         from PIL import Image, ImageDraw, ImageFont
-    except Exception:
+    except Exception as e:
+        print(f"[checkcredit] error-context PNG: PIL not available: {e!r}", flush=True)
         return False
-    body_lines = lines[:] if lines else ["(empty)"]
-    try:
-        font = ImageFont.load_default()
-    except Exception:
+    font = _load_mono_font_for_error_png()
+    if font is None:
+        print("[checkcredit] error-context PNG: could not load any font", flush=True)
         return False
+    body_lines: list[str] = []
+    for raw_ln in lines[:] if lines else ["(empty)"]:
+        for part in _wrap_log_line(raw_ln, width=118):
+            body_lines.append(part)
+    title_safe = (title or "").encode("utf-8", "replace").decode("utf-8")
     probe = Image.new("RGB", (10, 10), "white")
     draw = ImageDraw.Draw(probe)
-    all_lines = [title, ""] + body_lines
+    wrapped_title = _wrap_log_line(title_safe, width=118)
+    all_lines = wrapped_title + [""] + body_lines
     max_w = 0
     line_h = 16
     for ln in all_lines:
-        try:
-            bbox = draw.textbbox((0, 0), ln, font=font)
-            w = max(1, int(bbox[2] - bbox[0]))
-            h = max(1, int(bbox[3] - bbox[1]))
-        except Exception:
-            w = max(1, len(ln) * 7)
-            h = 12
+        w, h = _measure_text(draw, ln, font)
         max_w = max(max_w, w)
-        line_h = max(line_h, h + 4)
-    pad = 16
-    width = min(2000, max(600, max_w + pad * 2))
-    height = max(140, line_h * len(all_lines) + pad * 2)
-    img = Image.new("RGB", (width, height), "white")
-    d = ImageDraw.Draw(img)
-    y = pad
-    d.text((pad, y), title, fill="black", font=font)
-    y += line_h * 2
-    for ln in body_lines:
-        d.text((pad, y), ln, fill="black", font=font)
-        y += line_h
+        line_h = max(line_h, h + 5)
+    pad = 18
+    width = min(2200, max(720, max_w + pad * 2))
+    height = max(160, line_h * len(all_lines) + pad * 2)
     try:
+        img = Image.new("RGB", (width, height), "white")
+        d = ImageDraw.Draw(img)
+        y = pad
+        for ln in all_lines:
+            safe = (ln or "").encode("utf-8", "replace").decode("utf-8")
+            try:
+                d.text((pad, y), safe, fill="black", font=font)
+            except Exception:
+                d.text((pad, y), safe.encode("ascii", "replace").decode("ascii"), fill="black", font=font)
+            y += line_h
         img.save(output_path, format="PNG")
-    except Exception:
+    except Exception as e:
+        print(f"[checkcredit] error-context PNG render failed: {e!r}", flush=True)
         return False
     return True
+
+
+def format_error_context_text_fallback(row: dict[str, Any] | None, *, max_errors: int = 6) -> str:
+    """Plain markdown: ±4 lines per error when PNG / upload is unavailable."""
+    if not row:
+        return ""
+    uid = str(row.get("user_id") or "n/a")
+    parts: list[str] = []
+    parts.append(f"**User `{uid}` — error log (text, ±4 lines each)**")
+    for i, e in enumerate((row.get("errors") or [])[: max(1, int(max_errors))], start=1):
+        ctx = e.get("context_lines") or []
+        if ctx:
+            body = "\n".join(ctx)
+        else:
+            body = (e.get("full_line") or e.get("snippet") or "").strip() or "(no line)"
+        parts.append(f"```{body}```")
+    return "\n\n".join(parts)
 
 
 def build_error_context_screenshots(

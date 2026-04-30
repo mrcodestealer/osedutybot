@@ -339,6 +339,7 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str, mode: 
         preview_img_err = ""
         preview_img_attempted = False
         error_ctx_paths: list[str] = []
+        machineerror_fb: list[str] = []
         if isinstance(np, dict):
             try:
                 md = str(np.get("machine_display") or "").strip() or None
@@ -368,10 +369,14 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str, mode: 
                         merged_rows = out.get("merged_players") or []
                         pick_err = getattr(checkcredit, "select_top2_error_players", None)
                         build_ctx = getattr(checkcredit, "build_error_context_screenshots", None)
+                        fb_ctx = getattr(checkcredit, "format_error_context_text_fallback", None)
                         if callable(pick_err) and callable(build_ctx):
                             err_rows = pick_err(merged_rows) or []
                             for rr in err_rows[:2]:
+                                if not (rr.get("errors") or []):
+                                    continue
                                 ctx_items = build_ctx(rr, max_errors=6, lines_before_after=4) or []
+                                row_got_img = False
                                 for ci in ctx_items:
                                     pth = str(ci.get("path") or "").strip()
                                     if not pth:
@@ -380,12 +385,17 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str, mode: 
                                     ik = upload_image_lark(pth) or ""
                                     if not ik:
                                         continue
+                                    row_got_img = True
                                     extra_error_images.append(
                                         {
                                             "img_key": ik,
                                             "title": str(ci.get("title") or "Error context screenshot"),
                                         }
                                     )
+                                if not row_got_img and callable(fb_ctx):
+                                    chunk = fb_ctx(rr, max_errors=6)
+                                    if chunk:
+                                        machineerror_fb.append(chunk)
                     same_last_line = ""
                     if str(mode or "").strip().lower() != "error_only":
                         same_last_line = str(np.get("same_last_line") or "")
@@ -429,6 +439,12 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str, mode: 
             resp = send_message(chat_id, card_json, msg_type="interactive")
             if resp.get("code") != 0:
                 send_message(chat_id, text if text else "(no output)")
+            if machineerror_fb and str(mode or "").strip().lower() == "error_only":
+                send_message(
+                    chat_id,
+                    "⚠️ Error log images unavailable (PNG render or Lark upload failed). Text context:\n\n"
+                    + "\n\n".join(machineerror_fb),
+                )
         else:
             send_message(chat_id, text if text else "(no output)")
 
