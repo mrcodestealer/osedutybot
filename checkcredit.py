@@ -1929,6 +1929,19 @@ def _np_parse_machine_amount_from_request_blob(blob: str) -> tuple[str | None, f
     return mid, amt
 
 
+def _np_parse_user_id_from_detail_text(blob: str) -> str | None:
+    """Extract Response/Data user id from dialog text/JSON-ish blob."""
+    if not blob:
+        return None
+    s = _np_normalize_jsonish_quotes(blob)
+    m = re.search(r'"userId"\s*:\s*"?(\d+)"?', s, re.I)
+    if not m:
+        m = re.search(r"(?<![\w.])userId\s*:\s*(\d+)\b", s, re.I)
+    if not m:
+        return None
+    return (m.group(1) or "").strip() or None
+
+
 def _np_machine_substr_for_log_third_http_detail(raw: str | None) -> str:
     """
     Value used to match Request ``machineId`` inside Log Third Http **Detail** dialogs.
@@ -1994,14 +2007,20 @@ def _np_detail_matches_credit_and_machine_id(
     expected_credit: float | None,
     *,
     amount_scale: float = 1.0,
+    expected_user_id: str | None = None,
 ) -> bool:
     """
     Request JSON: ``machineId`` contains machine digits; when ``expected_credit`` is not ``None``,
     ``amount`` matches within ``NP_BACKEND_AMOUNT_EPS`` (default 0.05), after optional
-    ``amount_scale`` (TBP: ``TBP_THIRD_HTTP_AMOUNT_SCALE``).
+    ``amount_scale`` (TBP: ``TBP_THIRD_HTTP_AMOUNT_SCALE``). If ``expected_user_id`` is given,
+    Response/Data ``userId`` must match too.
     """
     mid, amt = _np_parse_machine_amount_from_request_blob(req_blob)
     if mid is None:
+        return False
+    uid = _np_parse_user_id_from_detail_text(req_blob)
+    eu = (expected_user_id or "").strip()
+    if eu and uid and uid != eu:
         return False
     if not _np_machine_id_contains_substr(machine_substr, mid):
         return False
@@ -2208,6 +2227,7 @@ def _np_try_screenshot_matching_detail(
     rows,
     ordered_indices: list[int],
     *,
+    player_id: str,
     machine_substr: str | None,
     expected_credit: float | None,
     out_path: str,
@@ -2249,20 +2269,36 @@ def _np_try_screenshot_matching_detail(
         layers = _np_dialog_text_layers_for_match(dlg_sel)
         blob = _np_detail_request_section(full_txt)
         ok = _np_detail_matches_credit_and_machine_id(
-            blob, machine_substr, expected_credit, amount_scale=amount_scale
+            blob,
+            machine_substr,
+            expected_credit,
+            amount_scale=amount_scale,
+            expected_user_id=player_id,
         )
         if not ok:
             ok = _np_detail_matches_credit_and_machine_id(
-                layers, machine_substr, expected_credit, amount_scale=amount_scale
+                layers,
+                machine_substr,
+                expected_credit,
+                amount_scale=amount_scale,
+                expected_user_id=player_id,
             )
         if not ok:
             ok = _np_detail_matches_credit_and_machine_id(
-                full_txt, machine_substr, expected_credit, amount_scale=amount_scale
+                full_txt,
+                machine_substr,
+                expected_credit,
+                amount_scale=amount_scale,
+                expected_user_id=player_id,
             )
         if not ok:
             blob2 = _np_detail_request_section(layers)
             ok = _np_detail_matches_credit_and_machine_id(
-                blob2, machine_substr, expected_credit, amount_scale=amount_scale
+                blob2,
+                machine_substr,
+                expected_credit,
+                amount_scale=amount_scale,
+                expected_user_id=player_id,
             )
         if not ok:
             ok = _np_detail_matches_credit_and_machine_id(
@@ -2270,6 +2306,7 @@ def _np_try_screenshot_matching_detail(
                 machine_substr,
                 expected_credit,
                 amount_scale=amount_scale,
+                expected_user_id=player_id,
             )
         if ok:
             dlg_sel.screenshot(path=out_path, animations="disabled")
@@ -2666,6 +2703,7 @@ def screenshot_np_recharge_detail(
                                 page,
                                 rows,
                                 to_scan,
+                                player_id=str(player_id).strip(),
                                 machine_substr=machine_substr,
                                 expected_credit=exp_try,
                                 out_path=out_path,
