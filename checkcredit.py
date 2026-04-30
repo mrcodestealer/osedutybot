@@ -70,6 +70,7 @@ Requires: playwright (+ chromium) for LogNavigator; requests for OSS.
 from __future__ import annotations
 
 import argparse
+import html
 import os
 import re
 import sys
@@ -1569,6 +1570,73 @@ def _render_text_lines_png(lines: list[str], *, title: str, output_path: str) ->
     return True
 
 
+def _render_error_context_playwright(lines: list[str], *, title: str, output_path: str, timeout_ms: int = 45_000) -> bool:
+    """
+    Fallback when Pillow is missing or bitmap render fails: headless Chromium → PNG.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as e:
+        print(f"[checkcredit] error-context Playwright import failed: {e!r}", flush=True)
+        return False
+    safe_title = html.escape(title or "")
+    body = "\n".join(html.escape(ln or "") for ln in (lines or ["(empty)"]))
+    doc = f"""<!DOCTYPE html><html><head><meta charset="utf-8"/>
+<style>
+body {{ margin:0; background:#fff; color:#111; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }}
+.wrap {{ padding: 12px 14px; max-width: 900px; }}
+.t {{ font-weight: 600; margin-bottom: 8px; border-bottom: 1px solid #ccc; padding-bottom: 6px; }}
+pre {{ margin:0; white-space: pre-wrap; word-break: break-word; line-height: 1.35; }}
+</style></head><body><div class="wrap"><div class="t">{safe_title}</div><pre>{body}</pre></div></body></html>"""
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            try:
+                page = browser.new_page(viewport={"width": 960, "height": 1400})
+                page.set_content(doc, wait_until="domcontentloaded", timeout=timeout_ms)
+                page.locator(".wrap").wait_for(state="visible", timeout=10_000)
+                time.sleep(0.2)
+                try:
+                    page.locator(".wrap").screenshot(path=output_path, type="png")
+                except Exception:
+                    page.screenshot(path=output_path, full_page=True)
+            finally:
+                browser.close()
+        return os.path.isfile(output_path) and os.path.getsize(output_path) > 80
+    except Exception as e:
+        print(f"[checkcredit] error-context Playwright render failed: {e!r}", flush=True)
+        return False
+
+
+def _prefer_smaller_jpeg_if_pillow(png_path: str) -> str:
+    """If Pillow can read the PNG, try JPEG; keep whichever file is smaller (unlink the other)."""
+    if not png_path.lower().endswith(".png"):
+        return png_path
+    try:
+        from PIL import Image
+    except Exception:
+        return png_path
+    jpg_path = png_path[:-4] + ".jpg"
+    try:
+        Image.open(png_path).convert("RGB").save(jpg_path, "JPEG", quality=82, optimize=True)
+        if not os.path.isfile(jpg_path):
+            return png_path
+        sp, sj = os.path.getsize(png_path), os.path.getsize(jpg_path)
+        if sj < sp * 0.92:
+            try:
+                os.unlink(png_path)
+            except OSError:
+                pass
+            return jpg_path
+        try:
+            os.unlink(jpg_path)
+        except OSError:
+            pass
+    except Exception as e:
+        print(f"[checkcredit] error-context JPEG compress skipped: {e!r}", flush=True)
+    return png_path
+
+
 def format_error_context_text_fallback(row: dict[str, Any] | None, *, max_errors: int = 6) -> str:
     """Plain markdown: ±4 lines per error when PNG / upload is unavailable."""
     if not row:
@@ -1601,7 +1669,8 @@ def build_error_context_screenshots(
     uid = str(row.get("user_id") or "n/a")
     errs = row.get("errors") or []
     out: list[dict[str, str]] = []
-    for idx, e in enumerate(errs[: max(0, int(max_errors))], start=1):
+    n_err = max(1, int(max_errors or 6))
+    for idx, e in enumerate(errs[:n_err], start=1):
         ctx = e.get("context_lines") or []
         if not ctx:
             one = (e.get("full_line") or e.get("snippet") or "").strip()
@@ -1616,8 +1685,17 @@ def build_error_context_screenshots(
             tempfile.gettempdir(),
             f"checkcredit_errctx_{uid}_{idx}_{uuid.uuid4().hex[:8]}.png",
         )
-        if _render_text_lines_png(compact_ctx, title=title, output_path=path):
-            out.append({"path": path, "title": title})
+        ok = _render_text_lines_png(compact_ctx, title=title, output_path=path)
+        if not ok:
+            ok = _render_error_context_playwright(compact_ctx, title=title, output_path=path)
+        if not ok:
+            print(
+                f"[checkcredit] error-context: PNG+Playwright both failed user={uid} err#{idx}",
+                flush=True,
+            )
+            continue
+        final_path = _prefer_smaller_jpeg_if_pillow(path)
+        out.append({"path": final_path, "title": title})
     return out
 
 

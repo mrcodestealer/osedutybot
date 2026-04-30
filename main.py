@@ -6,6 +6,7 @@ from typing import Optional
 import requests
 import time
 import os
+import mimetypes
 from dotenv import load_dotenv
 
 # Resolve imports from this repo regardless of process cwd (systemd, gunicorn, etc.)
@@ -988,8 +989,12 @@ def upload_image_lark(image_path: str):
     token = get_tenant_access_token()
     url = "https://open.larksuite.com/open-apis/im/v1/images"
     headers = {"Authorization": f"Bearer {token}"}
+    ext = os.path.splitext(image_path)[1].lower()
+    mime, _ = mimetypes.guess_type(image_path)
+    if not mime or mime not in ("image/png", "image/jpeg"):
+        mime = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
     with open(image_path, "rb") as f:
-        files = {"image": (os.path.basename(image_path), f, "image/png")}
+        files = {"image": (os.path.basename(image_path), f, mime)}
         data = {"image_type": "message"}
         resp = requests.post(url, headers=headers, files=files, data=data)
     result = resp.json()
