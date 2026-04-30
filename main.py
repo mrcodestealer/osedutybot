@@ -1178,28 +1178,30 @@ def _lark_http_empty_json_ok():
 def _lark_http_card_callback_ok():
     # type: () -> Response
     """
-    Lark requires HTTP **200** within ~**3s** with body ``{}`` (or toast/card JSON).
-    Use literal ``b\"{}\"`` — minimal parsing on client; optional toast via ``LARK_CARD_REPLY_TOAST=1``.
+    Feishu ``card.action.trigger`` requires HTTP **200** within ~**3s**. Official doc allows ``{}`` or
+    ``toast``/``card``. Error **200672** = wrong response body — some clients reject bare ``{}``;
+    default to a minimal **toast** (same shape as open.feishu.cn card-callback-communication).
+
+    - ``LARK_CARD_ACK_EMPTY=1`` — respond with literal ``{}`` only (legacy).
+    - ``LARK_CARD_REPLY_TOAST=1`` — force toast (default already uses toast; kept for compatibility).
     """
     print("[lark] HTTP 200 card ACK (instant)", flush=True)
-    if (os.getenv("LARK_CARD_REPLY_TOAST") or "").strip() == "1":
-        body = json.dumps(
-            {
-                "toast": {
-                    "type": "success",
-                    "content": "OK",
-                    "i18n": {"zh_cn": "已收到", "en_us": "OK"},
-                }
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        return Response(body, status=200, mimetype="application/json; charset=utf-8")
-    return Response(
-        b"{}",
-        status=200,
-        mimetype="application/json; charset=utf-8",
+    empty_only = (os.getenv("LARK_CARD_ACK_EMPTY") or "").strip() == "1"
+    if empty_only:
+        return Response(b"{}", status=200, mimetype="application/json")
+    body = json.dumps(
+        {
+            "toast": {
+                "type": "success",
+                "content": "OK",
+                "i18n": {"zh_cn": "已收到", "en_us": "OK"},
+            }
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
     )
+    # No ``charset=`` in Content-Type — matches Feishu examples; avoid 200672 edge cases.
+    return Response(body, status=200, mimetype="application/json")
 
 
 def _lark_safe_parse_json_body(req):
@@ -1230,21 +1232,40 @@ def _lark_coerce_event_dict(data):
             data["event"] = parsed if isinstance(parsed, dict) else {}
         except Exception:
             data["event"] = {}
-    elif ev is None and _lark_header_event_type(data).startswith("card.action"):
-        data["event"] = {}
+    elif ev is None and isinstance(data, dict):
+        het = _lark_header_event_type(data)
+        if het.startswith("card.action"):
+            data["event"] = {}
+        elif _lark_is_schema_v2(data) and isinstance(data.get("action"), dict):
+            # SDK-flat card callback (no ``event`` yet) — same trigger as :func:`_lark_should_merge_flat_card_callback`
+            data["event"] = {}
     return data
+
+
+def _lark_should_merge_flat_card_callback(data):
+    # type: (dict) -> bool
+    """True when payload is (or looks like) ``card.action.trigger`` including SDK-flat shapes."""
+    if not isinstance(data, dict):
+        return False
+    et = _lark_header_event_type(data)
+    if et.startswith("card.action"):
+        return True
+    # Schema 2.0 + top-level ``action`` (gateway stripped ``event`` / ``header.event_type``).
+    if _lark_is_schema_v2(data) and isinstance(data.get("action"), dict):
+        return True
+    return False
 
 
 def _lark_normalize_card_callback_envelope(data):
     # type: (object) -> object
     """
     Merge flattened ``card.action.trigger`` fields into ``event`` when proxies strip nesting.
-    Feishu normally nests under ``event``; without this, resolver yields empty chat/sender.
+    Feishu Schema 2.0 puts **chat** in ``event.context.open_chat_id`` (not ``context.chat_id``);
+    SDK-flat payloads use top-level ``open_chat_id`` / ``open_message_id`` — mirror OpenClaw #71670.
     """
     if not isinstance(data, dict):
         return data
-    et = _lark_header_event_type(data)
-    if not et.startswith("card.action"):
+    if not _lark_should_merge_flat_card_callback(data):
         return data
     ev = data.get("event")
     if not isinstance(ev, dict):
@@ -1261,14 +1282,32 @@ def _lark_normalize_card_callback_envelope(data):
     ):
         if k in data and data[k] is not None and k not in ev:
             ev[k] = data[k]
+    # Flat IDs → ``context`` (canonical IM shape per open.feishu.cn card-callback-communication).
+    ctx = ev.get("context")
+    if not isinstance(ctx, dict):
+        ctx = {}
+        ev["context"] = ctx
+    if isinstance(data.get("open_chat_id"), str) and data["open_chat_id"].strip() and not ctx.get(
+        "open_chat_id"
+    ):
+        ctx["open_chat_id"] = data["open_chat_id"].strip()
+    if isinstance(data.get("open_message_id"), str) and data["open_message_id"].strip() and not ctx.get(
+        "open_message_id"
+    ):
+        ctx["open_message_id"] = data["open_message_id"].strip()
     top_uid = data.get("open_id") or data.get("user_id")
+    top_union = data.get("union_id")
     op = ev.get("operator")
-    if top_uid:
+    if top_uid or top_union:
         if not isinstance(op, dict):
-            ev["operator"] = {"open_id": top_uid}
-        elif not op.get("open_id") and not op.get("union_id"):
+            ev["operator"] = {}
+            op = ev["operator"]
+        if isinstance(op, dict):
             op = dict(op)
-            op["open_id"] = top_uid
+            if top_uid and not op.get("open_id"):
+                op["open_id"] = top_uid
+            if top_union and not op.get("union_id"):
+                op["union_id"] = top_union
             ev["operator"] = op
     data["event"] = ev
     return data
@@ -1369,17 +1408,17 @@ def _lark_resolve_card_action(data):
 def _lark_payload_has_card_action(data):
     # type: (object) -> bool
     """
-    True when ``event.action`` is present (any ``tag`` — button, overflow, form submit, etc.).
-    Relying on ``tag == button`` alone misses some Lark builds and caused fall-through to
-    ``success: true`` → client ``code: undefined``.
+    True when ``event.action`` **or** SDK-flat top-level ``action`` is present (any interactive tag).
     """
     if not isinstance(data, dict):
         return False
     ev = data.get("event")
-    if not isinstance(ev, dict):
-        return False
-    act = ev.get("action")
-    return isinstance(act, dict) and len(act) > 0
+    if isinstance(ev, dict):
+        act = ev.get("action")
+        if isinstance(act, dict) and len(act) > 0:
+            return True
+    act_top = data.get("action")
+    return isinstance(act_top, dict) and len(act_top) > 0
 
 
 def _lark_header_event_type(data):
@@ -1581,7 +1620,7 @@ def lark_webhook():
             or _lark_payload_has_card_action(data)
             or (het and het.lower().startswith("card.action"))
         ):
-            return jsonify({})
+            return _lark_http_card_callback_ok()
         return jsonify({"success": True})
 
     with processed_lock:
@@ -1598,7 +1637,7 @@ def lark_webhook():
                 "[lark] Missing chat_id/text on card-shaped POST — ACK {} (avoid 400 on interaction)",
                 flush=True,
             )
-            return jsonify({})
+            return _lark_http_card_callback_ok()
         print("❌ Could not extract chat_id or text")
         return jsonify({"error": "Missing data"}), 400
     
