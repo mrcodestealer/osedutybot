@@ -7,6 +7,8 @@ Find user log errors (--finderror).
 
   python3 checkcredit.py --finderror 2074 --date 2026-04-27
   python3 checkcredit.py --finderror CP0231 --date 2026-02-05 --oss
+  python3 checkcredit.py 185 --debug
+    After the log report, prompts for **which user**, then opens the routed backend (Log Third Http → Detail screenshot).
 
 Env (optional):
   A ``.env`` file next to ``checkcredit.py`` is auto-loaded (``pip install python-dotenv``).
@@ -500,9 +502,11 @@ def parse_user_blocks_full(log_text: str) -> list[dict[str, Any]]:
     so reduce_num / successJson on `extra:` continuation lines get the correct time.
 
     **Enter-game AFT timeout:** if the block contains ``enter game time out`` / ``errorJson`` time-out
-    etc., ``latest_credit`` is taken from the last ``httpaft:enter_game`` line that includes
-    ``add_num`` / ``target`` (prefer ``target``), e.g. ``target:20265.0``, instead of leaving n/a when
-    there is no ``successJson`` ``cur_coin``.
+    etc., ``latest_credit`` can fall back to the last ``httpaft:enter_game`` line with ``add_num`` /
+    ``target`` when there is no ``successJson`` ``cur_coin``.
+
+    **reduce_num first:** if the block has any parsed ``reduce_num`` credit line, that wins over
+    ``cur_coin`` and ``enter_game`` for ``latest_credit`` (last ``reduce_num`` in the block by line order).
     """
     raw = log_text.splitlines()
     blocks: list[tuple[str, list[tuple[int, str]]]] = []
@@ -596,12 +600,12 @@ def parse_user_blocks_full(log_text: str) -> list[dict[str, Any]]:
             "block_max_line": block_max_line,
         }
         has_enter_timeout = _block_has_enter_game_timeout(blines)
-        if has_enter_timeout and best_enter is not None:
-            latest_credit: dict[str, Any] | None = best_enter
+        if best_reduce is not None:
+            latest_credit: dict[str, Any] | None = best_reduce
+        elif has_enter_timeout and best_enter is not None:
+            latest_credit = best_enter
         elif best_coin is not None:
             latest_credit = best_coin
-        elif best_reduce is not None:
-            latest_credit = best_reduce
         elif best_enter is not None:
             latest_credit = best_enter
         else:
@@ -690,9 +694,13 @@ def merge_players_full(payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
         errs = by_uid[uid]["errors"][:]
         errs.sort(key=_error_line_time_key, reverse=True)
         d = by_uid[uid]
-        lc_cands = [d["_lc_coin"], d["_lc_reduce"], d["_lc_enter"]]
-        lc_cands = [c for c in lc_cands if c is not None]
-        lc_final = max(lc_cands, key=lambda x: int(x["line_idx"])) if lc_cands else None
+        # Prefer reduce_num over cur_coin / enter_game whenever present anywhere for this user.
+        if d["_lc_reduce"] is not None:
+            lc_final = d["_lc_reduce"]
+        else:
+            lc_cands = [d["_lc_coin"], d["_lc_enter"]]
+            lc_cands = [c for c in lc_cands if c is not None]
+            lc_final = max(lc_cands, key=lambda x: int(x["line_idx"])) if lc_cands else None
         merged.append(
             {
                 "user_id": uid,
@@ -831,6 +839,78 @@ def build_np_followup_payload(
         "latest_two_players": latest_two_players,
         "np_choices": np_choices,
     }
+
+
+def _interactive_debug_pick_player(
+    merged_players: list[dict[str, Any]],
+    *,
+    machine_display: str,
+) -> dict[str, Any] | None:
+    """
+    After ``--finderror`` + ``--debug``, prompt for a user row then drive ``screenshot_np_recharge_detail``.
+    Returns ``user_id``, ``time_short``, optional ``credit_value``, or ``None`` to skip.
+    """
+    if not merged_players:
+        print("[checkcredit --debug] No players in log — skipping backend step.", flush=True)
+        return None
+    md = (machine_display or "").strip()
+    be = _np_log_backend_tag(md or None)
+    bar = "─" * 58
+    print(f"\n{bar}", flush=True)
+    print("[checkcredit --debug] Choose a user — backend Log Third Http → Detail screenshot:", flush=True)
+    print(f"  Machine `{md or '?'}' → backend `{be}` (from folder label)", flush=True)
+    print(bar, flush=True)
+
+    for i, row in enumerate(merged_players, start=1):
+        uid = str(row.get("user_id", ""))
+        lc = row.get("latest_credit") or {}
+        ts = (lc.get("time_short") or "").strip()
+        val = lc.get("value")
+        cred_s = str(val) if val is not None else "n/a"
+        warn = "" if ts else "  ⚠ needs credit time in log"
+        print(f"  {i}) User `{uid}` — credit `{cred_s}` @ `{ts or '—'}`{warn}", flush=True)
+    print(bar, flush=True)
+    print("Enter index 1–%d, or paste User ID, or q to skip:" % len(merged_players), flush=True)
+
+    while True:
+        try:
+            raw = input("> ").strip()
+        except EOFError:
+            print("[checkcredit --debug] EOF — skip backend.", flush=True)
+            return None
+        if not raw or raw.lower() in ("q", "quit"):
+            print("[checkcredit --debug] Skipped backend.", flush=True)
+            return None
+        pick_row: dict[str, Any] | None = None
+        if raw.isdigit():
+            idx = int(raw)
+            if 1 <= idx <= len(merged_players):
+                pick_row = merged_players[idx - 1]
+            else:
+                print(f"  Enter a number between 1 and {len(merged_players)}.", flush=True)
+                continue
+        else:
+            for row in merged_players:
+                if str(row.get("user_id", "")).strip() == raw:
+                    pick_row = row
+                    break
+            if pick_row is None:
+                print("  No matching User ID — try again or q.", flush=True)
+                continue
+        lc = pick_row.get("latest_credit") or {}
+        ts = (lc.get("time_short") or "").strip()
+        if not ts:
+            print("  This user has no parsed credit time — pick another row.", flush=True)
+            continue
+        uid = str(pick_row["user_id"]).strip()
+        credit_val: float | None = None
+        v = lc.get("value")
+        if v is not None:
+            try:
+                credit_val = float(v)
+            except (TypeError, ValueError):
+                credit_val = None
+        return {"user_id": uid, "time_short": ts, "credit_value": credit_val}
 
 
 def pick_latest_error_uid(merged: list[dict[str, Any]]) -> tuple[str | None, int]:
@@ -1155,11 +1235,13 @@ def run_finderror(
     user: str,
     pw: str,
     source: str = "navigator",
+    debug_headed: bool = False,
 ) -> dict[str, Any]:
     """
     source:
       - \"oss\" — GET log from OSM_LOG_OSS_TEMPLATE (no browser).
       - \"navigator\" — LogNavigator UI + tail (Chromium; headless on Linux without DISPLAY).
+    ``debug_headed`` (CLI ``--debug``): force visible LogNavigator Chromium regardless of env / DISPLAY.
     """
     td = target_date or date.today()
     parsed: list[dict[str, Any]] = []
@@ -1173,7 +1255,7 @@ def run_finderror(
     else:
         from playwright.sync_api import sync_playwright
 
-        headless = _playwright_headless()
+        headless = False if debug_headed else _playwright_headless()
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=headless)
             try:
@@ -1209,6 +1291,8 @@ def run_finderror(
 
     header = "\n".join(text_parts)
     merged = merge_players_full(parsed)
+    merged_players_ordered = merged[:]
+    _sort_players_latest_credit_first(merged_players_ordered)
     top2_err = select_top2_error_players(merged)
     top2_any = select_top2_overall(merged)
     le_uid, _le_line = pick_latest_error_uid(merged)
@@ -1219,6 +1303,9 @@ def run_finderror(
     plain = f"{header}\n\n{report}" if header else report
     return {
         "text": plain,
+        "merged_players": merged_players_ordered,
+        "machine_display_resolved": machine_display,
+        "target_date": td,
         "np_followup": build_np_followup_payload(top2_any, top2_err, machine_display, td),
         "lark_card": build_latest_two_overall_lark_card(
             top2_any,
@@ -2356,6 +2443,8 @@ def main(argv: list[str] | None = None) -> int:
             "Examples:\n"
             "  python3 checkcredit.py --finderror 2074 --date 2026-04-27\n"
             "  python3 checkcredit.py --finderror CP0231 --date 2026-02-05 --oss\n"
+            "  python3 checkcredit.py 185 --debug\n"
+            "    LogNavigator tail → report → pick user → headed backend Log Third Http screenshot\n"
             "\n"
             "NP --checkuser (visible Chromium, headed — watch detection):\n"
             "  python3 checkcredit.py --checkuser --player-id 132594948 --date 2026-04-27 \\\n"
@@ -2376,11 +2465,21 @@ def main(argv: list[str] | None = None) -> int:
         help="Fetch log via OSS HTTP (OSM_LOG_OSS_TEMPLATE) instead of LogNavigator browser",
     )
     ap.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "With --finderror / MACHINE: visible LogNavigator when using browser mode; after the report, "
+            "prompt for a user then open the routed backend (Log Third Http → Detail PNG). "
+            "Uses stdin — non-TTY skips the picker."
+        ),
+    )
+    ap.add_argument(
         "--checkuser",
         action="store_true",
         help=(
-            "NP Log Third Http Req: always use headed (visible) Chromium — same detection as "
-            "Duty Bot /npthirdhttp; requires --player-id, --date, --time"
+            "NP Log Third Http Req: headed Chromium — same as Duty Bot /npthirdhttp. "
+            "Needs --date, --time; User ID can be first positional after --checkuser "
+            "(same as --player-id)."
         ),
     )
     ap.add_argument("--player-id", metavar="USER_ID", help="With --checkuser")
@@ -2418,15 +2517,63 @@ def main(argv: list[str] | None = None) -> int:
             "matches Duty Bot context"
         ),
     )
+    ap.add_argument(
+        "machine_positional",
+        nargs="?",
+        default=None,
+        metavar="MACHINE_OR_USER_ID",
+        help=(
+            "With --finderror: shorthand machine query (e.g. 185). "
+            "With --checkuser and no --player-id: shorthand user id (e.g. 130000720)."
+        ),
+    )
     args = ap.parse_args(argv)
 
+    fe_opt = (args.finderror or "").strip() if getattr(args, "finderror", None) else ""
+    fe_pos = (args.machine_positional or "").strip() if getattr(args, "machine_positional", None) else ""
+
+    # --checkuser 130000720 → positional is User ID, not --finderror MACHINE
+    if getattr(args, "checkuser", False) and fe_pos and not fe_opt:
+        if not (args.player_id or "").strip():
+            args.player_id = fe_pos
+            fe_pos = ""
+
+    if fe_opt and fe_pos and fe_opt != fe_pos:
+        print(
+            "❌ --finderror and positional MACHINE disagree — use one or the same value.",
+            file=sys.stderr,
+        )
+        return 2
+    finderror_resolved = fe_opt or fe_pos or None
+
     if getattr(args, "checkuser", False):
-        if args.finderror:
-            print("❌ Use either --finderror or --checkuser, not both.", file=sys.stderr)
-            return 2
-        if not args.player_id or not args.date or not getattr(args, "credit_time", None):
+        if fe_pos:
             print(
-                "❌ --checkuser requires --player-id, --date YYYY-MM-DD, --time HH:MM:SS[.mmm]",
+                "❌ Extra positional argument with --checkuser — put User ID right after --checkuser "
+                "(or use --player-id), not a second positional.",
+                file=sys.stderr,
+            )
+            return 2
+        if finderror_resolved:
+            print("❌ Use either --finderror / MACHINE or --checkuser, not both.", file=sys.stderr)
+            return 2
+        pid = (args.player_id or "").strip()
+        ds = (args.date or "").strip()
+        ts = (getattr(args, "credit_time", None) or "").strip()
+        missing = [x for x, ok in (("--player-id / User ID", pid), ("--date YYYY-MM-DD", ds), ("--time HH:MM:SS[.mmm]", ts)) if not ok]
+        if missing:
+            print(
+                "❌ --checkuser still needs: " + ", ".join(missing),
+                file=sys.stderr,
+            )
+            print(
+                "   Example:\n"
+                "     python3 checkcredit.py --checkuser 130000720 --date 2026-04-29 --time 14:30:05.123 \\\n"
+                "       --machine-substr 2074 --credit 1352",
+                file=sys.stderr,
+            )
+            print(
+                "   Add --machine-display WF8173 (or CP/OSM/MDR/TBP/…) if not using NP backend.",
                 file=sys.stderr,
             )
             return 2
@@ -2455,7 +2602,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"❌ {e}", file=sys.stderr)
             return 1
 
-    if args.finderror:
+    if finderror_resolved:
         td = None
         if args.date:
             try:
@@ -2464,20 +2611,65 @@ def main(argv: list[str] | None = None) -> int:
                 print("❌ --date must be YYYY-MM-DD", file=sys.stderr)
                 return 2
         use_oss = bool(args.oss) or _env_truthy("CHECKCREDIT_USE_OSS")
+        want_debug = bool(getattr(args, "debug", False))
         try:
             out = run_finderror(
-                str(args.finderror).strip(),
+                str(finderror_resolved).strip(),
                 target_date=td,
                 timeout_ms=max(15_000, args.timeout_ms),
                 base=args.base_url.rstrip("/"),
                 user=DEFAULT_USER,
                 pw=DEFAULT_PASS,
                 source="oss" if use_oss else "navigator",
+                debug_headed=want_debug and not use_oss,
             )
         except Exception as e:
             print(f"❌ {e}", file=sys.stderr)
             return 1
         print(out["text"])
+        if want_debug and sys.stdin.isatty():
+            pick = _interactive_debug_pick_player(
+                out.get("merged_players") or [],
+                machine_display=str(out.get("machine_display_resolved") or ""),
+            )
+            if pick:
+                md = (out.get("machine_display_resolved") or "").strip() or None
+                np_fu = out.get("np_followup") or {}
+                td_iso = np_fu.get("target_date")
+                if td_iso is None and out.get("target_date") is not None:
+                    td = out["target_date"]
+                    td_iso = td.isoformat() if isinstance(td, date) else str(td)
+                if not td_iso:
+                    print("❌ missing target date for backend step", file=sys.stderr)
+                    return 1
+                ms = (np_fu.get("machine_match_substr") or "").strip()
+                if not ms:
+                    ms = machine_match_substr_from_display(md or "")
+                ms = ms.strip() or None
+                try:
+                    b_base, _, _ = _np_resolve_backend(md)
+                    tag = _np_log_backend_tag(md)
+                    print(f"\n→ Backend ({tag}): {b_base} — Log Third Http / Detail…", flush=True)
+                    out_png = screenshot_np_recharge_detail(
+                        pick["user_id"],
+                        str(td_iso).strip(),
+                        pick["time_short"],
+                        timeout_ms=max(60_000, args.timeout_ms),
+                        machine_substr=ms,
+                        expected_credit=pick.get("credit_value"),
+                        machine_display=md,
+                        headed=True,
+                        pause_for_input=True,
+                    )
+                    print(f"\n→ Detail screenshot: {out_png}", flush=True)
+                except Exception as e:
+                    print(f"❌ backend screenshot: {e}", file=sys.stderr)
+                    return 1
+        elif want_debug and not sys.stdin.isatty():
+            print(
+                "[checkcredit --debug] stdin is not a TTY — skipping user picker / backend step.",
+                file=sys.stderr,
+            )
         return 0
 
     ap.print_help()
