@@ -1334,6 +1334,18 @@ def lark_webhook():
             }
         )
 
+    # One line per POST — if this never appears when you tap a card button, Feishu is not reaching this process
+    # (wrong public URL/port, nginx not proxy_pass to here, or firewall). Fix infra before debugging Python.
+    print(
+        "[lark] webhook POST len=%s path=%s ct=%s"
+        % (
+            request.content_length,
+            request.path,
+            (request.headers.get("Content-Type") or "")[:80],
+        ),
+        flush=True,
+    )
+
     raw_in = _lark_safe_parse_json_body(request)
     if raw_in is None:
         return jsonify({"error": "invalid json"}), 400
@@ -2312,12 +2324,25 @@ def _run_main_entry() -> int:
         sys.path.insert(0, root)
 
     try:
-        app.run(host="0.0.0.0", port=5000, debug=False)
+        port_str = os.getenv("PORT") or os.getenv("LARKBOT_PORT") or "5000"
+        port = int(port_str)
+        print(
+            "[lark] Listening http://0.0.0.0:%d (threaded=True). "
+            "Feishu Request URL must be HTTPS and reachable from the internet; reverse-proxy to this port."
+            % port,
+            flush=True,
+        )
+        app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
         return 0
     except OSError as e:
         traceback.print_exc(file=sys.stderr)
         sys.stderr.flush()
-        print(f"Flask bind failed (port 5000 in use or permission?): {e}", file=sys.stderr, flush=True)
+        print(
+            "Flask bind failed (port %s in use or permission?): %s"
+            % (os.getenv("PORT") or os.getenv("LARKBOT_PORT") or "5000", e),
+            file=sys.stderr,
+            flush=True,
+        )
         return 1
     except BaseException:
         traceback.print_exc(file=sys.stderr)
