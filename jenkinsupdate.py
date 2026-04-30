@@ -165,6 +165,18 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
         "CPMS-UAT-UPDATE",
         "https://jenkins.client8.me/job/CPMS/job/UAT/job/CPMS-UAT-UPDATE/build?delay=0sec",
     ),
+    "pms uat update": (
+        "PMS-UAT-UPDATE",
+        "https://jenkins.client8.me/job/PMS/job/UAT/job/PMS-UAT-UPDATE/build?delay=0sec",
+    ),
+    "pms ph cp production": (
+        "PMS-UAT-UPDATE",
+        "https://jenkins.client8.me/job/PMS/job/UAT/job/PMS-UAT-UPDATE/build?delay=0sec",
+    ),
+    "update pms": (
+        "PMS-UAT-UPDATE",
+        "https://jenkins.client8.me/job/PMS/job/UAT/job/PMS-UAT-UPDATE/build?delay=0sec",
+    ),
     "igo uat script run": (
         "IGO UAT SCRIPT RUN",
         "https://jenkins.client8.me/job/IGO/job/UAT/job/IGO-UAT-SCRIPT-RUN/build?delay=0sec",
@@ -211,7 +223,7 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
     ),
 }
 
-JENKINS_UPDATE_CMD_RE = re.compile(r"/jenkinsupdate\b", re.I)
+JENKINS_UPDATE_CMD_RE = re.compile(r"/(?:jenkinsupdate|updatejenkins)\b", re.I)
 FPMS_PROD_SCRIPT_FLAG_RE = re.compile(r"--fpmsprodscript\b", re.I)
 FPMS_PROD_SCRIPT_BUILD_URL = (
     "https://jenkins.client8.me/job/FPMS/job/FPMS_PROD_SCRIPT_RUN/build?delay=0sec"
@@ -383,7 +395,15 @@ def _service_lines_mean_update_all(service_lines: list[str]) -> bool:
                 toks.append(t)
     if len(toks) != 1:
         return False
-    return toks[0].casefold() in ("all", "*", "every", "全部", "__all__")
+    return toks[0].casefold() in (
+        "all",
+        "all service",
+        "all services",
+        "*",
+        "every",
+        "全部",
+        "__all__",
+    )
 
 
 # Default: apply ``_ensure_fast_fill_mode`` at import unless ``FPMS_STABLE_FILL=1`` (conservative pacing).
@@ -4322,7 +4342,7 @@ def _jenkins_update_job_automation_profile(raw_urls: str) -> str | None:
     """
     Which automated fill path applies to this Jenkins URL (first line if several).
 
-    Returns ``\"fpms\"`` | ``\"fnt_rc\"`` | ``\"sms_uat\"`` | ``\"fpms_prod_script\"`` |
+    Returns ``\"fpms\"`` | ``\"pms_uat\"`` | ``\"fnt_rc\"`` | ``\"sms_uat\"`` | ``\"fpms_prod_script\"`` |
     ``\"bi_api_update\"`` or ``None``.
     """
     u = _jenkins_update_primary_url(raw_urls).replace("\\", "/")
@@ -4337,6 +4357,8 @@ def _jenkins_update_job_automation_profile(raw_urls: str) -> str | None:
         return "fnt_rc"
     if "/job/sms/job/uat/job/sms-uat-update/" in ul:
         return "sms_uat"
+    if "/job/pms/job/uat/job/pms-uat-update/" in ul:
+        return "pms_uat"
     if "/job/fpms/job/fpms_prod_script_run/" in ul:
         return "fpms_prod_script"
     if "/job/bi-go/job/bi-api-update/" in ul:
@@ -5590,13 +5612,25 @@ def _fpms_lark_begin_jenkins_run(
             "lark_cancel": False,
         },
     )
+    update_all = bool(data.get("update_all_services"))
+    bot_headless = os.environ.get("JENKINSUPDATE_BOT_HEADLESS", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
     preview = _fpms_format_config_preview(data, resolved)
     send(
         chat_id,
         preview
-        + "\n\n⏳ Starting **headless** Jenkins — filling **all** parameters, running **two** on-page "
-        "re-checks, then you will be asked here to click **Build** or skip. Say **cancel** anytime.",
+        + (
+            "\n\n⏳ Starting **headless** Jenkins — filling **all** parameters, running **two** on-page "
+            if bot_headless
+            else "\n\n⏳ Starting **visible browser** Jenkins — filling **all** parameters, running **two** on-page "
+        )
+        + "re-checks, then you will be asked here to click **Build** or skip. Say **cancel** anytime.",
     )
+    
     _fpms_lark_spawn_run(
         chat_id,
         session_key,
@@ -5605,6 +5639,8 @@ def _fpms_lark_begin_jenkins_run(
         raw_prompt_body=raw_prompt_body,
         jenkins_build_url=ju,
         job_profile=jp,
+        update_all_services=update_all,
+        headless=bot_headless,
     )
 
 
@@ -5630,6 +5666,8 @@ def _fpms_lark_spawn_run(
     raw_prompt_body: str = "",
     jenkins_build_url: str | None = None,
     job_profile: str = "fpms",
+    update_all_services: bool = False,
+    headless: bool = True,
 ) -> None:
     """``session_key`` must already hold ``jenkins_wait_build`` with ``build_gate_event``."""
 
@@ -5640,11 +5678,11 @@ def _fpms_lark_spawn_run(
         try:
             run(
                 review_seconds=float(os.environ.get("FPMS_BOT_REVIEW_SECONDS", "12")),
-                headless=True,
+                headless=headless,
                 browser=os.environ.get("FPMS_PLAYWRIGHT_BROWSER", "chromium"),
                 config_block=config_block,
                 user_data_dir=(os.environ.get("FPMS_PLAYWRIGHT_USER_DATA_DIR") or "").strip() or None,
-                update_all_services=False,
+                update_all_services=update_all_services,
                 bot_lark_gate={
                     "session_key": session_key,
                     "chat_id": chat_id,
@@ -5689,7 +5727,7 @@ def _fpms_lark_dispatch_job_row(
         for i, uu in enumerate([u.strip() for u in url_raw.splitlines() if u.strip()], 1):
             lines.append(f"{i}. {uu}")
         lines.append(
-            "\n_Only **FPMS UAT branch / NT UAT master update**, **FPMS PROD SCRIPT RUN**, **FNT RC** / **FNT script** ECP jobs, and **SMS UAT update** "
+            "\n_Only **FPMS/PMS UAT update**, **FPMS NT UAT master update**, **FPMS PROD SCRIPT RUN**, **FNT RC** / **FNT script** ECP jobs, and **SMS UAT update** "
             "are auto-filled by this bot; use the links for other jobs._"
         )
         send(chat_id, "\n".join(lines))
@@ -5710,6 +5748,10 @@ def _fpms_lark_dispatch_job_row(
     if prof == "bi_api_update":
         return _fpms_lark_dispatch_bi_api_update_parameter_flow(
             chat_id, session_key, body, ju, send
+        )
+    if prof == "pms_uat":
+        return _fpms_lark_dispatch_fpms_parameter_flow(
+            chat_id, session_key, body, ju, send, job_profile="pms_uat"
         )
     return _fpms_lark_dispatch_fpms_parameter_flow(
         chat_id, session_key, body, ju, send
@@ -5942,6 +5984,8 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
     body: str,
     jenkins_build_url: str,
     send,
+    *,
+    job_profile: str = "fpms",
 ) -> bool:
     """Parse FPMS block, resolve services, then headless run or service pick session."""
     try:
@@ -5953,6 +5997,10 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
             f"then `branch:`, `version:`, `Service:` lines.\n```\n{ex}\n```",
         )
         return True
+    jp = (job_profile or "fpms").strip() or "fpms"
+    if jp == "pms_uat":
+        # PMS-UAT-UPDATE page uses fixed Environment option.
+        data["environment"] = "pms-uat"
     with _fpms_lark_sessions_lock:
         prev = _fpms_lark_sessions.get(session_key)
         if isinstance(prev, dict) and prev.get("state") == "jenkins_wait_build":
@@ -5972,7 +6020,7 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
             send,
             raw_prompt_body=body,
             jenkins_build_url=jenkins_build_url,
-            job_profile="fpms",
+            job_profile=jp,
         )
         return True
     resolved_ids: list[str] = []
@@ -6001,7 +6049,7 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
             send,
             raw_prompt_body=body,
             jenkins_build_url=jenkins_build_url,
-            job_profile="fpms",
+            job_profile=jp,
         )
         return True
     first = tokens_to_pick[0]
@@ -6030,7 +6078,7 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
         return True
     sess_new = {
         "state": "pick",
-        "job_profile": "fpms",
+        "job_profile": jp,
         "data": data,
         "service_tokens": tokens_to_pick,
         "pick_index": 0,
