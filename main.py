@@ -1180,6 +1180,7 @@ def _lark_http_card_callback_ok():
     """
     Prefer Flask ``jsonify({})`` (matches official samples). Optional toast via ``LARK_CARD_REPLY_TOAST=1``.
     """
+    print("[lark] HTTP 200 card/interaction ACK body={}", flush=True)
     if (os.getenv("LARK_CARD_REPLY_TOAST") or "").strip() == "1":
         body = json.dumps(
             {
@@ -1296,16 +1297,20 @@ def _lark_resolve_card_action(data):
     return (chat_id, sender_id, val, eid)
 
 
-def _lark_payload_has_card_button_action(data):
+def _lark_payload_has_card_action(data):
     # type: (object) -> bool
-    """True when decrypted body looks like ``card.action.trigger`` / button tap (even if ``header`` is odd)."""
+    """
+    True when ``event.action`` is present (any ``tag`` — button, overflow, form submit, etc.).
+    Relying on ``tag == button`` alone misses some Lark builds and caused fall-through to
+    ``success: true`` → client ``code: undefined``.
+    """
     if not isinstance(data, dict):
         return False
     ev = data.get("event")
     if not isinstance(ev, dict):
         return False
     act = ev.get("action")
-    return isinstance(act, dict) and act.get("tag") == "button"
+    return isinstance(act, dict) and len(act) > 0
 
 
 def _lark_header_event_type(data):
@@ -1419,10 +1424,10 @@ def lark_webhook():
         threading.Thread(target=_run_jenkins_card_action, daemon=True).start()
         return _lark_http_card_callback_ok()
 
-    # Resolver missed but body clearly has a card button action — never fall through to ``success: true``.
-    if card_resolved is None and _lark_payload_has_card_button_action(data):
+    # Resolver missed but body has ``event.action`` — never fall through to ``success: true``.
+    if card_resolved is None and _lark_payload_has_card_action(data):
         print(
-            "[lark] card-like button payload but resolver returned None — ACK 200 {} (check Lark payload format)",
+            "[lark] card-like payload (event.action present) but resolver returned None — ACK 200 {}",
             flush=True,
         )
         return _lark_http_card_callback_ok()
@@ -1477,7 +1482,11 @@ def lark_webhook():
                 except:
                     pass
     else:
-        print(f"⚠️ Ignoring unknown event type")
+        het = _lark_header_event_type(data)
+        print("⚠️ Unknown webhook branch hdr_et=%r (not im.message / event_callback)" % (het,), flush=True)
+        # Schema 2.0 card/interaction must NOT get ``{"success":true}`` — clients show ``code: undefined``.
+        if _lark_is_schema_v2(data):
+            return jsonify({})
         return jsonify({"success": True})
 
     with processed_lock:
