@@ -391,10 +391,7 @@ def _sheet_delete_picker_card(rows: list[dict]) -> dict:
             "tag": "div",
             "text": {
                 "tag": "lark_md",
-                "content": (
-                    "Tap one button to delete that reminder.\n"
-                    "You can still type `/deletereminder <ID> [ID] [ID]` for batch delete."
-                ),
+                "content": "Tap an ID button to delete one reminder.",
             },
         }
     ]

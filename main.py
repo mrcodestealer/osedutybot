@@ -2700,7 +2700,6 @@ def lark_webhook():
                     chat_id=chat_id,
                     get_token_func=get_tenant_access_token,
                 )
-                send_message(chat_id, "Tap an ID button to delete one reminder, or type `/deletereminder <ID> [ID] [ID]` for batch.")
             except Exception as e:
                 send_message(chat_id, f"❌ Failed to load reminder list: {e}")
             return jsonify({"success": True})
