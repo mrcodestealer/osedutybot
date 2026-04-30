@@ -1806,6 +1806,25 @@ def lark_webhook():
                             daemon=True,
                         ).start()
                     return
+                if isinstance(parsed_ca, dict) and str(parsed_ca.get("k") or "").strip().lower() == "rem_del":
+                    rid = str(parsed_ca.get("id") or "").strip()
+                    if not rid:
+                        send_message(chat_id_ca, "❌ Reminder delete failed: missing ID.")
+                        return
+                    try:
+                        result = reminder.delete_sheet_reminders(
+                            ids=[rid],
+                            get_token_func=get_tenant_access_token,
+                            scheduler=scheduler,
+                            send_func=send_message,
+                            chat_id=chat_id_ca,
+                            target_user_id=TARGET_USER_OPEN_ID,
+                            schedule_chat_id=REMINDER_TARGET_CHAT_ID,
+                        )
+                        send_message(chat_id_ca, result)
+                    except Exception as e:
+                        send_message(chat_id_ca, f"❌ Reminder delete failed: {e}")
+                    return
                 ju = _get_jenkinsupdate()
                 if not ju:
                     print(
@@ -2681,10 +2700,7 @@ def lark_webhook():
                     chat_id=chat_id,
                     get_token_func=get_tenant_access_token,
                 )
-                send_message(
-                    chat_id,
-                    "Reply with `/deletereminder <ID> [ID] [ID]` to delete multiple reminders.",
-                )
+                send_message(chat_id, "Tap an ID button to delete one reminder, or type `/deletereminder <ID> [ID] [ID]` for batch.")
             except Exception as e:
                 send_message(chat_id, f"❌ Failed to load reminder list: {e}")
             return jsonify({"success": True})
