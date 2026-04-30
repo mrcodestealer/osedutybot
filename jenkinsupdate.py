@@ -4148,9 +4148,9 @@ def wait_review(seconds: float, *, build_was_clicked: bool = False) -> None:
 
 
 # ----- Lark / Chat bot: /jenkinsupdate (job match → optional FPMS parameter flow → yes → Jenkins) -----
-# Interactive cards use ``tag: action`` + ``tag: button``; clicks arrive as HTTP webhook
-# ``card.action.trigger`` (schema 2.0). Subscribe to that event for the app + ensure the request URL
-# matches ``/webhook/event``. Users can still type **yes** / **no** / **1** as before.
+# Interactive cards use **卡片 JSON 2.0** + ``behaviors[type=callback]`` (legacy ``tag: action`` is
+# deprecated). Clicks arrive as ``card.action.trigger`` — subscribe in the console and use request URL
+# ``/webhook/event``. Users can still type **yes** / **no** / **1** as before.
 _fpms_lark_sessions_lock = threading.Lock()
 _fpms_lark_sessions: dict[str, dict] = {}
 
@@ -4275,41 +4275,81 @@ def _fpms_lark_normalize_card_action_value(value: object) -> dict[str, object] |
     return None
 
 
+def _fpms_lark_v2_callback_button(
+    label: str,
+    btn_type: str,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    """
+    Lark **卡片 JSON 2.0** button: ``behaviors[type=callback]`` is required; legacy ``tag: action``
+    rows are deprecated and often yield client ``code: undefined`` on tap (see open.larksuite.com
+    card-json-v2 / button docs).
+    """
+    return {
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": label},
+        "type": btn_type,
+        "behaviors": [{"type": "callback", "value": payload}],
+    }
+
+
+def _fpms_lark_v2_column_set_button_row(
+    buttons: list[dict[str, object]],
+) -> dict[str, object]:
+    """One horizontal row of buttons (up to 5) using ``column_set`` + ``flex_mode: flow``."""
+    columns: list[dict[str, object]] = []
+    for b in buttons:
+        columns.append(
+            {
+                "tag": "column",
+                "width": "weighted",
+                "weight": 1,
+                "vertical_align": "top",
+                "elements": [b],
+            }
+        )
+    return {
+        "tag": "column_set",
+        "flex_mode": "flow",
+        "horizontal_spacing": "6px",
+        "columns": columns,
+    }
+
+
 def _fpms_lark_job_choice_card_json(candidates: list[tuple[str, float, str, str]]) -> str:
-    """Lark ``msg_type=interactive``: numbered body + one row of digit buttons (tap = pick job)."""
+    """Lark ``msg_type=interactive``: JSON **2.0** card — numbered body + rows of digit buttons."""
     lines_md: list[str] = [
         "Several Jenkins jobs match your text. **Tap a number** below or reply with **one** number "
         "**1**–"
         f"**{len(candidates)}** (or **cancel**):",
         "",
     ]
-    actions: list[dict[str, object]] = []
+    buttons: list[dict[str, object]] = []
     for i, (alias, _sc, label, url_raw) in enumerate(candidates, start=1):
         u0 = _jenkins_update_primary_url(url_raw)
         lines_md.append(f"**{i}.** **{label}** — `{alias}` — {u0}")
-        payload = json.dumps({"k": "job", "i": i}, ensure_ascii=False)
-        actions.append(
-            {
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": str(i)},
-                "type": "primary" if i == 1 else "default",
-                "value": payload,
-            }
+        payload: dict[str, object] = {"k": "job", "i": i}
+        buttons.append(
+            _fpms_lark_v2_callback_button(
+                str(i),
+                "primary" if i == 1 else "default",
+                payload,
+            )
         )
-    # Feishu: up to 5 buttons per action row (docs); split if needed
-    elements: list[dict[str, object]] = [
+    body_elements: list[dict[str, object]] = [
         {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines_md)}},
     ]
-    for off in range(0, len(actions), 5):
-        chunk = actions[off : off + 5]
-        elements.append({"tag": "action", "actions": chunk})
+    for off in range(0, len(buttons), 5):
+        chunk = buttons[off : off + 5]
+        body_elements.append(_fpms_lark_v2_column_set_button_row(chunk))
     card: dict[str, object] = {
-        "config": {"wide_screen_mode": True},
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
         "header": {
             "template": "blue",
             "title": {"tag": "plain_text", "content": "Jenkins job — pick one"},
         },
-        "elements": elements,
+        "body": {"elements": body_elements},
     }
     return json.dumps(card, ensure_ascii=False)
 
@@ -5097,10 +5137,19 @@ def _fpms_lark_verification_card_json(
     else:
         title_text = "FPMS UAT — form filled & re-check"
 
-    yes_pl = json.dumps({"k": "wb", "v": "y"}, ensure_ascii=False)
-    no_pl = json.dumps({"k": "wb", "v": "n"}, ensure_ascii=False)
+    yes_btn = _fpms_lark_v2_callback_button(
+        "YES — Build",
+        "primary",
+        {"k": "wb", "v": "y"},
+    )
+    no_btn = _fpms_lark_v2_callback_button(
+        "NO — Skip",
+        "default",
+        {"k": "wb", "v": "n"},
+    )
     card: dict = {
-        "config": {"wide_screen_mode": True},
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
         "header": {
             "template": "green" if ok_all else "orange",
             "title": {
@@ -5108,28 +5157,14 @@ def _fpms_lark_verification_card_json(
                 "content": title_text,
             },
         },
-        "elements": [
-            {"tag": "div", "text": {"tag": "lark_md", "content": block_a}},
-            {"tag": "hr"},
-            {"tag": "div", "text": {"tag": "lark_md", "content": block_b}},
-            {
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "YES — Build"},
-                        "type": "primary",
-                        "value": yes_pl,
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "NO — Skip"},
-                        "type": "default",
-                        "value": no_pl,
-                    },
-                ],
-            },
-        ],
+        "body": {
+            "elements": [
+                {"tag": "div", "text": {"tag": "lark_md", "content": block_a}},
+                {"tag": "hr"},
+                {"tag": "div", "text": {"tag": "lark_md", "content": block_b}},
+                _fpms_lark_v2_column_set_button_row([yes_btn, no_btn]),
+            ],
+        },
     }
     return json.dumps(card, ensure_ascii=False)
 
