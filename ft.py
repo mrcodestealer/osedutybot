@@ -29,9 +29,12 @@ FIELD_NAME = "Member"
 DUTY_LIST_PATH = "dutyList.csv"
 DEBUG = False
 
-# Name mapping: table name -> CSV name
+# Name mapping: Lark ``Member`` text -> dutyList.csv Name column (exact match).
+# Sheet often uses short names; CSV uses full names.
 NAME_MAPPING = {
-    "Kelvin Lim": "Kevin Lim",           # if "Kevin Lim" exists in CSV
+    "Kelvin Lim": "Kevin Lim",
+    "Kevin": "Kevin Lim",                # sheet short name → CSV ``Kevin Lim``
+    "Kelvin": "Kevin Lim",
     "Pin Quan": "Pin Quan",
     "Xuan You": "Sim Xuan You",
     "Winson": "Winson Hong",
