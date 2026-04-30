@@ -1178,51 +1178,100 @@ def _lark_http_empty_json_ok():
     )
 
 
-def _lark_parse_card_action_fields(data):
+def _lark_safe_parse_json_body(req):
+    # type: (object) -> Optional[dict]
+    """Prefer ``get_json``; fallback to raw body (some proxies strip / alter Content-Type)."""
+    raw = req.get_json(silent=True)
+    if isinstance(raw, dict):
+        return raw
+    b = req.get_data(cache=False)
+    if not b:
+        return None
+    try:
+        parsed = json.loads(b.decode("utf-8"))
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return None
+
+
+def _lark_extract_card_event_fields(ev):
     # type: (dict) -> tuple
     """
-    ``card.action.trigger`` (v2 event block) vs legacy ``card.action.trigger_v1`` differ slightly.
-    Returns ``(chat_id, sender_id, value, event_id)``.
+    Best-effort chat / sender / button value from ``event`` (see Lark ``card.action.trigger`` doc).
+    Works for ``card.action.trigger`` and legacy ``card.action.trigger_v1``-shaped payloads.
     """
-    hdr = data.get("header") if isinstance(data.get("header"), dict) else {}
-    et = hdr.get("event_type") or ""
-    eid = hdr.get("event_id")
-    ev = data.get("event") if isinstance(data.get("event"), dict) else {}
-
-    if et == "card.action.trigger":
-        ctx = ev.get("context") or {}
-        chat_id = ctx.get("open_chat_id") or ctx.get("chat_id")
-        op = ev.get("operator") or {}
-        sender_id = op.get("open_id")
-        act = ev.get("action") or {}
-        val = act.get("value")
-        return chat_id, sender_id, val, eid
-
-    if et == "card.action.trigger_v1":
-        ctx = ev.get("context") or {}
-        chat_id = (
-            ev.get("open_chat_id")
-            or ev.get("chat_id")
-            or ctx.get("open_chat_id")
-            or ctx.get("chat_id")
-        )
-        op = ev.get("operator") or {}
+    ctx = ev.get("context") or {}
+    act = ev.get("action") or {}
+    val = act.get("value")
+    chat_id = ctx.get("open_chat_id") or ctx.get("chat_id")
+    if not chat_id:
+        chat_id = ev.get("open_chat_id") or ev.get("chat_id")
+    op = ev.get("operator") or {}
+    sender_id = op.get("open_id")
+    if not sender_id:
         sender_id = (
             ev.get("open_id")
             or ev.get("user_id")
-            or op.get("open_id")
             or op.get("user_id")
         )
-        act = ev.get("action") or {}
-        val = act.get("value")
-        return chat_id, sender_id, val, eid
+    return chat_id, sender_id, val
 
-    return None, None, None, eid
+
+def _lark_event_body_looks_like_card_interaction(ev):
+    # type: (object) -> bool
+    """When ``header.event_type`` is missing or wrong, still recognize card callbacks by shape."""
+    if not isinstance(ev, dict):
+        return False
+    act = ev.get("action")
+    if not isinstance(act, dict):
+        return False
+    if ev.get("message"):
+        return False
+    if act.get("tag") == "button":
+        return True
+    return bool(ev.get("operator") or ev.get("context"))
+
+
+def _lark_resolve_card_action(data):
+    # type: (dict) -> Optional[tuple]
+    """
+    Returns ``(chat_id, sender_id, value, event_id)`` for card button callbacks, or ``None``.
+    Matches by ``header.event_type`` **or** schema-2.0 payload shape (operator + action + context).
+    """
+    if not isinstance(data, dict):
+        return None
+    hdr = data.get("header") if isinstance(data.get("header"), dict) else {}
+    et = (hdr.get("event_type") or "").strip()
+    eid = hdr.get("event_id")
+    ev = data.get("event") if isinstance(data.get("event"), dict) else {}
+
+    named = et in ("card.action.trigger", "card.action.trigger_v1")
+    heuristic = et != "im.message.receive_v1" and (
+        (
+            _lark_is_schema_v2(data)
+            and _lark_event_body_looks_like_card_interaction(ev)
+        )
+        or (
+            isinstance(ev.get("action"), dict)
+            and ev.get("action", {}).get("tag") == "button"
+            and (ev.get("operator") or ev.get("context"))
+        )
+    )
+    if not (named or heuristic):
+        return None
+    if heuristic and not named:
+        print(
+            "[lark] card.action matched by payload shape (event.operator/context + event.action); "
+            f"header.event_type was {et!r}",
+            flush=True,
+        )
+    chat_id, sender_id, val = _lark_extract_card_event_fields(ev)
+    return (chat_id, sender_id, val, eid)
 
 
 @app.route("/webhook/event", methods=["POST"])
 def lark_webhook():
-    raw_in = request.get_json(silent=True)
+    raw_in = _lark_safe_parse_json_body(request)
     if raw_in is None:
         return jsonify({"error": "invalid json"}), 400
     data = _feishu_maybe_decrypt_webhook_payload(raw_in)
@@ -1239,17 +1288,23 @@ def lark_webhook():
         )
         return jsonify({"error": "Invalid token"}), 403
 
-    hdr_et = (data.get("header") or {}).get("event_type") if isinstance(data.get("header"), dict) else None
+    hdr_et = (
+        ((data.get("header") or {}).get("event_type") or "").strip()
+        if isinstance(data.get("header"), dict)
+        else ""
+    )
 
     # ``card.action.trigger``: MUST respond within **3s** with HTTP 200 and body ``{}`` or ``toast``/``card``.
-    # Run Jenkins handler in a **background thread** so Lark never times out (otherwise "Something went wrong").
-    if hdr_et in ("card.action.trigger", "card.action.trigger_v1"):
-        chat_id_ca, sender_id_ca, val_ca, eid_ca = _lark_parse_card_action_fields(data)
+    # Never return ``{"success": true}`` here — Feishu treats that as an invalid card callback and shows
+    # "Something went wrong … code: undefined". Also match by payload shape if ``event_type`` is missing.
+    card_resolved = _lark_resolve_card_action(data)
+    if card_resolved is not None:
+        chat_id_ca, sender_id_ca, val_ca, eid_ca = card_resolved
         if sender_id_ca and sender_id_ca == BOT_OPEN_ID:
             return _lark_http_empty_json_ok()
         with processed_lock:
             if eid_ca and eid_ca in processed_messages:
-                print(f"⏭️ Duplicate {hdr_et} {eid_ca} ignored", flush=True)
+                print(f"⏭️ Duplicate card callback {eid_ca} ignored ({hdr_et!r})", flush=True)
                 return _lark_http_empty_json_ok()
             if eid_ca:
                 processed_messages.add(eid_ca)
