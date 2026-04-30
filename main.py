@@ -1171,19 +1171,14 @@ def _lark_extract_verification_token(data):
 
 def _lark_http_empty_json_ok():
     # type: () -> Response
-    """Feishu card callbacks may use bare ``{}`` (see handle-card-callbacks doc)."""
-    return Response(
-        "{}",
-        status=200,
-        mimetype="application/json; charset=utf-8",
-    )
+    """Feishu card callbacks: HTTP 200 + JSON ``{}`` (see handle-card-callbacks doc)."""
+    return jsonify({})
 
 
 def _lark_http_card_callback_ok():
     # type: () -> Response
     """
-    Official docs allow bare ``{}``. Default to that; some mobile builds choke on ``toast`` shape.
-    Set ``LARK_CARD_REPLY_TOAST=1`` to respond with a minimal success toast instead.
+    Prefer Flask ``jsonify({})`` (matches official samples). Optional toast via ``LARK_CARD_REPLY_TOAST=1``.
     """
     if (os.getenv("LARK_CARD_REPLY_TOAST") or "").strip() == "1":
         body = json.dumps(
@@ -1198,7 +1193,7 @@ def _lark_http_card_callback_ok():
             separators=(",", ":"),
         )
         return Response(body, status=200, mimetype="application/json; charset=utf-8")
-    return _lark_http_empty_json_ok()
+    return jsonify({})
 
 
 def _lark_safe_parse_json_body(req):
@@ -1336,6 +1331,16 @@ def lark_webhook():
     # Never return ``{"success": true}`` here — Feishu treats that as an invalid card callback and shows
     # "Something went wrong … code: undefined". Also match by payload shape if ``event_type`` is missing.
     card_resolved = _lark_resolve_card_action(data)
+    # Any ``card.action*`` must ACK — if resolver misses a new payload shape, still return ``{}``.
+    if hdr_et.startswith("card.action") and card_resolved is None:
+        print(
+            "[lark] card.callback event_type=%r but resolver returned None — still returning 200 {}. "
+            "Payload keys: %r"
+            % (hdr_et, list(data.keys()) if isinstance(data, dict) else type(data)),
+            flush=True,
+        )
+        return _lark_http_card_callback_ok()
+
     if card_resolved is not None:
         chat_id_ca, sender_id_ca, val_ca, eid_ca = card_resolved
         if sender_id_ca and sender_id_ca == BOT_OPEN_ID:
@@ -2214,6 +2219,25 @@ def lark_webhook():
         print(f"⚠️ No command matched and no reply generated for chat {chat_id}")
 
     return jsonify({"success": True})
+
+def _register_lark_webhook_duplicate_paths():
+    """
+    If the developer console still points at a legacy path (e.g. old 「消息卡片请求网址」),
+    set ``LARK_WEBHOOK_EXTRA_PATHS=/callback,/open/event`` — comma-separated POST paths on this app.
+    Each path will invoke the same handler as ``POST /webhook/event``.
+    """
+    extra = (os.getenv("LARK_WEBHOOK_EXTRA_PATHS") or "").strip()
+    if not extra:
+        return
+    for i, raw in enumerate(extra.split(",")):
+        path = raw.strip()
+        if not path or path.rstrip("/") == "/webhook/event":
+            continue
+        app.add_url_rule(path, "lark_webhook_extra_%d" % i, lark_webhook, methods=["POST"])
+        print("[lark] Extra webhook POST route registered: %s" % path, flush=True)
+
+
+_register_lark_webhook_duplicate_paths()
 
 scheduler.start()
 atexit.register(lambda: scheduler.shutdown())
