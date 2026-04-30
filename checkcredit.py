@@ -1469,6 +1469,18 @@ def _wrap_log_line(s: str, width: int = 118) -> list[str]:
     return out
 
 
+def _strip_ctx_line_for_screenshot(line: str) -> str:
+    """
+    Parser prefixes lines with ``>> `` (error) or three spaces (context); reference log UI has none.
+    """
+    s = (line or "").replace("\r", "")
+    if s.startswith(">> "):
+        return s[3:]
+    if s.startswith("   "):
+        return s[3:]
+    return s
+
+
 def _compact_error_ctx_lines(lines: list[str], *, max_lines: int = 9, max_chars: int = 220) -> list[str]:
     """
     Keep screenshot payload small/stable: exact line count window (default 9),
@@ -1477,31 +1489,39 @@ def _compact_error_ctx_lines(lines: list[str], *, max_lines: int = 9, max_chars:
     out: list[str] = []
     src = lines[:] if lines else [">> (empty)"]
     for ln in src[: max(1, int(max_lines))]:
-        t = (ln or "").replace("\r", "").replace("\t", "    ")
+        t = _strip_ctx_line_for_screenshot(ln)
+        t = t.replace("\t", "    ")
         if len(t) > max_chars:
             t = t[: max_chars - 1] + "…"
         out.append(t)
     return out
 
 
+# Log viewer style (user reference): light gray canvas, black monospace, no chrome.
+_ERROR_CTX_BG = (244, 244, 244)  # #F4F4F4
+_ERROR_CTX_FG = (0, 0, 0)
+
+
 def _load_mono_font_for_error_png():
-    """Prefer a system monospace TTF so long / unicode log lines render reliably."""
+    """Monospace stack aligned with macOS log / terminal look (SF Mono / Menlo / Courier)."""
     try:
         from PIL import ImageFont
     except Exception:
         return None
-    size = 13
+    size = 12
     candidates = [
-        "/System/Library/Fonts/Supplemental/Courier New.ttf",
-        "/System/Library/Fonts/Supplemental/Menlo.ttc",
-        "/Library/Fonts/Menlo.ttc",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+        ("/System/Library/Fonts/Supplemental/SFMono-Regular.otf", False),
+        ("/System/Library/Fonts/SFNSMono.ttf", False),
+        ("/System/Library/Fonts/Supplemental/Menlo.ttc", True),
+        ("/Library/Fonts/Menlo.ttc", True),
+        ("/System/Library/Fonts/Supplemental/Courier New.ttf", False),
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", False),
+        ("/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf", False),
     ]
-    for p in candidates:
+    for p, is_ttc in candidates:
         if os.path.isfile(p):
             try:
-                if p.lower().endswith(".ttc"):
+                if is_ttc or p.lower().endswith(".ttc"):
                     return ImageFont.truetype(p, size, index=0)
                 return ImageFont.truetype(p, size)
             except Exception:
@@ -1522,9 +1542,10 @@ def _measure_text(draw, text: str, font) -> tuple[int, int]:
 
 def _render_text_lines_png(lines: list[str], *, title: str, output_path: str) -> bool:
     """
-    Render text lines to a PNG image.
-    Returns True on success, False on rendering/import failures.
+    Render log-style PNG: #F4F4F4 background, black monospace (matches LogNavigator-style crop).
+    ``title`` is ignored for pixels (reference has no header); kept for API compatibility.
     """
+    del title  # design: log body only, same as user reference screenshot
     try:
         from PIL import Image, ImageDraw, ImageFont
     except Exception as e:
@@ -1534,34 +1555,39 @@ def _render_text_lines_png(lines: list[str], *, title: str, output_path: str) ->
     if font is None:
         print("[checkcredit] error-context PNG: could not load any font", flush=True)
         return False
+    # Wide wrap so long INFO|...|extra: lines behave like a log viewer (continuations from left).
+    wrap_ch = 168
     body_lines: list[str] = []
     for raw_ln in lines[:] if lines else ["(empty)"]:
-        for part in _wrap_log_line(raw_ln, width=118):
+        for part in _wrap_log_line(raw_ln, width=wrap_ch):
             body_lines.append(part)
-    title_safe = (title or "").encode("utf-8", "replace").decode("utf-8")
-    probe = Image.new("RGB", (10, 10), "white")
+    all_lines = body_lines
+    probe = Image.new("RGB", (10, 10), _ERROR_CTX_BG)
     draw = ImageDraw.Draw(probe)
-    wrapped_title = _wrap_log_line(title_safe, width=118)
-    all_lines = wrapped_title + [""] + body_lines
     max_w = 0
-    line_h = 16
+    line_h = 14
     for ln in all_lines:
         w, h = _measure_text(draw, ln, font)
         max_w = max(max_w, w)
-        line_h = max(line_h, h + 5)
-    pad = 18
-    width = min(2200, max(720, max_w + pad * 2))
-    height = max(160, line_h * len(all_lines) + pad * 2)
+        line_h = max(line_h, h + 3)
+    pad_x, pad_y = 14, 12
+    width = min(2400, max(640, max_w + pad_x * 2))
+    height = max(120, line_h * len(all_lines) + pad_y * 2)
     try:
-        img = Image.new("RGB", (width, height), "white")
+        img = Image.new("RGB", (width, height), _ERROR_CTX_BG)
         d = ImageDraw.Draw(img)
-        y = pad
+        y = pad_y
         for ln in all_lines:
             safe = (ln or "").encode("utf-8", "replace").decode("utf-8")
             try:
-                d.text((pad, y), safe, fill="black", font=font)
+                d.text((pad_x, y), safe, fill=_ERROR_CTX_FG, font=font)
             except Exception:
-                d.text((pad, y), safe.encode("ascii", "replace").decode("ascii"), fill="black", font=font)
+                d.text(
+                    (pad_x, y),
+                    safe.encode("ascii", "replace").decode("ascii"),
+                    fill=_ERROR_CTX_FG,
+                    font=font,
+                )
             y += line_h
         img.save(output_path, format="PNG")
     except Exception as e:
@@ -1573,31 +1599,41 @@ def _render_text_lines_png(lines: list[str], *, title: str, output_path: str) ->
 def _render_error_context_playwright(lines: list[str], *, title: str, output_path: str, timeout_ms: int = 45_000) -> bool:
     """
     Fallback when Pillow is missing or bitmap render fails: headless Chromium → PNG.
+    Pixel style matches user reference: #F4F4F4, black monospace, log body only.
     """
+    del title
     try:
         from playwright.sync_api import sync_playwright
     except Exception as e:
         print(f"[checkcredit] error-context Playwright import failed: {e!r}", flush=True)
         return False
-    safe_title = html.escape(title or "")
     body = "\n".join(html.escape(ln or "") for ln in (lines or ["(empty)"]))
     doc = f"""<!DOCTYPE html><html><head><meta charset="utf-8"/>
 <style>
-body {{ margin:0; background:#fff; color:#111; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }}
-.wrap {{ padding: 12px 14px; max-width: 900px; }}
-.t {{ font-weight: 600; margin-bottom: 8px; border-bottom: 1px solid #ccc; padding-bottom: 6px; }}
-pre {{ margin:0; white-space: pre-wrap; word-break: break-word; line-height: 1.35; }}
-</style></head><body><div class="wrap"><div class="t">{safe_title}</div><pre>{body}</pre></div></body></html>"""
+html, body {{ margin:0; padding:0; background:#F4F4F4; }}
+pre.wrap {{
+  margin:0;
+  padding:12px 14px 14px 14px;
+  background:#F4F4F4;
+  color:#000000;
+  font-family: "SF Mono", "SFMono-Regular", ui-monospace, Menlo, Monaco, Consolas, "Courier New", monospace;
+  font-size:12px;
+  line-height:1.25;
+  white-space:pre-wrap;
+  word-break:break-word;
+  border:0;
+}}
+</style></head><body><pre class="wrap">{body}</pre></body></html>"""
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             try:
-                page = browser.new_page(viewport={"width": 960, "height": 1400})
+                page = browser.new_page(viewport={"width": 1100, "height": 1600})
                 page.set_content(doc, wait_until="domcontentloaded", timeout=timeout_ms)
-                page.locator(".wrap").wait_for(state="visible", timeout=10_000)
+                page.locator("pre.wrap").wait_for(state="visible", timeout=10_000)
                 time.sleep(0.2)
                 try:
-                    page.locator(".wrap").screenshot(path=output_path, type="png")
+                    page.locator("pre.wrap").screenshot(path=output_path, type="png")
                 except Exception:
                     page.screenshot(path=output_path, full_page=True)
             finally:
@@ -1678,7 +1714,7 @@ def build_error_context_screenshots(
         compact_ctx = _compact_error_ctx_lines(
             ctx,
             max_lines=lines_before_after * 2 + 1,
-            max_chars=220,
+            max_chars=520,
         )
         title = f"User {uid} error #{idx} ({lines_before_after}+1+{lines_before_after} lines)"
         path = os.path.join(
@@ -1694,8 +1730,8 @@ def build_error_context_screenshots(
                 flush=True,
             )
             continue
-        final_path = _prefer_smaller_jpeg_if_pillow(path)
-        out.append({"path": final_path, "title": title})
+        # Keep PNG only — JPEG changes #F4F4F4 and does not match reference log viewer.
+        out.append({"path": path, "title": title})
     return out
 
 
