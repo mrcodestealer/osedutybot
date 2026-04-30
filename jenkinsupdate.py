@@ -88,7 +88,9 @@ mouse path — different event path than ``click()``. Optional **quiet** waits:
 from __future__ import annotations
 
 import argparse
+import contextvars
 import difflib
+import functools
 import json
 import os
 import re
@@ -4154,9 +4156,74 @@ def wait_review(seconds: float, *, build_was_clicked: bool = False) -> None:
 _fpms_lark_sessions_lock = threading.Lock()
 _fpms_lark_sessions: dict[str, dict] = {}
 
+# Set by :func:`handle_lark_jenkins_update_message` so session rows can be keyed by **union_id**
+# alias (card callbacks sometimes send ``operator.union_id`` without ``open_id``).
+_fpms_lark_sender_union_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "fpms_lark_sender_union_id", default=None
+)
+
 
 def _fpms_lark_session_key(chat_id: str, sender_id: str) -> str:
     return f"{chat_id}:{sender_id}"
+
+
+def _fpms_lark_sessions_put(
+    chat_id: str,
+    sender_open_id: str,
+    sess: dict,
+    sender_union_id: str | None = None,
+) -> None:
+    """Store session under ``chat_id:open_id`` and optionally ``chat_id:union_id`` (same dict)."""
+    uid = (sender_union_id if sender_union_id is not None else _fpms_lark_sender_union_id.get()) or None
+    uid = (uid or "").strip() or None
+    ou = (sender_open_id or "").strip()
+    if ou:
+        sess["_lark_open_id"] = ou
+    if uid:
+        sess["_lark_union_id"] = uid
+    if not ou:
+        with _fpms_lark_sessions_lock:
+            _fpms_lark_sessions[_fpms_lark_session_key(chat_id, uid or "")] = sess
+        return
+    key_ou = _fpms_lark_session_key(chat_id, ou)
+    with _fpms_lark_sessions_lock:
+        _fpms_lark_sessions[key_ou] = sess
+        if uid and uid != ou:
+            _fpms_lark_sessions[_fpms_lark_session_key(chat_id, uid)] = sess
+
+
+def _fpms_lark_sessions_put_chat_key(session_key: str, sess: dict) -> None:
+    """Parse ``chat_id:sender_open_id`` from ``session_key`` (see :func:`_fpms_lark_session_key`)."""
+    if ":" not in session_key:
+        with _fpms_lark_sessions_lock:
+            _fpms_lark_sessions[session_key] = sess
+        return
+    chat_id, open_id = session_key.split(":", 1)
+    _fpms_lark_sessions_put(chat_id, open_id, sess)
+
+
+def resolve_lark_jenkins_card_sender(
+    chat_id: str,
+    extracted_sender_id: str,
+    operator: object,
+) -> str:
+    """
+    Pick ``open_id`` or ``union_id`` so the ID matches an existing ``/jenkinsupdate`` session row.
+    Feishu sometimes omits ``operator.open_id`` but sends ``union_id``, while IM events keyed the
+    session with ``open_id``.
+    """
+    op = operator if isinstance(operator, dict) else {}
+    cand = [
+        (extracted_sender_id or "").strip(),
+        (op.get("open_id") or "").strip(),
+        (op.get("union_id") or "").strip(),
+    ]
+    cand = [c for c in cand if c]
+    with _fpms_lark_sessions_lock:
+        for c in cand:
+            if _fpms_lark_session_key(chat_id, c) in _fpms_lark_sessions:
+                return c
+    return cand[0] if cand else ""
 
 
 def jenkins_update_has_active_lark_session(chat_id: str, sender_id: str) -> bool:
@@ -4166,12 +4233,27 @@ def jenkins_update_has_active_lark_session(chat_id: str, sender_id: str) -> bool
 
 def _fpms_lark_clear_session(chat_id: str, sender_id: str) -> None:
     with _fpms_lark_sessions_lock:
-        _fpms_lark_sessions.pop(_fpms_lark_session_key(chat_id, sender_id), None)
+        k = _fpms_lark_session_key(chat_id, sender_id)
+        sess = _fpms_lark_sessions.pop(k, None)
+        if sess is None or not isinstance(sess, dict):
+            return
+        ou = sess.get("_lark_open_id")
+        uid = sess.get("_lark_union_id")
+        for sid in (ou, uid):
+            if not sid:
+                continue
+            kk = _fpms_lark_session_key(chat_id, str(sid))
+            if kk != k and _fpms_lark_sessions.get(kk) is sess:
+                _fpms_lark_sessions.pop(kk, None)
 
 
 def _fpms_lark_clear_session_key(session_key: str) -> None:
-    with _fpms_lark_sessions_lock:
-        _fpms_lark_sessions.pop(session_key, None)
+    if ":" not in session_key:
+        with _fpms_lark_sessions_lock:
+            _fpms_lark_sessions.pop(session_key, None)
+        return
+    chat_id, sender_id = session_key.split(":", 1)
+    _fpms_lark_clear_session(chat_id, sender_id)
 
 
 def _jenkins_update_primary_url(raw: str) -> str:
@@ -5283,13 +5365,15 @@ def _fpms_lark_begin_jenkins_run(
         cfg = _fpms_bot_build_config_block(data, resolved)
     ev = threading.Event()
     ju = (jenkins_build_url or BUILD_URL).strip()
-    with _fpms_lark_sessions_lock:
-        _fpms_lark_sessions[session_key] = {
+    _fpms_lark_sessions_put_chat_key(
+        session_key,
+        {
             "state": "jenkins_wait_build",
             "build_gate_event": ev,
             "approve_build": None,
             "lark_cancel": False,
-        }
+        },
+    )
     preview = _fpms_format_config_preview(data, resolved)
     send(
         chat_id,
@@ -5785,6 +5869,22 @@ def _fpms_lark_dispatch_bi_api_update_parameter_flow(
     return True
 
 
+def _fpms_lark_with_sender_union_scope(fn):
+    """Bind ``lark_sender_union_id`` into :data:`_fpms_lark_sender_union_id` for session aliasing."""
+
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        uid = kwargs.get("lark_sender_union_id")
+        tok = _fpms_lark_sender_union_id.set(uid)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _fpms_lark_sender_union_id.reset(tok)
+
+    return wrapped
+
+
+@_fpms_lark_with_sender_union_scope
 def handle_lark_jenkins_update_message(
     chat_id: str,
     sender_id: str,
@@ -5793,6 +5893,7 @@ def handle_lark_jenkins_update_message(
     send,
     *,
     allow_start: bool,
+    lark_sender_union_id: str | None = None,
 ) -> bool:
     """
     Lark ``/jenkinsupdate``: match a registered Jenkins job from keywords (or ask 1–N),
@@ -5800,6 +5901,9 @@ def handle_lark_jenkins_update_message(
 
     ``allow_start`` — in **group** chats, only **True** when the bot was @mentioned (first message).
     **cancel** works anytime.
+
+    ``lark_sender_union_id`` — optional **union_id** from ``im.message.receive_v1`` so card taps can
+    resolve sessions when Feishu sends ``union_id`` but not ``open_id`` on ``card.action.trigger``.
 
     Returns **True** if this message was consumed (caller should stop processing).
     """
@@ -6071,12 +6175,15 @@ def handle_lark_jenkins_update_message(
     prof0 = _jenkins_update_job_automation_profile(ties[0][3])
     need_menu = (len(ties) > 1) or (len(ties) == 1 and prof0 in ("fnt_rc", "sms_uat"))
     if need_menu:
-        with _fpms_lark_sessions_lock:
-            _fpms_lark_sessions[key] = {
+        _fpms_lark_sessions_put(
+            chat_id,
+            sender_id,
+            {
                 "state": "choose_job",
                 "job_candidates": ties,
                 "pending_body": body,
-            }
+            },
+        )
         card_js = _fpms_lark_job_choice_card_json(ties)
         try:
             send(chat_id, card_js, msg_type="interactive")

@@ -1218,6 +1218,62 @@ def _lark_safe_parse_json_body(req):
         return None
 
 
+def _lark_coerce_event_dict(data):
+    # type: (object) -> object
+    """Some gateways deliver ``event`` as a JSON string — normalize to a dict."""
+    if not isinstance(data, dict):
+        return data
+    ev = data.get("event")
+    if isinstance(ev, str):
+        try:
+            parsed = json.loads(ev)
+            data["event"] = parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            data["event"] = {}
+    elif ev is None and _lark_header_event_type(data).startswith("card.action"):
+        data["event"] = {}
+    return data
+
+
+def _lark_normalize_card_callback_envelope(data):
+    # type: (object) -> object
+    """
+    Merge flattened ``card.action.trigger`` fields into ``event`` when proxies strip nesting.
+    Feishu normally nests under ``event``; without this, resolver yields empty chat/sender.
+    """
+    if not isinstance(data, dict):
+        return data
+    et = _lark_header_event_type(data)
+    if not et.startswith("card.action"):
+        return data
+    ev = data.get("event")
+    if not isinstance(ev, dict):
+        ev = {}
+    for k in (
+        "action",
+        "operator",
+        "open_chat_id",
+        "chat_id",
+        "context",
+        "host",
+        "delivery_type",
+        "token",
+    ):
+        if k in data and data[k] is not None and k not in ev:
+            ev[k] = data[k]
+    top_uid = data.get("open_id") or data.get("user_id")
+    op = ev.get("operator")
+    if top_uid:
+        if not isinstance(op, dict):
+            ev["operator"] = {"open_id": top_uid}
+        elif not op.get("open_id") and not op.get("union_id"):
+            op = dict(op)
+            op["open_id"] = top_uid
+            ev["operator"] = op
+    data["event"] = ev
+    return data
+
+
 def _lark_extract_card_event_fields(ev):
     # type: (dict) -> tuple
     """
@@ -1233,6 +1289,8 @@ def _lark_extract_card_event_fields(ev):
         chat_id = ctx.get("open_chat_id") or ctx.get("chat_id")
     op = ev.get("operator") or {}
     sender_id = op.get("open_id")
+    if not sender_id:
+        sender_id = op.get("union_id")
     if not sender_id:
         sender_id = (
             ev.get("open_id")
@@ -1366,6 +1424,9 @@ def lark_webhook():
     if raw_in is None:
         return jsonify({"error": "invalid json"}), 400
     data = _feishu_maybe_decrypt_webhook_payload(raw_in)
+    data = _lark_coerce_event_dict(data)
+    if isinstance(data, dict):
+        data = _lark_normalize_card_callback_envelope(data)
 
     if isinstance(raw_in, dict) and raw_in.get("encrypt") is not None and data is raw_in:
         print(
@@ -1416,15 +1477,27 @@ def lark_webhook():
                 if eid_ca:
                     processed_messages.add(eid_ca)
             ju = _get_jenkinsupdate()
-            if not ju or not chat_id_ca or not sender_id_ca:
+            if not ju or not chat_id_ca:
                 print(
-                    f"⚠️ card action skipped: ju={bool(ju)} chat_id={chat_id_ca!r} sender={sender_id_ca!r} "
+                    f"⚠️ card action skipped: ju={bool(ju)} chat_id={chat_id_ca!r} "
                     f"event_type={hdr_et!r}",
                     flush=True,
                 )
                 return
             try:
-                ju.handle_lark_jenkins_card_action(chat_id_ca, sender_id_ca, val_ca, send_message)
+                ev_ca = data.get("event") if isinstance(data.get("event"), dict) else {}
+                op_ca = ev_ca.get("operator") if isinstance(ev_ca.get("operator"), dict) else {}
+                sender_use = ju.resolve_lark_jenkins_card_sender(
+                    chat_id_ca, sender_id_ca or "", op_ca
+                )
+                if not sender_use:
+                    print(
+                        f"⚠️ card action skipped: could not resolve sender "
+                        f"chat_id={chat_id_ca!r} raw_sender={sender_id_ca!r} event_type={hdr_et!r}",
+                        flush=True,
+                    )
+                    return
+                ju.handle_lark_jenkins_card_action(chat_id_ca, sender_use, val_ca, send_message)
             except Exception as ex:
                 print(f"❌ handle_lark_jenkins_card_action: {ex!r}", flush=True)
                 try:
@@ -1444,10 +1517,17 @@ def lark_webhook():
         return _lark_http_card_callback_ok()
 
     sender_id = None
+    sender_union_id = None
     if _lark_is_schema_v2(data):
         event = data.get("event", {})
         sender = event.get("sender", {})
-        sender_id = sender.get("sender_id", {}).get("open_id")
+        sid_obj = sender.get("sender_id") or {}
+        if isinstance(sid_obj, dict):
+            sender_id = sid_obj.get("open_id")
+            sender_union_id = sid_obj.get("union_id")
+        else:
+            sender_id = None
+            sender_union_id = None
     else:
         event = data.get("event", {})
         sender_id = event.get("open_id") or event.get("user_id")
@@ -1618,6 +1698,7 @@ def lark_webhook():
         original_text,
         send_message,
         allow_start=bot_mentioned,
+        lark_sender_union_id=sender_union_id,
     ):
         return jsonify({"success": True})
 
