@@ -2543,6 +2543,185 @@ def screenshot_egm_status_window(
     return out_path
 
 
+def get_egm_member_user_id(
+    *,
+    machine_display: str | None,
+    machine_substr: str | None = None,
+    timeout_ms: int = 120_000,
+    headed: bool | None = None,
+) -> str | None:
+    """
+    Open EGM Status small window and read current ``Member`` user id.
+    Returns user-id digits (e.g. ``123881283``) or ``None`` if empty/unset.
+    """
+    md = (machine_display or "").strip()
+    if not md:
+        raise RuntimeError("EGM member check requires machine_display.")
+    base, user, pw = _np_resolve_backend(md)
+    tag = _np_log_backend_tag(md)
+    if not user or not pw:
+        raise RuntimeError(f"Missing credentials for {tag} EGM backend.")
+    tok = _np_egm_machine_search_token(md, machine_substr)
+    if not tok:
+        raise RuntimeError("Could not derive machine number token for EGM Search.")
+
+    login_url = f"{base}/login?redirect=%2Fegm%2FegmStatusList"
+    egm_url = f"{base}/egm/egmStatusList"
+    from playwright.sync_api import sync_playwright
+
+    if headed is True:
+        headless = False
+    elif headed is False:
+        headless = True
+    else:
+        headless = _np_backend_playwright_headless()
+
+    def _extract_member_id(text: str) -> str | None:
+        s = (text or "").strip()
+        if not s:
+            return None
+        m = re.search(r"Member:\s*.*?\((\d{5,})\)", s, re.I | re.S)
+        if m:
+            return m.group(1)
+        m = re.search(r"Member:\s*(\d{5,})", s, re.I)
+        if m:
+            return m.group(1)
+        nums = re.findall(r"\b(\d{5,})\b", s)
+        if nums:
+            return nums[0]
+        return None
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=headless)
+        try:
+            context = browser.new_context(
+                viewport={"width": 1600, "height": 900},
+                ignore_https_errors=True,
+                device_scale_factor=2,
+            )
+            page = context.new_page()
+            page.set_default_timeout(timeout_ms)
+            page.goto(login_url, wait_until="domcontentloaded")
+            page.wait_for_timeout(900)
+
+            pwd_box = page.locator('input[type="password"]').first
+            pwd_box.wait_for(state="visible", timeout=min(30_000, timeout_ms))
+            form = pwd_box.locator("xpath=ancestor::form[1]")
+            if form.count():
+                tin = form.locator(
+                    'input[type="text"], input:not([type]), input[type="tel"], input[type="email"]'
+                ).first
+                tin.fill(user)
+            else:
+                page.locator('input[type="text"]').first.fill(user)
+            pwd_box.fill(pw)
+            lb = page.get_by_role("button", name=re.compile(r"login|sign in|log in", re.I))
+            if lb.count():
+                lb.first.click()
+            else:
+                page.locator('button[type="submit"], button.el-button--primary').first.click()
+
+            page.wait_for_timeout(1800)
+            if "/egm/egmStatusList" not in (page.url or ""):
+                page.goto(egm_url, wait_until="domcontentloaded")
+
+            page.wait_for_selector(".app-container, .filter-container", timeout=timeout_ms)
+            search_in = page.locator(".el-form-item").filter(has_text=re.compile(r"Search", re.I)).locator(
+                "input.el-input__inner"
+            ).first
+            if search_in.count() == 0:
+                cands = page.locator(".filter-container input.el-input__inner")
+                if cands.count() == 0:
+                    raise RuntimeError("Could not find EGM Search input.")
+                search_in = cands.last
+            search_in.click()
+            search_in.fill("")
+            search_in.fill(tok)
+            page.keyboard.press("Enter")
+            try:
+                view_btn = page.locator(".filter-container button.el-button--small").filter(
+                    has_text=re.compile(r"View|查看", re.I)
+                ).first
+                if view_btn.count():
+                    view_btn.click(timeout=min(30_000, timeout_ms))
+            except Exception:
+                pass
+            page.wait_for_timeout(1000)
+            try:
+                page.wait_for_function(
+                    "() => !Array.from(document.querySelectorAll('.el-loading-mask')).some(x => x && x.offsetParent !== null)",
+                    timeout=min(timeout_ms, 30_000),
+                )
+            except Exception:
+                pass
+
+            tbody = page.locator(".el-table__body tbody").first
+            tbody.wait_for(state="visible", timeout=timeout_ms)
+            rows = page.locator(".el-table__body tr.el-table__row")
+            n = rows.count()
+            if n <= 0:
+                raise RuntimeError(f"No EGM rows after Search `{tok}`.")
+
+            target = None
+            tok_re = re.compile(re.escape(tok), re.I)
+            try:
+                cands = rows.filter(has_text=tok_re)
+                if cands.count() > 0:
+                    target = cands.first
+            except Exception:
+                target = None
+            if target is None:
+                tok_cf = tok.casefold()
+                for i in range(n):
+                    row = rows.nth(i)
+                    try:
+                        row_txt = (row.inner_text(timeout=min(4_000, timeout_ms)) or "").casefold()
+                    except Exception:
+                        continue
+                    if tok_cf in row_txt:
+                        target = row
+                        break
+            if target is None:
+                target = rows.nth(0)
+
+            op_cell = target.locator("td").last
+            op_btns = op_cell.locator("button.el-button--small")
+            if op_btns.count() < 3:
+                raise RuntimeError("Operation column has fewer than 3 buttons; aborting for safety.")
+            b1 = (op_btns.nth(0).inner_text() or "").strip()
+            b2 = (op_btns.nth(1).inner_text() or "").strip()
+            if re.search(r"Maintenance", b1, re.I) is None or re.search(r"Kick\s*Out", b2, re.I) is None:
+                raise RuntimeError("Operation button order changed; refusing unsafe click.")
+            cog_btn = op_btns.nth(2)
+            cog_icon = cog_btn.locator("i.fa.fa-cog")
+            if cog_icon.count() == 0:
+                raise RuntimeError("3rd operation button is not cog icon; aborting.")
+            bt = (cog_btn.inner_text() or "").strip()
+            if re.search(r"Maintenance|Kick\s*Out", bt, re.I):
+                raise RuntimeError("Unsafe operation button resolved; aborting.")
+            cog_btn.click(timeout=min(60_000, timeout_ms))
+
+            dlg = page.locator(".el-dialog.add-floor, div[role='dialog'].add-floor").last
+            dlg.wait_for(state="visible", timeout=timeout_ms)
+            page.wait_for_timeout(700)
+
+            # Prefer the Member row text; fallback to whole dialog text.
+            member_row = dlg.locator(".el-row").filter(
+                has=dlg.locator("span.operation-label", has_text=re.compile(r"^Member:\s*$", re.I))
+            ).first
+            txt = ""
+            if member_row.count():
+                try:
+                    txt = member_row.inner_text(timeout=min(8_000, timeout_ms)) or ""
+                except Exception:
+                    txt = ""
+            if not txt:
+                txt = dlg.inner_text(timeout=min(8_000, timeout_ms)) or ""
+            return _extract_member_id(txt)
+        finally:
+            browser.close()
+
+
 def screenshot_np_recharge_detail(
     player_id: str,
     date_iso: str,

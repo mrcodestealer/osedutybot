@@ -514,6 +514,28 @@ def run_np_third_http_by_choice(chat_id: str, choice_idx: int) -> None:
         except ValueError:
             exp = None
     md = (pend.get("machine_display") or "").strip() or None
+    # If EGM small window currently shows the same member as selected player,
+    # short-circuit and prompt that the player has not left machine yet.
+    if md:
+        try:
+            import checkcredit
+
+            get_member = getattr(checkcredit, "get_egm_member_user_id", None)
+            if callable(get_member):
+                cur_member = str(
+                    get_member(
+                        machine_display=md,
+                        machine_substr=ms,
+                        timeout_ms=120_000,
+                        headed=False,
+                    )
+                    or ""
+                ).strip()
+                if cur_member and cur_member == uid:
+                    send_message(chat_id, "Player haven't out the machine")
+                    return
+        except Exception as e:
+            print(f"[npthirdhttp] EGM member pre-check skipped: {e!r}", flush=True)
     _np_run_screenshot_worker(
         chat_id,
         uid,
