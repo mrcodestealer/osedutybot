@@ -699,10 +699,10 @@ def build_add_reminder_form_card() -> dict:
                     "placeholder": {"tag": "plain_text", "content": "Pick end date"},
                 },
                 {
-                    "tag": "picker_time",
+                    "tag": "input",
                     "name": "time",
                     "label": {"tag": "plain_text", "content": "Time"},
-                    "placeholder": {"tag": "plain_text", "content": "Pick time"},
+                    "placeholder": {"tag": "plain_text", "content": "6:30PM"},
                 },
                 {
                     "tag": "textarea",
