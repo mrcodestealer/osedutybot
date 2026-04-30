@@ -1652,6 +1652,17 @@ def lark_webhook():
         return jsonify({"error": "Invalid token"}), 403
 
     hdr_et = _lark_header_event_type(data)
+    # Text messages → ``im.message.receive_v1``; button taps → ``card.action.trigger`` / ``card.action.trigger_v1``.
+    # If you only see the former when testing, the app is not receiving card events (subscribe + publish).
+    print(
+        "[lark] event_type=%r schema=%r top_keys=%r"
+        % (
+            hdr_et,
+            data.get("schema") if isinstance(data, dict) else None,
+            list(data.keys())[:14] if isinstance(data, dict) else [],
+        ),
+        flush=True,
+    )
 
     # ``card.action.trigger``: MUST respond within **3s** with HTTP 200 and body ``{}`` or ``toast``/``card``.
     # Never return ``{"success": true}`` here — Feishu treats that as an invalid card callback and shows
