@@ -952,6 +952,15 @@ def build_np_followup_payload(
             }
         )
 
+    err_only: list[dict[str, Any]] = []
+    seen_err_uid: set[str] = set()
+    for r in top2_err[:2]:
+        uid = str(r.get("user_id") or "").strip()
+        if not uid or uid in seen_err_uid:
+            continue
+        err_only.append(_row_choice(r, "with_error"))
+        seen_err_uid.add(uid)
+
     return {
         "machine_display": machine_display,
         "machine_match_substr": machine_match_substr_from_display(machine_display),
