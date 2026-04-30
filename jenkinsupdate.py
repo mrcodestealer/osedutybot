@@ -94,6 +94,7 @@ import functools
 import json
 import os
 import re
+import secrets
 import sys
 import threading
 import time
@@ -4156,6 +4157,11 @@ def wait_review(seconds: float, *, build_was_clicked: bool = False) -> None:
 _fpms_lark_sessions_lock = threading.Lock()
 _fpms_lark_sessions: dict[str, dict] = {}
 
+# Job-picker interactive cards: bind button taps to the session row even when ``card.action`` ``operator``
+# ids do not match the keys used for ``im.message.receive_v1`` (common in groups / mixed open_id vs union_id).
+_fpms_lark_picker_sid_lock = threading.Lock()
+_fpms_lark_picker_sid_to_session_key: dict[str, str] = {}
+
 # Set by :func:`handle_lark_jenkins_update_message` so session rows can be keyed by **union_id**
 # alias (card callbacks sometimes send ``operator.union_id`` without ``open_id``).
 _fpms_lark_sender_union_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -4165,6 +4171,42 @@ _fpms_lark_sender_union_id: contextvars.ContextVar[str | None] = contextvars.Con
 
 def _fpms_lark_session_key(chat_id: str, sender_id: str) -> str:
     return f"{chat_id}:{sender_id}"
+
+
+def _fpms_lark_unregister_picker_sid_from_sess(sess: dict) -> None:
+    ps = str(sess.get("picker_sid") or "").strip()
+    if not ps:
+        return
+    with _fpms_lark_picker_sid_lock:
+        _fpms_lark_picker_sid_to_session_key.pop(ps, None)
+
+
+def _fpms_lark_register_picker_sid(picker_sid: str, session_key: str) -> None:
+    ps = (picker_sid or "").strip()
+    sk = (session_key or "").strip()
+    if not ps or not sk or ":" not in sk:
+        return
+    with _fpms_lark_picker_sid_lock:
+        _fpms_lark_picker_sid_to_session_key[ps] = sk
+
+
+def resolve_jenkins_job_card_session(chat_id: str, picker_sid: object) -> tuple[str, str] | None:
+    """
+    Map ``picker_sid`` from a job-picker card button to ``(chat_id, sender_id)`` for :data:`_fpms_lark_sessions`.
+
+    ``chat_id`` must match the callback (same chat as the card).
+    """
+    ps = str(picker_sid or "").strip()
+    if not ps:
+        return None
+    with _fpms_lark_picker_sid_lock:
+        sk = _fpms_lark_picker_sid_to_session_key.get(ps)
+    if not sk or ":" not in sk:
+        return None
+    cchat, sender = sk.split(":", 1)
+    if (chat_id or "").strip() != (cchat or "").strip():
+        return None
+    return (cchat, sender)
 
 
 def _fpms_lark_sessions_put(
@@ -4183,10 +4225,16 @@ def _fpms_lark_sessions_put(
         sess["_lark_union_id"] = uid
     if not ou:
         with _fpms_lark_sessions_lock:
+            prev_u = _fpms_lark_sessions.get(_fpms_lark_session_key(chat_id, uid or ""))
+            if isinstance(prev_u, dict):
+                _fpms_lark_unregister_picker_sid_from_sess(prev_u)
             _fpms_lark_sessions[_fpms_lark_session_key(chat_id, uid or "")] = sess
         return
     key_ou = _fpms_lark_session_key(chat_id, ou)
     with _fpms_lark_sessions_lock:
+        prev = _fpms_lark_sessions.get(key_ou)
+        if isinstance(prev, dict):
+            _fpms_lark_unregister_picker_sid_from_sess(prev)
         _fpms_lark_sessions[key_ou] = sess
         if uid and uid != ou:
             _fpms_lark_sessions[_fpms_lark_session_key(chat_id, uid)] = sess
@@ -4237,6 +4285,7 @@ def _fpms_lark_clear_session(chat_id: str, sender_id: str) -> None:
         sess = _fpms_lark_sessions.pop(k, None)
         if sess is None or not isinstance(sess, dict):
             return
+        _fpms_lark_unregister_picker_sid_from_sess(sess)
         ou = sess.get("_lark_open_id")
         uid = sess.get("_lark_union_id")
         for sid in (ou, uid):
@@ -4426,8 +4475,13 @@ def _fpms_lark_v2_column_set_button_row(
     }
 
 
-def _fpms_lark_job_choice_card_json(candidates: list[tuple[str, float, str, str]]) -> str:
+def _fpms_lark_job_choice_card_json(
+    candidates: list[tuple[str, float, str, str]],
+    *,
+    picker_sid: str | None = None,
+) -> str:
     """Lark ``msg_type=interactive``: JSON **2.0** card — numbered body + rows of digit buttons + Cancel."""
+    ps = (picker_sid or "").strip()
     lines_md: list[str] = [
         "Several Jenkins jobs match your text. **Tap a number** below to choose, or **Cancel**.",
         "",
@@ -4437,6 +4491,8 @@ def _fpms_lark_job_choice_card_json(candidates: list[tuple[str, float, str, str]
         u0 = _jenkins_update_primary_url(url_raw)
         lines_md.append(f"**{i}.** **{label}** — `{alias}` — {u0}")
         payload: dict[str, object] = {"k": "job", "i": i}
+        if ps:
+            payload["sid"] = ps
         buttons.append(
             _fpms_lark_v2_callback_button(
                 str(i),
@@ -4452,11 +4508,14 @@ def _fpms_lark_job_choice_card_json(candidates: list[tuple[str, float, str, str]
         chunk = buttons[off : off + 5]
         body_elements.append(_fpms_lark_v2_column_set_button_row(chunk))
     body_elements.append({"tag": "hr"})
+    cancel_pl: dict[str, object] = {"k": "ju_cancel"}
+    if ps:
+        cancel_pl["sid"] = ps
     body_elements.append(
         _fpms_lark_v2_callback_button(
             "Cancel",
             "default",
-            {"k": "ju_cancel"},
+            cancel_pl,
             element_id="ju_cancel",
         )
     )
@@ -6001,7 +6060,8 @@ def handle_lark_jenkins_update_message(
                 return True
             idx = _parse_single_menu_index(clean_text.strip(), len(cands))
             if idx is None:
-                card_js = _fpms_lark_job_choice_card_json(cands)
+                ps = str(sess.get("picker_sid") or "").strip()
+                card_js = _fpms_lark_job_choice_card_json(cands, picker_sid=ps or None)
                 try:
                     send(chat_id, card_js, msg_type="interactive")
                 except TypeError:
@@ -6011,8 +6071,7 @@ def handle_lark_jenkins_update_message(
                     )
                 return True
             row = cands[idx - 1]
-            with _fpms_lark_sessions_lock:
-                _fpms_lark_sessions.pop(key, None)
+            _fpms_lark_clear_session(chat_id, sender_id)
             return _fpms_lark_dispatch_job_row(chat_id, key, pending, row, send)
         if st == "jenkins_wait_build":
             if not isinstance(sess.get("build_gate_event"), threading.Event):
@@ -6206,16 +6265,21 @@ def handle_lark_jenkins_update_message(
     prof0 = _jenkins_update_job_automation_profile(ties[0][3])
     need_menu = (len(ties) > 1) or (len(ties) == 1 and prof0 in ("fnt_rc", "sms_uat"))
     if need_menu:
+        picker_sid = secrets.token_hex(16)
+        sess_menu = {
+            "state": "choose_job",
+            "job_candidates": ties,
+            "pending_body": body,
+            "picker_sid": picker_sid,
+        }
+        sk_menu = _fpms_lark_session_key(chat_id, sender_id)
+        _fpms_lark_register_picker_sid(picker_sid, sk_menu)
         _fpms_lark_sessions_put(
             chat_id,
             sender_id,
-            {
-                "state": "choose_job",
-                "job_candidates": ties,
-                "pending_body": body,
-            },
+            sess_menu,
         )
-        card_js = _fpms_lark_job_choice_card_json(ties)
+        card_js = _fpms_lark_job_choice_card_json(ties, picker_sid=picker_sid)
         try:
             send(chat_id, card_js, msg_type="interactive")
         except TypeError:
@@ -6233,10 +6297,18 @@ def handle_lark_jenkins_card_action(
     """
     Feishu ``card.action.trigger``: YES/NO (**k** ``wb``), job index (**k** ``job``), or Cancel (**k** ``ju_cancel``).
     Mirrors typed **yes** / **no** / **1** … / **cancel** in :func:`handle_lark_jenkins_update_message`.
+
+    Job-picker payloads include **sid** so taps bind to the correct session even when ``operator`` ids
+    differ from ``im.message`` session keys (see **picker_sid** on ``choose_job`` sessions).
     """
     parsed = _fpms_lark_normalize_card_action_value(value)
     if not parsed:
         return False
+    sid = str(parsed.get("sid") or "").strip()
+    if sid:
+        resolved = resolve_jenkins_job_card_session(chat_id, sid)
+        if resolved:
+            chat_id, sender_id = resolved
     k = str(parsed.get("k") or "").strip().lower()
     if k == "ju_cancel":
         return handle_lark_jenkins_update_message(
