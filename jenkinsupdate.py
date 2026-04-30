@@ -4357,22 +4357,48 @@ def _fpms_lark_normalize_card_action_value(value: object) -> dict[str, object] |
     return None
 
 
+def _fpms_lark_v2_callback_payload_strings(payload: dict[str, object]) -> dict[str, object]:
+    """
+    Lark/OpenAPI docs recommend callback ``behaviors[].value`` as **object**; SDK notes imply all scalar
+    values as strings improve compatibility (avoid number coercion bugs on some clients).
+    """
+    out: dict[str, object] = {}
+    for key, val in payload.items():
+        ks = str(key)
+        if isinstance(val, (dict, list)):
+            out[ks] = val
+        elif val is None:
+            out[ks] = ""
+        else:
+            out[ks] = str(val)
+    return out
+
+
 def _fpms_lark_v2_callback_button(
     label: str,
     btn_type: str,
     payload: dict[str, object],
+    *,
+    element_id: str | None = None,
 ) -> dict[str, object]:
     """
     Lark **卡片 JSON 2.0** button: ``behaviors[type=callback]`` is required; legacy ``tag: action``
     rows are deprecated and often yield client ``code: undefined`` on tap (see open.larksuite.com
     card-json-v2 / button docs).
+
+    ``element_id`` is optional but recommended (≤20 chars, letter-leading — fixes routing on some builds).
     """
-    return {
+    cb_val = _fpms_lark_v2_callback_payload_strings(payload)
+    btn: dict[str, object] = {
         "tag": "button",
         "text": {"tag": "plain_text", "content": label},
         "type": btn_type,
-        "behaviors": [{"type": "callback", "value": payload}],
+        "behaviors": [{"type": "callback", "value": cb_val}],
     }
+    eid = (element_id or "").strip()
+    if eid:
+        btn["element_id"] = eid
+    return btn
 
 
 def _fpms_lark_v2_column_set_button_row(
@@ -4384,7 +4410,8 @@ def _fpms_lark_v2_column_set_button_row(
         columns.append(
             {
                 "tag": "column",
-                "width": "weighted",
+                # Match Lark JSON 2.0 examples ("auto"); "weighted" has caused tap/callback issues on some clients.
+                "width": "auto",
                 "weight": 1,
                 "vertical_align": "top",
                 "elements": [b],
@@ -4394,7 +4421,7 @@ def _fpms_lark_v2_column_set_button_row(
         "tag": "column_set",
         "flex_mode": "flow",
         "background_style": "default",
-        "horizontal_spacing": "6px",
+        "horizontal_spacing": "8px",
         "columns": columns,
     }
 
@@ -4415,6 +4442,7 @@ def _fpms_lark_job_choice_card_json(candidates: list[tuple[str, float, str, str]
                 str(i),
                 "primary" if i == 1 else "default",
                 payload,
+                element_id=f"ju_job_{i}"[:20],
             )
         )
     body_elements: list[dict[str, object]] = [
@@ -4429,6 +4457,7 @@ def _fpms_lark_job_choice_card_json(candidates: list[tuple[str, float, str, str]
             "Cancel",
             "default",
             {"k": "ju_cancel"},
+            element_id="ju_cancel",
         )
     )
     card: dict[str, object] = {
@@ -5230,11 +5259,13 @@ def _fpms_lark_verification_card_json(
         "YES — Build",
         "primary",
         {"k": "wb", "v": "y"},
+        element_id="ju_wb_y",
     )
     no_btn = _fpms_lark_v2_callback_button(
         "NO — Skip",
         "default",
         {"k": "wb", "v": "n"},
+        element_id="ju_wb_n",
     )
     card: dict = {
         "schema": "2.0",
@@ -6234,7 +6265,7 @@ def handle_lark_jenkins_card_action(
         )
     if k == "job":
         try:
-            idx = int(parsed.get("i"))
+            idx = int(str(parsed.get("i")).strip())
         except (TypeError, ValueError):
             return False
         token = str(idx)
