@@ -334,46 +334,66 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
         )
         text = (out.get("text") or "").strip()
         np = out.get("np_followup")
-        egm_img_path = None
-        egm_img_key = ""
-        egm_img_err = ""
-        egm_img_attempted = False
+        preview_img_path = None
+        preview_img_key = ""
+        preview_img_err = ""
+        preview_img_attempted = False
         if isinstance(np, dict):
             try:
                 md = str(np.get("machine_display") or "").strip() or None
                 ms = str(np.get("machine_match_substr") or "").strip() or None
-                cap = getattr(checkcredit, "screenshot_egm_status_window", None)
-                if callable(cap) and md:
-                    egm_img_attempted = True
-                    egm_img_path = cap(
-                        machine_display=md,
-                        machine_substr=ms,
-                        timeout_ms=120_000,
-                        headed=False,
-                    )
-                    egm_img_key = upload_image_lark(egm_img_path) or ""
-                    if not egm_img_key:
-                        egm_img_err = "upload image failed"
-                        print("[checkcredit] EGM status screenshot upload failed", flush=True)
+                cap = getattr(checkcredit, "screenshot_np_recharge_detail", None)
+                choices0 = np.get("np_choices") or []
+                if callable(cap) and choices0:
+                    ch0 = choices0[0] if isinstance(choices0[0], dict) else {}
+                    uid0 = str(ch0.get("user_id") or "").strip()
+                    ts0 = str(ch0.get("time_short") or "").strip()
+                    td0 = str(np.get("target_date") or "").strip()
+                    exp0 = ch0.get("credit_value")
+                    if exp0 is None and ch0.get("credit") not in (None, "", "n/a"):
+                        try:
+                            exp0 = float(str(ch0.get("credit")).strip())
+                        except ValueError:
+                            exp0 = None
+                    if uid0 and ts0 and td0:
+                        preview_img_attempted = True
+                        preview_img_path = cap(
+                            uid0,
+                            td0,
+                            ts0,
+                            timeout_ms=120_000,
+                            machine_substr=ms,
+                            expected_credit=exp0,
+                            machine_display=md,
+                            headed=False,
+                        )
+                        preview_img_key = upload_image_lark(preview_img_path) or ""
+                        if not preview_img_key:
+                            preview_img_err = "upload image failed"
+                            print("[checkcredit] Log Third Http preview screenshot upload failed", flush=True)
                 if callable(getattr(checkcredit, "build_np_choice_lark_card", None)):
                     out["lark_card_candidates"] = checkcredit.build_np_choice_lark_card(
                         np.get("np_choices") or [],
                         target_date_iso=str(np.get("target_date") or ""),
                         machine_display=str(np.get("machine_display") or ""),
                         third_http_backend=str(np.get("third_http_backend") or "NP"),
-                        image_key=egm_img_key,
+                        image_key=preview_img_key,
                     )
             except Exception as e:
-                egm_img_err = str(e)
-                print(f"[checkcredit] EGM status screenshot failed: {e!r}", flush=True)
+                preview_img_err = str(e)
+                print(f"[checkcredit] Log Third Http preview screenshot failed: {e!r}", flush=True)
             finally:
-                if egm_img_path and os.path.isfile(egm_img_path):
+                if preview_img_path and os.path.isfile(preview_img_path):
                     try:
-                        os.unlink(egm_img_path)
+                        os.unlink(preview_img_path)
                     except OSError:
                         pass
-            if egm_img_attempted and not egm_img_key:
-                msg = f"⚠️ EGM screenshot unavailable: {egm_img_err}" if egm_img_err else "⚠️ EGM screenshot unavailable."
+            if preview_img_attempted and not preview_img_key:
+                msg = (
+                    f"⚠️ Log Third Http preview screenshot unavailable: {preview_img_err}"
+                    if preview_img_err
+                    else "⚠️ Log Third Http preview screenshot unavailable."
+                )
                 send_message(chat_id, msg)
         cards: list[dict] = []
         for key in (
