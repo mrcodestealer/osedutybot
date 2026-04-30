@@ -1412,6 +1412,11 @@ def _lark_normalize_card_callback_envelope(data):
             if top_union and not op.get("union_id"):
                 op["union_id"] = top_union
             ev["operator"] = op
+    # Lark troubleshooting: groups often expose chat on ``event.open_chat_id``; only ``context.open_chat_id``
+    # may exist — mirror onto event top-level so downstream always sees a stable target id.
+    ctx_merge = ev.get("context") if isinstance(ev.get("context"), dict) else {}
+    if not ev.get("open_chat_id") and ctx_merge.get("open_chat_id"):
+        ev["open_chat_id"] = ctx_merge["open_chat_id"]
     data["event"] = ev
     return data
 
@@ -1419,11 +1424,14 @@ def _lark_normalize_card_callback_envelope(data):
 def _lark_extract_card_event_fields(ev):
     # type: (dict) -> tuple
     """
-    Best-effort chat / sender / button value from ``event`` (see Lark ``card.action.trigger`` doc).
-    In **group chats**, ``open_chat_id`` may appear on ``event`` top-level before ``context``; try that first
-    (avoids ``code: undefined`` when chat_id was only read from ``context``).
+    Resolve chat / sender / button ``value`` from ``event`` for ``card.action.trigger`` payloads.
+
+    **Chat ID priority** (avoids client ``code: undefined`` when the synthetic reply has no target):
+    **event.open_chat_id** first (often top-level on the event object in groups), then ``event.chat_id``,
+    then ``context.open_chat_id``, then ``context.chat_id``. Do **not** rely on ``context.chat_id`` alone
+    when ``open_chat_id`` exists elsewhere — wrong field mapping is a common cause of ``code: undefined``.
     """
-    ctx = ev.get("context") or {}
+    ctx = ev.get("context") if isinstance(ev.get("context"), dict) else {}
     act = ev.get("action") or {}
     val = act.get("value")
     chat_id = ev.get("open_chat_id") or ev.get("chat_id")
@@ -1581,6 +1589,8 @@ def lark_webhook():
                 "若开启了加密：设 LARK_ENCRYPT_KEY；未开启加密：后台关掉加密或勿配密钥。",
                 "点按钮时 journalctl 应出现 [lark] webhook POST；若没有，请求没到本进程（DNS/防火墙/URL 错误）。",
                 "若日志有 ❌ Token mismatch → 修正 VERIFICATION_TOKEN；403 会导致客户端报错/code undefined。",
+                "群组卡片交互：会话 ID 优先读 event.open_chat_id（或 context.open_chat_id）；只用 context.chat_id 易导致客户端 code:undefined — 本仓库已按该优先级解析并在仅有 context 时回填 event.open_chat_id。",
+                "核对开发者后台：事件订阅 Request URL；若仍配置「消息卡片请求网址」，须指向同一可访问端点或使用 LARK_WEBHOOK_EXTRA_PATHS。",
             ]
         return jsonify(payload)
 
