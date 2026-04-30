@@ -75,6 +75,7 @@ import re
 import sys
 import tempfile
 import time
+import uuid
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -622,6 +623,12 @@ def parse_user_blocks_full(log_text: str) -> list[dict[str, Any]]:
                 parts = line.split("|", 2)
                 if len(parts) >= 3:
                     json_like = parts[2].strip()
+            ctx_start = max(0, line_idx - 4)
+            ctx_end = min(len(raw), line_idx + 5)
+            ctx_lines: list[str] = []
+            for gi in range(ctx_start, ctx_end):
+                marker = ">>" if gi == line_idx else "  "
+                ctx_lines.append(f"{marker} {raw[gi]}")
             findings.append(
                 {
                     "time": time_part,
@@ -629,6 +636,7 @@ def parse_user_blocks_full(log_text: str) -> list[dict[str, Any]]:
                     "snippet": json_like[:800],
                     "full_line": line.rstrip(),
                     "line_idx": line_idx,
+                    "context_lines": ctx_lines,
                 }
             )
         row: dict[str, Any] = {
@@ -849,6 +857,7 @@ def build_np_choice_lark_card(
     intro_line: str = "",
     same_last_line: str = "",
     extra_md: str = "",
+    extra_error_images: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Lark card 2.0: log date + machine + players; buttons **1**..**N** (N = len(choices), max 4) or type digits in chat."""
     lines: list[str] = []
@@ -896,6 +905,22 @@ def build_np_choice_lark_card(
             }
         )
     body_elements.append({"tag": "div", "text": {"tag": "lark_md", "content": content}})
+    ex_imgs = extra_error_images or []
+    for it in ex_imgs:
+        ik2 = str(it.get("img_key") or "").strip()
+        if not ik2:
+            continue
+        title2 = str(it.get("title") or "Error context screenshot").strip()
+        body_elements.append(
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"📷 **{title2}**"}}
+        )
+        body_elements.append(
+            {
+                "tag": "img",
+                "img_key": ik2,
+                "alt": {"tag": "plain_text", "content": title2},
+            }
+        )
     n = len(np_choices)
     if n > 0:
         body_elements.append(
@@ -1123,8 +1148,9 @@ def _player_detail_block(
         credit_s = "*(none)*"
     time_s = ct or et or "*(n/a)*"
     errs = row.get("errors") or []
-    lines_body = "\n".join(e.get("full_line") or e.get("snippet") or "" for e in errs)
-    log_md = _truncate_log(lines_body) if lines_body else ""
+    screenshot_note = ""
+    if errs:
+        screenshot_note = f"(error screenshot mode; {len(errs)} item(s))"
 
     head = "\n".join(
         [
@@ -1135,10 +1161,10 @@ def _player_detail_block(
         ]
     )
     if error_log_mode == "always":
-        inner = log_md if log_md else "(no error lines)"
+        inner = screenshot_note if screenshot_note else "(no error lines)"
         return f"{head}\n\n📋 **Error log:**\n{inner}"
-    if log_md:
-        return f"{head}\n\n📋 **Error log:**\n{log_md}"
+    if screenshot_note:
+        return f"{head}\n\n📋 **Error log:**\n{screenshot_note}"
     return head
 
 
@@ -1413,13 +1439,8 @@ def _machineerror_player_md(
     if force_no_error_log:
         log_md = "(no error lines)"
     elif errs:
-        log_md = "\n".join(
-            f"- `{(e.get('full_line') or e.get('snippet') or '').strip()}`"
-            for e in errs[:6]
-            if (e.get("full_line") or e.get("snippet"))
-        ).strip()
-        if not log_md:
-            log_md = "(has error entries, but no printable lines)"
+        shown = min(6, len(errs))
+        log_md = f"(see {shown} screenshot(s) below; each screenshot is 4 lines above + current + 4 lines below)"
     else:
         log_md = "(no error lines)"
     return (
@@ -1430,6 +1451,83 @@ def _machineerror_player_md(
         f"💰 **Last credit:** `{credit_s}` @ `{ts}`{rn}\n"
         f"📋 **Error log:**\n{log_md}"
     )
+
+
+def _render_text_lines_png(lines: list[str], *, title: str, output_path: str) -> bool:
+    """
+    Render text lines to a PNG image.
+    Returns True on success, False on rendering/import failures.
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except Exception:
+        return False
+    body_lines = lines[:] if lines else ["(empty)"]
+    try:
+        font = ImageFont.load_default()
+    except Exception:
+        return False
+    probe = Image.new("RGB", (10, 10), "white")
+    draw = ImageDraw.Draw(probe)
+    all_lines = [title, ""] + body_lines
+    max_w = 0
+    line_h = 16
+    for ln in all_lines:
+        try:
+            bbox = draw.textbbox((0, 0), ln, font=font)
+            w = max(1, int(bbox[2] - bbox[0]))
+            h = max(1, int(bbox[3] - bbox[1]))
+        except Exception:
+            w = max(1, len(ln) * 7)
+            h = 12
+        max_w = max(max_w, w)
+        line_h = max(line_h, h + 4)
+    pad = 16
+    width = min(2000, max(600, max_w + pad * 2))
+    height = max(140, line_h * len(all_lines) + pad * 2)
+    img = Image.new("RGB", (width, height), "white")
+    d = ImageDraw.Draw(img)
+    y = pad
+    d.text((pad, y), title, fill="black", font=font)
+    y += line_h * 2
+    for ln in body_lines:
+        d.text((pad, y), ln, fill="black", font=font)
+        y += line_h
+    try:
+        img.save(output_path, format="PNG")
+    except Exception:
+        return False
+    return True
+
+
+def build_error_context_screenshots(
+    row: dict[str, Any] | None,
+    *,
+    max_errors: int = 6,
+    lines_before_after: int = 4,
+) -> list[dict[str, str]]:
+    """
+    Build local PNG screenshots for row error contexts.
+    Returns list of {"path": ..., "title": ...}; each image contains 9 lines by default.
+    """
+    if not row:
+        return []
+    uid = str(row.get("user_id") or "n/a")
+    errs = row.get("errors") or []
+    out: list[dict[str, str]] = []
+    for idx, e in enumerate(errs[: max(0, int(max_errors))], start=1):
+        ctx = e.get("context_lines") or []
+        if not ctx:
+            one = (e.get("full_line") or e.get("snippet") or "").strip()
+            ctx = [f">> {one}"] if one else [">> (no printable log line)"]
+        title = f"User {uid} error #{idx} ({lines_before_after} above + current + {lines_before_after} below)"
+        path = os.path.join(
+            tempfile.gettempdir(),
+            f"checkcredit_errctx_{uid}_{idx}_{uuid.uuid4().hex[:8]}.png",
+        )
+        if _render_text_lines_png(ctx, title=title, output_path=path):
+            out.append({"path": path, "title": title})
+    return out
 
 
 def run_finderror(

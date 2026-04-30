@@ -338,6 +338,7 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str, mode: 
         preview_img_key = ""
         preview_img_err = ""
         preview_img_attempted = False
+        error_ctx_paths: list[str] = []
         if isinstance(np, dict):
             try:
                 md = str(np.get("machine_display") or "").strip() or None
@@ -359,10 +360,32 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str, mode: 
                     np_choices = np.get("np_choices") or []
                     intro_line = ""
                     extra_md = ""
+                    extra_error_images: list[dict[str, str]] = []
                     if str(mode or "").strip().lower() == "error_only":
                         np_choices = np.get("np_choices_error_only") or []
                         intro_line = "Found players error"
                         extra_md = str(np.get("machineerror_context_md") or "")
+                        merged_rows = out.get("merged_players") or []
+                        pick_err = getattr(checkcredit, "select_top2_error_players", None)
+                        build_ctx = getattr(checkcredit, "build_error_context_screenshots", None)
+                        if callable(pick_err) and callable(build_ctx):
+                            err_rows = pick_err(merged_rows) or []
+                            for rr in err_rows[:2]:
+                                ctx_items = build_ctx(rr, max_errors=6, lines_before_after=4) or []
+                                for ci in ctx_items:
+                                    pth = str(ci.get("path") or "").strip()
+                                    if not pth:
+                                        continue
+                                    error_ctx_paths.append(pth)
+                                    ik = upload_image_lark(pth) or ""
+                                    if not ik:
+                                        continue
+                                    extra_error_images.append(
+                                        {
+                                            "img_key": ik,
+                                            "title": str(ci.get("title") or "Error context screenshot"),
+                                        }
+                                    )
                     same_last_line = ""
                     if str(mode or "").strip().lower() != "error_only":
                         same_last_line = str(np.get("same_last_line") or "")
@@ -376,6 +399,7 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str, mode: 
                         intro_line=intro_line,
                         same_last_line=same_last_line,
                         extra_md=extra_md,
+                        extra_error_images=extra_error_images,
                     )
             except Exception as e:
                 preview_img_err = str(e)
@@ -386,6 +410,12 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str, mode: 
                         os.unlink(preview_img_path)
                     except OSError:
                         pass
+                for pth in error_ctx_paths:
+                    if pth and os.path.isfile(pth):
+                        try:
+                            os.unlink(pth)
+                        except OSError:
+                            pass
             if preview_img_attempted and not preview_img_key:
                 msg = (
                     f"⚠️ EGM preview screenshot unavailable: {preview_img_err}"
