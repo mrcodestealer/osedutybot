@@ -2419,7 +2419,6 @@ def screenshot_egm_status_window(
             context = browser.new_context(
                 viewport={"width": 1600, "height": 900},
                 ignore_https_errors=True,
-                device_scale_factor=2,
             )
             page = context.new_page()
             page.set_default_timeout(timeout_ms)
@@ -2536,7 +2535,7 @@ def screenshot_egm_status_window(
                     grid_btn.click(timeout=min(15_000, timeout_ms))
                     page.wait_for_timeout(350)
             # Capture only the small operation window (same as user screenshot), not whole page.
-            dlg.screenshot(path=out_path, animations="disabled")
+            dlg.screenshot(path=out_path, animations="disabled", scale="css")
         finally:
             browser.close()
     return out_path
