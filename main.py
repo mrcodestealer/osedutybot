@@ -1465,13 +1465,36 @@ def lark_webhook():
         return Response(status=204)
 
     if request.method == "GET":
-        return jsonify(
-            {
-                "ok": True,
-                "service": "lark_webhook",
-                "detail": "Feishu/Lark must POST JSON to this URL for events and card callbacks.",
+        payload = {
+            "ok": True,
+            "service": "lark_webhook",
+            "detail": "Feishu/Lark must POST JSON to this URL for events and card callbacks.",
+        }
+        if (request.args.get("diag") or "").strip().lower() in ("1", "true", "yes"):
+            ek = (
+                (os.getenv("LARK_ENCRYPT_KEY") or os.getenv("ENCRYPT_KEY") or os.getenv("FEISHU_ENCRYPT_KEY") or "")
+                .strip()
+            )
+            ju = _get_jenkinsupdate()
+            payload["diag"] = {
+                "verification_token_configured": bool(VERIFICATION_TOKEN),
+                "encrypt_key_configured": bool(ek),
+                "jenkinsupdate_import_ok": ju is not None,
+                "extra_webhook_paths": [
+                    p.strip()
+                    for p in (os.getenv("LARK_WEBHOOK_EXTRA_PATHS") or "").split(",")
+                    if p.strip()
+                ],
             }
-        )
+            payload["checklist_cn"] = [
+                "开发者后台 → 事件与回调：请求地址必须是公网 HTTPS，路径与本服务一致（含 nginx 转发）。",
+                "同一页「订阅事件」里勾选 card.action.trigger（卡片回传交互），保存后创建版本并发布应用。",
+                "环境变量 VERIFICATION_TOKEN 与后台「Verification Token」完全一致（无多空格）。",
+                "若开启了加密：设 LARK_ENCRYPT_KEY；未开启加密：后台关掉加密或勿配密钥。",
+                "点按钮时 journalctl 应出现 [lark] webhook POST；若没有，请求没到本进程（DNS/防火墙/URL 错误）。",
+                "若日志有 ❌ Token mismatch → 修正 VERIFICATION_TOKEN；403 会导致客户端报错/code undefined。",
+            ]
+        return jsonify(payload)
 
     # One line per POST — if this never appears when you tap a card button, Feishu is not reaching this process
     # (wrong public URL/port, nginx not proxy_pass to here, or firewall). Fix infra before debugging Python.
