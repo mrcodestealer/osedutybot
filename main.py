@@ -1664,6 +1664,12 @@ def lark_webhook():
         flush=True,
     )
 
+    # Bot footer menu « Push event » — ``application.bot.menu_v6`` (Lark docs). **Not** ``card.action.trigger``;
+    # client expects ``{"success": true}``, **not** empty ``{}`` (card ACK).
+    if hdr_et in ("application.bot.menu_v6", "application.bot.menu"):
+        print("[lark] bot menu event — ACK success=True", flush=True)
+        return jsonify({"success": True})
+
     # ``card.action.trigger``: MUST respond within **3s** with HTTP 200 and body ``{}`` or ``toast``/``card``.
     # Never return ``{"success": true}`` here — Feishu treats that as an invalid card callback and shows
     # "Something went wrong … code: undefined". Also match by payload shape if ``event_type`` is missing.
@@ -1789,11 +1795,10 @@ def lark_webhook():
     else:
         het = _lark_header_event_type(data)
         print("⚠️ Unknown webhook branch hdr_et=%r (not im.message / event_callback)" % (het,), flush=True)
-        # Never return ``success:true`` for card/interaction — include legacy payloads without ``schema:2.0``.
-        if (
-            _lark_is_schema_v2(data)
-            or _lark_payload_has_card_action(data)
-            or (het and het.lower().startswith("card.action"))
+        # Card callbacks need HTTP 200 + ``{}`` (or toast). **Do not** use that ACK for every schema-2.0
+        # event — bot menu / approvals etc. expect ``{"success": true}`` or they show ``code: undefined``.
+        if _lark_payload_has_card_action(data) or (
+            het and het.lower().startswith("card.action")
         ):
             return _lark_http_card_callback_ok()
         return jsonify({"success": True})
