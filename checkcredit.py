@@ -2429,6 +2429,13 @@ def screenshot_egm_status_window(
             except Exception:
                 pass
             page.wait_for_timeout(1000)
+            try:
+                page.wait_for_function(
+                    "() => !Array.from(document.querySelectorAll('.el-loading-mask')).some(x => x && x.offsetParent !== null)",
+                    timeout=min(timeout_ms, 30_000),
+                )
+            except Exception:
+                pass
 
             tbody = page.locator(".el-table__body tbody").first
             tbody.wait_for(state="visible", timeout=timeout_ms)
@@ -2438,13 +2445,24 @@ def screenshot_egm_status_window(
                 raise RuntimeError(f"No EGM rows after Search `{tok}`.")
 
             target = None
-            tok_cf = tok.casefold()
-            for i in range(n):
-                row = rows.nth(i)
-                row_txt = (row.inner_text() or "").casefold()
-                if tok_cf in row_txt:
-                    target = row
-                    break
+            tok_re = re.compile(re.escape(tok), re.I)
+            try:
+                cands = rows.filter(has_text=tok_re)
+                if cands.count() > 0:
+                    target = cands.first
+            except Exception:
+                target = None
+            if target is None:
+                tok_cf = tok.casefold()
+                for i in range(n):
+                    row = rows.nth(i)
+                    try:
+                        row_txt = (row.inner_text(timeout=min(4_000, timeout_ms)) or "").casefold()
+                    except Exception:
+                        continue
+                    if tok_cf in row_txt:
+                        target = row
+                        break
             if target is None:
                 target = rows.nth(0)
 
