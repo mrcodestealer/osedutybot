@@ -16,7 +16,7 @@ if _CHBOX_DIR not in sys.path:
 # Load .env from the project directory (works under systemd when CWD is not the app folder)
 load_dotenv(os.path.join(_CHBOX_DIR, ".env"))
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 import atexit
@@ -1145,6 +1145,81 @@ def _feishu_maybe_decrypt_webhook_payload(raw):
         return raw
 
 
+def _lark_is_schema_v2(data):
+    # type: (Optional[dict]) -> bool
+    """Schema may arrive as str ``2.0`` or occasionally non-string — avoid wrong token branch."""
+    if not isinstance(data, dict):
+        return False
+    s = data.get("schema")
+    return s == "2.0" or str(s).strip() == "2.0"
+
+
+def _lark_extract_verification_token(data):
+    # type: (Optional[dict]) -> Optional[str]
+    """v2 events put token under ``header.token``; legacy uses top-level ``token``. Always try both."""
+    if not isinstance(data, dict):
+        return None
+    h = data.get("header")
+    if isinstance(h, dict):
+        t = h.get("token")
+        if t is not None:
+            return t
+    t2 = data.get("token")
+    return t2
+
+
+def _lark_http_empty_json_ok():
+    # type: () -> Response
+    """Feishu card callbacks expect HTTP 200 with body literally ``{}`` (see handle-card-callbacks doc)."""
+    return Response(
+        "{}",
+        status=200,
+        mimetype="application/json; charset=utf-8",
+    )
+
+
+def _lark_parse_card_action_fields(data):
+    # type: (dict) -> tuple
+    """
+    ``card.action.trigger`` (v2 event block) vs legacy ``card.action.trigger_v1`` differ slightly.
+    Returns ``(chat_id, sender_id, value, event_id)``.
+    """
+    hdr = data.get("header") if isinstance(data.get("header"), dict) else {}
+    et = hdr.get("event_type") or ""
+    eid = hdr.get("event_id")
+    ev = data.get("event") if isinstance(data.get("event"), dict) else {}
+
+    if et == "card.action.trigger":
+        ctx = ev.get("context") or {}
+        chat_id = ctx.get("open_chat_id") or ctx.get("chat_id")
+        op = ev.get("operator") or {}
+        sender_id = op.get("open_id")
+        act = ev.get("action") or {}
+        val = act.get("value")
+        return chat_id, sender_id, val, eid
+
+    if et == "card.action.trigger_v1":
+        ctx = ev.get("context") or {}
+        chat_id = (
+            ev.get("open_chat_id")
+            or ev.get("chat_id")
+            or ctx.get("open_chat_id")
+            or ctx.get("chat_id")
+        )
+        op = ev.get("operator") or {}
+        sender_id = (
+            ev.get("open_id")
+            or ev.get("user_id")
+            or op.get("open_id")
+            or op.get("user_id")
+        )
+        act = ev.get("action") or {}
+        val = act.get("value")
+        return chat_id, sender_id, val, eid
+
+    return None, None, None, eid
+
+
 @app.route("/webhook/event", methods=["POST"])
 def lark_webhook():
     raw_in = request.get_json(silent=True)
@@ -1155,38 +1230,38 @@ def lark_webhook():
     if data.get("type") == "url_verification":
         return jsonify({"challenge": data["challenge"]})
 
-    token = None
-    if data.get("schema") == "2.0":
-        token = data.get("header", {}).get("token")
-    else:
-        token = data.get("token")
+    token = _lark_extract_verification_token(data)
     if token != VERIFICATION_TOKEN:
-        print(f"❌ Token mismatch: expected {VERIFICATION_TOKEN}, got {token}")
+        sch = data.get("schema") if isinstance(data, dict) else None
+        print(
+            f"❌ Token mismatch: expected {VERIFICATION_TOKEN}, got {token!r} schema={sch!r}",
+            flush=True,
+        )
         return jsonify({"error": "Invalid token"}), 403
+
+    hdr_et = (data.get("header") or {}).get("event_type") if isinstance(data.get("header"), dict) else None
 
     # ``card.action.trigger``: MUST respond within **3s** with HTTP 200 and body ``{}`` or ``toast``/``card``.
     # Run Jenkins handler in a **background thread** so Lark never times out (otherwise "Something went wrong").
-    if data.get("schema") == "2.0" and data.get("header", {}).get("event_type") == "card.action.trigger":
-        ev_ca = data.get("event", {})
-        ctx_ca = ev_ca.get("context") or {}
-        chat_id_ca = ctx_ca.get("open_chat_id") or ctx_ca.get("chat_id")
-        op_ca = ev_ca.get("operator") or {}
-        sender_id_ca = op_ca.get("open_id")
-        act_ca = ev_ca.get("action") or {}
-        val_ca = act_ca.get("value")
-        eid_ca = data.get("header", {}).get("event_id")
+    if hdr_et in ("card.action.trigger", "card.action.trigger_v1"):
+        chat_id_ca, sender_id_ca, val_ca, eid_ca = _lark_parse_card_action_fields(data)
         if sender_id_ca and sender_id_ca == BOT_OPEN_ID:
-            return jsonify({})
+            return _lark_http_empty_json_ok()
         with processed_lock:
             if eid_ca and eid_ca in processed_messages:
-                print(f"⏭️ Duplicate card.action.trigger {eid_ca} ignored")
-                return jsonify({})
+                print(f"⏭️ Duplicate {hdr_et} {eid_ca} ignored", flush=True)
+                return _lark_http_empty_json_ok()
             if eid_ca:
                 processed_messages.add(eid_ca)
 
         def _run_jenkins_card_action() -> None:
             ju = _get_jenkinsupdate()
             if not ju or not chat_id_ca or not sender_id_ca:
+                print(
+                    f"⚠️ card action skipped: ju={bool(ju)} chat_id={chat_id_ca!r} sender={sender_id_ca!r} "
+                    f"event_type={hdr_et!r}",
+                    flush=True,
+                )
                 return
             try:
                 ju.handle_lark_jenkins_card_action(chat_id_ca, sender_id_ca, val_ca, send_message)
@@ -1198,10 +1273,10 @@ def lark_webhook():
                     pass
 
         threading.Thread(target=_run_jenkins_card_action, daemon=True).start()
-        return jsonify({})
+        return _lark_http_empty_json_ok()
 
     sender_id = None
-    if data.get("schema") == "2.0":
+    if _lark_is_schema_v2(data):
         event = data.get("event", {})
         sender = event.get("sender", {})
         sender_id = sender.get("sender_id", {}).get("open_id")
