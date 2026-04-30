@@ -1484,8 +1484,12 @@ def lark_webhook():
     else:
         het = _lark_header_event_type(data)
         print("⚠️ Unknown webhook branch hdr_et=%r (not im.message / event_callback)" % (het,), flush=True)
-        # Schema 2.0 card/interaction must NOT get ``{"success":true}`` — clients show ``code: undefined``.
-        if _lark_is_schema_v2(data):
+        # Never return ``success:true`` for card/interaction — include legacy payloads without ``schema:2.0``.
+        if (
+            _lark_is_schema_v2(data)
+            or _lark_payload_has_card_action(data)
+            or (het and het.lower().startswith("card.action"))
+        ):
             return jsonify({})
         return jsonify({"success": True})
 
@@ -1497,6 +1501,13 @@ def lark_webhook():
             processed_messages.add(message_id)
 
     if not chat_id or text is None:
+        # Card callbacks can be mis-parsed as ``im.message`` shape but lack chat/text — **400 breaks the client**.
+        if hdr_et.startswith("card.action") or _lark_payload_has_card_action(data):
+            print(
+                "[lark] Missing chat_id/text on card-shaped POST — ACK {} (avoid 400 on interaction)",
+                flush=True,
+            )
+            return jsonify({})
         print("❌ Could not extract chat_id or text")
         return jsonify({"error": "Missing data"}), 400
     
