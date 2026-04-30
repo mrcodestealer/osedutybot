@@ -807,6 +807,8 @@ def build_np_choice_lark_card(
     machine_display: str = "",
     third_http_backend: str = "NP",
     image_key: str = "",
+    intro_line: str = "",
+    same_last_line: str = "",
 ) -> dict[str, Any]:
     """Lark card 2.0: log date + machine + players; buttons **1**..**N** (N = len(choices), max 4) or type digits in chat."""
     lines: list[str] = []
@@ -824,11 +826,19 @@ def build_np_choice_lark_card(
         lines.append(" · ".join(bits))
         lines.append("Screenshot uses the log date above + each line's credit time.")
         lines.append("")
+    il = (intro_line or "").strip()
+    if il:
+        lines.append(il)
+        lines.append("")
     for i, ch in enumerate(np_choices):
         uid = ch.get("user_id", "")
         cr = ch.get("credit", "n/a")
         ts = ch.get("time_short") or "n/a"
         lines.append(f"{i + 1}) User ID `{uid}` — last credit `{cr}` @ `{ts}`")
+    sll = (same_last_line or "").strip()
+    if sll:
+        lines.append("")
+        lines.append(f"ℹ️ {sll}")
     content = "\n".join(lines) if lines else "_No players._"
     title = "Kindly choose one of the player"
     body_elements: list[dict[str, Any]] = []
@@ -926,6 +936,10 @@ def build_np_followup_payload(
         "third_http_backend": _np_log_backend_tag(machine_display),
         "latest_two_players": latest_two_players,
         "np_choices": np_choices,
+        "np_choices_error_only": [
+            _row_choice(r, "with_error")
+            for r in top2_err[:2]
+        ],
     }
 
 
@@ -1390,6 +1404,16 @@ def run_finderror(
     report = format_dual_terminal_report(top2_any, top2_err, machine_display, td)
     plain = f"{header}\n\n{report}" if header else report
     np_followup = build_np_followup_payload(top2_any, top2_err, machine_display, td)
+    if isinstance(np_followup, dict):
+        if not le_uid:
+            same_line = 'No error > 0 in log - cannot compare "last with error" to "last in log".'
+        elif same_uid and le_uid and la_uid:
+            same_line = "Same player: last activity in log and last error line refer to this user ID."
+        else:
+            same_line = "Different: last player in log != last player with error."
+        np_followup["same_last_line"] = same_line
+        np_followup["latest_err_uid"] = le_uid or ""
+        np_followup["latest_any_uid"] = la_uid or ""
     return {
         "text": plain,
         "merged_players": merged_players_ordered,

@@ -313,7 +313,7 @@ def run_smscheckplayer_check(chat_id, player_id: str):
         print(f"[SMS check player] error: {e!r}")
 
 
-def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
+def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str, mode: str = "default"):
     """Background: same as checkcredit + `--date`. Uses OSS HTTP if CHECKCREDIT_USE_OSS is set."""
     try:
         import checkcredit
@@ -356,12 +356,23 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
                         preview_img_err = "upload image failed"
                         print("[checkcredit] EGM preview screenshot upload failed", flush=True)
                 if callable(getattr(checkcredit, "build_np_choice_lark_card", None)):
+                    np_choices = np.get("np_choices") or []
+                    intro_line = ""
+                    if str(mode or "").strip().lower() == "error_only":
+                        np_choices = np.get("np_choices_error_only") or []
+                        intro_line = "Found players error"
+                    same_last_line = ""
+                    if str(mode or "").strip().lower() != "error_only":
+                        same_last_line = str(np.get("same_last_line") or "")
+                    np["np_choices"] = np_choices
                     out["lark_card_candidates"] = checkcredit.build_np_choice_lark_card(
-                        np.get("np_choices") or [],
+                        np_choices,
                         target_date_iso=str(np.get("target_date") or ""),
                         machine_display=str(np.get("machine_display") or ""),
                         third_http_backend=str(np.get("third_http_backend") or "NP"),
                         image_key=preview_img_key,
+                        intro_line=intro_line,
+                        same_last_line=same_last_line,
                     )
             except Exception as e:
                 preview_img_err = str(e)
@@ -379,25 +390,11 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
                     else "⚠️ EGM preview screenshot unavailable."
                 )
                 send_message(chat_id, msg)
-        cards: list[dict] = []
-        for key in (
-            "lark_card",
-            "lark_card_summary",
-            "lark_card_candidates",
-            "lark_card_same_player",
-        ):
-            c = out.get(key)
-            if isinstance(c, dict):
-                cards.append(c)
-        if cards:
-            card_failed = False
-            for card in cards:
-                card_json = json.dumps(card)
-                resp = send_message(chat_id, card_json, msg_type="interactive")
-                if resp.get("code") != 0:
-                    card_failed = True
-                    break
-            if card_failed:
+        card = out.get("lark_card_candidates")
+        if isinstance(card, dict):
+            card_json = json.dumps(card)
+            resp = send_message(chat_id, card_json, msg_type="interactive")
+            if resp.get("code") != 0:
                 send_message(chat_id, text if text else "(no output)")
         else:
             send_message(chat_id, text if text else "(no output)")
@@ -405,8 +402,9 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
         if isinstance(np, dict):
             _set_checkcredit_np_pending(chat_id, np)
     except Exception as e:
-        send_message(chat_id, f"❌ checkcredit failed: {e}")
-        print(f"[checkcredit] error: {e!r}")
+        cmd = "machineerror" if str(mode or "").strip().lower() == "error_only" else "checkcredit"
+        send_message(chat_id, f"❌ {cmd} failed: {e}")
+        print(f"[{cmd}] error: {e!r}")
 
 
 def _np_run_screenshot_worker(
@@ -2674,11 +2672,11 @@ def lark_webhook():
             daemon=True,
         ).start()
         return jsonify({"success": True})
-    elif re.search(r"/(?:checkcreditdate|checkcredit)\b", clean_text, re.I):
+    elif re.search(r"/(?:checkcreditdate|checkcredit|machineerror)\b", clean_text, re.I):
         # Longer token first in alternation so `/checkcreditdate` is not parsed as `/checkcredit` + `date`.
         # Optional date defaults to **today** (server local) when omitted — e.g. `@Duty Bot /checkcredit 1171`.
         m_cc = re.search(
-            r"/(checkcreditdate|checkcredit)\b\s+(\S+)(?:\s+(\d{4}-\d{2}-\d{2}))?",
+            r"/(checkcreditdate|checkcredit|machineerror)\b\s+(\S+)(?:\s+(\d{4}-\d{2}-\d{2}))?",
             clean_text,
             re.I,
         )
@@ -2688,10 +2686,12 @@ def lark_webhook():
                 "❌ Usage:\n"
                 "• `/checkcredit <machine>` — **today** (same as `--date` omitted in CLI)\n"
                 "• `/checkcreditdate <machine> [YYYY-MM-DD]` — optional date; omit for today\n"
+                "• `/machineerror <machine> [YYYY-MM-DD]` — latest two players with error only\n"
                 "Examples: `@Duty Bot /checkcredit 1171` · `/checkcreditdate 2074 2026-04-27`\n"
                 "(same as `python3 checkcredit.py --finderror … --date YYYY-MM-DD`)",
             )
             return jsonify({"success": True})
+        cmd_cc = (m_cc.group(1) or "").strip().lower()
         machine_q = m_cc.group(2).strip()
         date_arg = (m_cc.group(3) or "").strip()
         if not date_arg:
@@ -2707,13 +2707,19 @@ def lark_webhook():
         use_oss_wait = os.getenv("CHECKCREDIT_USE_OSS", "").strip().lower() in ("1", "true", "yes", "on")
         send_message(
             chat_id,
-            "⏳ Running checkcredit via OSS HTTP , please wait..."
-            if use_oss_wait
-            else "⏳ Running LogNavigator checkcredit, browser may take a while — please wait...",
+            (
+                "⏳ Running machineerror via OSS HTTP, please wait..."
+                if cmd_cc == "machineerror" and use_oss_wait
+                else "⏳ Running machineerror, browser may take a while — please wait..."
+                if cmd_cc == "machineerror"
+                else "⏳ Running checkcredit via OSS HTTP , please wait..."
+                if use_oss_wait
+                else "⏳ Running LogNavigator checkcredit, browser may take a while — please wait..."
+            )
         )
         threading.Thread(
             target=run_checkcredit_finderror,
-            args=(chat_id, machine_q, date_arg),
+            args=(chat_id, machine_q, date_arg, "error_only" if cmd_cc == "machineerror" else "default"),
             daemon=True,
         ).start()
         return jsonify({"success": True})
