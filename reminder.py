@@ -445,8 +445,6 @@ def _send_daily_sheet_reminder(
     today = date.today()
     if not (row["start_date"] <= today <= row["end_date"]):
         return
-    # Ensure real mention highlight in chat before the card.
-    send_func(chat_id, f'<at user_id="{target_user_id}">User</at> ⏰ Reminder')
     card = {
         "config": {"wide_screen_mode": True},
         "header": {"template": "orange", "title": {"tag": "plain_text", "content": "⏰ Reminder"}},
@@ -456,6 +454,7 @@ def _send_daily_sheet_reminder(
                 "text": {
                     "tag": "lark_md",
                     "content": (
+                        f'<at user_id="{target_user_id}">User</at>\n\n'
                         f"📅 **Start Time:** `{row['start_date'].strftime('%Y/%m/%d')}`\n"
                         f"📅 **End Time:** `{row['end_date'].strftime('%Y/%m/%d')}`\n"
                         f"⏰ **Time:** `{row['time']}`\n"

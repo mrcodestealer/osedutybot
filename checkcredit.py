@@ -791,6 +791,15 @@ def _np_lark_v2_button_row(buttons: list[dict[str, Any]]) -> dict[str, Any]:
                 "elements": [b],
             }
         )
+    err_only: list[dict[str, Any]] = []
+    seen_err_uid: set[str] = set()
+    for r in top2_err[:2]:
+        uid = str(r.get("user_id") or "").strip()
+        if not uid or uid in seen_err_uid:
+            continue
+        err_only.append(_row_choice(r, "with_error"))
+        seen_err_uid.add(uid)
+
     return {
         "tag": "column_set",
         "flex_mode": "flow",
@@ -918,10 +927,19 @@ def build_np_followup_payload(
         }
 
     np_choices: list[dict[str, Any]] = []
+    seen_uid: set[str] = set()
     for r in top2_any[:2]:
+        uid = str(r.get("user_id") or "").strip()
+        if not uid or uid in seen_uid:
+            continue
         np_choices.append(_row_choice(r, "latest_in_log"))
+        seen_uid.add(uid)
     for r in top2_err[:2]:
+        uid = str(r.get("user_id") or "").strip()
+        if not uid or uid in seen_uid:
+            continue
         np_choices.append(_row_choice(r, "with_error"))
+        seen_uid.add(uid)
     np_choices = np_choices[:4]
 
     latest_two_players: list[dict[str, str]] = []
@@ -941,10 +959,7 @@ def build_np_followup_payload(
         "third_http_backend": _np_log_backend_tag(machine_display),
         "latest_two_players": latest_two_players,
         "np_choices": np_choices,
-        "np_choices_error_only": [
-            _row_choice(r, "with_error")
-            for r in top2_err[:2]
-        ],
+        "np_choices_error_only": err_only,
     }
 
 
@@ -2610,22 +2625,36 @@ def screenshot_egm_status_window(
             if target is None:
                 target = rows.nth(0)
 
-            # STRICT safety: in Operation column, click ONLY the 3rd button (cog).
+            # Safe operation click: prefer 3rd button, but tolerate UI reordering.
             op_cell = target.locator("td").last
             op_btns = op_cell.locator("button.el-button--small")
-            if op_btns.count() < 3:
-                raise RuntimeError("Operation column has fewer than 3 buttons; aborting for safety.")
-            b1 = (op_btns.nth(0).inner_text() or "").strip()
-            b2 = (op_btns.nth(1).inner_text() or "").strip()
-            if re.search(r"Maintenance", b1, re.I) is None or re.search(r"Kick\s*Out", b2, re.I) is None:
-                raise RuntimeError("Operation button order changed; refusing unsafe click.")
-            cog_btn = op_btns.nth(2)
-            cog_icon = cog_btn.locator("i.fa.fa-cog")
-            if cog_icon.count() == 0:
-                raise RuntimeError("3rd operation button is not cog icon; aborting.")
-            bt = (cog_btn.inner_text() or "").strip()
-            if re.search(r"Maintenance|Kick\s*Out", bt, re.I):
-                raise RuntimeError("Unsafe operation button resolved; aborting.")
+            nbtn = op_btns.count()
+            if nbtn <= 0:
+                raise RuntimeError("Operation column has no clickable buttons; aborting.")
+            danger_re = re.compile(r"Maintenance|Kick\s*Out", re.I)
+            cog_btn = None
+            if nbtn >= 3:
+                cand = op_btns.nth(2)
+                try:
+                    t3 = (cand.inner_text() or "").strip()
+                except Exception:
+                    t3 = ""
+                if cand.locator("i.fa.fa-cog").count() > 0 and not danger_re.search(t3):
+                    cog_btn = cand
+            if cog_btn is None:
+                for i in range(nbtn):
+                    b = op_btns.nth(i)
+                    try:
+                        bt = (b.inner_text() or "").strip()
+                    except Exception:
+                        bt = ""
+                    if danger_re.search(bt):
+                        continue
+                    if b.locator("i.fa.fa-cog").count() > 0:
+                        cog_btn = b
+                        break
+            if cog_btn is None:
+                raise RuntimeError("No safe cog operation button found; refusing unsafe click.")
             cog_btn.click(timeout=min(60_000, timeout_ms))
 
             dlg = page.locator(".el-dialog.add-floor, div[role='dialog'].add-floor").last
@@ -2789,19 +2818,33 @@ def get_egm_member_user_id(
 
             op_cell = target.locator("td").last
             op_btns = op_cell.locator("button.el-button--small")
-            if op_btns.count() < 3:
-                raise RuntimeError("Operation column has fewer than 3 buttons; aborting for safety.")
-            b1 = (op_btns.nth(0).inner_text() or "").strip()
-            b2 = (op_btns.nth(1).inner_text() or "").strip()
-            if re.search(r"Maintenance", b1, re.I) is None or re.search(r"Kick\s*Out", b2, re.I) is None:
-                raise RuntimeError("Operation button order changed; refusing unsafe click.")
-            cog_btn = op_btns.nth(2)
-            cog_icon = cog_btn.locator("i.fa.fa-cog")
-            if cog_icon.count() == 0:
-                raise RuntimeError("3rd operation button is not cog icon; aborting.")
-            bt = (cog_btn.inner_text() or "").strip()
-            if re.search(r"Maintenance|Kick\s*Out", bt, re.I):
-                raise RuntimeError("Unsafe operation button resolved; aborting.")
+            nbtn = op_btns.count()
+            if nbtn <= 0:
+                raise RuntimeError("Operation column has no clickable buttons; aborting.")
+            danger_re = re.compile(r"Maintenance|Kick\s*Out", re.I)
+            cog_btn = None
+            if nbtn >= 3:
+                cand = op_btns.nth(2)
+                try:
+                    t3 = (cand.inner_text() or "").strip()
+                except Exception:
+                    t3 = ""
+                if cand.locator("i.fa.fa-cog").count() > 0 and not danger_re.search(t3):
+                    cog_btn = cand
+            if cog_btn is None:
+                for i in range(nbtn):
+                    b = op_btns.nth(i)
+                    try:
+                        bt = (b.inner_text() or "").strip()
+                    except Exception:
+                        bt = ""
+                    if danger_re.search(bt):
+                        continue
+                    if b.locator("i.fa.fa-cog").count() > 0:
+                        cog_btn = b
+                        break
+            if cog_btn is None:
+                raise RuntimeError("No safe cog operation button found; refusing unsafe click.")
             cog_btn.click(timeout=min(60_000, timeout_ms))
 
             dlg = page.locator(".el-dialog.add-floor, div[role='dialog'].add-floor").last
