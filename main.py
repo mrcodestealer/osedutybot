@@ -1169,9 +1169,27 @@ def _lark_is_schema_v2(data):
     return s == "2.0" or str(s).strip() == "2.0"
 
 
+def _lark_looks_like_lark_card_update_credential(token_str):
+    # type: (str) -> bool
+    """
+    Legacy ``card.action.trigger_v1`` flat payloads use top-level ``token`` for **updating the card**
+    (credential like ``c-xxxxx``), **not** the app Verification Token — see Lark docs
+    "Message Card Callback Interaction" (trigger_v1). Do not use that field for verification compare.
+    """
+    s = (token_str or "").strip()
+    if not s:
+        return False
+    return s.startswith("c-") or s.startswith("d-")
+
+
 def _lark_extract_verification_token(data):
     # type: (Optional[dict]) -> Optional[str]
-    """v2 events put token under ``header.token``; legacy uses top-level ``token``. Always try both."""
+    """
+    App **Verification Token**: schema 2.0 uses ``header.token``; some payloads use ``verification_token``.
+
+    **Do not** treat top-level ``token`` as verification when it is the **card update credential**
+    (see :func:`_lark_looks_like_lark_card_update_credential`).
+    """
     if not isinstance(data, dict):
         return None
     h = data.get("header")
@@ -1179,12 +1197,81 @@ def _lark_extract_verification_token(data):
         for key in ("token", "Token", "verification_token"):
             t = h.get(key)
             if t is not None:
-                return str(t).strip()
-    for key in ("token", "verification_token"):
-        t2 = data.get(key)
-        if t2 is not None:
-            return str(t2).strip()
-    return None
+                ts = str(t).strip()
+                # header.token in schema 2.0 envelope is the app verification token
+                return ts
+    vt = data.get("verification_token")
+    if vt is not None:
+        return str(vt).strip()
+    t2 = data.get("token")
+    if t2 is None:
+        return None
+    ts = str(t2).strip()
+    if _lark_looks_like_lark_card_update_credential(ts):
+        return None
+    return ts
+
+
+def _lark_is_legacy_card_trigger_v1_flat(data):
+    # type: (object) -> bool
+    """
+    Earlier **card.action.trigger_v1** body shape (flat JSON, no ``schema`` / ``event`` envelope):
+    ``open_id``, ``open_message_id``, ``action``, top-level ``token`` = card credential — Lark docs 2024.
+    """
+    if not isinstance(data, dict):
+        return False
+    if data.get("encrypt") is not None:
+        return False
+    # Already normalized or schema 2 envelope with header.event_type
+    het = _lark_header_event_type(data)
+    if het.startswith("card.action"):
+        return False
+    if isinstance(data.get("header"), dict) and data["header"].get("event_type"):
+        return False
+    if not isinstance(data.get("action"), dict):
+        return False
+    return bool(data.get("open_message_id") or data.get("open_id"))
+
+
+def _lark_normalize_legacy_card_trigger_v1_flat(data):
+    # type: (object) -> object
+    """
+    Map flat ``trigger_v1`` POST body into the same shape as schema-2 ``event`` + ``header.event_type``
+    so :func:`_lark_resolve_card_action` and Jenkins handlers work.
+    """
+    if not isinstance(data, dict) or not _lark_is_legacy_card_trigger_v1_flat(data):
+        return data
+    ev = {
+        "operator": {},
+        "action": data.get("action"),
+        "context": {},
+    }
+    oid = data.get("open_id")
+    if oid:
+        ev["operator"]["open_id"] = str(oid).strip()
+    uid = data.get("union_id")
+    if uid:
+        ev["operator"]["union_id"] = str(uid).strip()
+    ocid = data.get("open_chat_id") or data.get("chat_id")
+    if ocid:
+        ev["open_chat_id"] = str(ocid).strip()
+        ev["context"]["open_chat_id"] = str(ocid).strip()
+    omid = data.get("open_message_id")
+    if omid:
+        ev["context"]["open_message_id"] = str(omid).strip()
+    data["event"] = ev
+    hdr = data.get("header") if isinstance(data.get("header"), dict) else {}
+    hdr["event_type"] = "card.action.trigger_v1"
+    hdr["event_id"] = hdr.get("event_id") or str(omid or "")[:80]
+    data["header"] = hdr
+    data["schema"] = "2.0"
+    print(
+        "[lark] normalized legacy flat card.action.trigger_v1 body → schema-shaped event "
+        "(open_message_id=%r)"
+        % (omid,),
+        flush=True,
+    )
+    return data
 
 
 def _lark_http_empty_json_ok():
@@ -1488,7 +1575,8 @@ def lark_webhook():
             }
             payload["checklist_cn"] = [
                 "开发者后台 → 事件与回调：请求地址必须是公网 HTTPS，路径与本服务一致（含 nginx 转发）。",
-                "同一页「订阅事件」里勾选 card.action.trigger（卡片回传交互），保存后创建版本并发布应用。",
+                "优先订阅新版「卡片回传交互」card.action.trigger（请求体含 header.token = Verification Token）。",
+                "若仍订阅旧版 card.action.trigger_v1（扁平 JSON，token 为卡片凭证 c-…）：误把该 token 当 Verification Token 会 403；本仓库已忽略 c- 前缀。若 JSON 内仍无 Verification Token，可设 LARK_LEGACY_CARD_V1_ALLOW_MISSING_VERIFICATION_TOKEN=1（仅信任链路时使用）。",
                 "环境变量 VERIFICATION_TOKEN 与后台「Verification Token」完全一致（无多空格）。",
                 "若开启了加密：设 LARK_ENCRYPT_KEY；未开启加密：后台关掉加密或勿配密钥。",
                 "点按钮时 journalctl 应出现 [lark] webhook POST；若没有，请求没到本进程（DNS/防火墙/URL 错误）。",
@@ -1514,6 +1602,8 @@ def lark_webhook():
     data = _feishu_maybe_decrypt_webhook_payload(raw_in)
     data = _lark_coerce_event_dict(data)
     if isinstance(data, dict):
+        data = _lark_normalize_legacy_card_trigger_v1_flat(data)
+    if isinstance(data, dict):
         data = _lark_normalize_card_callback_envelope(data)
 
     if isinstance(raw_in, dict) and raw_in.get("encrypt") is not None and data is raw_in:
@@ -1528,7 +1618,22 @@ def lark_webhook():
         return jsonify({"challenge": data["challenge"]})
 
     token = _lark_extract_verification_token(data)
-    if token != VERIFICATION_TOKEN:
+    token_ok = token == VERIFICATION_TOKEN
+    if not token_ok and token is None and VERIFICATION_TOKEN:
+        # Legacy flat ``trigger_v1`` often has **no** Verification Token in JSON (only ``c-`` card credential).
+        # Opt-in only — prefer subscribing to **Card Callback Interaction** (``card.action.trigger``) which includes ``header.token``.
+        if (
+            (os.getenv("LARK_LEGACY_CARD_V1_ALLOW_MISSING_VERIFICATION_TOKEN") or "").strip() == "1"
+            and _lark_header_event_type(data) == "card.action.trigger_v1"
+        ):
+            print(
+                "[lark] accepting card.action.trigger_v1 without body Verification Token "
+                "(LARK_LEGACY_CARD_V1_ALLOW_MISSING_VERIFICATION_TOKEN=1); "
+                "prefer migrating subscription to card.action.trigger schema 2.0.",
+                flush=True,
+            )
+            token_ok = True
+    if not token_ok:
         sch = data.get("schema") if isinstance(data, dict) else None
         print(
             f"❌ Token mismatch: expected {VERIFICATION_TOKEN}, got {token!r} schema={sch!r}",
