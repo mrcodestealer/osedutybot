@@ -660,6 +660,15 @@ def send_sheet_reminder_list_card(*, send_func, chat_id: str, get_token_func) ->
 
 
 def build_add_reminder_form_card() -> dict:
+    time_options: list[dict] = []
+    for hh in range(24):
+        for mm in (0, 30):
+            ap = "AM" if hh < 12 else "PM"
+            hh12 = hh % 12
+            if hh12 == 0:
+                hh12 = 12
+            v = f"{hh12}:{mm:02d}{ap}"
+            time_options.append({"text": {"tag": "plain_text", "content": v}, "value": v})
     return {
         "schema": "2.0",
         "config": {"update_multi": True, "width_mode": "fill"},
@@ -676,44 +685,52 @@ def build_add_reminder_form_card() -> dict:
                         "content": (
                             "Fill all fields, then tap **Submit** once.\n"
                             "Date can be picked from UI date picker.\n"
-                            "Time: `HH:MMPM/AM` (e.g. `6:30PM`)"
+                            "Time can be picked from dropdown list."
                         ),
                     },
                 },
                 {
-                    "tag": "div",
-                    "text": {"tag": "plain_text", "content": "Start Date"},
-                },
-                {
-                    "tag": "date_picker",
-                    "name": "start_date",
-                    "placeholder": {"tag": "plain_text", "content": "Pick start date"},
-                },
-                {
-                    "tag": "div",
-                    "text": {"tag": "plain_text", "content": "End Date"},
-                },
-                {
-                    "tag": "date_picker",
-                    "name": "end_date",
-                    "placeholder": {"tag": "plain_text", "content": "Pick end date"},
-                },
-                {
-                    "tag": "picker_time",
-                    "name": "time",
-                    "placeholder": {"tag": "plain_text", "content": "Pick time"},
-                },
-                {
-                    "tag": "input",
-                    "name": "reason",
-                    "label": {"tag": "plain_text", "content": "Reason"},
-                    "placeholder": {"tag": "plain_text", "content": "Kindly send graph"},
-                },
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "Submit"},
-                    "type": "primary",
-                    "behaviors": [{"type": "callback", "value": {"k": "rem_add_submit"}}],
+                    "tag": "form",
+                    "name": "rem_add_form",
+                    "elements": [
+                        {
+                            "tag": "date_picker",
+                            "name": "start_date",
+                            "label": {"tag": "plain_text", "content": "Start Date"},
+                            "placeholder": {"tag": "plain_text", "content": "Pick start date"},
+                            "required": True,
+                        },
+                        {
+                            "tag": "date_picker",
+                            "name": "end_date",
+                            "label": {"tag": "plain_text", "content": "End Date"},
+                            "placeholder": {"tag": "plain_text", "content": "Pick end date"},
+                            "required": True,
+                        },
+                        {
+                            "tag": "select_static",
+                            "name": "time",
+                            "label": {"tag": "plain_text", "content": "Time"},
+                            "placeholder": {"tag": "plain_text", "content": "Select time"},
+                            "options": time_options,
+                            "required": True,
+                        },
+                        {
+                            "tag": "input",
+                            "name": "reason",
+                            "label": {"tag": "plain_text", "content": "Reason"},
+                            "placeholder": {"tag": "plain_text", "content": "Kindly send graph"},
+                            "required": True,
+                        },
+                        {
+                            "tag": "button",
+                            "name": "submit_rem_add",
+                            "text": {"tag": "plain_text", "content": "Submit"},
+                            "type": "primary",
+                            "form_action_type": "submit",
+                            "behaviors": [{"type": "callback", "value": {"k": "rem_add_submit"}}],
+                        },
+                    ],
                 },
             ]
         },

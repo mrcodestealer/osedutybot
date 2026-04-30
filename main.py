@@ -1920,6 +1920,9 @@ def lark_webhook():
                                 return datetime.fromtimestamp(ts).strftime("%Y/%m/%d")
                             except Exception:
                                 return s
+                        m = re.match(r"^\s*(\d{4})-(\d{2})-(\d{2})(?:\s+.*)?$", s)
+                        if m:
+                            return f"{m.group(1)}/{m.group(2)}/{m.group(3)}"
                         return s
                     start_raw = _normalize_date_field(start_raw)
                     end_raw = _normalize_date_field(end_raw)
