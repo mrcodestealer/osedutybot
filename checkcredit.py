@@ -2020,8 +2020,11 @@ def _np_detail_matches_credit_and_machine_id(
         return False
     uid = _np_parse_user_id_from_detail_text(req_blob)
     eu = (expected_user_id or "").strip()
-    if eu and uid and uid != eu:
-        return False
+    if eu:
+        if not uid:
+            return False
+        if uid != eu:
+            return False
     if not _np_machine_id_contains_substr(machine_substr, mid):
         return False
     if expected_credit is None:
