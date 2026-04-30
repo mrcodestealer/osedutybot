@@ -1468,6 +1468,21 @@ def _wrap_log_line(s: str, width: int = 118) -> list[str]:
     return out
 
 
+def _compact_error_ctx_lines(lines: list[str], *, max_lines: int = 9, max_chars: int = 220) -> list[str]:
+    """
+    Keep screenshot payload small/stable: exact line count window (default 9),
+    each line truncated to max_chars with ellipsis.
+    """
+    out: list[str] = []
+    src = lines[:] if lines else [">> (empty)"]
+    for ln in src[: max(1, int(max_lines))]:
+        t = (ln or "").replace("\r", "").replace("\t", "    ")
+        if len(t) > max_chars:
+            t = t[: max_chars - 1] + "…"
+        out.append(t)
+    return out
+
+
 def _load_mono_font_for_error_png():
     """Prefer a system monospace TTF so long / unicode log lines render reliably."""
     try:
@@ -1591,12 +1606,17 @@ def build_error_context_screenshots(
         if not ctx:
             one = (e.get("full_line") or e.get("snippet") or "").strip()
             ctx = [f">> {one}"] if one else [">> (no printable log line)"]
-        title = f"User {uid} error #{idx} ({lines_before_after} above + current + {lines_before_after} below)"
+        compact_ctx = _compact_error_ctx_lines(
+            ctx,
+            max_lines=lines_before_after * 2 + 1,
+            max_chars=220,
+        )
+        title = f"User {uid} error #{idx} ({lines_before_after}+1+{lines_before_after} lines)"
         path = os.path.join(
             tempfile.gettempdir(),
             f"checkcredit_errctx_{uid}_{idx}_{uuid.uuid4().hex[:8]}.png",
         )
-        if _render_text_lines_png(ctx, title=title, output_path=path):
+        if _render_text_lines_png(compact_ctx, title=title, output_path=path):
             out.append({"path": path, "title": title})
     return out
 

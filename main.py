@@ -384,6 +384,14 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str, mode: 
                                     error_ctx_paths.append(pth)
                                     ik = upload_image_lark(pth) or ""
                                     if not ik:
+                                        try:
+                                            sz = os.path.getsize(pth)
+                                        except OSError:
+                                            sz = -1
+                                        print(
+                                            f"[checkcredit] error-context upload failed: path={pth} size={sz}",
+                                            flush=True,
+                                        )
                                         continue
                                     row_got_img = True
                                     extra_error_images.append(
