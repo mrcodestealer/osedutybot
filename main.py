@@ -1305,6 +1305,55 @@ def _lark_http_card_callback_ok():
     return Response(b"{}", status=200, mimetype="application/json")
 
 
+def _lark_parse_card_action_value(val):
+    # type: (object) -> Optional[dict]
+    """Decode ``event.action.value`` (object or JSON string)."""
+    if val is None:
+        return None
+    if isinstance(val, dict):
+        return val
+    if isinstance(val, str):
+        s = val.strip()
+        if not s:
+            return None
+        try:
+            o = json.loads(s)
+            return o if isinstance(o, dict) else None
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def _lark_test_card_json() -> str:
+    """Minimal interactive card for ``/test`` — button triggers ``k=test_hi`` card callback."""
+    card = {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": "Message card test"},
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": "Tap **Say hi** — the bot will **@ you** with **hi**.",
+                    },
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "Say hi"},
+                    "type": "primary",
+                    "behaviors": [{"type": "callback", "value": {"k": "test_hi"}}],
+                },
+            ],
+        },
+    }
+    return json.dumps(card, ensure_ascii=False)
+
+
 def _lark_safe_parse_json_body(req):
     # type: (object) -> Optional[dict]
     """Prefer ``get_json``; fallback to raw body (some proxies strip / alter Content-Type)."""
@@ -1696,17 +1745,35 @@ def lark_webhook():
                     return
                 if eid_ca:
                     processed_messages.add(eid_ca)
-            ju = _get_jenkinsupdate()
-            if not ju or not chat_id_ca:
+            if not chat_id_ca:
                 print(
-                    f"⚠️ card action skipped: ju={bool(ju)} chat_id={chat_id_ca!r} "
-                    f"event_type={hdr_et!r}",
+                    f"⚠️ card action skipped: missing chat_id event_type={hdr_et!r}",
                     flush=True,
                 )
                 return
             try:
                 ev_ca = data.get("event") if isinstance(data.get("event"), dict) else {}
                 op_ca = ev_ca.get("operator") if isinstance(ev_ca.get("operator"), dict) else {}
+                parsed_ca = _lark_parse_card_action_value(val_ca)
+                if isinstance(parsed_ca, dict) and str(parsed_ca.get("k") or "").strip().lower() == "test_hi":
+                    at_id = (
+                        (op_ca.get("open_id") or "").strip()
+                        or (sender_id_ca or "").strip()
+                        or (op_ca.get("union_id") or "").strip()
+                    )
+                    if not at_id:
+                        print("⚠️ test_hi card: missing operator open_id", flush=True)
+                        return
+                    send_message(chat_id_ca, f'<at user_id="{at_id}"></at> hi')
+                    return
+                ju = _get_jenkinsupdate()
+                if not ju:
+                    print(
+                        f"⚠️ card action skipped: jenkinsupdate unavailable chat_id={chat_id_ca!r} "
+                        f"event_type={hdr_et!r}",
+                        flush=True,
+                    )
+                    return
                 sender_use = ju.resolve_lark_jenkins_card_sender(
                     chat_id_ca, sender_id_ca or "", op_ca
                 )
@@ -1719,9 +1786,9 @@ def lark_webhook():
                     return
                 ju.handle_lark_jenkins_card_action(chat_id_ca, sender_use, val_ca, send_message)
             except Exception as ex:
-                print(f"❌ handle_lark_jenkins_card_action: {ex!r}", flush=True)
+                print(f"❌ card callback worker: {ex!r}", flush=True)
                 try:
-                    send_message(chat_id_ca, f"❌ Jenkins card action failed: {ex}")
+                    send_message(chat_id_ca, f"❌ Card action failed: {ex}")
                 except Exception:
                     pass
 
@@ -1941,6 +2008,10 @@ def lark_webhook():
     
 
     # 命令处理
+    if clean_text.lower() == "/test":
+        send_message(chat_id, _lark_test_card_json(), msg_type="interactive")
+        return jsonify({"success": True})
+
     if clean_text.lower() == '/cancelp1':
         if sender_id in active_p1_reminders:
             job_id = active_p1_reminders[sender_id]
