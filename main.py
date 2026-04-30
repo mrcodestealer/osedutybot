@@ -1217,14 +1217,15 @@ def _lark_extract_card_event_fields(ev):
     # type: (dict) -> tuple
     """
     Best-effort chat / sender / button value from ``event`` (see Lark ``card.action.trigger`` doc).
-    Works for ``card.action.trigger`` and legacy ``card.action.trigger_v1``-shaped payloads.
+    In **group chats**, ``open_chat_id`` may appear on ``event`` top-level before ``context``; try that first
+    (avoids ``code: undefined`` when chat_id was only read from ``context``).
     """
     ctx = ev.get("context") or {}
     act = ev.get("action") or {}
     val = act.get("value")
-    chat_id = ctx.get("open_chat_id") or ctx.get("chat_id")
+    chat_id = ev.get("open_chat_id") or ev.get("chat_id")
     if not chat_id:
-        chat_id = ev.get("open_chat_id") or ev.get("chat_id")
+        chat_id = ctx.get("open_chat_id") or ctx.get("chat_id")
     op = ev.get("operator") or {}
     sender_id = op.get("open_id")
     if not sender_id:
@@ -1283,7 +1284,12 @@ def _lark_resolve_card_action(data):
         et != "im.message.receive_v1"
         and isinstance(ev.get("action"), dict)
         and ev.get("action", {}).get("tag") == "button"
-        and bool(ctx0.get("open_chat_id") or ctx0.get("chat_id"))
+        and bool(
+            ev.get("open_chat_id")
+            or ev.get("chat_id")
+            or ctx0.get("open_chat_id")
+            or ctx0.get("chat_id")
+        )
     )
     if not (named or heuristic or legacy_shape):
         return None
