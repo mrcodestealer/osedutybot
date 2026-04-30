@@ -1348,6 +1348,14 @@ def _lark_form_field_text(v):
                 parts.append(t)
         return " ".join(parts).strip()
     if isinstance(v, dict):
+        if "hour" in v and "minute" in v:
+            try:
+                hh = int(v.get("hour"))
+                mm = int(v.get("minute"))
+                if 0 <= hh <= 23 and 0 <= mm <= 59:
+                    return f"{hh:02d}:{mm:02d}"
+            except Exception:
+                pass
         for k in ("value", "text", "content", "date", "time", "datetime"):
             t = _lark_form_field_text(v.get(k))
             if t:
@@ -1368,6 +1376,25 @@ def _lark_get_card_form_field(action_obj, name):
     if not isinstance(fv, dict):
         return ""
     return _lark_form_field_text(fv.get(name))
+
+
+def _lark_find_field_deep(obj, name):
+    # type: (object, str) -> str
+    if isinstance(obj, dict):
+        if name in obj:
+            t = _lark_form_field_text(obj.get(name))
+            if t:
+                return t
+        for vv in obj.values():
+            t = _lark_find_field_deep(vv, name)
+            if t:
+                return t
+    elif isinstance(obj, list):
+        for it in obj:
+            t = _lark_find_field_deep(it, name)
+            if t:
+                return t
+    return ""
 
 
 def _lark_test_card_json() -> str:
@@ -1869,6 +1896,20 @@ def lark_webhook():
                     end_raw = _lark_get_card_form_field(act_ca, "end_date")
                     time_raw = _lark_get_card_form_field(act_ca, "time")
                     reason = _lark_get_card_form_field(act_ca, "reason")
+                    if isinstance(parsed_ca, dict):
+                        start_raw = start_raw or _lark_form_field_text((parsed_ca.get("form_value") or {}).get("start_date"))
+                        end_raw = end_raw or _lark_form_field_text((parsed_ca.get("form_value") or {}).get("end_date"))
+                        time_raw = time_raw or _lark_form_field_text((parsed_ca.get("form_value") or {}).get("time"))
+                        reason = reason or _lark_form_field_text((parsed_ca.get("form_value") or {}).get("reason"))
+                        start_raw = start_raw or _lark_form_field_text(parsed_ca.get("start_date"))
+                        end_raw = end_raw or _lark_form_field_text(parsed_ca.get("end_date"))
+                        time_raw = time_raw or _lark_form_field_text(parsed_ca.get("time"))
+                        reason = reason or _lark_form_field_text(parsed_ca.get("reason"))
+                    # Last-resort deep scan for provider-specific callback shapes.
+                    start_raw = start_raw or _lark_find_field_deep(ev_ca, "start_date")
+                    end_raw = end_raw or _lark_find_field_deep(ev_ca, "end_date")
+                    time_raw = time_raw or _lark_find_field_deep(ev_ca, "time")
+                    reason = reason or _lark_find_field_deep(ev_ca, "reason")
                     def _normalize_date_field(raw: str) -> str:
                         s = str(raw or "").strip()
                         if re.match(r"^\d{10,13}$", s):
@@ -1883,7 +1924,7 @@ def lark_webhook():
                     start_raw = _normalize_date_field(start_raw)
                     end_raw = _normalize_date_field(end_raw)
                     # picker_time may return 24-hour HH:MM; convert to parser-friendly H:MMPM/AM.
-                    m24 = re.match(r"^\s*(\d{1,2}):(\d{2})\s*$", time_raw or "")
+                    m24 = re.match(r"^\s*(\d{1,2}):(\d{2})(?::\d{2})?\s*$", time_raw or "")
                     if m24:
                         hh = int(m24.group(1))
                         mm = int(m24.group(2))
