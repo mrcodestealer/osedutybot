@@ -1974,8 +1974,8 @@ def _np_machine_id_contains_substr(machine_substr: str | None, machine_id_value:
 
 def _np_expected_credit_for_match(expected_credit: float | None) -> float | None:
     """
-    Lark / log lines sometimes yield ``0`` or unparsed credit → ``0.0``. Matching that against
-    Request ``amount`` > 0 is impossible; treat non-positive values like "no amount filter".
+    Lark / log lines sometimes yield ``0`` or unparsed credit → ``0.0``. Treat only zero as
+    "no amount filter". Negative values are valid on some backends and must still be matched.
     """
     if expected_credit is None:
         return None
@@ -1983,7 +1983,7 @@ def _np_expected_credit_for_match(expected_credit: float | None) -> float | None
         v = float(expected_credit)
     except (TypeError, ValueError):
         return None
-    if v <= 0:
+    if v == 0:
         return None
     return v
 
@@ -1997,7 +1997,7 @@ def _np_detail_matches_credit_and_machine_id(
 ) -> bool:
     """
     Request JSON: ``machineId`` contains machine digits; when ``expected_credit`` is not ``None``,
-    ``amount`` > 0 and matches within ``NP_BACKEND_AMOUNT_EPS`` (default 0.05), after optional
+    ``amount`` matches within ``NP_BACKEND_AMOUNT_EPS`` (default 0.05), after optional
     ``amount_scale`` (TBP: ``TBP_THIRD_HTTP_AMOUNT_SCALE``).
     """
     mid, amt = _np_parse_machine_amount_from_request_blob(req_blob)
@@ -2019,7 +2019,7 @@ def _np_detail_matches_credit_and_machine_id(
     if sc <= 0:
         sc = 1.0
     scaled = float(amt) / sc
-    if scaled <= 0:
+    if scaled == 0:
         return False
     if abs(scaled - float(expected_credit)) > _np_amount_match_eps():
         return False
@@ -2698,7 +2698,7 @@ def screenshot_np_recharge_detail(
                         bits.append(f"`machineId` containing `{ms}`")
                     if exp_match is not None:
                         bits.append(
-                            f"positive `amount` within {_np_amount_match_eps()} of `{exp_match}`"
+                            f"`amount` within {_np_amount_match_eps()} of `{exp_match}` (non-zero)"
                             + (f" (÷ `{amt_scale}` scale)" if amt_scale != 1.0 else "")
                         )
                     elif ms:
