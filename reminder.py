@@ -674,32 +674,38 @@ def build_add_reminder_form_card() -> dict:
                     "text": {
                         "tag": "lark_md",
                         "content": (
-                            "Fill the form and tap **Submit**.\n"
-                            "Date: `YYYY/MM/DD` (or `MM/DD`)\n"
+                            "Fill all fields, then tap **Submit** once.\n"
+                            "Date can be picked from UI date picker.\n"
                             "Time: `HH:MMPM/AM` (e.g. `6:30PM`)"
                         ),
                     },
                 },
                 {
-                    "tag": "input",
+                    "tag": "div",
+                    "text": {"tag": "plain_text", "content": "Start Date"},
+                },
+                {
+                    "tag": "date_picker",
                     "name": "start_date",
-                    "label": {"tag": "plain_text", "content": "Start Date"},
-                    "placeholder": {"tag": "plain_text", "content": "2026/04/29"},
+                    "placeholder": {"tag": "plain_text", "content": "Pick start date"},
                 },
                 {
-                    "tag": "input",
+                    "tag": "div",
+                    "text": {"tag": "plain_text", "content": "End Date"},
+                },
+                {
+                    "tag": "date_picker",
                     "name": "end_date",
-                    "label": {"tag": "plain_text", "content": "End Date"},
-                    "placeholder": {"tag": "plain_text", "content": "2026/12/31"},
+                    "placeholder": {"tag": "plain_text", "content": "Pick end date"},
                 },
                 {
-                    "tag": "input",
+                    "tag": "picker_time",
                     "name": "time",
                     "label": {"tag": "plain_text", "content": "Time"},
-                    "placeholder": {"tag": "plain_text", "content": "6:30PM"},
+                    "placeholder": {"tag": "plain_text", "content": "Pick time"},
                 },
                 {
-                    "tag": "input",
+                    "tag": "textarea",
                     "name": "reason",
                     "label": {"tag": "plain_text", "content": "Reason"},
                     "placeholder": {"tag": "plain_text", "content": "Kindly send graph"},

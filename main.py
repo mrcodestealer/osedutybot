@@ -1869,6 +1869,30 @@ def lark_webhook():
                     end_raw = _lark_get_card_form_field(act_ca, "end_date")
                     time_raw = _lark_get_card_form_field(act_ca, "time")
                     reason = _lark_get_card_form_field(act_ca, "reason")
+                    def _normalize_date_field(raw: str) -> str:
+                        s = str(raw or "").strip()
+                        if re.match(r"^\d{10,13}$", s):
+                            try:
+                                ts = int(s)
+                                if ts > 10**12:
+                                    ts = ts // 1000
+                                return datetime.fromtimestamp(ts).strftime("%Y/%m/%d")
+                            except Exception:
+                                return s
+                        return s
+                    start_raw = _normalize_date_field(start_raw)
+                    end_raw = _normalize_date_field(end_raw)
+                    # picker_time may return 24-hour HH:MM; convert to parser-friendly H:MMPM/AM.
+                    m24 = re.match(r"^\s*(\d{1,2}):(\d{2})\s*$", time_raw or "")
+                    if m24:
+                        hh = int(m24.group(1))
+                        mm = int(m24.group(2))
+                        if 0 <= hh <= 23 and 0 <= mm <= 59:
+                            ap = "AM" if hh < 12 else "PM"
+                            hh12 = hh % 12
+                            if hh12 == 0:
+                                hh12 = 12
+                            time_raw = f"{hh12}:{mm:02d}{ap}"
                     if not (start_raw and end_raw and time_raw and reason):
                         send_message(
                             chat_id_ca,
