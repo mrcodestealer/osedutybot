@@ -420,6 +420,7 @@ _USERID_START = re.compile(
 _ERR_ZERO = re.compile(r"""['\"]error['\"]\s*:\s*0\b""")
 _CUR_COIN = re.compile(r"""['\"]cur_coin['\"]\s*:\s*([\d.]+)""")
 _REDUCE_NUM = re.compile(r"""['\"]reduce_num['\"]\s*:\s*([\d.]+)""")
+_AMOUNT_NUM = re.compile(r"""['\"]amount['\"]\s*:\s*(-?\d+(?:\.\d+)?)""")
 _LINE_TIME_PREFIX = re.compile(r"^(\d{2}:\d{2}:\d{2}(?:\.\d{3})?)")
 
 
@@ -452,6 +453,26 @@ def _parse_reduce_num_credit(line: str) -> tuple[float, str] | None:
     if not _ERR_ZERO.search(line):
         return None
     m = _REDUCE_NUM.search(line)
+    if not m:
+        return None
+    try:
+        val = float(m.group(1))
+    except ValueError:
+        return None
+    tshort = _line_time_prefix(line)
+    return (val, tshort)
+
+
+def _parse_aft_interrogation_fail_credit(line: str) -> tuple[float, str] | None:
+    """
+    successJson with ``desc: aft interrogation faild``:
+    use ``data.amount`` as latest credit fallback for this player block.
+    """
+    if "successJson" not in line:
+        return None
+    if "aft interrogation faild" not in line.lower():
+        return None
+    m = _AMOUNT_NUM.search(line)
     if not m:
         return None
     try:
@@ -537,6 +558,7 @@ def parse_user_blocks_full(log_text: str) -> list[dict[str, Any]]:
         findings: list[dict[str, Any]] = []
         best_coin: dict[str, Any] | None = None
         best_reduce: dict[str, Any] | None = None
+        best_aft_fail: dict[str, Any] | None = None
         best_enter: dict[str, Any] | None = None
         block_max_line = max((ln for ln, _ in blines), default=-1)
         rolling_ts = ""
@@ -563,6 +585,16 @@ def parse_user_blocks_full(log_text: str) -> list[dict[str, Any]]:
                     "value": val,
                     "time_short": eff_ts,
                     "source": "reduce_num",
+                }
+            af = _parse_aft_interrogation_fail_credit(line)
+            if af:
+                val, tshort = af
+                eff_ts = (tshort or rolling_ts).strip()
+                best_aft_fail = {
+                    "line_idx": line_idx,
+                    "value": val,
+                    "time_short": eff_ts,
+                    "source": "aft_interrogation_faild_amount",
                 }
             eg = _parse_enter_game_credit(line)
             if eg:
@@ -605,7 +637,9 @@ def parse_user_blocks_full(log_text: str) -> list[dict[str, Any]]:
             "block_max_line": block_max_line,
         }
         has_enter_timeout = _block_has_enter_game_timeout(blines)
-        if best_reduce is not None:
+        if best_aft_fail is not None:
+            latest_credit: dict[str, Any] | None = best_aft_fail
+        elif best_reduce is not None:
             latest_credit: dict[str, Any] | None = best_reduce
         elif has_enter_timeout and best_enter is not None:
             latest_credit = best_enter
@@ -671,6 +705,7 @@ def merge_players_full(payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
             order.append(uid)
             by_uid[uid] = {
                 "errors": [],
+                "_lc_aft_fail": None,
                 "_lc_coin": None,
                 "_lc_reduce": None,
                 "_lc_enter": None,
@@ -680,7 +715,9 @@ def merge_players_full(payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
         lc = blk.get("latest_credit")
         if lc:
             src = (lc.get("source") or "").strip()
-            if src == "reduce_num":
+            if src == "aft_interrogation_faild_amount":
+                slot = "_lc_aft_fail"
+            elif src == "reduce_num":
                 slot = "_lc_reduce"
             elif src == "enter_game_target":
                 slot = "_lc_enter"
@@ -699,8 +736,10 @@ def merge_players_full(payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
         errs = by_uid[uid]["errors"][:]
         errs.sort(key=_error_line_time_key, reverse=True)
         d = by_uid[uid]
-        # Prefer reduce_num over cur_coin / enter_game whenever present anywhere for this user.
-        if d["_lc_reduce"] is not None:
+        # Prefer aft_interrogation_faild amount, then reduce_num, then cur_coin / enter_game.
+        if d["_lc_aft_fail"] is not None:
+            lc_final = d["_lc_aft_fail"]
+        elif d["_lc_reduce"] is not None:
             lc_final = d["_lc_reduce"]
         else:
             lc_cands = [d["_lc_coin"], d["_lc_enter"]]
