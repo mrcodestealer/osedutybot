@@ -1974,16 +1974,14 @@ def _np_machine_id_contains_substr(machine_substr: str | None, machine_id_value:
 
 def _np_expected_credit_for_match(expected_credit: float | None) -> float | None:
     """
-    Lark / log lines sometimes yield ``0`` or unparsed credit → ``0.0``. Treat only zero as
-    "no amount filter". Negative values are valid on some backends and must still be matched.
+    Keep numeric log credit for amount matching (including ``0.0`` and negatives).
+    Return ``None`` only when credit is missing/unparseable.
     """
     if expected_credit is None:
         return None
     try:
         v = float(expected_credit)
     except (TypeError, ValueError):
-        return None
-    if v == 0:
         return None
     return v
 
@@ -2019,8 +2017,6 @@ def _np_detail_matches_credit_and_machine_id(
     if sc <= 0:
         sc = 1.0
     scaled = float(amt) / sc
-    if scaled == 0:
-        return False
     if abs(scaled - float(expected_credit)) > _np_amount_match_eps():
         return False
     return True
@@ -2772,7 +2768,7 @@ def screenshot_np_recharge_detail(
                         bits.append(f"`machineId` containing `{ms}`")
                     if exp_match is not None:
                         bits.append(
-                            f"`amount` within {_np_amount_match_eps()} of `{exp_match}` (non-zero)"
+                            f"`amount` within {_np_amount_match_eps()} of `{exp_match}`"
                             + (f" (÷ `{amt_scale}` scale)" if amt_scale != 1.0 else "")
                         )
                     elif ms:
