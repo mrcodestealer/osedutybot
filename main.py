@@ -336,12 +336,15 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
         np = out.get("np_followup")
         egm_img_path = None
         egm_img_key = ""
+        egm_img_err = ""
+        egm_img_attempted = False
         if isinstance(np, dict):
             try:
                 md = str(np.get("machine_display") or "").strip() or None
                 ms = str(np.get("machine_match_substr") or "").strip() or None
                 cap = getattr(checkcredit, "screenshot_egm_status_window", None)
                 if callable(cap) and md:
+                    egm_img_attempted = True
                     egm_img_path = cap(
                         machine_display=md,
                         machine_substr=ms,
@@ -350,6 +353,7 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
                     )
                     egm_img_key = upload_image_lark(egm_img_path) or ""
                     if not egm_img_key:
+                        egm_img_err = "upload image failed"
                         print("[checkcredit] EGM status screenshot upload failed", flush=True)
                 if callable(getattr(checkcredit, "build_np_choice_lark_card", None)):
                     out["lark_card_candidates"] = checkcredit.build_np_choice_lark_card(
@@ -360,6 +364,7 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
                         image_key=egm_img_key,
                     )
             except Exception as e:
+                egm_img_err = str(e)
                 print(f"[checkcredit] EGM status screenshot failed: {e!r}", flush=True)
             finally:
                 if egm_img_path and os.path.isfile(egm_img_path):
@@ -367,6 +372,9 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str):
                         os.unlink(egm_img_path)
                     except OSError:
                         pass
+            if egm_img_attempted and not egm_img_key:
+                msg = f"⚠️ EGM screenshot unavailable: {egm_img_err}" if egm_img_err else "⚠️ EGM screenshot unavailable."
+                send_message(chat_id, msg)
         cards: list[dict] = []
         for key in (
             "lark_card",
