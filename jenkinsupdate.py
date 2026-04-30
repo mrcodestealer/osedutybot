@@ -4318,11 +4318,9 @@ def _fpms_lark_v2_column_set_button_row(
 
 
 def _fpms_lark_job_choice_card_json(candidates: list[tuple[str, float, str, str]]) -> str:
-    """Lark ``msg_type=interactive``: JSON **2.0** card — numbered body + rows of digit buttons."""
+    """Lark ``msg_type=interactive``: JSON **2.0** card — numbered body + rows of digit buttons + Cancel."""
     lines_md: list[str] = [
-        "Several Jenkins jobs match your text. **Tap a number** below or reply with **one** number "
-        "**1**–"
-        f"**{len(candidates)}** (or **cancel**):",
+        "Several Jenkins jobs match your text. **Tap a number** below to choose, or **Cancel**.",
         "",
     ]
     buttons: list[dict[str, object]] = []
@@ -4343,6 +4341,14 @@ def _fpms_lark_job_choice_card_json(candidates: list[tuple[str, float, str, str]
     for off in range(0, len(buttons), 5):
         chunk = buttons[off : off + 5]
         body_elements.append(_fpms_lark_v2_column_set_button_row(chunk))
+    body_elements.append({"tag": "hr"})
+    body_elements.append(
+        _fpms_lark_v2_callback_button(
+            "Cancel",
+            "default",
+            {"k": "ju_cancel"},
+        )
+    )
     card: dict[str, object] = {
         "schema": "2.0",
         "config": {"update_multi": True, "width_mode": "fill"},
@@ -4356,15 +4362,15 @@ def _fpms_lark_job_choice_card_json(candidates: list[tuple[str, float, str, str]
 
 
 def _fpms_format_jenkins_job_menu(candidates: list[tuple[str, float, str, str]]) -> str:
+    """Plain-text fallback when interactive cards cannot be sent (no buttons — typing only)."""
     n = len(candidates)
     if n == 1:
         lines = [
-            "Pick the Jenkins job below (reply **1** only, or say **cancel**):",
+            "Pick the Jenkins job (interactive buttons unavailable here — reply **1** or **cancel**):",
         ]
     else:
         lines = [
-            "Several Jenkins jobs match your text. Reply with **one** number only (**1**–"
-            f"**{n}**), or say **cancel**:",
+            f"Several jobs match (**1**–**{n}**). Buttons unavailable in this view — reply one number or **cancel**:",
         ]
     for i, (alias, _sc, label, url_raw) in enumerate(candidates, start=1):
         u0 = _jenkins_update_primary_url(url_raw)
@@ -5860,10 +5866,14 @@ def handle_lark_jenkins_update_message(
                 return True
             idx = _parse_single_menu_index(clean_text.strip(), len(cands))
             if idx is None:
-                send(
-                    chat_id,
-                    f"Reply with **one** number **1**–**{len(cands)}** only, or say **cancel**.",
-                )
+                card_js = _fpms_lark_job_choice_card_json(cands)
+                try:
+                    send(chat_id, card_js, msg_type="interactive")
+                except TypeError:
+                    send(
+                        chat_id,
+                        _fpms_format_jenkins_job_menu(cands),
+                    )
                 return True
             row = cands[idx - 1]
             with _fpms_lark_sessions_lock:
@@ -6083,13 +6093,22 @@ def handle_lark_jenkins_card_action(
     send,
 ) -> bool:
     """
-    Feishu ``card.action.trigger``: YES/NO (**k** ``wb``) or job index (**k** ``job``).
-    Mirrors typed **yes** / **no** / **1** … in :func:`handle_lark_jenkins_update_message`.
+    Feishu ``card.action.trigger``: YES/NO (**k** ``wb``), job index (**k** ``job``), or Cancel (**k** ``ju_cancel``).
+    Mirrors typed **yes** / **no** / **1** … / **cancel** in :func:`handle_lark_jenkins_update_message`.
     """
     parsed = _fpms_lark_normalize_card_action_value(value)
     if not parsed:
         return False
     k = str(parsed.get("k") or "").strip().lower()
+    if k == "ju_cancel":
+        return handle_lark_jenkins_update_message(
+            chat_id,
+            sender_id,
+            "cancel",
+            "cancel",
+            send,
+            allow_start=True,
+        )
     if k == "wb":
         v = str(parsed.get("v") or "").strip().lower()
         if v == "y":
