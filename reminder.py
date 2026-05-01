@@ -119,7 +119,14 @@ REMINDER_FIELD_START = os.getenv("REMINDER_FIELD_START", "Start Time").strip() o
 REMINDER_FIELD_END = os.getenv("REMINDER_FIELD_END", "End Time").strip() or "End Time"
 REMINDER_FIELD_TIME = os.getenv("REMINDER_FIELD_TIME", "Time").strip() or "Time"
 REMINDER_FIELD_REASON = os.getenv("REMINDER_FIELD_REASON", "Reason").strip() or "Reason"
+REMINDER_FIELD_WHEN = os.getenv("REMINDER_FIELD_WHEN", "When").strip() or "When"
+REMINDER_WHEN_DEFAULT = os.getenv("REMINDER_WHEN_DEFAULT", "Every day").strip() or "Every day"
 _SHEET_JOB_PREFIX = "sheet_daily_reminder::"
+
+# Canonical tokens for ``When`` matching (multi-select on Bitable + form).
+_WHEN_TOKEN_DAILY = "DAILY"
+_WHEN_TOKEN_MONTHLY = "MONTHLY"
+_WEEKDAY_TOKENS_ORDER = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
 
 
 def lark_card_at_open_id(open_id: str) -> str:
@@ -298,6 +305,130 @@ def _field_text(v) -> str:
     return str(v).strip()
 
 
+def _field_when_list(v) -> list[str]:
+    """Bitable multi-select / text → list of option labels."""
+    if v is None:
+        return []
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return []
+        return [p.strip() for p in re.split(r"[,，、]", s) if p.strip()]
+    if isinstance(v, list):
+        out: list[str] = []
+        for item in v:
+            if isinstance(item, str):
+                t = item.strip()
+                if t:
+                    out.append(t)
+            elif isinstance(item, dict):
+                t = (
+                    str(item.get("name") or item.get("text") or item.get("option_name") or "").strip()
+                    or str(item.get("value") or "").strip()
+                )
+                if t:
+                    out.append(t)
+        return out
+    if isinstance(v, dict):
+        t = _field_text(v)
+        return [t] if t else []
+    return [str(v).strip()] if str(v).strip() else []
+
+
+def parse_when_form_value(v) -> list[str]:
+    """Lark card ``form_value["when"]`` may be list of strings / dicts or a single string."""
+    return _field_when_list(v)
+
+
+def _normalize_when_label(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+
+def _label_to_when_tokens(label: str) -> set[str]:
+    """Map one multi-select label (any language / wording) to canonical tokens."""
+    x = _normalize_when_label(label)
+    if not x:
+        return set()
+    out: set[str] = set()
+    if x in (
+        "every day",
+        "everyday",
+        "daily",
+        "每天",
+        "每日",
+        "all days",
+    ) or re.search(r"\b(every\s+day|daily)\b", x):
+        out.add(_WHEN_TOKEN_DAILY)
+    if x in ("every month", "monthly", "每月", "每个月") or re.search(
+        r"\b(every\s+month|monthly)\b", x
+    ):
+        out.add(_WHEN_TOKEN_MONTHLY)
+
+    wd_specs: list[tuple[str, str]] = [
+        ("MON", r"\b(every\s+)?monday\b|星期一|周一"),
+        ("TUE", r"\b(every\s+)?tuesday\b|星期二|周二"),
+        ("WED", r"\b(every\s+)?wednesday\b|星期三|周三"),
+        ("THU", r"\b(every\s+)?thursday\b|星期四|周四"),
+        ("FRI", r"\b(every\s+)?friday\b|星期五|周五"),
+        ("SAT", r"\b(every\s+)?saturday\b|星期六|周六"),
+        ("SUN", r"\b(every\s+)?sunday\b|星期日|周日|星期天"),
+    ]
+    for tok, pat in wd_specs:
+        if re.search(pat, x):
+            out.add(tok)
+    return out
+
+
+def _when_tokens_from_labels(labels: list[str]) -> tuple[frozenset[str], str]:
+    """
+    Merge all labels into token set + human display string.
+    Empty labels → treat as **every day** (backward compatible).
+    """
+    labels_n = [str(l).strip() for l in labels if str(l).strip()]
+    tokens: set[str] = set()
+    for lab in labels_n:
+        tokens |= _label_to_when_tokens(lab)
+    if not labels_n:
+        tokens = {_WHEN_TOKEN_DAILY}
+        disp = REMINDER_WHEN_DEFAULT
+    elif not tokens:
+        tokens.add(_WHEN_TOKEN_DAILY)
+        disp = ", ".join(labels_n)
+    else:
+        disp = ", ".join(labels_n)
+    return frozenset(tokens), disp
+
+
+def _py_weekday_to_token(wd: int) -> str:
+    """Monday=0 … Sunday=6 → MON…SUN."""
+    return _WEEKDAY_TOKENS_ORDER[int(wd) % 7]
+
+
+def when_matches_schedule(
+    when_tokens: frozenset[str],
+    today: date,
+    *,
+    row_start_date: date,
+) -> bool:
+    """
+    Whether ``today`` should fire for this row's **When** multi-select.
+
+    - **DAILY**: any day in [start, end].
+    - **MON–SUN**: weekday matches one selected day.
+    - **MONTHLY**: same calendar day-of-month as **Start Time** (within range).
+    Multiple selections are OR'd (e.g. Monday OR monthly on the 15th).
+    """
+    if _WHEN_TOKEN_DAILY in when_tokens:
+        return True
+    matched = False
+    if _WHEN_TOKEN_MONTHLY in when_tokens and today.day == row_start_date.day:
+        matched = True
+    wd_sel = set(when_tokens) & set(_WEEKDAY_TOKENS_ORDER)
+    if wd_sel and _py_weekday_to_token(today.weekday()) in wd_sel:
+        matched = True
+    return matched
+
+
 def _normalize_sheet_rows(records: list[dict]) -> list[dict]:
     rows: list[dict] = []
     for rec in records:
@@ -316,6 +447,8 @@ def _normalize_sheet_rows(records: list[dict]) -> list[dict]:
             time_n = _normalize_sheet_time(time_raw)
         except Exception:
             continue
+        when_labels = _field_when_list(fields.get(REMINDER_FIELD_WHEN))
+        when_tokens, when_display = _when_tokens_from_labels(when_labels)
         rows.append(
             {
                 "record_id": rid,
@@ -324,6 +457,8 @@ def _normalize_sheet_rows(records: list[dict]) -> list[dict]:
                 "end_date": end_d,
                 "time": time_n,
                 "reason": reason,
+                "when_tokens": when_tokens,
+                "when_display": when_display,
             }
         )
     rows.sort(key=lambda x: (x["start_date"], x["time"], x["id"]))
@@ -351,6 +486,7 @@ def _sheet_rows_card(
                 f"{id_line}"
                 f"📅 **Start Time:** `{r['start_date'].strftime('%Y/%m/%d')}`\n"
                 f"📅 **End Time:** `{r['end_date'].strftime('%Y/%m/%d')}`\n"
+                f"📆 **When:** `{r.get('when_display') or REMINDER_WHEN_DEFAULT}`\n"
                 f"⏰ **Time:** `{r['time']}`\n"
                 f"📝 **Reason:** {r['reason']}"
             )
@@ -435,6 +571,7 @@ def _sheet_delete_picker_card(rows: list[dict]) -> dict:
                         "content": (
                             f"🆔 **ID:** `{rid}`\n"
                             f"📅 `{r['start_date'].strftime('%Y/%m/%d')}` → `{r['end_date'].strftime('%Y/%m/%d')}`\n"
+                            f"📆 `{r.get('when_display') or REMINDER_WHEN_DEFAULT}`\n"
                             f"⏰ `{r['time']}`\n"
                             f"📝 {r['reason']}"
                         ),
@@ -472,6 +609,11 @@ def _send_daily_sheet_reminder(
     today = date.today()
     if not (row["start_date"] <= today <= row["end_date"]):
         return
+    wt = row.get("when_tokens")
+    if not isinstance(wt, frozenset):
+        wt = frozenset({_WHEN_TOKEN_DAILY})
+    if not when_matches_schedule(wt, today, row_start_date=row["start_date"]):
+        return
     mention_id = _resolve_sheet_reminder_mention_id(target_user_id)
     at_line = (f"{lark_card_at_open_id(mention_id)}\n\n" if mention_id else "")
     card = {
@@ -486,6 +628,7 @@ def _send_daily_sheet_reminder(
                         f"{at_line}"
                         f"📅 **Start Time:** `{row['start_date'].strftime('%Y/%m/%d')}`\n"
                         f"📅 **End Time:** `{row['end_date'].strftime('%Y/%m/%d')}`\n"
+                        f"📆 **When:** `{row.get('when_display') or REMINDER_WHEN_DEFAULT}`\n"
                         f"⏰ **Time:** `{row['time']}`\n"
                         f"📝 **Reason:** {row['reason']}"
                     ),
@@ -556,6 +699,7 @@ def add_sheet_reminder(
     chat_id: str,
     target_user_id: str,
     schedule_chat_id: str | None = None,
+    when_labels: list[str] | None = None,
 ) -> str:
     if not _reminder_sheet_enabled():
         return "❌ REMINDERSHEETTOKEN / REMINDERSHEETID is not set."
@@ -585,12 +729,21 @@ def add_sheet_reminder(
             max_id = max(max_id, int(m.group(0)))
     new_id = str(max_id + 1)
 
+    if when_labels:
+        wl = [str(x).strip() for x in when_labels if str(x).strip()]
+    else:
+        wl = [p.strip() for p in REMINDER_WHEN_DEFAULT.split(",") if p.strip()]
+    if not wl:
+        wl = ["Every day"]
+    when_tokens, when_display = _when_tokens_from_labels(wl)
+
     fields = {
         REMINDER_FIELD_ID: new_id,
         REMINDER_FIELD_START: _sheet_date_to_timestamp_ms(start_d),
         REMINDER_FIELD_END: _sheet_date_to_timestamp_ms(end_d),
         REMINDER_FIELD_TIME: time_s,
         REMINDER_FIELD_REASON: reason_n,
+        REMINDER_FIELD_WHEN: wl,
     }
     resp = requests.post(
         _bitable_records_url(),
@@ -618,6 +771,8 @@ def add_sheet_reminder(
                 "end_date": end_d,
                 "time": time_s,
                 "reason": reason_n,
+                "when_tokens": when_tokens,
+                "when_display": when_display,
             }
         ],
         title="✅ Reminder Added",
@@ -697,6 +852,20 @@ def build_add_reminder_form_card() -> dict:
                 hh12 = 12
             v = f"{hh12}:{mm:02d}{ap}"
             time_options.append({"text": {"tag": "plain_text", "content": v}, "value": v})
+    when_labels_form = [
+        "Every Monday",
+        "Every Tuesday",
+        "Every Wednesday",
+        "Every Thursday",
+        "Every Friday",
+        "Every Saturday",
+        "Every Sunday",
+        "Every day",
+        "Every month",
+    ]
+    when_options = [
+        {"text": {"tag": "plain_text", "content": lab}, "value": lab} for lab in when_labels_form
+    ]
     return {
         "schema": "2.0",
         "config": {"update_multi": True, "width_mode": "fill"},
@@ -713,7 +882,9 @@ def build_add_reminder_form_card() -> dict:
                         "content": (
                             "Fill all fields, then tap **Submit** once.\n"
                             "Date can be picked from UI date picker.\n"
-                            "Time can be picked from dropdown list."
+                            "Time can be picked from dropdown list.\n"
+                            "**When** (optional): weekday(s), **Every day**, or **Every month** "
+                            "(must match your Bitable multi-select option names)."
                         ),
                     },
                 },
@@ -751,6 +922,22 @@ def build_add_reminder_form_card() -> dict:
                             "placeholder": {"tag": "plain_text", "content": "Select time"},
                             "options": time_options,
                             "required": True,
+                        },
+                        {
+                            "tag": "div",
+                            "text": {"tag": "plain_text", "content": "When (multi-select)"},
+                        },
+                        {
+                            "tag": "multi_select_static",
+                            "name": "when",
+                            "placeholder": {
+                                "tag": "plain_text",
+                                "content": "Every day / weekdays / Every month",
+                            },
+                            "required": False,
+                            "width": "fill",
+                            "selected_values": ["Every day"],
+                            "options": when_options,
                         },
                         {
                             "tag": "div",

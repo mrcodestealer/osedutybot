@@ -405,6 +405,8 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str, mode: 
                                     chunk = fb_ctx(rr, max_errors=6)
                                     if chunk:
                                         machineerror_fb.append(chunk)
+                    else:
+                        intro_line = str(np.get("np_choice_intro") or "").strip()
                     same_last_line = ""
                     if str(mode or "").strip().lower() != "error_only":
                         same_last_line = str(np.get("same_last_line") or "")

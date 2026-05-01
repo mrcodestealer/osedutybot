@@ -810,7 +810,7 @@ def select_no_error_players(
     *,
     limit: int = 4,
 ) -> list[dict[str, Any]]:
-    """Players with no parsed error lines, newest log activity first (for NP / Third Http)."""
+    """Players with no parsed error lines, newest log activity first (Third Http / Detail flow)."""
     rows = [r for r in merged if not (r.get("errors") or [])]
     rows.sort(key=lambda r: int(r.get("max_line_idx", -1)), reverse=True)
     return rows[: max(0, int(limit))]
@@ -991,10 +991,10 @@ def build_np_followup_payload(
     merged_players: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
-    NP / Third Http picker: up to 4 choices.
+    Third Http / Detail picker: up to 4 choices (backend tag from machine label: NP, WF, DHS, …).
 
     When there are **no** parsed error lines (``top2_err`` empty), choices are filled only from
-    players **without** errors (latest activity first), so `/checkcredit` can still run Third Http.
+    players **without** errors (latest activity first), so `/checkcredit` still works on every routed backend.
 
     When errors exist: latest 2 in log order plus latest 2 with error (deduped), same as before.
     """
@@ -1332,15 +1332,18 @@ def build_same_latest_players_card(
     latest_err_uid: str | None,
     latest_any_uid: str | None,
     same_uid: bool,
+    third_http_backend: str = "",
 ) -> dict[str, Any]:
     """Whether the last player in the log and the last player with an error are the same uid."""
     dstr = target_date.isoformat()
     le = latest_err_uid or "*(none)*"
     la = latest_any_uid or "*(none)*"
+    be = (third_http_backend or "").strip().upper() or "NP"
     if not latest_err_uid:
         same_line = (
-            "No error lines in this log — NP list is **no-error players only**; "
-            "use **1**–**N** / Third Http to verify."
+            f"No parsed errors — picker shows **no-error players only** (`{be}` routed backend); "
+            "use **1**–**N** / Third Http.\n"
+            f"未解析到 error — 列表仅为 **无 error 玩家**（当前 **`{be}`** 后端）；请 **1–N** / Third Http。"
         )
     elif same_uid and latest_err_uid and latest_any_uid:
         same_line = "Same player: last activity in log and last error line refer to this user ID."
@@ -1886,11 +1889,23 @@ def run_finderror(
         top2_any, top2_err, machine_display, td, merged_players_ordered
     )
     if isinstance(np_followup, dict):
+        _be = str(np_followup.get("third_http_backend") or "").strip().upper() or "NP"
         if not le_uid:
             same_line = (
-                "No error lines in this log — NP list shows players **without** parsed errors only; "
-                "tap **1**–**N** or reply the digit to run **Third Http / Detail**."
+                f"Tap **1**–**N** → **Third Http / Detail** (`{_be}` backend) · "
+                f"点 **1–N** → **Third Http / Detail**（**{_be}** 后端，与各机台路由一致）。"
             )
+            _choices = np_followup.get("np_choices") or []
+            if _choices:
+                np_followup["np_choice_intro"] = (
+                    f"**无 error log 的玩家**（解析未命中 error；**{_be}** 后端与其它机台同一 checkcredit 流程）：\n"
+                    f"**Players with no error log** (`{_be}` routed backend — same flow for all cabinets):"
+                )
+            else:
+                np_followup["np_choice_intro"] = (
+                    "**本日志未解析到 error，且没有可列出的玩家。**\n"
+                    "**No error lines parsed and no players to list.**"
+                )
         elif same_uid and le_uid and la_uid:
             same_line = "Same player: last activity in log and last error line refer to this user ID."
         else:
@@ -1906,7 +1921,8 @@ def run_finderror(
         err_row = top2_err[0] if top2_err else None
         if not le_uid:
             same_player_line = (
-                "No error lines in log — only **no-error** players are listed for NP / Third Http."
+                f"No error lines — only **no-error** players listed for **Third Http / Detail** (`{_be}`).\n"
+                f"无 error 行 — 下列仅为 **无 error** 玩家（**{_be}** · Third Http / Detail）。"
             )
         elif same_uid and le_uid and la_uid:
             same_player_line = (
@@ -1968,6 +1984,7 @@ def run_finderror(
             latest_err_uid=le_uid,
             latest_any_uid=la_uid,
             same_uid=same_uid,
+            third_http_backend=str(np_followup.get("third_http_backend") or ""),
         ),
     }
 
