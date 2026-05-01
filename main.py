@@ -2615,24 +2615,36 @@ def lark_webhook():
         reply = f'cd /home/pi/osm && ./stopallserver.sh && ./startserver.sh'
         send_message(chat_id, reply)
         return jsonify({"success": True})
-    elif clean_text.lower().startswith('/maintenance') or clean_text.lower().startswith('/maintenanceshort'):
-        cmd = 'maintenance' if clean_text.lower().startswith('/maintenance') else 'maintenanceshort'
-        pattern = rf'/{cmd}\s+(.*)'
-        match = re.search(pattern, original_text, re.IGNORECASE | re.DOTALL)
+    elif (
+        re.match(r"^/maintenance\s", clean_text, re.I)
+        or re.match(r"^/maintenanceshort\s", clean_text, re.I)
+        or re.match(r"^/m\s", clean_text, re.I)
+    ):
+        match = re.search(
+            r"^/(maintenance|maintenanceshort|m)\s+(.*)",
+            original_text,
+            re.IGNORECASE | re.DOTALL,
+        )
         if match:
-            email_text = match.group(1).strip()
+            email_text = match.group(2).strip()
             if email_text.startswith('"') and email_text.endswith('"'):
                 email_text = email_text[1:-1]
         else:
-            email_text = ''
+            email_text = ""
         if email_text:
-            game_name = maintenance.get_table_name(email_text)
-            if game_name == "Unknown":
-                game_name = "Unknown table"
-            second_reply = maintenance.process_email(email_text)
+            token = get_tenant_access_token()
+            first_reply, second_reply = maintenance.process_maintenance_pipeline(
+                email_text, token
+            )
+            if (first_reply or "").strip():
+                send_message(chat_id, first_reply)
             send_message(chat_id, second_reply)
         else:
-            send_message(chat_id, "Please provide the email text after the command.")
+            send_message(
+                chat_id,
+                "Please paste email content after the command.\n"
+                "Examples: `/m …`, `/maintenance …`, `/maintenanceshort …`",
+            )
         return jsonify({"success": True})
     elif clean_text.lower().startswith('/nch'):
         parts = clean_text.split(maxsplit=1)
