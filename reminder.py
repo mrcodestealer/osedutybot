@@ -119,10 +119,10 @@ REMINDER_FIELD_START = os.getenv("REMINDER_FIELD_START", "Start Time").strip() o
 REMINDER_FIELD_END = os.getenv("REMINDER_FIELD_END", "End Time").strip() or "End Time"
 REMINDER_FIELD_TIME = os.getenv("REMINDER_FIELD_TIME", "Time").strip() or "Time"
 REMINDER_FIELD_REASON = os.getenv("REMINDER_FIELD_REASON", "Reason").strip() or "Reason"
-# Leave empty until the Bitable table has a matching multi-select column — otherwise Lark returns
-# ``1254045 FieldNameNotFound``. Must match the **exact** field name (or Feishu-exposed name).
-REMINDER_FIELD_WHEN = os.getenv("REMINDER_FIELD_WHEN", "").strip()
-REMINDER_WHEN_DEFAULT = os.getenv("REMINDER_WHEN_DEFAULT", "Every day").strip() or "Every day"
+# Schedule multi-select column in Bitable: title **when** (lowercase). API writes this key; reads try ``when`` then ``When``.
+REMINDER_FIELD_WHEN_WRITE = "when"
+REMINDER_FIELD_WHEN_READ_KEYS = ("when", "When")
+_WHEN_LABEL_DEFAULT = "Every day"
 _SHEET_JOB_PREFIX = "sheet_daily_reminder::"
 
 # Canonical tokens for ``When`` matching (multi-select on Bitable + form).
@@ -392,13 +392,24 @@ def _when_tokens_from_labels(labels: list[str]) -> tuple[frozenset[str], str]:
         tokens |= _label_to_when_tokens(lab)
     if not labels_n:
         tokens = {_WHEN_TOKEN_DAILY}
-        disp = REMINDER_WHEN_DEFAULT
+        disp = _WHEN_LABEL_DEFAULT
     elif not tokens:
         tokens.add(_WHEN_TOKEN_DAILY)
         disp = ", ".join(labels_n)
     else:
         disp = ", ".join(labels_n)
     return frozenset(tokens), disp
+
+
+def _bitable_raw_when_field(fields: dict) -> object | None:
+    """Return first non-missing When column payload (table may use ``when`` or legacy ``When``)."""
+    if not isinstance(fields, dict):
+        return None
+    for k in REMINDER_FIELD_WHEN_READ_KEYS:
+        if k not in fields:
+            continue
+        return fields[k]
+    return None
 
 
 def _py_weekday_to_token(wd: int) -> str:
@@ -449,11 +460,7 @@ def _normalize_sheet_rows(records: list[dict]) -> list[dict]:
             time_n = _normalize_sheet_time(time_raw)
         except Exception:
             continue
-        when_labels = (
-            _field_when_list(fields.get(REMINDER_FIELD_WHEN))
-            if REMINDER_FIELD_WHEN
-            else []
-        )
+        when_labels = _field_when_list(_bitable_raw_when_field(fields))
         when_tokens, when_display = _when_tokens_from_labels(when_labels)
         rows.append(
             {
@@ -492,7 +499,7 @@ def _sheet_rows_card(
                 f"{id_line}"
                 f"📅 **Start Time:** `{r['start_date'].strftime('%Y/%m/%d')}`\n"
                 f"📅 **End Time:** `{r['end_date'].strftime('%Y/%m/%d')}`\n"
-                f"📆 **When:** `{r.get('when_display') or REMINDER_WHEN_DEFAULT}`\n"
+                f"📆 **When:** `{r.get('when_display') or _WHEN_LABEL_DEFAULT}`\n"
                 f"⏰ **Time:** `{r['time']}`\n"
                 f"📝 **Reason:** {r['reason']}"
             )
@@ -577,7 +584,7 @@ def _sheet_delete_picker_card(rows: list[dict]) -> dict:
                         "content": (
                             f"🆔 **ID:** `{rid}`\n"
                             f"📅 `{r['start_date'].strftime('%Y/%m/%d')}` → `{r['end_date'].strftime('%Y/%m/%d')}`\n"
-                            f"📆 `{r.get('when_display') or REMINDER_WHEN_DEFAULT}`\n"
+                            f"📆 `{r.get('when_display') or _WHEN_LABEL_DEFAULT}`\n"
                             f"⏰ `{r['time']}`\n"
                             f"📝 {r['reason']}"
                         ),
@@ -634,7 +641,7 @@ def _send_daily_sheet_reminder(
                         f"{at_line}"
                         f"📅 **Start Time:** `{row['start_date'].strftime('%Y/%m/%d')}`\n"
                         f"📅 **End Time:** `{row['end_date'].strftime('%Y/%m/%d')}`\n"
-                        f"📆 **When:** `{row.get('when_display') or REMINDER_WHEN_DEFAULT}`\n"
+                        f"📆 **When:** `{row.get('when_display') or _WHEN_LABEL_DEFAULT}`\n"
                         f"⏰ **Time:** `{row['time']}`\n"
                         f"📝 **Reason:** {row['reason']}"
                     ),
@@ -738,9 +745,7 @@ def add_sheet_reminder(
     if when_labels:
         wl = [str(x).strip() for x in when_labels if str(x).strip()]
     else:
-        wl = [p.strip() for p in REMINDER_WHEN_DEFAULT.split(",") if p.strip()]
-    if not wl:
-        wl = ["Every day"]
+        wl = [_WHEN_LABEL_DEFAULT]
     when_tokens, when_display = _when_tokens_from_labels(wl)
 
     fields = {
@@ -749,9 +754,8 @@ def add_sheet_reminder(
         REMINDER_FIELD_END: _sheet_date_to_timestamp_ms(end_d),
         REMINDER_FIELD_TIME: time_s,
         REMINDER_FIELD_REASON: reason_n,
+        REMINDER_FIELD_WHEN_WRITE: wl,
     }
-    if REMINDER_FIELD_WHEN:
-        fields[REMINDER_FIELD_WHEN] = wl
     resp = requests.post(
         _bitable_records_url(),
         headers=_bitable_headers(token),
@@ -864,17 +868,8 @@ def build_add_reminder_form_card() -> dict:
         "Fill all fields, then tap **Submit** once.",
         "Date can be picked from UI date picker.",
         "Time can be picked from dropdown list.",
+        "**When** (optional): weekdays / **Every day** / **Every month** — same labels as Bitable column **when**.",
     ]
-    if REMINDER_FIELD_WHEN:
-        intro_lines.append(
-            f"**When** (optional): weekdays / **Every day** / **Every month** — labels must match "
-            f"Bitable multi-select **`{REMINDER_FIELD_WHEN}`**."
-        )
-    else:
-        intro_lines.append(
-            "*To enable **When** on the sheet: add a multi-select column in Bitable, then set "
-            "**REMINDER_FIELD_WHEN** in `.env` to that column’s exact name and restart the bot.*"
-        )
 
     form_elements: list[dict] = [
         {"tag": "div", "text": {"tag": "plain_text", "content": "Start Date"}},
@@ -899,40 +894,33 @@ def build_add_reminder_form_card() -> dict:
             "options": time_options,
             "required": True,
         },
+        {"tag": "div", "text": {"tag": "plain_text", "content": "When (multi-select)"}},
+        {
+            "tag": "multi_select_static",
+            "name": "when",
+            "placeholder": {
+                "tag": "plain_text",
+                "content": "Every day / weekdays / Every month",
+            },
+            "required": False,
+            "width": "fill",
+            "selected_values": ["Every day"],
+            "options": [
+                {"text": {"tag": "plain_text", "content": lab}, "value": lab}
+                for lab in (
+                    "Every Monday",
+                    "Every Tuesday",
+                    "Every Wednesday",
+                    "Every Thursday",
+                    "Every Friday",
+                    "Every Saturday",
+                    "Every Sunday",
+                    "Every day",
+                    "Every month",
+                )
+            ],
+        },
     ]
-    if REMINDER_FIELD_WHEN:
-        when_labels_form = [
-            "Every Monday",
-            "Every Tuesday",
-            "Every Wednesday",
-            "Every Thursday",
-            "Every Friday",
-            "Every Saturday",
-            "Every Sunday",
-            "Every day",
-            "Every month",
-        ]
-        when_options = [
-            {"text": {"tag": "plain_text", "content": lab}, "value": lab}
-            for lab in when_labels_form
-        ]
-        form_elements.extend(
-            [
-                {"tag": "div", "text": {"tag": "plain_text", "content": "When (multi-select)"}},
-                {
-                    "tag": "multi_select_static",
-                    "name": "when",
-                    "placeholder": {
-                        "tag": "plain_text",
-                        "content": "Every day / weekdays / Every month",
-                    },
-                    "required": False,
-                    "width": "fill",
-                    "selected_values": ["Every day"],
-                    "options": when_options,
-                },
-            ]
-        )
     form_elements.extend(
         [
             {"tag": "div", "text": {"tag": "plain_text", "content": "Reason"}},
