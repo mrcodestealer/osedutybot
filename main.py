@@ -2615,18 +2615,21 @@ def lark_webhook():
         reply = f'cd /home/pi/osm && ./stopallserver.sh && ./startserver.sh'
         send_message(chat_id, reply)
         return jsonify({"success": True})
-    elif (
-        re.match(r"^/maintenance\s", clean_text, re.I)
-        or re.match(r"^/maintenanceshort\s", clean_text, re.I)
-        or re.match(r"^/m\s", clean_text, re.I)
+    elif re.search(
+        r"(?:^|\s)/(maintenance|maintenanceshort|m)\s+",
+        clean_text,
+        re.I,
     ):
-        match = re.search(
-            r"^/(maintenance|maintenanceshort|m)\s+(.*)",
+        # Do not use ^... on original_text: Lark often prefixes <at>...</at> or
+        # mention keys before “/m …”, so the body must be sliced after the
+        # first “/m ” (or /maintenance) in the raw message.
+        cmd_m = re.search(
+            r"/(maintenance|maintenanceshort|m)\s+",
             original_text,
             re.IGNORECASE | re.DOTALL,
         )
-        if match:
-            email_text = match.group(2).strip()
+        if cmd_m:
+            email_text = original_text[cmd_m.end() :].strip()
             if email_text.startswith('"') and email_text.endswith('"'):
                 email_text = email_text[1:-1]
         else:
