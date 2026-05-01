@@ -400,7 +400,7 @@ def process_maintenance_pipeline(
     for g in candidates:
         sh = _best_sheet_match(sheets, g)
         if not sh:
-            unknown_list.append(g)
+            unknown_list.append(f"{g}（gamelist 中无匹配子表标题）")
             continue
         try:
             grid = _fetch_sheet_values(tok, ss, sh["sheet_id"])
