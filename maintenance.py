@@ -222,11 +222,12 @@ def extract_info(text):
     """Parse email text line by line to extract fields."""
     info = {
         'table': 'Unknown',
+        'table_names': [],
         'reason': 'Unknown',
         'status': 'Unknown',
         'start_time': 'Unknown',
         'end_time': 'Unknown',
-        'reference': 'Unknown'
+        'reference': 'Unknown',
     }
 
     lines = [line.strip() for line in text.splitlines()]
@@ -245,20 +246,24 @@ def extract_info(text):
             match = re.search(r'table\s+([^\.]+?)\s+in', line, re.IGNORECASE)
             if match:
                 info['table'] = match.group(1).strip()
+                info['table_names'] = [info['table']]
             else:
                 match = re.search(r'table\s+(.*?)\s+was', line, re.IGNORECASE)
                 if match:
                     info['table'] = match.group(1).strip()
+                    info['table_names'] = [info['table']]
         elif re.search(r'^Affected table/-s:', line, re.IGNORECASE):
             block_names, j = _parse_table_block_after_heading(lines, i)
             if block_names:
                 info["table"] = ", ".join(block_names)
+                info["table_names"] = list(block_names)
             i = j
             continue
         elif re.search(r'following tables will be unavailable:', line, re.IGNORECASE):
             block_names, j = _parse_table_block_after_heading(lines, i)
             if block_names:
                 info["table"] = ", ".join(block_names)
+                info["table_names"] = list(block_names)
             i = j
             continue
 
@@ -326,6 +331,11 @@ def extract_info(text):
         table_match = re.search(r'table\s+([^\.]+?)\s+in', text, re.IGNORECASE)
         if table_match:
             info['table'] = table_match.group(1).strip()
+            info['table_names'] = [info['table']]
+    elif info['table'] != 'Unknown' and not info['table_names']:
+        info['table_names'] = [
+            x.strip() for x in info['table'].split(',') if x.strip()
+        ]
     # Do NOT fallback to first line for reference; leave as "Unknown" if not found
 
     # Set status based on table availability (only if not already set)
@@ -336,16 +346,31 @@ def extract_info(text):
 
     return info
 
-def generate_output(info):
+def generate_output(
+    info: dict[str, Any],
+    *,
+    affected_tables: list[str] | None = None,
+) -> str:
     """Format the extracted info into the desired output with user mentions."""
     # Use the provided open IDs for the two roles
     qa_os_local_id = "ou_0342007237c6c1aa262acae839acb7c6"
     cs_team_id = "ou_c927a378e9b464741c67b61c1641577b"
 
+    names = (
+        list(affected_tables)
+        if affected_tables is not None
+        else list(info.get('table_names') or [])
+    )
+    affected_lines = ["Affected table :"]
+    if names:
+        affected_lines.extend(names)
+    else:
+        affected_lines.append("Unknown")
+
     output = [
         f'Hi <at user_id="{qa_os_local_id}">QA OS Local</at> <at user_id="{cs_team_id}">CS (Team)</at> , kindly check this email. Thank you.',
         "",
-        f"Affected table : {info['table']}",
+        *affected_lines,
         f"Reason : {info['reason']}",
         f"Status: {info['status']}",
         f"Start time: {info['start_time']}",
@@ -424,10 +449,20 @@ def extract_candidate_game_names(text: str) -> list[str]:
     return out
 
 
-def process_email(text):
-    """Process email text and return the formatted summary."""
+def process_email(
+    text: str,
+    *,
+    affected_launched_only: list[str] | None = None,
+) -> str:
+    """
+    Format QA/CS summary. If ``affected_launched_only`` is set (e.g. from ``/m``
+    pipeline), **Affected table** lists only those names, one per line.
+    """
     info = extract_info(text)
-    return generate_output(info)
+    return generate_output(
+        info,
+        affected_tables=affected_launched_only,
+    )
 
 
 def process_maintenance_pipeline(
@@ -529,7 +564,7 @@ def process_maintenance_pipeline(
     msg1 = "\n".join(lines1)
 
     if launched_list:
-        msg2 = process_email(email_text)
+        msg2 = process_email(email_text, affected_launched_only=launched_list)
     else:
         msg2 = (
             "📭 **第二段（已过滤）：** 邮件中识别的游戏均未处于「上线 Launched」，"
