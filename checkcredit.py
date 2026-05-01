@@ -2921,6 +2921,73 @@ def _np_egm_machine_search_token(machine_display: str | None, machine_substr: st
     return ""
 
 
+def _egm_cog_button_is_actionable(btn: Any) -> bool:
+    """True if the small EGM op button can receive a click (not disabled in DOM)."""
+    try:
+        if btn.count() == 0:
+            return False
+        cls = (btn.get_attribute("class") or "")
+        if "is-disabled" in cls:
+            return False
+        aria_d = (btn.get_attribute("aria-disabled") or "").strip().lower()
+        if aria_d == "true":
+            return False
+        dis = btn.get_attribute("disabled")
+        if dis is not None:
+            dsl = str(dis).strip().lower()
+            if dsl and dsl not in ("false", "0"):
+                return False
+        return bool(btn.is_enabled())
+    except Exception:
+        return False
+
+
+def _pick_enabled_egm_cog_button(op_cell: Any) -> Any:
+    """
+    EGM Status list: last column has small buttons; we only click a **cog** icon
+    button that is **enabled**. The 3rd button (index 2) is preferred when it matches.
+    If every cog is ``disabled``, Playwright would wait until timeout — avoid that.
+    """
+    danger_re = re.compile(r"Maintenance|Kick\s*Out", re.I)
+    op_btns = op_cell.locator("button.el-button--small")
+    nbtn = op_btns.count()
+    if nbtn <= 0:
+        raise RuntimeError("Operation column has no clickable buttons; aborting.")
+    safe: list[tuple[int, Any]] = []
+    for i in range(nbtn):
+        b = op_btns.nth(i)
+        try:
+            if b.locator("i.fa.fa-cog").count() == 0:
+                continue
+            bt = (b.inner_text() or "").strip()
+        except Exception:
+            continue
+        if danger_re.search(bt):
+            continue
+        safe.append((i, b))
+    if not safe:
+        raise RuntimeError("No safe cog operation button found; refusing unsafe click.")
+
+    page = op_cell.page
+    for _ in range(3):
+        for i, b in safe:
+            if i == 2 and _egm_cog_button_is_actionable(b):
+                return b
+        for i, b in safe:
+            if _egm_cog_button_is_actionable(b):
+                return b
+        try:
+            page.wait_for_timeout(1500)
+        except Exception:
+            break
+
+    raise RuntimeError(
+        "EGM row found, but every cog operation button is disabled "
+        "(machine offline / not session-ready / permission or UI lock). "
+        "Open EGM Status in browser to confirm; checkcredit continues without preview image."
+    )
+
+
 def screenshot_egm_status_window(
     *,
     machine_display: str | None,
@@ -2934,9 +3001,10 @@ def screenshot_egm_status_window(
     Flow:
     1) open ``/egm/egmStatusList`` (same host as resolved backend),
     2) fill Search with machine number token,
-    3) click ONLY the 3rd operation button (primary + cog icon),
+    3) click the first **enabled** operation button that has the **cog** icon (prefers the 3rd
+       button when it is enabled; skips Maintenance / Kick Out),
     4) in dialog: if button shows ``Hide Grid``, click once to make it ``Show Grid``,
-    5) screenshot the whole visible window (page viewport).
+    5) screenshot the dialog (operation window), not the full page.
     """
     md = (machine_display or "").strip()
     if not md:
@@ -3056,36 +3124,8 @@ def screenshot_egm_status_window(
             if target is None:
                 target = rows.nth(0)
 
-            # Safe operation click: prefer 3rd button, but tolerate UI reordering.
             op_cell = target.locator("td").last
-            op_btns = op_cell.locator("button.el-button--small")
-            nbtn = op_btns.count()
-            if nbtn <= 0:
-                raise RuntimeError("Operation column has no clickable buttons; aborting.")
-            danger_re = re.compile(r"Maintenance|Kick\s*Out", re.I)
-            cog_btn = None
-            if nbtn >= 3:
-                cand = op_btns.nth(2)
-                try:
-                    t3 = (cand.inner_text() or "").strip()
-                except Exception:
-                    t3 = ""
-                if cand.locator("i.fa.fa-cog").count() > 0 and not danger_re.search(t3):
-                    cog_btn = cand
-            if cog_btn is None:
-                for i in range(nbtn):
-                    b = op_btns.nth(i)
-                    try:
-                        bt = (b.inner_text() or "").strip()
-                    except Exception:
-                        bt = ""
-                    if danger_re.search(bt):
-                        continue
-                    if b.locator("i.fa.fa-cog").count() > 0:
-                        cog_btn = b
-                        break
-            if cog_btn is None:
-                raise RuntimeError("No safe cog operation button found; refusing unsafe click.")
+            cog_btn = _pick_enabled_egm_cog_button(op_cell)
             cog_btn.click(timeout=min(60_000, timeout_ms))
 
             dlg = page.locator(".el-dialog.add-floor, div[role='dialog'].add-floor").last
@@ -3248,34 +3288,7 @@ def get_egm_member_user_id(
                 target = rows.nth(0)
 
             op_cell = target.locator("td").last
-            op_btns = op_cell.locator("button.el-button--small")
-            nbtn = op_btns.count()
-            if nbtn <= 0:
-                raise RuntimeError("Operation column has no clickable buttons; aborting.")
-            danger_re = re.compile(r"Maintenance|Kick\s*Out", re.I)
-            cog_btn = None
-            if nbtn >= 3:
-                cand = op_btns.nth(2)
-                try:
-                    t3 = (cand.inner_text() or "").strip()
-                except Exception:
-                    t3 = ""
-                if cand.locator("i.fa.fa-cog").count() > 0 and not danger_re.search(t3):
-                    cog_btn = cand
-            if cog_btn is None:
-                for i in range(nbtn):
-                    b = op_btns.nth(i)
-                    try:
-                        bt = (b.inner_text() or "").strip()
-                    except Exception:
-                        bt = ""
-                    if danger_re.search(bt):
-                        continue
-                    if b.locator("i.fa.fa-cog").count() > 0:
-                        cog_btn = b
-                        break
-            if cog_btn is None:
-                raise RuntimeError("No safe cog operation button found; refusing unsafe click.")
+            cog_btn = _pick_enabled_egm_cog_button(op_cell)
             cog_btn.click(timeout=min(60_000, timeout_ms))
 
             dlg = page.locator(".el-dialog.add-floor, div[role='dialog'].add-floor").last
