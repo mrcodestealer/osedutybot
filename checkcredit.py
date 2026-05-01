@@ -805,6 +805,17 @@ def select_top2_overall(merged: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(merged, key=lambda r: int(r.get("max_line_idx", -1)), reverse=True)[:2]
 
 
+def select_no_error_players(
+    merged: list[dict[str, Any]],
+    *,
+    limit: int = 4,
+) -> list[dict[str, Any]]:
+    """Players with no parsed error lines, newest log activity first (for NP / Third Http)."""
+    rows = [r for r in merged if not (r.get("errors") or [])]
+    rows.sort(key=lambda r: int(r.get("max_line_idx", -1)), reverse=True)
+    return rows[: max(0, int(limit))]
+
+
 def machine_match_substr_from_display(machine_display: str) -> str:
     """Digits substring to match NP `machineId` (e.g. NWR2074 → `2074`)."""
     nums = re.findall(r"\d+", machine_display or "")
@@ -977,10 +988,15 @@ def build_np_followup_payload(
     top2_err: list[dict[str, Any]],
     machine_display: str,
     td: date,
+    merged_players: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
-    Cards 1–2: latest 2 in log; cards 3–4: latest 2 with error.
-    np_choices index 0..3 → user picks 1–4 in chat.
+    NP / Third Http picker: up to 4 choices.
+
+    When there are **no** parsed error lines (``top2_err`` empty), choices are filled only from
+    players **without** errors (latest activity first), so `/checkcredit` can still run Third Http.
+
+    When errors exist: latest 2 in log order plus latest 2 with error (deduped), same as before.
     """
     def _row_choice(r: dict[str, Any], source: str) -> dict[str, Any]:
         lc = r.get("latest_credit") or {}
@@ -1000,31 +1016,52 @@ def build_np_followup_payload(
             "source": source,
         }
 
+    merged = merged_players or []
     np_choices: list[dict[str, Any]] = []
     seen_uid: set[str] = set()
-    for r in top2_any[:2]:
-        uid = str(r.get("user_id") or "").strip()
-        if not uid or uid in seen_uid:
-            continue
-        np_choices.append(_row_choice(r, "latest_in_log"))
-        seen_uid.add(uid)
-    for r in top2_err[:2]:
-        uid = str(r.get("user_id") or "").strip()
-        if not uid or uid in seen_uid:
-            continue
-        np_choices.append(_row_choice(r, "with_error"))
-        seen_uid.add(uid)
+    no_err_pool = select_no_error_players(merged, limit=4) if not top2_err else []
+
+    if top2_err:
+        for r in top2_any[:2]:
+            uid = str(r.get("user_id") or "").strip()
+            if not uid or uid in seen_uid:
+                continue
+            np_choices.append(_row_choice(r, "latest_in_log"))
+            seen_uid.add(uid)
+        for r in top2_err[:2]:
+            uid = str(r.get("user_id") or "").strip()
+            if not uid or uid in seen_uid:
+                continue
+            np_choices.append(_row_choice(r, "with_error"))
+            seen_uid.add(uid)
+    else:
+        for r in no_err_pool:
+            uid = str(r.get("user_id") or "").strip()
+            if not uid or uid in seen_uid:
+                continue
+            np_choices.append(_row_choice(r, "no_error"))
+            seen_uid.add(uid)
     np_choices = np_choices[:4]
 
     latest_two_players: list[dict[str, str]] = []
-    for r in top2_any[:2]:
-        lc = r.get("latest_credit") or {}
-        latest_two_players.append(
-            {
-                "user_id": str(r["user_id"]),
-                "time_short": (lc.get("time_short") or "").strip(),
-            }
-        )
+    if top2_err:
+        for r in top2_any[:2]:
+            lc = r.get("latest_credit") or {}
+            latest_two_players.append(
+                {
+                    "user_id": str(r["user_id"]),
+                    "time_short": (lc.get("time_short") or "").strip(),
+                }
+            )
+    else:
+        for r in no_err_pool[:2]:
+            lc = r.get("latest_credit") or {}
+            latest_two_players.append(
+                {
+                    "user_id": str(r["user_id"]),
+                    "time_short": (lc.get("time_short") or "").strip(),
+                }
+            )
 
     err_only: list[dict[str, Any]] = []
     seen_err_uid: set[str] = set()
@@ -1301,7 +1338,10 @@ def build_same_latest_players_card(
     le = latest_err_uid or "*(none)*"
     la = latest_any_uid or "*(none)*"
     if not latest_err_uid:
-        same_line = 'No error > 0 in log — cannot compare "last with error" to "last in log".'
+        same_line = (
+            "No error lines in this log — NP list is **no-error players only**; "
+            "use **1**–**N** / Third Http to verify."
+        )
     elif same_uid and latest_err_uid and latest_any_uid:
         same_line = "Same player: last activity in log and last error line refer to this user ID."
     else:
@@ -1842,10 +1882,15 @@ def run_finderror(
 
     report = format_dual_terminal_report(top2_any, top2_err, machine_display, td)
     plain = f"{header}\n\n{report}" if header else report
-    np_followup = build_np_followup_payload(top2_any, top2_err, machine_display, td)
+    np_followup = build_np_followup_payload(
+        top2_any, top2_err, machine_display, td, merged_players_ordered
+    )
     if isinstance(np_followup, dict):
         if not le_uid:
-            same_line = 'No error > 0 in log - cannot compare "last with error" to "last in log".'
+            same_line = (
+                "No error lines in this log — NP list shows players **without** parsed errors only; "
+                "tap **1**–**N** or reply the digit to run **Third Http / Detail**."
+            )
         elif same_uid and le_uid and la_uid:
             same_line = "Same player: last activity in log and last error line refer to this user ID."
         else:
@@ -1859,29 +1904,41 @@ def run_finderror(
                 noerr_row = r
                 break
         err_row = top2_err[0] if top2_err else None
-        same_player_line = (
-            "Last player out and Last player with error is same player"
-            if same_uid and le_uid and la_uid
-            else "Last player out and Last player with error is different player"
-            if le_uid and la_uid
-            else 'No error > 0 in log - cannot compare "last with error" to "last in log".'
-        )
-        np_followup["machineerror_context_md"] = (
-            same_player_line
-            + "\n\n"
-            + _machineerror_player_md(
+        if not le_uid:
+            same_player_line = (
+                "No error lines in log — only **no-error** players are listed for NP / Third Http."
+            )
+        elif same_uid and le_uid and la_uid:
+            same_player_line = (
+                "Last player out and Last player with error is same player"
+            )
+        elif le_uid and la_uid:
+            same_player_line = (
+                "Last player out and Last player with error is different player"
+            )
+        else:
+            same_player_line = (
+                'No error > 0 in log - cannot compare "last with error" to "last in log".'
+            )
+        md_chunks = [same_player_line, ""]
+        md_chunks.append(
+            _machineerror_player_md(
                 noerr_row,
                 machine_display=machine_display,
                 title="For player with no error",
                 force_no_error_log=True,
             )
-            + "\n\n"
-            + _machineerror_player_md(
-                err_row,
-                machine_display=machine_display,
-                title="For player with error",
-            )
         )
+        if err_row:
+            md_chunks.append("")
+            md_chunks.append(
+                _machineerror_player_md(
+                    err_row,
+                    machine_display=machine_display,
+                    title="For player with error",
+                )
+            )
+        np_followup["machineerror_context_md"] = "\n".join(md_chunks)
     return {
         "text": plain,
         "merged_players": merged_players_ordered,
