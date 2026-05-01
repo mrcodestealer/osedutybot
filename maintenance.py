@@ -143,6 +143,54 @@ def _best_sheet_match(sheets: list[dict[str, Any]], game_name: str) -> dict[str,
     return best
 
 
+def _table_block_stop_line(line: str) -> bool:
+    """True if this line ends the “list of tables” block (not a table name row)."""
+    if not line or not line.strip():
+        return False
+    ln = line.strip()
+    if re.match(
+        r"^(?:You may find summary|Start time:|End time:|Reason:|Table availability:|\[Service Desk\])",
+        ln,
+        re.I,
+    ):
+        return True
+    if re.match(r"^(?:TINC-|SD-\d)", ln, re.I):
+        return True
+    if re.match(
+        r"^(?:This is to inform|During which|Please |Kindly |Note:)",
+        ln,
+        re.I,
+    ):
+        return True
+    return False
+
+
+def _parse_table_block_after_heading(
+    lines: list[str], heading_i: int
+) -> tuple[list[str], int]:
+    """
+    Collect consecutive table-name lines after ``Affected table`` /
+    ``following tables will be unavailable`` headings.
+
+    Skips blank lines after the heading, then reads non-empty lines until a
+    blank line or a known section header.
+    """
+    j = heading_i + 1
+    n = len(lines)
+    while j < n and not lines[j].strip():
+        j += 1
+    names: list[str] = []
+    while j < n:
+        chunk = lines[j].strip()
+        if not chunk:
+            break
+        if _table_block_stop_line(chunk):
+            break
+        names.append(chunk)
+        j += 1
+    return names, j
+
+
 def extract_info(text):
     """Parse email text line by line to extract fields."""
     info = {
@@ -175,19 +223,15 @@ def extract_info(text):
                 if match:
                     info['table'] = match.group(1).strip()
         elif re.search(r'^Affected table/-s:', line, re.IGNORECASE):
-            j = i + 1
-            while j < n and not lines[j]:
-                j += 1
-            if j < n:
-                info['table'] = lines[j].strip()
+            block_names, j = _parse_table_block_after_heading(lines, i)
+            if block_names:
+                info["table"] = ", ".join(block_names)
             i = j
             continue
         elif re.search(r'following tables will be unavailable:', line, re.IGNORECASE):
-            j = i + 1
-            while j < n and not lines[j]:
-                j += 1
-            if j < n:
-                info['table'] = lines[j].strip()
+            block_names, j = _parse_table_block_after_heading(lines, i)
+            if block_names:
+                info["table"] = ", ".join(block_names)
             i = j
             continue
 
@@ -296,13 +340,13 @@ def get_table_name(text):
             if match:
                 return match.group(1).strip()
         elif re.search(r'^Affected table/-s:', line, re.IGNORECASE):
-            for j in range(i+1, len(lines)):
-                if lines[j]:
-                    return lines[j].strip()
+            block_names, _ = _parse_table_block_after_heading(lines, i)
+            if block_names:
+                return block_names[0]
         elif re.search(r'following tables will be unavailable:', line, re.IGNORECASE):
-            for j in range(i+1, len(lines)):
-                if lines[j]:
-                    return lines[j].strip()
+            block_names, _ = _parse_table_block_after_heading(lines, i)
+            if block_names:
+                return block_names[0]
         elif re.search(r'table\s+([^\.]+?)\s+in', line, re.IGNORECASE):
             match = re.search(r'table\s+([^\.]+?)\s+in', line, re.IGNORECASE)
             if match:
@@ -340,18 +384,14 @@ def extract_candidate_game_names(text: str) -> list[str]:
     lines = [line.strip() for line in text.splitlines()]
     for i, line in enumerate(lines):
         if re.search(r"^Affected table/-s:", line, re.IGNORECASE):
-            for j in range(i + 1, len(lines)):
-                chunk = lines[j].strip()
-                if chunk:
-                    add(chunk)
-                    break
+            block_names, _ = _parse_table_block_after_heading(lines, i)
+            for nm in block_names:
+                add(nm)
             break
         if re.search(r"following tables will be unavailable:", line, re.IGNORECASE):
-            for j in range(i + 1, len(lines)):
-                chunk = lines[j].strip()
-                if chunk:
-                    add(chunk)
-                    break
+            block_names, _ = _parse_table_block_after_heading(lines, i)
+            for nm in block_names:
+                add(nm)
             break
 
     return out
