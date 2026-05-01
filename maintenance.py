@@ -5,8 +5,10 @@ Supports multiple email formats, including ongoing maintenance.
 
 Env (optional):
   gamelist / GAMELIST — Lark **spreadsheet token** for the game list workbook.
-  Each **sheet tab title** is treated as a game name; sheets must include columns
-  ``游戏名称 / Games Name`` and ``游戏状态 / Game Status``.
+  Sheets must include header columns ``游戏名称 / Games Name`` and
+  ``游戏状态 / Game Status`` (often on **row 2**). **Tab title** may differ from the
+  game name: we match each email game against the **游戏名称** column across all
+  sheets when the tab name does not match.
 """
 
 from __future__ import annotations
@@ -81,6 +83,8 @@ def _fetch_sheet_values(
 
 
 def _find_header_row_and_cols(grid: list[list[Any]]) -> tuple[int, int, int] | None:
+    """Pick the best header row when multiple rows contain name/status-like cells."""
+    scored: list[tuple[int, int, int, int]] = []
     for ri, row in enumerate(grid[:60]):
         if not row:
             continue
@@ -92,13 +96,29 @@ def _find_header_row_and_cols(grid: list[list[Any]]) -> tuple[int, int, int] | N
                 name_ci = ci
             if "游戏状态" in cn or ("game" in cn and "status" in cn):
                 status_ci = ci
-        if name_ci is not None and status_ci is not None:
-            return ri, name_ci, status_ci
-    return None
+        if name_ci is None or status_ci is None:
+            continue
+        nc = _cell_norm(row[name_ci]) if name_ci < len(row) else ""
+        sc = _cell_norm(row[status_ci]) if status_ci < len(row) else ""
+        score = 0
+        if "游戏名称" in nc:
+            score += 4
+        elif "games" in nc and "name" in nc:
+            score += 2
+        if "游戏状态" in sc:
+            score += 4
+        elif "game" in sc and "status" in sc:
+            score += 2
+        scored.append((score, ri, name_ci, status_ci))
+    if not scored:
+        return None
+    scored.sort(key=lambda t: (-t[0], -t[1]))
+    _, ri, name_ci, status_ci = scored[0]
+    return ri, name_ci, status_ci
 
 
 def _row_launched_for_game(
-    grid: list[list[Any]], game_name: str, sheet_title: str
+    grid: list[list[Any]], game_name: str, sheet_title: str = ""
 ) -> bool | None:
     parsed = _find_header_row_and_cols(grid)
     if not parsed:
@@ -110,12 +130,19 @@ def _row_launched_for_game(
             continue
         name_cell = row[ci_name] if len(row) > ci_name else ""
         status_cell = row[ci_status] if len(row) > ci_status else ""
-        if not (_names_match(name_cell, game_name) or _names_match(name_cell, sheet_title)):
+        match_name = _names_match(name_cell, game_name)
+        match_tab = bool(sheet_title.strip()) and _names_match(name_cell, sheet_title)
+        if not (match_name or match_tab):
             continue
         last = _is_launched_status(status_cell)
 
     data_rows = [r for r in grid[hi + 1 :] if r]
-    if last is None and len(data_rows) == 1 and _names_match(sheet_title, game_name):
+    if (
+        last is None
+        and len(data_rows) == 1
+        and sheet_title.strip()
+        and _names_match(sheet_title, game_name)
+    ):
         r = data_rows[0]
         st = r[ci_status] if len(r) > ci_status else ""
         return _is_launched_status(st)
@@ -437,23 +464,55 @@ def process_maintenance_pipeline(
     not_launched_list: list[str] = []
     unknown_list: list[str] = []
 
+    grid_cache: dict[str, list[list[Any]]] = {}
+
+    def _cached_grid(sheet_id: str) -> list[list[Any]]:
+        if sheet_id not in grid_cache:
+            grid_cache[sheet_id] = _fetch_sheet_values(tok, ss, sheet_id)
+        return grid_cache[sheet_id]
+
     for g in candidates:
+        verdict: bool | None = None
         sh = _best_sheet_match(sheets, g)
-        if not sh:
-            unknown_list.append(f"{g}（gamelist 中无匹配子表标题）")
-            continue
-        try:
-            grid = _fetch_sheet_values(tok, ss, sh["sheet_id"])
-        except Exception:
-            unknown_list.append(f"{g}（读表失败）")
-            continue
-        verdict = _row_launched_for_game(grid, g, sh.get("title") or "")
+        if sh:
+            try:
+                grid0 = _cached_grid(sh["sheet_id"])
+                verdict = _row_launched_for_game(grid0, g, sh.get("title") or "")
+            except Exception:
+                unknown_list.append(
+                    f"{g}（读表失败：子表「{sh.get('title') or sh['sheet_id']}」）"
+                )
+                continue
+
+        if verdict is None:
+            any_headers = False
+            for sh2 in sheets:
+                sid = sh2["sheet_id"]
+                try:
+                    grid = _cached_grid(sid)
+                except Exception:
+                    continue
+                if _find_header_row_and_cols(grid) is None:
+                    continue
+                any_headers = True
+                v = _row_launched_for_game(grid, g, "")
+                if v is not None:
+                    verdict = v
+                    break
+
         if verdict is True:
             launched_list.append(g)
         elif verdict is False:
             not_launched_list.append(g)
         else:
-            unknown_list.append(f"{g}（未找到列或无匹配行）")
+            if not any_headers:
+                unknown_list.append(
+                    f"{g}（gamelist 各子表未找到「游戏名称/游戏状态」表头或无法读表）"
+                )
+            else:
+                unknown_list.append(
+                    f"{g}（「游戏名称」列无匹配行或状态单元格无法判定上线）"
+                )
 
     lines1 = ["📋 **游戏上线状态（对照 gamelist 表格）**"]
     lines1.append(
