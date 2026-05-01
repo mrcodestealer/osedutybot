@@ -1999,6 +1999,22 @@ def lark_webhook():
                     end_raw = end_raw or _lark_find_field_deep(ev_ca, "end_date")
                     time_raw = time_raw or _lark_find_field_deep(ev_ca, "time")
                     reason = reason or _lark_find_field_deep(ev_ca, "reason")
+                    fv_ca = act_ca.get("form_value") if isinstance(act_ca, dict) else {}
+                    when_labels_cb: list[str] = []
+                    if isinstance(fv_ca, dict):
+                        when_labels_cb = reminder.parse_when_form_value(fv_ca.get("when"))
+                    if (
+                        isinstance(parsed_ca, dict)
+                        and isinstance(parsed_ca.get("form_value"), dict)
+                        and not when_labels_cb
+                    ):
+                        when_labels_cb = reminder.parse_when_form_value(
+                            parsed_ca["form_value"].get("when")
+                        )
+                    if not when_labels_cb:
+                        when_labels_cb = reminder.parse_when_form_value(
+                            _lark_find_field_deep(ev_ca, "when")
+                        )
                     def _normalize_date_field(raw: str) -> str:
                         s = str(raw or "").strip()
                         if re.match(r"^\d{10,13}$", s):
@@ -2043,6 +2059,7 @@ def lark_webhook():
                         chat_id=chat_id_ca,
                         target_user_id=TARGET_USER_OPEN_ID,
                         schedule_chat_id=REMINDER_TARGET_CHAT_ID,
+                        when_labels=when_labels_cb if when_labels_cb else None,
                     )
                     if (result or "").strip():
                         send_message(chat_id_ca, result)

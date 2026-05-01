@@ -119,7 +119,9 @@ REMINDER_FIELD_START = os.getenv("REMINDER_FIELD_START", "Start Time").strip() o
 REMINDER_FIELD_END = os.getenv("REMINDER_FIELD_END", "End Time").strip() or "End Time"
 REMINDER_FIELD_TIME = os.getenv("REMINDER_FIELD_TIME", "Time").strip() or "Time"
 REMINDER_FIELD_REASON = os.getenv("REMINDER_FIELD_REASON", "Reason").strip() or "Reason"
-REMINDER_FIELD_WHEN = os.getenv("REMINDER_FIELD_WHEN", "When").strip() or "When"
+# Leave empty until the Bitable table has a matching multi-select column — otherwise Lark returns
+# ``1254045 FieldNameNotFound``. Must match the **exact** field name (or Feishu-exposed name).
+REMINDER_FIELD_WHEN = os.getenv("REMINDER_FIELD_WHEN", "").strip()
 REMINDER_WHEN_DEFAULT = os.getenv("REMINDER_WHEN_DEFAULT", "Every day").strip() or "Every day"
 _SHEET_JOB_PREFIX = "sheet_daily_reminder::"
 
@@ -447,7 +449,11 @@ def _normalize_sheet_rows(records: list[dict]) -> list[dict]:
             time_n = _normalize_sheet_time(time_raw)
         except Exception:
             continue
-        when_labels = _field_when_list(fields.get(REMINDER_FIELD_WHEN))
+        when_labels = (
+            _field_when_list(fields.get(REMINDER_FIELD_WHEN))
+            if REMINDER_FIELD_WHEN
+            else []
+        )
         when_tokens, when_display = _when_tokens_from_labels(when_labels)
         rows.append(
             {
@@ -743,8 +749,9 @@ def add_sheet_reminder(
         REMINDER_FIELD_END: _sheet_date_to_timestamp_ms(end_d),
         REMINDER_FIELD_TIME: time_s,
         REMINDER_FIELD_REASON: reason_n,
-        REMINDER_FIELD_WHEN: wl,
     }
+    if REMINDER_FIELD_WHEN:
+        fields[REMINDER_FIELD_WHEN] = wl
     resp = requests.post(
         _bitable_records_url(),
         headers=_bitable_headers(token),
@@ -852,20 +859,100 @@ def build_add_reminder_form_card() -> dict:
                 hh12 = 12
             v = f"{hh12}:{mm:02d}{ap}"
             time_options.append({"text": {"tag": "plain_text", "content": v}, "value": v})
-    when_labels_form = [
-        "Every Monday",
-        "Every Tuesday",
-        "Every Wednesday",
-        "Every Thursday",
-        "Every Friday",
-        "Every Saturday",
-        "Every Sunday",
-        "Every day",
-        "Every month",
+
+    intro_lines = [
+        "Fill all fields, then tap **Submit** once.",
+        "Date can be picked from UI date picker.",
+        "Time can be picked from dropdown list.",
     ]
-    when_options = [
-        {"text": {"tag": "plain_text", "content": lab}, "value": lab} for lab in when_labels_form
+    if REMINDER_FIELD_WHEN:
+        intro_lines.append(
+            f"**When** (optional): weekdays / **Every day** / **Every month** — labels must match "
+            f"Bitable multi-select **`{REMINDER_FIELD_WHEN}`**."
+        )
+    else:
+        intro_lines.append(
+            "*To enable **When** on the sheet: add a multi-select column in Bitable, then set "
+            "**REMINDER_FIELD_WHEN** in `.env` to that column’s exact name and restart the bot.*"
+        )
+
+    form_elements: list[dict] = [
+        {"tag": "div", "text": {"tag": "plain_text", "content": "Start Date"}},
+        {
+            "tag": "date_picker",
+            "name": "start_date",
+            "placeholder": {"tag": "plain_text", "content": "Pick start date"},
+            "required": True,
+        },
+        {"tag": "div", "text": {"tag": "plain_text", "content": "End Date"}},
+        {
+            "tag": "date_picker",
+            "name": "end_date",
+            "placeholder": {"tag": "plain_text", "content": "Pick end date"},
+            "required": True,
+        },
+        {"tag": "div", "text": {"tag": "plain_text", "content": "Time"}},
+        {
+            "tag": "select_static",
+            "name": "time",
+            "placeholder": {"tag": "plain_text", "content": "Select time"},
+            "options": time_options,
+            "required": True,
+        },
     ]
+    if REMINDER_FIELD_WHEN:
+        when_labels_form = [
+            "Every Monday",
+            "Every Tuesday",
+            "Every Wednesday",
+            "Every Thursday",
+            "Every Friday",
+            "Every Saturday",
+            "Every Sunday",
+            "Every day",
+            "Every month",
+        ]
+        when_options = [
+            {"text": {"tag": "plain_text", "content": lab}, "value": lab}
+            for lab in when_labels_form
+        ]
+        form_elements.extend(
+            [
+                {"tag": "div", "text": {"tag": "plain_text", "content": "When (multi-select)"}},
+                {
+                    "tag": "multi_select_static",
+                    "name": "when",
+                    "placeholder": {
+                        "tag": "plain_text",
+                        "content": "Every day / weekdays / Every month",
+                    },
+                    "required": False,
+                    "width": "fill",
+                    "selected_values": ["Every day"],
+                    "options": when_options,
+                },
+            ]
+        )
+    form_elements.extend(
+        [
+            {"tag": "div", "text": {"tag": "plain_text", "content": "Reason"}},
+            {
+                "tag": "input",
+                "name": "reason",
+                "placeholder": {"tag": "plain_text", "content": "Kindly send graph"},
+                "required": True,
+            },
+            {
+                "tag": "button",
+                "name": "submit_rem_add",
+                "text": {"tag": "plain_text", "content": "Submit"},
+                "type": "primary",
+                "form_action_type": "submit",
+                "behaviors": [{"type": "callback", "value": {"k": "rem_add_submit"}}],
+            },
+        ]
+    )
+
     return {
         "schema": "2.0",
         "config": {"update_multi": True, "width_mode": "fill"},
@@ -877,88 +964,9 @@ def build_add_reminder_form_card() -> dict:
             "elements": [
                 {
                     "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": (
-                            "Fill all fields, then tap **Submit** once.\n"
-                            "Date can be picked from UI date picker.\n"
-                            "Time can be picked from dropdown list.\n"
-                            "**When** (optional): weekday(s), **Every day**, or **Every month** "
-                            "(must match your Bitable multi-select option names)."
-                        ),
-                    },
+                    "text": {"tag": "lark_md", "content": "\n".join(intro_lines)},
                 },
-                {
-                    "tag": "form",
-                    "name": "rem_add_form",
-                    "elements": [
-                        {
-                            "tag": "div",
-                            "text": {"tag": "plain_text", "content": "Start Date"},
-                        },
-                        {
-                            "tag": "date_picker",
-                            "name": "start_date",
-                            "placeholder": {"tag": "plain_text", "content": "Pick start date"},
-                            "required": True,
-                        },
-                        {
-                            "tag": "div",
-                            "text": {"tag": "plain_text", "content": "End Date"},
-                        },
-                        {
-                            "tag": "date_picker",
-                            "name": "end_date",
-                            "placeholder": {"tag": "plain_text", "content": "Pick end date"},
-                            "required": True,
-                        },
-                        {
-                            "tag": "div",
-                            "text": {"tag": "plain_text", "content": "Time"},
-                        },
-                        {
-                            "tag": "select_static",
-                            "name": "time",
-                            "placeholder": {"tag": "plain_text", "content": "Select time"},
-                            "options": time_options,
-                            "required": True,
-                        },
-                        {
-                            "tag": "div",
-                            "text": {"tag": "plain_text", "content": "When (multi-select)"},
-                        },
-                        {
-                            "tag": "multi_select_static",
-                            "name": "when",
-                            "placeholder": {
-                                "tag": "plain_text",
-                                "content": "Every day / weekdays / Every month",
-                            },
-                            "required": False,
-                            "width": "fill",
-                            "selected_values": ["Every day"],
-                            "options": when_options,
-                        },
-                        {
-                            "tag": "div",
-                            "text": {"tag": "plain_text", "content": "Reason"},
-                        },
-                        {
-                            "tag": "input",
-                            "name": "reason",
-                            "placeholder": {"tag": "plain_text", "content": "Kindly send graph"},
-                            "required": True,
-                        },
-                        {
-                            "tag": "button",
-                            "name": "submit_rem_add",
-                            "text": {"tag": "plain_text", "content": "Submit"},
-                            "type": "primary",
-                            "form_action_type": "submit",
-                            "behaviors": [{"type": "callback", "value": {"k": "rem_add_submit"}}],
-                        },
-                    ],
-                },
+                {"tag": "form", "name": "rem_add_form", "elements": form_elements},
             ]
         },
     }
