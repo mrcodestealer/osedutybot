@@ -175,6 +175,65 @@ def fetch_log_via_oss(machine_query: str, td: date, *, timeout_sec: float = 120.
     return text, meta
 
 
+def fetch_log_via_navigator(
+    machine_query: str,
+    td: date,
+    *,
+    timeout_ms: int,
+    base: str,
+    user: str,
+    pw: str,
+    debug_headed: bool = False,
+) -> tuple[str, str, list[str]]:
+    """
+    Pull logic log text via LogNavigator UI (same as ``run_finderror`` when ``source=\"navigator\"``).
+    Returns ``(log_body, machine_display_from_selector, status_lines)``.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as e:
+        raise RuntimeError(
+            "LogNavigator mode needs Playwright (`pip install playwright` + install chromium)."
+        ) from e
+
+    mq = (machine_query or "").strip()
+    machine_display = mq
+    text_parts: list[str] = []
+    headless = False if debug_headed else _playwright_headless()
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=headless)
+        try:
+            context = browser.new_context(
+                ignore_https_errors=True,
+                viewport={"width": 1400, "height": 900},
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                ),
+            )
+            page = context.new_page()
+            lognavigator_login(page, base, user, pw, timeout_ms=timeout_ms)
+
+            chosen = select_machine_by_number(page, mq, timeout_ms=timeout_ms)
+            machine_display = (chosen or "").strip() or machine_display
+            text_parts.append(f"→ Machine selected: {chosen}")
+            wait_for_logs_file_browser(page, timeout_ms=timeout_ms)
+
+            navigate_to_logic_folder(page, timeout_ms=timeout_ms)
+            click_log_file_for_date(page, td, timeout_ms=timeout_ms)
+            bump_tail_and_execute(page, timeout_ms=timeout_ms)
+
+            pre = page.locator("section[role='results'] pre, pre.nofloat").first
+            pre.wait_for(state="attached", timeout=timeout_ms)
+            log_body = pre.inner_text() or ""
+
+            text_parts.append(f"→ Date file: {td.isoformat()}")
+        finally:
+            browser.close()
+
+    return log_body, machine_display, text_parts
+
+
 # ----- machine option matching -----
 def _machine_query_alnum_upper(s: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "", (s or "")).upper()
@@ -830,28 +889,36 @@ def resolve_player_log_credit_snapshot(
     timeout_sec: float = 120.0,
 ) -> tuple[str | None, dict[str, Any] | None, str]:
     """
-    Load logic log via OSS (same as ``CHECKCREDIT_USE_OSS`` finderror path), merge player blocks,
-    return ``(machine_folder_display, latest_credit_dict_or_None, error_message)``.
+    Load logic log (**OSS HTTP** when ``CHECKCREDIT_USE_OSS`` is set; otherwise **LogNavigator / Playwright**
+    like ``/checkcreditdate`` without OSS), merge player blocks, return
+    ``(machine_folder_display, latest_credit_dict_or_None, error_message)``.
     ``latest_credit`` matches rows from ``merge_players_full`` / ``parse_user_blocks_full``.
     """
-    oss_on = os.getenv("CHECKCREDIT_USE_OSS", "").strip().lower() in ("1", "true", "yes", "on")
-    if not oss_on:
-        return (
-            None,
-            None,
-            "Set **CHECKCREDIT_USE_OSS=1** for this shortcut, or use `/checkcreditdate` then `/npthirdhttp`.",
-        )
     pid = str(player_id or "").strip()
     if not pid:
         return None, None, "Player ID is empty."
     mq = str(machine_query or "").strip()
     if not mq:
         return None, None, "Machine type is empty."
+    oss_on = os.getenv("CHECKCREDIT_USE_OSS", "").strip().lower() in ("1", "true", "yes", "on")
+    timeout_ms = max(15_000, int(timeout_sec * 1000))
     try:
-        log_body, _meta = fetch_log_via_oss(mq, target_date, timeout_sec=timeout_sec)
+        if oss_on:
+            log_body, _meta = fetch_log_via_oss(mq, target_date, timeout_sec=timeout_sec)
+            md = resolve_oss_machine_folder(mq)
+        else:
+            log_body, md_nav, _parts = fetch_log_via_navigator(
+                mq,
+                target_date,
+                timeout_ms=timeout_ms,
+                base=DEFAULT_BASE,
+                user=DEFAULT_USER,
+                pw=DEFAULT_PASS,
+                debug_headed=False,
+            )
+            md = (md_nav or "").strip() or resolve_oss_machine_folder(mq)
     except Exception as e:
         return None, None, f"Log load failed: {e}"
-    md = resolve_oss_machine_folder(mq)
     merged = merge_players_full(parse_user_blocks_full(log_body))
     for row in merged:
         if str(row.get("user_id", "")).strip() != pid:
@@ -885,8 +952,9 @@ def build_checkcredit_player_form_card() -> dict[str, Any]:
                         "content": (
                             "**Machine type** (folder label, e.g. `NWR2074`, `DHS3189`) · "
                             "**Player ID** · **Log date**.\n"
-                            "Submit loads the OSS logic log for that day and runs **Third Http → Detail** "
-                            "when a credit time is found (**CHECKCREDIT_USE_OSS=1** required)."
+                            "Submit loads that day's logic log (**OSS** if `CHECKCREDIT_USE_OSS=1`, else "
+                            "**LogNavigator / Playwright** like `/checkcreditdate`) and runs "
+                            "**Third Http → Detail** when a credit time is found."
                         ),
                     },
                 },
@@ -1968,41 +2036,17 @@ def run_finderror(
         machine_display = resolve_oss_machine_folder(machine_query)
         parsed = parse_user_blocks_full(log_body)
     else:
-        from playwright.sync_api import sync_playwright
-
-        headless = False if debug_headed else _playwright_headless()
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=headless)
-            try:
-                context = browser.new_context(
-                    ignore_https_errors=True,
-                    viewport={"width": 1400, "height": 900},
-                    user_agent=(
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-                    ),
-                )
-                page = context.new_page()
-                lognavigator_login(page, base, user, pw, timeout_ms=timeout_ms)
-
-                chosen = select_machine_by_number(page, machine_query, timeout_ms=timeout_ms)
-                machine_display = (chosen or "").strip() or machine_display
-                text_parts.append(f"→ Machine selected: {chosen}")
-                wait_for_logs_file_browser(page, timeout_ms=timeout_ms)
-
-                navigate_to_logic_folder(page, timeout_ms=timeout_ms)
-                click_log_file_for_date(page, td, timeout_ms=timeout_ms)
-                bump_tail_and_execute(page, timeout_ms=timeout_ms)
-
-                pre = page.locator("section[role='results'] pre, pre.nofloat").first
-                pre.wait_for(state="attached", timeout=timeout_ms)
-                log_body = pre.inner_text() or ""
-
-                parsed = parse_user_blocks_full(log_body)
-
-                text_parts.append(f"→ Date file: {td.isoformat()}")
-            finally:
-                browser.close()
+        log_body, machine_display, nav_parts = fetch_log_via_navigator(
+            machine_query,
+            td,
+            timeout_ms=timeout_ms,
+            base=base,
+            user=user,
+            pw=pw,
+            debug_headed=debug_headed,
+        )
+        text_parts.extend(nav_parts)
+        parsed = parse_user_blocks_full(log_body)
 
     header = "\n".join(text_parts)
     merged = merge_players_full(parsed)
