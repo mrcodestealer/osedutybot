@@ -467,6 +467,50 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str, mode: 
         print(f"[{cmd}] error: {e!r}")
 
 
+def run_checkcredit_player_job(chat_id: str, machine: str, player_id: str, date_iso: str) -> None:
+    """OSS log → player credit row → Third Http Detail screenshot (same path as ``/npthirdhttp``)."""
+    try:
+        import checkcredit
+        from datetime import datetime as _dt
+
+        td = _dt.strptime(date_iso.strip(), "%Y-%m-%d").date()
+    except ValueError:
+        send_message(chat_id, "❌ Invalid date — use YYYY-MM-DD.")
+        return
+    except ImportError as e:
+        send_message(chat_id, f"❌ Cannot load checkcredit: {e}")
+        return
+    md, lc, err = checkcredit.resolve_player_log_credit_snapshot(
+        machine.strip(), player_id.strip(), td
+    )
+    if err:
+        send_message(chat_id, f"❌ {err}")
+        return
+    assert lc is not None
+    ts = str(lc.get("time_short") or "").strip()
+    if not ts:
+        send_message(chat_id, "❌ No credit time in log for this player.")
+        return
+    exp: Optional[float] = None
+    v = lc.get("value")
+    if v is not None:
+        try:
+            exp = float(v)
+        except (TypeError, ValueError):
+            exp = None
+    display_md = (md or "").strip() or None
+    ms = checkcredit.machine_match_substr_from_display((md or "").strip()) or None
+    _np_run_screenshot_worker(
+        chat_id,
+        player_id.strip(),
+        date_iso.strip(),
+        ts,
+        machine_substr=ms,
+        expected_credit=exp,
+        machine_display=display_md,
+    )
+
+
 def _np_run_screenshot_worker(
     chat_id: str,
     uid: str,
@@ -2064,6 +2108,63 @@ def lark_webhook():
                     if (result or "").strip():
                         send_message(chat_id_ca, result)
                     return
+                if (
+                    isinstance(parsed_ca, dict)
+                    and str(parsed_ca.get("k") or "").strip().lower() == "checkcredit_player_submit"
+                ):
+                    act_ca = ev_ca.get("action") if isinstance(ev_ca.get("action"), dict) else {}
+                    machine_raw = _lark_get_card_form_field(act_ca, "machine_type")
+                    player_raw = _lark_get_card_form_field(act_ca, "player_id")
+                    date_raw = _lark_get_card_form_field(act_ca, "log_date")
+                    if isinstance(parsed_ca, dict):
+                        fv_cb = parsed_ca.get("form_value")
+                        if isinstance(fv_cb, dict):
+                            machine_raw = machine_raw or _lark_form_field_text(fv_cb.get("machine_type"))
+                            player_raw = player_raw or _lark_form_field_text(fv_cb.get("player_id"))
+                            date_raw = date_raw or _lark_form_field_text(fv_cb.get("log_date"))
+                        machine_raw = machine_raw or _lark_form_field_text(parsed_ca.get("machine_type"))
+                        player_raw = player_raw or _lark_form_field_text(parsed_ca.get("player_id"))
+                        date_raw = date_raw or _lark_form_field_text(parsed_ca.get("log_date"))
+                    machine_raw = machine_raw or _lark_find_field_deep(ev_ca, "machine_type")
+                    player_raw = player_raw or _lark_find_field_deep(ev_ca, "player_id")
+                    date_raw = date_raw or _lark_find_field_deep(ev_ca, "log_date")
+
+                    def _normalize_checkcredit_date_iso(raw: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+                        s = str(raw or "").strip()
+                        if not s:
+                            return None, "Date is empty."
+                        if re.match(r"^\d{10,13}$", s):
+                            try:
+                                ts = int(s)
+                                if ts > 10**12:
+                                    ts = ts // 1000
+                                return datetime.fromtimestamp(ts).strftime("%Y-%m-%d"), None
+                            except Exception:
+                                return None, "Invalid date timestamp."
+                        m = re.match(r"^\s*(\d{4})-(\d{2})-(\d{2})", s)
+                        if m:
+                            return f"{m.group(1)}-{m.group(2)}-{m.group(3)}", None
+                        m2 = re.match(r"^\s*(\d{4})/(\d{2})/(\d{2})", s)
+                        if m2:
+                            return f"{m2.group(1)}-{m2.group(2)}-{m2.group(3)}", None
+                        return None, "Date must be YYYY-MM-DD (or use the date picker)."
+
+                    date_iso_cb, derr = _normalize_checkcredit_date_iso(date_raw)
+                    if derr:
+                        send_message(chat_id_ca, f"❌ {derr}")
+                        return
+                    machine_cb = str(machine_raw or "").strip()
+                    player_cb = str(player_raw or "").strip()
+                    if not machine_cb or not player_cb:
+                        send_message(chat_id_ca, "❌ Please fill Machine type and Player ID.")
+                        return
+                    assert date_iso_cb is not None
+                    threading.Thread(
+                        target=run_checkcredit_player_job,
+                        args=(chat_id_ca, machine_cb, player_cb, date_iso_cb),
+                        daemon=True,
+                    ).start()
+                    return
                 ju = _get_jenkinsupdate()
                 if not ju:
                     print(
@@ -2772,6 +2873,15 @@ def lark_webhook():
             args=(chat_id, parts[1:]),
             daemon=True,
         ).start()
+        return jsonify({"success": True})
+    elif re.match(r"^/checkcreditplayer\b", clean_text, re.I):
+        try:
+            import checkcredit
+
+            card_cp = checkcredit.build_checkcredit_player_form_card()
+            send_message(chat_id, json.dumps(card_cp), msg_type="interactive")
+        except Exception as e:
+            send_message(chat_id, f"❌ checkcredit player card failed: {e}")
         return jsonify({"success": True})
     elif re.search(r"/(?:checkcreditdate|checkcredit|machineerror)\b", clean_text, re.I):
         # Longer token first in alternation so `/checkcreditdate` is not parsed as `/checkcredit` + `date`.

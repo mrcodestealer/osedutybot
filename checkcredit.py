@@ -822,6 +822,137 @@ def machine_match_substr_from_display(machine_display: str) -> str:
     return max(nums, key=len) if nums else ""
 
 
+def resolve_player_log_credit_snapshot(
+    machine_query: str,
+    player_id: str,
+    target_date: date,
+    *,
+    timeout_sec: float = 120.0,
+) -> tuple[str | None, dict[str, Any] | None, str]:
+    """
+    Load logic log via OSS (same as ``CHECKCREDIT_USE_OSS`` finderror path), merge player blocks,
+    return ``(machine_folder_display, latest_credit_dict_or_None, error_message)``.
+    ``latest_credit`` matches rows from ``merge_players_full`` / ``parse_user_blocks_full``.
+    """
+    oss_on = os.getenv("CHECKCREDIT_USE_OSS", "").strip().lower() in ("1", "true", "yes", "on")
+    if not oss_on:
+        return (
+            None,
+            None,
+            "Set **CHECKCREDIT_USE_OSS=1** for this shortcut, or use `/checkcreditdate` then `/npthirdhttp`.",
+        )
+    pid = str(player_id or "").strip()
+    if not pid:
+        return None, None, "Player ID is empty."
+    mq = str(machine_query or "").strip()
+    if not mq:
+        return None, None, "Machine type is empty."
+    try:
+        log_body, _meta = fetch_log_via_oss(mq, target_date, timeout_sec=timeout_sec)
+    except Exception as e:
+        return None, None, f"Log load failed: {e}"
+    md = resolve_oss_machine_folder(mq)
+    merged = merge_players_full(parse_user_blocks_full(log_body))
+    for row in merged:
+        if str(row.get("user_id", "")).strip() != pid:
+            continue
+        lc = row.get("latest_credit")
+        if isinstance(lc, dict) and (str(lc.get("time_short") or "").strip()):
+            return md, lc, ""
+        return (
+            md,
+            lc if isinstance(lc, dict) else None,
+            "Found this user in the log but could not parse a credit timestamp.",
+        )
+    return md, None, f"No log block found for user `{pid}` on that file."
+
+
+def build_checkcredit_player_form_card() -> dict[str, Any]:
+    """Lark card 2.0: machine + player + date → Duty Bot ``checkcredit_player_submit``."""
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": "checkcredit — by player"},
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": (
+                            "**Machine type** (folder label, e.g. `NWR2074`, `DHS3189`) · "
+                            "**Player ID** · **Log date**.\n"
+                            "Submit loads the OSS logic log for that day and runs **Third Http → Detail** "
+                            "when a credit time is found (**CHECKCREDIT_USE_OSS=1** required)."
+                        ),
+                    },
+                },
+                {
+                    "tag": "form",
+                    "name": "checkcredit_player_form",
+                    "elements": [
+                        {
+                            "tag": "div",
+                            "text": {"tag": "plain_text", "content": "Machine type"},
+                        },
+                        {
+                            "tag": "input",
+                            "name": "machine_type",
+                            "placeholder": {
+                                "tag": "plain_text",
+                                "content": "e.g. NWR2074 / DHS3189",
+                            },
+                            "required": True,
+                        },
+                        {
+                            "tag": "div",
+                            "text": {"tag": "plain_text", "content": "Player ID"},
+                        },
+                        {
+                            "tag": "input",
+                            "name": "player_id",
+                            "placeholder": {
+                                "tag": "plain_text",
+                                "content": "Numeric user id",
+                            },
+                            "required": True,
+                        },
+                        {
+                            "tag": "div",
+                            "text": {"tag": "plain_text", "content": "Date"},
+                        },
+                        {
+                            "tag": "date_picker",
+                            "name": "log_date",
+                            "placeholder": {
+                                "tag": "plain_text",
+                                "content": "Pick log date",
+                            },
+                            "required": True,
+                        },
+                        {
+                            "tag": "button",
+                            "name": "submit_checkcredit_player",
+                            "text": {"tag": "plain_text", "content": "Submit"},
+                            "type": "primary",
+                            "form_action_type": "submit",
+                            "behaviors": [
+                                {
+                                    "type": "callback",
+                                    "value": {"k": "checkcredit_player_submit"},
+                                }
+                            ],
+                        },
+                    ],
+                },
+            ]
+        },
+    }
+
+
 def _np_lark_v2_callback_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Stringify callback ``value`` scalars for Feishu card 2.0 (same idea as Jenkins cards)."""
     out: dict[str, Any] = {}
