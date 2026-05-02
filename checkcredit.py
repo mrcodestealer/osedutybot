@@ -952,8 +952,9 @@ def build_checkcredit_player_form_card() -> dict[str, Any]:
                         "content": (
                             "**Machine type** (folder label, e.g. `NWR2074`, `DHS3189`) · "
                             "**Player ID** · **Log date**.\n"
+                            "Opened by **`/checkcreditdate`** alone (with **`@Duty Bot`** in groups). "
                             "Submit loads that day's logic log (**OSS** if `CHECKCREDIT_USE_OSS=1`, else "
-                            "**LogNavigator / Playwright** like `/checkcreditdate`) and runs "
+                            "**LogNavigator / Playwright**, same as `/checkcreditdate <machine>`) and runs "
                             "**Third Http → Detail** when a credit time is found."
                         ),
                     },

@@ -2874,14 +2874,15 @@ def lark_webhook():
             daemon=True,
         ).start()
         return jsonify({"success": True})
-    elif re.match(r"^/checkcreditplayer\b", clean_text, re.I):
+    elif re.match(r"^/checkcreditdate\s*$", clean_text, re.I):
+        # Bare `/checkcreditdate` — interactive card (machine + player + date). With a machine token, use the branch below.
         try:
             import checkcredit
 
             card_cp = checkcredit.build_checkcredit_player_form_card()
             send_message(chat_id, json.dumps(card_cp), msg_type="interactive")
         except Exception as e:
-            send_message(chat_id, f"❌ checkcredit player card failed: {e}")
+            send_message(chat_id, f"❌ checkcredit date card failed: {e}")
         return jsonify({"success": True})
     elif re.search(r"/(?:checkcreditdate|checkcredit|machineerror)\b", clean_text, re.I):
         # Longer token first in alternation so `/checkcreditdate` is not parsed as `/checkcredit` + `date`.
@@ -2895,6 +2896,7 @@ def lark_webhook():
             send_message(
                 chat_id,
                 "❌ Usage:\n"
+                "• `/checkcreditdate` — **interactive card**: machine + player + date → Third Http Detail\n"
                 "• `/checkcredit <machine>` — **today** (same as `--date` omitted in CLI)\n"
                 "• `/checkcreditdate <machine> [YYYY-MM-DD]` — optional date; omit for today\n"
                 "• `/machineerror <machine> [YYYY-MM-DD]` — latest two players with error only\n"

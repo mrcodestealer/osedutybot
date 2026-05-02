@@ -18,7 +18,8 @@ from typing import Any
 VERIFY_URLS = (
     "https://lognavigator.cliveslot.com/lognavigator/logs/DHS3050/list",
     "https://backend-nc.osmplay.com/log/logThirdHttpReq",
-    "https://oss-osm-log.osmplay.com/"
+    "https://oss-osm-log.osmplay.com/",
+    "https://grafana.client8.me/d/281e8816-ccb0-4335-922b-6b248491fd28/core-metrics-arms-aliyun?orgId=1&from=now-1m&to=now&timezone=browser&refresh=1m"
 )
 
 
