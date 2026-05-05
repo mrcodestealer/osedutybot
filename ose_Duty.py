@@ -1,74 +1,186 @@
 #!/usr/bin/env python3
 """
-OSE Duty Schedule – Today's Duty or Specific Date
+OSE Duty + Leave + Offset
 
-Usage:
-    ./ose_duty.py                # shows today's duty
-    ./ose_duty.py DD/MM/YYYY     # shows duty for the specified date
-    ./ose_duty.py --debug        # shows debug output (add before date, or alone)
+- Shift source: OSE sheet (`D`=day, `N`=night)
+- Leave source: Lark Bitable (Approved + date range)
+- Offset source: Lark Bitable (Approved + Original/Exchange date)
 """
 
+from __future__ import annotations
+
+import os
 import re
 import sys
+from datetime import date, datetime, timedelta
+from typing import Any, Optional
+
 import requests
-from datetime import datetime
-import os
 from dotenv import load_dotenv
+
 load_dotenv()
-# ================= Configuration =================
+
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
+
 SPREADSHEET_TOKEN = os.getenv("OSE_SPREADSHEET_TOKEN")
 SHEET_ID = os.getenv("OSE_SHEET_ID")
-LEAVE_SPREADSHEET_TOKEN = os.getenv("OSE_LEAVE_SPREADSHEET_TOKEN")
-LEAVE_SHEET_ID = os.getenv("OSE_LEAVE_SHEET_ID")
 
-# Target names as they appear in column A (case‑insensitive start‑match)
+# Leave / Offset Bitable (defaults from user-provided URLs).
+OSE_BASE_TOKEN = os.getenv("OSE_BASE_TOKEN", "CpdEbEofwaYyyEsSjlElKNxzgec")
+OSE_LEAVE_TABLE_ID = os.getenv("OSE_LEAVE_TABLE_ID", "tblmHJHe12BCJRD8")
+OSE_OFFSET_TABLE_ID = os.getenv("OSE_OFFSET_TABLE_ID", "tblC5T2MAydwT42j")
+
 TARGET_NAMES = [
-    "Louie", "Bryan Peh", "Eduard James", "Chrisjames", "Augustine Si yew",
-    "Man Chung", "Jan Rei", "Katleen", "Lynette", "Chun Chee",
-    "Renzel", "Jun Chen", "Kenneth", "Jewel", "Justine Miguel",
-    "Kheng Kwan", "Kris Ng"
+    "Louie",
+    "Bryan Peh",
+    "Eduard James",
+    "Chrisjames",
+    "Augustine Si yew",
+    "Man Chung",
+    "Jan Rei",
+    "Katleen",
+    "Lynette",
+    "Chun Chee",
+    "Renzel",
+    "Jun Chen",
+    "Kenneth",
+    "Jewel",
+    "Justine Miguel",
+    "Kheng Kwan",
+    "Kris Ng",
 ]
 
-# Month name to number mapping (full and abbreviated)
 MONTH_MAP = {
-    "January": 1, "February": 2, "March": 3, "April": 4, "May": 5, "June": 6,
-    "July": 7, "August": 8, "September": 9, "October": 10, "November": 11, "December": 12,
-    "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
-    "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12
+    "January": 1,
+    "February": 2,
+    "March": 3,
+    "April": 4,
+    "May": 5,
+    "June": 6,
+    "July": 7,
+    "August": 8,
+    "September": 9,
+    "October": 10,
+    "November": 11,
+    "December": 12,
+    "Jan": 1,
+    "Feb": 2,
+    "Mar": 3,
+    "Apr": 4,
+    "Jun": 6,
+    "Jul": 7,
+    "Aug": 8,
+    "Sep": 9,
+    "Oct": 10,
+    "Nov": 11,
+    "Dec": 12,
 }
 
 DEBUG = False
 
-def debug_print(*args, **kwargs):
+
+def debug_print(*args, **kwargs) -> None:
     if DEBUG:
         print("[DEBUG]", *args, file=sys.stderr, **kwargs)
 
-def col_index_to_letter(col_index):
-    """Convert 1‑based column index to Excel column letters."""
-    letters = ''
+
+def _title_name(name: str) -> str:
+    return re.sub(r"\s+", " ", str(name or "").strip()).title()
+
+
+def _field_text(v: Any) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v.strip()
+    if isinstance(v, (int, float)):
+        return str(v).strip()
+    if isinstance(v, dict):
+        t = str(v.get("name") or v.get("text") or v.get("value") or "").strip()
+        if t:
+            return t
+        return str(v).strip()
+    if isinstance(v, list):
+        parts: list[str] = []
+        for item in v:
+            s = _field_text(item)
+            if s:
+                parts.append(s)
+        return ", ".join(parts).strip()
+    return str(v).strip()
+
+
+def _parse_date_value(v: Any) -> Optional[date]:
+    if v is None or v == "":
+        return None
+    if isinstance(v, (int, float)):
+        ts = int(v)
+        if ts > 10**12:
+            ts //= 1000
+        try:
+            return datetime.fromtimestamp(ts).date()
+        except Exception:
+            return None
+    s = _field_text(v)
+    if not s:
+        return None
+    fmts = (
+        "%Y-%m-%d",
+        "%d/%m/%Y",
+        "%Y/%m/%d",
+        "%d-%m-%Y",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+    )
+    for fmt in fmts:
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    m = re.match(r"^\s*(\d{4})[-/](\d{2})[-/](\d{2})", s)
+    if m:
+        try:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return None
+    m2 = re.match(r"^\s*(\d{2})[-/](\d{2})[-/](\d{4})", s)
+    if m2:
+        try:
+            return date(int(m2.group(3)), int(m2.group(2)), int(m2.group(1)))
+        except ValueError:
+            return None
+    return None
+
+
+def _format_ddmmyyyy(d: Optional[date]) -> str:
+    return d.strftime("%d/%m/%Y") if isinstance(d, date) else "-"
+
+
+def col_index_to_letter(col_index: int) -> str:
+    letters = ""
     while col_index > 0:
         col_index -= 1
         letters = chr(65 + (col_index % 26)) + letters
         col_index //= 26
     return letters
 
-def get_tenant_access_token():
+
+def get_tenant_access_token() -> str:
     url = "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal"
     headers = {"Content-Type": "application/json"}
     data = {"app_id": APP_ID, "app_secret": APP_SECRET}
-    resp = requests.post(url, headers=headers, json=data)
+    resp = requests.post(url, headers=headers, json=data, timeout=20)
     result = resp.json()
     if result.get("code") != 0:
-        raise Exception(f"Failed to get token: {result}")
+        raise RuntimeError(f"Failed to get token: {result}")
     return result["tenant_access_token"]
 
-def get_sheet_metadata(token, spreadsheet_token, sheet_id):
+
+def get_sheet_metadata(token: str, spreadsheet_token: str, sheet_id: str) -> Optional[dict[str, Any]]:
     url = f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/metainfo"
     headers = {"Authorization": f"Bearer {token}"}
-    resp = requests.get(url, headers=headers)
-    result = resp.json()
+    result = requests.get(url, headers=headers, timeout=20).json()
     if result.get("code") != 0:
         debug_print(f"Metadata error: {result.get('msg')}")
         return None
@@ -77,391 +189,335 @@ def get_sheet_metadata(token, spreadsheet_token, sheet_id):
         if sheet.get("sheetId") == sheet_id:
             return {
                 "rowCount": sheet.get("rowCount"),
-                "columnCount": sheet.get("columnCount")
+                "columnCount": sheet.get("columnCount"),
             }
     return None
 
-def get_range_values(token, spreadsheet_token, sheet_id, range_str):
-    url = f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values/{sheet_id}!{range_str}?valueRenderOption=FormattedValue"
+
+def get_range_values(token: str, spreadsheet_token: str, sheet_id: str, range_str: str) -> Optional[list[list[Any]]]:
+    url = (
+        f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/"
+        f"{spreadsheet_token}/values/{sheet_id}!{range_str}?valueRenderOption=FormattedValue"
+    )
     headers = {"Authorization": f"Bearer {token}"}
-    resp = requests.get(url, headers=headers)
-    result = resp.json()
-    debug_print(f"Range values response: {result}")  # 添加这行
+    result = requests.get(url, headers=headers, timeout=30).json()
     if result.get("code") != 0:
+        debug_print(f"Range values error: {result}")
         return None
     return result.get("data", {}).get("valueRange", {}).get("values", [])
 
-def get_leaves_for_date(target_date):
-    """
-    从请假表读取指定日期的请假信息。
-    假设请假表的结构：
-        - 第一行是表头，包含 "Name" 和 "Leave Type" 列
-        - 有一列是日期列（格式 DD/MM/YYYY 或类似）
-    返回列表，元素为 (name, leave_type)
-    """
-    if not LEAVE_SPREADSHEET_TOKEN or not LEAVE_SHEET_ID:
-        debug_print("Leave sheet not configured (missing token or sheet ID).")
-        return []
 
-    try:
-        token = get_tenant_access_token()
-    except Exception as e:
-        debug_print(f"Failed to get token for leave sheet: {e}")
-        return []
-
-    # 获取请假表的最大行列数（用于全表扫描）
-    props = get_sheet_metadata(token, LEAVE_SPREADSHEET_TOKEN, LEAVE_SHEET_ID)
-    if not props:
-        debug_print("Cannot retrieve leave sheet metadata")
-        return []
-    max_row = props.get("rowCount", 500)
-    max_col = props.get("columnCount", 20)
-    end_col = col_index_to_letter(max_col)
-    scan_range = f"A1:{end_col}{max_row}"
-
-    values = get_range_values(token, LEAVE_SPREADSHEET_TOKEN, LEAVE_SHEET_ID, scan_range)
-    debug_print(f"values type: {type(values)}, length: {len(values) if values else 0}")
-    if values:
-        debug_print(f"First row: {values[0] if len(values)>0 else None}")
-        debug_print(f"Second row: {values[1] if len(values)>1 else None}")
-    if values is None or len(values) < 2:
-        debug_print("No data in leave sheet")
-        return []
-
-    # 假设第一行是表头，找到 "Name" 和 "Leave Type" 以及日期列
-    header = values[0]
-    name_col = None
-    leave_type_col = None
-    date_col = None
-
-    for idx, cell in enumerate(header):
-        if cell is None:
-            continue
-        cell_str = str(cell).strip().lower()
-        if "name" in cell_str or "姓名" in cell_str:
-            name_col = idx
-        elif "leave type" in cell_str or "type" in cell_str or "请假类型" in cell_str:
-            leave_type_col = idx
-        elif "date" in cell_str or "day" in cell_str or "日期" in cell_str:
-            date_col = idx
-    debug_print("First few rows of leave sheet:")
-    for i, row in enumerate(values[:5]):
-        debug_print(f"Row {i}: {row}")
-
-    if name_col is None or leave_type_col is None or date_col is None:
-        debug_print("Leave sheet missing required columns (Name, Leave Type, Date)")
-        return []
-
-    leaves = []
-    target_date_str = target_date.strftime("%d/%m/%Y")  # 可根据实际日期格式调整
-
-    for row in values[1:]:  # 跳过表头
-        if len(row) <= max(name_col, leave_type_col, date_col):
-            continue
-        cell_date = row[date_col]
-        if cell_date is None:
-            continue
-        # 尝试匹配日期，支持多种格式
-        row_date_str = str(cell_date).strip()
-        if target_date_str in row_date_str or target_date.strftime("%Y-%m-%d") in row_date_str:
-            name = row[name_col] if name_col < len(row) else None
-            leave_type = row[leave_type_col] if leave_type_col < len(row) else None
-            if name and leave_type:
-                leaves.append((str(name).strip(), str(leave_type).strip()))
-
-    return leaves
-
-def get_shift_names_for_date(target_date):
-    """
-    Returns a tuple (morning_names, night_names) for the given date.
-    Each is a list of strings (names) sorted alphabetically.
-    """
-    current_year = target_date.year
-    current_month = target_date.month
-    current_day = target_date.day
-
-    try:
-        token = get_tenant_access_token()
-    except Exception as e:
-        return [], []
-
-    props = get_sheet_metadata(token, SPREADSHEET_TOKEN, SHEET_ID)
-    if not props:
-        return [], []
-    max_row = props.get("rowCount", 200)
-    max_col = props.get("columnCount", 200)
-    end_col = col_index_to_letter(max_col)
-    scan_range = f"A1:{end_col}{max_row}"
-
-    values = get_range_values(token, SPREADSHEET_TOKEN, SHEET_ID, scan_range)
-    if values is None or len(values) < 2:
-        return [], []
-
-    # 1. Find the column whose header contains the target month/year
-    target_header_col = None
-    for col_idx, cell in enumerate(values[0]):
-        mon_num, year = parse_month_year(cell)
-        if mon_num == current_month and year == current_year:
-            target_header_col = col_idx
-            break
-    if target_header_col is None:
-        return [], []
-
-    # 2. Find today's day column
-    date_col = None
-    for row_idx in range(1, min(15, len(values))):
-        row = values[row_idx]
-        if not row:
-            continue
-        for col in range(len(row)):
-            cell = row[col]
-            try:
-                day_num = int(str(cell).strip())
-            except (ValueError, TypeError):
-                continue
-            if day_num == current_day:
-                # Verify that this column belongs to the target month
-                header = ""
-                for hcol in range(col, -1, -1):
-                    if hcol < len(values[0]) and values[0][hcol]:
-                        header = values[0][hcol]
-                        break
-                mon_num, year = parse_month_year(header)
-                if mon_num == current_month and year == current_year:
-                    date_col = col
-                    break
-        if date_col is not None:
-            break
-
-    if date_col is None:
-        return [], []
-
-    # 3. Collect names from column A that match target list
-    name_rows = {}
-    for row_idx in range(2, len(values)):
-        row = values[row_idx]
-        if not row or len(row) == 0:
-            continue
-        cell_a = row[0]
-        if not isinstance(cell_a, str):
-            continue
-        cell_upper = cell_a.upper()
-        for target in TARGET_NAMES:
-            if cell_upper.startswith(target.upper()):
-                if target not in name_rows:
-                    name_rows[target] = row_idx
-                break
-
-    if not name_rows:
-        return [], []
-
-    # 4. Check the cell at (name row, date column)
-    morning = []
-    night = []
-    for name, row_idx in name_rows.items():
-        if row_idx >= len(values):
-            continue
-        row = values[row_idx]
-        if date_col >= len(row):
-            continue
-        cell = row[date_col]
-        if not isinstance(cell, str):
-            continue
-        code = cell.strip().upper()
-        if code == "D":
-            morning.append(name)
-        elif code == "N":
-            night.append(name)
-
-    morning.sort()
-    night.sort()
-    return morning, night
-
-def parse_month_year(text):
-    """Extract (month_num, year) from a string like 'March 2026' or 'Dec 2026'."""
-    if not isinstance(text, str):
+def parse_month_year(text: Any) -> tuple[Optional[int], Optional[int]]:
+    s = _field_text(text)
+    if not s:
         return None, None
     for mon_name, mon_num in MONTH_MAP.items():
         pattern = rf"\b{re.escape(mon_name)}\b\s+(\d{{4}})"
-        m = re.search(pattern, text, re.IGNORECASE)
+        m = re.search(pattern, s, re.IGNORECASE)
         if m:
             return mon_num, int(m.group(1))
     return None, None
 
-def get_ose_duty_for_date(target_date):
+
+def get_shift_names_for_date(target_date: date) -> tuple[list[str], list[str]]:
+    """Return (morning_names, night_names) from OSE shift sheet."""
+    try:
+        token = get_tenant_access_token()
+    except Exception:
+        return [], []
+    props = get_sheet_metadata(token, SPREADSHEET_TOKEN, SHEET_ID)
+    if not props:
+        return [], []
+    max_row = props.get("rowCount", 200)
+    max_col = props.get("columnCount", 200)
+    scan_range = f"A1:{col_index_to_letter(max_col)}{max_row}"
+    values = get_range_values(token, SPREADSHEET_TOKEN, SHEET_ID, scan_range)
+    if not values or len(values) < 2:
+        return [], []
+
     current_year = target_date.year
     current_month = target_date.month
     current_day = target_date.day
 
-    debug_print(f"Looking for {target_date.strftime('%d/%m/%Y')} (month {current_month}, year {current_year})")
-
-    try:
-        token = get_tenant_access_token()
-    except Exception as e:
-        return f"❌ Failed to get access token: {e}"
-
-    props = get_sheet_metadata(token, SPREADSHEET_TOKEN, SHEET_ID)
-    if not props:
-        return "❌ Cannot retrieve sheet metadata"
-    max_row = props.get("rowCount", 200)
-    max_col = props.get("columnCount", 200)
-    end_col = col_index_to_letter(max_col)
-    scan_range = f"A1:{end_col}{max_row}"
-    debug_print(f"Using range {scan_range}")
-
-    values = get_range_values(token, SPREADSHEET_TOKEN, SHEET_ID, scan_range)
-    if values is None:
-        return "❌ Failed to read sheet data"
-    if len(values) < 2:
-        return "Sheet has fewer than 2 rows."
-
-    # 1. Find the column whose header (row0) contains the target month/year
-    target_header_col = None
-    for col_idx, cell in enumerate(values[0]):
-        mon_num, year = parse_month_year(cell)
-        if mon_num == current_month and year == current_year:
-            target_header_col = col_idx
-            debug_print(f"Found target header at column {col_idx}")
-            break
-
-    if target_header_col is None:
-        return f"❌ Could not find header for {target_date.strftime('%B %Y')} in row 1."
-
-    # 2. Find today's day column in rows 1..15
     date_col = None
     for row_idx in range(1, min(15, len(values))):
+        row = values[row_idx] if row_idx < len(values) else []
+        for col in range(len(row)):
+            try:
+                day_num = int(str(row[col]).strip())
+            except Exception:
+                continue
+            if day_num != current_day:
+                continue
+            header = ""
+            for hcol in range(col, -1, -1):
+                if hcol < len(values[0]) and values[0][hcol]:
+                    header = values[0][hcol]
+                    break
+            mon_num, year = parse_month_year(header)
+            if mon_num == current_month and year == current_year:
+                date_col = col
+                break
+        if date_col is not None:
+            break
+    if date_col is None:
+        return [], []
+
+    name_rows: dict[str, int] = {}
+    for row_idx in range(2, len(values)):
         row = values[row_idx]
         if not row:
             continue
-        for col in range(len(row)):
-            cell = row[col]
-            try:
-                day_num = int(str(cell).strip())
-            except (ValueError, TypeError):
-                continue
-            if day_num == current_day:
-                # Verify that this column belongs to the target month
-                header = ""
-                for hcol in range(col, -1, -1):
-                    if hcol < len(values[0]) and values[0][hcol]:
-                        header = values[0][hcol]
-                        break
-                mon_num, year = parse_month_year(header)
-                if mon_num == current_month and year == current_year:
-                    date_col = col
-                    debug_print(f"Found day {current_day} at column {col} (row {row_idx})")
-                    break
-        if date_col is not None:
-            break
-
-    if date_col is None:
-        return f"📅 {target_date.strftime('%d/%m/%Y')} not found under {target_date.strftime('%B %Y')}."
-
-    # 3. Collect names from column A that match target list
-    name_rows = {}
-    for row_idx in range(2, len(values)):
-        row = values[row_idx]
-        if not row or len(row) == 0:
+        name_cell = _field_text(row[0] if len(row) > 0 else "")
+        if not name_cell:
             continue
-        cell_a = row[0]
-        if not isinstance(cell_a, str):
-            continue
-        cell_upper = cell_a.upper()
+        up = name_cell.upper()
         for target in TARGET_NAMES:
-            if cell_upper.startswith(target.upper()):
-                if target not in name_rows:
-                    name_rows[target] = row_idx
+            if up.startswith(target.upper()) and target not in name_rows:
+                name_rows[target] = row_idx
                 break
 
-    if not name_rows:
-        return f"📅 {target_date.strftime('%d/%m/%Y')} – no OSE duty assigned (no target names found)."
-
-    # 4. Check the cell at (name row, date column)
-    duties = []   # list of (name, shift)
+    morning: list[str] = []
+    night: list[str] = []
     for name, row_idx in name_rows.items():
-        if row_idx >= len(values):
-            continue
         row = values[row_idx]
         if date_col >= len(row):
             continue
-        cell = row[date_col]
-        if not isinstance(cell, str):
-            continue
-        code = cell.strip().upper()
+        code = _field_text(row[date_col]).upper()
         if code == "D":
-            shift = "Morning Shift"
+            morning.append(_title_name(name))
         elif code == "N":
-            shift = "Night Shift"
-        else:
+            night.append(_title_name(name))
+    return sorted(morning), sorted(night)
+
+
+def _bitable_get_all_records(token: str, app_token: str, table_id: str) -> list[dict[str, Any]]:
+    url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
+    headers = {"Authorization": f"Bearer {token}"}
+    out: list[dict[str, Any]] = []
+    page_token = None
+    while True:
+        params: dict[str, Any] = {"page_size": 200}
+        if page_token:
+            params["page_token"] = page_token
+        res = requests.get(url, headers=headers, params=params, timeout=30).json()
+        if res.get("code") != 0:
+            raise RuntimeError(f"Bitable fetch failed: {res}")
+        data = res.get("data", {})
+        out.extend(data.get("items") or [])
+        if not data.get("has_more"):
+            break
+        page_token = data.get("page_token")
+    return out
+
+
+def _is_approved(v: Any) -> bool:
+    return _field_text(v).strip().lower() == "approved"
+
+
+def _extract_leave_entries_for_date(target_date: date, token: str) -> list[dict[str, Any]]:
+    items = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_LEAVE_TABLE_ID)
+    out: list[dict[str, Any]] = []
+    for it in items:
+        f = it.get("fields") or {}
+        if not _is_approved(f.get("Status")):
             continue
-        duties.append((name, shift))
+        name = _title_name(_field_text(f.get("Name")))
+        if not name:
+            continue
+        st = _parse_date_value(f.get("Start Date"))
+        ed = _parse_date_value(f.get("End Date"))
+        if not st or not ed:
+            continue
+        if st <= target_date <= ed:
+            out.append(
+                {
+                    "name": name,
+                    "leave_type": _field_text(f.get("Leave Type")) or "Leave",
+                    "start": st,
+                    "end": ed,
+                }
+            )
+    return sorted(out, key=lambda x: x["name"])
 
-    if not duties:
-        return f"📅 {target_date.strftime('%d/%m/%Y')} – no OSE duty assigned."
 
-    # Separate into morning and night
-    morning = [name for name, shift in duties if shift == "Morning Shift"]
-    night = [name for name, shift in duties if shift == "Night Shift"]
-    # Sort each list alphabetically
-    morning.sort()
-    night.sort()
+def _extract_offset_lines_for_date(target_date: date, token: str) -> list[str]:
+    items = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_OFFSET_TABLE_ID)
+    lines: list[str] = []
+    for it in items:
+        f = it.get("fields") or {}
+        if not _is_approved(f.get("Approval Status")):
+            continue
+        req = _title_name(_field_text(f.get("Request Person")))
+        exc = _title_name(_field_text(f.get("Exchange Person")))
+        od = _parse_date_value(f.get("Original Date"))
+        xd = _parse_date_value(f.get("Exchange Date"))
+        if not req or not exc or not od or not xd:
+            continue
+        if target_date != od and target_date != xd:
+            continue
+        if req.lower() == exc.lower():
+            lines.append(f"• {req} is offset with him/herself.")
+            continue
+        lines.append(
+            f"• {req}({_format_ddmmyyyy(od)}) offset with {exc}({_format_ddmmyyyy(xd)})"
+        )
+    return sorted(set(lines))
 
-    lines = [f"OSE Duty – {target_date.strftime('%d/%m/%Y')}", ""]
-    if morning:
-        lines.append("Morning Shift")
-        for name in morning:
-            lines.append(f"• {name}")
-    if night:
-        if morning:
-            lines.append("")  # blank line between shifts
-        lines.append("Night Shift")
-        for name in night:
-            lines.append(f"• {name}")
 
-    # 2. 获取请假信息
-    leaves = get_leaves_for_date(target_date)
+def _section_lines(title: str, rows: list[str], *, empty_text: str = "• -") -> list[str]:
+    out = [title]
+    if rows:
+        out.extend(rows)
+    else:
+        out.append(empty_text)
+    out.append("")
+    return out
 
-    # 3. 构建输出
-    lines = [f"OSE Duty – {target_date.strftime('%d/%m/%Y')}", ""]
 
-    if morning:
-        lines.append("Morning Shift")
-        lines.extend([f"• {name}" for name in morning])
-    if night:
-        if morning:
-            lines.append("")
-        lines.append("Night Shift")
-        lines.extend([f"• {name}" for name in night])
+def _build_ose_context(target_date: date, mode: str) -> tuple[list[str], list[str], list[str], list[dict[str, Any]], Optional[str]]:
+    """
+    mode:
+      - 'morning': Rest yesterday night, Luck today morning
+      - 'evening': Rest today morning, Luck today night
+      - 'date': Rest previous night, Luck target morning
+    """
+    try:
+        if mode == "evening":
+            rest_names, _night_unused = get_shift_names_for_date(target_date)
+            _m_unused, luck_names = get_shift_names_for_date(target_date)
+        elif mode == "morning":
+            _, rest_names = get_shift_names_for_date(target_date - timedelta(days=1))
+            luck_names, _ = get_shift_names_for_date(target_date)
+        else:
+            _, rest_names = get_shift_names_for_date(target_date - timedelta(days=1))
+            luck_names, _ = get_shift_names_for_date(target_date)
 
-    if leaves:
-        if morning or night:
-            lines.append("")
+        token = get_tenant_access_token()
+        leave_entries = _extract_leave_entries_for_date(target_date, token)
+        offset_lines = _extract_offset_lines_for_date(target_date, token)
+    except Exception as e:
+        return [], [], [], [], f"❌ OSE data load failed: {e}"
+
+    leave_names = {str(r.get("name") or "").strip().lower() for r in leave_entries}
+    rest_names = [n for n in rest_names if n.strip().lower() not in leave_names]
+    luck_names = [n for n in luck_names if n.strip().lower() not in leave_names]
+    return sorted(rest_names), sorted(luck_names), offset_lines, leave_entries, None
+
+
+def build_ose_message_card(
+    *,
+    target_date: date,
+    rest_names: list[str],
+    luck_names: list[str],
+    offset_lines: list[str],
+    leave_entries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    lines: list[str] = []
+    lines.append("👥 **@CP OM Duty**")
+    lines.append(f"📅 **{target_date.strftime('%d/%m/%Y')}**")
+    lines.append("")
+    lines.extend(_section_lines("😴 (～￣▽￣)～ Rest Well", [f"• {n}" for n in rest_names]))
+    lines.extend(_section_lines("🍀 Good Luckヾ(≧▽≦*)o", [f"• {n}" for n in luck_names]))
+    if offset_lines:
+        lines.extend(_section_lines("🔁 Offset", offset_lines))
+    if leave_entries:
+        leave_lines: list[str] = []
+        for row in leave_entries:
+            name = row["name"]
+            lt = row["leave_type"]
+            st = row["start"]
+            ed = row["end"]
+            if st == ed:
+                leave_lines.append(f"• {name} ({lt}) - {_format_ddmmyyyy(st)}")
+            else:
+                leave_lines.append(
+                    f"• {name} ({lt}) - From {_format_ddmmyyyy(st)} until {_format_ddmmyyyy(ed)}"
+                )
+        lines.extend(_section_lines("🏖️ Leave", leave_lines))
+    content = "\n".join(lines).strip()
+
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "green",
+            "title": {"tag": "plain_text", "content": "CP OM Duty"},
+        },
+        "body": {"elements": [{"tag": "markdown", "content": content}]},
+    }
+
+
+def get_ose_payload_for_date(target_date: date, mode: str = "date") -> dict[str, Any]:
+    rest_names, luck_names, offset_lines, leave_entries, err = _build_ose_context(target_date, mode)
+    if err:
+        return {"text": err, "lark_card": None}
+
+    lines: list[str] = []
+    lines.append("@CP OM Duty")
+    lines.append("(～￣▽￣)～ Rest Well")
+    lines.extend([f"• {n}" for n in rest_names] or ["• -"])
+    lines.append("")
+    lines.append("Good Luckヾ(≧▽≦*)o")
+    lines.extend([f"• {n}" for n in luck_names] or ["• -"])
+    if offset_lines:
+        lines.append("")
+        lines.append("Offset")
+        lines.extend(offset_lines)
+    if leave_entries:
+        lines.append("")
         lines.append("Leave")
-        for name, leave_type in leaves:
-            lines.append(f"• {name} - {leave_type}")
+        for row in leave_entries:
+            name = row["name"]
+            lt = row["leave_type"]
+            st = row["start"]
+            ed = row["end"]
+            if st == ed:
+                lines.append(f"• {name} ({lt}) - {_format_ddmmyyyy(st)}")
+            else:
+                lines.append(
+                    f"• {name} ({lt}) - From {_format_ddmmyyyy(st)} until {_format_ddmmyyyy(ed)}"
+                )
 
-    if not morning and not night and not leaves:
-        return f"📅 {target_date.strftime('%d/%m/%Y')} – no duty or leave records found."
+    text = "\n".join(lines).strip()
+    return {
+        "text": text,
+        "lark_card": build_ose_message_card(
+            target_date=target_date,
+            rest_names=rest_names,
+            luck_names=luck_names,
+            offset_lines=offset_lines,
+            leave_entries=leave_entries,
+        ),
+    }
 
-    return "\n".join(lines)
 
-def osedate(date_str):
+def get_ose_payload_for_now(now_dt: Optional[datetime] = None) -> dict[str, Any]:
+    now_dt = now_dt or datetime.now()
+    mode = "evening" if now_dt.hour >= 19 else "morning"
+    return get_ose_payload_for_date(now_dt.date(), mode=mode)
+
+
+def get_ose_duty_for_date(target_date: date) -> str:
+    return str(get_ose_payload_for_date(target_date, mode="date").get("text") or "")
+
+
+def osedate(date_str: str) -> str:
     try:
         target_date = datetime.strptime(date_str, "%d/%m/%Y").date()
     except ValueError:
         return "❌ Invalid date format. Please use DD/MM/YYYY (e.g., 31/12/2026)"
     return get_ose_duty_for_date(target_date)
 
-def get_ose_today_duty():
-    """Return today's OSE duty (for use in main bot)."""
-    return get_ose_duty_for_date(datetime.now().date())
+
+def get_ose_today_duty() -> str:
+    return str(get_ose_payload_for_now().get("text") or "")
+
 
 if __name__ == "__main__":
-    # Check for --debug flag
     if "--debug" in sys.argv:
         DEBUG = True
         sys.argv.remove("--debug")
-
     if len(sys.argv) > 1:
         print(osedate(sys.argv[1]))
     else:
