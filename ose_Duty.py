@@ -424,10 +424,11 @@ def build_ose_message_card(
     luck_names: list[str],
     offset_lines: list[str],
     leave_entries: list[dict[str, Any]],
+    include_tag: bool = False,
 ) -> dict[str, Any]:
     mention_line = (
-        f'👥 <at user_id="{TARGET_USER_OPEN_ID}">User</at>'
-        if TARGET_USER_OPEN_ID
+        f'👥 <at id="{TARGET_USER_OPEN_ID}">User</at>'
+        if include_tag and TARGET_USER_OPEN_ID
         else "👥 @CP OM Duty"
     )
     lines: list[str] = []
@@ -459,19 +460,32 @@ def build_ose_message_card(
         "config": {"update_multi": True, "width_mode": "fill"},
         "header": {
             "template": "green",
-            "title": {"tag": "plain_text", "content": "CP OM Duty"},
+            "title": {
+                "tag": "plain_text",
+                "content": f"OSE DUTY FOR {target_date.strftime('%d/%m/%Y')}",
+            },
         },
-        "body": {"elements": [{"tag": "markdown", "content": content}]},
+        "body": {
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": content,
+                    },
+                }
+            ]
+        },
     }
 
 
-def get_ose_payload_for_date(target_date: date, mode: str = "date") -> dict[str, Any]:
+def get_ose_payload_for_date(target_date: date, mode: str = "date", *, include_tag: bool = False) -> dict[str, Any]:
     rest_names, luck_names, offset_lines, leave_entries, err = _build_ose_context(target_date, mode)
     if err:
         return {"text": err, "lark_card": None}
 
     lines: list[str] = []
-    if TARGET_USER_OPEN_ID:
+    if include_tag and TARGET_USER_OPEN_ID:
         lines.append(f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>')
     else:
         lines.append("@CP OM Duty")
@@ -508,14 +522,15 @@ def get_ose_payload_for_date(target_date: date, mode: str = "date") -> dict[str,
             luck_names=luck_names,
             offset_lines=offset_lines,
             leave_entries=leave_entries,
+            include_tag=include_tag,
         ),
     }
 
 
-def get_ose_payload_for_now(now_dt: Optional[datetime] = None) -> dict[str, Any]:
+def get_ose_payload_for_now(now_dt: Optional[datetime] = None, *, include_tag: bool = False) -> dict[str, Any]:
     now_dt = now_dt or datetime.now()
     mode = "evening" if now_dt.hour >= 19 else "morning"
-    return get_ose_payload_for_date(now_dt.date(), mode=mode)
+    return get_ose_payload_for_date(now_dt.date(), mode=mode, include_tag=include_tag)
 
 
 def get_ose_duty_for_date(target_date: date) -> str:

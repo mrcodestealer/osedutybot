@@ -1133,13 +1133,13 @@ def _send_ose_payload(chat_id: str, payload: dict, *, mention_user_id: Optional[
 
 def morning_reminder():
     today = datetime.now().date()
-    payload = ose_Duty.get_ose_payload_for_date(today, mode="morning")
+    payload = ose_Duty.get_ose_payload_for_date(today, mode="morning", include_tag=True)
     _send_ose_payload(DUTY_CHAT_ID, payload)
     print(f"⏰ OSE morning card sent to {DUTY_CHAT_ID}")
 
 def evening_reminder():
     today = datetime.now().date()
-    payload = ose_Duty.get_ose_payload_for_date(today, mode="evening")
+    payload = ose_Duty.get_ose_payload_for_date(today, mode="evening", include_tag=True)
     _send_ose_payload(DUTY_CHAT_ID, payload)
     print(f"⏰ OSE evening card sent to {DUTY_CHAT_ID}")
 
@@ -2654,20 +2654,20 @@ def lark_webhook():
         send_message(chat_id, reply)
         return jsonify({"success": True})
     elif clean_text == '/ose':
-        payload = ose_Duty.get_ose_payload_for_now()
+        payload = ose_Duty.get_ose_payload_for_now(include_tag=False)
         _send_ose_payload(chat_id, payload)
         return jsonify({"success": True})
     elif clean_text.startswith('/osedate'):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
-            payload = ose_Duty.get_ose_payload_for_now()
+            payload = ose_Duty.get_ose_payload_for_now(include_tag=False)
             _send_ose_payload(chat_id, payload)
             return jsonify({"success": True})
         else:
             date_str = parts[1].strip()
             try:
                 target_date = datetime.strptime(date_str, "%d/%m/%Y").date()
-                payload = ose_Duty.get_ose_payload_for_date(target_date, mode="date")
+                payload = ose_Duty.get_ose_payload_for_date(target_date, mode="date", include_tag=False)
                 _send_ose_payload(chat_id, payload)
                 return jsonify({"success": True})
             except ValueError:
