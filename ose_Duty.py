@@ -123,8 +123,57 @@ def _field_text(v: Any) -> str:
     return str(v).strip()
 
 
+def _norm_key(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(s or "").lower())
+
+
+def _get_field_by_aliases(fields: dict[str, Any], aliases: list[str]) -> Any:
+    """
+    Resolve field value by fuzzy key matching (case/space/punct-insensitive).
+    Useful when Bitable returns slightly different field names.
+    """
+    if not isinstance(fields, dict):
+        return None
+    if not aliases:
+        return None
+    alias_norm = [_norm_key(a) for a in aliases if a]
+    if not alias_norm:
+        return None
+
+    # 1) exact normalized match
+    for k, v in fields.items():
+        nk = _norm_key(k)
+        if nk in alias_norm:
+            return v
+    # 2) contains match (both directions)
+    for k, v in fields.items():
+        nk = _norm_key(k)
+        for an in alias_norm:
+            if an in nk or nk in an:
+                return v
+    return None
+
+
 def _parse_date_value(v: Any) -> Optional[date]:
     if v is None or v == "":
+        return None
+    if isinstance(v, list):
+        for item in v:
+            d = _parse_date_value(item)
+            if d:
+                return d
+        return None
+    if isinstance(v, dict):
+        # common date-like keys in bitable payload
+        for key in ("value", "timestamp", "ts", "date", "start_date", "end_date"):
+            if key in v:
+                d = _parse_date_value(v.get(key))
+                if d:
+                    return d
+        # fallback: try dict text flatten
+        sdict = _field_text(v)
+        if sdict:
+            return _parse_date_value(sdict)
         return None
     if isinstance(v, (int, float)):
         ts = int(v)
@@ -332,20 +381,21 @@ def _extract_leave_entries_for_date(target_date: date, token: str) -> list[dict[
     out: list[dict[str, Any]] = []
     for it in items:
         f = it.get("fields") or {}
-        if not _is_approved(f.get("Status")):
+        status_v = _get_field_by_aliases(f, ["Status", "Approval Status"])
+        if not _is_approved(status_v):
             continue
-        name = _title_name(_field_text(f.get("Name")))
+        name = _title_name(_field_text(_get_field_by_aliases(f, ["Name", "Employee Name", "Person"])))
         if not name:
             continue
-        st = _parse_date_value(f.get("Start Date"))
-        ed = _parse_date_value(f.get("End Date"))
+        st = _parse_date_value(_get_field_by_aliases(f, ["Start Date", "Leave Start Date", "From"]))
+        ed = _parse_date_value(_get_field_by_aliases(f, ["End Date", "Leave End Date", "To"]))
         if not st or not ed:
             continue
         if st <= target_date <= ed:
             out.append(
                 {
                     "name": name,
-                    "leave_type": _field_text(f.get("Leave Type")) or "Leave",
+                    "leave_type": _field_text(_get_field_by_aliases(f, ["Leave Type", "Type"])) or "Leave",
                     "start": st,
                     "end": ed,
                 }
@@ -358,12 +408,17 @@ def _extract_offset_lines_for_date(target_date: date, token: str) -> list[str]:
     lines: list[str] = []
     for it in items:
         f = it.get("fields") or {}
-        if not _is_approved(f.get("Approval Status")):
+        approval_v = _get_field_by_aliases(f, ["Approval Status", "Status"])
+        if not _is_approved(approval_v):
             continue
-        req = _title_name(_field_text(f.get("Request Person")))
-        exc = _title_name(_field_text(f.get("Exchange Person")))
-        od = _parse_date_value(f.get("Original Date"))
-        xd = _parse_date_value(f.get("Exchange Date"))
+        req = _title_name(
+            _field_text(_get_field_by_aliases(f, ["Request Person", "Requester", "Requester Person", "Name"]))
+        )
+        exc = _title_name(
+            _field_text(_get_field_by_aliases(f, ["Exchange Person", "Replacement", "Swap Person"]))
+        )
+        od = _parse_date_value(_get_field_by_aliases(f, ["Original Date", "Request Date", "Date"]))
+        xd = _parse_date_value(_get_field_by_aliases(f, ["Exchange Date", "Swap Date", "Target Date"]))
         if not req or not exc or not od or not xd:
             continue
         if target_date != od and target_date != xd:
@@ -426,13 +481,9 @@ def build_ose_message_card(
     leave_entries: list[dict[str, Any]],
     include_tag: bool = False,
 ) -> dict[str, Any]:
-    mention_line = (
-        f'👥 <at id="{TARGET_USER_OPEN_ID}">User</at>'
-        if include_tag and TARGET_USER_OPEN_ID
-        else "👥 @CP OM Duty"
-    )
     lines: list[str] = []
-    lines.append(mention_line)
+    if include_tag and TARGET_USER_OPEN_ID:
+        lines.append(f'👥 <at id="{TARGET_USER_OPEN_ID}">User</at>')
     lines.append(f"📅 **{target_date.strftime('%d/%m/%Y')}**")
     lines.append("")
     lines.extend(_section_lines("😴 (～￣▽￣)～ Rest Well", [f"• {n}" for n in rest_names]))
@@ -487,8 +538,6 @@ def get_ose_payload_for_date(target_date: date, mode: str = "date", *, include_t
     lines: list[str] = []
     if include_tag and TARGET_USER_OPEN_ID:
         lines.append(f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>')
-    else:
-        lines.append("@CP OM Duty")
     lines.append("(～￣▽￣)～ Rest Well")
     lines.extend([f"• {n}" for n in rest_names] or ["• -"])
     lines.append("")
