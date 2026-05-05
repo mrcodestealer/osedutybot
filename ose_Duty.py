@@ -263,7 +263,7 @@ def _format_cp_om_duty_text(
     offset_lines: list[str],
 ) -> str:
     lines: list[str] = [f"📢 @CP OM Duty", f"📅 {target_date.strftime('%d/%m/%Y')}", ""]
-    lines.append("🌙 (～￣▽￣)～ Rest Well")
+    lines.append("😴 (～￣▽￣)～ Rest Well")
     if rest_names:
         lines.extend([f"• {n}" for n in rest_names])
     else:
@@ -294,7 +294,7 @@ def _build_cp_om_duty_card(text: str, target_date: date) -> dict[str, Any]:
             "template": "turquoise",
             "title": {
                 "tag": "plain_text",
-                "content": f"📢 CP OM Duty - {target_date.strftime('%d/%m/%Y')}",
+                "content": f"📢 @CP OM Duty - {target_date.strftime('%d/%m/%Y')}",
             },
         },
         "body": {
