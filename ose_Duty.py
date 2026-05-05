@@ -161,6 +161,10 @@ def _format_short(dv: date | None) -> str:
     return dv.strftime("%d/%m") if isinstance(dv, date) else "?"
 
 
+def _format_full(dv: date | None) -> str:
+    return dv.strftime("%d/%m/%Y") if isinstance(dv, date) else "?"
+
+
 def _fetch_bitable_records(app_token: str, table_id: str) -> list[dict[str, Any]]:
     if not app_token or not table_id:
         return []
@@ -208,9 +212,9 @@ def get_leave_entries_for_date(target_date: date) -> list[dict[str, str]]:
         if not (start <= target_date <= end):
             continue
         period = (
-            f"that day ({_format_short(start)})"
+            "that day"
             if start == end
-            else f"From {_format_short(start)} until {_format_short(end)}"
+            else f"From {_format_full(start)} until {_format_full(end)}"
         )
         key = (name.lower(), leave_type.lower(), period.lower())
         if key in seen:

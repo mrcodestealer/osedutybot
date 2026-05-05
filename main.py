@@ -1112,36 +1112,39 @@ REMINDER_TARGET_CHAT_ID = os.getenv(
     "oc_9de3d63fc589df6feeb9b0bee9c45b72",
 ).strip() or "oc_9de3d63fc589df6feeb9b0bee9c45b72"
 
-def send_shift_reminder(chat_id, message):
-    send_message(chat_id, message)
-    print(f"⏰ Shift reminder sent to {chat_id}: {message}")
-
-
-def _send_ose_payload(chat_id: str, payload: dict, mention_open_id: Optional[str] = None):
-    mention_line = ""
-    if mention_open_id:
-        mention_line = f'<at user_id="{mention_open_id}">User</at>'
-    card = payload.get("lark_card") if isinstance(payload, dict) else None
-    text = (payload.get("text") or "").strip() if isinstance(payload, dict) else ""
-    if mention_line:
-        send_message(chat_id, mention_line)
-    if isinstance(card, dict):
-        resp = send_message(chat_id, json.dumps(card), msg_type="interactive")
-        if resp.get("code") == 0:
+def send_shift_reminder(chat_id, payload):
+    """
+    Send OSE shift reminder as interactive card when available.
+    ``payload`` may be a string or ``{"text": ..., "lark_card": ...}``.
+    """
+    if isinstance(payload, dict):
+        card = payload.get("lark_card")
+        text = str(payload.get("text") or "").strip()
+        if isinstance(card, dict):
+            resp = send_message(chat_id, json.dumps(card), msg_type="interactive")
+            if resp.get("code") == 0:
+                print(f"⏰ Shift reminder card sent to {chat_id}")
+                return
+            if text:
+                send_message(chat_id, text)
+                print(f"⏰ Shift reminder fallback text sent to {chat_id}")
+                return
+        if text:
+            send_message(chat_id, text)
+            print(f"⏰ Shift reminder text sent to {chat_id}")
             return
-    if text:
-        send_message(chat_id, text)
-
+    send_message(chat_id, str(payload))
+    print(f"⏰ Shift reminder sent to {chat_id}: {payload}")
 
 def morning_reminder():
     today = datetime.now().date()
     payload = ose_Duty.get_ose_duty_payload_for_date(today, mode="morning")
-    _send_ose_payload(DUTY_CHAT_ID, payload, mention_open_id=TARGET_USER_OPEN_ID)
+    send_shift_reminder(DUTY_CHAT_ID, payload)
 
 def evening_reminder():
     today = datetime.now().date()
     payload = ose_Duty.get_ose_duty_payload_for_date(today, mode="evening")
-    _send_ose_payload(DUTY_CHAT_ID, payload, mention_open_id=TARGET_USER_OPEN_ID)
+    send_shift_reminder(DUTY_CHAT_ID, payload)
 
 # def amountloss():
 #     mention_line = f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>'
@@ -2653,22 +2656,37 @@ def lark_webhook():
             reply = ft.ft_check()
         send_message(chat_id, reply)
         return jsonify({"success": True})
-    elif clean_text.lower() == '/ose':
+    elif clean_text == '/ose':
         payload_ose = ose_Duty.get_ose_today_payload(mode="command")
-        _send_ose_payload(chat_id, payload_ose)
+        if isinstance(payload_ose, dict) and payload_ose.get("lark_card"):
+            resp = send_message(chat_id, json.dumps(payload_ose["lark_card"]), msg_type="interactive")
+            if resp.get("code") != 0:
+                send_message(chat_id, payload_ose.get("text") or "❌ Failed to send OSE card.")
+        else:
+            send_message(chat_id, ose_Duty.get_ose_today_duty())
         return jsonify({"success": True})
-    elif clean_text.lower().startswith('/osedate'):
+    elif clean_text.startswith('/osedate'):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
             payload_ose = ose_Duty.get_ose_today_payload(mode="command")
-            _send_ose_payload(chat_id, payload_ose)
+            if isinstance(payload_ose, dict) and payload_ose.get("lark_card"):
+                resp = send_message(chat_id, json.dumps(payload_ose["lark_card"]), msg_type="interactive")
+                if resp.get("code") != 0:
+                    send_message(chat_id, payload_ose.get("text") or "❌ Failed to send OSE card.")
+            else:
+                send_message(chat_id, ose_Duty.get_ose_today_duty())
             return jsonify({"success": True})
         else:
             date_str = parts[1].strip()
             try:
                 target_date = datetime.strptime(date_str, "%d/%m/%Y").date()
                 payload_ose = ose_Duty.get_ose_duty_payload_for_date(target_date, mode="command")
-                _send_ose_payload(chat_id, payload_ose)
+                if isinstance(payload_ose, dict) and payload_ose.get("lark_card"):
+                    resp = send_message(chat_id, json.dumps(payload_ose["lark_card"]), msg_type="interactive")
+                    if resp.get("code") != 0:
+                        send_message(chat_id, payload_ose.get("text") or "❌ Failed to send OSE card.")
+                else:
+                    send_message(chat_id, ose_Duty.get_ose_duty_for_date(target_date))
                 return jsonify({"success": True})
             except ValueError:
                 reply = "❌ Invalid date format. Please use DD/MM/YYYY (e.g., 12/12/2026)"
