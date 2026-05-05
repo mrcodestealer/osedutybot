@@ -85,6 +85,18 @@ def debug_print(*args, **kwargs) -> None:
         print("[DEBUG]", *args, file=sys.stderr, **kwargs)
 
 
+TARGET_USER_OPEN_ID = (
+    os.getenv("omduty", "").strip()
+    or os.getenv("OMDUTY", "").strip()
+    or "ou_d7bc33724e2d6ced4050c944c2ca5650"
+)
+
+
+def _name_key(name: str) -> str:
+    # "Augustine (Si Yew)" and "Augustine Si Yew" should match.
+    return re.sub(r"[^a-z0-9]+", "", str(name or "").lower())
+
+
 def _title_name(name: str) -> str:
     return re.sub(r"\s+", " ", str(name or "").strip()).title()
 
@@ -399,9 +411,9 @@ def _build_ose_context(target_date: date, mode: str) -> tuple[list[str], list[st
     except Exception as e:
         return [], [], [], [], f"❌ OSE data load failed: {e}"
 
-    leave_names = {str(r.get("name") or "").strip().lower() for r in leave_entries}
-    rest_names = [n for n in rest_names if n.strip().lower() not in leave_names]
-    luck_names = [n for n in luck_names if n.strip().lower() not in leave_names]
+    leave_names = {_name_key(str(r.get("name") or "").strip()) for r in leave_entries}
+    rest_names = [n for n in rest_names if _name_key(n) not in leave_names]
+    luck_names = [n for n in luck_names if _name_key(n) not in leave_names]
     return sorted(rest_names), sorted(luck_names), offset_lines, leave_entries, None
 
 
@@ -413,8 +425,13 @@ def build_ose_message_card(
     offset_lines: list[str],
     leave_entries: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    mention_line = (
+        f'👥 <at user_id="{TARGET_USER_OPEN_ID}">User</at>'
+        if TARGET_USER_OPEN_ID
+        else "👥 @CP OM Duty"
+    )
     lines: list[str] = []
-    lines.append("👥 **@CP OM Duty**")
+    lines.append(mention_line)
     lines.append(f"📅 **{target_date.strftime('%d/%m/%Y')}**")
     lines.append("")
     lines.extend(_section_lines("😴 (～￣▽￣)～ Rest Well", [f"• {n}" for n in rest_names]))
@@ -454,7 +471,10 @@ def get_ose_payload_for_date(target_date: date, mode: str = "date") -> dict[str,
         return {"text": err, "lark_card": None}
 
     lines: list[str] = []
-    lines.append("@CP OM Duty")
+    if TARGET_USER_OPEN_ID:
+        lines.append(f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>')
+    else:
+        lines.append("@CP OM Duty")
     lines.append("(～￣▽￣)～ Rest Well")
     lines.extend([f"• {n}" for n in rest_names] or ["• -"])
     lines.append("")

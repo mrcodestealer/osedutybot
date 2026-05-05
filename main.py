@@ -1134,13 +1134,13 @@ def _send_ose_payload(chat_id: str, payload: dict, *, mention_user_id: Optional[
 def morning_reminder():
     today = datetime.now().date()
     payload = ose_Duty.get_ose_payload_for_date(today, mode="morning")
-    _send_ose_payload(DUTY_CHAT_ID, payload, mention_user_id=TARGET_USER_OPEN_ID)
+    _send_ose_payload(DUTY_CHAT_ID, payload)
     print(f"⏰ OSE morning card sent to {DUTY_CHAT_ID}")
 
 def evening_reminder():
     today = datetime.now().date()
     payload = ose_Duty.get_ose_payload_for_date(today, mode="evening")
-    _send_ose_payload(DUTY_CHAT_ID, payload, mention_user_id=TARGET_USER_OPEN_ID)
+    _send_ose_payload(DUTY_CHAT_ID, payload)
     print(f"⏰ OSE evening card sent to {DUTY_CHAT_ID}")
 
 # def amountloss():
