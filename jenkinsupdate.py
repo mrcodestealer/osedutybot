@@ -993,7 +993,10 @@ def _service_ids_from_service_block_lines(lines: list[str]) -> list[str]:
 
 _KEY_LINE_RE = re.compile(
     r"^(?:[>\-\*\u2022]\s*)*"
-    r"(?:`+|\*{1,2})?(?P<key>environment|branch|version|services?)(?:`+|\*{1,2})?"
+    r"(?:`+|\*{1,2})?"
+    r"(?:(?:[A-Za-z][A-Za-z0-9/_\-.]{0,24})\s+){0,2}"
+    r"(?P<key>environment|branch|version|services?)"
+    r"(?:`+|\*{1,2})?"
     r"\s*:\s*(?P<rest>.*)$",
     re.IGNORECASE,
 )
@@ -1014,7 +1017,8 @@ def _match_key_line_fuzzy(line: str):
     # Strip markdown wrappers and retry with flexible separators (: / - / en/em dash)
     plain = re.sub(r"[`*_]", "", s).strip()
     return re.match(
-        r"^(?P<key>environment|branch|version|services?)\s*[:\-–—]\s*(?P<rest>.*)$",
+        r"^(?:(?:[A-Za-z][A-Za-z0-9/_\-.]{0,24})\s+){0,2}"
+        r"(?P<key>environment|branch|version|services?)\s*[:\-–—]\s*(?P<rest>.*)$",
         plain,
         re.IGNORECASE,
     )
