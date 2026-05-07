@@ -3598,11 +3598,13 @@ def screenshot_egm_cctv_window(
     except ValueError:
         _vw = 1680
     try:
-        _vh = int(os.environ.get("CCTV_EGM_VIEWPORT_HEIGHT", "2400").strip() or "2400")
+        # Default shorter viewport keeps the operation dialog layout compact (matches manual CCTV PNG ~420×480 CSS),
+        # unlike a very tall viewport + expanded body which yields ~478×1024-style captures.
+        _vh = int(os.environ.get("CCTV_EGM_VIEWPORT_HEIGHT", "960").strip() or "960")
     except ValueError:
-        _vh = 2400
+        _vh = 960
     _vw = max(1280, _vw)
-    _vh = max(1200, _vh)
+    _vh = max(720, _vh)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
@@ -3728,8 +3730,14 @@ def screenshot_egm_cctv_window(
             dlg_cap.scroll_into_view_if_needed(timeout=min(15_000, timeout_ms))
             _egm_click_hide_grid_if_shown(dlg_cap, timeout_ms=min(15_000, timeout_ms))
             page.wait_for_timeout(int(os.environ.get("CCTV_POST_HIDE_GRID_MS", "600").strip() or "600"))
-            _egm_expand_operation_dialog_for_capture(page, dlg_cap)
             _egm_cctv_hide_sections_below_screen(dlg_cap, page)
+            if os.environ.get("CCTV_EXPAND_DIALOG_FOR_CAPTURE", "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            ):
+                _egm_expand_operation_dialog_for_capture(page, dlg_cap)
             dlg_cap.screenshot(path=out_path, animations="disabled", scale="css")
         finally:
             browser.close()
