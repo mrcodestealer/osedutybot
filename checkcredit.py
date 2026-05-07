@@ -3317,6 +3317,42 @@ def _egm_expand_operation_dialog_for_capture(page: Any, dlg: Any) -> None:
         pass
 
 
+def _egm_cctv_hide_sections_below_screen(dlg: Any, page: Any) -> None:
+    """
+    CCTV capture: hide **Keyboard**, **Machine**, and any cards below the **Screen** card
+    (same-level ``.el-card`` siblings under ``.test-dialog-content``).
+    Set ``CCTV_INCLUDE_KEYBOARD=1`` to keep the full dialog (legacy behaviour).
+    """
+    if os.environ.get("CCTV_INCLUDE_KEYBOARD", "").strip().lower() in ("1", "true", "yes", "on"):
+        return
+    try:
+        dlg.evaluate(
+            """dialogEl => {
+              if (!(dialogEl instanceof HTMLElement)) return;
+              const scope = dialogEl.querySelector('.test-dialog-content') || dialogEl;
+              const titles = scope.querySelectorAll('.card-header-title');
+              let screenCard = null;
+              for (const t of titles) {
+                const tx = (t.textContent || '').trim();
+                if (/^screen$/i.test(tx) || /^屏幕$/i.test(tx)) {
+                  screenCard = t.closest('.el-card');
+                  break;
+                }
+              }
+              if (!screenCard) return;
+              let el = screenCard.nextElementSibling;
+              while (el) {
+                const nx = el.nextElementSibling;
+                if (el instanceof HTMLElement) el.style.display = 'none';
+                el = nx;
+              }
+            }"""
+        )
+        page.wait_for_timeout(220)
+    except Exception:
+        pass
+
+
 def _pick_enabled_egm_cog_button(op_cell: Any) -> Any:
     """
     EGM Status list: last column has small buttons; we only click a **cog** icon
@@ -3528,7 +3564,8 @@ def screenshot_egm_cctv_window(
 
     Tries **CCTV** on the row operation buttons first; if absent, opens the usual cog dialog and clicks **CCTV**
     inside ``.el-dialog__body``. Clicks **Hide Grid** when the Screen toolbar shows it, relaxes dialog
-    ``max-height`` for a full modal capture, uses a taller viewport (``CCTV_EGM_VIEWPORT_*``), then screenshots.
+    ``max-height`` for a full modal capture, hides **Keyboard** / **Machine** cards below **Screen**,
+    uses a taller viewport (``CCTV_EGM_VIEWPORT_*``), then screenshots.
     """
     md = (machine_display or "").strip()
     if not md:
@@ -3692,6 +3729,7 @@ def screenshot_egm_cctv_window(
             _egm_click_hide_grid_if_shown(dlg_cap, timeout_ms=min(15_000, timeout_ms))
             page.wait_for_timeout(int(os.environ.get("CCTV_POST_HIDE_GRID_MS", "600").strip() or "600"))
             _egm_expand_operation_dialog_for_capture(page, dlg_cap)
+            _egm_cctv_hide_sections_below_screen(dlg_cap, page)
             dlg_cap.screenshot(path=out_path, animations="disabled", scale="css")
         finally:
             browser.close()
