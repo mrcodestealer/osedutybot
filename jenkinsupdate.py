@@ -414,12 +414,17 @@ def _service_lines_mean_update_all(service_lines: list[str]) -> bool:
 def _looks_like_chat_trailing_line_under_services(line: str) -> bool:
     """
     Ignore common chat trailing lines accidentally pasted under ``services:``.
-    Examples: ``@CP OM Duty ...``, ``please assist ...``, ``thanks``.
+    Examples: ``@CP OM Duty ...``, ``please assist ...``, ``thanks``,
+    ``Email: ...`` subject lines, ``cc @Someone``.
     """
     s = _normalize_config_colons(line).strip()
     if not s:
         return True
     if s.startswith("@") or s.startswith("<at "):
+        return True
+    if re.match(r"^\s*email\b", s, re.I):
+        return True
+    if re.match(r"^\s*cc\b", s, re.I):
         return True
     if re.search(r"\b(?:pls|please|assist|thanks|thank\s*you|tq)\b", s, re.I):
         return True
@@ -4693,8 +4698,6 @@ def parse_jenkins_update_fpms_bot_block(text: str, *, preserve_branch_case: bool
                 and not re.match(r"^\s*update\b", line, re.I)
             ):
                 service_lines.append(line)
-            elif re.match(r"^\s*email\b", line, re.I):
-                continue
             elif re.match(r"^\s*update\b", line, re.I):
                 continue
             elif line.lstrip().startswith("#"):
@@ -4796,6 +4799,8 @@ def parse_fnt_rc_uat_master_bot_block(text: str) -> dict:
                 raise ValueError(f"Unknown key: {line!r}")
             continue
         if last_key == "services":
+            if _looks_like_chat_trailing_line_under_services(line):
+                continue
             if port_head.match(line):
                 service_lines.append(line)
             elif (
@@ -4804,8 +4809,6 @@ def parse_fnt_rc_uat_master_bot_block(text: str) -> dict:
                 and not re.match(r"^\s*update\b", line, re.I)
             ):
                 service_lines.append(line)
-            elif re.match(r"^\s*email\b", line, re.I):
-                continue
             elif re.match(r"^\s*update\b", line, re.I):
                 continue
             elif line.lstrip().startswith("#"):
@@ -4911,6 +4914,8 @@ def parse_fnt_rc_run_config_block(text: str) -> tuple[list[str], str, str, bool]
                 raise ConfigBlockError(f"Unknown key: {line!r}")
             continue
         if last_key == "services":
+            if _looks_like_chat_trailing_line_under_services(line):
+                continue
             if port_head.match(line):
                 service_lines.append(line)
             elif re.search(r"[a-zA-Z_]", line) and len(line) < 200:
@@ -4984,6 +4989,8 @@ def parse_sms_uat_update_bot_block(text: str) -> dict:
                 raise ValueError(f"Unknown key: {line!r}")
             continue
         if last_key == "services":
+            if _looks_like_chat_trailing_line_under_services(line):
+                continue
             if port_head.match(line):
                 service_lines.append(line)
             elif (
@@ -4992,8 +4999,6 @@ def parse_sms_uat_update_bot_block(text: str) -> dict:
                 and not re.match(r"^\s*update\b", line, re.I)
             ):
                 service_lines.append(line)
-            elif re.match(r"^\s*email\b", line, re.I):
-                continue
             elif re.match(r"^\s*update\b", line, re.I):
                 continue
             elif line.lstrip().startswith("#"):
@@ -5204,6 +5209,8 @@ def parse_sms_uat_run_config_block(text: str) -> tuple[list[str], str, str, bool
                 raise ConfigBlockError(f"Unknown key: {line!r}")
             continue
         if last_key == "services":
+            if _looks_like_chat_trailing_line_under_services(line):
+                continue
             if port_head.match(line):
                 service_lines.append(line)
             elif re.search(r"[a-zA-Z_]", line) and len(line) < 200:
