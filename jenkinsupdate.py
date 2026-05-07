@@ -395,7 +395,8 @@ def _service_lines_mean_update_all(service_lines: list[str]) -> bool:
                 toks.append(t)
     if len(toks) != 1:
         return False
-    return toks[0].casefold() in (
+    t0 = toks[0].casefold().strip()
+    if t0 in (
         "all",
         "all service",
         "all services",
@@ -403,7 +404,11 @@ def _service_lines_mean_update_all(service_lines: list[str]) -> bool:
         "every",
         "全部",
         "__all__",
-    )
+    ):
+        return True
+    # Accept loose variants users often paste in chat blocks.
+    t0_simple = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", t0)
+    return t0_simple in ("allservice", "allservices", "allsvc", "allsvcs", "全部服务")
 
 
 # Default: apply ``_ensure_fast_fill_mode`` at import unless ``FPMS_STABLE_FILL=1`` (conservative pacing).
@@ -6022,6 +6027,13 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
     if jp == "pms_uat":
         # PMS-UAT-UPDATE page uses fixed Environment option.
         data["environment"] = "pms-uat"
+    # Extra safety for chat variants like "All Services"/"allservices":
+    # if parser left it as one token, still treat as update-all.
+    if not data.get("update_all_services"):
+        toks_raw = list(data.get("service_tokens") or [])
+        if len(toks_raw) == 1 and _service_lines_mean_update_all(toks_raw):
+            data["update_all_services"] = True
+            data["service_tokens"] = []
     with _fpms_lark_sessions_lock:
         prev = _fpms_lark_sessions.get(session_key)
         if isinstance(prev, dict) and prev.get("state") == "jenkins_wait_build":
