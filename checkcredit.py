@@ -3283,6 +3283,40 @@ def _egm_wait_visible_operation_dialog(page: Any, *, timeout_ms: int) -> Any:
     )
 
 
+def _egm_click_hide_grid_if_shown(dlg: Any, *, timeout_ms: int = 15_000) -> None:
+    """Screen toolbar: if label is **Hide Grid**, click once (removes overlay — same as EGM preview flow)."""
+    grid_btn = dlg.locator("button.el-button--primary.el-button--mini").filter(
+        has_text=re.compile(r"Hide\s*Grid|Show\s*Grid", re.I)
+    ).first
+    if grid_btn.count() == 0:
+        return
+    try:
+        gtxt = (grid_btn.inner_text(timeout=min(8_000, timeout_ms)) or "").strip()
+        if re.search(r"Hide\s*Grid", gtxt, re.I):
+            grid_btn.click(timeout=min(15_000, timeout_ms))
+    except Exception:
+        pass
+
+
+def _egm_expand_operation_dialog_for_capture(page: Any, dlg: Any) -> None:
+    """Relax Element UI max-height / overflow so ``locator.screenshot`` includes the full modal body."""
+    try:
+        dlg.evaluate(
+            """el => {
+              if (!(el instanceof HTMLElement)) return;
+              el.style.maxHeight = 'none';
+              const body = el.querySelector('.el-dialog__body');
+              if (body instanceof HTMLElement) {
+                body.style.maxHeight = 'none';
+                body.style.overflow = 'visible';
+              }
+            }"""
+        )
+        page.wait_for_timeout(450)
+    except Exception:
+        pass
+
+
 def _pick_enabled_egm_cog_button(op_cell: Any) -> Any:
     """
     EGM Status list: last column has small buttons; we only click a **cog** icon
@@ -3471,14 +3505,10 @@ def screenshot_egm_status_window(
 
             dlg = _egm_wait_visible_operation_dialog(page, timeout_ms=timeout_ms)
             page.wait_for_timeout(1000)
-            grid_btn = dlg.locator("button.el-button--primary.el-button--mini").filter(
-                has_text=re.compile(r"Hide\s*Grid|Show\s*Grid", re.I)
-            ).first
-            if grid_btn.count():
-                gtxt = (grid_btn.inner_text() or "").strip()
-                if re.search(r"Hide\s*Grid", gtxt, re.I):
-                    grid_btn.click(timeout=min(15_000, timeout_ms))
-                    page.wait_for_timeout(350)
+            _egm_click_hide_grid_if_shown(dlg, timeout_ms=min(15_000, timeout_ms))
+            page.wait_for_timeout(350)
+            dlg.scroll_into_view_if_needed(timeout=min(15_000, timeout_ms))
+            _egm_expand_operation_dialog_for_capture(page, dlg)
             # Capture only the small operation window (same as user screenshot), not whole page.
             dlg.screenshot(path=out_path, animations="disabled", scale="css")
         finally:
@@ -3497,8 +3527,8 @@ def screenshot_egm_cctv_window(
     EGM Status: click **CCTV** (row or inside operation dialog), then screenshot the dialog — no credit / log checks.
 
     Tries **CCTV** on the row operation buttons first; if absent, opens the usual cog dialog and clicks **CCTV**
-    inside ``.el-dialog__body``. Waits briefly for a ``video`` element when present, then captures the topmost
-    visible ``.el-dialog``.
+    inside ``.el-dialog__body``. Clicks **Hide Grid** when the Screen toolbar shows it, relaxes dialog
+    ``max-height`` for a full modal capture, uses a taller viewport (``CCTV_EGM_VIEWPORT_*``), then screenshots.
     """
     md = (machine_display or "").strip()
     if not md:
@@ -3526,11 +3556,22 @@ def screenshot_egm_cctv_window(
     os.close(out_fd)
     cctv_re = re.compile(r"CCTV", re.I)
 
+    try:
+        _vw = int(os.environ.get("CCTV_EGM_VIEWPORT_WIDTH", "1680").strip() or "1680")
+    except ValueError:
+        _vw = 1680
+    try:
+        _vh = int(os.environ.get("CCTV_EGM_VIEWPORT_HEIGHT", "2400").strip() or "2400")
+    except ValueError:
+        _vh = 2400
+    _vw = max(1280, _vw)
+    _vh = max(1200, _vh)
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
         try:
             context = browser.new_context(
-                viewport={"width": 1600, "height": 900},
+                viewport={"width": _vw, "height": _vh},
                 ignore_https_errors=True,
                 device_scale_factor=2,
             )
@@ -3647,6 +3688,10 @@ def screenshot_egm_cctv_window(
             page.wait_for_timeout(int(os.environ.get("CCTV_SCREENSHOT_SETTLE_MS", "2000").strip() or "2000"))
 
             dlg_cap = _egm_wait_visible_operation_dialog(page, timeout_ms=min(45_000, timeout_ms))
+            dlg_cap.scroll_into_view_if_needed(timeout=min(15_000, timeout_ms))
+            _egm_click_hide_grid_if_shown(dlg_cap, timeout_ms=min(15_000, timeout_ms))
+            page.wait_for_timeout(int(os.environ.get("CCTV_POST_HIDE_GRID_MS", "600").strip() or "600"))
+            _egm_expand_operation_dialog_for_capture(page, dlg_cap)
             dlg_cap.screenshot(path=out_path, animations="disabled", scale="css")
         finally:
             browser.close()
