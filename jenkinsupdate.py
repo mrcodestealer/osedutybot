@@ -833,6 +833,11 @@ def _resolve_environment_token(raw: str) -> str:
     t = normalize_parameter_text(raw)
     if not t:
         raise ConfigBlockError("environment: value is empty.")
+    # PMS-UAT-UPDATE job has a fixed single environment option ("pms-uat"),
+    # which is outside the FPMS ENVIRONMENTS list used by most flows.
+    t_low = t.casefold().replace(" ", "").replace("_", "-")
+    if t_low in ("pms-uat", "pmsuat"):
+        return "pms-uat"
     if t in ENVIRONMENTS:
         return t
     if t.isdigit():
