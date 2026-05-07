@@ -511,6 +511,49 @@ def run_checkcredit_player_job(chat_id: str, machine: str, player_id: str, date_
     )
 
 
+def run_cctv_screenshot_job(chat_id: str, machine_query: str) -> None:
+    """EGM Status: click **CCTV**, screenshot dialog only (no credit / log checks)."""
+    try:
+        import checkcredit
+    except ImportError as e:
+        send_message(chat_id, f"❌ Cannot load checkcredit module: {e}")
+        return
+    cap = getattr(checkcredit, "screenshot_egm_cctv_window", None)
+    if not callable(cap):
+        send_message(
+            chat_id,
+            "❌ `checkcredit.screenshot_egm_cctv_window` missing — deploy the latest `checkcredit.py`.",
+        )
+        return
+    mq = (machine_query or "").strip()
+    if not mq:
+        send_message(
+            chat_id,
+            "❌ Usage: `/cctv <machine>` — same machine label as checkcredit (e.g. `OSMCP181`, `Dragons-0181`).",
+        )
+        return
+    send_message(chat_id, "⏳ EGM **CCTV** — login → click **CCTV** → screenshot…")
+    path = None
+    try:
+        path = cap(machine_display=mq, machine_substr=None, timeout_ms=120_000, headed=False)
+        key = upload_image_lark(path)
+        if not key:
+            send_message(chat_id, "❌ CCTV screenshot upload failed.")
+            return
+        r = send_image_message(chat_id, key)
+        if r.get("code") != 0:
+            send_message(chat_id, f"❌ Failed to send image: {r}")
+    except Exception as e:
+        send_message(chat_id, f"❌ CCTV screenshot failed: {e}")
+        print(f"[cctv] error: {e!r}", flush=True)
+    finally:
+        if path and os.path.isfile(path):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
 def _np_run_screenshot_worker(
     chat_id: str,
     uid: str,
@@ -2856,6 +2899,21 @@ def lark_webhook():
             send_message(chat_id, "⏳ Checking Amount Loss (CHECKLOG), please wait...")
             threading.Thread(target=run_amountloss_check, args=(chat_id, date_param), daemon=True).start()
             return jsonify({"success": True})
+    elif re.match(r"^/cctv\b", clean_text, re.I):
+        m_cv = re.match(r"^/cctv\s+(\S+)", clean_text.strip(), re.I)
+        if not m_cv:
+            send_message(
+                chat_id,
+                "❌ Usage: `/cctv <machine>` — EGM **CCTV** only (no credit check).\n"
+                "Example: `@Duty Bot /cctv OSMCP181` · `/cctv Dragons-0181`",
+            )
+            return jsonify({"success": True})
+        threading.Thread(
+            target=run_cctv_screenshot_job,
+            args=(chat_id, m_cv.group(1)),
+            daemon=True,
+        ).start()
+        return jsonify({"success": True})
     elif clean_text.lower().startswith("/npthirdhttp"):
         parts = clean_text.split()
         threading.Thread(

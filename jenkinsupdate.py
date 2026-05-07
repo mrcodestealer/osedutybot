@@ -100,6 +100,7 @@ import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 from playwright.sync_api import (
     Error as PlaywrightError,
@@ -5650,6 +5651,94 @@ def _fpms_lark_send_verification_summary(
         )
 
 
+def _jenkins_job_folder_url(raw_build_url: str) -> str:
+    """
+    Turn a Jenkins ``…/build`` (with optional query) URL into the job folder URL ending with ``/``.
+    Example: ``…/FPMS_UAT_BRANCH_UPDATE/build?delay=0sec`` → ``…/FPMS_UAT_BRANCH_UPDATE/``.
+    """
+    u = (raw_build_url or "").strip().splitlines()[0].strip()
+    parsed = urlparse(u)
+    scheme = parsed.scheme or "https"
+    netloc = parsed.netloc
+    path = parsed.path.rstrip("/")
+    low = path.casefold()
+    if low.endswith("/build"):
+        path = path[: -len("/build")].rstrip("/")
+    path = path.rstrip("/") + "/"
+    return urlunparse((scheme, netloc, path, "", "", ""))
+
+
+def _parse_build_number_from_jenkins_post_build_url(url: str) -> int | None:
+    """After **Build**, Jenkins often redirects to ``…/job/…/<n>/`` or ``…/<n>/console``."""
+    try:
+        path = urlparse(url or "").path.rstrip("/")
+        segments = [p for p in path.split("/") if p]
+        if not segments:
+            return None
+        tail = segments[-1].casefold()
+        if tail == "console" or tail == "consoletext":
+            segments = segments[:-1]
+            if not segments:
+                return None
+        tail = segments[-1]
+        if tail.isdigit():
+            n = int(tail)
+            return n if n > 0 else None
+        # Still on parameterized ``…/build`` page (no numeric tail yet).
+        if tail.casefold() == "build":
+            return None
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_build_number_after_jenkins_build_click(
+    page,
+    predicted_next: int | None,
+    *,
+    timeout_ms: int = 20_000,
+) -> int | None:
+    """
+    Poll the browser URL after clicking **Build** until a ``…/<buildNumber>/`` segment appears,
+    else fall back to ``predicted_next`` (from history ``max+1`` before the gate).
+    """
+    deadline = time.monotonic() + max(0, timeout_ms) / 1000.0
+    while time.monotonic() < deadline:
+        n = _parse_build_number_from_jenkins_post_build_url(page.url)
+        if n is not None:
+            return n
+        time.sleep(0.25)
+    if isinstance(predicted_next, int) and predicted_next > 0:
+        return predicted_next
+    return None
+
+
+def _fpms_lark_send_build_completed_plain_ping(
+    send,
+    chat_id: str,
+    *,
+    folder_url: str,
+    build_number: int | None,
+) -> None:
+    """
+    Final plain-text line after **Build**: @mention + job folder URL + pipeline/build number (not a card).
+    Set ``JENKINS_BUILD_DONE_NOTIFY_OPEN_ID`` to empty / ``0`` / ``false`` to disable.
+    """
+    raw = (os.environ.get("JENKINS_BUILD_DONE_NOTIFY_OPEN_ID") or "").strip()
+    if not raw:
+        raw = "ou_45cc096780a23354f0719c9635765985"
+    if raw.casefold() in ("0", "false", "no", "off"):
+        return
+    try:
+        at = f'<at user_id="{raw}">User</at>'
+        if isinstance(build_number, int) and build_number > 0:
+            send(chat_id, f"{at} {folder_url} {build_number}")
+        else:
+            send(chat_id, f"{at} {folder_url}")
+    except Exception as ex:
+        print(f"⚠️ Jenkins build-done Lark ping failed: {ex!r}", flush=True)
+
+
 def _predict_next_build_number_from_history(page) -> int | None:
     """
     Read Jenkins build history cards and predict the next build number as ``max(#N)+1``.
@@ -7301,6 +7390,23 @@ def run(
                             build_clicked = True
                             print("→ **Build** clicked (Lark-approved).")
                             send(cid, "**Build** clicked in Jenkins.")
+                            folder_u = _jenkins_job_folder_url(build_url)
+                            _raw_wait_bn = (os.environ.get("JENKINS_POST_BUILD_NUMBER_WAIT_MS") or "20000").strip()
+                            try:
+                                wait_bn_ms = int(_raw_wait_bn or "20000")
+                            except ValueError:
+                                wait_bn_ms = 20_000
+                            resolved_bn = _resolve_build_number_after_jenkins_build_click(
+                                page,
+                                next_build_number,
+                                timeout_ms=max(0, wait_bn_ms),
+                            )
+                            _fpms_lark_send_build_completed_plain_ping(
+                                send,
+                                cid,
+                                folder_url=folder_u,
+                                build_number=resolved_bn,
+                            )
                         else:
                             build_clicked = False
                             send(
