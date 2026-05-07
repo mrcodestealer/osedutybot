@@ -48,6 +48,8 @@ TABLE_TO_CSV = {
     "Jeng Liang": "Jeng Liang",
     "Misa": "Misa",
     "Adrian": "Adrian",
+    "Clarence": "Clarence",
+    "Khai Xuan": "Khai Xuan"
 }
 
 # 姓名 → 项目信息（固定映射，根据您提供的列表）
@@ -62,6 +64,8 @@ NAME_TO_PROJECT = {
     "Misa": "FPMS",
     "Kai Xuan": "PMS/IGO/CPMS",
     "Yoon Hong": "FE/PMS/IGO/CPMS",
+    "Khai Xuan": "",
+    "Clarence": "",
     "Adrian": "",
 }
 
