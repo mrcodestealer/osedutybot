@@ -205,6 +205,15 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
         "FPMS NT UAT MASTER UPDATE",
         "https://jenkins.client8.me/job/FPMS_NT/view/all/job/FPMS_NT_UAT_MASTER_UPDATE/build?delay=0sec",
     ),
+    # Headlines like ``Update NT Auth/Player MASTER`` — must beat fuzzy ``update pms`` (chunk ``update``).
+    "nt auth": (
+        "FPMS NT UAT MASTER UPDATE",
+        "https://jenkins.client8.me/job/FPMS_NT/view/all/job/FPMS_NT_UAT_MASTER_UPDATE/build?delay=0sec",
+    ),
+    "nt auth player": (
+        "FPMS NT UAT MASTER UPDATE",
+        "https://jenkins.client8.me/job/FPMS_NT/view/all/job/FPMS_NT_UAT_MASTER_UPDATE/build?delay=0sec",
+    ),
     "fpms uat master": (
         "FPMS UAT MASTER UPDATE",
         "https://jenkins.client8.me/job/FPMS/view/FPMS-UAT/job/FPMS_UAT_MASTER_UPDATE/",
@@ -895,6 +904,9 @@ def _environment_hint_from_banner(line: str) -> str | None:
     Checks ``UAT5`` … ``UAT2`` before plain ``UAT`` so ``UAT2`` is not swallowed as ``UAT``.
     """
     s = line.casefold().replace("_", " ")
+    # ``Update NT Auth/Player MASTER`` — FPMS_NT master job (not PMS-UAT-UPDATE).
+    if re.search(r"\bnt\s+auth\b", s) and re.search(r"\bmaster\b", s):
+        return "fpms-nt-uat-master"
     # FPMS NT UAT MASTER jobs (same fill flow, different env values).
     if re.search(r"\bfpms[\s-]*nt[\s-]*uat[\s-]*master\b", s):
         return "fpms-nt-uat-master"
@@ -4428,7 +4440,13 @@ def _jenkins_update_job_score(query_text: str, alias: str) -> float:
         c = chunk.strip()
         if len(c) < 2:
             continue
-        best = max(best, difflib.SequenceMatcher(None, c, a).ratio())
+        r = difflib.SequenceMatcher(None, c, a).ratio()
+        # Down-weight short headline tokens (e.g. ``update`` vs alias ``update pms``) so they do not
+        # beat aliases that actually overlap the full query (NT Auth / FPMS NT master, etc.).
+        lc, la = len(c), len(a)
+        if lc < la:
+            r *= lc / la
+        best = max(best, r)
         if a in c:
             best = max(best, 1.3)
     return best
@@ -6597,36 +6615,50 @@ def _fpms_lark_handle_service_pick_callbacks(
             send,
             allow_start=True,
         )
-    with _fpms_lark_sessions_lock:
-        sess = _fpms_lark_sessions.get(sk)
-    if not isinstance(sess, dict) or sess.get("state") != "pick":
-        return False
     if k == "svc_clr":
-        sess["svc_staged"] = []
         with _fpms_lark_sessions_lock:
+            sess = _fpms_lark_sessions.get(sk)
+            if not isinstance(sess, dict) or sess.get("state") != "pick":
+                return False
+            sess["svc_staged"] = []
             _fpms_lark_sessions[sk] = sess
         _fpms_lark_refresh_service_pick_card(chat_id, sk, send)
         return True
     if k == "svc_go":
-        staged = list(sess.get("svc_staged") or [])
-        ranked = list(sess.get("current_ranked") or [])
-        if not staged:
+        clean: str | None = None
+        stale_refresh = False
+        with _fpms_lark_sessions_lock:
+            sess = _fpms_lark_sessions.get(sk)
+            if not isinstance(sess, dict) or sess.get("state") != "pick":
+                return False
+            staged = list(dict.fromkeys(sess.get("svc_staged") or []))
+            ranked = list(sess.get("current_ranked") or [])
+            if not staged:
+                pass
+            else:
+                idx_parts: list[str] = []
+                ok = True
+                for svc_id in staged:
+                    if svc_id not in ranked:
+                        ok = False
+                        break
+                    idx_parts.append(str(ranked.index(svc_id) + 1))
+                if ok:
+                    clean = " ".join(idx_parts)
+                else:
+                    sess["svc_staged"] = []
+                    _fpms_lark_sessions[sk] = sess
+                    stale_refresh = True
+        if stale_refresh:
+            send(chat_id, "⚠️ Staged list is out of date — pick again.")
+            _fpms_lark_refresh_service_pick_card(chat_id, sk, send)
+            return True
+        if clean is None:
             send(
                 chat_id,
                 "Tap one or more **numbers** on the card to stage services, then **Confirm**.",
             )
             return True
-        idx_parts: list[str] = []
-        for svc_id in staged:
-            if svc_id not in ranked:
-                send(chat_id, "⚠️ Staged list is out of date — pick again.")
-                sess["svc_staged"] = []
-                with _fpms_lark_sessions_lock:
-                    _fpms_lark_sessions[sk] = sess
-                _fpms_lark_refresh_service_pick_card(chat_id, sk, send)
-                return True
-            idx_parts.append(str(ranked.index(svc_id) + 1))
-        clean = " ".join(idx_parts)
         return handle_lark_jenkins_update_message(
             chat_id,
             sender_id,
@@ -6640,15 +6672,18 @@ def _fpms_lark_handle_service_pick_callbacks(
             idx = int(str(parsed.get("i")).strip())
         except (TypeError, ValueError):
             return False
-        ranked = list(sess.get("current_ranked") or [])
-        if idx < 1 or idx > len(ranked):
-            return False
-        choice = ranked[idx - 1]
-        staged = list(sess.get("svc_staged") or [])
-        if choice not in staged:
-            staged.append(choice)
-        sess["svc_staged"] = staged
         with _fpms_lark_sessions_lock:
+            sess = _fpms_lark_sessions.get(sk)
+            if not isinstance(sess, dict) or sess.get("state") != "pick":
+                return False
+            ranked = list(sess.get("current_ranked") or [])
+            if idx < 1 or idx > len(ranked):
+                return False
+            choice = ranked[idx - 1]
+            staged = list(dict.fromkeys(sess.get("svc_staged") or []))
+            if choice not in staged:
+                staged.append(choice)
+            sess["svc_staged"] = staged
             _fpms_lark_sessions[sk] = sess
         _fpms_lark_refresh_service_pick_card(chat_id, sk, send)
         return True
