@@ -1038,7 +1038,11 @@ def _clean_key_rest(rest: str) -> str:
     return t.strip()
 
 
-def parse_fpms_config_block(text: str) -> tuple[str, list[str], str, str, bool]:
+def parse_fpms_config_block(
+    text: str,
+    *,
+    preserve_branch_case: bool = False,
+) -> tuple[str, list[str], str, str, bool]:
     """
     Parse a pasted block (``branch:``, ``version:``, ``Service(s):``, ``environment:``).
 
@@ -1050,7 +1054,7 @@ def parse_fpms_config_block(text: str) -> tuple[str, list[str], str, str, bool]:
     If you paste **two jobs**, only the **first complete** job is used (branch + version +
     at least one ``services:`` payload line).
 
-    * **branch** — stripped, lowercased.
+    * **branch** — stripped; lowercased by default (set ``preserve_branch_case=True`` to keep case).
     * **version** — stripped only (case preserved).
     * **services** — comma-separated **ports** (``3000``), **fuzzy names** (``MGNT_API_server``), or
       ``name,1,2`` to pick ranks without a menu. On a **TTY**, a bare fuzzy **name** opens a numbered
@@ -1103,7 +1107,7 @@ def parse_fpms_config_block(text: str) -> tuple[str, list[str], str, str, bool]:
             if key == "environment":
                 env = _resolve_environment_token(rest)
             elif key == "branch":
-                branch = _branch_from_config_block(rest)
+                branch = _branch_from_config_block(rest, preserve_case=preserve_branch_case)
                 if not branch:
                     raise ConfigBlockError("branch: is empty after trim.")
             elif key == "version":
@@ -6845,7 +6849,8 @@ def run(
             )
         else:
             environment, services, branch, version, parsed_update_all = parse_fpms_config_block(
-                config_block
+                config_block,
+                preserve_branch_case=(jp == "pms_uat"),
             )
             svc_note = (
                 f"update-all ({_jenkins_update_all_stapler_name()})"
