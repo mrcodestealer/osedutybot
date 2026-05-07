@@ -411,6 +411,21 @@ def _service_lines_mean_update_all(service_lines: list[str]) -> bool:
     return t0_simple in ("allservice", "allservices", "allsvc", "allsvcs", "全部服务")
 
 
+def _looks_like_chat_trailing_line_under_services(line: str) -> bool:
+    """
+    Ignore common chat trailing lines accidentally pasted under ``services:``.
+    Examples: ``@CP OM Duty ...``, ``please assist ...``, ``thanks``.
+    """
+    s = _normalize_config_colons(line).strip()
+    if not s:
+        return True
+    if s.startswith("@") or s.startswith("<at "):
+        return True
+    if re.search(r"\b(?:pls|please|assist|thanks|thank\s*you|tq)\b", s, re.I):
+        return True
+    return False
+
+
 # Default: apply ``_ensure_fast_fill_mode`` at import unless ``FPMS_STABLE_FILL=1`` (conservative pacing).
 _FPMS_FAST_FILL_NOTE_SHOWN = False
 # When true: aggressive service ticks + shorter post-click settles (set only by ``_ensure_fast_fill_mode``).
@@ -1127,6 +1142,8 @@ def parse_fpms_config_block(
             continue
 
         if last_key == "services":
+            if _looks_like_chat_trailing_line_under_services(line):
+                continue
             if port_head.match(line):
                 service_lines.append(line)
             elif (
@@ -4666,6 +4683,8 @@ def parse_jenkins_update_fpms_bot_block(text: str, *, preserve_branch_case: bool
             continue
 
         if last_key == "services":
+            if _looks_like_chat_trailing_line_under_services(line):
+                continue
             if port_head.match(line):
                 service_lines.append(line)
             elif (
