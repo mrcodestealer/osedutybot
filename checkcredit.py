@@ -3225,6 +3225,64 @@ def _egm_first_enabled_button_matching(scope: Any, pat: re.Pattern[str]) -> Any 
     return None
 
 
+def _egm_wait_visible_operation_dialog(page: Any, *, timeout_ms: int) -> Any:
+    """
+    Element UI often leaves a hidden ``confirm-dialog`` node in the DOM; ``locator('.el-dialog').last``
+    can attach to it and never becomes visible. Wait for a **visible** machine-operation dialog, then
+    return a locator (prefers ``.test-dialog-content``, then ``.add-floor``, then **Machine Name** text).
+    """
+    page.wait_for_function(
+        """() => {
+          const qs = [...document.querySelectorAll('.el-dialog')];
+          for (const d of qs) {
+            if (!(d instanceof HTMLElement)) continue;
+            const st = window.getComputedStyle(d);
+            if (st.display === 'none' || st.visibility === 'hidden') continue;
+            const r = d.getBoundingClientRect();
+            if (r.width < 80 || r.height < 80) continue;
+            const wrap = d.closest('.el-dialog__wrapper');
+            if (wrap instanceof HTMLElement) {
+              const ws = window.getComputedStyle(wrap);
+              if (ws.display === 'none') continue;
+            }
+            const txt = d.textContent || '';
+            const hasPanel = d.querySelector('.test-dialog-content')
+              || d.classList.contains('add-floor')
+              || /Machine\\s*Name/i.test(txt);
+            if (!hasPanel) continue;
+            if (d.classList.contains('confirm-dialog')) {
+              const shallow = (txt || '').replace(/\\s+/g, ' ').trim();
+              if (!d.querySelector('.test-dialog-content') && !d.classList.contains('add-floor')
+                  && shallow.length < 120 && !/Machine\\s*Name/i.test(txt)) {
+                continue;
+              }
+            }
+            return true;
+          }
+          return false;
+        }""",
+        timeout=min(timeout_ms, 120_000),
+    )
+    candidates = [
+        page.locator("div.el-dialog").filter(has=page.locator(".test-dialog-content")).first,
+        page.locator(".el-dialog.add-floor").first,
+        page.locator("div[role='dialog'].add-floor").first,
+        page.locator("div.el-dialog").filter(has_text=re.compile(r"Machine\s*Name", re.I)).first,
+    ]
+    last_exc: BaseException | None = None
+    for loc in candidates:
+        try:
+            loc.wait_for(state="visible", timeout=12_000)
+            return loc
+        except BaseException as e:
+            last_exc = e
+            continue
+    raise RuntimeError(
+        "EGM operation dialog became visible per DOM check, but no candidate locator matched. "
+        f"Last error: {last_exc!r}"
+    )
+
+
 def _pick_enabled_egm_cog_button(op_cell: Any) -> Any:
     """
     EGM Status list: last column has small buttons; we only click a **cog** icon
@@ -3411,8 +3469,7 @@ def screenshot_egm_status_window(
             cog_btn = _pick_enabled_egm_cog_button(op_cell)
             cog_btn.click(timeout=min(60_000, timeout_ms))
 
-            dlg = page.locator(".el-dialog.add-floor, div[role='dialog'].add-floor").last
-            dlg.wait_for(state="visible", timeout=timeout_ms)
+            dlg = _egm_wait_visible_operation_dialog(page, timeout_ms=timeout_ms)
             page.wait_for_timeout(1000)
             grid_btn = dlg.locator("button.el-button--primary.el-button--mini").filter(
                 has_text=re.compile(r"Hide\s*Grid|Show\s*Grid", re.I)
@@ -3570,8 +3627,7 @@ def screenshot_egm_cctv_window(
             else:
                 cog_btn = _pick_enabled_egm_cog_button(op_cell)
                 cog_btn.click(timeout=min(60_000, timeout_ms))
-                dlg0 = page.locator(".el-dialog.add-floor, div[role='dialog'].add-floor, div.el-dialog").last
-                dlg0.wait_for(state="visible", timeout=timeout_ms)
+                dlg0 = _egm_wait_visible_operation_dialog(page, timeout_ms=timeout_ms)
                 page.wait_for_timeout(700)
                 inner_cctv = _egm_first_enabled_button_matching(dlg0.locator(".el-dialog__body"), cctv_re)
                 if inner_cctv is None:
@@ -3590,8 +3646,7 @@ def screenshot_egm_cctv_window(
                 pass
             page.wait_for_timeout(int(os.environ.get("CCTV_SCREENSHOT_SETTLE_MS", "2000").strip() or "2000"))
 
-            dlg_cap = page.locator(".el-dialog").last
-            dlg_cap.wait_for(state="visible", timeout=min(30_000, timeout_ms))
+            dlg_cap = _egm_wait_visible_operation_dialog(page, timeout_ms=min(45_000, timeout_ms))
             dlg_cap.screenshot(path=out_path, animations="disabled", scale="css")
         finally:
             browser.close()
