@@ -3319,11 +3319,14 @@ def _egm_expand_operation_dialog_for_capture(page: Any, dlg: Any) -> None:
 
 def _egm_cctv_hide_sections_below_screen(dlg: Any, page: Any) -> None:
     """
-    CCTV capture: hide **Keyboard**, **Machine**, and any cards below the **Screen** card
+    CCTV capture: optionally hide **Keyboard**, **Machine**, and cards below the **Screen** card
     (same-level ``.el-card`` siblings under ``.test-dialog-content``).
-    Set ``CCTV_INCLUDE_KEYBOARD=1`` to keep the full dialog (legacy behaviour).
+
+    By default the **entire** operation dialog is captured. Set ``CCTV_TRIM_BELOW_SCREEN=1`` for a
+    shorter PNG (Screen card only, no sections below).
     """
-    if os.environ.get("CCTV_INCLUDE_KEYBOARD", "").strip().lower() in ("1", "true", "yes", "on"):
+    trim = os.environ.get("CCTV_TRIM_BELOW_SCREEN", "").strip().lower() in ("1", "true", "yes", "on")
+    if not trim:
         return
     try:
         dlg.evaluate(
@@ -3598,13 +3601,11 @@ def screenshot_egm_cctv_window(
     except ValueError:
         _vw = 1680
     try:
-        # Default shorter viewport keeps the operation dialog layout compact (matches manual CCTV PNG ~420×480 CSS),
-        # unlike a very tall viewport + expanded body which yields ~478×1024-style captures.
-        _vh = int(os.environ.get("CCTV_EGM_VIEWPORT_HEIGHT", "960").strip() or "960")
+        _vh = int(os.environ.get("CCTV_EGM_VIEWPORT_HEIGHT", "2400").strip() or "2400")
     except ValueError:
-        _vh = 960
+        _vh = 2400
     _vw = max(1280, _vw)
-    _vh = max(720, _vh)
+    _vh = max(1200, _vh)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
@@ -3731,7 +3732,7 @@ def screenshot_egm_cctv_window(
             _egm_click_hide_grid_if_shown(dlg_cap, timeout_ms=min(15_000, timeout_ms))
             page.wait_for_timeout(int(os.environ.get("CCTV_POST_HIDE_GRID_MS", "600").strip() or "600"))
             _egm_cctv_hide_sections_below_screen(dlg_cap, page)
-            if os.environ.get("CCTV_EXPAND_DIALOG_FOR_CAPTURE", "").strip().lower() in (
+            if os.environ.get("CCTV_NO_EXPAND_DIALOG_FOR_CAPTURE", "").strip().lower() not in (
                 "1",
                 "true",
                 "yes",
