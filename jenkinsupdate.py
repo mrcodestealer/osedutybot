@@ -818,9 +818,10 @@ def _normalize_config_colons(s: str) -> str:
     return t
 
 
-def _branch_from_config_block(raw: str) -> str:
-    """Strip + lowercase (Jenkins branch field; user asked no outer spaces, lowercase)."""
-    return (raw or "").strip().lower()
+def _branch_from_config_block(raw: str, *, preserve_case: bool = False) -> str:
+    """Strip branch; default lowercases unless ``preserve_case`` is requested."""
+    s = (raw or "").strip()
+    return s if preserve_case else s.lower()
 
 
 def _version_from_config_block(raw: str) -> str:
@@ -4607,7 +4608,7 @@ def _environment_from_bot_trigger_line(head: str) -> str | None:
     return None
 
 
-def parse_jenkins_update_fpms_bot_block(text: str) -> dict:
+def parse_jenkins_update_fpms_bot_block(text: str, *, preserve_branch_case: bool = False) -> dict:
     """
     Parse a Lark-pasted **multi-line** block whose first line contains ``/jenkinsupdate``.
 
@@ -4641,7 +4642,7 @@ def parse_jenkins_update_fpms_bot_block(text: str) -> dict:
             if key == "environment":
                 env = _resolve_environment_token(rest)
             elif key == "branch":
-                branch = _branch_from_config_block(rest)
+                branch = _branch_from_config_block(rest, preserve_case=preserve_branch_case)
                 if not branch:
                     raise ValueError("branch: is empty.")
             elif key == "version":
@@ -5622,12 +5623,11 @@ def _fpms_lark_begin_jenkins_run(
         },
     )
     update_all = bool(data.get("update_all_services"))
-    bot_headless = os.environ.get("JENKINSUPDATE_BOT_HEADLESS", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    raw_headless = os.environ.get("JENKINSUPDATE_BOT_HEADLESS", "1").strip().lower()
+    bot_headless = raw_headless in ("1", "true", "yes", "on")
+    # Server safety: headed Chromium on Linux needs X11/$DISPLAY.
+    if (not bot_headless) and sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+        bot_headless = True
     preview = _fpms_format_config_preview(data, resolved)
     send(
         chat_id,
@@ -5637,7 +5637,12 @@ def _fpms_lark_begin_jenkins_run(
             if bot_headless
             else "\n\n⏳ Starting **visible browser** Jenkins — filling **all** parameters, running **two** on-page "
         )
-        + "re-checks, then you will be asked here to click **Build** or skip. Say **cancel** anytime.",
+        + "re-checks, then you will be asked here to click **Build** or skip. Say **cancel** anytime."
+        + (
+            "\n\nℹ️ Auto-switched to **headless** because this Linux host has no `$DISPLAY` (no X server)."
+            if (raw_headless in ("0", "false", "no", "off") and sys.platform.startswith("linux") and not os.environ.get("DISPLAY"))
+            else ""
+        ),
     )
     
     _fpms_lark_spawn_run(
@@ -5997,8 +6002,12 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
     job_profile: str = "fpms",
 ) -> bool:
     """Parse FPMS block, resolve services, then headless run or service pick session."""
+    jp = (job_profile or "fpms").strip() or "fpms"
     try:
-        data = parse_jenkins_update_fpms_bot_block(body)
+        data = parse_jenkins_update_fpms_bot_block(
+            body,
+            preserve_branch_case=(jp == "pms_uat"),
+        )
     except Exception as ex:
         send(
             chat_id,
@@ -6006,7 +6015,6 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
             f"then `branch:`, `version:`, `Service:` lines.\n```\n{ex}\n```",
         )
         return True
-    jp = (job_profile or "fpms").strip() or "fpms"
     if jp == "pms_uat":
         # PMS-UAT-UPDATE page uses fixed Environment option.
         data["environment"] = "pms-uat"
