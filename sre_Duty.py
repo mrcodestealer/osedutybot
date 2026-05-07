@@ -29,7 +29,7 @@ DUTY_LIST_PATH = "dutyList.csv"
 TARGET_NAMES = [
     "Alex Tai", "Kelvin", "WeiSiong", "Bowei", "Jay",
     "Linus Lim", "Jeng Liang", "Misa", "Kai Xuan", "Yoon Hong",
-    "Adrian"
+    "Adrian","Clarence","Khai Xuan"
 ]
 
 # 表格中出现的姓名形式 → CSV 中的标准姓名（用于电话查询）
