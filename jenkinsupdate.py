@@ -5469,6 +5469,7 @@ def _fpms_lark_verification_card_json(
     ok_all: bool,
     build_url: str,
     job_profile: str = "fpms",
+    next_build_number: int | None = None,
 ) -> str:
     """Lark ``msg_type=interactive`` payload: JSON string of the card."""
     safe = _fpms_lark_safe_code_fence(prompt_echo) or "(empty)"
@@ -5499,6 +5500,8 @@ def _fpms_lark_verification_card_json(
         title_text = "BI API UPDATE — form filled & re-check"
     else:
         title_text = "FPMS UAT — form filled & re-check"
+    if isinstance(next_build_number, int) and next_build_number > 0:
+        title_text = f"{title_text} #{next_build_number}"
 
     yes_btn = _fpms_lark_v2_callback_button(
         "YES — Build",
@@ -5543,6 +5546,7 @@ def _fpms_lark_verification_plain_fallback(
     ok_all: bool,
     build_url: str,
     job_profile: str = "fpms",
+    next_build_number: int | None = None,
 ) -> str:
     jp = (job_profile or "fpms").strip()
     if jp == "fnt_rc":
@@ -5555,6 +5559,8 @@ def _fpms_lark_verification_plain_fallback(
         head = "BI API UPDATE — form filled & re-check"
     else:
         head = "FPMS UAT — form filled & re-check"
+    if isinstance(next_build_number, int) and next_build_number > 0:
+        head = f"{head} #{next_build_number}"
     safe = _fpms_lark_safe_code_fence(prompt_echo) or "(empty)"
     lines = [
         f"🧾 **{head}**",
@@ -5593,6 +5599,7 @@ def _fpms_lark_send_verification_summary(
     ok_all: bool,
     build_url: str,
     job_profile: str = "fpms",
+    next_build_number: int | None = None,
 ) -> None:
     card = _fpms_lark_verification_card_json(
         prompt_echo=prompt_echo,
@@ -5600,6 +5607,7 @@ def _fpms_lark_send_verification_summary(
         ok_all=ok_all,
         build_url=build_url,
         job_profile=job_profile,
+        next_build_number=next_build_number,
     )
     try:
         send(chat_id, card, msg_type="interactive")
@@ -5612,8 +5620,48 @@ def _fpms_lark_send_verification_summary(
                 ok_all=ok_all,
                 build_url=build_url,
                 job_profile=job_profile,
+                next_build_number=next_build_number,
             ),
         )
+
+
+def _predict_next_build_number_from_history(page) -> int | None:
+    """
+    Read Jenkins build history cards and predict the next build number as ``max(#N)+1``.
+    Returns ``None`` when no build number can be extracted.
+    """
+    try:
+        n = page.evaluate(
+            r"""() => {
+              const nums = [];
+              const links = document.querySelectorAll(
+                "#jenkins-build-history a.app-builds-container__item__inner__link, "
+                + ".app-builds-container__item a.app-builds-container__item__inner__link"
+              );
+              for (const a of links) {
+                const txt = (a.textContent || "").trim();
+                const mTxt = txt.match(/#\s*(\d+)/);
+                if (mTxt) {
+                  const v = parseInt(mTxt[1], 10);
+                  if (Number.isFinite(v)) nums.push(v);
+                }
+                const href = a.getAttribute("href") || "";
+                const mHref = href.match(/\/(\d+)(?:\/|$)/);
+                if (mHref) {
+                  const v2 = parseInt(mHref[1], 10);
+                  if (Number.isFinite(v2)) nums.push(v2);
+                }
+              }
+              if (!nums.length) return null;
+              return Math.max(...nums) + 1;
+            }"""
+        )
+    except Exception:
+        return None
+    if isinstance(n, (int, float)):
+        iv = int(n)
+        return iv if iv > 0 else None
+    return None
 
 
 def _fpms_lark_begin_jenkins_run(
@@ -7183,6 +7231,7 @@ def run(
                 to = float(bot_lark_gate.get("timeout_sec", 7200))
                 build_url = str(bot_lark_gate.get("build_url") or BUILD_URL)
                 prompt_echo = str(bot_lark_gate.get("prompt_echo") or "")
+                next_build_number = _predict_next_build_number_from_history(page)
                 _fpms_lark_send_verification_summary(
                     send,
                     cid,
@@ -7191,6 +7240,7 @@ def run(
                     ok_all=ok_all,
                     build_url=build_url,
                     job_profile=jp,
+                    next_build_number=next_build_number,
                 )
                 with _fpms_lark_sessions_lock:
                     gate = _fpms_lark_sessions.get(sk)
