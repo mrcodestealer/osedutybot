@@ -519,6 +519,7 @@ def run_cctv_screenshot_job(chat_id: str, machine_query: str) -> None:
         send_message(chat_id, f"❌ Cannot load checkcredit module: {e}")
         return
     cap = getattr(checkcredit, "screenshot_egm_cctv_window", None)
+    resolve_route = getattr(checkcredit, "resolve_machine_display_for_egm_route", None)
     if not callable(cap):
         send_message(
             chat_id,
@@ -532,10 +533,30 @@ def run_cctv_screenshot_job(chat_id: str, machine_query: str) -> None:
             "❌ Usage: `/cctv <machine>` — same machine label as checkcredit (e.g. `OSMCP181`, `Dragons-0181`).",
         )
         return
-    send_message(chat_id, "⏳ EGM **CCTV** — login → click **CCTV** → screenshot…")
+    md_resolved = mq
+    ms_resolved: Optional[str] = None
+    if callable(resolve_route):
+        send_message(chat_id, "⏳ LogNavigator / OSS — resolving machine → correct backend (NCH, CP, …)…")
+        try:
+            md_resolved, ms_resolved = resolve_route(mq, timeout_ms=120_000)
+        except Exception as e:
+            send_message(chat_id, f"❌ Could not resolve machine / environment: {e}")
+            return
+        tag_fn = getattr(checkcredit, "_np_log_backend_tag", lambda _: "?")
+        send_message(
+            chat_id,
+            f"→ **{md_resolved}** · backend **{tag_fn(md_resolved)}** — EGM **CCTV**…",
+        )
+    else:
+        send_message(chat_id, "⏳ EGM **CCTV** — login → click **CCTV** → screenshot…")
     path = None
     try:
-        path = cap(machine_display=mq, machine_substr=None, timeout_ms=120_000, headed=False)
+        path = cap(
+            machine_display=md_resolved,
+            machine_substr=(ms_resolved or "").strip() or None,
+            timeout_ms=120_000,
+            headed=False,
+        )
         key = upload_image_lark(path)
         if not key:
             send_message(chat_id, "❌ CCTV screenshot upload failed.")

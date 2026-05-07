@@ -234,6 +234,79 @@ def fetch_log_via_navigator(
     return log_body, machine_display, text_parts
 
 
+def resolve_machine_display_from_lognavigator(
+    machine_query: str,
+    *,
+    timeout_ms: int = 90_000,
+    base: str | None = None,
+    user: str | None = None,
+    pw: str | None = None,
+    debug_headed: bool = False,
+) -> str:
+    """
+    LogNavigator only: login + machine Select2 — returns the canonical folder label (e.g. ``NCH2074``,
+    ``OSMCP181``) so :func:`_np_resolve_backend` routes EGM / Third Http to the correct environment.
+
+    Does **not** open a dated logic log or parse credit — lighter than :func:`fetch_log_via_navigator`.
+    """
+    mq = (machine_query or "").strip()
+    if not mq:
+        raise ValueError("empty machine query")
+    bu = (base or DEFAULT_BASE).rstrip("/")
+    us = user or DEFAULT_USER
+    pwv = pw or DEFAULT_PASS
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as e:
+        raise RuntimeError(
+            "LogNavigator resolution needs Playwright (`pip install playwright` + install chromium)."
+        ) from e
+    headless = False if debug_headed else _playwright_headless()
+    chosen = ""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=headless)
+        try:
+            context = browser.new_context(
+                ignore_https_errors=True,
+                viewport={"width": 1400, "height": 900},
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                ),
+            )
+            page = context.new_page()
+            lognavigator_login(page, bu, us, pwv, timeout_ms=timeout_ms)
+            chosen = select_machine_by_number(page, mq, timeout_ms=timeout_ms)
+        finally:
+            browser.close()
+    out = (chosen or "").strip()
+    return out if out else mq
+
+
+def resolve_machine_display_for_egm_route(
+    machine_query: str,
+    *,
+    timeout_ms: int = 90_000,
+) -> tuple[str, str]:
+    """
+    Machine folder label + EGM Search token for the correct backend:
+
+    - ``CHECKCREDIT_USE_OSS=1``: :func:`resolve_oss_machine_folder` (no LogNavigator).
+    - Otherwise: :func:`resolve_machine_display_from_lognavigator` so **NCH** / **CP** / … match Select2.
+    """
+    mq = (machine_query or "").strip()
+    if not mq:
+        raise ValueError("empty machine query")
+    oss_on = os.getenv("CHECKCREDIT_USE_OSS", "").strip().lower() in ("1", "true", "yes", "on")
+    if oss_on:
+        md = resolve_oss_machine_folder(mq)
+    else:
+        md = resolve_machine_display_from_lognavigator(mq, timeout_ms=timeout_ms)
+    md = (md or "").strip() or mq
+    ms = machine_match_substr_from_display(md)
+    return md, ms
+
+
 # ----- machine option matching -----
 def _machine_query_alnum_upper(s: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "", (s or "")).upper()
