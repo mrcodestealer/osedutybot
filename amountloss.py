@@ -306,21 +306,59 @@ def _sls_log_is_error_candidate(contents):
     return ("platformCreditLostFix" in blob) and ("null" in blob.lower())
 
 
+_SLS_COPY_EXTRA_KEYS = ("span_id", "time", "trace_flags", "trace_id")
+
+
+def _sls_skip_verbose_field_key(key):
+    # type: (str) -> bool
+    """省略 SLS 注入的 __tag__ / 冗长元数据，Error log 只保留业务 msg + 链路字段。"""
+    k = key or ""
+    if k.startswith("__tag__"):
+        return True
+    if k in ("_source_", "_time_", "instance_id", "level"):
+        return True
+    return False
+
+
+def _sls_norm_field_value(v):
+    # type: (Any) -> str
+    s = str(v).strip() if v is not None else ""
+    return s.replace("\t", " ").replace("\r", " ").replace("\n", " ")
+
+
 def _sls_format_log_contents(contents):
     # type: (dict) -> str
-    """SLS 一条 log 的所有字段拼成一段文本（Copy for Sheet / CHECKLOG 可见完整上下文，而非仅 msg 里一小段）。"""
+    """
+    CHECKLOG / By Game 粘贴列：msg=… | span_id=… | time=… | trace_flags=… | trace_id=…
+    不包含 __tag__:*、_time_、instance_id、level 等整行元数据。
+    """
     if not contents:
         return ""
     parts = []
+    msg = contents.get("msg")
+    if msg is not None:
+        sm = _sls_norm_field_value(msg)
+        if sm:
+            parts.append("msg=%s" % sm)
+    for ek in _SLS_COPY_EXTRA_KEYS:
+        if ek not in contents:
+            continue
+        sv = _sls_norm_field_value(contents.get(ek))
+        if not sv:
+            continue
+        parts.append("%s=%s" % (ek, sv))
+    if parts:
+        return " | ".join(parts)
+    # 无 msg 时（极少）：输出少量非 tag 字段，避免单元格空白
     for k in sorted(contents.keys()):
-        v = contents.get(k)
-        if v is None:
+        if _sls_skip_verbose_field_key(k):
             continue
-        s = str(v).strip()
-        if not s:
+        sv = _sls_norm_field_value(contents.get(k))
+        if not sv:
             continue
-        s = s.replace("\t", " ").replace("\r", " ").replace("\n", " ")
-        parts.append("%s=%s" % (k, s))
+        parts.append("%s=%s" % (k, sv))
+        if len(parts) >= 12:
+            break
     return " | ".join(parts)
 
 
@@ -394,7 +432,7 @@ def _attach_sls_error_logs(filter_headers, filter_rows):
     print(
         f"📡 SLS：每行 Transfer ID + Start Time ±{SLS_WINDOW_MINUTES} 分钟；"
         '检索式与控制台一致："<id> and \\"null null\\""；'
-        "保留 platformCreditLostFix + null 的日志；Error log 写入该条所有字段（非仅 msg）。"
+        "保留 platformCreditLostFix + null 的日志；Error log 写入 msg + span_id/time/trace_flags/trace_id（省略 __tag__ 等）。"
     )
     _ensure_aliyun_log_sdk()
     for row in filter_rows:
@@ -928,12 +966,21 @@ def _al_cell_plain(cell):
     return str(cell).strip()
 
 
+def _al_open_api_base():
+    # type: () -> str
+    """Open Platform host（须与租户一致）。国内版示例: https://open.feishu.cn/open-apis"""
+    base = (_env_first("LARK_OPEN_API_BASE") or "https://open.larksuite.com/open-apis").strip().rstrip(
+        "/"
+    )
+    return base or "https://open.larksuite.com/open-apis"
+
+
 def _al_lark_tenant_token():
     app_id = _env_first("APP_ID")
     app_secret = _env_first("APP_SECRET")
     if not app_id or not app_secret:
         raise ValueError("Lark sync 需要 APP_ID / APP_SECRET（与 main 机器人相同）")
-    url = "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal"
+    url = "%s/auth/v3/tenant_access_token/internal" % _al_open_api_base()
     resp = requests.post(
         url,
         headers={"Content-Type": "application/json"},
@@ -947,11 +994,30 @@ def _al_lark_tenant_token():
 
 
 def _al_sheet_metainfo(token, spreadsheet_token):
-    url = "https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/%s/metainfo" % spreadsheet_token
+    url = "%s/sheets/v2/spreadsheets/%s/metainfo" % (_al_open_api_base(), spreadsheet_token)
     resp = requests.get(url, headers={"Authorization": "Bearer %s" % token}, timeout=60)
     result = resp.json()
     if result.get("code") != 0:
-        raise ValueError("spreadsheet metainfo 失败: %s" % result)
+        code = result.get("code")
+        msg = str(result.get("msg") or "")
+        tok_h = (spreadsheet_token or "").strip()
+        if len(tok_h) > 12:
+            tok_h = tok_h[:4] + "..." + tok_h[-4:] + " (len=%d)" % len(spreadsheet_token or "")
+        else:
+            tok_h = repr(tok_h)
+        hint = ""
+        if code == 91402 or msg.upper() == "NOTEXIST":
+            hint = (
+                " 91402 NOTEXIST：OpenAPI 找不到该 spreadsheet（或机器人无权访问）。"
+                "请核对 AMOUNT_LOSS_SPREADSHEET_TOKEN（及第二张表的 AMOUNT_LOSS_SECOND_SPREADSHEET_TOKEN）"
+                "必须是「电子表格」用浏览器打开后 URL 里的 token（…/sheets/<token>），"
+                "不要用 Wiki 链接里的 ?sheet=<短 id>。"
+                "把表格分享给应用 / 所在群组需含机器人；勿删表。"
+                "若为国内飞书租户，尝试设置 LARK_OPEN_API_BASE=https://open.feishu.cn/open-apis 。"
+                "当前请求 token=%s API=%s"
+                % (tok_h, _al_open_api_base())
+            )
+        raise ValueError("spreadsheet metainfo 失败: %s%s" % (result, hint))
     return result.get("data", {}).get("sheets", []) or []
 
 
@@ -982,8 +1048,8 @@ def _al_sheet_row_count(token, spreadsheet_token, sheet_id):
 
 def _al_get_range(token, spreadsheet_token, sheet_id, range_suffix):
     url = (
-        "https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/%s/values/%s!%s?valueRenderOption=FormattedValue"
-        % (spreadsheet_token, sheet_id, range_suffix)
+        "%s/sheets/v2/spreadsheets/%s/values/%s!%s?valueRenderOption=FormattedValue"
+        % (_al_open_api_base(), spreadsheet_token, sheet_id, range_suffix)
     )
     resp = requests.get(url, headers={"Authorization": "Bearer %s" % token}, timeout=120)
     result = resp.json()
@@ -995,9 +1061,9 @@ def _al_get_range(token, spreadsheet_token, sheet_id, range_suffix):
 def _al_batch_update_ranges(token, spreadsheet_token, value_ranges):
     # type: (str, str, list) -> None
     """value_ranges: [{"range": "sheetId!A1:B2", "values": [[...]]}, ...]"""
-    url = (
-        "https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/%s/values_batch_update"
-        % spreadsheet_token
+    url = "%s/sheets/v2/spreadsheets/%s/values_batch_update" % (
+        _al_open_api_base(),
+        spreadsheet_token,
     )
     resp = requests.post(
         url,
@@ -1030,9 +1096,9 @@ def _al_batch_update_styles(token, spreadsheet_token, style_items):
         data.append({"ranges": [rng], "style": st})
     if not data:
         return
-    url = (
-        "https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/%s/styles_batch_update"
-        % spreadsheet_token
+    url = "%s/sheets/v2/spreadsheets/%s/styles_batch_update" % (
+        _al_open_api_base(),
+        spreadsheet_token,
     )
     resp = requests.put(
         url,
@@ -1761,6 +1827,7 @@ def amount_loss_sync_to_lark_sheet(
     在 FPMS 查询结束后写入 Lark 电子表格「Amount Loss YYYY」。
     需环境变量 AMOUNT_LOSS_SPREADSHEET_TOKEN；可选 AMOUNT_LOSS_SHEET_ID（否则按标题查找）。
     wiki 示例: https://casinoplus.sg.larksuite.com/wiki/...?sheet=ixOcBO → token 取「关联表格」真实 spreadsheet token。
+    国内飞书租户：设 LARK_OPEN_API_BASE=https://open.feishu.cn/open-apis（与 APP 上架区域一致）。
     """
     spreadsheet_token = (_env_first("AMOUNT_LOSS_SPREADSHEET_TOKEN") or "").strip()
     if not spreadsheet_token:
