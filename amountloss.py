@@ -1132,6 +1132,52 @@ def _al_zero_block_signature_at_row(token, spreadsheet_token, sheet_id, row_idx)
     return ok, dbg
 
 
+def _al_grid_is_zero_block_at_row(grid_af, row_idx):
+    # type: (list, int) -> bool
+    """
+    grid_af: A..F 二维数组（1-based row_idx 映射到 grid_af[row_idx-1]）。
+    """
+    i = row_idx - 1
+    if i < 0 or i + 2 >= len(grid_af):
+        return False
+
+    def _g(r0, c0):
+        row = grid_af[r0] if 0 <= r0 < len(grid_af) else []
+        return _al_cell_plain(row[c0]) if c0 < len(row) else ""
+
+    e0 = _g(i, 4).strip().upper()  # E
+    f0 = _g(i, 5).strip().casefold()  # F
+    e1 = _g(i + 1, 4).strip()  # E+1
+    b2 = _g(i + 2, 1).strip().casefold()  # B+2
+    e2 = _g(i + 2, 4).strip().casefold()  # E+2
+    return (
+        e0 == "TOTAL"
+        and ("manual credit" in f0)
+        and e1 == "0"
+        and b2 == "no data available in table"
+        and e2 == "no data available in table"
+    )
+
+
+def _al_collect_zero_block_rows_and_dates(grid_af):
+    # type: (list) -> tuple[list, dict]
+    """
+    返回 (valid_rows, date_map):
+      valid_rows: 所有匹配 0-record 区块签名的起始行号（1-based）
+      date_map: DD/MM/YY -> [row1,row2,...]
+    """
+    rows = []
+    dmap = {}
+    for r in range(1, len(grid_af) - 1):
+        if not _al_grid_is_zero_block_at_row(grid_af, r):
+            continue
+        rows.append(r)
+        a = _al_cell_plain(grid_af[r - 1][0] if grid_af[r - 1] else "").strip()
+        if re.match(r"^\d{2}/\d{2}/\d{2}$", a):
+            dmap.setdefault(a, []).append(r)
+    return rows, dmap
+
+
 def _amount_loss_detect_missing_days_this_month(col_a_values):
     # type: (list) -> List[str]
     """
@@ -1218,26 +1264,17 @@ def amount_loss_sync_to_lark_sheet(
     if missing_days:
         missing_note = "⚠️ Amount Loss 本月 A 列缺失日期: %s" % ", ".join(missing_days)
         print("⚠️ Lark Amount Loss：检测到缺失日期 -> %s" % ", ".join(missing_days))
-    existed = _al_find_anchor_row_col_a(col_a, target_ddmmyy)
-    if existed is not None:
-        ok_sig, sig_dbg = _al_zero_block_signature_at_row(
-            token,
-            spreadsheet_token,
+    grid_af = _al_get_range(token, spreadsheet_token, sheet_id, "A1:F%d" % nrow)
+    valid_rows, date_map = _al_collect_zero_block_rows_and_dates(grid_af)
+    hit_rows = list(date_map.get(target_ddmmyy) or [])
+    if hit_rows:
+        note = "record already found in sheet (%s) at row %d [sheet=%s]" % (
+            target_ddmmyy,
+            hit_rows[0],
             sheet_id,
-            existed,
         )
-        if ok_sig:
-            note = "record already found in sheet (%s) at row %d [sheet=%s]" % (
-                target_ddmmyy,
-                existed,
-                sheet_id,
-            )
-            print("📎 Lark Amount Loss：%s" % note)
-            return note
-        print(
-            "⚠️ Lark Amount Loss：A 列命中日期 %s 于 A%d，但区块签名不匹配（%s），视为非有效区块，继续追加。"
-            % (target_ddmmyy, existed, sig_dbg)
-        )
+        print("📎 Lark Amount Loss：%s" % note)
+        return note
 
     # 业务要求：有记录时先人工录入，不自动写明细。
     if total_n > 0:
@@ -1246,12 +1283,17 @@ def amount_loss_sync_to_lark_sheet(
         return note
 
     # Total=0：只追加，不覆盖任何已有内容。
-    prev_anchor = _al_find_anchor_row_col_a(col_a, prev_ddmmyy)
+    prev_rows = list(date_map.get(prev_ddmmyy) or [])
+    prev_anchor = prev_rows[0] if prev_rows else None
     if prev_anchor is not None:
         base = prev_anchor + 4
     else:
-        last_a = _al_last_non_empty_row_col_a(col_a)
-        base = (last_a + 4) if last_a else 2
+        last_valid = max(valid_rows) if valid_rows else None
+        if last_valid is not None:
+            base = last_valid + 4
+        else:
+            last_a = _al_last_non_empty_row_col_a(col_a)
+            base = (last_a + 4) if last_a else 2
 
     end_zero_l = _al_col_num_to_letter(5 + len(AL_ZERO_RECORD_HEADERS))
     for _ in range(300):
