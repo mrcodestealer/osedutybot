@@ -810,6 +810,38 @@ FPMS_SYNC_COLUMNS = [
     "Remarks",
 ]
 
+AL_ZERO_RECORD_HEADERS = [
+    "Manual credit lost",
+    "EGS",
+    "EGSFC",
+    "PGSOFT",
+    "JILIBETA",
+    "LIVESLOT",
+    "COLORGAME",
+    "BACCARAT",
+    "PPGAME",
+    "PULAPUTI",
+    "ROULETTE",
+    "DRAGONTIGER",
+    "BLACKJACK",
+    "KINGMIDAS",
+    "DROPBALL",
+    "PAIGOW",
+    "JDB",
+    "TWSLOT",
+    "RTG",
+    "PLAYTECH",
+    "HACKSAW",
+    "5G",
+    "EEZE",
+    "EVOLIVE",
+    "YELLOWBAT",
+    "SM",
+    "Playstar",
+]
+
+AL_DEFAULT_SHEET_ID = "ixOcBO"
+
 
 def _al_col_num_to_letter(n):
     # type: (int) -> str
@@ -932,6 +964,32 @@ def _al_batch_update_ranges(token, spreadsheet_token, value_ranges):
     return
 
 
+def _al_batch_update_styles(token, spreadsheet_token, style_items):
+    # type: (str, str, list) -> None
+    """
+    style_items: [{"range": "sheetId!A1:B2", "style": {...}}, ...]
+    """
+    if not style_items:
+        return
+    url = (
+        "https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/%s/styles_batch_update"
+        % spreadsheet_token
+    )
+    resp = requests.put(
+        url,
+        headers={
+            "Authorization": "Bearer %s" % token,
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        json={"data": style_items},
+        timeout=120,
+    )
+    result = resp.json()
+    if result.get("code") != 0:
+        raise ValueError("写入表格样式失败: %s" % result)
+    return
+
+
 def _al_pad_row(row, width):
     # type: (list, int) -> list
     r = [row[i] if i < len(row) else "" for i in range(width)]
@@ -987,6 +1045,44 @@ def _amount_loss_fmt_dd_mm_yy(d):
     return d.strftime("%d/%m/%y")
 
 
+def _amount_loss_target_date(target_date_str):
+    # type: (Optional[str]) -> date
+    """
+    /al 默认写昨天；/al DD/MM（或 DD/MM/YY, DD/MM/YYYY）写指定日期。
+    """
+    raw = (target_date_str or "").strip()
+    if not raw:
+        return date.today() - timedelta(days=1)
+    year_now = date.today().year
+    for fmt in ("%d/%m/%Y", "%d/%m/%y", "%d/%m"):
+        try:
+            dt = datetime.strptime(raw, fmt)
+            if fmt == "%d/%m":
+                return date(year_now, dt.month, dt.day)
+            return dt.date()
+        except ValueError:
+            continue
+    raise ValueError("日期格式无效（应为 DD/MM 或 DD/MM/YY）: %r" % raw)
+
+
+def _al_last_non_empty_row_col_a(col_a_values):
+    # type: (list) -> Optional[int]
+    last = None
+    for i, row in enumerate(col_a_values or [], start=1):
+        if row and _al_cell_plain(row[0]).strip():
+            last = i
+    return last
+
+
+def _al_block_has_content(block_values):
+    # type: (list) -> bool
+    for row in block_values or []:
+        for c in row or []:
+            if _al_cell_plain(c).strip():
+                return True
+    return False
+
+
 def _amount_loss_detect_missing_days_this_month(col_a_values):
     # type: (list) -> List[str]
     """
@@ -1026,6 +1122,7 @@ def amount_loss_sync_to_lark_sheet(
     full_cell_rows,
     eh,
     er,
+    target_date_str=None,
 ):
     """
     在 FPMS 查询结束后写入 Lark 电子表格「Amount Loss YYYY」。
@@ -1040,7 +1137,7 @@ def amount_loss_sync_to_lark_sheet(
         )
         print(note)
         return note
-    sheet_id = (_env_first("AMOUNT_LOSS_SHEET_ID") or "").strip()
+    sheet_id = (_env_first("AMOUNT_LOSS_SHEET_ID") or "").strip() or AL_DEFAULT_SHEET_ID
     title_year = datetime.now().year
     want_title = "Amount Loss %s" % title_year
 
@@ -1054,22 +1151,17 @@ def amount_loss_sync_to_lark_sheet(
         print(note)
         return note
 
-    print(
-        "📎 Lark Amount Loss：开始同步（Total=%s；找 A 列锚点=两天前 DD/MM/YY）"
-        % total_n
-    )
+    target_day = _amount_loss_target_date(target_date_str)
+    target_ddmmyy = _amount_loss_fmt_dd_mm_yy(target_day)
+    prev_ddmmyy = _amount_loss_fmt_dd_mm_yy(target_day - timedelta(days=1))
+
+    print("📎 Lark Amount Loss：开始同步（Total=%s；目标日期=%s）" % (total_n, target_ddmmyy))
     token = _al_lark_tenant_token()
     if not sheet_id:
         sheet_id = _al_find_sheet_id_by_title(token, spreadsheet_token, want_title)
 
     ncol = _al_sheet_column_count(token, spreadsheet_token, sheet_id)
     nrow = _al_sheet_row_count(token, spreadsheet_token, sheet_id)
-    end_l = _al_col_num_to_letter(ncol)
-
-    two_days = date.today() - timedelta(days=2)
-    yesterday = date.today() - timedelta(days=1)
-    marker_ddmmyy = _amount_loss_fmt_dd_mm_yy(two_days)
-    yesterday_ddmmyy = _amount_loss_fmt_dd_mm_yy(yesterday)
 
     col_a = _al_get_range(token, spreadsheet_token, sheet_id, "A1:A%d" % nrow)
     missing_days = _amount_loss_detect_missing_days_this_month(col_a)
@@ -1077,86 +1169,96 @@ def amount_loss_sync_to_lark_sheet(
     if missing_days:
         missing_note = "⚠️ Amount Loss 本月 A 列缺失日期: %s" % ", ".join(missing_days)
         print("⚠️ Lark Amount Loss：检测到缺失日期 -> %s" % ", ".join(missing_days))
-    anchor = _al_find_anchor_row_col_a(col_a, marker_ddmmyy)
-    if anchor is None:
-        raise ValueError(
-            "Lark sync：A 列未找到两日前的日期 %s（DD/MM/YY）" % marker_ddmmyy
-        )
+    existed = _al_find_anchor_row_col_a(col_a, target_ddmmyy)
+    if existed is not None:
+        note = "record already found in sheet (%s)" % target_ddmmyy
+        print("📎 Lark Amount Loss：%s" % note)
+        return note
 
-    if total_n == 0:
-        tpl234 = _al_get_range(token, spreadsheet_token, sheet_id, "A2:%s4" % end_l)
-        while len(tpl234) < 3:
-            tpl234.append([])
-        tpl234 = [_al_pad_row(r, ncol) for r in tpl234[:3]]
-        base = anchor + 4
-        rng = "%s%d:%s%d" % ("A", base, end_l, base + 2)
-        payload = [{"range": "%s!%s" % (sheet_id, rng), "values": tpl234}]
-        _al_batch_update_ranges(token, spreadsheet_token, payload)
-        only_a = "%s%d:%s%d" % ("A", base, "A", base)
-        _al_batch_update_ranges(
+    # 业务要求：有记录时先人工录入，不自动写明细。
+    if total_n > 0:
+        note = "Kindly manual add the record first， JC still doing it"
+        print("📎 Lark Amount Loss：%s（Total=%s）" % (note, total_n))
+        return note
+
+    # Total=0：只追加，不覆盖任何已有内容。
+    prev_anchor = _al_find_anchor_row_col_a(col_a, prev_ddmmyy)
+    if prev_anchor is not None:
+        base = prev_anchor + 4
+    else:
+        last_a = _al_last_non_empty_row_col_a(col_a)
+        base = (last_a + 4) if last_a else 2
+
+    end_zero_l = _al_col_num_to_letter(5 + len(AL_ZERO_RECORD_HEADERS))
+    for _ in range(300):
+        probe = _al_get_range(
             token,
             spreadsheet_token,
-            [{"range": "%s!%s" % (sheet_id, only_a), "values": [[yesterday_ddmmyy]]}],
+            sheet_id,
+            "A%d:%s%d" % (base, end_zero_l, base + 2),
         )
-        print(
-            "📎 Lark Amount Loss：无记录 → 已粘贴模板行 %d–%d，A%d=%s"
-            % (base, base + 2, base, yesterday_ddmmyy)
-        )
-        return missing_note
+        if not _al_block_has_content(probe):
+            break
+        base += 4
+    else:
+        raise ValueError("找不到安全追加行（检查 A~%s 是否存在大量非空内容）" % end_zero_l)
 
-    tpl23 = _al_get_range(token, spreadsheet_token, sheet_id, "A2:%s3" % end_l)
-    while len(tpl23) < 2:
-        tpl23.append([])
-    tpl23 = [_al_pad_row(r, ncol) for r in tpl23[:2]]
-
-    base = anchor + 4
-    row_h = base + 2
-    row_d0 = base + 3
-
-    hdr_row_vals = FPMS_SYNC_COLUMNS[:]
-    if eh and er and "Error log" in eh:
-        hdr_row_vals.append("Error log")
-
-    ranges_batch = []
-    r2 = "%s%d:%s%d" % ("A", base, end_l, base)
-    r3 = "%s%d:%s%d" % ("A", base + 1, end_l, base + 1)
-    ranges_batch.append({"range": "%s!%s" % (sheet_id, r2), "values": [tpl23[0]]})
-    ranges_batch.append({"range": "%s!%s" % (sheet_id, r3), "values": [tpl23[1]]})
-
-    el = _al_col_num_to_letter(5)
-    end_seg_l = _al_col_num_to_letter(5 + len(hdr_row_vals) - 1)
-    hdr_range = "%s%d:%s%d" % (el, row_h, end_seg_l, row_h)
-    ranges_batch.append({"range": "%s!%s" % (sheet_id, hdr_range), "values": [hdr_row_vals]})
-
-    data_rows = []
-    err_col_idx = None
-    if eh and er and "Error log" in eh:
-        try:
-            err_col_idx = eh.index("Error log")
-        except ValueError:
-            err_col_idx = None
-
-    for i, cells in enumerate(full_cell_rows):
-        vals = _fpms_row_product_to_remarks(fp_headers, cells)
-        if err_col_idx is not None and er and i < len(er):
-            erow = er[i]
-            extra = _al_cell_plain(erow[err_col_idx]) if err_col_idx < len(erow) else ""
-            vals.append(extra)
-        data_rows.append(vals)
-
-    if data_rows:
-        dr = "%s%d:%s%d" % (el, row_d0, end_seg_l, row_d0 + len(data_rows) - 1)
-        ranges_batch.append({"range": "%s!%s" % (sheet_id, dr), "values": data_rows})
-
+    row_hdr = ["TOTAL"] + AL_ZERO_RECORD_HEADERS
+    row_zero = ["0"] + (["0"] * len(AL_ZERO_RECORD_HEADERS))
+    ranges_batch = [
+        {"range": "%s!A%d:A%d" % (sheet_id, base, base), "values": [[target_ddmmyy]]},
+        {"range": "%s!E%d:%s%d" % (sheet_id, base, end_zero_l, base), "values": [row_hdr]},
+        {"range": "%s!E%d:%s%d" % (sheet_id, base + 1, end_zero_l, base + 1), "values": [row_zero]},
+        {
+            "range": "%s!B%d:B%d" % (sheet_id, base + 2, base + 2),
+            "values": [["No data available in table"]],
+        },
+        {
+            "range": "%s!E%d:E%d" % (sheet_id, base + 2, base + 2),
+            "values": [["No data available in table"]],
+        },
+    ]
     _al_batch_update_ranges(token, spreadsheet_token, ranges_batch)
-    ok_note = (
-        "📎 Lark Amount Loss：%d 条记录 → 已写入自第 %d 行（含表头列）"
-        % (total_n, base)
-    )
-    print(ok_note)
-    if missing_note:
-        return "%s\n%s" % (ok_note, missing_note)
-    return ok_note
+
+    style_items = [
+        {
+            "range": "%s!A%d:A%d" % (sheet_id, base, base),
+            "style": {"font": {"fontSize": "11"}, "hAlign": 2},
+        },
+        {
+            "range": "%s!E%d:E%d" % (sheet_id, base, base),
+            "style": {"font": {"fontSize": "10", "bold": True}, "hAlign": 0, "backColor": "#987210"},
+        },
+        {
+            "range": "%s!F%d:%s%d" % (sheet_id, base, end_zero_l, base),
+            "style": {"font": {"fontSize": "10"}, "hAlign": 0, "backColor": "#987210"},
+        },
+        {
+            "range": "%s!E%d:E%d" % (sheet_id, base + 1, base + 1),
+            "style": {"font": {"fontSize": "10"}, "hAlign": 0, "backColor": "#68041C"},
+        },
+        {
+            "range": "%s!F%d:%s%d" % (sheet_id, base + 1, end_zero_l, base + 1),
+            "style": {"font": {"fontSize": "10"}, "hAlign": 0, "backColor": "#987210"},
+        },
+        {
+            "range": "%s!B%d:B%d" % (sheet_id, base + 2, base + 2),
+            "style": {"font": {"fontSize": "9"}, "hAlign": 1, "backColor": "#282827"},
+        },
+        {
+            "range": "%s!E%d:E%d" % (sheet_id, base + 2, base + 2),
+            "style": {"font": {"fontSize": "9"}, "hAlign": 1, "backColor": "#282827"},
+        },
+    ]
+    try:
+        _al_batch_update_styles(token, spreadsheet_token, style_items)
+    except Exception as st_ex:
+        # 值已写入成功；样式失败不回滚，避免覆盖/重复写入风险。
+        print("⚠️ Lark Amount Loss：样式设置失败（值已写入）: %s" % st_ex)
+
+    note = "done add in sheet kindly check"
+    print("📎 Lark Amount Loss：%s（A%d=%s）" % (note, base, target_ddmmyy))
+    return note
 
 
 def fetch_fpms_data(
@@ -1438,6 +1540,7 @@ def fetch_fpms_data(
                                 + sheet_tsv_game
                                 + "\n```"
                             )
+                            sync_note = ""
                             try:
                                 if sync_fp_headers is not None:
                                     sync_note = amount_loss_sync_to_lark_sheet(
@@ -1446,6 +1549,7 @@ def fetch_fpms_data(
                                         sync_full_cell_rows or [],
                                         sync_eh,
                                         sync_er,
+                                        target_date_str=target_date_str,
                                     )
                                     if sync_note:
                                         out = "%s\n\n%s" % (sync_note, out)
@@ -1458,6 +1562,7 @@ def fetch_fpms_data(
                                 "lark_card": card,
                                 "sheet_tsv_all": sheet_tsv_all,
                                 "sheet_tsv_game": sheet_tsv_game,
+                                "sync_note": sync_note,
                             }
                     except ValueError as ve:
                         warn = "⚠️ filterdata/checklog: %s" % (ve,)
@@ -1473,6 +1578,7 @@ def fetch_fpms_data(
                         sync_full_cell_rows or [],
                         sync_eh,
                         sync_er,
+                        target_date_str=target_date_str,
                     )
                     if sync_note:
                         out = "%s\n\n%s" % (sync_note, out)
