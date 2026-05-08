@@ -1083,6 +1083,14 @@ def _al_block_has_content(block_values):
     return False
 
 
+def _al_mask_token(tok):
+    # type: (str) -> str
+    s = (tok or "").strip()
+    if len(s) <= 8:
+        return s or "(empty)"
+    return s[:4] + "..." + s[-4:]
+
+
 def _amount_loss_detect_missing_days_this_month(col_a_values):
     # type: (list) -> List[str]
     """
@@ -1255,6 +1263,28 @@ def amount_loss_sync_to_lark_sheet(
     except Exception as st_ex:
         # 值已写入成功；样式失败不回滚，避免覆盖/重复写入风险。
         print("⚠️ Lark Amount Loss：样式设置失败（值已写入）: %s" % st_ex)
+
+    # 写入后回读验证：避免“已回 done 但用户看不到”的假成功。
+    rb_date = _al_get_range(token, spreadsheet_token, sheet_id, "A%d:A%d" % (base, base))
+    rb_total = _al_get_range(token, spreadsheet_token, sheet_id, "E%d:E%d" % (base, base))
+    got_date = _al_cell_plain(rb_date[0][0]) if rb_date and rb_date[0] else ""
+    got_total = _al_cell_plain(rb_total[0][0]) if rb_total and rb_total[0] else ""
+    if got_date != target_ddmmyy or got_total.upper() != "TOTAL":
+        note = (
+            "⚠️ sheet write verify failed: expected A%s=%s & E%s=TOTAL, got A=%r E=%r "
+            "(sheet=%s, spreadsheet=%s)"
+            % (
+                base,
+                target_ddmmyy,
+                base,
+                got_date,
+                got_total,
+                sheet_id,
+                _al_mask_token(spreadsheet_token),
+            )
+        )
+        print("📎 Lark Amount Loss：%s" % note)
+        return note
 
     note = "done add in sheet kindly check"
     print("📎 Lark Amount Loss：%s（A%d=%s）" % (note, base, target_ddmmyy))
