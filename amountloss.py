@@ -971,6 +971,15 @@ def _al_batch_update_styles(token, spreadsheet_token, style_items):
     """
     if not style_items:
         return
+    data = []
+    for it in style_items:
+        rng = str(it.get("range") or "").strip()
+        st = it.get("style") or {}
+        if not rng or not isinstance(st, dict):
+            continue
+        data.append({"ranges": [rng], "style": st})
+    if not data:
+        return
     url = (
         "https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/%s/styles_batch_update"
         % spreadsheet_token
@@ -981,7 +990,7 @@ def _al_batch_update_styles(token, spreadsheet_token, style_items):
             "Authorization": "Bearer %s" % token,
             "Content-Type": "application/json; charset=utf-8",
         },
-        json={"data": style_items},
+        json={"data": data},
         timeout=120,
     )
     result = resp.json()
@@ -1329,38 +1338,39 @@ def amount_loss_sync_to_lark_sheet(
     style_items = [
         {
             "range": "%s!A%d:A%d" % (sheet_id, base, base),
-            "style": {"font": {"fontSize": "11"}, "hAlign": 2},
+            "style": {"font": {"fontSize": "11pt/1.5"}, "hAlign": 2},
         },
         {
             "range": "%s!E%d:E%d" % (sheet_id, base, base),
-            "style": {"font": {"fontSize": "10", "bold": True}, "hAlign": 0, "backColor": "#987210"},
+            "style": {"font": {"fontSize": "10pt/1.5", "bold": True}, "hAlign": 0, "backColor": "#987210"},
         },
         {
             "range": "%s!F%d:%s%d" % (sheet_id, base, end_zero_l, base),
-            "style": {"font": {"fontSize": "10"}, "hAlign": 0, "backColor": "#987210"},
+            "style": {"font": {"fontSize": "10pt/1.5"}, "hAlign": 0, "backColor": "#987210"},
         },
         {
             "range": "%s!E%d:E%d" % (sheet_id, base + 1, base + 1),
-            "style": {"font": {"fontSize": "10"}, "hAlign": 0, "backColor": "#68041C"},
+            "style": {"font": {"fontSize": "10pt/1.5"}, "hAlign": 0, "backColor": "#68041C"},
         },
         {
             "range": "%s!F%d:%s%d" % (sheet_id, base + 1, end_zero_l, base + 1),
-            "style": {"font": {"fontSize": "10"}, "hAlign": 0, "backColor": "#987210"},
+            "style": {"font": {"fontSize": "10pt/1.5"}, "hAlign": 0, "backColor": "#987210"},
         },
         {
             "range": "%s!B%d:B%d" % (sheet_id, base + 2, base + 2),
-            "style": {"font": {"fontSize": "9"}, "hAlign": 1, "backColor": "#282827"},
+            "style": {"font": {"fontSize": "9pt/1.5"}, "hAlign": 1, "backColor": "#282827"},
         },
         {
             "range": "%s!E%d:E%d" % (sheet_id, base + 2, base + 2),
-            "style": {"font": {"fontSize": "9"}, "hAlign": 1, "backColor": "#282827"},
+            "style": {"font": {"fontSize": "9pt/1.5"}, "hAlign": 1, "backColor": "#282827"},
         },
     ]
     try:
         _al_batch_update_styles(token, spreadsheet_token, style_items)
     except Exception as st_ex:
-        # 值已写入成功；样式失败不回滚，避免覆盖/重复写入风险。
-        print("⚠️ Lark Amount Loss：样式设置失败（值已写入）: %s" % st_ex)
+        note = "⚠️ Lark Amount Loss：样式设置失败（值已写入）: %s" % st_ex
+        print(note)
+        return note
 
     # 写入后回读验证：避免“已回 done 但用户看不到”的假成功。
     rb_date = _al_get_range(token, spreadsheet_token, sheet_id, "A%d:A%d" % (base, base))
