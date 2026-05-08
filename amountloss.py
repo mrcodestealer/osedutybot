@@ -1683,6 +1683,7 @@ def fetch_fpms_data(
                                         out = "%s\n\n%s" % (sync_note, out)
                             except Exception as sync_ex:
                                 warn_sync = "⚠️ Lark Amount Loss 表格同步失败: %s" % sync_ex
+                                sync_note = warn_sync
                                 print(warn_sync)
                                 out = "%s\n\n%s" % (warn_sync, out)
                             return {
