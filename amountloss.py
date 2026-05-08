@@ -504,17 +504,28 @@ def _table_to_tsv(headers, rows):
 
 def _extract_game_from_transfer_name(transfer_name: str) -> str:
     """
-    Example:
-      Transfer-InLive SlotsAmount Lost  -> Live Slots
+    Parse Transfer-In / Transfer-Out … Amount Lost remarks → canonical game key.
+
+    Examples:
+      Transfer-InLive SlotsAmount Lost   -> LIVESLOT
+      Transfer-Out Live Slots Amount Lost -> LIVESLOT
+
+    Rules: strip ``Transfer-In`` / ``Transfer-Out``, strip trailing ``Amount Lost``
+    (allows glued text like ``SlotsAmount Lost``), normalize spaces, ``Slots``→``Slot``,
+    then UPPERCASE and remove all spaces.
     """
     raw = (transfer_name or "").strip()
     if not raw:
         return ""
-    # Remove prefix/suffix markers (case-insensitive, tolerant to spaces).
-    t = re.sub(r"^\s*transfer[\s\-]*in\s*", "", raw, flags=re.I)
-    t = re.sub(r"\s*amount\s*lost\s*$", "", t, flags=re.I)
+    if not re.search(r"transfer[\s\-]*(in|out)", raw, re.I):
+        return ""
+    t = re.sub(r"^\s*transfer[\s\-]*(in|out)\s*", "", raw, flags=re.I)
+    t = re.sub(r"(?i)\s*amount\s*lost\s*$", "", t)
     t = re.sub(r"\s+", " ", t).strip(" -_")
-    return t
+    if not t:
+        return ""
+    t = re.sub(r"\bslots\b", "slot", t, flags=re.I)
+    return re.sub(r"\s+", "", t.upper())
 
 
 def _build_by_game_copy_text(headers, rows):
@@ -839,6 +850,13 @@ AL_ZERO_RECORD_HEADERS = [
     "SM",
     "Playstar",
 ]
+
+# Second workbook tabs match column tokens (ALL CAPS, no spaces), e.g. LIVESLOT, DRAGONTIGER.
+_AL_SECOND_SHEET_TAB_BY_CANONICAL = {}
+for _al_hdr in AL_ZERO_RECORD_HEADERS:
+    _al_k = re.sub(r"\s+", "", _al_hdr).upper()
+    _AL_SECOND_SHEET_TAB_BY_CANONICAL[_al_k] = _al_k
+_AL_SECOND_SHEET_TAB_BY_CANONICAL["LIVESLOTS"] = "LIVESLOT"
 
 AL_DEFAULT_SHEET_ID = "ixOcBO"
 
@@ -1231,6 +1249,472 @@ def _amount_loss_detect_missing_days_this_month(col_a_values):
     return missing
 
 
+AL_DETAIL_HEADER_BG = "#4C82C1"
+AL_SECOND_DATE_ROW_BG = "#22F80A"
+
+
+def _al_match_extracted_game_to_zero_header(extracted: str) -> Optional[str]:
+    """Map Transfer Name extracted game string → AL_ZERO_RECORD_HEADERS column label."""
+    if not extracted:
+        return None
+    raw = extracted.strip()
+    g = re.sub(r"\s+", "", raw).casefold()
+    g = g.replace("-", "")
+    if "manualcredit" in g or "manualcreditlost" in g:
+        return "Manual credit lost"
+    rules: list[tuple[str, str]] = [
+        ("liveslot", "LIVESLOT"),
+        ("egsfc", "EGSFC"),
+        ("egs", "EGS"),
+        ("pgsoft", "PGSOFT"),
+        ("jilibeta", "JILIBETA"),
+        ("colorgame", "COLORGAME"),
+        ("baccarat", "BACCARAT"),
+        ("ppgame", "PPGAME"),
+        ("pulaputi", "PULAPUTI"),
+        ("roulette", "ROULETTE"),
+        ("dragontiger", "DRAGONTIGER"),
+        ("blackjack", "BLACKJACK"),
+        ("kingmidas", "KINGMIDAS"),
+        ("dropball", "DROPBALL"),
+        ("paigow", "PAIGOW"),
+        ("jdb", "JDB"),
+        ("twslot", "TWSLOT"),
+        ("rtg", "RTG"),
+        ("playtech", "PLAYTECH"),
+        ("hacksaw", "HACKSAW"),
+        ("5g", "5G"),
+        ("eeze", "EEZE"),
+        ("evolive", "EVOLIVE"),
+        ("evolve", "EVOLIVE"),
+        ("yellowbat", "YELLOWBAT"),
+        ("sm", "SM"),
+        ("playstar", "Playstar"),
+    ]
+    for sub, hdr in rules:
+        if sub in g:
+            return hdr
+    return None
+
+
+def _al_counts_per_game_header(fp_headers, detail_rows):
+    # type: (list, list) -> dict[str, int]
+    counts = {h: 0 for h in AL_ZERO_RECORD_HEADERS}
+    idx_tname = _header_col_index(fp_headers, "Transfer Name")
+    if idx_tname is None:
+        return counts
+    for cells in detail_rows or []:
+        tname = _al_cell_plain(cells[idx_tname]) if idx_tname < len(cells) else ""
+        key = _al_match_extracted_game_to_zero_header(_extract_game_from_transfer_name(tname))
+        if key:
+            counts[key] += 1
+    return counts
+
+
+def _al_find_existing_detail_block_row(
+    token, spreadsheet_token, sheet_id, nrow, target_ddmmyy
+):
+    """若该日期已写入「TOTAL + 数字行 + Product 表头」区块，返回日期所在行（1-based）。"""
+    col_a = _al_get_range(token, spreadsheet_token, sheet_id, "A1:A%d" % nrow)
+    tgt = (target_ddmmyy or "").strip()
+    for i, row in enumerate(col_a):
+        if not row or _al_cell_plain(row[0]).strip() != tgt:
+            continue
+        r = i + 1
+        if r + 2 > nrow:
+            continue
+        probe = _al_get_range(token, spreadsheet_token, sheet_id, "A%d:A%d" % (r + 2, r + 2))
+        if not probe or not probe[0]:
+            continue
+        if _al_cell_plain(probe[0][0]).strip().casefold() == "product":
+            return r
+    return None
+
+
+def _al_game_to_sheet_title(game_heading: str) -> str:
+    """Parsed game key → second workbook sheet tab title (same ALL-CAPS token as tabs)."""
+    gh = (game_heading or "").strip().strip("[]").strip()
+    key = re.sub(r"\s+", "", gh).upper()
+    if not key:
+        return ""
+    out = _AL_SECOND_SHEET_TAB_BY_CANONICAL.get(key)
+    if out:
+        return out
+    if "liveslot" in key.casefold() or gh.casefold() == "live slots":
+        return "LIVESLOT"
+    return key
+
+
+def _al_find_sheet_id_fuzzy(token, spreadsheet_token, want: str):
+    """Resolve sheet id by tab title; exact normalized match only (avoids EGS matching EGSFC)."""
+    want_k = re.sub(r"\s+", "", (want or "").strip()).casefold()
+    want_strip = (want or "").strip()
+    fallback_tid = None
+    for sh in _al_sheet_metainfo(token, spreadsheet_token):
+        title = (sh.get("title") or "").strip()
+        tid = sh.get("sheetId")
+        if not tid:
+            continue
+        tk = re.sub(r"\s+", "", title).casefold()
+        if tk == want_k:
+            return tid
+        if title.casefold() == want_strip.casefold():
+            fallback_tid = tid
+    return fallback_tid
+
+
+def _al_rows_by_game_from_checklog(eh, er):
+    # type: (list, list) -> dict[str, list[list]]
+    """eh/er: CHECKLOG 表头与行 → game_label -> rows (each row 6 cells)."""
+    idx_account = _header_col_index(eh, "Account")
+    idx_amount = _header_col_index(eh, "Amount (PHP)", "Amount")
+    idx_start = _header_col_index(eh, "Start Time")
+    idx_tname = _header_col_index(eh, "Transfer Name")
+    idx_tid = _header_col_index(eh, "Transfer ID")
+    idx_err = _header_col_index(eh, "Error log")
+    if any(
+        x is None
+        for x in (idx_account, idx_amount, idx_start, idx_tname, idx_tid, idx_err)
+    ):
+        return {}
+
+    def _col(r, idx):
+        if idx is None or idx < 0 or idx >= len(r):
+            return ""
+        return (
+            (r[idx] or "")
+            .replace("\t", " ")
+            .replace("\r", " ")
+            .replace("\n", " | ")
+            .strip()
+        )
+
+    buckets = {}
+    for r in er or []:
+        tname = _col(r, idx_tname)
+        game = _extract_game_from_transfer_name(tname) or "Unknown"
+        row_vals = [
+            _col(r, idx_account),
+            _col(r, idx_amount),
+            _col(r, idx_start),
+            tname,
+            _col(r, idx_tid),
+            _col(r, idx_err),
+        ]
+        buckets.setdefault(game, []).append(row_vals)
+    return buckets
+
+
+def _al_unknown_from_error_cell(err_text: str) -> str:
+    s = err_text or ""
+    if re.search(r"null\s*undefined", s, re.I):
+        return "UNKNOWN"
+    return ""
+
+
+def _al_append_primary_records_block(
+    token,
+    spreadsheet_token,
+    sheet_id,
+    nrow,
+    target_day,
+    target_ddmmyy,
+    prev_ddmmyy,
+    total_n,
+    detail_headers,
+    detail_rows,
+):
+    # type: (...) -> str
+    """主表：TOTAL 区块 + 计数行 + --getdata 全表明细（含样式）。返回备注或 done。"""
+    col_a = _al_get_range(token, spreadsheet_token, sheet_id, "A1:A%d" % nrow)
+    grid_af = _al_get_range(token, spreadsheet_token, sheet_id, "A1:F%d" % nrow)
+    valid_rows, date_map = _al_collect_zero_block_rows_and_dates(grid_af)
+
+    prev_rows = list(date_map.get(prev_ddmmyy) or [])
+    prev_anchor = prev_rows[0] if prev_rows else None
+    if prev_anchor is not None:
+        base = prev_anchor + 3
+    else:
+        last_valid = max(valid_rows) if valid_rows else None
+        if last_valid is not None:
+            base = last_valid + 3
+        else:
+            last_a = _al_last_non_empty_row_col_a(col_a)
+            base = (last_a + 3) if last_a else 2
+
+    last_valid_before = max([r for r in valid_rows if r < base], default=None)
+    need_month_summary = False
+    month_summary_text = ""
+    if last_valid_before is not None and (last_valid_before - 1) < len(grid_af):
+        prev_date_raw = _al_cell_plain(
+            grid_af[last_valid_before - 1][0] if grid_af[last_valid_before - 1] else ""
+        )
+        prev_date = _al_parse_ddmmyy_date(prev_date_raw)
+        if prev_date is not None and (
+            prev_date.year != target_day.year or prev_date.month != target_day.month
+        ):
+            need_month_summary = True
+            month_summary_text = "%d 月份总结" % target_day.month
+
+    dh = list(detail_headers or [])
+    dr = list(detail_rows or [])
+    if not dh or not dr:
+        return "⚠️ Lark Amount Loss：有记录但缺少 detail_rows/detail_headers，跳过主表明细写入"
+
+    n_data = len(dr)
+    height = (1 if need_month_summary else 0) + 3 + n_data
+    end_zero_l = _al_col_num_to_letter(5 + len(AL_ZERO_RECORD_HEADERS))
+    end_detail_l = _al_col_num_to_letter(max(len(dh), 1))
+
+    for _ in range(400):
+        last_r = base + height - 1
+        probe = _al_get_range(
+            token,
+            spreadsheet_token,
+            sheet_id,
+            "A%d:%s%d" % (base, end_detail_l, last_r),
+        )
+        if not _al_block_has_content(probe):
+            break
+        base += 3
+    else:
+        raise ValueError("主表：找不到安全追加行（有记录块）")
+
+    block_base = base + 1 if need_month_summary else base
+    counts_map = _al_counts_per_game_header(dh, dr)
+    count_cells = [str(total_n)] + [str(counts_map[h]) for h in AL_ZERO_RECORD_HEADERS]
+    row_hdr = ["TOTAL"] + AL_ZERO_RECORD_HEADERS
+
+    hdr_cells = [_al_cell_plain(h) for h in dh]
+    data_vals = []
+    for cells in dr:
+        data_vals.append(
+            [_al_cell_plain(cells[i]) if i < len(cells) else "" for i in range(len(dh))]
+        )
+
+    ranges_batch = []
+    if need_month_summary:
+        ranges_batch.append(
+            {"range": "%s!A%d:A%d" % (sheet_id, base, base), "values": [[month_summary_text]]}
+        )
+    ranges_batch.extend(
+        [
+            {"range": "%s!A%d:A%d" % (sheet_id, block_base, block_base), "values": [[target_ddmmyy]]},
+            {"range": "%s!E%d:%s%d" % (sheet_id, block_base, end_zero_l, block_base), "values": [row_hdr]},
+            {
+                "range": "%s!E%d:%s%d" % (sheet_id, block_base + 1, end_zero_l, block_base + 1),
+                "values": [count_cells],
+            },
+            {
+                "range": "%s!A%d:%s%d" % (sheet_id, block_base + 2, end_detail_l, block_base + 2),
+                "values": [hdr_cells],
+            },
+        ]
+    )
+    if data_vals:
+        ranges_batch.append(
+            {
+                "range": "%s!A%d:%s%d"
+                % (sheet_id, block_base + 3, end_detail_l, block_base + 3 + len(data_vals) - 1),
+                "values": data_vals,
+            }
+        )
+    _al_batch_update_ranges(token, spreadsheet_token, ranges_batch)
+
+    hdr_row = block_base + 2
+    data_r0 = block_base + 3
+    data_r1 = block_base + 3 + max(0, n_data - 1)
+
+    style_items = []
+    if need_month_summary:
+        style_items.append(
+            {
+                "range": "%s!A%d:%s%d" % (sheet_id, base, end_zero_l, base),
+                "style": {
+                    "font": {"fontSize": "18pt/1.5", "bold": True},
+                    "hAlign": 0,
+                    "backColor": "#224BAA",
+                },
+            }
+        )
+    style_items.extend(
+        [
+            {
+                "range": "%s!A%d:A%d" % (sheet_id, block_base, block_base),
+                "style": {"font": {"fontSize": "11pt/1.5", "bold": True}, "hAlign": 2},
+            },
+            {
+                "range": "%s!E%d:E%d" % (sheet_id, block_base, block_base),
+                "style": {
+                    "font": {"fontSize": "10pt/1.5", "bold": True},
+                    "hAlign": 0,
+                    "vAlign": 2,
+                    "backColor": "#987210",
+                },
+            },
+            {
+                "range": "%s!F%d:%s%d" % (sheet_id, block_base, end_zero_l, block_base),
+                "style": {
+                    "font": {"fontSize": "10pt/1.5"},
+                    "hAlign": 0,
+                    "vAlign": 2,
+                    "backColor": "#987210",
+                },
+            },
+            {
+                "range": "%s!E%d:%s%d" % (sheet_id, block_base + 1, end_zero_l, block_base + 1),
+                "style": {
+                    "font": {"fontSize": "10pt/1.5"},
+                    "hAlign": 2,
+                    "vAlign": 2,
+                    "backColor": "#987210",
+                },
+            },
+            {
+                "range": "%s!E%d:E%d" % (sheet_id, block_base + 1, block_base + 1),
+                "style": {"backColor": "#68041C"},
+            },
+            {
+                "range": "%s!A%d:%s%d" % (sheet_id, hdr_row, end_detail_l, hdr_row),
+                "style": {
+                    "font": {"fontSize": "9pt/1.5", "bold": True},
+                    "hAlign": 0,
+                    "vAlign": 2,
+                    "backColor": AL_DETAIL_HEADER_BG,
+                },
+            },
+        ]
+    )
+    if n_data > 0:
+        style_items.append(
+            {
+                "range": "%s!A%d:%s%d" % (sheet_id, data_r0, end_detail_l, data_r1),
+                "style": {"font": {"fontSize": "9pt/1.5"}, "hAlign": 0, "vAlign": 2},
+            }
+        )
+
+    try:
+        _al_batch_update_styles(token, spreadsheet_token, style_items)
+    except Exception as st_ex:
+        return "⚠️ Lark Amount Loss：主表样式失败（值已写入）: %s" % st_ex
+
+    rb_date = _al_get_range(token, spreadsheet_token, sheet_id, "A%d:A%d" % (block_base, block_base))
+    rb_total = _al_get_range(token, spreadsheet_token, sheet_id, "E%d:E%d" % (block_base, block_base))
+    got_date = _al_cell_plain(rb_date[0][0]) if rb_date and rb_date[0] else ""
+    got_total = _al_cell_plain(rb_total[0][0]) if rb_total and rb_total[0] else ""
+    if got_date != target_ddmmyy or got_total.upper() != "TOTAL":
+        return (
+            "⚠️ 主表写入校验失败: expected A%s=%s & E%s=TOTAL, got A=%r E=%r"
+            % (block_base, target_ddmmyy, block_base, got_date, got_total)
+        )
+
+    print(
+        "📎 Lark Amount Loss：主表已写入有记录块（A%d；明细 %d 行）"
+        % (block_base, n_data)
+    )
+    return "done add in sheet kindly check"
+
+
+def _al_sync_second_spreadsheet_by_game(token, target_day, eh, er):
+    # type: (str, date, list, list) -> str
+    second_tok = (
+        _env_first("AMOUNT_LOSS_SECOND_SPREADSHEET_TOKEN", "amountlosssecond") or ""
+    ).strip()
+    if not second_tok:
+        return ""
+
+    buckets = _al_rows_by_game_from_checklog(eh, er)
+    if not buckets:
+        return ""
+
+    marker_str = _amount_loss_fmt_dd_mm_yy(target_day - timedelta(days=2))
+    target_str = _amount_loss_fmt_dd_mm_yy(target_day)
+    notes = []
+
+    for game, rows in sorted(buckets.items(), key=lambda x: x[0].casefold()):
+        title = _al_game_to_sheet_title(game)
+        sid = _al_find_sheet_id_fuzzy(token, second_tok, title)
+        if not sid:
+            notes.append("⚠️ 第二张表未找到子表 %r（game=%r）" % (title, game))
+            continue
+
+        nrow = _al_sheet_row_count(token, second_tok, sid)
+        col_a = _al_get_range(token, second_tok, sid, "A1:A%d" % nrow)
+        anchor = _al_find_anchor_row_col_a(col_a, marker_str)
+        if anchor is None:
+            last_a = _al_last_non_empty_row_col_a(col_a)
+            date_row = (last_a + 3) if last_a else 2
+        else:
+            date_row = anchor + 2
+
+        dup_probe = _al_get_range(token, second_tok, sid, "A%d:A%d" % (date_row, date_row))
+        if dup_probe and dup_probe[0] and _al_cell_plain(dup_probe[0][0]).strip() == target_str:
+            notes.append("%s: record already found (%s)" % (title, target_str))
+            continue
+
+        content_start = date_row + 1
+        matrix = []
+        for rv in rows:
+            row6 = (list(rv) + [""] * 6)[:6]
+            unk = _al_unknown_from_error_cell(row6[5])
+            matrix.append(row6 + [unk])
+
+        end_g = _al_col_num_to_letter(7)
+        vr = [{"range": "%s!A%d:A%d" % (sid, date_row, date_row), "values": [[target_str]]}]
+        if matrix:
+            vr.append(
+                {
+                    "range": "%s!A%d:%s%d"
+                    % (sid, content_start, end_g, content_start + len(matrix) - 1),
+                    "values": matrix,
+                }
+            )
+        try:
+            _al_batch_update_ranges(token, second_tok, vr)
+        except Exception as ex:
+            notes.append("%s: write failed %s" % (title, ex))
+            continue
+
+        style_items = [
+            {
+                "range": "%s!A%d:G%d" % (sid, date_row, date_row),
+                "style": {
+                    "font": {"fontSize": "11pt/1.5", "bold": True},
+                    "hAlign": 2,
+                    "backColor": AL_SECOND_DATE_ROW_BG,
+                },
+            },
+        ]
+        if matrix:
+            r0 = content_start
+            r1 = content_start + len(matrix) - 1
+            col_styles = [
+                ("A", {"font": {"fontSize": "9pt/1.5"}, "hAlign": 1, "vAlign": 2}),
+                ("B", {"font": {"fontSize": "9pt/1.5"}, "hAlign": 2, "vAlign": 2}),
+                ("C", {"font": {"fontSize": "9pt/1.5"}, "hAlign": 1, "vAlign": 2}),
+                ("D", {"font": {"fontSize": "9pt/1.5"}, "hAlign": 1, "vAlign": 2}),
+                ("E", {"font": {"fontSize": "9pt/1.5"}, "hAlign": 1, "vAlign": 2}),
+                ("F", {"font": {"fontSize": "11pt/1.5"}, "hAlign": 0, "vAlign": 0}),
+                ("G", {"font": {"fontSize": "11pt/1.5"}, "hAlign": 0, "vAlign": 0}),
+            ]
+            for col_letter, st in col_styles:
+                style_items.append(
+                    {
+                        "range": "%s!%s%d:%s%d" % (sid, col_letter, r0, col_letter, r1),
+                        "style": st,
+                    }
+                )
+        try:
+            _al_batch_update_styles(token, second_tok, style_items)
+        except Exception as ex:
+            notes.append("%s: style failed %s" % (title, ex))
+
+        notes.append("%s: OK (%d rows)" % (title, len(matrix)))
+
+    # 飞书 OpenAPI 暂无 Excel 式「分组折叠」，此处仅写入数据与样式。
+    return "\n".join(notes) if notes else ""
+
+
 def amount_loss_sync_to_lark_sheet(
     summary_block,
     fp_headers,
@@ -1238,6 +1722,8 @@ def amount_loss_sync_to_lark_sheet(
     eh,
     er,
     target_date_str=None,
+    detail_headers=None,
+    detail_rows=None,
 ):
     """
     在 FPMS 查询结束后写入 Lark 电子表格「Amount Loss YYYY」。
@@ -1296,11 +1782,41 @@ def amount_loss_sync_to_lark_sheet(
         print("📎 Lark Amount Loss：%s" % note)
         return note
 
-    # 业务要求：有记录时先人工录入，不自动写明细。
     if total_n > 0:
-        note = "Kindly manual add the record first， JC still doing it"
-        print("📎 Lark Amount Loss：%s（Total=%s）" % (note, total_n))
-        return note
+        dup_detail = _al_find_existing_detail_block_row(
+            token, spreadsheet_token, sheet_id, nrow, target_ddmmyy
+        )
+        if dup_detail is not None:
+            note = "record already found in sheet (detail %s) at row %d [sheet=%s]" % (
+                target_ddmmyy,
+                dup_detail,
+                sheet_id,
+            )
+            print("📎 Lark Amount Loss：%s" % note)
+            return note
+
+        dh_use = detail_headers if detail_headers else fp_headers
+        dr_use = detail_rows if detail_rows is not None else []
+
+        note_primary = _al_append_primary_records_block(
+            token,
+            spreadsheet_token,
+            sheet_id,
+            nrow,
+            target_day,
+            target_ddmmyy,
+            prev_ddmmyy,
+            total_n,
+            dh_use,
+            dr_use,
+        )
+        note_second = _al_sync_second_spreadsheet_by_game(token, target_day, eh or [], er or [])
+        parts = [note_primary]
+        if note_second.strip():
+            parts.append("📎 Amount Loss second spreadsheet:\n%s" % note_second.strip())
+        out_notes = "\n\n".join(parts)
+        print(out_notes)
+        return out_notes
 
     # Total=0：只追加，不覆盖任何已有内容。
     prev_rows = list(date_map.get(prev_ddmmyy) or [])
@@ -1676,6 +2192,8 @@ def fetch_fpms_data(
             sync_full_cell_rows = None
             sync_eh = None
             sync_er = None
+            sync_detail_headers = None
+            sync_detail_rows = None
 
             if getdata or filterdata or checklog:
                 print("📄 设置 Length Per Page = 1000 并移开焦点…")
@@ -1687,6 +2205,8 @@ def fetch_fpms_data(
                     print(f"⚠️ 抓表: {data['error']}")
                 headers = data.get("headers") or []
                 rows = data.get("rows") or []
+                sync_detail_headers = headers
+                sync_detail_rows = rows
                 if getdata:
                     print(
                         "\n===== CREDIT_LOST_FIX_PROPOSAL 明细（scrollHead 列名 / scrollBody 数据）====="
@@ -1749,6 +2269,8 @@ def fetch_fpms_data(
                                         sync_eh,
                                         sync_er,
                                         target_date_str=target_date_str,
+                                        detail_headers=sync_detail_headers,
+                                        detail_rows=sync_detail_rows,
                                     )
                                     if sync_note:
                                         out = "%s\n\n%s" % (sync_note, out)
@@ -1779,6 +2301,8 @@ def fetch_fpms_data(
                         sync_eh,
                         sync_er,
                         target_date_str=target_date_str,
+                        detail_headers=sync_detail_headers,
+                        detail_rows=sync_detail_rows,
                     )
                     if sync_note:
                         out = "%s\n\n%s" % (sync_note, out)
