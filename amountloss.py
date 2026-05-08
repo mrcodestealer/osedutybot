@@ -1179,9 +1179,20 @@ def amount_loss_sync_to_lark_sheet(
         print("⚠️ Lark Amount Loss：检测到缺失日期 -> %s" % ", ".join(missing_days))
     existed = _al_find_anchor_row_col_a(col_a, target_ddmmyy)
     if existed is not None:
-        note = "record already found in sheet (%s)" % target_ddmmyy
-        print("📎 Lark Amount Loss：%s" % note)
-        return note
+        eprobe = _al_get_range(token, spreadsheet_token, sheet_id, "E%d:E%d" % (existed, existed))
+        ecell = _al_cell_plain(eprobe[0][0]) if eprobe and eprobe[0] else ""
+        if ecell.strip().upper() == "TOTAL":
+            note = "record already found in sheet (%s) at row %d [sheet=%s]" % (
+                target_ddmmyy,
+                existed,
+                sheet_id,
+            )
+            print("📎 Lark Amount Loss：%s" % note)
+            return note
+        print(
+            "⚠️ Lark Amount Loss：A 列命中日期 %s 于 A%d，但 E%d=%r 非 TOTAL，视为非 Amount Loss 区块，继续追加。"
+            % (target_ddmmyy, existed, existed, ecell)
+        )
 
     # 业务要求：有记录时先人工录入，不自动写明细。
     if total_n > 0:
