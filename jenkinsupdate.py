@@ -4429,6 +4429,20 @@ def _jenkins_update_first_non_empty_line(body: str) -> str:
     return (body or "").strip()
 
 
+def _jenkins_update_headline_is_config_like(headline: str) -> bool:
+    """
+    True when the first line is just config syntax (e.g. ``Branch: UAT``) rather than
+    a job hint. In that case, ranking should use the full body to avoid losing signals
+    like ``PMS Version`` that appear on later lines.
+    """
+    t = JENKINS_UPDATE_CMD_RE.sub("", (headline or ""), count=1).strip()
+    if not t:
+        return True
+    if _match_key_line_fuzzy(t):
+        return True
+    return bool(re.match(r"^(?:environment|branch|version|services?)\b", t, re.I))
+
+
 def _jenkins_update_job_score(query_text: str, alias: str) -> float:
     q = JENKINS_UPDATE_CMD_RE.sub("", (query_text or ""), count=1).strip().casefold()
     a = (alias or "").strip().casefold()
@@ -6645,8 +6659,10 @@ def handle_lark_jenkins_update_message(
             return True
 
     head_line = _jenkins_update_first_non_empty_line(body)
-    ranked_h = _rank_jenkins_update_job_matches(head_line)
-    ties_h = _jenkins_update_disambiguation_ties(ranked_h, band=0.08)
+    ties_h: list[tuple[str, float, str, str]] = []
+    if not _jenkins_update_headline_is_config_like(head_line):
+        ranked_h = _rank_jenkins_update_job_matches(head_line)
+        ties_h = _jenkins_update_disambiguation_ties(ranked_h, band=0.08)
     if ties_h:
         ranked, ties = ranked_h, ties_h
     else:
