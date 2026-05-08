@@ -292,6 +292,38 @@ def _sls_msg_is_error_candidate(msg: str) -> bool:
     return ("platformCreditLostFix" in msg) and ("null" in msg.lower())
 
 
+def _sls_log_is_error_candidate(contents):
+    # type: (dict) -> bool
+    """整条日志是否为目标错误：先看 msg，否则在所有字段拼接文本上判断。"""
+    if not contents:
+        return False
+    msg = contents.get("msg")
+    if isinstance(msg, str) and _sls_msg_is_error_candidate(msg):
+        return True
+    blob = " ".join(
+        str(v) for v in contents.values() if v is not None
+    )
+    return ("platformCreditLostFix" in blob) and ("null" in blob.lower())
+
+
+def _sls_format_log_contents(contents):
+    # type: (dict) -> str
+    """SLS 一条 log 的所有字段拼成一段文本（Copy for Sheet / CHECKLOG 可见完整上下文，而非仅 msg 里一小段）。"""
+    if not contents:
+        return ""
+    parts = []
+    for k in sorted(contents.keys()):
+        v = contents.get(k)
+        if v is None:
+            continue
+        s = str(v).strip()
+        if not s:
+            continue
+        s = s.replace("\t", " ").replace("\r", " ").replace("\n", " ")
+        parts.append("%s=%s" % (k, s))
+    return " | ".join(parts)
+
+
 def _ensure_aliyun_log_sdk():
     """checklog 依赖 aliyun.log；失败时抛出 ValueError（含当前解释器路径，便于与 pip 环境对齐）。"""
     try:
@@ -340,11 +372,11 @@ def _sls_fetch_error_msgs_for_row(transfer_id, center_dt):
     out = []  # type: List[str]
     for log in resp.get_logs():
         contents = log.get_contents() or {}
-        msg = contents.get("msg")
-        if msg is None:
+        if not _sls_log_is_error_candidate(contents):
             continue
-        if isinstance(msg, str) and _sls_msg_is_error_candidate(msg):
-            out.append(msg.strip())
+        formatted = _sls_format_log_contents(contents)
+        if formatted:
+            out.append(formatted)
     return out
 
 
@@ -362,7 +394,7 @@ def _attach_sls_error_logs(filter_headers, filter_rows):
     print(
         f"📡 SLS：每行 Transfer ID + Start Time ±{SLS_WINDOW_MINUTES} 分钟；"
         '检索式与控制台一致："<id> and \\"null null\\""；'
-        "保留 msg 中含 platformCreditLostFix 且含 null 的记录。"
+        "保留 platformCreditLostFix + null 的日志；Error log 写入该条所有字段（非仅 msg）。"
     )
     _ensure_aliyun_log_sdk()
     for row in filter_rows:
