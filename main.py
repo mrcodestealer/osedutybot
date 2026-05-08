@@ -228,6 +228,9 @@ def run_amountloss_check(chat_id, date_str=None):
                 checklog=True,
             )
             if isinstance(result, dict) and result.get("lark_card"):
+                sync_note = str(result.get("sync_note") or "").strip()
+                if sync_note:
+                    send_message(chat_id, sync_note)
                 card_json = json.dumps(result["lark_card"])
                 resp = send_message(chat_id, card_json, msg_type="interactive")
                 if resp.get("code") != 0:
