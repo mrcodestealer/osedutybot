@@ -1091,6 +1091,47 @@ def _al_mask_token(tok):
     return s[:4] + "..." + s[-4:]
 
 
+def _al_zero_block_signature_at_row(token, spreadsheet_token, sheet_id, row_idx):
+    # type: (str, str, str, int) -> tuple[bool, str]
+    """
+    判断 row_idx 是否为我们自动写入的 0-record 区块起始行。
+    需要至少满足：
+      - E 行为 TOTAL
+      - F 行包含 Manual credit lost
+      - 下一行 E 为 0
+      - 下两行 B / E 均为 No data available in table
+    """
+    probe = _al_get_range(
+        token,
+        spreadsheet_token,
+        sheet_id,
+        "B%d:F%d" % (row_idx, row_idx + 2),
+    )
+    # 统一为 3x5（B..F）
+    grid = []
+    for i in range(3):
+        src = probe[i] if i < len(probe) else []
+        row = []
+        for j in range(5):
+            row.append(_al_cell_plain(src[j]) if j < len(src) else "")
+        grid.append(row)
+
+    e0 = grid[0][3].strip().upper()  # E(row)
+    f0 = grid[0][4].strip().casefold()  # F(row)
+    e1 = grid[1][3].strip()  # E(row+1)
+    b2 = grid[2][0].strip().casefold()  # B(row+2)
+    e2 = grid[2][3].strip().casefold()  # E(row+2)
+    ok = (
+        e0 == "TOTAL"
+        and ("manual credit" in f0)
+        and e1 == "0"
+        and b2 == "no data available in table"
+        and e2 == "no data available in table"
+    )
+    dbg = "E=%r F=%r E+1=%r B+2=%r E+2=%r" % (e0, f0, e1, b2, e2)
+    return ok, dbg
+
+
 def _amount_loss_detect_missing_days_this_month(col_a_values):
     # type: (list) -> List[str]
     """
@@ -1179,9 +1220,13 @@ def amount_loss_sync_to_lark_sheet(
         print("⚠️ Lark Amount Loss：检测到缺失日期 -> %s" % ", ".join(missing_days))
     existed = _al_find_anchor_row_col_a(col_a, target_ddmmyy)
     if existed is not None:
-        eprobe = _al_get_range(token, spreadsheet_token, sheet_id, "E%d:E%d" % (existed, existed))
-        ecell = _al_cell_plain(eprobe[0][0]) if eprobe and eprobe[0] else ""
-        if ecell.strip().upper() == "TOTAL":
+        ok_sig, sig_dbg = _al_zero_block_signature_at_row(
+            token,
+            spreadsheet_token,
+            sheet_id,
+            existed,
+        )
+        if ok_sig:
             note = "record already found in sheet (%s) at row %d [sheet=%s]" % (
                 target_ddmmyy,
                 existed,
@@ -1190,8 +1235,8 @@ def amount_loss_sync_to_lark_sheet(
             print("📎 Lark Amount Loss：%s" % note)
             return note
         print(
-            "⚠️ Lark Amount Loss：A 列命中日期 %s 于 A%d，但 E%d=%r 非 TOTAL，视为非 Amount Loss 区块，继续追加。"
-            % (target_ddmmyy, existed, existed, ecell)
+            "⚠️ Lark Amount Loss：A 列命中日期 %s 于 A%d，但区块签名不匹配（%s），视为非有效区块，继续追加。"
+            % (target_ddmmyy, existed, sig_dbg)
         )
 
     # 业务要求：有记录时先人工录入，不自动写明细。
