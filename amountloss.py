@@ -1338,7 +1338,7 @@ def amount_loss_sync_to_lark_sheet(
     style_items = [
         {
             "range": "%s!A%d:A%d" % (sheet_id, base, base),
-            "style": {"font": {"fontSize": "11pt/1.5"}, "hAlign": 2},
+            "style": {"font": {"fontSize": "11pt/1.5", "bold": True}, "hAlign": 2},
         },
         {
             "range": "%s!E%d:E%d" % (sheet_id, base, base),
