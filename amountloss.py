@@ -1187,6 +1187,17 @@ def _al_collect_zero_block_rows_and_dates(grid_af):
     return rows, dmap
 
 
+def _al_parse_ddmmyy_date(s):
+    # type: (str) -> Optional[date]
+    raw = (s or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, "%d/%m/%y").date()
+    except ValueError:
+        return None
+
+
 def _amount_loss_detect_missing_days_this_month(col_a_values):
     # type: (list) -> List[str]
     """
@@ -1304,13 +1315,27 @@ def amount_loss_sync_to_lark_sheet(
             last_a = _al_last_non_empty_row_col_a(col_a)
             base = (last_a + 3) if last_a else 2
 
+    # 跨月时，在新块前插一行「X 月份总结」。
+    last_valid_before = max([r for r in valid_rows if r < base], default=None)
+    need_month_summary = False
+    month_summary_text = ""
+    if last_valid_before is not None and (last_valid_before - 1) < len(grid_af):
+        prev_date_raw = _al_cell_plain(grid_af[last_valid_before - 1][0] if grid_af[last_valid_before - 1] else "")
+        prev_date = _al_parse_ddmmyy_date(prev_date_raw)
+        if prev_date is not None and (
+            prev_date.year != target_day.year or prev_date.month != target_day.month
+        ):
+            need_month_summary = True
+            month_summary_text = "%d 月份总结" % target_day.month
+
+    block_rows = 4 if need_month_summary else 3
     end_zero_l = _al_col_num_to_letter(5 + len(AL_ZERO_RECORD_HEADERS))
     for _ in range(300):
         probe = _al_get_range(
             token,
             spreadsheet_token,
             sheet_id,
-            "A%d:%s%d" % (base, end_zero_l, base + 2),
+            "A%d:%s%d" % (base, end_zero_l, base + block_rows - 1),
         )
         if not _al_block_has_content(probe):
             break
@@ -1320,28 +1345,49 @@ def amount_loss_sync_to_lark_sheet(
 
     row_hdr = ["TOTAL"] + AL_ZERO_RECORD_HEADERS
     row_zero = ["0"] + (["0"] * len(AL_ZERO_RECORD_HEADERS))
-    ranges_batch = [
-        {"range": "%s!A%d:A%d" % (sheet_id, base, base), "values": [[target_ddmmyy]]},
-        {"range": "%s!E%d:%s%d" % (sheet_id, base, end_zero_l, base), "values": [row_hdr]},
-        {"range": "%s!E%d:%s%d" % (sheet_id, base + 1, end_zero_l, base + 1), "values": [row_zero]},
+    block_base = base + 1 if need_month_summary else base
+    ranges_batch = []
+    if need_month_summary:
+        ranges_batch.append(
+            {"range": "%s!A%d:A%d" % (sheet_id, base, base), "values": [[month_summary_text]]}
+        )
+    ranges_batch.extend([
+        {"range": "%s!A%d:A%d" % (sheet_id, block_base, block_base), "values": [[target_ddmmyy]]},
+        {"range": "%s!E%d:%s%d" % (sheet_id, block_base, end_zero_l, block_base), "values": [row_hdr]},
         {
-            "range": "%s!B%d:B%d" % (sheet_id, base + 2, base + 2),
+            "range": "%s!E%d:%s%d" % (sheet_id, block_base + 1, end_zero_l, block_base + 1),
+            "values": [row_zero],
+        },
+        {
+            "range": "%s!B%d:B%d" % (sheet_id, block_base + 2, block_base + 2),
             "values": [["No data available in table"]],
         },
         {
-            "range": "%s!E%d:E%d" % (sheet_id, base + 2, base + 2),
+            "range": "%s!E%d:E%d" % (sheet_id, block_base + 2, block_base + 2),
             "values": [["No data available in table"]],
         },
-    ]
+    ])
     _al_batch_update_ranges(token, spreadsheet_token, ranges_batch)
 
-    style_items = [
+    style_items = []
+    if need_month_summary:
+        style_items.append(
+            {
+                "range": "%s!A%d:%s%d" % (sheet_id, base, end_zero_l, base),
+                "style": {
+                    "font": {"fontSize": "18pt/1.5", "bold": True},
+                    "hAlign": 0,
+                    "backColor": "#224BAA",
+                },
+            }
+        )
+    style_items.extend([
         {
-            "range": "%s!A%d:A%d" % (sheet_id, base, base),
+            "range": "%s!A%d:A%d" % (sheet_id, block_base, block_base),
             "style": {"font": {"fontSize": "11pt/1.5", "bold": True}, "hAlign": 2},
         },
         {
-            "range": "%s!E%d:E%d" % (sheet_id, base, base),
+            "range": "%s!E%d:E%d" % (sheet_id, block_base, block_base),
             "style": {
                 "font": {"fontSize": "10pt/1.5", "bold": True},
                 "hAlign": 0,
@@ -1350,7 +1396,7 @@ def amount_loss_sync_to_lark_sheet(
             },
         },
         {
-            "range": "%s!F%d:%s%d" % (sheet_id, base, end_zero_l, base),
+            "range": "%s!F%d:%s%d" % (sheet_id, block_base, end_zero_l, block_base),
             "style": {
                 "font": {"fontSize": "10pt/1.5"},
                 "hAlign": 0,
@@ -1359,7 +1405,7 @@ def amount_loss_sync_to_lark_sheet(
             },
         },
         {
-            "range": "%s!E%d:%s%d" % (sheet_id, base + 1, end_zero_l, base + 1),
+            "range": "%s!E%d:%s%d" % (sheet_id, block_base + 1, end_zero_l, block_base + 1),
             "style": {
                 "font": {"fontSize": "10pt/1.5"},
                 "hAlign": 2,
@@ -1368,18 +1414,18 @@ def amount_loss_sync_to_lark_sheet(
             },
         },
         {
-            "range": "%s!E%d:E%d" % (sheet_id, base + 1, base + 1),
+            "range": "%s!E%d:E%d" % (sheet_id, block_base + 1, block_base + 1),
             "style": {"backColor": "#68041C"},
         },
         {
-            "range": "%s!B%d:B%d" % (sheet_id, base + 2, base + 2),
+            "range": "%s!B%d:B%d" % (sheet_id, block_base + 2, block_base + 2),
             "style": {"font": {"fontSize": "9pt/1.5"}, "hAlign": 1, "backColor": "#282827"},
         },
         {
-            "range": "%s!E%d:E%d" % (sheet_id, base + 2, base + 2),
+            "range": "%s!E%d:E%d" % (sheet_id, block_base + 2, block_base + 2),
             "style": {"font": {"fontSize": "9pt/1.5"}, "hAlign": 1, "backColor": "#282827"},
         },
-    ]
+    ])
     try:
         _al_batch_update_styles(token, spreadsheet_token, style_items)
     except Exception as st_ex:
@@ -1388,8 +1434,8 @@ def amount_loss_sync_to_lark_sheet(
         return note
 
     # 写入后回读验证：避免“已回 done 但用户看不到”的假成功。
-    rb_date = _al_get_range(token, spreadsheet_token, sheet_id, "A%d:A%d" % (base, base))
-    rb_total = _al_get_range(token, spreadsheet_token, sheet_id, "E%d:E%d" % (base, base))
+    rb_date = _al_get_range(token, spreadsheet_token, sheet_id, "A%d:A%d" % (block_base, block_base))
+    rb_total = _al_get_range(token, spreadsheet_token, sheet_id, "E%d:E%d" % (block_base, block_base))
     got_date = _al_cell_plain(rb_date[0][0]) if rb_date and rb_date[0] else ""
     got_total = _al_cell_plain(rb_total[0][0]) if rb_total and rb_total[0] else ""
     if got_date != target_ddmmyy or got_total.upper() != "TOTAL":
@@ -1397,9 +1443,9 @@ def amount_loss_sync_to_lark_sheet(
             "⚠️ sheet write verify failed: expected A%s=%s & E%s=TOTAL, got A=%r E=%r "
             "(sheet=%s, spreadsheet=%s)"
             % (
-                base,
+                block_base,
                 target_ddmmyy,
-                base,
+                block_base,
                 got_date,
                 got_total,
                 sheet_id,
@@ -1410,7 +1456,7 @@ def amount_loss_sync_to_lark_sheet(
         return note
 
     note = "done add in sheet kindly check"
-    print("📎 Lark Amount Loss：%s（A%d=%s）" % (note, base, target_ddmmyy))
+    print("📎 Lark Amount Loss：%s（A%d=%s）" % (note, block_base, target_ddmmyy))
     return note
 
 

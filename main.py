@@ -821,52 +821,21 @@ def run_np_third_http_job(chat_id: str, argv: list[str]):
 
 def scheduled_amountloss_check():
     """
-    每日 9:00：在 DUTY_CHAT_ID 群 @TARGET_USER_OPEN_ID，
-    文案格式：As checked today amount loss show 0 records / Search time: 0.029 seconds
-    （数字与耗时来自 amountloss.fetch_fpms_data 实时结果）
+    每日 9:00：与手动 `/al` 相同（filterdata + CHECKLOG + Lark sheet 同步 + 卡片 + TSV）。
+    目标日期为昨天（与 fetch_fpms_data 默认一致）。
     """
     target_chat_id = DUTY_CHAT_ID
-    try:
-        from amountloss import fetch_fpms_data
-    except ImportError as e:
-        send_message(
-            target_chat_id,
-            f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>\n'
-            f"❌ 无法加载 amountloss 模块: {str(e)}",
-        )
-        return
-
-    result = None
-    for attempt in range(1, AMOUNT_LOSS_MAX_ATTEMPTS + 1):
-        try:
-            result = fetch_fpms_data(headless=True, target_date_str=None)
-            break
-        except Exception as e:
-            if attempt < AMOUNT_LOSS_MAX_ATTEMPTS:
-                send_message(
-                    target_chat_id,
-                    f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>\n{AMOUNT_LOSS_RETRY_NOTICE}',
-                )
-                print(f"[scheduled_amountloss_check] attempt {attempt} failed: {e!r}, auto-retrying...")
-            else:
-                send_message(
-                    target_chat_id,
-                    f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>\n'
-                    f"❌ Amount Loss 检查失败: {str(e)}",
-                )
-                print(f"scheduled_amountloss_check failed after {AMOUNT_LOSS_MAX_ATTEMPTS} attempts: {e}")
-                return
-
-    if result is None:
-        return
-
-    line = (result or "").strip()
-    # 页面原文多为 "Total 0 records / Search time: ..."，去掉开头 Total 以贴合口头文案
-    line = re.sub(r"^Total\s+", "", line, count=1, flags=re.IGNORECASE)
     mention = f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>'
-    text = f"{mention}\nAs checked amount loss show {line}"
-    send_message(target_chat_id, text)
-    print(f"✅ Scheduled Amount Loss (9:00) sent to {target_chat_id}")
+    send_message(
+        target_chat_id,
+        f"{mention}\n⏳ Amount Loss (9:00 — same as /al), please wait...",
+    )
+    threading.Thread(
+        target=run_amountloss_check,
+        args=(target_chat_id, None),
+        daemon=True,
+    ).start()
+    print(f"✅ Scheduled Amount Loss (9:00) started (run_amountloss_check) → {target_chat_id}")
 
 # ================= P0 交互确认相关 =================
 pending_p0_confirmation = {}  # key: sender_id -> {"timestamp": datetime, "original_text": str}
