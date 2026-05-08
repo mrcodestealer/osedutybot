@@ -1295,14 +1295,14 @@ def amount_loss_sync_to_lark_sheet(
     prev_rows = list(date_map.get(prev_ddmmyy) or [])
     prev_anchor = prev_rows[0] if prev_rows else None
     if prev_anchor is not None:
-        base = prev_anchor + 4
+        base = prev_anchor + 3
     else:
         last_valid = max(valid_rows) if valid_rows else None
         if last_valid is not None:
-            base = last_valid + 4
+            base = last_valid + 3
         else:
             last_a = _al_last_non_empty_row_col_a(col_a)
-            base = (last_a + 4) if last_a else 2
+            base = (last_a + 3) if last_a else 2
 
     end_zero_l = _al_col_num_to_letter(5 + len(AL_ZERO_RECORD_HEADERS))
     for _ in range(300):
@@ -1314,7 +1314,7 @@ def amount_loss_sync_to_lark_sheet(
         )
         if not _al_block_has_content(probe):
             break
-        base += 4
+        base += 3
     else:
         raise ValueError("找不到安全追加行（检查 A~%s 是否存在大量非空内容）" % end_zero_l)
 
@@ -1342,19 +1342,34 @@ def amount_loss_sync_to_lark_sheet(
         },
         {
             "range": "%s!E%d:E%d" % (sheet_id, base, base),
-            "style": {"font": {"fontSize": "10pt/1.5", "bold": True}, "hAlign": 0, "backColor": "#987210"},
+            "style": {
+                "font": {"fontSize": "10pt/1.5", "bold": True},
+                "hAlign": 0,
+                "vAlign": 2,
+                "backColor": "#987210",
+            },
         },
         {
             "range": "%s!F%d:%s%d" % (sheet_id, base, end_zero_l, base),
-            "style": {"font": {"fontSize": "10pt/1.5"}, "hAlign": 0, "backColor": "#987210"},
+            "style": {
+                "font": {"fontSize": "10pt/1.5"},
+                "hAlign": 0,
+                "vAlign": 2,
+                "backColor": "#987210",
+            },
+        },
+        {
+            "range": "%s!E%d:%s%d" % (sheet_id, base + 1, end_zero_l, base + 1),
+            "style": {
+                "font": {"fontSize": "10pt/1.5"},
+                "hAlign": 2,
+                "vAlign": 2,
+                "backColor": "#987210",
+            },
         },
         {
             "range": "%s!E%d:E%d" % (sheet_id, base + 1, base + 1),
-            "style": {"font": {"fontSize": "10pt/1.5"}, "hAlign": 0, "backColor": "#68041C"},
-        },
-        {
-            "range": "%s!F%d:%s%d" % (sheet_id, base + 1, end_zero_l, base + 1),
-            "style": {"font": {"fontSize": "10pt/1.5"}, "hAlign": 0, "backColor": "#987210"},
+            "style": {"backColor": "#68041C"},
         },
         {
             "range": "%s!B%d:B%d" % (sheet_id, base + 2, base + 2),
