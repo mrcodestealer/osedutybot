@@ -50,6 +50,8 @@ Env (optional):
   If **Machine** label starts with ``MDR`` (e.g. ``MDR7178``), uses ``https://backend-midori.osmplay.com``
   (Midori; Log Third Http path same as NP: ``/log/logThirdHttpReq``; EGM status UI lives under ``/egm/``).
   Login defaults ``MDR_BACKEND_USER`` / ``MDR_BACKEND_PASSWORD`` to ``mdr-omduty`` when unset.
+  If **Machine** label starts with ``TBR`` (e.g. ``TBR1234``), uses ``https://backend-tbr.osmplay.com``
+  + ``TBR_BACKEND_USER`` / ``TBR_BACKEND_PASSWORD`` (defaults ``tromduty`` when unset).
   If **Machine** label starts with ``TBP`` (e.g. ``TBP8641``), uses ``https://backend-tbp.osmplay.com``
   + ``TBP_BACKEND_USER`` / ``TBP_BACKEND_PASSWORD``.
   TBP extras: ``TBP_THIRD_HTTP_AMOUNT_SCALE`` (default ``1`` — set e.g. ``100`` if Request amounts are in cents),
@@ -59,7 +61,7 @@ Env (optional):
   NP debug — **visible Chromium** (not headless), same logic as Duty Bot ``/npthirdhttp``::
     python3 checkcredit.py --checkuser --player-id 132594948 --date 2026-04-27 \\
       --time 23:55:12.092 --machine-substr 2074 --credit 1352 --pause
-    Add ``--machine-display WF8173`` / ``DHS3178`` / ``NCH1171`` / ``CP7178`` / ``OSM7178`` / ``MDR7178`` / ``TBP8641`` when testing non-NP backends from CLI
+    Add ``--machine-display WF8173`` / ``DHS3178`` / ``NCH1171`` / ``CP7178`` / ``OSM7178`` / ``MDR7178`` / ``TBR1234`` / ``TBP8641`` when testing non-NP backends from CLI
     (Duty Bot passes machine from ``/checkcreditdate`` context automatically).
   Use ``--pause`` to leave Chromium open until you press **Enter in this terminal** (then the script closes
   the browser — that is intentional). If stdin is not a TTY (IDE Run / piped input), ``input()`` gets EOF and
@@ -1166,7 +1168,7 @@ def build_np_choice_lark_card(
     td = (target_date_iso or "").strip()
     md = (machine_display or "").strip()
     be = (third_http_backend or "NP").strip().upper()
-    if be not in ("NP", "WF", "DHS", "NCH", "CP", "OSM", "MDR", "TBP"):
+    if be not in ("NP", "WF", "DHS", "NCH", "CP", "OSM", "MDR", "TBR", "TBP"):
         be = "NP"
     if td or md:
         bits: list[str] = []
@@ -2265,10 +2267,13 @@ _WINFORD_NP_BASE = "https://backend-winford.osmplay.com".rstrip("/")
 _DHS_BACKEND_BASE = "https://backend-dhs.osmplay.com".rstrip("/")
 _NCH_BACKEND_BASE = "https://backend-nc.osmplay.com".rstrip("/")
 _TBP_BACKEND_BASE = "https://backend-tbp.osmplay.com".rstrip("/")
+_TBR_BACKEND_BASE = "https://backend-tbr.osmplay.com".rstrip("/")
 _CP_BACKEND_BASE = "https://backend.osmplay.com".rstrip("/")
 _MDR_BACKEND_BASE = "https://backend-midori.osmplay.com".rstrip("/")
 _MDR_BACKEND_DEFAULT_USER = "mdr-omduty"
 _MDR_BACKEND_DEFAULT_PASSWORD = "mdr-omduty"
+_TBR_BACKEND_DEFAULT_USER = "tromduty"
+_TBR_BACKEND_DEFAULT_PASSWORD = "tromduty"
 
 
 def _np_tbp_amount_scale() -> float:
@@ -2345,6 +2350,18 @@ def _np_use_mdr_log_backend(machine_display: str | None) -> bool:
     return bool(alnum.startswith("MDR"))
 
 
+def _np_use_tbr_log_backend(machine_display: str | None) -> bool:
+    """TBR cabinet — folder / last path segment starts with ``TBR`` (e.g. ``TBR1234``)."""
+    raw = (machine_display or "").strip()
+    if not raw:
+        return False
+    seg = raw.replace("\\", "/").rstrip("/").split("/")[-1].strip()
+    if seg and re.match(r"(?i)TBR", seg):
+        return True
+    alnum = re.sub(r"[^A-Za-z0-9]", "", raw).upper()
+    return bool(alnum.startswith("TBR"))
+
+
 def _np_use_tbp_log_backend(machine_display: str | None) -> bool:
     """TBP cabinet — folder / last path segment starts with ``TBP`` (e.g. ``TBP8641``)."""
     raw = (machine_display or "").strip()
@@ -2381,7 +2398,7 @@ def _np_use_winford_log_backend(machine_display: str | None) -> bool:
 
 
 def _np_log_backend_tag(machine_display: str | None) -> str:
-    """Short label for Lark / Duty Bot: ``DHS``, ``NCH``, ``OSM``, ``CP``, ``MDR``, ``TBP``, ``WF``, or ``NP``."""
+    """Short label for Lark / Duty Bot: ``DHS``, ``NCH``, ``OSM``, ``CP``, ``MDR``, ``TBR``, ``TBP``, ``WF``, or ``NP``."""
     if _np_use_dhs_log_backend(machine_display):
         return "DHS"
     if _np_use_nch_log_backend(machine_display):
@@ -2392,6 +2409,8 @@ def _np_log_backend_tag(machine_display: str | None) -> str:
         return "CP"
     if _np_use_mdr_log_backend(machine_display):
         return "MDR"
+    if _np_use_tbr_log_backend(machine_display):
+        return "TBR"
     if _np_use_tbp_log_backend(machine_display):
         return "TBP"
     if _np_use_winford_log_backend(machine_display):
@@ -2408,6 +2427,8 @@ def _np_resolve_backend(machine_display: str | None) -> tuple[str, str, str]:
     **CP** / **OSM** (machine labels ``CP*`` / ``OSM*``) → ``backend.osmplay.com`` + ``CP_BACKEND_USER`` / ``CP_BACKEND_PASSWORD``.
     **MDR** (machine label ``MDR*``) → ``backend-midori.osmplay.com`` + ``MDR_BACKEND_*``
     (default ``mdr-omduty`` / ``mdr-omduty`` when unset).
+    **TBR** (machine label ``TBR*``) → ``backend-tbr.osmplay.com`` + ``TBR_BACKEND_*``
+    (default ``tromduty`` / ``tromduty`` when unset).
     **TBP** (machine label ``TBP*``) → ``backend-tbp.osmplay.com`` + ``TBP_BACKEND_*``.
     **Winford** (``WF*``, ``winford``, ``NWR8173`` OSS alias) → ``backend-winford`` + ``WF_BACKEND_*``
     (default ``omduty1``).
@@ -2433,6 +2454,12 @@ def _np_resolve_backend(machine_display: str | None) -> tuple[str, str, str]:
             _MDR_BACKEND_DEFAULT_PASSWORD
         )
         return _MDR_BACKEND_BASE, u, p
+    if _np_use_tbr_log_backend(machine_display):
+        u = (os.environ.get("TBR_BACKEND_USER") or _TBR_BACKEND_DEFAULT_USER).strip() or _TBR_BACKEND_DEFAULT_USER
+        p = (os.environ.get("TBR_BACKEND_PASSWORD") or _TBR_BACKEND_DEFAULT_PASSWORD).strip() or (
+            _TBR_BACKEND_DEFAULT_PASSWORD
+        )
+        return _TBR_BACKEND_BASE, u, p
     if _np_use_tbp_log_backend(machine_display):
         u = (os.environ.get("TBP_BACKEND_USER") or "").strip()
         p = (os.environ.get("TBP_BACKEND_PASSWORD") or "").strip()
@@ -2669,7 +2696,7 @@ def _np_normalize_jsonish_quotes(s: str) -> str:
 
 def _np_parse_machine_amount_from_request_blob(blob: str) -> tuple[str | None, float | None]:
     """
-    Best-effort Request JSON fields across NP / NCH / DHS / CP / OSM / MDR / TBP / WF style payloads.
+    Best-effort Request JSON fields across NP / NCH / DHS / CP / OSM / MDR / TBR / TBP / WF style payloads.
     Some cabinets use ``machineNo`` / ``add_num`` instead of ``machineId`` / ``amount``.
     """
     if not blob:
@@ -3931,7 +3958,7 @@ def screenshot_np_recharge_detail(
     of that credit (default 0.05).
     (non-positive ``expected_credit`` is ignored — same as ``None``). **Header Request Time is not
     used to reject** (avoids closing valid dialogs when UI text differs slightly from log seconds).
-    ``machine_display``: LogNavigator / OSS folder label (``DHS*`` / ``NCH*`` / ``CP*`` / ``OSM*`` / ``MDR*`` / ``TBP*`` → respective backend;
+    ``machine_display``: LogNavigator / OSS folder label (``DHS*`` / ``NCH*`` / ``CP*`` / ``OSM*`` / ``MDR*`` / ``TBR*`` / ``TBP*`` → respective backend;
     creds fall back to ``NP_BACKEND_*`` when ``DHS_BACKEND_*`` / ``NCH_BACKEND_*`` unset).
     ``WF*`` / ``NWR8173`` → Winford + ``WF_BACKEND_*``; else NP + ``NP_BACKEND_*``.
 
