@@ -1012,12 +1012,19 @@ def build_add_reminder_form_card() -> dict:
     ]
     form_elements.extend(
         [
-            {"tag": "div", "text": {"tag": "plain_text", "content": "Reason"}},
             {
                 "tag": "input",
                 "name": "reason",
+                "input_type": "multiline_text",
+                "rows": 5,
+                "auto_resize": True,
+                "max_rows": 12,
+                "width": "fill",
+                "label": {"tag": "plain_text", "content": "Reason"},
+                "label_position": "top",
                 "placeholder": {"tag": "plain_text", "content": "Kindly send graph"},
                 "required": True,
+                "max_length": 1000,
             },
             {
                 "tag": "button",
