@@ -2056,22 +2056,35 @@ def lark_webhook():
                     act_ca = ev_ca.get("action") if isinstance(ev_ca.get("action"), dict) else {}
                     start_raw = _lark_get_card_form_field(act_ca, "start_date")
                     end_raw = _lark_get_card_form_field(act_ca, "end_date")
-                    time_raw = _lark_get_card_form_field(act_ca, "time")
+                    time_preset = _lark_get_card_form_field(act_ca, "time_preset")
+                    time_override = _lark_get_card_form_field(act_ca, "time_override")
+                    legacy_time = _lark_get_card_form_field(act_ca, "time")
                     reason = _lark_get_card_form_field(act_ca, "reason")
                     if isinstance(parsed_ca, dict):
-                        start_raw = start_raw or _lark_form_field_text((parsed_ca.get("form_value") or {}).get("start_date"))
-                        end_raw = end_raw or _lark_form_field_text((parsed_ca.get("form_value") or {}).get("end_date"))
-                        time_raw = time_raw or _lark_form_field_text((parsed_ca.get("form_value") or {}).get("time"))
-                        reason = reason or _lark_form_field_text((parsed_ca.get("form_value") or {}).get("reason"))
+                        fv_rem = parsed_ca.get("form_value")
+                        if isinstance(fv_rem, dict):
+                            start_raw = start_raw or _lark_form_field_text(fv_rem.get("start_date"))
+                            end_raw = end_raw or _lark_form_field_text(fv_rem.get("end_date"))
+                            time_preset = time_preset or _lark_form_field_text(fv_rem.get("time_preset"))
+                            time_override = time_override or _lark_form_field_text(fv_rem.get("time_override"))
+                            legacy_time = legacy_time or _lark_form_field_text(fv_rem.get("time"))
+                            reason = reason or _lark_form_field_text(fv_rem.get("reason"))
                         start_raw = start_raw or _lark_form_field_text(parsed_ca.get("start_date"))
                         end_raw = end_raw or _lark_form_field_text(parsed_ca.get("end_date"))
-                        time_raw = time_raw or _lark_form_field_text(parsed_ca.get("time"))
+                        time_preset = time_preset or _lark_form_field_text(parsed_ca.get("time_preset"))
+                        time_override = time_override or _lark_form_field_text(parsed_ca.get("time_override"))
+                        legacy_time = legacy_time or _lark_form_field_text(parsed_ca.get("time"))
                         reason = reason or _lark_form_field_text(parsed_ca.get("reason"))
                     # Last-resort deep scan for provider-specific callback shapes.
                     start_raw = start_raw or _lark_find_field_deep(ev_ca, "start_date")
                     end_raw = end_raw or _lark_find_field_deep(ev_ca, "end_date")
-                    time_raw = time_raw or _lark_find_field_deep(ev_ca, "time")
+                    time_preset = time_preset or _lark_find_field_deep(ev_ca, "time_preset")
+                    time_override = time_override or _lark_find_field_deep(ev_ca, "time_override")
+                    legacy_time = legacy_time or _lark_find_field_deep(ev_ca, "time")
                     reason = reason or _lark_find_field_deep(ev_ca, "reason")
+                    time_raw = reminder.resolve_add_reminder_form_time(
+                        time_preset, time_override, legacy_time=legacy_time
+                    )
                     fv_ca = act_ca.get("form_value") if isinstance(act_ca, dict) else {}
                     when_labels_cb: list[str] = []
                     if isinstance(fv_ca, dict):
@@ -2118,7 +2131,7 @@ def lark_webhook():
                     if not (start_raw and end_raw and time_raw and reason):
                         send_message(
                             chat_id_ca,
-                            "❌ Please fill all fields: Start Date, End Date, Time, Reason.",
+                            "❌ Please fill all fields: Start Date, End Date, Time (quick pick or exact), Reason.",
                         )
                         return
                     result = reminder.add_sheet_reminder(
