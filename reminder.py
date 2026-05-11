@@ -930,11 +930,11 @@ def build_add_reminder_form_card() -> dict:
             "placeholder": {"tag": "plain_text", "content": "Pick end date"},
             "required": True,
         },
-        {"tag": "div", "text": {"tag": "plain_text", "content": "Time (every 10 min)"}},
+        {"tag": "div", "text": {"tag": "plain_text", "content": "Time"}},
         {
             "tag": "select_static",
             "name": "time",
-            "width": "fill",
+            "width": "auto",
             "placeholder": {"tag": "plain_text", "content": "Select time"},
             "options": time_options,
             "required": True,
@@ -949,7 +949,7 @@ def build_add_reminder_form_card() -> dict:
                 "content": "Every day / weekdays / Every month / One time",
             },
             "required": False,
-            "width": "fill",
+            "width": "auto",
             "selected_values": ["Every day"],
             "options": [
                 {"text": {"tag": "plain_text", "content": lab}, "value": lab}
@@ -974,6 +974,7 @@ def build_add_reminder_form_card() -> dict:
             {
                 "tag": "input",
                 "name": "reason",
+                "width": "fill",
                 "placeholder": {"tag": "plain_text", "content": "Kindly send graph"},
                 "required": True,
             },
