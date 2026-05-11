@@ -211,25 +211,6 @@ def _sheet_date_to_timestamp_ms(d: date) -> int:
     return int(dt.timestamp() * 1000)
 
 
-def resolve_add_reminder_form_time(
-    time_preset: str | None,
-    time_override: str | None,
-    *,
-    legacy_time: str | None = None,
-) -> str:
-    """
-    Add-reminder card: optional **Exact time** overrides **Time (quick pick)**.
-    ``legacy_time`` supports older cards that used a single ``time`` field only.
-    """
-    o = (time_override or "").strip()
-    if o:
-        return o
-    p = (time_preset or "").strip()
-    if p:
-        return p
-    return (legacy_time or "").strip()
-
-
 def _normalize_sheet_time(raw: str) -> str:
     """
     Normalize to ``H:MMAPM`` (12-hour) for storage + cron.
@@ -912,26 +893,10 @@ def send_sheet_reminder_list_card(*, send_func, chat_id: str, get_token_func) ->
 
 
 def build_add_reminder_form_card() -> dict:
-    time_options: list[dict] = []
-    for hh in range(24):
-        for mm in (0, 30):
-            ap = "AM" if hh < 12 else "PM"
-            hh12 = hh % 12
-            if hh12 == 0:
-                hh12 = 12
-            v = f"{hh12}:{mm:02d}{ap}"
-            time_options.append({"text": {"tag": "plain_text", "content": v}, "value": v})
-    default_quick = "9:30AM"
-    # Lark ``initial_index`` is 1-based (1 = first option); 0 = none selected.
-    initial_index_1based = next(
-        (i + 1 for i, o in enumerate(time_options) if o.get("value") == default_quick),
-        1,
-    )
-
     intro_lines = [
         "Fill all fields, then tap **Submit** once.",
         "Date can be picked from UI date picker.",
-        "**Time:** pick **30-minute slots** below, or type an **exact time** to override (e.g. `9:55AM`, `14:25`).",
+        "**Time:** type freely — e.g. `9:30AM`, `10:00AM`, `9:55AM`, or 24-hour `14:25` (Lark dropdowns are not editable on some clients).",
         "**When** (optional): weekdays / **Every day** / **Every month** / **One time** (only on Start date) — same labels as Bitable **when**.",
     ]
 
@@ -950,30 +915,16 @@ def build_add_reminder_form_card() -> dict:
             "placeholder": {"tag": "plain_text", "content": "Pick end date"},
             "required": True,
         },
-        {"tag": "div", "text": {"tag": "plain_text", "content": "Time (quick pick, every 30 min)"}},
-        {
-            "tag": "select_static",
-            "name": "time_preset",
-            "placeholder": {"tag": "plain_text", "content": "e.g. 9:30AM, 10:00AM"},
-            "options": time_options,
-            "required": True,
-            "initial_index": initial_index_1based,
-        },
-        {
-            "tag": "div",
-            "text": {
-                "tag": "plain_text",
-                "content": "Exact time (optional — overrides quick pick if you fill this)",
-            },
-        },
+        {"tag": "div", "text": {"tag": "plain_text", "content": "Time"}},
         {
             "tag": "input",
-            "name": "time_override",
+            "name": "time",
+            "width": "fill",
             "placeholder": {
                 "tag": "plain_text",
-                "content": "e.g. 9:55AM — leave empty to use dropdown",
+                "content": "e.g. 9:30AM, 10:00AM, 9:55AM, 14:30",
             },
-            "required": False,
+            "required": True,
         },
         {"tag": "div", "text": {"tag": "plain_text", "content": "When (multi-select)"}},
         {
