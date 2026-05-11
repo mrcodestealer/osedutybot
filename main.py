@@ -1179,6 +1179,13 @@ def evening_reminder():
     _send_ose_payload(DUTY_CHAT_ID, payload)
     print(f"⏰ OSE evening card sent to {DUTY_CHAT_ID}")
 
+
+def ose_leave_offset_daily_sync():
+    """Refresh OSE Lark Bitable leave/offset cache once per day (same host TZ as morning OSE)."""
+    line = ose_Duty.sync_ose_leave_offset_bitable()
+    print(f"[OSE Bitable] {line}", flush=True)
+
+
 # def amountloss():
 #     mention_line = f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>'
 #     msg = mention_line + "\n" + "Hi Morning Shift kindly reminder to do Amount Loss~"
@@ -1199,6 +1206,8 @@ def clean_pending_p1_confirmations():
         print(f"🧹 Cleaned {len(expired)} expired P1 confirmations")
 
 scheduler = BackgroundScheduler()
+# Lark leave/offset: clear in-process cache + prefetch before morning OSE card (same TZ as hour=7 job).
+scheduler.add_job(func=ose_leave_offset_daily_sync, trigger="cron", hour=6, minute=50)
 scheduler.add_job(func=morning_reminder, trigger="cron", hour=7, minute=00)
 scheduler.add_job(func=evening_reminder, trigger="cron", hour=19, minute=0)
 scheduler.add_job(func=scheduled_amountloss_check,trigger="cron",hour=9,minute=0)

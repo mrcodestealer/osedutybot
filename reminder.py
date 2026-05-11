@@ -120,6 +120,7 @@ REMINDER_FIELD_END = os.getenv("REMINDER_FIELD_END", "End Time").strip() or "End
 REMINDER_FIELD_TIME = os.getenv("REMINDER_FIELD_TIME", "Time").strip() or "Time"
 REMINDER_FIELD_REASON = os.getenv("REMINDER_FIELD_REASON", "Reason").strip() or "Reason"
 # Schedule multi-select column in Bitable: title **when** (lowercase). API writes this key; reads try ``when`` then ``When``.
+# Options include **One time** → fires only on the row's Start Time date (see ``when_matches_schedule``).
 REMINDER_FIELD_WHEN_WRITE = "when"
 REMINDER_FIELD_WHEN_READ_KEYS = ("when", "When")
 _WHEN_LABEL_DEFAULT = "Every day"
@@ -128,6 +129,7 @@ _SHEET_JOB_PREFIX = "sheet_daily_reminder::"
 # Canonical tokens for ``When`` matching (multi-select on Bitable + form).
 _WHEN_TOKEN_DAILY = "DAILY"
 _WHEN_TOKEN_MONTHLY = "MONTHLY"
+_WHEN_TOKEN_ONCE = "ONCE"
 _WEEKDAY_TOKENS_ORDER = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
 
 
@@ -365,6 +367,17 @@ def _label_to_when_tokens(label: str) -> set[str]:
         r"\b(every\s+month|monthly)\b", x
     ):
         out.add(_WHEN_TOKEN_MONTHLY)
+    if x in (
+        "one time",
+        "onetime",
+        "once",
+        "once only",
+        "single time",
+        "单次",
+        "仅一次",
+        "只提醒一次",
+    ) or re.search(r"\b(one[\s-]?time|once\s+only)\b", x):
+        out.add(_WHEN_TOKEN_ONCE)
 
     wd_specs: list[tuple[str, str]] = [
         ("MON", r"\b(every\s+)?monday\b|星期一|周一"),
@@ -430,7 +443,11 @@ def when_matches_schedule(
     - **MON–SUN**: weekday matches one selected day.
     - **MONTHLY**: same calendar day-of-month as **Start Time** (within range).
     Multiple selections are OR'd (e.g. Monday OR monthly on the 15th).
+    **ONCE** (One time): fires only on **Start Time** calendar day (still must fall in [start, end]; checked by caller).
+    If **ONCE** is selected with other options, **ONCE wins** (single trigger on start date only).
     """
+    if _WHEN_TOKEN_ONCE in when_tokens:
+        return today == row_start_date
     if _WHEN_TOKEN_DAILY in when_tokens:
         return True
     matched = False
@@ -868,7 +885,7 @@ def build_add_reminder_form_card() -> dict:
         "Fill all fields, then tap **Submit** once.",
         "Date can be picked from UI date picker.",
         "Time can be picked from dropdown list.",
-        "**When** (optional): weekdays / **Every day** / **Every month** — same labels as Bitable column **when**.",
+        "**When** (optional): weekdays / **Every day** / **Every month** / **One time** (only on Start date) — same labels as Bitable **when**.",
     ]
 
     form_elements: list[dict] = [
@@ -900,7 +917,7 @@ def build_add_reminder_form_card() -> dict:
             "name": "when",
             "placeholder": {
                 "tag": "plain_text",
-                "content": "Every day / weekdays / Every month",
+                "content": "Every day / weekdays / Every month / One time",
             },
             "required": False,
             "width": "fill",
@@ -917,6 +934,7 @@ def build_add_reminder_form_card() -> dict:
                     "Every Sunday",
                     "Every day",
                     "Every month",
+                    "One time",
                 )
             ],
         },

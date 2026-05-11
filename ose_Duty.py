@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
@@ -95,6 +96,46 @@ TARGET_USER_OPEN_ID = (
 def _name_key(name: str) -> str:
     # "Augustine (Si Yew)" and "Augustine Si Yew" should match.
     return re.sub(r"[^a-z0-9]+", "", str(name or "").lower())
+
+
+def _word_tokens(name: str) -> list[str]:
+    """Lowercase word tokens for roster short name vs leave-sheet full name."""
+    return [t.lower() for t in re.findall(r"[A-Za-z0-9]+", str(name or "")) if t]
+
+
+def _token_prefix_matches_roster_to_leave(roster_tokens: list[str], leave_tokens: list[str]) -> bool:
+    """
+    True if roster name refers to the same person as leave full name.
+    Examples: Lynette ↔ Lynette Enriquez; Jun Chen ↔ Jun Chen Wong.
+    First token may match by equality or (if roster is a single word) by prefix with min length 3
+    to avoid matching unrelated one-letter names.
+    """
+    if not roster_tokens or not leave_tokens:
+        return False
+    if len(roster_tokens) > len(leave_tokens):
+        return False
+    for i, rw in enumerate(roster_tokens):
+        lw = leave_tokens[i]
+        if i == 0 and len(roster_tokens) == 1:
+            if rw == lw:
+                return True
+            if len(rw) >= 3 and lw.startswith(rw):
+                return True
+            return False
+        if rw != lw:
+            return False
+    return True
+
+
+def _names_same_person(roster_name: str, leave_sheet_name: str) -> bool:
+    """Roster / shift label vs leave Bitable full name (may differ in length)."""
+    if not roster_name or not leave_sheet_name:
+        return False
+    rk, lk = _name_key(roster_name), _name_key(leave_sheet_name)
+    if rk and rk == lk:
+        return True
+    rt, lt = _word_tokens(roster_name), _word_tokens(leave_sheet_name)
+    return _token_prefix_matches_roster_to_leave(rt, lt) or _token_prefix_matches_roster_to_leave(lt, rt)
 
 
 def _title_name(name: str) -> str:
@@ -352,6 +393,56 @@ def get_shift_names_for_date(target_date: date) -> tuple[list[str], list[str]]:
     return sorted(morning), sorted(night)
 
 
+# Short-lived in-memory cache so morning card + /ose do not double-hit Bitable.
+# Set OSE_BITABLE_CACHE_SEC=0 to disable. Daily cron calls ``invalidate_ose_bitable_cache``.
+_OSE_BITABLE_RAW: dict[str, Any] = {"monotonic": 0.0, "leave": None, "offset": None}
+_OSE_BITABLE_TTL_SEC = int(os.getenv("OSE_BITABLE_CACHE_SEC", "120"))
+
+
+def invalidate_ose_bitable_cache() -> None:
+    """Clear cached leave/offset rows (e.g. after daily sync job)."""
+    _OSE_BITABLE_RAW["leave"] = None
+    _OSE_BITABLE_RAW["offset"] = None
+    _OSE_BITABLE_RAW["monotonic"] = 0.0
+
+
+def sync_ose_leave_offset_bitable() -> str:
+    """
+    Force-fetch leave + offset tables from Lark (for a daily scheduler).
+    Returns a one-line status for logs.
+    """
+    try:
+        token = get_tenant_access_token()
+    except Exception as e:
+        return f"❌ OSE Bitable sync (token): {e}"
+    invalidate_ose_bitable_cache()
+    try:
+        leave, offset = _get_bitable_raw_pair(token)
+    except Exception as e:
+        return f"❌ OSE Bitable sync: {e}"
+    return f"✅ OSE leave/offset Bitable synced ({len(leave)} leave, {len(offset)} offset rows)"
+
+
+def _get_bitable_raw_pair(token: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    now = time.monotonic()
+    leave = _OSE_BITABLE_RAW.get("leave")
+    offset = _OSE_BITABLE_RAW.get("offset")
+    ts = float(_OSE_BITABLE_RAW.get("monotonic") or 0)
+    if (
+        _OSE_BITABLE_TTL_SEC > 0
+        and isinstance(leave, list)
+        and isinstance(offset, list)
+        and now - ts < _OSE_BITABLE_TTL_SEC
+    ):
+        return leave, offset
+    leave = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_LEAVE_TABLE_ID)
+    offset = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_OFFSET_TABLE_ID)
+    _OSE_BITABLE_RAW["monotonic"] = now
+    _OSE_BITABLE_RAW["leave"] = leave
+    _OSE_BITABLE_RAW["offset"] = offset
+    return leave, offset
+
+
 def _bitable_get_all_records(token: str, app_token: str, table_id: str) -> list[dict[str, Any]]:
     url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
     headers = {"Authorization": f"Bearer {token}"}
@@ -376,8 +467,14 @@ def _is_approved(v: Any) -> bool:
     return _field_text(v).strip().lower() == "approved"
 
 
-def _extract_leave_entries_for_date(target_date: date, token: str) -> list[dict[str, Any]]:
-    items = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_LEAVE_TABLE_ID)
+def _extract_leave_entries_for_date(
+    target_date: date,
+    token: str,
+    *,
+    items: Optional[list[dict[str, Any]]] = None,
+) -> list[dict[str, Any]]:
+    if items is None:
+        items = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_LEAVE_TABLE_ID)
     out: list[dict[str, Any]] = []
     for it in items:
         f = it.get("fields") or {}
@@ -403,8 +500,14 @@ def _extract_leave_entries_for_date(target_date: date, token: str) -> list[dict[
     return sorted(out, key=lambda x: x["name"])
 
 
-def _extract_offset_lines_for_date(target_date: date, token: str) -> list[str]:
-    items = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_OFFSET_TABLE_ID)
+def _extract_offset_lines_for_date(
+    target_date: date,
+    token: str,
+    *,
+    items: Optional[list[dict[str, Any]]] = None,
+) -> list[str]:
+    if items is None:
+        items = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_OFFSET_TABLE_ID)
     lines: list[str] = []
     for it in items:
         f = it.get("fields") or {}
@@ -461,14 +564,21 @@ def _build_ose_context(target_date: date, mode: str) -> tuple[list[str], list[st
             luck_names, _ = get_shift_names_for_date(target_date)
 
         token = get_tenant_access_token()
-        leave_entries = _extract_leave_entries_for_date(target_date, token)
-        offset_lines = _extract_offset_lines_for_date(target_date, token)
+        leave_items, offset_items = _get_bitable_raw_pair(token)
+        leave_entries = _extract_leave_entries_for_date(target_date, token, items=leave_items)
+        offset_lines = _extract_offset_lines_for_date(target_date, token, items=offset_items)
     except Exception as e:
         return [], [], [], [], f"❌ OSE data load failed: {e}"
 
-    leave_names = {_name_key(str(r.get("name") or "").strip()) for r in leave_entries}
-    rest_names = [n for n in rest_names if _name_key(n) not in leave_names]
-    luck_names = [n for n in luck_names if _name_key(n) not in leave_names]
+    def _on_leave(shift_label: str) -> bool:
+        for r in leave_entries:
+            ln = str(r.get("name") or "").strip()
+            if ln and _names_same_person(shift_label, ln):
+                return True
+        return False
+
+    rest_names = [n for n in rest_names if not _on_leave(n)]
+    luck_names = [n for n in luck_names if not _on_leave(n)]
     return sorted(rest_names), sorted(luck_names), offset_lines, leave_entries, None
 
 
