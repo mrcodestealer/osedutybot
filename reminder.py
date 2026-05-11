@@ -883,6 +883,46 @@ def delete_sheet_reminders(
     return msg
 
 
+def _reminder_form_narrow_field_row(
+    *,
+    label: str,
+    control: dict,
+    left_weight: int = 2,
+    right_weight: int = 5,
+) -> dict:
+    """
+    Put label + control in a **narrow** column (Lark form rejects ``width: auto`` on controls).
+    Official form + ``column_set`` + ``weighted`` pattern — see Feishu form-container examples.
+    """
+    return {
+        "tag": "column_set",
+        "flex_mode": "stretch",
+        "background_style": "default",
+        "horizontal_spacing": "8px",
+        "columns": [
+            {
+                "tag": "column",
+                "width": "weighted",
+                "weight": left_weight,
+                "vertical_align": "top",
+                "elements": [
+                    {"tag": "div", "text": {"tag": "plain_text", "content": label}},
+                    control,
+                ],
+            },
+            {
+                "tag": "column",
+                "width": "weighted",
+                "weight": right_weight,
+                "vertical_align": "top",
+                "elements": [
+                    {"tag": "div", "text": {"tag": "plain_text", "content": " "}},
+                ],
+            },
+        ],
+    }
+
+
 def send_sheet_reminder_list_card(*, send_func, chat_id: str, get_token_func) -> None:
     rows = list_sheet_reminders(get_token_func=get_token_func)
     card = _sheet_delete_picker_card(rows)
@@ -930,43 +970,45 @@ def build_add_reminder_form_card() -> dict:
             "placeholder": {"tag": "plain_text", "content": "Pick end date"},
             "required": True,
         },
-        {"tag": "div", "text": {"tag": "plain_text", "content": "Time"}},
-        {
-            "tag": "select_static",
-            "name": "time",
-            "width": "auto",
-            "placeholder": {"tag": "plain_text", "content": "Select time"},
-            "options": time_options,
-            "required": True,
-            "initial_index": initial_index_1based,
-        },
-        {"tag": "div", "text": {"tag": "plain_text", "content": "When (multi-select)"}},
-        {
-            "tag": "multi_select_static",
-            "name": "when",
-            "placeholder": {
-                "tag": "plain_text",
-                "content": "Every day / weekdays / Every month / One time",
+        _reminder_form_narrow_field_row(
+            label="Time",
+            control={
+                "tag": "select_static",
+                "name": "time",
+                "placeholder": {"tag": "plain_text", "content": "Select time"},
+                "options": time_options,
+                "required": True,
+                "initial_index": initial_index_1based,
             },
-            "required": False,
-            "width": "auto",
-            "selected_values": ["Every day"],
-            "options": [
-                {"text": {"tag": "plain_text", "content": lab}, "value": lab}
-                for lab in (
-                    "Every Monday",
-                    "Every Tuesday",
-                    "Every Wednesday",
-                    "Every Thursday",
-                    "Every Friday",
-                    "Every Saturday",
-                    "Every Sunday",
-                    "Every day",
-                    "Every month",
-                    "One time",
-                )
-            ],
-        },
+        ),
+        _reminder_form_narrow_field_row(
+            label="When (multi-select)",
+            control={
+                "tag": "multi_select_static",
+                "name": "when",
+                "placeholder": {
+                    "tag": "plain_text",
+                    "content": "Every day / weekdays / Every month / One time",
+                },
+                "required": False,
+                "selected_values": ["Every day"],
+                "options": [
+                    {"text": {"tag": "plain_text", "content": lab}, "value": lab}
+                    for lab in (
+                        "Every Monday",
+                        "Every Tuesday",
+                        "Every Wednesday",
+                        "Every Thursday",
+                        "Every Friday",
+                        "Every Saturday",
+                        "Every Sunday",
+                        "Every day",
+                        "Every month",
+                        "One time",
+                    )
+                ],
+            },
+        ),
     ]
     form_elements.extend(
         [
@@ -974,7 +1016,6 @@ def build_add_reminder_form_card() -> dict:
             {
                 "tag": "input",
                 "name": "reason",
-                "width": "fill",
                 "placeholder": {"tag": "plain_text", "content": "Kindly send graph"},
                 "required": True,
             },
