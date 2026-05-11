@@ -550,7 +550,7 @@ def _build_ose_context(target_date: date, mode: str) -> tuple[list[str], list[st
     mode:
       - 'morning': Rest yesterday night, Luck today morning
       - 'evening': Rest today morning, Luck today night
-      - 'date': Rest previous night, Luck target morning
+      - 'date': Morning shift (D) and Night shift (N) on ``target_date`` (/osedate)
     """
     try:
         if mode == "evening":
@@ -560,8 +560,8 @@ def _build_ose_context(target_date: date, mode: str) -> tuple[list[str], list[st
             _, rest_names = get_shift_names_for_date(target_date - timedelta(days=1))
             luck_names, _ = get_shift_names_for_date(target_date)
         else:
-            _, rest_names = get_shift_names_for_date(target_date - timedelta(days=1))
-            luck_names, _ = get_shift_names_for_date(target_date)
+            # ``date`` (/osedate): same calendar day — morning (D) first, night (N) second.
+            rest_names, luck_names = get_shift_names_for_date(target_date)
 
         token = get_tenant_access_token()
         leave_items, offset_items = _get_bitable_raw_pair(token)
@@ -590,14 +590,16 @@ def build_ose_message_card(
     offset_lines: list[str],
     leave_entries: list[dict[str, Any]],
     include_tag: bool = False,
+    first_section_title: str = "😴 (～￣▽￣)～ Rest Well",
+    second_section_title: str = "🍀 Good Luckヾ(≧▽≦*)o",
 ) -> dict[str, Any]:
     lines: list[str] = []
     if include_tag and TARGET_USER_OPEN_ID:
         lines.append(f'👥 <at id="{TARGET_USER_OPEN_ID}">User</at>')
     lines.append(f"📅 **{target_date.strftime('%d/%m/%Y')}**")
     lines.append("")
-    lines.extend(_section_lines("😴 (～￣▽￣)～ Rest Well", [f"• {n}" for n in rest_names]))
-    lines.extend(_section_lines("🍀 Good Luckヾ(≧▽≦*)o", [f"• {n}" for n in luck_names]))
+    lines.extend(_section_lines(first_section_title, [f"• {n}" for n in rest_names]))
+    lines.extend(_section_lines(second_section_title, [f"• {n}" for n in luck_names]))
     if offset_lines:
         lines.extend(_section_lines("🔁 Offset", offset_lines))
     if leave_entries:
@@ -645,13 +647,24 @@ def get_ose_payload_for_date(target_date: date, mode: str = "date", *, include_t
     if err:
         return {"text": err, "lark_card": None}
 
+    if mode == "date":
+        first_title_plain = "Morning shift"
+        second_title_plain = "Night shift"
+        first_title_card = "🌅 Morning shift"
+        second_title_card = "🌙 Night shift"
+    else:
+        first_title_plain = "(～￣▽￣)～ Rest Well"
+        second_title_plain = "Good Luckヾ(≧▽≦*)o"
+        first_title_card = "😴 (～￣▽￣)～ Rest Well"
+        second_title_card = "🍀 Good Luckヾ(≧▽≦*)o"
+
     lines: list[str] = []
     if include_tag and TARGET_USER_OPEN_ID:
         lines.append(f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>')
-    lines.append("(～￣▽￣)～ Rest Well")
+    lines.append(first_title_plain)
     lines.extend([f"• {n}" for n in rest_names] or ["• -"])
     lines.append("")
-    lines.append("Good Luckヾ(≧▽≦*)o")
+    lines.append(second_title_plain)
     lines.extend([f"• {n}" for n in luck_names] or ["• -"])
     if offset_lines:
         lines.append("")
@@ -682,6 +695,8 @@ def get_ose_payload_for_date(target_date: date, mode: str = "date", *, include_t
             offset_lines=offset_lines,
             leave_entries=leave_entries,
             include_tag=include_tag,
+            first_section_title=first_title_card,
+            second_section_title=second_title_card,
         ),
     }
 
