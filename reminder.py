@@ -212,23 +212,45 @@ def _sheet_date_to_timestamp_ms(d: date) -> int:
 
 
 def _normalize_sheet_time(raw: str) -> str:
-    s = (raw or "").strip().upper().replace(" ", "")
-    m = re.match(r"^(\d{1,2}):(\d{2})(AM|PM)$", s)
+    """
+    Normalize to ``H:MMAPM`` (12-hour) for storage + cron.
+
+    Accepts:
+    - 12-hour: ``9:55AM``, ``9:55 AM``, ``6:30pm``
+    - hour only: ``9pm`` → ``9:00PM``
+    - 24-hour: ``14:30``, ``09:05`` (also used when Lark returns HH:MM)
+    """
+    s_compact = (raw or "").strip().upper().replace(" ", "")
+    # 24-hour H:MM or HH:MM
+    m24 = re.match(r"^(\d{1,2}):(\d{2})$", s_compact)
+    if m24:
+        hh24 = int(m24.group(1))
+        mm = int(m24.group(2))
+        if not (0 <= hh24 <= 23 and 0 <= mm <= 59):
+            raise ValueError(f"Invalid time `{raw}`. Use 0:00–23:59 (24h) or e.g. 9:55AM.")
+        ap = "AM" if hh24 < 12 else "PM"
+        hh12 = hh24 % 12
+        if hh12 == 0:
+            hh12 = 12
+        return f"{hh12}:{mm:02d}{ap}"
+    m = re.match(r"^(\d{1,2}):(\d{2})(AM|PM)$", s_compact)
     if m:
         hh = int(m.group(1))
         mm = int(m.group(2))
         ap = m.group(3)
         if not (1 <= hh <= 12 and 0 <= mm <= 59):
-            raise ValueError(f"Invalid time `{raw}`. Use HH:MMPM/AM, e.g. 6:30PM.")
+            raise ValueError(f"Invalid time `{raw}`. Use HH:MMPM/AM, e.g. 9:55AM.")
         return f"{hh}:{mm:02d}{ap}"
-    m = re.match(r"^(\d{1,2})(AM|PM)$", s)
+    m = re.match(r"^(\d{1,2})(AM|PM)$", s_compact)
     if m:
         hh = int(m.group(1))
         ap = m.group(2)
         if not (1 <= hh <= 12):
             raise ValueError(f"Invalid time `{raw}`. Use HH:MMPM/AM, e.g. 6:30PM.")
         return f"{hh}:00{ap}"
-    raise ValueError(f"Invalid time `{raw}`. Use HH:MMPM/AM, e.g. 6:30PM.")
+    raise ValueError(
+        f"Invalid time `{raw}`. Examples: 9:55AM, 2:05pm, 14:30 (24-hour), 9pm."
+    )
 
 
 def _time_to_hour_minute(raw: str) -> tuple[int, int]:
@@ -871,20 +893,10 @@ def send_sheet_reminder_list_card(*, send_func, chat_id: str, get_token_func) ->
 
 
 def build_add_reminder_form_card() -> dict:
-    time_options: list[dict] = []
-    for hh in range(24):
-        for mm in (0, 30):
-            ap = "AM" if hh < 12 else "PM"
-            hh12 = hh % 12
-            if hh12 == 0:
-                hh12 = 12
-            v = f"{hh12}:{mm:02d}{ap}"
-            time_options.append({"text": {"tag": "plain_text", "content": v}, "value": v})
-
     intro_lines = [
         "Fill all fields, then tap **Submit** once.",
         "Date can be picked from UI date picker.",
-        "Time can be picked from dropdown list.",
+        "**Time:** type any minute — e.g. `9:55AM`, `2:05pm`, or 24-hour `14:30`.",
         "**When** (optional): weekdays / **Every day** / **Every month** / **One time** (only on Start date) — same labels as Bitable **when**.",
     ]
 
@@ -905,10 +917,12 @@ def build_add_reminder_form_card() -> dict:
         },
         {"tag": "div", "text": {"tag": "plain_text", "content": "Time"}},
         {
-            "tag": "select_static",
+            "tag": "input",
             "name": "time",
-            "placeholder": {"tag": "plain_text", "content": "Select time"},
-            "options": time_options,
+            "placeholder": {
+                "tag": "plain_text",
+                "content": "e.g. 9:55AM, 2:05pm, 14:30",
+            },
             "required": True,
         },
         {"tag": "div", "text": {"tag": "plain_text", "content": "When (multi-select)"}},
