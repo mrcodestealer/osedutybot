@@ -4445,6 +4445,33 @@ def _jenkins_update_first_non_empty_line(body: str) -> str:
     return (body or "").strip()
 
 
+def _jenkins_update_job_hint_query_for_ranking(body: str) -> str:
+    """
+    Text used to **rank** which Jenkins job the user meant.
+
+    If the user pastes **one long line** ``/jenkinsupdate NT UPDATE … branch: … version: … service: …``,
+    ranking on the **entire** line wrongly boosts aliases like ``update pms`` (substring noise in
+    ``promotion`` / ``version`` / etc.). We therefore take only the segment **before** the first
+    ``branch:`` / ``version:`` / ``service(s):`` / ``environment:`` token on the first non-empty line.
+    """
+    raw = (body or "").replace("\r\n", "\n").strip()
+    if not raw:
+        return ""
+    first = ""
+    for line in raw.splitlines():
+        t = line.strip()
+        if t:
+            first = t
+            break
+    q = JENKINS_UPDATE_CMD_RE.sub("", first, count=1).strip()
+    if not q:
+        return ""
+    m = re.search(r"\b(branch|version|services?|environment)\s*:", q, re.I)
+    if m is not None and m.start() > 0:
+        return q[: m.start()].strip()
+    return q
+
+
 def _jenkins_update_headline_is_config_like(headline: str) -> bool:
     """
     True when the first line is just config syntax (e.g. ``Branch: UAT``) rather than
@@ -6685,7 +6712,9 @@ def handle_lark_jenkins_update_message(
     head_line = _jenkins_update_first_non_empty_line(body)
     ties_h: list[tuple[str, float, str, str]] = []
     if not _jenkins_update_headline_is_config_like(head_line):
-        ranked_h = _rank_jenkins_update_job_matches(head_line)
+        hint_q = _jenkins_update_job_hint_query_for_ranking(body).strip()
+        q_rank = hint_q or JENKINS_UPDATE_CMD_RE.sub("", head_line, count=1).strip()
+        ranked_h = _rank_jenkins_update_job_matches(q_rank)
         ties_h = _jenkins_update_disambiguation_ties(ranked_h, band=0.08)
     if ties_h:
         ranked, ties = ranked_h, ties_h
