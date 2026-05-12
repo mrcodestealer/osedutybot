@@ -640,6 +640,18 @@ def _sms_uat_canonical_service_id(tok: str) -> str | None:
     return None
 
 
+def _fpms_uat_catalog_exact_service_id(tok: str) -> str | None:
+    """
+    Return canonical Jenkins **checkbox id** when ``tok`` equals a name in ``FPMS_UAT_BRANCH_SERVICES``
+    after :func:`_normalize_service_query_key` (FPMS UAT + PMS-UAT-UPDATE share this list in Lark).
+    """
+    k = _normalize_service_query_key(tok)
+    for s in FPMS_UAT_BRANCH_SERVICES:
+        if _normalize_service_query_key(s) == k:
+            return s
+    return None
+
+
 def _fpms_lark_is_sms_uat_only_service_token(tok: str) -> bool:
     """True if ``tok`` is an SMS UAT service id but **not** on the FPMS UAT Services list."""
     k = _normalize_service_query_key(tok)
@@ -5385,14 +5397,25 @@ def _fpms_lark_service_pick_card_json(
     ranked: list[str],
     service_pick_sid: str,
     staged: list[str],
+    *,
+    pick_pos_1based: int | None = None,
+    pick_n_total: int | None = None,
 ) -> str:
     """
     Interactive card: stage Jenkins service rows by number, **Confirm** / **Clear** / **Cancel**
     (callback keys ``svc`` / ``svc_go`` / ``svc_clr`` / ``svc_can``).
     """
     ps = (service_pick_sid or "").strip()
+    ntot = int(pick_n_total) if pick_n_total is not None else 0
+    pos = int(pick_pos_1based) if pick_pos_1based is not None else 0
+    if ntot > 1 and pos >= 1:
+        head = f"**Service search ({pos}/{ntot}):** {_fpms_lark_short_line(token, 120)}"
+        title_txt = f"Service {pos}/{ntot}: {_fpms_lark_short_line(token, 56)}"
+    else:
+        head = f"**Service search:** {_fpms_lark_short_line(token, 120)}"
+        title_txt = f"Service search: {_fpms_lark_short_line(token, 56)}"
     lines_md: list[str] = [
-        f"**Service search:** {_fpms_lark_short_line(token, 120)}",
+        head,
         "",
         "Tap **1–N** below to **stage** services (any order), then **Confirm**. "
         "You can still type numbers (e.g. **1 2**) if you prefer.",
@@ -5442,7 +5465,7 @@ def _fpms_lark_service_pick_card_json(
         "config": {"update_multi": True, "width_mode": "fill"},
         "header": {
             "template": "wathet",
-            "title": {"tag": "plain_text", "content": "Pick Jenkins services"},
+            "title": {"tag": "plain_text", "content": title_txt},
         },
         "body": {"elements": body_elements},
     }
@@ -5466,7 +5489,11 @@ def _fpms_lark_send_service_pick_card(
         sess["svc_staged"] = []
         _fpms_lark_register_picker_sid(sp, session_key)
         _fpms_lark_sessions[session_key] = sess
-    card_js = _fpms_lark_service_pick_card_json(token, ranked, sp, [])
+        pi = int(sess.get("pick_index") or 0)
+        ntot = len(sess.get("service_tokens") or [])
+    card_js = _fpms_lark_service_pick_card_json(
+        token, ranked, sp, [], pick_pos_1based=pi + 1, pick_n_total=ntot
+    )
     try:
         send(chat_id, card_js, msg_type="interactive")
     except TypeError:
@@ -5483,10 +5510,14 @@ def _fpms_lark_refresh_service_pick_card(chat_id: str, session_key: str, send) -
         tok = sess["service_tokens"][int(sess["pick_index"])]
         ranked = list(sess.get("current_ranked") or [])
         staged = list(sess.get("svc_staged") or [])
+        pi = int(sess["pick_index"])
+        ntot = len(sess["service_tokens"])
     if not sp:
         send(chat_id, _fpms_format_service_menu_message(tok, ranked))
         return
-    card_js = _fpms_lark_service_pick_card_json(tok, ranked, sp, staged)
+    card_js = _fpms_lark_service_pick_card_json(
+        tok, ranked, sp, staged, pick_pos_1based=pi + 1, pick_n_total=ntot
+    )
     try:
         send(chat_id, card_js, msg_type="interactive")
     except TypeError:
@@ -6316,6 +6347,14 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
                     resolved_ids.append(sid)
         else:
             tokens_to_pick.append(tok)
+    if jp in ("fpms", "pms_uat"):
+        while tokens_to_pick:
+            hit = _fpms_uat_catalog_exact_service_id(tokens_to_pick[0])
+            if hit is None:
+                break
+            if hit not in resolved_ids:
+                resolved_ids.append(hit)
+            tokens_to_pick = tokens_to_pick[1:]
     if not tokens_to_pick:
         if not resolved_ids:
             send(chat_id, "❌ No services parsed after resolving ports.")
@@ -6582,82 +6621,108 @@ def handle_lark_jenkins_update_message(
                 if sid not in sess["resolved_ids"]:
                     sess["resolved_ids"].append(sid)
             sess["pick_index"] = int(sess["pick_index"]) + 1
-            if sess["pick_index"] >= len(sess["service_tokens"]):
-                data = sess["data"]
-                resolved_ids: list[str] = sess["resolved_ids"]
-                raw_pb = str(sess.get("raw_prompt_body") or "")
-                ju = str(sess.get("jenkins_job_url") or BUILD_URL).strip() or BUILD_URL
-                jp = str(sess.get("job_profile") or "fpms").strip() or "fpms"
+            jp_sess = str(sess.get("job_profile") or "fpms").strip() or "fpms"
+            data_pick = sess["data"]
+            raw_pb = str(sess.get("raw_prompt_body") or "")
+            ju_pick = str(sess.get("jenkins_job_url") or BUILD_URL).strip() or BUILD_URL
+
+            def _run_jenkins_when_pick_done() -> None:
                 _fpms_lark_begin_jenkins_run(
                     chat_id,
                     key,
-                    data,
-                    resolved_ids,
+                    data_pick,
+                    list(sess["resolved_ids"]),
                     send,
                     raw_prompt_body=raw_pb,
-                    jenkins_build_url=ju,
-                    job_profile=jp,
+                    jenkins_build_url=ju_pick,
+                    job_profile=jp_sess,
                 )
+
+            if sess["pick_index"] >= len(sess["service_tokens"]):
+                _run_jenkins_when_pick_done()
                 return True
-            next_tok = sess["service_tokens"][sess["pick_index"]]
-            jp_sess = str(sess.get("job_profile") or "fpms").strip() or "fpms"
-            if jp_sess == "fpms" and _fpms_lark_is_fnt_rc_only_service_token(next_tok):
-                _fpms_lark_clear_session(chat_id, sender_id)
-                send(
-                    chat_id,
-                    f"❌ `{next_tok}` is an **FNT RC UAT master** service, not FPMS. "
-                    "Say **cancel**, then start again with **rc uat master** in your `/jenkinsupdate` message.",
-                )
+
+            while sess["pick_index"] < len(sess["service_tokens"]):
+                next_tok = sess["service_tokens"][sess["pick_index"]]
+                if jp_sess == "fpms" and _fpms_lark_is_fnt_rc_only_service_token(next_tok):
+                    _fpms_lark_clear_session(chat_id, sender_id)
+                    send(
+                        chat_id,
+                        f"❌ `{next_tok}` is an **FNT RC UAT master** service, not FPMS. "
+                        "Say **cancel**, then start again with **rc uat master** in your `/jenkinsupdate` message.",
+                    )
+                    return True
+                if jp_sess == "fpms" and _fpms_lark_is_sms_uat_only_service_token(next_tok):
+                    _fpms_lark_clear_session(chat_id, sender_id)
+                    send(
+                        chat_id,
+                        f"❌ `{next_tok}` is an **SMS UAT update** service, not FPMS. "
+                        "Say **cancel**, then start again with **sms uat update** in your `/jenkinsupdate` message.",
+                    )
+                    return True
+                if (
+                    jp_sess == "fnt_rc"
+                    and _sms_uat_canonical_service_id(next_tok) is not None
+                    and _fnt_rc_canonical_service_id(next_tok) is None
+                ):
+                    _fpms_lark_clear_session(chat_id, sender_id)
+                    send(
+                        chat_id,
+                        f"❌ `{next_tok}` is an **SMS UAT** service, not on the **FNT RC** job list. "
+                        "Say **cancel**, then start again with **sms uat update** for **SMS-UAT-UPDATE**.",
+                    )
+                    return True
+                if (
+                    jp_sess == "sms_uat"
+                    and _fnt_rc_canonical_service_id(next_tok) is not None
+                    and _sms_uat_canonical_service_id(next_tok) is None
+                ):
+                    _fpms_lark_clear_session(chat_id, sender_id)
+                    send(
+                        chat_id,
+                        f"❌ `{next_tok}` is an **FNT RC** service, not on the **SMS UAT** job list. "
+                        "Say **cancel**, then start again with **rc uat master** / **fnt uat script run**.",
+                    )
+                    return True
+
+                exact_id: str | None = None
+                if jp_sess in ("fpms", "pms_uat"):
+                    exact_id = _fpms_uat_catalog_exact_service_id(next_tok)
+                elif jp_sess == "fnt_rc":
+                    exact_id = _fnt_rc_canonical_service_id(next_tok)
+                elif jp_sess == "sms_uat":
+                    exact_id = _sms_uat_canonical_service_id(next_tok)
+
+                if exact_id is not None:
+                    if exact_id not in sess["resolved_ids"]:
+                        sess["resolved_ids"].append(exact_id)
+                    sess["pick_index"] = int(sess["pick_index"]) + 1
+                    if sess["pick_index"] >= len(sess["service_tokens"]):
+                        with _fpms_lark_sessions_lock:
+                            _fpms_lark_sessions[key] = sess
+                        _run_jenkins_when_pick_done()
+                        return True
+                    with _fpms_lark_sessions_lock:
+                        _fpms_lark_sessions[key] = sess
+                    continue
+
+                q = next_tok.replace("_", "-")
+                if jp_sess == "fnt_rc":
+                    nranked = _rank_fnt_rc_services_by_query(q, limit=12, for_menu=True)
+                elif jp_sess == "sms_uat":
+                    nranked = _rank_sms_uat_services_by_query(q, limit=12, for_menu=True)
+                else:
+                    nranked = _rank_services_by_query(q, limit=12, for_menu=True)
+                if not nranked:
+                    _fpms_lark_clear_session(chat_id, sender_id)
+                    send(chat_id, f"❌ No Jenkins service matches `{next_tok}`. Cancelled.")
+                    return True
+                sess["current_ranked"] = nranked
+                sess["svc_staged"] = []
+                with _fpms_lark_sessions_lock:
+                    _fpms_lark_sessions[key] = sess
+                _fpms_lark_refresh_service_pick_card(chat_id, key, send)
                 return True
-            if jp_sess == "fpms" and _fpms_lark_is_sms_uat_only_service_token(next_tok):
-                _fpms_lark_clear_session(chat_id, sender_id)
-                send(
-                    chat_id,
-                    f"❌ `{next_tok}` is an **SMS UAT update** service, not FPMS. "
-                    "Say **cancel**, then start again with **sms uat update** in your `/jenkinsupdate` message.",
-                )
-                return True
-            if (
-                jp_sess == "fnt_rc"
-                and _sms_uat_canonical_service_id(next_tok) is not None
-                and _fnt_rc_canonical_service_id(next_tok) is None
-            ):
-                _fpms_lark_clear_session(chat_id, sender_id)
-                send(
-                    chat_id,
-                    f"❌ `{next_tok}` is an **SMS UAT** service, not on the **FNT RC** job list. "
-                    "Say **cancel**, then start again with **sms uat update** for **SMS-UAT-UPDATE**.",
-                )
-                return True
-            if (
-                jp_sess == "sms_uat"
-                and _fnt_rc_canonical_service_id(next_tok) is not None
-                and _sms_uat_canonical_service_id(next_tok) is None
-            ):
-                _fpms_lark_clear_session(chat_id, sender_id)
-                send(
-                    chat_id,
-                    f"❌ `{next_tok}` is an **FNT RC** service, not on the **SMS UAT** job list. "
-                    "Say **cancel**, then start again with **rc uat master** / **fnt uat script run**.",
-                )
-                return True
-            q = next_tok.replace("_", "-")
-            if jp_sess == "fnt_rc":
-                nranked = _rank_fnt_rc_services_by_query(q, limit=12, for_menu=True)
-            elif jp_sess == "sms_uat":
-                nranked = _rank_sms_uat_services_by_query(q, limit=12, for_menu=True)
-            else:
-                nranked = _rank_services_by_query(q, limit=12, for_menu=True)
-            if not nranked:
-                _fpms_lark_clear_session(chat_id, sender_id)
-                send(chat_id, f"❌ No Jenkins service matches `{next_tok}`. Cancelled.")
-                return True
-            sess["current_ranked"] = nranked
-            sess["svc_staged"] = []
-            with _fpms_lark_sessions_lock:
-                _fpms_lark_sessions[key] = sess
-            _fpms_lark_refresh_service_pick_card(chat_id, key, send)
-            return True
 
         _fpms_lark_clear_session(chat_id, sender_id)
         send(chat_id, "⚠️ Internal session state was reset. Start again with `/jenkinsupdate`.")
