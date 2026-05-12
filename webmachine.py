@@ -18,6 +18,18 @@ Mount inside Duty bot (same process, no second ``main.py``) — **on by default*
 
 Point Feishu **Desktop / Mobile homepage** to your public HTTPS URL (reverse-proxy to this port).
 
+**Feishu + free ngrok (``*.ngrok-free.app``) — interstitial / 内置页打不开**
+
+Free ngrok shows a **warning HTML page** before traffic reaches this app. Normal browsers can click **Visit site**; Lark’s **in-app WebView** often cannot, so the same URL works in Chrome but **fails inside Lark**.
+
+- **Practical fix:** append Feishu’s **open in system browser** flag to the homepage URL in the developer console, e.g.  
+  ``https://<your-tunnel>.ngrok-free.app/wm/?lk_jump_to_browser=true``  
+  (Feishu / Lark docs: open webpage in external browser.)
+
+- **Other options:** paid ngrok (disable interstitial in dashboard), or a **real HTTPS domain** / Cloudflare Tunnel without that page.
+
+Adding ``ngrok-skip-browser-warning`` in **Flask** does **not** fix the **first** HTML load: ngrok serves the warning **before** the request hits this app, and Lark’s WebView does not send that header on normal navigation. (Custom headers only help clients you control, e.g. ``curl`` / ``fetch``.)
+
 Data sources:
 
 1. **Live scrape** (default **on**) — background thread calls ``smmachine.smachine_collect_machines_multi_sites``; disable with ``WEBMACHINE_SCRAPE=0``.
