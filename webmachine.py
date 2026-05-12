@@ -43,7 +43,7 @@ The HTML dashboard shows **global and per-environment** totals (online / offline
 
 Optional: ``WEBMACHINE_API_TOKEN`` — ``GET /api/machines`` requires ``Authorization: Bearer <token>``.
 
-Env: ``WEBMACHINE_PORT``, ``WEBMACHINE_HOST``, ``WEBMACHINE_TITLE``, ``WEBMACHINE_REFRESH_SEC``, ``WEBMACHINE_DEBUG``.
+Env: ``WEBMACHINE_PORT``, ``WEBMACHINE_HOST``, ``WEBMACHINE_TITLE``, ``WEBMACHINE_REFRESH_SEC`` (default **0** = no auto page reload), ``WEBMACHINE_DEBUG``.
 """
 
 from __future__ import annotations
@@ -222,14 +222,11 @@ _PAGE = """<!DOCTYPE html>
       <button type="button" class="env-filter-btn" data-wm-env="{{ e.environment|e }}">{{ e.environment }}</button>
       {% endfor %}
     </div>
-    <div class="env-filter-bar row-filter-bar" id="wm-row-filters" role="toolbar" aria-label="Filter by test, status, connectivity">
-      <button type="button" class="env-filter-btn active" data-wm-row="" id="wm-row-all">Show all</button>
-      <button type="button" class="env-filter-btn" data-wm-row="test">Test</button>
-      <button type="button" class="env-filter-btn" data-wm-row="notest">No test</button>
-      <button type="button" class="env-filter-btn" data-wm-row="maintain">Maintain</button>
-      <button type="button" class="env-filter-btn" data-wm-row="nomaintain">No maintain</button>
-      <button type="button" class="env-filter-btn" data-wm-row="offline">Offline</button>
-      <button type="button" class="env-filter-btn" data-wm-row="online">Online</button>
+    <div class="env-filter-bar row-filter-bar" id="wm-row-filters" role="toolbar" aria-label="Optional row filters (multi-select)">
+      <button type="button" class="env-filter-btn active" data-wm-clear="1" id="wm-row-all">Show all</button>
+      <button type="button" class="env-filter-btn" data-wm-toggle="test">Test</button>
+      <button type="button" class="env-filter-btn" data-wm-toggle="maintain">Maintain</button>
+      <button type="button" class="env-filter-btn" data-wm-toggle="offline">Offline</button>
     </div>
     <div class="toolbar">
       <input type="search" id="wm-search" placeholder="Search environment, machine, status, online…" autocomplete="off" aria-label="Filter machines"/>
@@ -251,8 +248,7 @@ _PAGE = """<!DOCTYPE html>
         <tr data-env="{{ r.environment|e }}" data-name="{{ r.name|e }}" data-status="{{ r.status|e }}" data-online="{{ r.online_label|e }}"
             data-test="{% if r.is_test %}1{% else %}0{% endif %}"
             data-maint="{% if 'maintain' in ((r.status or '')|lower) %}1{% else %}0{% endif %}"
-            data-offline="{% if r.pill_class == 'pill-offline' %}1{% else %}0{% endif %}"
-            data-online1="{% if r.pill_class == 'pill-online' %}1{% else %}0{% endif %}">
+            data-offline="{% if r.pill_class == 'pill-offline' %}1{% else %}0{% endif %}">
           <td>{{ r.environment }}</td>
           <td><strong>{{ r.name }}</strong></td>
           <td>{% if r.is_test %}<span class="pill pill-test">TEST</span>{% else %}<span class="muted">—</span>{% endif %}</td>
@@ -283,7 +279,11 @@ _PAGE = """<!DOCTYPE html>
       var rowBar = document.getElementById("wm-row-filters");
       if (!tbody) return;
       var envSel = "";
-      var rowSel = "";
+      var filt = { test: false, maintain: false, offline: false };
+
+      function anyRowFilt() {
+        return filt.test || filt.maintain || filt.offline;
+      }
 
       function matchesEnv(tr) {
         if (!envSel) return true;
@@ -291,32 +291,26 @@ _PAGE = """<!DOCTYPE html>
       }
 
       function matchesRowKind(tr) {
-        if (!rowSel) return true;
+        if (!anyRowFilt()) return true;
         var t = tr.getAttribute("data-test") || "0";
         var m = tr.getAttribute("data-maint") || "0";
         var off = tr.getAttribute("data-offline") || "0";
-        var on1 = tr.getAttribute("data-online1") || "0";
-        switch (rowSel) {
-          case "test": return t === "1";
-          case "notest": return t !== "1";
-          case "maintain": return m === "1";
-          case "nomaintain": return m !== "1";
-          case "offline": return off === "1";
-          case "online": return on1 === "1";
-          default: return true;
-        }
+        if (filt.test && t !== "1") return false;
+        if (filt.maintain && m !== "1") return false;
+        if (filt.offline && off !== "1") return false;
+        return true;
       }
 
-      function rowSelLabel() {
-        if (!rowSel) return "";
-        return ({
-          test: "test only",
-          notest: "no test",
-          maintain: "maintain only",
-          nomaintain: "no maintain",
-          offline: "offline only",
-          online: "online only"
-        })[rowSel] || rowSel;
+      function syncRowBarActive() {
+        if (!rowBar) return;
+        var clearBtn = rowBar.querySelector("#wm-row-all");
+        rowBar.querySelectorAll("[data-wm-toggle]").forEach(function (b) {
+          var k = b.getAttribute("data-wm-toggle");
+          if (k && Object.prototype.hasOwnProperty.call(filt, k)) {
+            b.classList.toggle("active", !!filt[k]);
+          }
+        });
+        if (clearBtn) clearBtn.classList.toggle("active", !anyRowFilt());
       }
 
       function apply() {
@@ -337,12 +331,14 @@ _PAGE = """<!DOCTYPE html>
           if (show) n++;
         }
         if (hint) {
-          if (!envSel && !term && !rowSel) {
+          if (!envSel && !term && !anyRowFilt()) {
             hint.textContent = "";
           } else {
             var label = [];
             if (envSel) label.push("env: " + envSel);
-            if (rowSel) label.push(rowSelLabel());
+            if (filt.test) label.push("test");
+            if (filt.maintain) label.push("maintain");
+            if (filt.offline) label.push("offline");
             if (term) label.push("search");
             hint.textContent = "Showing " + n + " of " + total + " (" + label.join(", ") + ")";
           }
@@ -361,13 +357,20 @@ _PAGE = """<!DOCTYPE html>
         });
       }
       if (rowBar) {
+        syncRowBarActive();
         rowBar.addEventListener("click", function (ev) {
-          var btn = ev.target.closest("[data-wm-row]");
+          var btn = ev.target.closest("button");
           if (!btn || !rowBar.contains(btn)) return;
-          rowSel = btn.getAttribute("data-wm-row") || "";
-          rowBar.querySelectorAll(".env-filter-btn").forEach(function (b) {
-            b.classList.toggle("active", b === btn);
-          });
+          if (btn.getAttribute("data-wm-clear") === "1") {
+            filt.test = filt.maintain = filt.offline = false;
+            syncRowBarActive();
+            apply();
+            return;
+          }
+          var k = btn.getAttribute("data-wm-toggle");
+          if (!k || !Object.prototype.hasOwnProperty.call(filt, k)) return;
+          filt[k] = !filt[k];
+          syncRowBarActive();
           apply();
         });
       }
@@ -722,9 +725,9 @@ def api_machines():
 def index():
     title = (os.environ.get("WEBMACHINE_TITLE") or "Machine status").strip() or "Machine status"
     try:
-        refresh_sec = int((os.environ.get("WEBMACHINE_REFRESH_SEC") or "30").strip() or "30")
+        refresh_sec = int((os.environ.get("WEBMACHINE_REFRESH_SEC") or "0").strip() or "0")
     except ValueError:
-        refresh_sec = 30
+        refresh_sec = 0
     if refresh_sec < 0:
         refresh_sec = 0
     if not _scrape_enabled():
