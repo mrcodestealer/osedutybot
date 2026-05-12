@@ -3179,6 +3179,29 @@ def _register_lark_webhook_duplicate_paths():
 
 _register_lark_webhook_duplicate_paths()
 
+
+def _try_mount_webmachine_blueprint() -> None:
+    if (os.environ.get("WEBMACHINE_MOUNT_IN_MAIN") or "").strip().lower() not in ("1", "true", "yes", "on"):
+        return
+    try:
+        import webmachine as _wm
+    except Exception as e:
+        print("[webmachine] optional mount skipped (import failed): %r" % (e,), flush=True)
+        return
+    prefix = (os.environ.get("WEBMACHINE_URL_PREFIX") or "/wm").strip()
+    if prefix and not prefix.startswith("/"):
+        prefix = "/" + prefix
+    try:
+        _wm.register_webmachine(app, url_prefix=prefix)
+        if (os.environ.get("WEBMACHINE_SCRAPE") or "").strip().lower() in ("1", "true", "yes", "on"):
+            _wm.start_background_scrape_loop()
+        print("[webmachine] dashboard registered at prefix %r (set WEBMACHINE_SCRAPE=1 for live EGM)" % prefix, flush=True)
+    except Exception as e:
+        print("[webmachine] optional mount failed: %r" % (e,), flush=True)
+
+
+_try_mount_webmachine_blueprint()
+
 scheduler.start()
 atexit.register(lambda: scheduler.shutdown())
 # Load daily reminder jobs from Lark Sheet at startup.
