@@ -433,7 +433,7 @@ _PAGE = """<!DOCTYPE html>
 </html>
 """
 
-_VALID_DUTY_KINDS = frozenset({"ote", "ose", "fpms", "ft", "fe", "bi", "cpms", "db"})
+_VALID_DUTY_KINDS = frozenset({"ote", "ose", "fpms", "ft", "fe", "bi", "cpms", "db", "sre"})
 
 
 def _duty_month_label(year: int, month: int) -> str:
@@ -466,7 +466,7 @@ def _duty_weeks_from_cells(year: int, month: int, day_cells: dict[int, dict]) ->
 
 
 def duty_calendar_payload(kind: str, year: int, month: int) -> dict[str, object]:
-    """JSON for All Duty calendar (``ote_duty``, ``ose_Duty``, ``fpms_duty``, ``ft``, ``fe_duty``, ``bi_duty``, ``cpms_duty``, ``db_duty``)."""
+    """JSON for All Duty calendar (duty modules + phones for all kinds except OSE)."""
     kind = (kind or "ose").strip().lower()
     base: dict[str, object] = {"ok": False, "kind": kind, "year": year, "month": month, "weeks": []}
     if kind not in _VALID_DUTY_KINDS:
@@ -499,7 +499,12 @@ def duty_calendar_payload(kind: str, year: int, month: int) -> dict[str, object]
             cells: dict[int, dict] = {}
             for d in range(1, last_day + 1):
                 dt = date(year, month, d)
-                cells[d] = {"day": d, "duty": sorted(od.get_duty_for_date(dt, vals, rows))}
+                names = sorted(od.get_duty_for_date(dt, vals, rows))
+                people: list[dict[str, str]] = []
+                for name in names:
+                    lookup = next((t["lookup"] for t in od.TARGET_DUTY if t["display"] == name), name)
+                    people.append({"name": name, "phone": od.get_phone_from_dutylist(lookup)})
+                cells[d] = {"day": d, "duty_people": people}
             return {
                 "ok": True,
                 "error": None,
@@ -521,7 +526,12 @@ def duty_calendar_payload(kind: str, year: int, month: int) -> dict[str, object]
             cells = {}
             for d in range(1, last_day + 1):
                 dt = date(year, month, d)
-                cells[d] = {"day": d, "duty": sorted(od.get_duty_for_date(dt, vals, rows))}
+                names = sorted(od.get_duty_for_date(dt, vals, rows))
+                people = []
+                for name in names:
+                    ph = next((t["phone"] for t in od.TARGET_DUTY if t["name"] == name), "未找到电话号码")
+                    people.append({"name": name, "phone": ph})
+                cells[d] = {"day": d, "duty_people": people}
             return {
                 "ok": True,
                 "error": None,
@@ -538,7 +548,11 @@ def duty_calendar_payload(kind: str, year: int, month: int) -> dict[str, object]
             dm = fd.get_month_duty_map(year, month)
             if dm is None:
                 return {**base, "error": "Could not load FPMS sheet for this month", "month_label": month_label}
-            cells = {d: {"day": d, "duty": sorted(dm.get(d, []))} for d in range(1, last_day + 1)}
+            cells = {}
+            for d in range(1, last_day + 1):
+                names = sorted(dm.get(d, []))
+                people = [{"name": n, "phone": fd.get_phone(n)} for n in names]
+                cells[d] = {"day": d, "duty_people": people}
             return {
                 "ok": True,
                 "error": None,
@@ -554,6 +568,7 @@ def duty_calendar_payload(kind: str, year: int, month: int) -> dict[str, object]
 
             token = ftmod.get_tenant_access_token()
             records = ftmod.get_table_records(token, ftmod.BASE_ID, ftmod.TABLE_ID)
+            phone_map = ftmod.load_phone_map(ftmod.DUTY_LIST_PATH)
             cells = {}
             for d in range(1, last_day + 1):
                 dt = date(year, month, d)
@@ -567,7 +582,8 @@ def duty_calendar_payload(kind: str, year: int, month: int) -> dict[str, object]
                     if n not in seen:
                         seen.add(n)
                         uniq.append(n)
-                cells[d] = {"day": d, "duty": sorted(uniq)}
+                people = [{"name": n, "phone": phone_map.get(n, "Not found")} for n in sorted(uniq)]
+                cells[d] = {"day": d, "duty_people": people}
             return {
                 "ok": True,
                 "error": None,
@@ -594,7 +610,8 @@ def duty_calendar_payload(kind: str, year: int, month: int) -> dict[str, object]
                 raw = values[d - 1] if d - 1 < len(values) else ""
                 raw_s = str(raw).strip() if raw is not None else ""
                 pairs = fe.parse_names_and_get_phones(raw_s) if raw_s else []
-                cells[d] = {"day": d, "duty": [p[0] for p in pairs]}
+                people = [{"name": p[0], "phone": p[1]} for p in pairs]
+                cells[d] = {"day": d, "duty_people": people}
             return {
                 "ok": True,
                 "error": None,
@@ -613,8 +630,9 @@ def duty_calendar_payload(kind: str, year: int, month: int) -> dict[str, object]
             cells = {}
             for d in range(1, last_day + 1):
                 dt = date(year, month, d)
-                names = [name for (sd, ed, name) in rows if sd <= dt <= ed]
-                cells[d] = {"day": d, "duty": sorted(set(names))}
+                names = sorted({name for (sd, ed, name) in rows if sd <= dt <= ed})
+                people = [{"name": n, "phone": bi.get_phone(n)} for n in names]
+                cells[d] = {"day": d, "duty_people": people}
             return {
                 "ok": True,
                 "error": None,
@@ -632,15 +650,63 @@ def duty_calendar_payload(kind: str, year: int, month: int) -> dict[str, object]
             for d in range(1, last_day + 1):
                 dt = date(year, month, d)
                 try:
-                    _, main, _, backup, _ = cp.get_cpms_duty_for_date(dt)
-                    cells[d] = {"day": d, "main": main or "", "backup": backup or ""}
+                    _, main, mph, backup, bph = cp.get_cpms_duty_for_date(dt)
+                    cells[d] = {
+                        "day": d,
+                        "main": main or "",
+                        "main_phone": mph or "",
+                        "backup": backup or "",
+                        "backup_phone": bph or "",
+                    }
                 except Exception as e:
-                    cells[d] = {"day": d, "main": "", "backup": "", "dutyNote": str(e)}
+                    cells[d] = {
+                        "day": d,
+                        "main": "",
+                        "main_phone": "",
+                        "backup": "",
+                        "backup_phone": "",
+                        "dutyNote": str(e),
+                    }
             return {
                 "ok": True,
                 "error": None,
                 "kind": "cpms",
                 "layout": "cpms",
+                "year": year,
+                "month": month,
+                "month_label": month_label,
+                "weeks": _duty_weeks_from_cells(year, month, cells),
+            }
+        if kind == "sre":
+            import sre_Duty as sre
+
+            token = sre.get_tenant_access_token()
+            props = sre.get_sheet_metadata(token, sre.SPREADSHEET_TOKEN, sre.SHEET_ID)
+            if not props:
+                return {**base, "error": "Cannot retrieve SRE sheet metadata", "month_label": month_label}
+            max_row = props.get("rowCount", 200)
+            scan_range = f"A1:ZZ{max_row}"
+            values = sre.get_range_values(token, sre.SPREADSHEET_TOKEN, sre.SHEET_ID, scan_range)
+            if values is None:
+                return {**base, "error": "Failed to read SRE sheet data", "month_label": month_label}
+            if len(values) < 2:
+                return {**base, "error": "SRE sheet has fewer than 2 rows", "month_label": month_label}
+            cells = {}
+            for d in range(1, last_day + 1):
+                dt = date(year, month, d)
+                raw_names = sre._get_duty_names_for_date(dt, values)
+                people = []
+                for name in sorted(raw_names):
+                    csv_name = sre.TABLE_TO_CSV.get(name, name)
+                    phone = sre.get_phone_from_dutylist(csv_name)
+                    proj = (sre.NAME_TO_PROJECT.get(name) or "").strip()
+                    people.append({"name": name, "phone": phone, "subtitle": proj})
+                cells[d] = {"day": d, "duty_people": people}
+            return {
+                "ok": True,
+                "error": None,
+                "kind": "sre",
+                "layout": "single",
                 "year": year,
                 "month": month,
                 "month_label": month_label,
@@ -786,6 +852,13 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
       background: rgba(15, 20, 28, 0.65); color: #cbd5e1; border: 1px solid rgba(42, 53, 68, 0.85); max-width: 100%;
     }
     .ose-dash { font-size: 0.62rem; color: var(--muted); opacity: 0.7; }
+    .ose-duty-people { display: flex; flex-direction: column; gap: 0.28rem; max-height: 6rem; overflow-y: auto; }
+    .ose-duty-people::-webkit-scrollbar { width: 4px; }
+    .ose-duty-people::-webkit-scrollbar-thumb { background: rgba(124, 58, 237, 0.35); border-radius: 4px; }
+    .ose-person-line { border-bottom: 1px solid rgba(42,53,68,.6); padding-bottom: 0.22rem; margin-bottom: 0.08rem; }
+    .ose-person-line:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+    .ose-person-name { font-size: 0.6rem; font-weight: 600; color: #e2e8f0; line-height: 1.25; word-break: break-word; }
+    .ose-person-phone { font-size: 0.54rem; color: #94a3b8; margin-top: 0.06rem; }
     .ose-extra-wrap { margin-top: 0.15rem; display: flex; flex-direction: column; gap: 0.35rem; max-height: 5.2rem; overflow-y: auto; }
     .ose-extra-wrap::-webkit-scrollbar { width: 4px; }
     .ose-extra-wrap::-webkit-scrollbar-thumb { background: rgba(124, 58, 237, 0.35); border-radius: 4px; }
@@ -809,7 +882,8 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
   <header class="wm-header-bar">
     <div class="ose-hero">
       <h1>All Duty</h1>
-      <p>Calendars read the same modules as the bot: <code>ote_duty.py</code>, <code>ose_Duty.py</code>, <code>fpms_duty.py</code>, <code>ft.py</code>, <code>fe_duty.py</code>, <code>bi_duty.py</code>, <code>cpms_duty.py</code>, <code>db_duty.py</code>. Pick a roster below.</p>
+      <p>Calendars use the same modules as the bot (see filenames below). <strong>Phone numbers</strong> show for every roster <em>except OSE</em>. OSE keeps morning/night + leave/offset only.</p>
+      <p style="margin-top:0.45rem"><code>ote_duty.py</code>, <code>ose_Duty.py</code>, <code>fpms_duty.py</code>, <code>ft.py</code>, <code>fe_duty.py</code>, <code>bi_duty.py</code>, <code>cpms_duty.py</code>, <code>db_duty.py</code>, <code>sre_Duty.py</code></p>
     </div>
     <a class="wm-head-title-btn" href="{{ back_href }}">Machine status</a>
   </header>
@@ -824,6 +898,7 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
       <button type="button" class="duty-kind-btn" data-kind="bi">BI</button>
       <button type="button" class="duty-kind-btn" data-kind="cpms">CPMS</button>
       <button type="button" class="duty-kind-btn" data-kind="db">DB</button>
+      <button type="button" class="duty-kind-btn" data-kind="sre">SRE</button>
     </nav>
     <div class="ose-year-row">
       <button type="button" class="ose-icon-btn" id="ose-y-prev" aria-label="Previous year">‹</button>
@@ -845,7 +920,7 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
   (function () {
     var API = {{ api_calendar_href | tojson }};
     var dutyKind = {{ initial_kind | tojson }};
-    var validKinds = ["ote", "ose", "fpms", "ft", "fe", "bi", "cpms", "db"];
+    var validKinds = ["ote", "ose", "fpms", "ft", "fe", "bi", "cpms", "db", "sre"];
     if (validKinds.indexOf(dutyKind) < 0) dutyKind = "ose";
     var monthNames = ["January","February","March","April","May","June","July","August","September","October","November","December"];
     var now = new Date();
@@ -1022,6 +1097,13 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
       wm.className = "ose-chip-wrap";
       fillNameChips(wm, cell.main ? [cell.main] : []);
       bm.appendChild(wm);
+      if (cell.main_phone) {
+        var pm = document.createElement("div");
+        pm.className = "ose-person-phone";
+        pm.style.marginTop = "0.2rem";
+        pm.textContent = "📞 " + cell.main_phone;
+        bm.appendChild(pm);
+      }
       blocks.appendChild(bm);
       var bn = document.createElement("div");
       bn.className = "ose-block ose-block-n";
@@ -1033,6 +1115,13 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
       wn.className = "ose-chip-wrap";
       fillNameChips(wn, cell.backup ? [cell.backup] : []);
       bn.appendChild(wn);
+      if (cell.backup_phone) {
+        var pb = document.createElement("div");
+        pb.className = "ose-person-phone";
+        pb.style.marginTop = "0.2rem";
+        pb.textContent = "📞 " + cell.backup_phone;
+        bn.appendChild(pb);
+      }
       blocks.appendChild(bn);
       box.appendChild(blocks);
     }
@@ -1044,10 +1133,36 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
       lb.className = "ose-block-label";
       lb.textContent = "Duty";
       blk.appendChild(lb);
-      var w = document.createElement("div");
-      w.className = "ose-chip-wrap";
-      fillNameChips(w, cell.duty || []);
-      blk.appendChild(w);
+      var people = cell.duty_people;
+      if (people && people.length) {
+        var wrap = document.createElement("div");
+        wrap.className = "ose-duty-people";
+        for (var i = 0; i < people.length; i++) {
+          var p = people[i];
+          var row = document.createElement("div");
+          row.className = "ose-person-line";
+          var nm = document.createElement("div");
+          nm.className = "ose-person-name";
+          nm.textContent = p.name + (p.subtitle ? " · " + p.subtitle : "");
+          row.appendChild(nm);
+          var ph = document.createElement("div");
+          ph.className = "ose-person-phone";
+          ph.textContent = "📞 " + (p.phone != null && p.phone !== "" ? p.phone : "—");
+          row.appendChild(ph);
+          wrap.appendChild(row);
+        }
+        blk.appendChild(wrap);
+      } else if (cell.duty && cell.duty.length) {
+        var w = document.createElement("div");
+        w.className = "ose-chip-wrap";
+        fillNameChips(w, cell.duty);
+        blk.appendChild(w);
+      } else {
+        var dash = document.createElement("span");
+        dash.className = "ose-dash";
+        dash.textContent = "—";
+        blk.appendChild(dash);
+      }
       box.appendChild(blk);
     }
 
