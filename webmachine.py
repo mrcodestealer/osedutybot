@@ -37,7 +37,9 @@ Data sources:
 3. **Inline JSON** — ``WEBMACHINE_JSON='[...]'`` overrides file for fallback display only (no auto-create / no persist).
 
 Row keys (first match wins): **environment** / ``env`` / ``site``; **name** / ``machine``; **status**;
-**online** / ``online_offline`` / ``state``.
+**online** / ``online_offline`` / ``state``. Optional boolean **is_test** (or ``(TEST)`` in the name) for dashboard counts.
+
+The HTML dashboard shows **global and per-environment** totals (online / offline / conn unknown / test / maintain) and a **search** box; ``GET /api/machines`` includes a **stats** object with the same numbers.
 
 Optional: ``WEBMACHINE_API_TOKEN`` — ``GET /api/machines`` requires ``Authorization: Bearer <token>``.
 
@@ -76,80 +78,182 @@ _PAGE = """<!DOCTYPE html>
   {% endif %}
   <style>
     :root {
-      --bg: #0f1419;
-      --card: #1a2332;
-      --text: #e7ecf3;
+      --bg: #0b0f14;
+      --card: #151b26;
+      --elev: #1c2533;
+      --text: #e8edf4;
       --muted: #8b9cb3;
       --accent: #3b82f6;
       --ok: #22c55e;
       --warn: #eab308;
       --bad: #ef4444;
+      --line: #2a3544;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-      background: var(--bg); color: var(--text); min-height: 100vh;
+      background: radial-gradient(1200px 600px at 10% -10%, rgba(59,130,246,.12), transparent), var(--bg);
+      color: var(--text); min-height: 100vh;
     }
     header {
-      padding: 1rem 1.25rem; border-bottom: 1px solid #243044;
-      display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem;
+      padding: 1.1rem 1.35rem; border-bottom: 1px solid var(--line);
+      display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 0.85rem;
     }
-    h1 { margin: 0; font-size: 1.15rem; font-weight: 600; }
-    .sub { color: var(--muted); font-size: 0.8rem; }
-    .count { font-weight: 600; color: var(--text); }
-    main { padding: 1rem 1.25rem 2rem; max-width: 100%; margin: 0 auto; width: 100%; }
-    .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-    table {
-      width: 100%; border-collapse: collapse; background: var(--card);
-      border-radius: 10px; overflow: hidden; box-shadow: 0 4px 24px rgba(0,0,0,.25);
+    h1 { margin: 0; font-size: 1.25rem; font-weight: 650; letter-spacing: -0.02em; }
+    .sub { color: var(--muted); font-size: 0.8rem; line-height: 1.45; max-width: 42rem; }
+    .count { font-weight: 700; color: var(--text); }
+    main { padding: 1rem 1.35rem 2.5rem; max-width: 1280px; margin: 0 auto; width: 100%; }
+    .panel {
+      background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+      padding: 1rem 1.1rem; margin-bottom: 1rem; box-shadow: 0 8px 32px rgba(0,0,0,.2);
     }
-    th, td { padding: 0.65rem 0.85rem; text-align: left; border-bottom: 1px solid #243044; }
-    th { background: #243044; font-size: 0.75rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+    .panel-title { margin: 0 0 0.75rem; font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+    .summary-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(108px, 1fr)); gap: 0.65rem;
+    }
+    .stat-card {
+      background: var(--elev); border: 1px solid var(--line); border-radius: 10px; padding: 0.7rem 0.85rem;
+    }
+    .stat-card .num { font-size: 1.35rem; font-weight: 750; line-height: 1.15; letter-spacing: -0.03em; }
+    .stat-card .lbl { font-size: 0.65rem; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-top: 0.2rem; }
+    .stat-card.total .num { color: var(--accent); }
+    .stat-card.ok .num { color: var(--ok); }
+    .stat-card.bad .num { color: var(--bad); }
+    .stat-card.warn .num { color: var(--warn); }
+    .env-scroll {
+      display: flex; flex-wrap: wrap; gap: 0.65rem;
+    }
+    .env-card {
+      flex: 1 1 160px; min-width: 148px; max-width: 220px;
+      background: var(--elev); border: 1px solid var(--line); border-radius: 10px; padding: 0.65rem 0.75rem;
+    }
+    .env-card h3 { margin: 0 0 0.45rem; font-size: 0.95rem; font-weight: 650; color: var(--accent); }
+    .env-mini { display: grid; grid-template-columns: 1fr 1fr; gap: 0.25rem 0.5rem; font-size: 0.72rem; color: var(--muted); }
+    .env-mini b { color: var(--text); font-weight: 600; }
+    .toolbar {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 0.65rem; margin-bottom: 0.85rem;
+    }
+    .toolbar input[type="search"] {
+      flex: 1 1 220px; max-width: 420px; min-width: 180px;
+      padding: 0.55rem 0.85rem; border-radius: 10px; border: 1px solid var(--line);
+      background: #0f141c; color: var(--text); font-size: 0.92rem; outline: none;
+    }
+    .toolbar input[type="search"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(59,130,246,.2); }
+    .filter-hint { font-size: 0.78rem; color: var(--muted); }
+    .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: 12px; border: 1px solid var(--line); }
+    table { width: 100%; border-collapse: collapse; background: var(--elev); }
+    th, td { padding: 0.6rem 0.8rem; text-align: left; border-bottom: 1px solid var(--line); font-size: 0.88rem; }
+    th {
+      background: #222b3a; font-size: 0.68rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+      position: sticky; top: 0; z-index: 1;
+    }
     tr:last-child td { border-bottom: none; }
-    tr:hover td { background: rgba(59,130,246,.06); }
+    tbody tr:hover td { background: rgba(59,130,246,.07); }
     .pill {
-      display: inline-block; padding: 0.2rem 0.55rem; border-radius: 999px; font-size: 0.75rem; font-weight: 600;
+      display: inline-block; padding: 0.18rem 0.5rem; border-radius: 999px; font-size: 0.72rem; font-weight: 600;
     }
     .pill-online { background: rgba(34,197,94,.15); color: var(--ok); }
     .pill-offline { background: rgba(239,68,68,.15); color: var(--bad); }
     .pill-unknown { background: rgba(139,156,179,.2); color: var(--muted); }
-    .empty { color: var(--muted); padding: 2rem; text-align: center; }
-    footer { padding: 1rem; text-align: center; color: var(--muted); font-size: 0.75rem; }
-    a { color: var(--accent); }
+    .pill-test { background: rgba(234,179,8,.14); color: var(--warn); }
+    .pill-maint { background: rgba(248,113,113,.12); color: #fca5a5; }
+    .empty { color: var(--muted); padding: 2.5rem 1rem; text-align: center; line-height: 1.6; }
+    footer { padding: 1rem; text-align: center; color: var(--muted); font-size: 0.75rem; border-top: 1px solid var(--line); }
+    a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+    .muted { color: var(--muted); font-size: 0.85rem; }
   </style>
 </head>
 <body>
   <header>
     <div>
       <h1>{{ title }}</h1>
-      <div class="sub">Environment · Machine · Status · Online/Offline{% if row_total %} · <span class="count">{{ row_total }} machines</span>{% endif %}</div>
+      <div class="sub">Live machine list · provenance: {{ loaded_from }}{% if row_total %} · <span class="count">{{ row_total }} rows</span>{% endif %}</div>
     </div>
-    <div class="sub">{{ loaded_from }}</div>
   </header>
   <main>
     {% if rows %}
+    <section class="panel" aria-label="All environments summary">
+      <h2 class="panel-title">All environments</h2>
+      <div class="summary-grid">
+        <div class="stat-card total"><div class="num">{{ stats.total }}</div><div class="lbl">Total</div></div>
+        <div class="stat-card ok"><div class="num">{{ stats.online }}</div><div class="lbl">Online</div></div>
+        <div class="stat-card bad"><div class="num">{{ stats.offline }}</div><div class="lbl">Offline</div></div>
+        <div class="stat-card"><div class="num">{{ stats.conn_unknown }}</div><div class="lbl">Conn unknown</div></div>
+        <div class="stat-card warn"><div class="num">{{ stats.test }}</div><div class="lbl">Test mode</div></div>
+        <div class="stat-card"><div class="num">{{ stats.maintain }}</div><div class="lbl">Maintain</div></div>
+      </div>
+    </section>
+    <section class="panel" aria-label="Per environment summary">
+      <h2 class="panel-title">By environment</h2>
+      <div class="env-scroll">
+        {% for e in stats_env %}
+        <div class="env-card">
+          <h3>{{ e.environment }}</h3>
+          <div class="env-mini">
+            <span>Total</span><b>{{ e.total }}</b>
+            <span>Online</span><b>{{ e.online }}</b>
+            <span>Offline</span><b>{{ e.offline }}</b>
+            <span>Unknown</span><b>{{ e.conn_unknown }}</b>
+            <span>Test</span><b>{{ e.test }}</b>
+            <span>Maintain</span><b>{{ e.maintain }}</b>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+    <div class="toolbar">
+      <input type="search" id="wm-search" placeholder="Search environment, machine, status, online…" autocomplete="off" aria-label="Filter machines"/>
+      <span class="filter-hint" id="wm-filter-hint"></span>
+    </div>
     <div class="table-wrap">
     <table>
       <thead>
         <tr>
           <th>Environment</th>
           <th>Machine name</th>
-          <th>Machine status</th>
+          <th>Test</th>
+          <th>Status</th>
           <th>Online / Offline</th>
         </tr>
       </thead>
-      <tbody>
+      <tbody id="wm-tbody">
         {% for r in rows %}
-        <tr>
+        <tr data-env="{{ r.environment|e }}" data-name="{{ r.name|e }}" data-status="{{ r.status|e }}" data-online="{{ r.online_label|e }}">
           <td>{{ r.environment }}</td>
           <td><strong>{{ r.name }}</strong></td>
-          <td>{{ r.status }}</td>
+          <td>{% if r.is_test %}<span class="pill pill-test">TEST</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td>{% if 'maintain' in ((r.status or '')|lower) %}<span class="pill pill-maint">{{ r.status }}</span>{% else %}{{ r.status }}{% endif %}</td>
           <td><span class="pill {{ r.pill_class }}">{{ r.online_label }}</span></td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
     </div>
+    <script>
+    (function () {
+      var inp = document.getElementById("wm-search");
+      var hint = document.getElementById("wm-filter-hint");
+      var tbody = document.getElementById("wm-tbody");
+      if (!inp || !tbody) return;
+      function apply() {
+        var term = (inp.value || "").trim().toLowerCase();
+        var rows = tbody.querySelectorAll("tr");
+        var n = 0, total = rows.length;
+        for (var i = 0; i < rows.length; i++) {
+          var tr = rows[i];
+          var hay = (tr.getAttribute("data-env") || "") + " " + (tr.getAttribute("data-name") || "") + " " +
+            (tr.getAttribute("data-status") || "") + " " + (tr.getAttribute("data-online") || "");
+          hay = hay.toLowerCase();
+          var show = !term || hay.indexOf(term) !== -1;
+          tr.style.display = show ? "" : "none";
+          if (show) n++;
+        }
+        hint.textContent = term ? ("Showing " + n + " of " + total + " machines") : "";
+      }
+      inp.addEventListener("input", apply);
+      inp.addEventListener("search", apply);
+    })();
+    </script>
     {% else %}
     <div class="empty">
       No rows yet. If live scrape is on, wait for the first run to finish or check <code>/api/machines</code> for <code>scrape.errors</code>.
@@ -217,6 +321,7 @@ def _persist_scrape_to_data_file(rows: list[dict]) -> None:
                 "name": r.get("name"),
                 "status": r.get("status"),
                 "online": r.get("online_raw") or r.get("online_label"),
+                "is_test": bool(r.get("is_test")),
             }
             for r in rows
         ]
@@ -243,6 +348,22 @@ def _online_pill(raw: str) -> tuple[str, str]:
     return t, "pill-unknown"
 
 
+def _infer_is_test(raw: dict, name: str) -> bool:
+    v = raw.get("is_test")
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(v)
+    if str(v or "").strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    n = (name or "").lower()
+    return "(test)" in n
+
+
+def _status_is_maintain(status: str) -> bool:
+    return "maintain" in " ".join((status or "").lower().split())
+
+
 def _normalize_rows(raw: object) -> list[dict]:
     if raw is None:
         return []
@@ -267,6 +388,7 @@ def _normalize_rows(raw: object) -> list[dict]:
             if st and st.lower() in ("online", "offline"):
                 online_raw = st
         label, pill = _online_pill(online_raw)
+        is_test = _infer_is_test(row, name)
         out.append(
             {
                 "environment": env or "—",
@@ -275,9 +397,51 @@ def _normalize_rows(raw: object) -> list[dict]:
                 "online_label": label,
                 "online_raw": online_raw or "—",
                 "pill_class": pill,
+                "is_test": is_test,
             }
         )
     return out
+
+
+def _compute_stats(rows: list[dict]) -> tuple[dict, list[dict]]:
+    """Global counts and per-environment counts (same keys)."""
+    g = {"total": 0, "online": 0, "offline": 0, "conn_unknown": 0, "test": 0, "maintain": 0}
+    if not rows:
+        return g, []
+    by_env: dict[str, dict] = {}
+    for r in rows:
+        env = str(r.get("environment") or "—")
+        if env not in by_env:
+            by_env[env] = {
+                "environment": env,
+                "total": 0,
+                "online": 0,
+                "offline": 0,
+                "conn_unknown": 0,
+                "test": 0,
+                "maintain": 0,
+            }
+        be = by_env[env]
+        g["total"] += 1
+        be["total"] += 1
+        pc = str(r.get("pill_class") or "")
+        if pc == "pill-online":
+            g["online"] += 1
+            be["online"] += 1
+        elif pc == "pill-offline":
+            g["offline"] += 1
+            be["offline"] += 1
+        else:
+            g["conn_unknown"] += 1
+            be["conn_unknown"] += 1
+        if r.get("is_test"):
+            g["test"] += 1
+            be["test"] += 1
+        if _status_is_maintain(str(r.get("status") or "")):
+            g["maintain"] += 1
+            be["maintain"] += 1
+    env_list = sorted(by_env.values(), key=lambda x: str(x["environment"]).lower())
+    return g, env_list
 
 
 def _load_raw_json() -> tuple[list[dict], str]:
@@ -412,9 +576,23 @@ def api_machines():
             rows, src = _load_raw_json()
         except ValueError as e:
             return jsonify(error=str(e)), 400
-        return jsonify(source=src, count=len(rows), machines=rows, scrape=scrape_meta)
+        stats, stats_env = _compute_stats(rows)
+        return jsonify(
+            source=src,
+            count=len(rows),
+            machines=rows,
+            scrape=scrape_meta,
+            stats={"global": stats, "by_environment": stats_env},
+        )
     rows, src = _display_rows_and_provenance()
-    return jsonify(source=src, count=len(rows), machines=rows, scrape=scrape_meta)
+    stats, stats_env = _compute_stats(rows)
+    return jsonify(
+        source=src,
+        count=len(rows),
+        machines=rows,
+        scrape=scrape_meta,
+        stats={"global": stats, "by_environment": stats_env},
+    )
 
 
 @wm_bp.get("/")
@@ -433,11 +611,14 @@ def index():
             rows, src = [], f"Error: {e}"
     else:
         rows, src = _display_rows_and_provenance()
+    stats, stats_env = _compute_stats(rows)
     return render_template_string(
         _PAGE,
         title=title,
         rows=rows,
         row_total=len(rows),
+        stats=stats,
+        stats_env=stats_env,
         loaded_from=src,
         refresh_sec=refresh_sec,
         api_href=url_for("wm.api_machines"),
