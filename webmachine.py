@@ -48,6 +48,7 @@ Env: ``WEBMACHINE_PORT``, ``WEBMACHINE_HOST``, ``WEBMACHINE_TITLE``, ``WEBMACHIN
 
 from __future__ import annotations
 
+import calendar
 import json
 import os
 import sys
@@ -64,7 +65,7 @@ try:
 except ImportError:
     pass
 
-from flask import Blueprint, Flask, jsonify, render_template_string, request, url_for
+from flask import Blueprint, Flask, jsonify, redirect, render_template_string, request, url_for
 
 wm_bp = Blueprint("wm", __name__)
 
@@ -204,7 +205,7 @@ _PAGE = """<!DOCTYPE html>
       <button type="button" class="wm-head-title-btn" id="wm-title-btn" aria-label="Scroll to dashboard content">{{ title }}</button>
       <p class="wm-head-total">Total <span class="count">{{ row_total }}</span> of machines detected</p>
     </div>
-    <a class="wm-head-title-btn wm-head-nav-btn" href="{{ ose_duty_href }}">OSE Duty</a>
+    <a class="wm-head-title-btn wm-head-nav-btn" href="{{ all_duty_href }}">All Duty</a>
   </header>
   <script>
   (function () {
@@ -432,12 +433,230 @@ _PAGE = """<!DOCTYPE html>
 </html>
 """
 
-_OSE_DUTY_PAGE = """<!DOCTYPE html>
+_VALID_DUTY_KINDS = frozenset({"ote", "ose", "fpms", "ft", "fe", "bi", "cpms", "db"})
+
+
+def _duty_month_label(year: int, month: int) -> str:
+    names = (
+        "",
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    )
+    return f"{names[month]} {year}"
+
+
+def _duty_weeks_from_cells(year: int, month: int, day_cells: dict[int, dict]) -> list[list[dict | None]]:
+    out: list[list[dict | None]] = []
+    for row in calendar.monthcalendar(year, month):
+        line: list[dict | None] = []
+        for d in row:
+            line.append(None if d == 0 else day_cells.get(d))
+        out.append(line)
+    return out
+
+
+def duty_calendar_payload(kind: str, year: int, month: int) -> dict[str, object]:
+    """JSON for All Duty calendar (``ote_duty``, ``ose_Duty``, ``fpms_duty``, ``ft``, ``fe_duty``, ``bi_duty``, ``cpms_duty``, ``db_duty``)."""
+    kind = (kind or "ose").strip().lower()
+    base: dict[str, object] = {"ok": False, "kind": kind, "year": year, "month": month, "weeks": []}
+    if kind not in _VALID_DUTY_KINDS:
+        base["error"] = "Unknown kind (valid: " + ", ".join(sorted(_VALID_DUTY_KINDS)) + ")"
+        return base
+    if month < 1 or month > 12:
+        base["error"] = "month must be 1–12"
+        return base
+    month_label = _duty_month_label(year, month)
+    _, last_day = calendar.monthrange(year, month)
+
+    try:
+        if kind == "ose":
+            import ose_Duty as od
+
+            out = od.get_ose_month_calendar(year, month)
+            if isinstance(out, dict):
+                out = dict(out)
+                out.setdefault("kind", "ose")
+                out["layout"] = "ose"
+            return out
+        if kind == "ote":
+            import ote_duty as od
+
+            vals, rows, err = od.get_values_and_targets_for_year(year)
+            if err:
+                return {**base, "error": err, "month_label": month_label}
+            if not rows:
+                return {**base, "error": "No OTE section in sheet", "month_label": month_label}
+            cells: dict[int, dict] = {}
+            for d in range(1, last_day + 1):
+                dt = date(year, month, d)
+                cells[d] = {"day": d, "duty": sorted(od.get_duty_for_date(dt, vals, rows))}
+            return {
+                "ok": True,
+                "error": None,
+                "kind": "ote",
+                "layout": "single",
+                "year": year,
+                "month": month,
+                "month_label": month_label,
+                "weeks": _duty_weeks_from_cells(year, month, cells),
+            }
+        if kind == "db":
+            import db_duty as od
+
+            vals, rows, err = od.get_values_and_targets_for_year(year)
+            if err:
+                return {**base, "error": err, "month_label": month_label}
+            if not rows:
+                return {**base, "error": "No DB duty section in sheet", "month_label": month_label}
+            cells = {}
+            for d in range(1, last_day + 1):
+                dt = date(year, month, d)
+                cells[d] = {"day": d, "duty": sorted(od.get_duty_for_date(dt, vals, rows))}
+            return {
+                "ok": True,
+                "error": None,
+                "kind": "db",
+                "layout": "single",
+                "year": year,
+                "month": month,
+                "month_label": month_label,
+                "weeks": _duty_weeks_from_cells(year, month, cells),
+            }
+        if kind == "fpms":
+            import fpms_duty as fd
+
+            dm = fd.get_month_duty_map(year, month)
+            if dm is None:
+                return {**base, "error": "Could not load FPMS sheet for this month", "month_label": month_label}
+            cells = {d: {"day": d, "duty": sorted(dm.get(d, []))} for d in range(1, last_day + 1)}
+            return {
+                "ok": True,
+                "error": None,
+                "kind": "fpms",
+                "layout": "single",
+                "year": year,
+                "month": month,
+                "month_label": month_label,
+                "weeks": _duty_weeks_from_cells(year, month, cells),
+            }
+        if kind == "ft":
+            import ft as ftmod
+
+            token = ftmod.get_tenant_access_token()
+            records = ftmod.get_table_records(token, ftmod.BASE_ID, ftmod.TABLE_ID)
+            cells = {}
+            for d in range(1, last_day + 1):
+                dt = date(year, month, d)
+                names: list[str] = []
+                for rec in records:
+                    if ftmod.extract_date_from_record(rec) == dt:
+                        names.extend(ftmod.extract_names_from_record(rec))
+                seen: set[str] = set()
+                uniq: list[str] = []
+                for n in names:
+                    if n not in seen:
+                        seen.add(n)
+                        uniq.append(n)
+                cells[d] = {"day": d, "duty": sorted(uniq)}
+            return {
+                "ok": True,
+                "error": None,
+                "kind": "ft",
+                "layout": "single",
+                "year": year,
+                "month": month,
+                "month_label": month_label,
+                "weeks": _duty_weeks_from_cells(year, month, cells),
+            }
+        if kind == "fe":
+            import fe_duty as fe
+
+            token = fe.get_tenant_access_token()
+            values = fe.get_sheet_values(token)
+            if not values or len(values) < 31:
+                return {
+                    **base,
+                    "error": "Insufficient FE sheet data (expected 31 day cells)",
+                    "month_label": month_label,
+                }
+            cells = {}
+            for d in range(1, last_day + 1):
+                raw = values[d - 1] if d - 1 < len(values) else ""
+                raw_s = str(raw).strip() if raw is not None else ""
+                pairs = fe.parse_names_and_get_phones(raw_s) if raw_s else []
+                cells[d] = {"day": d, "duty": [p[0] for p in pairs]}
+            return {
+                "ok": True,
+                "error": None,
+                "kind": "fe",
+                "layout": "single",
+                "year": year,
+                "month": month,
+                "month_label": month_label,
+                "weeks": _duty_weeks_from_cells(year, month, cells),
+            }
+        if kind == "bi":
+            import bi_duty as bi
+
+            token = bi.get_tenant_access_token()
+            rows = bi._get_bi_duty_rows(month, year, token)
+            cells = {}
+            for d in range(1, last_day + 1):
+                dt = date(year, month, d)
+                names = [name for (sd, ed, name) in rows if sd <= dt <= ed]
+                cells[d] = {"day": d, "duty": sorted(set(names))}
+            return {
+                "ok": True,
+                "error": None,
+                "kind": "bi",
+                "layout": "single",
+                "year": year,
+                "month": month,
+                "month_label": month_label,
+                "weeks": _duty_weeks_from_cells(year, month, cells),
+            }
+        if kind == "cpms":
+            import cpms_duty as cp
+
+            cells = {}
+            for d in range(1, last_day + 1):
+                dt = date(year, month, d)
+                try:
+                    _, main, _, backup, _ = cp.get_cpms_duty_for_date(dt)
+                    cells[d] = {"day": d, "main": main or "", "backup": backup or ""}
+                except Exception as e:
+                    cells[d] = {"day": d, "main": "", "backup": "", "dutyNote": str(e)}
+            return {
+                "ok": True,
+                "error": None,
+                "kind": "cpms",
+                "layout": "cpms",
+                "year": year,
+                "month": month,
+                "month_label": month_label,
+                "weeks": _duty_weeks_from_cells(year, month, cells),
+            }
+    except Exception as e:
+        return {**base, "error": str(e), "month_label": month_label}
+    return {**base, "error": f"Unhandled kind: {kind!r}", "month_label": month_label}
+
+
+_ALL_DUTY_PAGE = """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>OSE Duty</title>
+  <title>All Duty</title>
   <style>
     :root {
       --bg: #0b0f14; --card: #151b26; --elev: #1c2533; --text: #e8edf4; --muted: #8b9cb3;
@@ -466,6 +685,29 @@ _OSE_DUTY_PAGE = """<!DOCTYPE html>
       transition: border-color .15s, background .15s, box-shadow .15s;
     }
     a.wm-head-title-btn:hover { border-color: var(--accent); background: rgba(59,130,246,.12); box-shadow: 0 0 0 3px rgba(59,130,246,.15); text-decoration: none; }
+    .duty-kind-bar {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-bottom: 1rem;
+      padding: 0.5rem 0.55rem; border-radius: 12px; border: 1px solid var(--line); background: rgba(21,27,38,.65);
+    }
+    .duty-kind-bar .bar-label {
+      font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted);
+      width: 100%; margin-bottom: 0.15rem;
+    }
+    @media (min-width: 520px) {
+      .duty-kind-bar .bar-label { width: auto; margin-bottom: 0; margin-right: 0.35rem; }
+    }
+    .duty-kind-btn {
+      font: inherit; font-size: 0.72rem; font-weight: 650; padding: 0.38rem 0.55rem; border-radius: 8px;
+      border: 1px solid var(--line); background: var(--elev); color: var(--muted); cursor: pointer;
+      transition: background .2s, border-color .2s, color .2s, box-shadow .2s;
+    }
+    .duty-kind-btn:hover { border-color: rgba(167, 139, 250, 0.5); color: var(--text); }
+    .duty-kind-btn.active {
+      background: var(--ose-purple-bg);
+      border-color: rgba(196, 181, 253, 0.85);
+      color: var(--ose-purple);
+      box-shadow: var(--ose-glow);
+    }
     main.ose-main { padding: 1.1rem 1.35rem 2.5rem; max-width: 1100px; margin: 0 auto; width: 100%; }
     .ose-year-row {
       display: flex; align-items: center; justify-content: center; gap: 0.75rem; margin-bottom: 1.1rem;
@@ -566,12 +808,23 @@ _OSE_DUTY_PAGE = """<!DOCTYPE html>
 <body>
   <header class="wm-header-bar">
     <div class="ose-hero">
-      <h1>OSE Duty</h1>
-      <p>Shift roster (<strong>D</strong> morning / <strong>N</strong> night). Leave removes names from shifts. Leave &amp; offset lists match the Lark bot (<code>ose_Duty.py</code>).</p>
+      <h1>All Duty</h1>
+      <p>Calendars read the same modules as the bot: <code>ote_duty.py</code>, <code>ose_Duty.py</code>, <code>fpms_duty.py</code>, <code>ft.py</code>, <code>fe_duty.py</code>, <code>bi_duty.py</code>, <code>cpms_duty.py</code>, <code>db_duty.py</code>. Pick a roster below.</p>
     </div>
     <a class="wm-head-title-btn" href="{{ back_href }}">Machine status</a>
   </header>
   <main class="ose-main" id="ose-main">
+    <nav class="duty-kind-bar" id="duty-kind-bar" aria-label="Duty roster">
+      <span class="bar-label">Roster</span>
+      <button type="button" class="duty-kind-btn" data-kind="ote">OTE</button>
+      <button type="button" class="duty-kind-btn" data-kind="ose">OSE</button>
+      <button type="button" class="duty-kind-btn" data-kind="fpms">FPMS</button>
+      <button type="button" class="duty-kind-btn" data-kind="ft">FT</button>
+      <button type="button" class="duty-kind-btn" data-kind="fe">FE</button>
+      <button type="button" class="duty-kind-btn" data-kind="bi">BI</button>
+      <button type="button" class="duty-kind-btn" data-kind="cpms">CPMS</button>
+      <button type="button" class="duty-kind-btn" data-kind="db">DB</button>
+    </nav>
     <div class="ose-year-row">
       <button type="button" class="ose-icon-btn" id="ose-y-prev" aria-label="Previous year">‹</button>
       <span class="ose-year-label" id="ose-year-label"></span>
@@ -587,10 +840,13 @@ _OSE_DUTY_PAGE = """<!DOCTYPE html>
       <div class="ose-cal-weeks" id="ose-cal-root"><div class="ose-loading" id="ose-cal-loading">Loading calendar…</div></div>
     </div>
   </main>
-  <footer>Data: Lark OSE sheet + leave Bitable (same as bot). API: <a href="{{ api_calendar_href }}?year=2026&amp;month=1">ose-duty-calendar</a></footer>
+  <footer>API: <a id="duty-api-foot" href="#">api/duty-calendar</a> · <a href="{{ back_href }}">Machine list</a></footer>
   <script>
   (function () {
     var API = {{ api_calendar_href | tojson }};
+    var dutyKind = {{ initial_kind | tojson }};
+    var validKinds = ["ote", "ose", "fpms", "ft", "fe", "bi", "cpms", "db"];
+    if (validKinds.indexOf(dutyKind) < 0) dutyKind = "ose";
     var monthNames = ["January","February","March","April","May","June","July","August","September","October","November","December"];
     var now = new Date();
     var year = now.getFullYear();
@@ -601,8 +857,35 @@ _OSE_DUTY_PAGE = """<!DOCTYPE html>
     var calWarn = document.getElementById("ose-cal-warn");
     var calRoot = document.getElementById("ose-cal-root");
     var loadingEl = document.getElementById("ose-cal-loading");
+    var kindBar = document.getElementById("duty-kind-bar");
 
     function setYearLabel() { yearLabel.textContent = String(year); }
+
+    function syncKindBar() {
+      if (!kindBar) return;
+      kindBar.querySelectorAll(".duty-kind-btn").forEach(function (btn) {
+        var k = btn.getAttribute("data-kind");
+        var on = k === dutyKind;
+        btn.classList.toggle("active", on);
+        btn.setAttribute("aria-pressed", on ? "true" : "false");
+      });
+      var foot = document.getElementById("duty-api-foot");
+      if (foot) {
+        foot.href = API + "?kind=" + encodeURIComponent(dutyKind) + "&year=" + encodeURIComponent(String(year)) + "&month=" + encodeURIComponent(String(selectedMonth));
+      }
+    }
+
+    if (kindBar) {
+      kindBar.addEventListener("click", function (ev) {
+        var btn = ev.target.closest("[data-kind]");
+        if (!btn || !kindBar.contains(btn)) return;
+        var k = btn.getAttribute("data-kind");
+        if (!k || k === dutyKind) return;
+        dutyKind = k;
+        syncKindBar();
+        loadMonth();
+      });
+    }
 
     function buildMonthButtons() {
       monthBar.innerHTML = "";
@@ -689,6 +972,85 @@ _OSE_DUTY_PAGE = """<!DOCTYPE html>
       box.appendChild(wrap);
     }
 
+    function appendOseShifts(box, cell) {
+      var blocks = document.createElement("div");
+      blocks.className = "ose-blocks";
+      var bm = document.createElement("div");
+      bm.className = "ose-block ose-block-m";
+      var lm = document.createElement("div");
+      lm.className = "ose-block-label";
+      lm.textContent = "Morning";
+      bm.appendChild(lm);
+      var wm = document.createElement("div");
+      wm.className = "ose-chip-wrap";
+      fillNameChips(wm, cell.morning || []);
+      bm.appendChild(wm);
+      blocks.appendChild(bm);
+      var bn = document.createElement("div");
+      bn.className = "ose-block ose-block-n";
+      var ln = document.createElement("div");
+      ln.className = "ose-block-label";
+      ln.textContent = "Night";
+      bn.appendChild(ln);
+      var wn = document.createElement("div");
+      wn.className = "ose-chip-wrap";
+      fillNameChips(wn, cell.night || []);
+      bn.appendChild(wn);
+      blocks.appendChild(bn);
+      box.appendChild(blocks);
+      appendLeaveAndOffset(box, cell);
+    }
+
+    function appendCpmsShifts(box, cell) {
+      var blocks = document.createElement("div");
+      blocks.className = "ose-blocks";
+      if (cell.dutyNote) {
+        var er = document.createElement("div");
+        er.className = "ose-extra-line";
+        er.style.marginBottom = "0.35rem";
+        er.style.color = "#f87171";
+        er.textContent = cell.dutyNote;
+        blocks.appendChild(er);
+      }
+      var bm = document.createElement("div");
+      bm.className = "ose-block ose-block-m";
+      var lm = document.createElement("div");
+      lm.className = "ose-block-label";
+      lm.textContent = "Main";
+      bm.appendChild(lm);
+      var wm = document.createElement("div");
+      wm.className = "ose-chip-wrap";
+      fillNameChips(wm, cell.main ? [cell.main] : []);
+      bm.appendChild(wm);
+      blocks.appendChild(bm);
+      var bn = document.createElement("div");
+      bn.className = "ose-block ose-block-n";
+      var ln = document.createElement("div");
+      ln.className = "ose-block-label";
+      ln.textContent = "Backup";
+      bn.appendChild(ln);
+      var wn = document.createElement("div");
+      wn.className = "ose-chip-wrap";
+      fillNameChips(wn, cell.backup ? [cell.backup] : []);
+      bn.appendChild(wn);
+      blocks.appendChild(bn);
+      box.appendChild(blocks);
+    }
+
+    function appendSingleDuty(box, cell) {
+      var blk = document.createElement("div");
+      blk.className = "ose-block ose-block-m";
+      var lb = document.createElement("div");
+      lb.className = "ose-block-label";
+      lb.textContent = "Duty";
+      blk.appendChild(lb);
+      var w = document.createElement("div");
+      w.className = "ose-chip-wrap";
+      fillNameChips(w, cell.duty || []);
+      blk.appendChild(w);
+      box.appendChild(blk);
+    }
+
     function renderCalendar(data) {
       if (loadingEl && loadingEl.parentNode) loadingEl.parentNode.removeChild(loadingEl);
       calRoot.innerHTML = "";
@@ -706,6 +1068,7 @@ _OSE_DUTY_PAGE = """<!DOCTYPE html>
         calWarn.textContent = data.bitable_warning;
         calWarn.hidden = false;
       }
+      var layout = data.layout || (data.kind === "ose" ? "ose" : "single");
       var todayRef = new Date();
       var tY = todayRef.getFullYear();
       var tM = todayRef.getMonth() + 1;
@@ -738,37 +1101,15 @@ _OSE_DUTY_PAGE = """<!DOCTYPE html>
               head.appendChild(badge);
             }
             box.appendChild(head);
-            var blocks = document.createElement("div");
-            blocks.className = "ose-blocks";
-            var bm = document.createElement("div");
-            bm.className = "ose-block ose-block-m";
-            var lm = document.createElement("div");
-            lm.className = "ose-block-label";
-            lm.textContent = "Morning";
-            bm.appendChild(lm);
-            var wm = document.createElement("div");
-            wm.className = "ose-chip-wrap";
-            fillNameChips(wm, cell.morning);
-            bm.appendChild(wm);
-            blocks.appendChild(bm);
-            var bn = document.createElement("div");
-            bn.className = "ose-block ose-block-n";
-            var ln = document.createElement("div");
-            ln.className = "ose-block-label";
-            ln.textContent = "Night";
-            bn.appendChild(ln);
-            var wn = document.createElement("div");
-            wn.className = "ose-chip-wrap";
-            fillNameChips(wn, cell.night);
-            bn.appendChild(wn);
-            blocks.appendChild(bn);
-            box.appendChild(blocks);
-            appendLeaveAndOffset(box, cell);
+            if (layout === "ose") appendOseShifts(box, cell);
+            else if (layout === "cpms") appendCpmsShifts(box, cell);
+            else appendSingleDuty(box, cell);
           }
           row.appendChild(box);
         }
         calRoot.appendChild(row);
       }
+      syncKindBar();
     }
 
     function loadMonth() {
@@ -779,7 +1120,7 @@ _OSE_DUTY_PAGE = """<!DOCTYPE html>
       ld.textContent = "Loading calendar…";
       calRoot.appendChild(ld);
       loadingEl = ld;
-      var url = API + "?year=" + encodeURIComponent(String(year)) + "&month=" + encodeURIComponent(String(selectedMonth));
+      var url = API + "?kind=" + encodeURIComponent(dutyKind) + "&year=" + encodeURIComponent(String(year)) + "&month=" + encodeURIComponent(String(selectedMonth));
       fetch(url).then(function (r) { return r.json(); }).then(renderCalendar).catch(function (e) {
         renderCalendar({ ok: false, error: String(e) });
       });
@@ -788,16 +1129,19 @@ _OSE_DUTY_PAGE = """<!DOCTYPE html>
     document.getElementById("ose-y-prev").addEventListener("click", function () {
       year--;
       setYearLabel();
+      syncKindBar();
       buildMonthButtons();
       loadMonth();
     });
     document.getElementById("ose-y-next").addEventListener("click", function () {
       year++;
       setYearLabel();
+      syncKindBar();
       buildMonthButtons();
       loadMonth();
     });
 
+    syncKindBar();
     setYearLabel();
     buildMonthButtons();
     loadMonth();
@@ -1159,21 +1503,30 @@ def index():
         stats_env=stats_env,
         refresh_sec=refresh_sec,
         api_href=url_for("wm.api_machines"),
-        ose_duty_href=url_for("wm.ose_duty"),
+        all_duty_href=url_for("wm.all_duty"),
+    )
+
+
+@wm_bp.get("/all-duty")
+def all_duty():
+    raw = (request.args.get("kind") or "ose").strip().lower()
+    if raw not in _VALID_DUTY_KINDS:
+        raw = "ose"
+    return render_template_string(
+        _ALL_DUTY_PAGE,
+        back_href=url_for("wm.index"),
+        api_calendar_href=url_for("wm.api_duty_calendar"),
+        initial_kind=raw,
     )
 
 
 @wm_bp.get("/ose-duty")
 def ose_duty():
-    return render_template_string(
-        _OSE_DUTY_PAGE,
-        back_href=url_for("wm.index"),
-        api_calendar_href=url_for("wm.api_ose_duty_calendar"),
-    )
+    return redirect(url_for("wm.all_duty", kind="ose"), code=302)
 
 
-@wm_bp.get("/api/ose-duty-calendar")
-def api_ose_duty_calendar():
+@wm_bp.get("/api/duty-calendar")
+def api_duty_calendar():
     try:
         y = int((request.args.get("year") or str(date.today().year)).strip())
         m = int((request.args.get("month") or str(date.today().month)).strip())
@@ -1181,12 +1534,21 @@ def api_ose_duty_calendar():
         return jsonify(ok=False, error="Invalid year or month"), 400
     if m < 1 or m > 12:
         return jsonify(ok=False, error="month must be 1–12"), 400
+    kind = (request.args.get("kind") or "ose").strip().lower()
+    return jsonify(duty_calendar_payload(kind, y, m))
+
+
+@wm_bp.get("/api/ose-duty-calendar")
+def api_ose_duty_calendar():
+    """Backward-compatible alias: same as ``/api/duty-calendar?kind=ose``."""
     try:
-        import ose_Duty as od
-    except Exception as e:
-        return jsonify(ok=False, error=f"import ose_Duty: {e}"), 500
-    payload = od.get_ose_month_calendar(y, m)
-    return jsonify(payload)
+        y = int((request.args.get("year") or str(date.today().year)).strip())
+        m = int((request.args.get("month") or str(date.today().month)).strip())
+    except ValueError:
+        return jsonify(ok=False, error="Invalid year or month"), 400
+    if m < 1 or m > 12:
+        return jsonify(ok=False, error="month must be 1–12"), 400
+    return jsonify(duty_calendar_payload("ose", y, m))
 
 
 def register_webmachine(flask_app: Flask, *, url_prefix: str | None = None) -> None:
