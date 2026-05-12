@@ -3196,9 +3196,12 @@ def _try_mount_webmachine_blueprint() -> None:
         prefix = "/" + prefix
     try:
         _wm.register_webmachine(app, url_prefix=prefix)
-        if (os.environ.get("WEBMACHINE_SCRAPE") or "").strip().lower() in ("1", "true", "yes", "on"):
-            _wm.start_background_scrape_loop()
-        print("[webmachine] dashboard registered at prefix %r (set WEBMACHINE_SCRAPE=1 for live EGM)" % prefix, flush=True)
+        _wm.start_background_scrape_loop()
+        print(
+            "[webmachine] dashboard registered at prefix %r (live scrape on by default; WEBMACHINE_SCRAPE=0 to disable)"
+            % prefix,
+            flush=True,
+        )
     except Exception as e:
         print("[webmachine] optional mount failed: %r" % (e,), flush=True)
 

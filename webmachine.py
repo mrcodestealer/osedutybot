@@ -11,19 +11,18 @@ Mount inside Duty bot (same process, no second ``main.py``) — **on by default*
 
     # optional: WEBMACHINE_MOUNT_IN_MAIN=0   disable dashboard on this app
     # optional: WEBMACHINE_URL_PREFIX=/wm   (default /wm)
-    # optional: WEBMACHINE_SCRAPE=1       live EGM scrape via smmachine (background thread; also set on standalone ``python3 webmachine.py`` before run)
+    # optional: WEBMACHINE_SCRAPE=0       disable live EGM scrape (default: **on** in code; no .env required)
     # optional: WEBMACHINE_SCRAPE_INTERVAL_SEC=900
     # optional: WEBMACHINE_SITES=nwr,nch,...  (default: ``smmachine.DEFAULT_WEBMACHINE_SITES`` — all backends; CP/OSM share one URL and are deduped)
     # optional: SM_MACHINE_COLLECT_MAX_PAGES=500  (read-only scrape page cap when SM_MACHINE_MAX_PAGES unset)
 
 Point Feishu **Desktop / Mobile homepage** to your public HTTPS URL (reverse-proxy to this port).
 
-Data sources (priority when ``WEBMACHINE_SCRAPE=1``):
+Data sources:
 
-1. **Live scrape** — after the first background run, rows come from ``smmachine.smachine_collect_machines_multi_sites``.
-   Until then, falls back to JSON if present.
-2. **JSON file** — default ``./webmachine_data.json``, or ``WEBMACHINE_DATA_PATH``.
-3. **Inline JSON** — ``WEBMACHINE_JSON='[{"environment":"NWR",...}]'`` (overrides file when used as fallback).
+1. **Live scrape** (default **on**) — background thread calls ``smmachine.smachine_collect_machines_multi_sites``; disable with ``WEBMACHINE_SCRAPE=0``.
+2. **JSON file** — default ``webmachine_data.json`` next to this module (or ``WEBMACHINE_DATA_PATH``). If missing, an empty ``[]`` file is **created**; after each successful scrape, results are **written back** to that file (skipped when ``WEBMACHINE_JSON`` inline is set).
+3. **Inline JSON** — ``WEBMACHINE_JSON='[...]'`` overrides file for fallback display only (no auto-create / no persist).
 
 Row keys (first match wins): **environment** / ``env`` / ``site``; **name** / ``machine``; **status**;
 **online** / ``online_offline`` / ``state``.
@@ -141,8 +140,8 @@ _PAGE = """<!DOCTYPE html>
     </div>
     {% else %}
     <div class="empty">
-      No rows yet. Set <code>WEBMACHINE_SCRAPE=1</code> for live EGM data, or add <code>webmachine_data.json</code>
-      / <code>WEBMACHINE_JSON</code> (see module docstring).
+      No rows yet. If live scrape is on, wait for the first run to finish or check <code>/api/machines</code> for <code>scrape.errors</code>.
+      Otherwise add rows to <code>webmachine_data.json</code> or set <code>WEBMACHINE_JSON</code>.
     </div>
     {% endif %}
   </main>
@@ -164,6 +163,54 @@ _bg_lock = threading.Lock()
 
 def _truthy_env(name: str) -> bool:
     return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _scrape_enabled() -> bool:
+    """Live EGM scrape is **on** unless ``WEBMACHINE_SCRAPE`` is explicitly ``0`` / ``false`` / ``no`` / ``off``."""
+    return (os.environ.get("WEBMACHINE_SCRAPE") or "").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _data_json_path() -> Path:
+    custom = (os.environ.get("WEBMACHINE_DATA_PATH") or "").strip()
+    return Path(custom) if custom else (_ROOT / "webmachine_data.json")
+
+
+def _ensure_machine_data_file() -> None:
+    """Create ``webmachine_data.json`` (empty array) when missing — skipped if ``WEBMACHINE_JSON`` is set."""
+    if (os.environ.get("WEBMACHINE_JSON") or "").strip():
+        return
+    p = _data_json_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    if p.is_file():
+        return
+    try:
+        p.write_text("[\n]\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _persist_scrape_to_data_file(rows: list[dict]) -> None:
+    """Write latest scrape snapshot for reload / backup; skipped when ``WEBMACHINE_JSON`` inline is used."""
+    if (os.environ.get("WEBMACHINE_JSON") or "").strip():
+        return
+    p = _data_json_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        payload = [
+            {
+                "environment": r.get("environment"),
+                "name": r.get("name"),
+                "status": r.get("status"),
+                "online": r.get("online_raw") or r.get("online_label"),
+            }
+            for r in rows
+        ]
+        p.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _cell(row: dict, *keys: str) -> str:
@@ -230,10 +277,8 @@ def _load_raw_json() -> tuple[list[dict], str]:
             raise ValueError(f"WEBMACHINE_JSON is not valid JSON: {e}") from e
         return _normalize_rows(data), "WEBMACHINE_JSON"
 
-    path = (os.environ.get("WEBMACHINE_DATA_PATH") or "").strip()
-    if not path:
-        path = str(_ROOT / "webmachine_data.json")
-    p = Path(path)
+    _ensure_machine_data_file()
+    p = _data_json_path()
     if not p.is_file():
         return [], f"(no file {p.name})"
 
@@ -274,11 +319,12 @@ def _run_scrape_once() -> None:
         _scrape_rows = norm
         _scrape_errs = errs
         _scrape_ts = time.time()
+    _persist_scrape_to_data_file(norm)
 
 
 def _background_worker() -> None:
     while True:
-        if _truthy_env("WEBMACHINE_SCRAPE"):
+        if _scrape_enabled():
             try:
                 _run_scrape_once()
             except Exception as e:
@@ -293,9 +339,9 @@ def _background_worker() -> None:
 
 
 def start_background_scrape_loop() -> None:
-    """Start daemon thread that refreshes scrape cache (no-op unless ``WEBMACHINE_SCRAPE`` is truthy)."""
+    """Start daemon thread that refreshes scrape cache (runs when scrape is not explicitly disabled)."""
     global _bg_started
-    if not _truthy_env("WEBMACHINE_SCRAPE"):
+    if not _scrape_enabled():
         return
     with _bg_lock:
         if _bg_started:
@@ -314,7 +360,7 @@ def _display_rows_and_provenance() -> tuple[list[dict], str]:
     except ValueError:
         json_rows, json_src = [], ""
 
-    if not _truthy_env("WEBMACHINE_SCRAPE"):
+    if not _scrape_enabled():
         return json_rows, json_src
 
     with _scrape_lock:
@@ -333,7 +379,7 @@ def _display_rows_and_provenance() -> tuple[list[dict], str]:
 
     if json_rows:
         return json_rows, f"{json_src} (stale until first scrape)"
-    return [], "Waiting for first EGM scrape (WEBMACHINE_SCRAPE=1)…"
+    return [], "Waiting for first EGM scrape to finish…"
 
 
 @wm_bp.get("/healthz")
@@ -349,7 +395,7 @@ def api_machines():
         return jsonify(error="unauthorized"), 401
     with _scrape_lock:
         scrape_meta = {"ts": _scrape_ts, "errors": dict(_scrape_errs)}
-    if not _truthy_env("WEBMACHINE_SCRAPE"):
+    if not _scrape_enabled():
         try:
             rows, src = _load_raw_json()
         except ValueError as e:
@@ -368,7 +414,7 @@ def index():
         refresh_sec = 30
     if refresh_sec < 0:
         refresh_sec = 0
-    if not _truthy_env("WEBMACHINE_SCRAPE"):
+    if not _scrape_enabled():
         try:
             rows, src = _load_raw_json()
         except ValueError as e:
@@ -393,8 +439,7 @@ def register_webmachine(flask_app: Flask, *, url_prefix: str | None = None) -> N
     ``url_prefix`` ``None`` / ``""`` / ``"/"`` → mount at application root.
     Otherwise use e.g. ``"/wm"`` so the dashboard lives under that prefix.
 
-    Background scraping is **not** started here; call ``start_background_scrape_loop()`` after
-    registration when ``WEBMACHINE_SCRAPE=1`` (see ``main.py`` / ``webmachine.main``).
+    Background scraping starts when :func:`start_background_scrape_loop` is called (see ``main.py`` / ``webmachine.main``); scrape is **on by default** unless ``WEBMACHINE_SCRAPE=0``.
     """
     pref = (url_prefix or "").strip()
     if pref in ("", "/"):
@@ -403,6 +448,7 @@ def register_webmachine(flask_app: Flask, *, url_prefix: str | None = None) -> N
         if not pref.startswith("/"):
             pref = "/" + pref
         flask_app.register_blueprint(wm_bp, url_prefix=pref.rstrip("/") or "/")
+    _ensure_machine_data_file()
 
 
 app = Flask(__name__)
@@ -418,7 +464,7 @@ def main() -> int:
     host = (os.environ.get("WEBMACHINE_HOST") or "0.0.0.0").strip() or "0.0.0.0"
     print(
         f"[webmachine] http://{host}:{port}/  (Lark Web app homepage → public https URL that proxies here)\n"
-        f"[webmachine] Data: WEBMACHINE_SCRAPE + smmachine, or WEBMACHINE_DATA_PATH / {_ROOT / 'webmachine_data.json'} / WEBMACHINE_JSON",
+        f"[webmachine] Data: live scrape (default on) + {_ROOT / 'webmachine_data.json'}; WEBMACHINE_SCRAPE=0 to disable",
         flush=True,
     )
     start_background_scrape_loop()
