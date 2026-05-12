@@ -9,6 +9,7 @@ OSE Duty + Leave + Offset
 
 from __future__ import annotations
 
+import calendar
 import os
 import re
 import sys
@@ -79,6 +80,10 @@ MONTH_MAP = {
 }
 
 DEBUG = False
+
+# In-memory OSE shift sheet (avoids one full-sheet fetch per day for calendar / repeated /ose).
+_OSE_SHEET_CACHE_TTL_SEC = int(os.getenv("OSE_SHEET_CACHE_SEC", "120"))
+_OSE_SHEET_CACHE: dict[str, Any] = {"mono": 0.0, "values": None}
 
 
 def debug_print(*args, **kwargs) -> None:
@@ -321,22 +326,37 @@ def parse_month_year(text: Any) -> tuple[Optional[int], Optional[int]]:
     return None, None
 
 
-def get_shift_names_for_date(target_date: date) -> tuple[list[str], list[str]]:
-    """Return (morning_names, night_names) from OSE shift sheet."""
+def _get_cached_ose_sheet_values() -> tuple[Optional[list[list[Any]]], Optional[str]]:
+    """Fetch full shift sheet once; short TTL cache shared by ``get_shift_names_for_date`` and month calendar."""
+    now = time.monotonic()
+    if (
+        _OSE_SHEET_CACHE_TTL_SEC > 0
+        and isinstance(_OSE_SHEET_CACHE.get("values"), list)
+        and now - float(_OSE_SHEET_CACHE.get("mono") or 0) < _OSE_SHEET_CACHE_TTL_SEC
+    ):
+        return _OSE_SHEET_CACHE["values"], None
+    if not SPREADSHEET_TOKEN or not SHEET_ID:
+        return None, "OSE_SPREADSHEET_TOKEN / OSE_SHEET_ID not set"
     try:
         token = get_tenant_access_token()
-    except Exception:
-        return [], []
+    except Exception as e:
+        return None, str(e)
     props = get_sheet_metadata(token, SPREADSHEET_TOKEN, SHEET_ID)
     if not props:
-        return [], []
+        return None, "Sheet metadata unavailable"
     max_row = props.get("rowCount", 200)
     max_col = props.get("columnCount", 200)
     scan_range = f"A1:{col_index_to_letter(max_col)}{max_row}"
     values = get_range_values(token, SPREADSHEET_TOKEN, SHEET_ID, scan_range)
     if not values or len(values) < 2:
-        return [], []
+        return None, "Empty or invalid sheet range"
+    _OSE_SHEET_CACHE["values"] = values
+    _OSE_SHEET_CACHE["mono"] = now
+    return values, None
 
+
+def _shift_names_from_matrix(values: list[list[Any]], target_date: date) -> tuple[list[str], list[str]]:
+    """Parse ``D`` / ``N`` for one calendar day from preloaded sheet ``values`` (same rules as legacy scan)."""
     current_year = target_date.year
     current_month = target_date.month
     current_day = target_date.day
@@ -391,6 +411,134 @@ def get_shift_names_for_date(target_date: date) -> tuple[list[str], list[str]]:
         elif code == "N":
             night.append(_title_name(name))
     return sorted(morning), sorted(night)
+
+
+def get_shift_names_for_date(target_date: date) -> tuple[list[str], list[str]]:
+    """Return (morning_names, night_names) from OSE shift sheet."""
+    values, _err = _get_cached_ose_sheet_values()
+    if not values:
+        return [], []
+    return _shift_names_from_matrix(values, target_date)
+
+
+def get_ose_month_calendar(year: int, month: int) -> dict[str, Any]:
+    """
+    Build a month grid for the web dashboard: each day has morning (``D``) and night (``N``) from the OSE sheet,
+    with the same leave filtering as ``get_ose_payload_for_date`` (mode ``date``).
+
+    Each day cell also includes ``leave`` (list of serializable dicts) and ``offset`` (list of strings),
+    using the same Bitable helpers as the Lark card — without changing those helpers.
+
+    Returns keys: ``ok``, ``year``, ``month``, ``month_label``, ``weeks`` (Mon-first rows),
+    optional ``error``, ``bitable_warning``.
+    """
+    month_names = (
+        "",
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    )
+    if month < 1 or month > 12:
+        return {"ok": False, "error": "Invalid month", "year": year, "month": month, "weeks": []}
+    values, sheet_err = _get_cached_ose_sheet_values()
+    if not values:
+        return {
+            "ok": False,
+            "error": sheet_err or "No sheet data",
+            "year": year,
+            "month": month,
+            "month_label": f"{month_names[month]} {year}",
+            "weeks": [],
+        }
+
+    leave_items: list[dict[str, Any]] = []
+    offset_items: list[dict[str, Any]] = []
+    bitable_warning: Optional[str] = None
+    token: Optional[str] = None
+    try:
+        token = get_tenant_access_token()
+        leave_items, offset_items = _get_bitable_raw_pair(token)
+    except Exception as e:
+        bitable_warning = f"Leave filter skipped: {e}"
+
+    def _on_leave(shift_label: str, entries: list[dict[str, Any]]) -> bool:
+        for r in entries:
+            ln = str(r.get("name") or "").strip()
+            if ln and _names_same_person(shift_label, ln):
+                return True
+        return False
+
+    def _leave_for_json(entries: list[dict[str, Any]]) -> list[dict[str, str]]:
+        out: list[dict[str, str]] = []
+        for row in entries:
+            st = row.get("start")
+            ed = row.get("end")
+            out.append(
+                {
+                    "name": str(row.get("name") or ""),
+                    "leave_type": str(row.get("leave_type") or "Leave"),
+                    "start": _format_ddmmyyyy(st) if isinstance(st, date) else "",
+                    "end": _format_ddmmyyyy(ed) if isinstance(ed, date) else "",
+                }
+            )
+        return out
+
+    _, last_day = calendar.monthrange(year, month)
+    day_payload: dict[int, dict[str, Any]] = {}
+    for dnum in range(1, last_day + 1):
+        d = date(year, month, dnum)
+        morning, night = _shift_names_from_matrix(values, d)
+        leave_entries: list[dict[str, Any]] = []
+        offset_lines: list[str] = []
+        if leave_items and token:
+            try:
+                leave_entries = _extract_leave_entries_for_date(d, token, items=leave_items)
+            except Exception:
+                leave_entries = []
+        if offset_items and token:
+            try:
+                offset_lines = _extract_offset_lines_for_date(d, token, items=offset_items)
+            except Exception:
+                offset_lines = []
+        morning = [n for n in morning if not _on_leave(n, leave_entries)]
+        night = [n for n in night if not _on_leave(n, leave_entries)]
+        day_payload[dnum] = {
+            "day": dnum,
+            "morning": morning,
+            "night": night,
+            "leave": _leave_for_json(leave_entries),
+            "offset": offset_lines,
+        }
+
+    cal_weeks = calendar.monthcalendar(year, month)
+    weeks_out: list[list[Optional[dict[str, Any]]]] = []
+    for row in cal_weeks:
+        line: list[Optional[dict[str, Any]]] = []
+        for dnum in row:
+            if dnum == 0:
+                line.append(None)
+            else:
+                line.append(day_payload.get(dnum))
+        weeks_out.append(line)
+
+    return {
+        "ok": True,
+        "error": None,
+        "year": year,
+        "month": month,
+        "month_label": f"{month_names[month]} {year}",
+        "weeks": weeks_out,
+        "bitable_warning": bitable_warning,
+    }
 
 
 # Short-lived in-memory cache so morning card + /ose do not double-hit Bitable.

@@ -53,6 +53,7 @@ import os
 import sys
 import threading
 import time
+from datetime import date
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent
@@ -97,10 +98,29 @@ _PAGE = """<!DOCTYPE html>
     }
     header {
       padding: 1.1rem 1.35rem; border-bottom: 1px solid var(--line);
-      display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 0.85rem;
     }
-    h1 { margin: 0; font-size: 1.25rem; font-weight: 650; letter-spacing: -0.02em; }
-    .sub { color: var(--muted); font-size: 0.8rem; line-height: 1.45; max-width: 42rem; }
+    .wm-header-bar {
+      display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 1rem;
+    }
+    a.wm-head-nav-btn {
+      text-decoration: none; display: inline-block; flex-shrink: 0; align-self: flex-start;
+    }
+    a.wm-head-nav-btn:hover { text-decoration: none; }
+    .wm-head-top { display: flex; flex-direction: column; align-items: flex-start; gap: 0.55rem; }
+    .wm-head-title-btn {
+      margin: 0; cursor: pointer; font: inherit;
+      font-size: 1.2rem; font-weight: 650; letter-spacing: -0.02em; color: var(--text);
+      padding: 0.5rem 1rem; border-radius: 10px; border: 1px solid var(--line);
+      background: var(--elev);
+      transition: border-color .15s, background .15s, box-shadow .15s;
+    }
+    .wm-head-title-btn:hover {
+      border-color: var(--accent); background: rgba(59,130,246,.12);
+      box-shadow: 0 0 0 3px rgba(59,130,246,.15);
+    }
+    .wm-head-title-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .wm-head-total { margin: 0; font-size: 0.92rem; color: var(--muted); line-height: 1.4; }
+    .wm-head-total .count { font-weight: 700; color: var(--text); }
     .count { font-weight: 700; color: var(--text); }
     main { padding: 1rem 1.35rem 2.5rem; max-width: 1280px; margin: 0 auto; width: 100%; }
     .panel {
@@ -179,13 +199,25 @@ _PAGE = """<!DOCTYPE html>
   </style>
 </head>
 <body>
-  <header>
-    <div>
-      <h1>{{ title }}</h1>
-      <div class="sub">Live machine list · provenance: {{ loaded_from }}{% if row_total %} · <span class="count">{{ row_total }} rows</span>{% endif %}</div>
+  <header class="wm-header-bar">
+    <div class="wm-head-top">
+      <button type="button" class="wm-head-title-btn" id="wm-title-btn" aria-label="Scroll to dashboard content">{{ title }}</button>
+      <p class="wm-head-total">Total <span class="count">{{ row_total }}</span> of machines detected</p>
     </div>
+    <a class="wm-head-title-btn wm-head-nav-btn" href="{{ ose_duty_href }}">OSE Duty</a>
   </header>
-  <main>
+  <script>
+  (function () {
+    var btn = document.getElementById("wm-title-btn");
+    var main = document.getElementById("wm-main");
+    if (btn && main) {
+      btn.addEventListener("click", function () {
+        main.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    }
+  })();
+  </script>
+  <main id="wm-main">
     {% if rows %}
     <section class="panel" aria-label="All environments summary">
       <h2 class="panel-title">All environments</h2>
@@ -396,6 +428,287 @@ _PAGE = """<!DOCTYPE html>
     {% if refresh_sec > 0 %}Auto-refresh every {{ refresh_sec }}s · {% endif %}
     API: <a href="{{ api_href }}">api/machines</a>
   </footer>
+</body>
+</html>
+"""
+
+_OSE_DUTY_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>OSE Duty</title>
+  <style>
+    :root {
+      --bg: #0b0f14; --card: #151b26; --elev: #1c2533; --text: #e8edf4; --muted: #8b9cb3;
+      --accent: #3b82f6; --ok: #22c55e; --line: #2a3544; --morn: #fbbf24; --night: #93c5fd;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: radial-gradient(1200px 600px at 10% -10%, rgba(59,130,246,.12), transparent), var(--bg);
+      color: var(--text); min-height: 100vh;
+    }
+    header.wm-header-bar {
+      padding: 1.1rem 1.35rem; border-bottom: 1px solid var(--line);
+      display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 1rem;
+    }
+    .ose-hero h1 { margin: 0 0 0.35rem; font-size: 1.35rem; font-weight: 700; letter-spacing: -0.02em; }
+    .ose-hero p { margin: 0; font-size: 0.82rem; color: var(--muted); max-width: 36rem; line-height: 1.45; }
+    a.wm-head-title-btn {
+      text-decoration: none; display: inline-block; flex-shrink: 0;
+      margin: 0; cursor: pointer; font: inherit; font-size: 0.95rem; font-weight: 650;
+      padding: 0.5rem 1rem; border-radius: 10px; border: 1px solid var(--line); background: var(--elev); color: var(--text);
+      transition: border-color .15s, background .15s, box-shadow .15s;
+    }
+    a.wm-head-title-btn:hover { border-color: var(--accent); background: rgba(59,130,246,.12); box-shadow: 0 0 0 3px rgba(59,130,246,.15); text-decoration: none; }
+    main.ose-main { padding: 1.1rem 1.35rem 2.5rem; max-width: 1100px; margin: 0 auto; width: 100%; }
+    .ose-year-row {
+      display: flex; align-items: center; justify-content: center; gap: 0.75rem; margin-bottom: 1.1rem;
+    }
+    .ose-year-label { font-size: 1.15rem; font-weight: 700; min-width: 5rem; text-align: center; }
+    .ose-icon-btn {
+      font: inherit; width: 2.25rem; height: 2.25rem; border-radius: 10px; border: 1px solid var(--line);
+      background: var(--elev); color: var(--text); cursor: pointer; font-size: 1.1rem; line-height: 1;
+    }
+    .ose-icon-btn:hover { border-color: var(--accent); }
+    .ose-month-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 0.5rem; margin-bottom: 1.35rem;
+    }
+    .ose-month-btn {
+      font: inherit; font-size: 0.82rem; font-weight: 600; padding: 0.55rem 0.4rem; border-radius: 10px;
+      border: 1px solid var(--line); background: var(--card); color: var(--muted); cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+    .ose-month-btn:hover { border-color: var(--accent); color: var(--text); }
+    .ose-month-btn.active { background: rgba(59,130,246,.22); border-color: var(--accent); color: var(--text); }
+    .ose-cal-panel {
+      background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 1rem 1rem 1.1rem;
+      box-shadow: 0 8px 32px rgba(0,0,0,.22);
+    }
+    .ose-cal-title { margin: 0 0 0.5rem; font-size: 1.05rem; font-weight: 650; }
+    .ose-cal-warn { margin: 0 0 0.75rem; font-size: 0.82rem; color: #f87171; }
+    .ose-cal-dow {
+      display: grid; grid-template-columns: repeat(7, 1fr); gap: 0.35rem; margin-bottom: 0.35rem;
+    }
+    .ose-cal-dow span {
+      text-align: center; font-size: 0.65rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+    }
+    .ose-cal-weeks { display: flex; flex-direction: column; gap: 0.35rem; }
+    .ose-cal-row { display: grid; grid-template-columns: repeat(7, 1fr); gap: 0.35rem; }
+    .ose-cal-cell {
+      min-height: 5.5rem; border-radius: 10px; border: 1px solid var(--line); background: var(--elev);
+      padding: 0.35rem 0.4rem; display: flex; flex-direction: column; gap: 0.25rem; align-items: stretch;
+    }
+    .ose-cal-cell.empty { background: transparent; border: none; min-height: 0; }
+    .ose-cal-cell .d { font-weight: 750; font-size: 0.85rem; color: var(--text); }
+    .ose-shift { font-size: 0.65rem; line-height: 1.35; }
+    .ose-shift .tag { font-weight: 700; color: var(--morn); margin-right: 0.2rem; }
+    .ose-shift.n .tag { color: var(--night); }
+    .ose-names { color: var(--muted); font-weight: 500; word-break: break-word; }
+    .ose-extra { margin-top: 0.2rem; padding-top: 0.3rem; border-top: 1px solid rgba(42,53,68,.95); font-size: 0.6rem; line-height: 1.38; }
+    .ose-extra-title { font-weight: 700; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 0.15rem; font-size: 0.58rem; }
+    .ose-extra-leave .ose-extra-title { color: #fbbf24; }
+    .ose-extra-offset .ose-extra-title { color: #93c5fd; }
+    .ose-extra-line { color: var(--muted); margin-bottom: 0.1rem; word-break: break-word; }
+    .ose-loading { text-align: center; color: var(--muted); padding: 2rem; font-size: 0.9rem; }
+    footer { padding: 1rem; text-align: center; color: var(--muted); font-size: 0.75rem; border-top: 1px solid var(--line); }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <header class="wm-header-bar">
+    <div class="ose-hero">
+      <h1>OSE Duty</h1>
+      <p>Morning / night from the OSE sheet (<strong>D</strong> / <strong>N</strong>). Approved leave hides names from shifts (same as <code>ose_Duty.py</code>). Each day also lists <strong>Leave</strong> and <strong>Offset</strong> from the same Bitable helpers as the Lark card.</p>
+    </div>
+    <a class="wm-head-title-btn" href="{{ back_href }}">Machine status</a>
+  </header>
+  <main class="ose-main" id="ose-main">
+    <div class="ose-year-row">
+      <button type="button" class="ose-icon-btn" id="ose-y-prev" aria-label="Previous year">‹</button>
+      <span class="ose-year-label" id="ose-year-label"></span>
+      <button type="button" class="ose-icon-btn" id="ose-y-next" aria-label="Next year">›</button>
+    </div>
+    <div class="ose-month-grid" id="ose-month-btns" role="tablist" aria-label="Month"></div>
+    <div class="ose-cal-panel" id="ose-cal-panel">
+      <h3 class="ose-cal-title" id="ose-cal-title">Select a month</h3>
+      <p class="ose-cal-warn" id="ose-cal-warn" hidden></p>
+      <div class="ose-cal-dow" aria-hidden="true">
+        <span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span>
+      </div>
+      <div class="ose-cal-weeks" id="ose-cal-root"><div class="ose-loading" id="ose-cal-loading">Loading calendar…</div></div>
+    </div>
+  </main>
+  <footer>Data: Lark OSE sheet + leave Bitable (same as bot). API: <a href="{{ api_calendar_href }}?year=2026&amp;month=1">ose-duty-calendar</a></footer>
+  <script>
+  (function () {
+    var API = {{ api_calendar_href | tojson }};
+    var monthNames = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+    var now = new Date();
+    var year = now.getFullYear();
+    var selectedMonth = now.getMonth() + 1;
+    var monthBar = document.getElementById("ose-month-btns");
+    var yearLabel = document.getElementById("ose-year-label");
+    var calTitle = document.getElementById("ose-cal-title");
+    var calWarn = document.getElementById("ose-cal-warn");
+    var calRoot = document.getElementById("ose-cal-root");
+    var loadingEl = document.getElementById("ose-cal-loading");
+
+    function setYearLabel() { yearLabel.textContent = String(year); }
+
+    function buildMonthButtons() {
+      monthBar.innerHTML = "";
+      for (var m = 1; m <= 12; m++) {
+        var b = document.createElement("button");
+        b.type = "button";
+        b.className = "ose-month-btn" + (m === selectedMonth ? " active" : "");
+        b.textContent = monthNames[m - 1];
+        b.setAttribute("role", "tab");
+        b.setAttribute("aria-selected", m === selectedMonth ? "true" : "false");
+        b.setAttribute("data-month", String(m));
+        b.addEventListener("click", function (ev) {
+          var t = ev.target;
+          selectedMonth = parseInt(t.getAttribute("data-month"), 10);
+          monthBar.querySelectorAll(".ose-month-btn").forEach(function (x) {
+            var on = x === t;
+            x.classList.toggle("active", on);
+            x.setAttribute("aria-selected", on ? "true" : "false");
+          });
+          loadMonth();
+        });
+        monthBar.appendChild(b);
+      }
+    }
+
+    function namesLine(arr) {
+      if (!arr || !arr.length) return "—";
+      return arr.join(", ");
+    }
+
+    function appendLeaveAndOffset(box, cell) {
+      var leaves = cell.leave || [];
+      var offs = cell.offset || [];
+      if (leaves.length) {
+        var sec = document.createElement("div");
+        sec.className = "ose-extra ose-extra-leave";
+        var h = document.createElement("div");
+        h.className = "ose-extra-title";
+        h.textContent = "Leave";
+        sec.appendChild(h);
+        for (var i = 0; i < leaves.length; i++) {
+          var r = leaves[i];
+          var line = document.createElement("div");
+          line.className = "ose-extra-line";
+          if (r.start === r.end) {
+            line.textContent = r.name + " (" + r.leave_type + ") — " + r.start;
+          } else {
+            line.textContent = r.name + " (" + r.leave_type + ") — " + r.start + " → " + r.end;
+          }
+          sec.appendChild(line);
+        }
+        box.appendChild(sec);
+      }
+      if (offs.length) {
+        var sec2 = document.createElement("div");
+        sec2.className = "ose-extra ose-extra-offset";
+        var h2 = document.createElement("div");
+        h2.className = "ose-extra-title";
+        h2.textContent = "Offset";
+        sec2.appendChild(h2);
+        for (var j = 0; j < offs.length; j++) {
+          var line2 = document.createElement("div");
+          line2.className = "ose-extra-line";
+          line2.textContent = offs[j];
+          sec2.appendChild(line2);
+        }
+        box.appendChild(sec2);
+      }
+    }
+
+    function renderCalendar(data) {
+      if (loadingEl && loadingEl.parentNode) loadingEl.parentNode.removeChild(loadingEl);
+      calRoot.innerHTML = "";
+      calWarn.hidden = true;
+      calWarn.textContent = "";
+      if (!data || !data.ok) {
+        calTitle.textContent = data && data.month_label ? data.month_label : "Calendar";
+        var err = (data && data.error) ? data.error : "Failed to load";
+        calWarn.textContent = err;
+        calWarn.hidden = false;
+        return;
+      }
+      calTitle.textContent = data.month_label || ("Month " + data.month);
+      if (data.bitable_warning) {
+        calWarn.textContent = data.bitable_warning;
+        calWarn.hidden = false;
+      }
+      var weeks = data.weeks || [];
+      for (var wi = 0; wi < weeks.length; wi++) {
+        var row = document.createElement("div");
+        row.className = "ose-cal-row";
+        var wk = weeks[wi];
+        for (var di = 0; di < wk.length; di++) {
+          var cell = wk[di];
+          var box = document.createElement("div");
+          if (!cell) {
+            box.className = "ose-cal-cell empty";
+          } else {
+            box.className = "ose-cal-cell";
+            var dayn = document.createElement("div");
+            dayn.className = "d";
+            dayn.textContent = String(cell.day);
+            box.appendChild(dayn);
+            var sm = document.createElement("div");
+            sm.className = "ose-shift";
+            sm.innerHTML = '<span class="tag">Morning</span><span class="ose-names"></span>';
+            sm.querySelector(".ose-names").textContent = namesLine(cell.morning);
+            box.appendChild(sm);
+            var sn = document.createElement("div");
+            sn.className = "ose-shift n";
+            sn.innerHTML = '<span class="tag">Night</span><span class="ose-names"></span>';
+            sn.querySelector(".ose-names").textContent = namesLine(cell.night);
+            box.appendChild(sn);
+            appendLeaveAndOffset(box, cell);
+          }
+          row.appendChild(box);
+        }
+        calRoot.appendChild(row);
+      }
+    }
+
+    function loadMonth() {
+      calRoot.innerHTML = "";
+      var ld = document.createElement("div");
+      ld.className = "ose-loading";
+      ld.id = "ose-cal-loading";
+      ld.textContent = "Loading calendar…";
+      calRoot.appendChild(ld);
+      loadingEl = ld;
+      var url = API + "?year=" + encodeURIComponent(String(year)) + "&month=" + encodeURIComponent(String(selectedMonth));
+      fetch(url).then(function (r) { return r.json(); }).then(renderCalendar).catch(function (e) {
+        renderCalendar({ ok: false, error: String(e) });
+      });
+    }
+
+    document.getElementById("ose-y-prev").addEventListener("click", function () {
+      year--;
+      setYearLabel();
+      buildMonthButtons();
+      loadMonth();
+    });
+    document.getElementById("ose-y-next").addEventListener("click", function () {
+      year++;
+      setYearLabel();
+      buildMonthButtons();
+      loadMonth();
+    });
+
+    setYearLabel();
+    buildMonthButtons();
+    loadMonth();
+  })();
+  </script>
 </body>
 </html>
 """
@@ -737,11 +1050,11 @@ def index():
         refresh_sec = 0
     if not _scrape_enabled():
         try:
-            rows, src = _load_raw_json()
+            rows, _ = _load_raw_json()
         except ValueError as e:
-            rows, src = [], f"Error: {e}"
+            rows, _ = [], f"Error: {e}"
     else:
-        rows, src = _display_rows_and_provenance()
+        rows, _ = _display_rows_and_provenance()
     stats, stats_env = _compute_stats(rows)
     return render_template_string(
         _PAGE,
@@ -750,10 +1063,36 @@ def index():
         row_total=len(rows),
         stats=stats,
         stats_env=stats_env,
-        loaded_from=src,
         refresh_sec=refresh_sec,
         api_href=url_for("wm.api_machines"),
+        ose_duty_href=url_for("wm.ose_duty"),
     )
+
+
+@wm_bp.get("/ose-duty")
+def ose_duty():
+    return render_template_string(
+        _OSE_DUTY_PAGE,
+        back_href=url_for("wm.index"),
+        api_calendar_href=url_for("wm.api_ose_duty_calendar"),
+    )
+
+
+@wm_bp.get("/api/ose-duty-calendar")
+def api_ose_duty_calendar():
+    try:
+        y = int((request.args.get("year") or str(date.today().year)).strip())
+        m = int((request.args.get("month") or str(date.today().month)).strip())
+    except ValueError:
+        return jsonify(ok=False, error="Invalid year or month"), 400
+    if m < 1 or m > 12:
+        return jsonify(ok=False, error="month must be 1–12"), 400
+    try:
+        import ose_Duty as od
+    except Exception as e:
+        return jsonify(ok=False, error=f"import ose_Duty: {e}"), 500
+    payload = od.get_ose_month_calendar(y, m)
+    return jsonify(payload)
 
 
 def register_webmachine(flask_app: Flask, *, url_prefix: str | None = None) -> None:
