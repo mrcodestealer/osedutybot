@@ -122,6 +122,7 @@ _PAGE = """<!DOCTYPE html>
     .wm-head-title-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     .wm-head-total { margin: 0; font-size: 0.92rem; color: var(--muted); line-height: 1.4; }
     .wm-head-total .count { font-weight: 700; color: var(--text); }
+    .wm-head-updated { margin: 0.25rem 0 0; font-size: 0.82rem; color: var(--muted); line-height: 1.35; }
     .count { font-weight: 700; color: var(--text); }
     main { padding: 1rem 1.35rem 2.5rem; max-width: 1280px; margin: 0 auto; width: 100%; }
     .panel {
@@ -204,6 +205,7 @@ _PAGE = """<!DOCTYPE html>
     <div class="wm-head-top">
       <button type="button" class="wm-head-title-btn" id="wm-title-btn" aria-label="Scroll to dashboard content">{{ title }}</button>
       <p class="wm-head-total">Total <span class="count">{{ row_total }}</span> of machines detected</p>
+      <p class="wm-head-updated">Last Updated : {{ last_updated }}</p>
     </div>
     <a class="wm-head-title-btn wm-head-nav-btn" href="{{ all_duty_href }}">All Duty</a>
   </header>
@@ -1524,6 +1526,21 @@ def start_background_scrape_loop() -> None:
     th.start()
 
 
+def _machines_last_updated_str() -> str:
+    """Local ``YYYY-mm-dd HH:MM:SS`` for last machine list refresh (live scrape time, else data file mtime)."""
+    with _scrape_lock:
+        ts = _scrape_ts
+    if ts > 0:
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+    try:
+        p = _data_json_path()
+        if p.is_file():
+            return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(p.stat().st_mtime))
+    except OSError:
+        pass
+    return "—"
+
+
 def _display_rows_and_provenance() -> tuple[list[dict], str]:
     """Normalized display rows + short provenance string for the HTML header (only when ``WEBMACHINE_SCRAPE``)."""
     json_rows: list[dict] = []
@@ -1614,6 +1631,7 @@ def index():
         title=title,
         rows=rows,
         row_total=len(rows),
+        last_updated=_machines_last_updated_str(),
         stats=stats,
         stats_env=stats_env,
         refresh_sec=refresh_sec,
