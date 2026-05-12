@@ -441,7 +441,11 @@ _OSE_DUTY_PAGE = """<!DOCTYPE html>
   <style>
     :root {
       --bg: #0b0f14; --card: #151b26; --elev: #1c2533; --text: #e8edf4; --muted: #8b9cb3;
-      --accent: #3b82f6; --ok: #22c55e; --line: #2a3544; --morn: #fbbf24; --night: #93c5fd;
+      --accent: #3b82f6; --ok: #22c55e; --line: #2a3544; --morn: #e8c468; --night: #9ec5f7;
+      --ose-purple: #c4b5fd;
+      --ose-purple-deep: #7c3aed;
+      --ose-purple-bg: rgba(124, 58, 237, 0.12);
+      --ose-glow: 0 0 0 1px rgba(167, 139, 250, 0.45), 0 0 20px rgba(124, 58, 237, 0.35), 0 0 40px rgba(124, 58, 237, 0.12);
     }
     * { box-sizing: border-box; }
     body {
@@ -471,22 +475,30 @@ _OSE_DUTY_PAGE = """<!DOCTYPE html>
       font: inherit; width: 2.25rem; height: 2.25rem; border-radius: 10px; border: 1px solid var(--line);
       background: var(--elev); color: var(--text); cursor: pointer; font-size: 1.1rem; line-height: 1;
     }
-    .ose-icon-btn:hover { border-color: var(--accent); }
+    .ose-icon-btn:hover { border-color: rgba(167, 139, 250, 0.55); box-shadow: 0 0 14px rgba(124, 58, 237, 0.22); }
     .ose-month-grid {
-      display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 0.5rem; margin-bottom: 1.35rem;
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 0.45rem; margin-bottom: 1.25rem;
     }
     .ose-month-btn {
-      font: inherit; font-size: 0.82rem; font-weight: 600; padding: 0.55rem 0.4rem; border-radius: 10px;
+      font: inherit; font-size: 0.74rem; font-weight: 600; padding: 0.48rem 0.3rem; border-radius: 10px;
       border: 1px solid var(--line); background: var(--card); color: var(--muted); cursor: pointer;
-      transition: background .15s, border-color .15s, color .15s;
+      transition: background .2s, border-color .2s, color .2s, box-shadow .2s;
     }
-    .ose-month-btn:hover { border-color: var(--accent); color: var(--text); }
-    .ose-month-btn.active { background: rgba(59,130,246,.22); border-color: var(--accent); color: var(--text); }
+    .ose-month-btn:hover { border-color: rgba(167, 139, 250, 0.5); color: var(--text); }
+    .ose-month-btn.active {
+      background: var(--ose-purple-bg);
+      border-color: rgba(196, 181, 253, 0.85);
+      color: var(--ose-purple);
+      box-shadow: var(--ose-glow);
+    }
     .ose-cal-panel {
       background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 1rem 1rem 1.1rem;
       box-shadow: 0 8px 32px rgba(0,0,0,.22);
     }
-    .ose-cal-title { margin: 0 0 0.5rem; font-size: 1.05rem; font-weight: 650; }
+    .ose-cal-title {
+      margin: 0 0 0.65rem; font-size: 1.08rem; font-weight: 650;
+      padding-bottom: 0.45rem; border-bottom: 2px solid rgba(124, 58, 237, 0.35);
+    }
     .ose-cal-warn { margin: 0 0 0.75rem; font-size: 0.82rem; color: #f87171; }
     .ose-cal-dow {
       display: grid; grid-template-columns: repeat(7, 1fr); gap: 0.35rem; margin-bottom: 0.35rem;
@@ -495,22 +507,57 @@ _OSE_DUTY_PAGE = """<!DOCTYPE html>
       text-align: center; font-size: 0.65rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
     }
     .ose-cal-weeks { display: flex; flex-direction: column; gap: 0.35rem; }
-    .ose-cal-row { display: grid; grid-template-columns: repeat(7, 1fr); gap: 0.35rem; }
+    .ose-cal-row { display: grid; grid-template-columns: repeat(7, 1fr); gap: 0.45rem; align-items: stretch; }
     .ose-cal-cell {
-      min-height: 5.5rem; border-radius: 10px; border: 1px solid var(--line); background: var(--elev);
-      padding: 0.35rem 0.4rem; display: flex; flex-direction: column; gap: 0.25rem; align-items: stretch;
+      min-height: 6rem; border-radius: 12px; border: 1px solid var(--line); background: linear-gradient(165deg, rgba(28,37,51,.98), rgba(20,26,36,.99));
+      padding: 0.45rem 0.45rem 0.5rem; display: flex; flex-direction: column; gap: 0.3rem; align-items: stretch;
+      transition: border-color .2s, box-shadow .2s, background .2s;
     }
     .ose-cal-cell.empty { background: transparent; border: none; min-height: 0; }
-    .ose-cal-cell .d { font-weight: 750; font-size: 0.85rem; color: var(--text); }
-    .ose-shift { font-size: 0.65rem; line-height: 1.35; }
-    .ose-shift .tag { font-weight: 700; color: var(--morn); margin-right: 0.2rem; }
-    .ose-shift.n .tag { color: var(--night); }
-    .ose-names { color: var(--muted); font-weight: 500; word-break: break-word; }
-    .ose-extra { margin-top: 0.2rem; padding-top: 0.3rem; border-top: 1px solid rgba(42,53,68,.95); font-size: 0.6rem; line-height: 1.38; }
-    .ose-extra-title { font-weight: 700; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 0.15rem; font-size: 0.58rem; }
-    .ose-extra-leave .ose-extra-title { color: #fbbf24; }
-    .ose-extra-offset .ose-extra-title { color: #93c5fd; }
-    .ose-extra-line { color: var(--muted); margin-bottom: 0.1rem; word-break: break-word; }
+    .ose-cal-cell.is-today {
+      border-color: rgba(196, 181, 253, 0.75);
+      box-shadow: var(--ose-glow);
+      background: linear-gradient(165deg, rgba(124, 58, 237, 0.14), rgba(20,26,36,.98));
+    }
+    .ose-day-head { display: flex; align-items: center; justify-content: space-between; gap: 0.35rem; margin-bottom: 0.15rem; }
+    .ose-cal-cell .d { font-weight: 800; font-size: 0.95rem; color: var(--text); letter-spacing: -0.02em; line-height: 1; }
+    .ose-today-badge {
+      flex-shrink: 0; font-size: 0.58rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+      padding: 0.15rem 0.4rem; border-radius: 999px;
+      background: linear-gradient(135deg, rgba(124, 58, 237, 0.55), rgba(167, 139, 250, 0.35));
+      color: #f5f3ff; border: 1px solid rgba(196, 181, 253, 0.5);
+      box-shadow: 0 0 12px rgba(124, 58, 237, 0.45);
+    }
+    .ose-blocks { display: flex; flex-direction: column; gap: 0.28rem; }
+    .ose-block {
+      border-radius: 8px; padding: 0.28rem 0.32rem;
+      border: 1px solid rgba(42, 53, 68, 0.9);
+    }
+    .ose-block-m { background: rgba(232, 196, 104, 0.06); border-color: rgba(232, 196, 104, 0.12); }
+    .ose-block-n { background: rgba(158, 197, 247, 0.06); border-color: rgba(158, 197, 247, 0.12); }
+    .ose-block-label { font-size: 0.58rem; font-weight: 750; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.18rem; }
+    .ose-block-m .ose-block-label { color: var(--morn); }
+    .ose-block-n .ose-block-label { color: var(--night); }
+    .ose-chip-wrap { display: flex; flex-wrap: wrap; gap: 0.2rem 0.25rem; align-items: flex-start; }
+    .ose-chip {
+      font-size: 0.58rem; font-weight: 500; line-height: 1.2; padding: 0.12rem 0.32rem; border-radius: 6px;
+      background: rgba(15, 20, 28, 0.65); color: #cbd5e1; border: 1px solid rgba(42, 53, 68, 0.85); max-width: 100%;
+    }
+    .ose-dash { font-size: 0.62rem; color: var(--muted); opacity: 0.7; }
+    .ose-extra-wrap { margin-top: 0.15rem; display: flex; flex-direction: column; gap: 0.35rem; max-height: 5.2rem; overflow-y: auto; }
+    .ose-extra-wrap::-webkit-scrollbar { width: 4px; }
+    .ose-extra-wrap::-webkit-scrollbar-thumb { background: rgba(124, 58, 237, 0.35); border-radius: 4px; }
+    .ose-extra {
+      padding: 0.28rem 0.32rem; border-radius: 8px; font-size: 0.58rem; line-height: 1.42;
+      border: 1px solid rgba(42, 53, 68, 0.75); background: rgba(11, 15, 20, 0.35);
+    }
+    .ose-extra-title { font-weight: 750; text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 0.2rem; font-size: 0.56rem; }
+    .ose-extra-leave { border-color: rgba(232, 196, 104, 0.15); }
+    .ose-extra-leave .ose-extra-title { color: var(--morn); }
+    .ose-extra-offset { border-color: rgba(158, 197, 247, 0.15); }
+    .ose-extra-offset .ose-extra-title { color: var(--night); }
+    .ose-extra-line { color: #9fb0c9; margin-bottom: 0.14rem; word-break: break-word; }
+    .ose-extra-line:last-child { margin-bottom: 0; }
     .ose-loading { text-align: center; color: var(--muted); padding: 2rem; font-size: 0.9rem; }
     footer { padding: 1rem; text-align: center; color: var(--muted); font-size: 0.75rem; border-top: 1px solid var(--line); }
     a { color: var(--accent); }
@@ -520,7 +567,7 @@ _OSE_DUTY_PAGE = """<!DOCTYPE html>
   <header class="wm-header-bar">
     <div class="ose-hero">
       <h1>OSE Duty</h1>
-      <p>Morning / night from the OSE sheet (<strong>D</strong> / <strong>N</strong>). Approved leave hides names from shifts (same as <code>ose_Duty.py</code>). Each day also lists <strong>Leave</strong> and <strong>Offset</strong> from the same Bitable helpers as the Lark card.</p>
+      <p>Shift roster (<strong>D</strong> morning / <strong>N</strong> night). Leave removes names from shifts. Leave &amp; offset lists match the Lark bot (<code>ose_Duty.py</code>).</p>
     </div>
     <a class="wm-head-title-btn" href="{{ back_href }}">Machine status</a>
   </header>
@@ -581,14 +628,29 @@ _OSE_DUTY_PAGE = """<!DOCTYPE html>
       }
     }
 
-    function namesLine(arr) {
-      if (!arr || !arr.length) return "—";
-      return arr.join(", ");
+    function fillNameChips(wrapEl, arr) {
+      wrapEl.innerHTML = "";
+      if (!arr || !arr.length) {
+        var dash = document.createElement("span");
+        dash.className = "ose-dash";
+        dash.textContent = "—";
+        wrapEl.appendChild(dash);
+        return;
+      }
+      for (var i = 0; i < arr.length; i++) {
+        var ch = document.createElement("span");
+        ch.className = "ose-chip";
+        ch.textContent = arr[i];
+        wrapEl.appendChild(ch);
+      }
     }
 
     function appendLeaveAndOffset(box, cell) {
       var leaves = cell.leave || [];
       var offs = cell.offset || [];
+      if (!leaves.length && !offs.length) return;
+      var wrap = document.createElement("div");
+      wrap.className = "ose-extra-wrap";
       if (leaves.length) {
         var sec = document.createElement("div");
         sec.className = "ose-extra ose-extra-leave";
@@ -607,7 +669,7 @@ _OSE_DUTY_PAGE = """<!DOCTYPE html>
           }
           sec.appendChild(line);
         }
-        box.appendChild(sec);
+        wrap.appendChild(sec);
       }
       if (offs.length) {
         var sec2 = document.createElement("div");
@@ -622,8 +684,9 @@ _OSE_DUTY_PAGE = """<!DOCTYPE html>
           line2.textContent = offs[j];
           sec2.appendChild(line2);
         }
-        box.appendChild(sec2);
+        wrap.appendChild(sec2);
       }
+      box.appendChild(wrap);
     }
 
     function renderCalendar(data) {
@@ -643,6 +706,12 @@ _OSE_DUTY_PAGE = """<!DOCTYPE html>
         calWarn.textContent = data.bitable_warning;
         calWarn.hidden = false;
       }
+      var todayRef = new Date();
+      var tY = todayRef.getFullYear();
+      var tM = todayRef.getMonth() + 1;
+      var tD = todayRef.getDate();
+      var cy = data.year;
+      var cm = data.month;
       var weeks = data.weeks || [];
       for (var wi = 0; wi < weeks.length; wi++) {
         var row = document.createElement("div");
@@ -654,21 +723,46 @@ _OSE_DUTY_PAGE = """<!DOCTYPE html>
           if (!cell) {
             box.className = "ose-cal-cell empty";
           } else {
-            box.className = "ose-cal-cell";
-            var dayn = document.createElement("div");
+            var isToday = (cell.day === tD && cm === tM && cy === tY);
+            box.className = "ose-cal-cell" + (isToday ? " is-today" : "");
+            var head = document.createElement("div");
+            head.className = "ose-day-head";
+            var dayn = document.createElement("span");
             dayn.className = "d";
             dayn.textContent = String(cell.day);
-            box.appendChild(dayn);
-            var sm = document.createElement("div");
-            sm.className = "ose-shift";
-            sm.innerHTML = '<span class="tag">Morning</span><span class="ose-names"></span>';
-            sm.querySelector(".ose-names").textContent = namesLine(cell.morning);
-            box.appendChild(sm);
-            var sn = document.createElement("div");
-            sn.className = "ose-shift n";
-            sn.innerHTML = '<span class="tag">Night</span><span class="ose-names"></span>';
-            sn.querySelector(".ose-names").textContent = namesLine(cell.night);
-            box.appendChild(sn);
+            head.appendChild(dayn);
+            if (isToday) {
+              var badge = document.createElement("span");
+              badge.className = "ose-today-badge";
+              badge.textContent = "Today";
+              head.appendChild(badge);
+            }
+            box.appendChild(head);
+            var blocks = document.createElement("div");
+            blocks.className = "ose-blocks";
+            var bm = document.createElement("div");
+            bm.className = "ose-block ose-block-m";
+            var lm = document.createElement("div");
+            lm.className = "ose-block-label";
+            lm.textContent = "Morning";
+            bm.appendChild(lm);
+            var wm = document.createElement("div");
+            wm.className = "ose-chip-wrap";
+            fillNameChips(wm, cell.morning);
+            bm.appendChild(wm);
+            blocks.appendChild(bm);
+            var bn = document.createElement("div");
+            bn.className = "ose-block ose-block-n";
+            var ln = document.createElement("div");
+            ln.className = "ose-block-label";
+            ln.textContent = "Night";
+            bn.appendChild(ln);
+            var wn = document.createElement("div");
+            wn.className = "ose-chip-wrap";
+            fillNameChips(wn, cell.night);
+            bn.appendChild(wn);
+            blocks.appendChild(bn);
+            box.appendChild(blocks);
             appendLeaveAndOffset(box, cell);
           }
           row.appendChild(box);
