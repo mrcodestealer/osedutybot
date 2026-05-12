@@ -1099,8 +1099,8 @@ def parse_fpms_config_block(
       near-match list (type ``1`` / ``1 2 3``); ``FPMS_CONFIG_SERVICE_TEXT_AUTO=1`` forces auto top match.
       Use **only** ``all`` (or ``*``, ``every``, ``全部``) under ``services:`` to mean **Update_All_Services**
       (same as ``--allservice``); returned service list is empty and the fifth tuple value is ``True``.
-    * **environment** — optional; else from banner ``UAT`` / ``UAT2`` …, else ``FPMS_DEFAULT_ENVIRONMENT``
-      or ``fpms-uat-branch``.
+    * **environment** — optional; else from banner ``UAT`` / ``UAT2`` / ``MASTER`` …; else last resort
+      ``FPMS_DEFAULT_ENVIRONMENT`` (default ``fpms-uat-branch``, i.e. the usual **Branch** update job only).
 
     Returns ``(environment, services, branch, version, update_all_services)``.
     """
@@ -1230,7 +1230,8 @@ def parse_fpms_config_block(
                 env = ENVIRONMENTS[0]
             print(
                 f"→ No environment: in block — using {env!r} "
-                "(set environment: …, a title like ``Update FPMS UAT2 Branch``, or FPMS_DEFAULT_ENVIRONMENT)."
+                "(set ``environment:`` explicitly, a title like ``Update FPMS UAT2 Branch`` / ``… UAT Master``, "
+                "or env ``FPMS_DEFAULT_ENVIRONMENT`` — default string is for **Branch** job, not Master.)"
             )
 
     return env, services, branch, version, update_all
@@ -4420,6 +4421,21 @@ def _jenkins_update_job_automation_profile(raw_urls: str) -> str | None:
     return None
 
 
+def _environment_for_fpms_jenkins_job_url(raw_url: str) -> str | None:
+    """
+    When the opened job is an FPMS **master** update pipeline, Jenkins only exposes one Environment
+    value — derive it from the URL so we do not fall back to ``FPMS_DEFAULT_ENVIRONMENT`` / branch
+    defaults after picking this job from Lark (first line may still say only “FPMS UAT”).
+    """
+    u = _jenkins_update_primary_url(raw_url).replace("\\", "/")
+    ul = u.casefold()
+    if "/job/fpms/view/fpms-uat/job/fpms_uat_master_update/" in ul:
+        return "fpms-uat-master"
+    if "/job/fpms_nt/view/all/job/fpms_nt_uat_master_update/" in ul:
+        return "fpms-nt-uat-master"
+    return None
+
+
 def _jenkins_update_first_non_empty_line(body: str) -> str:
     """First non-empty line (headline before ``Branch:`` / ``Services:`` blocks)."""
     for line in (body or "").splitlines():
@@ -4678,6 +4694,10 @@ def parse_jenkins_update_fpms_bot_block(text: str, *, preserve_branch_case: bool
 
     Returns ``environment``, ``branch``, ``version``, ``service_tokens`` (raw fuzzy strings, not Jenkins ids),
     and optionally ``update_all_services`` when the block is ``services:`` **only** ``all`` / ``*`` / ``every`` / ``全部``.
+
+    If the first line does not mention **Master** but the user later picks the **FPMS UAT Master** job from
+    the Lark card, ``_fpms_lark_dispatch_fpms_parameter_flow`` overrides ``environment`` from the Jenkins URL
+    (``fpms-uat-master``) so it does not stay on the Branch-only default.
     """
     raw_lines = [_normalize_config_colons(L) for L in (text or "").splitlines()]
     lines = [L.strip() for L in raw_lines if L.strip() != ""]
@@ -6222,6 +6242,10 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
     if jp == "pms_uat":
         # PMS-UAT-UPDATE page uses fixed Environment option.
         data["environment"] = "pms-uat"
+    elif jp == "fpms":
+        url_env = _environment_for_fpms_jenkins_job_url(jenkins_build_url)
+        if url_env is not None:
+            data["environment"] = url_env
     # Extra safety for chat variants like "All Services"/"allservices":
     # if parser left it as one token, still treat as update-all.
     if not data.get("update_all_services"):
@@ -7122,6 +7146,22 @@ def run(
 
     update_all_services = bool(update_all_services) or parsed_update_all
 
+    ju_for_env = (jenkins_build_url or "").strip()
+    if not ju_for_env and bot_lark_gate:
+        ju_for_env = str(bot_lark_gate.get("build_url") or "").strip()
+    if not ju_for_env:
+        ju_for_env = BUILD_URL
+    if jp == "fpms" and not is_bi_api_update and not is_prod_script and not skip_env:
+        forced_env = _environment_for_fpms_jenkins_job_url(ju_for_env)
+        if forced_env is not None:
+            if normalize_parameter_text(environment).casefold() != forced_env.casefold():
+                print(
+                    f"→ Environment adjusted from {environment!r} to {forced_env!r} "
+                    "(Jenkins FPMS **master** job URL only supports this Environment value).",
+                    flush=True,
+                )
+            environment = forced_env
+
     if update_all_services and services:
         print(
             f"→ **Update-all** mode: ignoring {len(services)} configured / picked service id(s); "
@@ -7161,11 +7201,7 @@ def run(
             user_data_dir=user_data_dir,
         )
         try:
-            ju = (jenkins_build_url or "").strip()
-            if not ju and bot_lark_gate:
-                ju = str(bot_lark_gate.get("build_url") or "").strip()
-            if not ju:
-                ju = BUILD_URL
+            ju = ju_for_env
             print("\n→ Single browser session (post-login warm-up reload: **off**).")
             open_fpms_build_with_login(page, user, pw, first_visit=True, warmup=False, build_url=ju)
             page.wait_for_selector("div.jenkins-form-item", timeout=60_000)
