@@ -7,9 +7,9 @@ Run standalone::
     python3 webmachine.py
     # or: WEBMACHINE_PORT=8765 python3 webmachine.py
 
-Mount inside Duty bot (same process, no second ``main.py``)::
+Mount inside Duty bot (same process, no second ``main.py``) — **on by default**; to disable set ``WEBMACHINE_MOUNT_IN_MAIN=0`` (or ``false`` / ``no`` / ``off``)::
 
-    WEBMACHINE_MOUNT_IN_MAIN=1
+    # optional: WEBMACHINE_MOUNT_IN_MAIN=0   disable dashboard on this app
     # optional: WEBMACHINE_URL_PREFIX=/wm   (default /wm)
     # optional: WEBMACHINE_SCRAPE=1       live EGM scrape via smmachine (background thread; also set on standalone ``python3 webmachine.py`` before run)
     # optional: WEBMACHINE_SCRAPE_INTERVAL_SEC=900

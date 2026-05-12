@@ -3181,7 +3181,10 @@ _register_lark_webhook_duplicate_paths()
 
 
 def _try_mount_webmachine_blueprint() -> None:
-    if (os.environ.get("WEBMACHINE_MOUNT_IN_MAIN") or "").strip().lower() not in ("1", "true", "yes", "on"):
+    # Default: mount dashboard on this Flask app. Opt-out with WEBMACHINE_MOUNT_IN_MAIN=0|false|no|off
+    # (avoids 404 on /wm/ when operators forget to set the env on the server).
+    _v = (os.environ.get("WEBMACHINE_MOUNT_IN_MAIN") or "").strip().lower()
+    if _v in ("0", "false", "no", "off"):
         return
     try:
         import webmachine as _wm
