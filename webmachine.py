@@ -140,6 +140,19 @@ _PAGE = """<!DOCTYPE html>
     }
     .toolbar input[type="search"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(59,130,246,.2); }
     .filter-hint { font-size: 0.78rem; color: var(--muted); }
+    .env-filter-bar {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; margin-bottom: 0.75rem;
+    }
+    .env-filter-btn {
+      font: inherit; font-size: 0.8rem; font-weight: 600;
+      padding: 0.4rem 0.8rem; border-radius: 999px; cursor: pointer; border: 1px solid var(--line);
+      background: var(--elev); color: var(--muted);
+      transition: background .15s, color .15s, border-color .15s;
+    }
+    .env-filter-btn:hover { border-color: var(--accent); color: var(--text); }
+    .env-filter-btn.active {
+      background: rgba(59,130,246,.25); border-color: var(--accent); color: var(--text);
+    }
     .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: 12px; border: 1px solid var(--line); }
     table { width: 100%; border-collapse: collapse; background: var(--elev); }
     th, td { padding: 0.6rem 0.8rem; text-align: left; border-bottom: 1px solid var(--line); font-size: 0.88rem; }
@@ -202,6 +215,12 @@ _PAGE = """<!DOCTYPE html>
         {% endfor %}
       </div>
     </section>
+    <div class="env-filter-bar" id="wm-env-filters" role="toolbar" aria-label="Filter by environment">
+      <button type="button" class="env-filter-btn active" data-wm-env="" id="wm-env-all">Show all</button>
+      {% for e in stats_env %}
+      <button type="button" class="env-filter-btn" data-wm-env="{{ e.environment|e }}">{{ e.environment }}</button>
+      {% endfor %}
+    </div>
     <div class="toolbar">
       <input type="search" id="wm-search" placeholder="Search environment, machine, status, online…" autocomplete="off" aria-label="Filter machines"/>
       <span class="filter-hint" id="wm-filter-hint"></span>
@@ -246,24 +265,58 @@ _PAGE = """<!DOCTYPE html>
       var inp = document.getElementById("wm-search");
       var hint = document.getElementById("wm-filter-hint");
       var tbody = document.getElementById("wm-tbody");
-      if (!inp || !tbody) return;
+      var bar = document.getElementById("wm-env-filters");
+      if (!tbody) return;
+      var envSel = "";
+
+      function matchesEnv(tr) {
+        if (!envSel) return true;
+        return (tr.getAttribute("data-env") || "") === envSel;
+      }
+
       function apply() {
-        var term = (inp.value || "").trim().toLowerCase();
+        var term = (inp && inp.value) ? inp.value.trim().toLowerCase() : "";
         var rows = tbody.querySelectorAll("tr");
-        var n = 0, total = rows.length;
+        var total = rows.length;
+        var n = 0;
         for (var i = 0; i < rows.length; i++) {
           var tr = rows[i];
           var hay = (tr.getAttribute("data-env") || "") + " " + (tr.getAttribute("data-name") || "") + " " +
             (tr.getAttribute("data-status") || "") + " " + (tr.getAttribute("data-online") || "");
           hay = hay.toLowerCase();
-          var show = !term || hay.indexOf(term) !== -1;
+          var textOk = !term || hay.indexOf(term) !== -1;
+          var envOk = matchesEnv(tr);
+          var show = textOk && envOk;
           tr.style.display = show ? "" : "none";
           if (show) n++;
         }
-        hint.textContent = term ? ("Showing " + n + " of " + total + " machines") : "";
+        if (hint) {
+          if (!envSel && !term) {
+            hint.textContent = "";
+          } else {
+            var label = [];
+            if (envSel) label.push("env: " + envSel);
+            if (term) label.push("search");
+            hint.textContent = "Showing " + n + " of " + total + " (" + label.join(", ") + ")";
+          }
+        }
       }
-      inp.addEventListener("input", apply);
-      inp.addEventListener("search", apply);
+
+      if (bar) {
+        bar.addEventListener("click", function (ev) {
+          var btn = ev.target.closest("[data-wm-env]");
+          if (!btn || !bar.contains(btn)) return;
+          envSel = btn.getAttribute("data-wm-env") || "";
+          bar.querySelectorAll(".env-filter-btn").forEach(function (b) {
+            b.classList.toggle("active", b === btn);
+          });
+          apply();
+        });
+      }
+      if (inp) {
+        inp.addEventListener("input", apply);
+        inp.addEventListener("search", apply);
+      }
     })();
     </script>
     {% else %}
