@@ -157,6 +157,7 @@ _PAGE = """<!DOCTYPE html>
     .pill-unknown { background: rgba(139,156,179,.2); color: var(--muted); }
     .pill-test { background: rgba(234,179,8,.14); color: var(--warn); }
     .pill-maint { background: rgba(248,113,113,.12); color: #fca5a5; }
+    .pill-occupy { background: rgba(234,179,8,.14); color: var(--warn); }
     .empty { color: var(--muted); padding: 2.5rem 1rem; text-align: center; line-height: 1.6; }
     footer { padding: 1rem; text-align: center; color: var(--muted); font-size: 0.75rem; border-top: 1px solid var(--line); }
     a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
@@ -222,7 +223,18 @@ _PAGE = """<!DOCTYPE html>
           <td>{{ r.environment }}</td>
           <td><strong>{{ r.name }}</strong></td>
           <td>{% if r.is_test %}<span class="pill pill-test">TEST</span>{% else %}<span class="muted">—</span>{% endif %}</td>
-          <td>{% if 'maintain' in ((r.status or '')|lower) %}<span class="pill pill-maint">{{ r.status }}</span>{% else %}{{ r.status }}{% endif %}</td>
+          <td>
+            {% set st = (r.status or '')|lower %}
+            {% if 'maintain' in st %}
+            <span class="pill pill-maint">{{ r.status }}</span>
+            {% elif 'normal' in st %}
+            <span class="pill pill-online">{{ r.status }}</span>
+            {% elif 'occupy' in st %}
+            <span class="pill pill-occupy">{{ r.status }}</span>
+            {% else %}
+            {{ r.status }}
+            {% endif %}
+          </td>
           <td><span class="pill {{ r.pill_class }}">{{ r.online_label }}</span></td>
         </tr>
         {% endfor %}
