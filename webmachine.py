@@ -776,7 +776,7 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
       color: var(--ose-purple);
       box-shadow: var(--ose-glow);
     }
-    main.ose-main { padding: 1.1rem 1.35rem 2.5rem; max-width: 1100px; margin: 0 auto; width: 100%; }
+    main.ose-main { padding: 1.1rem 1.35rem 2.5rem; max-width: min(1480px, 98vw); margin: 0 auto; width: 100%; }
     .ose-year-row {
       display: flex; align-items: center; justify-content: center; gap: 0.75rem; margin-bottom: 1.1rem;
     }
@@ -802,25 +802,25 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
       box-shadow: var(--ose-glow);
     }
     .ose-cal-panel {
-      background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 1rem 1rem 1.1rem;
+      background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 1.15rem 1.15rem 1.25rem;
       box-shadow: 0 8px 32px rgba(0,0,0,.22);
     }
     .ose-cal-title {
-      margin: 0 0 0.65rem; font-size: 1.08rem; font-weight: 650;
-      padding-bottom: 0.45rem; border-bottom: 2px solid rgba(124, 58, 237, 0.35);
+      margin: 0 0 0.75rem; font-size: 1.22rem; font-weight: 650;
+      padding-bottom: 0.5rem; border-bottom: 2px solid rgba(124, 58, 237, 0.35);
     }
-    .ose-cal-warn { margin: 0 0 0.75rem; font-size: 0.82rem; color: #f87171; }
+    .ose-cal-warn { margin: 0 0 0.75rem; font-size: 0.9rem; color: #f87171; }
     .ose-cal-dow {
-      display: grid; grid-template-columns: repeat(7, 1fr); gap: 0.35rem; margin-bottom: 0.35rem;
+      display: grid; grid-template-columns: repeat(7, 1fr); gap: 0.5rem; margin-bottom: 0.45rem;
     }
     .ose-cal-dow span {
-      text-align: center; font-size: 0.65rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+      text-align: center; font-size: 0.74rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
     }
-    .ose-cal-weeks { display: flex; flex-direction: column; gap: 0.35rem; }
-    .ose-cal-row { display: grid; grid-template-columns: repeat(7, 1fr); gap: 0.45rem; align-items: stretch; }
+    .ose-cal-weeks { display: flex; flex-direction: column; gap: 0.5rem; }
+    .ose-cal-row { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 0.55rem; align-items: stretch; }
     .ose-cal-cell {
-      min-height: 6rem; border-radius: 12px; border: 1px solid var(--line); background: linear-gradient(165deg, rgba(28,37,51,.98), rgba(20,26,36,.99));
-      padding: 0.45rem 0.45rem 0.5rem; display: flex; flex-direction: column; gap: 0.3rem; align-items: stretch;
+      min-height: 9.5rem; border-radius: 12px; border: 1px solid var(--line); background: linear-gradient(165deg, rgba(28,37,51,.98), rgba(20,26,36,.99));
+      padding: 0.62rem 0.58rem 0.62rem; display: flex; flex-direction: column; gap: 0.38rem; align-items: stretch;
       transition: border-color .2s, box-shadow .2s, background .2s;
     }
     .ose-cal-cell.empty { background: transparent; border: none; min-height: 0; }
@@ -829,8 +829,8 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
       box-shadow: var(--ose-glow);
       background: linear-gradient(165deg, rgba(124, 58, 237, 0.14), rgba(20,26,36,.98));
     }
-    .ose-day-head { display: flex; align-items: center; justify-content: space-between; gap: 0.35rem; margin-bottom: 0.15rem; }
-    .ose-cal-cell .d { font-weight: 800; font-size: 0.95rem; color: var(--text); letter-spacing: -0.02em; line-height: 1; }
+    .ose-day-head { display: flex; align-items: center; justify-content: space-between; gap: 0.4rem; margin-bottom: 0.2rem; }
+    .ose-cal-cell .d { font-weight: 800; font-size: 1.08rem; color: var(--text); letter-spacing: -0.02em; line-height: 1; }
     .ose-today-badge {
       flex-shrink: 0; font-size: 0.58rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
       padding: 0.15rem 0.4rem; border-radius: 999px;
@@ -838,46 +838,51 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
       color: #f5f3ff; border: 1px solid rgba(196, 181, 253, 0.5);
       box-shadow: 0 0 12px rgba(124, 58, 237, 0.45);
     }
-    .ose-blocks { display: flex; flex-direction: column; gap: 0.28rem; }
+    .ose-blocks { display: flex; flex-direction: column; gap: 0.36rem; }
     .ose-block {
-      border-radius: 8px; padding: 0.28rem 0.32rem;
+      border-radius: 9px; padding: 0.38rem 0.4rem;
       border: 1px solid rgba(42, 53, 68, 0.9);
     }
     .ose-block-m { background: rgba(232, 196, 104, 0.06); border-color: rgba(232, 196, 104, 0.12); }
     .ose-block-n { background: rgba(158, 197, 247, 0.06); border-color: rgba(158, 197, 247, 0.12); }
-    .ose-block-label { font-size: 0.58rem; font-weight: 750; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.18rem; }
+    .ose-block-label { font-size: 0.68rem; font-weight: 750; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.22rem; }
     .ose-block-m .ose-block-label { color: var(--morn); }
     .ose-block-n .ose-block-label { color: var(--night); }
     .ose-chip-wrap { display: flex; flex-wrap: wrap; gap: 0.2rem 0.25rem; align-items: flex-start; }
     .ose-chip {
-      font-size: 0.58rem; font-weight: 500; line-height: 1.2; padding: 0.12rem 0.32rem; border-radius: 6px;
+      font-size: 0.72rem; font-weight: 500; line-height: 1.28; padding: 0.16rem 0.4rem; border-radius: 7px;
       background: rgba(15, 20, 28, 0.65); color: #cbd5e1; border: 1px solid rgba(42, 53, 68, 0.85); max-width: 100%;
     }
-    .ose-dash { font-size: 0.62rem; color: var(--muted); opacity: 0.7; }
-    .ose-duty-people { display: flex; flex-direction: column; gap: 0.28rem; max-height: 6rem; overflow-y: auto; }
+    .ose-dash { font-size: 0.74rem; color: var(--muted); opacity: 0.7; }
+    .ose-duty-people { display: flex; flex-direction: column; gap: 0.34rem; max-height: 11rem; overflow-y: auto; }
     .ose-duty-people::-webkit-scrollbar { width: 4px; }
     .ose-duty-people::-webkit-scrollbar-thumb { background: rgba(124, 58, 237, 0.35); border-radius: 4px; }
     .ose-person-line { border-bottom: 1px solid rgba(42,53,68,.6); padding-bottom: 0.22rem; margin-bottom: 0.08rem; }
     .ose-person-line:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
-    .ose-person-name { font-size: 0.6rem; font-weight: 600; color: #e2e8f0; line-height: 1.25; word-break: break-word; }
-    .ose-person-phone { font-size: 0.54rem; color: #94a3b8; margin-top: 0.06rem; }
-    .ose-extra-wrap { margin-top: 0.15rem; display: flex; flex-direction: column; gap: 0.35rem; max-height: 5.2rem; overflow-y: auto; }
+    .ose-person-name { font-size: 0.78rem; font-weight: 600; color: #e2e8f0; line-height: 1.32; word-break: break-word; }
+    .ose-person-phone { font-size: 0.7rem; color: #94a3b8; margin-top: 0.08rem; }
+    .ose-extra-wrap { margin-top: 0.2rem; display: flex; flex-direction: column; gap: 0.4rem; max-height: 8.5rem; overflow-y: auto; }
     .ose-extra-wrap::-webkit-scrollbar { width: 4px; }
     .ose-extra-wrap::-webkit-scrollbar-thumb { background: rgba(124, 58, 237, 0.35); border-radius: 4px; }
     .ose-extra {
-      padding: 0.28rem 0.32rem; border-radius: 8px; font-size: 0.58rem; line-height: 1.42;
+      padding: 0.36rem 0.4rem; border-radius: 8px; font-size: 0.72rem; line-height: 1.45;
       border: 1px solid rgba(42, 53, 68, 0.75); background: rgba(11, 15, 20, 0.35);
     }
-    .ose-extra-title { font-weight: 750; text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 0.2rem; font-size: 0.56rem; }
+    .ose-extra-title { font-weight: 750; text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 0.24rem; font-size: 0.66rem; }
     .ose-extra-leave { border-color: rgba(232, 196, 104, 0.15); }
     .ose-extra-leave .ose-extra-title { color: var(--morn); }
     .ose-extra-offset { border-color: rgba(158, 197, 247, 0.15); }
     .ose-extra-offset .ose-extra-title { color: var(--night); }
-    .ose-extra-line { color: #9fb0c9; margin-bottom: 0.14rem; word-break: break-word; }
+    .ose-extra-line { color: #9fb0c9; margin-bottom: 0.16rem; word-break: break-word; }
     .ose-extra-line:last-child { margin-bottom: 0; }
-    .ose-loading { text-align: center; color: var(--muted); padding: 2rem; font-size: 0.9rem; }
+    .ose-loading { text-align: center; color: var(--muted); padding: 2rem; font-size: 0.95rem; }
     footer { padding: 1rem; text-align: center; color: var(--muted); font-size: 0.75rem; border-top: 1px solid var(--line); }
     a { color: var(--accent); }
+    @media (min-width: 1200px) {
+      .ose-cal-cell { min-height: 10.5rem; padding: 0.7rem 0.65rem 0.7rem; }
+      .ose-duty-people { max-height: 12.5rem; }
+      .ose-extra-wrap { max-height: 9.5rem; }
+    }
   </style>
 </head>
 <body>
