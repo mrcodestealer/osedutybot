@@ -227,6 +227,7 @@ _PAGE = """<!DOCTYPE html>
       <button type="button" class="env-filter-btn" data-wm-toggle="test">Test</button>
       <button type="button" class="env-filter-btn" data-wm-toggle="maintain">Maintain</button>
       <button type="button" class="env-filter-btn" data-wm-toggle="offline">Offline</button>
+      <button type="button" class="env-filter-btn" data-wm-toggle="online">Online</button>
     </div>
     <div class="toolbar">
       <input type="search" id="wm-search" placeholder="Search environment, machine, status, online…" autocomplete="off" aria-label="Filter machines"/>
@@ -248,7 +249,8 @@ _PAGE = """<!DOCTYPE html>
         <tr data-env="{{ r.environment|e }}" data-name="{{ r.name|e }}" data-status="{{ r.status|e }}" data-online="{{ r.online_label|e }}"
             data-test="{% if r.is_test %}1{% else %}0{% endif %}"
             data-maint="{% if 'maintain' in ((r.status or '')|lower) %}1{% else %}0{% endif %}"
-            data-offline="{% if r.pill_class == 'pill-offline' %}1{% else %}0{% endif %}">
+            data-offline="{% if r.pill_class == 'pill-offline' %}1{% else %}0{% endif %}"
+            data-online1="{% if r.pill_class == 'pill-online' %}1{% else %}0{% endif %}">
           <td>{{ r.environment }}</td>
           <td><strong>{{ r.name }}</strong></td>
           <td>{% if r.is_test %}<span class="pill pill-test">TEST</span>{% else %}<span class="muted">—</span>{% endif %}</td>
@@ -279,10 +281,10 @@ _PAGE = """<!DOCTYPE html>
       var rowBar = document.getElementById("wm-row-filters");
       if (!tbody) return;
       var envSel = "";
-      var filt = { test: false, maintain: false, offline: false };
+      var filt = { test: false, maintain: false, offline: false, online: false };
 
       function anyRowFilt() {
-        return filt.test || filt.maintain || filt.offline;
+        return filt.test || filt.maintain || filt.offline || filt.online;
       }
 
       function matchesEnv(tr) {
@@ -295,9 +297,11 @@ _PAGE = """<!DOCTYPE html>
         var t = tr.getAttribute("data-test") || "0";
         var m = tr.getAttribute("data-maint") || "0";
         var off = tr.getAttribute("data-offline") || "0";
+        var on1 = tr.getAttribute("data-online1") || "0";
         if (filt.test && t !== "1") return false;
         if (filt.maintain && m !== "1") return false;
         if (filt.offline && off !== "1") return false;
+        if (filt.online && on1 !== "1") return false;
         return true;
       }
 
@@ -339,6 +343,7 @@ _PAGE = """<!DOCTYPE html>
             if (filt.test) label.push("test");
             if (filt.maintain) label.push("maintain");
             if (filt.offline) label.push("offline");
+            if (filt.online) label.push("online");
             if (term) label.push("search");
             hint.textContent = "Showing " + n + " of " + total + " (" + label.join(", ") + ")";
           }
@@ -362,7 +367,7 @@ _PAGE = """<!DOCTYPE html>
           var btn = ev.target.closest("button");
           if (!btn || !rowBar.contains(btn)) return;
           if (btn.getAttribute("data-wm-clear") === "1") {
-            filt.test = filt.maintain = filt.offline = false;
+            filt.test = filt.maintain = filt.offline = filt.online = false;
             syncRowBarActive();
             apply();
             return;
