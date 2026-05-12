@@ -143,6 +143,7 @@ _PAGE = """<!DOCTYPE html>
     .env-filter-bar {
       display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; margin-bottom: 0.75rem;
     }
+    .row-filter-bar { margin-bottom: 0.65rem; }
     .env-filter-btn {
       font: inherit; font-size: 0.8rem; font-weight: 600;
       padding: 0.4rem 0.8rem; border-radius: 999px; cursor: pointer; border: 1px solid var(--line);
@@ -221,6 +222,15 @@ _PAGE = """<!DOCTYPE html>
       <button type="button" class="env-filter-btn" data-wm-env="{{ e.environment|e }}">{{ e.environment }}</button>
       {% endfor %}
     </div>
+    <div class="env-filter-bar row-filter-bar" id="wm-row-filters" role="toolbar" aria-label="Filter by test, status, connectivity">
+      <button type="button" class="env-filter-btn active" data-wm-row="" id="wm-row-all">Show all</button>
+      <button type="button" class="env-filter-btn" data-wm-row="test">Test</button>
+      <button type="button" class="env-filter-btn" data-wm-row="notest">No test</button>
+      <button type="button" class="env-filter-btn" data-wm-row="maintain">Maintain</button>
+      <button type="button" class="env-filter-btn" data-wm-row="nomaintain">No maintain</button>
+      <button type="button" class="env-filter-btn" data-wm-row="offline">Offline</button>
+      <button type="button" class="env-filter-btn" data-wm-row="online">Online</button>
+    </div>
     <div class="toolbar">
       <input type="search" id="wm-search" placeholder="Search environment, machine, status, online…" autocomplete="off" aria-label="Filter machines"/>
       <span class="filter-hint" id="wm-filter-hint"></span>
@@ -238,7 +248,11 @@ _PAGE = """<!DOCTYPE html>
       </thead>
       <tbody id="wm-tbody">
         {% for r in rows %}
-        <tr data-env="{{ r.environment|e }}" data-name="{{ r.name|e }}" data-status="{{ r.status|e }}" data-online="{{ r.online_label|e }}">
+        <tr data-env="{{ r.environment|e }}" data-name="{{ r.name|e }}" data-status="{{ r.status|e }}" data-online="{{ r.online_label|e }}"
+            data-test="{% if r.is_test %}1{% else %}0{% endif %}"
+            data-maint="{% if 'maintain' in ((r.status or '')|lower) %}1{% else %}0{% endif %}"
+            data-offline="{% if r.pill_class == 'pill-offline' %}1{% else %}0{% endif %}"
+            data-online1="{% if r.pill_class == 'pill-online' %}1{% else %}0{% endif %}">
           <td>{{ r.environment }}</td>
           <td><strong>{{ r.name }}</strong></td>
           <td>{% if r.is_test %}<span class="pill pill-test">TEST</span>{% else %}<span class="muted">—</span>{% endif %}</td>
@@ -266,12 +280,43 @@ _PAGE = """<!DOCTYPE html>
       var hint = document.getElementById("wm-filter-hint");
       var tbody = document.getElementById("wm-tbody");
       var bar = document.getElementById("wm-env-filters");
+      var rowBar = document.getElementById("wm-row-filters");
       if (!tbody) return;
       var envSel = "";
+      var rowSel = "";
 
       function matchesEnv(tr) {
         if (!envSel) return true;
         return (tr.getAttribute("data-env") || "") === envSel;
+      }
+
+      function matchesRowKind(tr) {
+        if (!rowSel) return true;
+        var t = tr.getAttribute("data-test") || "0";
+        var m = tr.getAttribute("data-maint") || "0";
+        var off = tr.getAttribute("data-offline") || "0";
+        var on1 = tr.getAttribute("data-online1") || "0";
+        switch (rowSel) {
+          case "test": return t === "1";
+          case "notest": return t !== "1";
+          case "maintain": return m === "1";
+          case "nomaintain": return m !== "1";
+          case "offline": return off === "1";
+          case "online": return on1 === "1";
+          default: return true;
+        }
+      }
+
+      function rowSelLabel() {
+        if (!rowSel) return "";
+        return ({
+          test: "test only",
+          notest: "no test",
+          maintain: "maintain only",
+          nomaintain: "no maintain",
+          offline: "offline only",
+          online: "online only"
+        })[rowSel] || rowSel;
       }
 
       function apply() {
@@ -286,16 +331,18 @@ _PAGE = """<!DOCTYPE html>
           hay = hay.toLowerCase();
           var textOk = !term || hay.indexOf(term) !== -1;
           var envOk = matchesEnv(tr);
-          var show = textOk && envOk;
+          var rowOk = matchesRowKind(tr);
+          var show = textOk && envOk && rowOk;
           tr.style.display = show ? "" : "none";
           if (show) n++;
         }
         if (hint) {
-          if (!envSel && !term) {
+          if (!envSel && !term && !rowSel) {
             hint.textContent = "";
           } else {
             var label = [];
             if (envSel) label.push("env: " + envSel);
+            if (rowSel) label.push(rowSelLabel());
             if (term) label.push("search");
             hint.textContent = "Showing " + n + " of " + total + " (" + label.join(", ") + ")";
           }
@@ -308,6 +355,17 @@ _PAGE = """<!DOCTYPE html>
           if (!btn || !bar.contains(btn)) return;
           envSel = btn.getAttribute("data-wm-env") || "";
           bar.querySelectorAll(".env-filter-btn").forEach(function (b) {
+            b.classList.toggle("active", b === btn);
+          });
+          apply();
+        });
+      }
+      if (rowBar) {
+        rowBar.addEventListener("click", function (ev) {
+          var btn = ev.target.closest("[data-wm-row]");
+          if (!btn || !rowBar.contains(btn)) return;
+          rowSel = btn.getAttribute("data-wm-row") || "";
+          rowBar.querySelectorAll(".env-filter-btn").forEach(function (b) {
             b.classList.toggle("active", b === btn);
           });
           apply();
