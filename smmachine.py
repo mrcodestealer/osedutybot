@@ -126,6 +126,229 @@ def _parse_target_line(line: str) -> tuple[str, str]:
     return ("full", alnum.upper())
 
 
+def _site_belongs_label(site_key: str) -> str:
+    """Venue / property code for dashboard ``belongs`` column (PROD site aliases)."""
+    labels = {
+        "nwr": "NP",
+        "np": "NP",
+        "nch": "NCH",
+        "nc": "NCH",
+        "new": "NCH",
+        "tbr": "TBR",
+        "tbp": "TBP",
+        "mdr": "MDR",
+        "dhs": "DHS",
+        "cp": "CP",
+        "osm": "CP",
+        "wf": "WF",
+        "winford": "WF",
+    }
+    return labels.get((site_key or "").strip().lower(), (site_key or "").upper())
+
+
+def _osmslot_admin_credentials() -> tuple[str, str]:
+    user = (os.environ.get("WEBMACHINE_OSMSLOT_USER") or os.environ.get("OSMSLOT_ADMIN_USER") or "admin").strip()
+    pw = (os.environ.get("WEBMACHINE_OSMSLOT_PASSWORD") or os.environ.get("OSMSLOT_ADMIN_PASSWORD") or "123456").strip()
+    return user, pw
+
+
+def _nonprod_backend_specs(deployment: str) -> list[dict[str, str | bool]]:
+    """QAT / UAT EGM backends on ``*.osmslot.org`` (see webmachine deployment tabs)."""
+    dep = (deployment or "").strip().upper()
+    if dep not in ("QAT", "UAT"):
+        return []
+    prefix = "qat" if dep == "QAT" else "uat"
+    user, pw = _osmslot_admin_credentials()
+    hosts: tuple[tuple[str, str], ...] = (
+        ("CP", f"https://{prefix}-cp.osmslot.org"),
+        ("TBP", f"https://{prefix}-tbp.osmslot.org"),
+        ("TBR", f"https://{prefix}-tbr.osmslot.org"),
+        ("DHS", f"https://{prefix}-dhs.osmslot.org"),
+        ("NCH", f"https://{prefix}-nc.osmslot.org"),
+        ("WF", f"https://{prefix}-wf.osmslot.org"),
+        ("MDR", f"https://{prefix}-mdr.osmslot.org"),
+        ("NP", f"https://{prefix}-np.osmslot.org"),
+    )
+    out: list[dict[str, str | bool]] = []
+    for belongs, base in hosts:
+        out.append(
+            {
+                "belongs": belongs,
+                "base": base,
+                "user": user,
+                "password": pw,
+                "deployment": dep,
+                "dismiss_warning_dialog": dep == "QAT",
+                "list_path": "/egm/egmStatusList",
+                "login_path": "/login",
+            }
+        )
+    return out
+
+
+def _dismiss_warning_dialog(page, timeout_ms: int) -> None:
+    """Close Element UI ``Warnning`` modal (QAT) via header X before reading the EGM table."""
+    try:
+        dialog = page.locator('.el-dialog[aria-label="Warnning"], .el-dialog:has(.el-dialog__title:has-text("Warnning"))').first
+        if dialog.count() == 0:
+            return
+        close = dialog.locator(".el-dialog__headerbtn[aria-label='Close'], .el-dialog__headerbtn").first
+        if close.count() and close.is_visible(timeout=min(5000, timeout_ms)):
+            close.click()
+            page.wait_for_timeout(450)
+    except Exception:
+        pass
+
+
+def _resolve_collect_page_limit(max_pages: int | None) -> int:
+    from checkcredit import NP_BACKEND_MAX_PAGES  # noqa: WPS433
+
+    if max_pages is None:
+        explicit = (os.environ.get("SM_MACHINE_MAX_PAGES") or "").strip()
+        if explicit:
+            try:
+                return max(1, int(explicit))
+            except ValueError:
+                return max(1, NP_BACKEND_MAX_PAGES)
+        try:
+            collect_cap = int((os.environ.get("SM_MACHINE_COLLECT_MAX_PAGES") or "500").strip() or "500")
+        except ValueError:
+            collect_cap = 500
+        return max(1, collect_cap)
+    return max(1, int(max_pages))
+
+
+def smachine_collect_rows_at_backend(
+    *,
+    base_url: str,
+    username: str,
+    password: str,
+    belongs: str,
+    deployment: str,
+    list_path: str = "/egm/egmStatusList",
+    login_path: str = "/login",
+    dismiss_warning_dialog: bool = False,
+    headless: bool | None = None,
+    max_pages: int | None = None,
+    timeout_ms: int = 120_000,
+) -> tuple[list[dict], str | None]:
+    """
+    Log in to one explicit EGM origin, optionally dismiss the QAT warning dialog, walk
+    ``/egm/egmStatusList`` (read-only), and return normalized rows for webmachine.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as e:
+        raise RuntimeError("Install playwright: pip install playwright && playwright install chromium") from e
+
+    base = (base_url or "").strip().rstrip("/")
+    if not base:
+        raise ValueError("empty base_url")
+    user = (username or "").strip()
+    pw = (password or "").strip()
+    if not user or not pw:
+        raise RuntimeError(f"missing credentials for {belongs!r} @ {deployment}")
+
+    path = (list_path or "/egm/egmStatusList").strip() or "/egm/egmStatusList"
+    if not path.startswith("/"):
+        path = "/" + path
+    login = (login_path or "/login").strip() or "/login"
+    if not login.startswith("/"):
+        login = "/" + login
+    login_url = f"{base}{login}?redirect={quote(path, safe='')}"
+    list_url = f"{base}{path}"
+
+    limit = _resolve_collect_page_limit(max_pages)
+    hl = _smachine_resolve_headless(headless)
+    dep_label = (deployment or "PROD").strip().upper() or "PROD"
+    belong_label = (belongs or "—").strip() or "—"
+    collected: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    trunc_msg: str | None = None
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=hl)
+        try:
+            context = browser.new_context(
+                viewport={"width": 1600, "height": 900},
+                ignore_https_errors=True,
+            )
+            page = context.new_page()
+            page.set_default_timeout(timeout_ms)
+
+            page.goto(login_url, wait_until="domcontentloaded")
+            page.wait_for_timeout(900)
+
+            pwd_box = page.locator('input[type="password"]').first
+            pwd_box.wait_for(state="visible", timeout=min(30_000, timeout_ms))
+            form = pwd_box.locator("xpath=ancestor::form[1]")
+            if form.count():
+                tin = form.locator(
+                    'input[type="text"], input:not([type]), input[type="tel"], input[type="email"]'
+                ).first
+                tin.fill(user)
+            else:
+                page.locator('input[type="text"]').first.fill(user)
+            pwd_box.fill(pw)
+            lb = page.get_by_role("button", name=re.compile(r"login|sign in|log in", re.I))
+            if lb.count():
+                lb.first.click()
+            else:
+                page.locator('button[type="submit"], button.el-button--primary').first.click()
+
+            page.wait_for_timeout(1800)
+            if dismiss_warning_dialog:
+                _dismiss_warning_dialog(page, timeout_ms)
+            if path not in (page.url or ""):
+                page.goto(list_url, wait_until="domcontentloaded")
+            if dismiss_warning_dialog:
+                _dismiss_warning_dialog(page, timeout_ms)
+
+            page.wait_for_selector(".app-container, .filter-container, .el-table", timeout=timeout_ms)
+            _wait_table_idle(page, timeout_ms)
+
+            _go_first_page(page, timeout_ms=timeout_ms, max_steps=limit)
+            _wait_table_idle(page, timeout_ms)
+
+            next_clicks = 0
+            while True:
+                for mn, test, st, onl in _collect_visible_table_machine_rows(page, timeout_ms=timeout_ms):
+                    key = (dep_label, belong_label, mn)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    collected.append(
+                        {
+                            "environment": dep_label,
+                            "belongs": belong_label,
+                            "name": mn,
+                            "status": st,
+                            "online": onl,
+                            "is_test": test,
+                        }
+                    )
+
+                if not _can_pagination_next(page):
+                    break
+                if next_clicks >= limit:
+                    try:
+                        if _can_pagination_next(page):
+                            trunc_msg = (
+                                f"pagination stopped after {limit} page(s); more data exists — "
+                                "raise SM_MACHINE_COLLECT_MAX_PAGES or set SM_MACHINE_MAX_PAGES"
+                            )
+                    except Exception:
+                        trunc_msg = f"pagination stopped after {limit} page(s) (could not verify Next)"
+                    break
+                _click_pagination_next(page, timeout_ms=timeout_ms)
+                next_clicks += 1
+                _wait_table_idle(page, timeout_ms)
+        finally:
+            browser.close()
+
+    return collected, trunc_msg
+
+
 def _row_text_matches(kind: str, key: str, row_text: str) -> bool:
     t = (row_text or "").upper()
     if kind == "full":
@@ -683,12 +906,7 @@ def smachine_collect_all_machine_rows(
     Returns ``(rows, truncation_warning)`` where ``truncation_warning`` is set if the table still
     had a enabled **Next** when the page cap was hit (list may be incomplete).
     """
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError as e:
-        raise RuntimeError("Install playwright: pip install playwright && playwright install chromium") from e
-
-    from checkcredit import NP_BACKEND_MAX_PAGES, _np_resolve_backend  # noqa: WPS433
+    from checkcredit import _np_resolve_backend  # noqa: WPS433
 
     site_key = _site_routing_key(site or "")
     if not site_key:
@@ -702,109 +920,19 @@ def smachine_collect_all_machine_rows(
         raise RuntimeError(f"missing backend credentials for {site_key!r}")
 
     path = (os.environ.get("SM_MACHINE_PATH") or "/egm/egmStatusList").strip() or "/egm/egmStatusList"
-    if not path.startswith("/"):
-        path = "/" + path
-    login_url = f"{base}/login?redirect={quote(path, safe='')}"
-    list_url = f"{base}{path}"
-
-    if max_pages is None:
-        explicit = (os.environ.get("SM_MACHINE_MAX_PAGES") or "").strip()
-        if explicit:
-            try:
-                limit = max(1, int(explicit))
-            except ValueError:
-                limit = max(1, NP_BACKEND_MAX_PAGES)
-        else:
-            try:
-                collect_cap = int((os.environ.get("SM_MACHINE_COLLECT_MAX_PAGES") or "500").strip() or "500")
-            except ValueError:
-                collect_cap = 500
-            limit = max(1, collect_cap)
-    else:
-        limit = max(1, int(max_pages))
-
-    hl = _smachine_resolve_headless(headless)
-    env_label = site_key.upper()
-    collected: list[dict] = []
-    seen: set[tuple[str, str]] = set()
-    trunc_msg: str | None = None
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=hl)
-        try:
-            context = browser.new_context(
-                viewport={"width": 1600, "height": 900},
-                ignore_https_errors=True,
-            )
-            page = context.new_page()
-            page.set_default_timeout(timeout_ms)
-
-            page.goto(login_url, wait_until="domcontentloaded")
-            page.wait_for_timeout(900)
-
-            pwd_box = page.locator('input[type="password"]').first
-            pwd_box.wait_for(state="visible", timeout=min(30_000, timeout_ms))
-            form = pwd_box.locator("xpath=ancestor::form[1]")
-            if form.count():
-                tin = form.locator(
-                    'input[type="text"], input:not([type]), input[type="tel"], input[type="email"]'
-                ).first
-                tin.fill(user)
-            else:
-                page.locator('input[type="text"]').first.fill(user)
-            pwd_box.fill(pw)
-            lb = page.get_by_role("button", name=re.compile(r"login|sign in|log in", re.I))
-            if lb.count():
-                lb.first.click()
-            else:
-                page.locator('button[type="submit"], button.el-button--primary').first.click()
-
-            page.wait_for_timeout(1800)
-            if path not in (page.url or ""):
-                page.goto(list_url, wait_until="domcontentloaded")
-
-            page.wait_for_selector(".app-container, .filter-container, .el-table", timeout=timeout_ms)
-            _wait_table_idle(page, timeout_ms)
-
-            _go_first_page(page, timeout_ms=timeout_ms, max_steps=limit)
-            _wait_table_idle(page, timeout_ms)
-
-            next_clicks = 0
-            while True:
-                for mn, test, st, onl in _collect_visible_table_machine_rows(page, timeout_ms=timeout_ms):
-                    key = (env_label, mn)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    collected.append(
-                        {
-                            "environment": env_label,
-                            "name": mn,
-                            "status": st,
-                            "online": onl,
-                            "is_test": test,
-                        }
-                    )
-
-                if not _can_pagination_next(page):
-                    break
-                if next_clicks >= limit:
-                    try:
-                        if _can_pagination_next(page):
-                            trunc_msg = (
-                                f"pagination stopped after {limit} page(s); more data exists — "
-                                "raise SM_MACHINE_COLLECT_MAX_PAGES or set SM_MACHINE_MAX_PAGES"
-                            )
-                    except Exception:
-                        trunc_msg = f"pagination stopped after {limit} page(s) (could not verify Next)"
-                    break
-                _click_pagination_next(page, timeout_ms=timeout_ms)
-                next_clicks += 1
-                _wait_table_idle(page, timeout_ms)
-        finally:
-            browser.close()
-
-    return collected, trunc_msg
+    return smachine_collect_rows_at_backend(
+        base_url=base,
+        username=user,
+        password=pw,
+        belongs=_site_belongs_label(site_key),
+        deployment="PROD",
+        list_path=path,
+        login_path="/login",
+        dismiss_warning_dialog=False,
+        headless=headless,
+        max_pages=max_pages,
+        timeout_ms=timeout_ms,
+    )
 
 
 def _dedupe_site_keys_by_resolved_backend(site_keys: list[str]) -> tuple[list[str], dict[str, str]]:
@@ -876,6 +1004,66 @@ def smachine_collect_machines_multi_sites(
                 errs[sk] = twarn
         except Exception as e:
             errs[sk] = str(e)
+    return all_rows, errs
+
+
+def smachine_collect_nonprod_deployment(
+    deployment: str,
+    **kwargs: Any,
+) -> tuple[list[dict], dict[str, str]]:
+    """Scrape every QAT or UAT ``*.osmslot.org`` backend in :func:`_nonprod_backend_specs`."""
+    dep = (deployment or "").strip().upper()
+    specs = _nonprod_backend_specs(dep)
+    if not specs:
+        return [], {dep: f"unsupported deployment {deployment!r}"}
+    errs: dict[str, str] = {}
+    all_rows: list[dict] = []
+    for spec in specs:
+        belongs = str(spec["belongs"])
+        key = f"{dep}:{belongs}"
+        try:
+            part, twarn = smachine_collect_rows_at_backend(
+                base_url=str(spec["base"]),
+                username=str(spec["user"]),
+                password=str(spec["password"]),
+                belongs=belongs,
+                deployment=dep,
+                list_path=str(spec["list_path"]),
+                login_path=str(spec["login_path"]),
+                dismiss_warning_dialog=bool(spec["dismiss_warning_dialog"]),
+                **kwargs,
+            )
+            all_rows.extend(part)
+            if twarn:
+                errs[key] = twarn
+        except Exception as e:
+            errs[key] = str(e)
+    return all_rows, errs
+
+
+def smachine_collect_machines_all_deployments(
+    **kwargs: Any,
+) -> tuple[list[dict], dict[str, str]]:
+    """
+    Scrape configured deployments (``WEBMACHINE_DEPLOYMENTS``, default ``prod,qat,uat``).
+    PROD uses :func:`smachine_collect_machines_multi_sites`; QAT/UAT use explicit osmslot hosts.
+    """
+    raw = (os.environ.get("WEBMACHINE_DEPLOYMENTS") or "prod,qat,uat").strip()
+    deployments = [d.strip().upper() for d in raw.split(",") if d.strip()]
+    if not deployments:
+        deployments = ["PROD"]
+    all_rows: list[dict] = []
+    errs: dict[str, str] = {}
+    for dep in deployments:
+        if dep == "PROD":
+            part, e = smachine_collect_machines_multi_sites(**kwargs)
+        elif dep in ("QAT", "UAT"):
+            part, e = smachine_collect_nonprod_deployment(dep, **kwargs)
+        else:
+            errs[dep] = f"unknown deployment {dep!r}"
+            continue
+        all_rows.extend(part)
+        errs.update(e)
     return all_rows, errs
 
 

@@ -14,6 +14,8 @@ Mount inside Duty bot (same process, no second ``main.py``) — **on by default*
     # optional: WEBMACHINE_SCRAPE=0       disable live EGM scrape (default: **on** in code; no .env required)
     # optional: WEBMACHINE_SCRAPE_INTERVAL_SEC=900
     # optional: WEBMACHINE_SITES=nwr,nch,...  (default: ``smmachine.DEFAULT_WEBMACHINE_SITES`` — all backends; CP/OSM share one URL and are deduped)
+    # optional: WEBMACHINE_DEPLOYMENTS=prod,qat,uat  (default: all three; QAT/UAT use ``*.osmslot.org`` hosts in ``smmachine``)
+    # optional: WEBMACHINE_OSMSLOT_USER / WEBMACHINE_OSMSLOT_PASSWORD  (QAT/UAT login; default admin / 123456)
     # optional: SM_MACHINE_COLLECT_MAX_PAGES=500  (read-only scrape page cap when SM_MACHINE_MAX_PAGES unset)
 
 Point Feishu **Desktop / Mobile homepage** to your public HTTPS URL (reverse-proxy to this port).
@@ -36,10 +38,10 @@ Data sources:
 2. **JSON file** — default ``webmachine_data.json`` next to this module (or ``WEBMACHINE_DATA_PATH``). If missing, an empty ``[]`` file is **created**; after each successful scrape, results are **written back** to that file (skipped when ``WEBMACHINE_JSON`` inline is set).
 3. **Inline JSON** — ``WEBMACHINE_JSON='[...]'`` overrides file for fallback display only (no auto-create / no persist).
 
-Row keys (first match wins): **environment** / ``env`` / ``site``; **name** / ``machine``; **status**;
-**online** / ``online_offline`` / ``state``. Optional boolean **is_test** (or ``(TEST)`` in the name) for dashboard counts.
+Row keys (first match wins): **environment** (``PROD`` / ``QAT`` / ``UAT``); **belongs** (venue, e.g. ``CP``, ``MDR``);
+**name** / ``machine``; **status**; **online** / ``online_offline`` / ``state``. Optional boolean **is_test** (or ``(TEST)`` in the name) for dashboard counts.
 
-The HTML dashboard shows **global and per-environment** totals (online / offline / conn unknown / test / maintain) and a **search** box; ``GET /api/machines`` includes a **stats** object with the same numbers.
+The HTML dashboard shows **deployment** tabs (PROD / QAT / UAT), **global and per-belongs** totals, and a **search** box; ``GET /api/machines`` includes a **stats** object with the same numbers.
 
 Optional: ``WEBMACHINE_API_TOKEN`` — ``GET /api/machines`` requires ``Authorization: Bearer <token>``.
 
@@ -162,6 +164,9 @@ _PAGE = """<!DOCTYPE html>
     }
     .toolbar input[type="search"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(59,130,246,.2); }
     .filter-hint { font-size: 0.78rem; color: var(--muted); }
+    .deployment-filter-bar {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem;
+    }
     .env-filter-bar {
       display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; margin-bottom: 0.75rem;
     }
@@ -222,39 +227,46 @@ _PAGE = """<!DOCTYPE html>
   </script>
   <main id="wm-main">
     {% if rows %}
-    <section class="panel" aria-label="All environments summary">
-      <h2 class="panel-title">All environments</h2>
-      <div class="summary-grid">
-        <div class="stat-card total"><div class="num">{{ stats.total }}</div><div class="lbl">Total</div></div>
-        <div class="stat-card ok"><div class="num">{{ stats.online }}</div><div class="lbl">Online</div></div>
-        <div class="stat-card bad"><div class="num">{{ stats.offline }}</div><div class="lbl">Offline</div></div>
-        <div class="stat-card"><div class="num">{{ stats.conn_unknown }}</div><div class="lbl">Conn unknown</div></div>
-        <div class="stat-card warn"><div class="num">{{ stats.test }}</div><div class="lbl">Test mode</div></div>
-        <div class="stat-card"><div class="num">{{ stats.maintain }}</div><div class="lbl">Maintain</div></div>
+    <section class="panel" aria-label="Deployment tier">
+      <div class="deployment-filter-bar" id="wm-dep-filters" role="toolbar" aria-label="Deployment tier">
+        <button type="button" class="env-filter-btn active" data-wm-deployment="PROD">PROD</button>
+        <button type="button" class="env-filter-btn" data-wm-deployment="QAT">QAT</button>
+        <button type="button" class="env-filter-btn" data-wm-deployment="UAT">UAT</button>
       </div>
     </section>
-    <section class="panel" aria-label="Per environment summary">
-      <h2 class="panel-title">By environment</h2>
-      <div class="env-scroll">
+    <section class="panel" aria-label="All environments summary">
+      <h2 class="panel-title">All environments</h2>
+      <div class="summary-grid" id="wm-summary-global">
+        <div class="stat-card total"><div class="num" data-wm-stat="total">{{ stats.total }}</div><div class="lbl">Total</div></div>
+        <div class="stat-card ok"><div class="num" data-wm-stat="online">{{ stats.online }}</div><div class="lbl">Online</div></div>
+        <div class="stat-card bad"><div class="num" data-wm-stat="offline">{{ stats.offline }}</div><div class="lbl">Offline</div></div>
+        <div class="stat-card"><div class="num" data-wm-stat="conn_unknown">{{ stats.conn_unknown }}</div><div class="lbl">Conn unknown</div></div>
+        <div class="stat-card warn"><div class="num" data-wm-stat="test">{{ stats.test }}</div><div class="lbl">Test mode</div></div>
+        <div class="stat-card"><div class="num" data-wm-stat="maintain">{{ stats.maintain }}</div><div class="lbl">Maintain</div></div>
+      </div>
+    </section>
+    <section class="panel" aria-label="Per belongs summary">
+      <h2 class="panel-title">By belongs</h2>
+      <div class="env-scroll" id="wm-belongs-cards">
         {% for e in stats_env %}
-        <div class="env-card">
-          <h3>{{ e.environment }}</h3>
+        <div class="env-card" data-wm-belongs-card="{{ e.belongs|e }}">
+          <h3>{{ e.belongs }}</h3>
           <div class="env-mini">
-            <span>Total</span><b>{{ e.total }}</b>
-            <span>Online</span><b>{{ e.online }}</b>
-            <span>Offline</span><b>{{ e.offline }}</b>
-            <span>Unknown</span><b>{{ e.conn_unknown }}</b>
-            <span>Test</span><b>{{ e.test }}</b>
-            <span>Maintain</span><b>{{ e.maintain }}</b>
+            <span>Total</span><b data-wm-belongs-stat="total">{{ e.total }}</b>
+            <span>Online</span><b data-wm-belongs-stat="online">{{ e.online }}</b>
+            <span>Offline</span><b data-wm-belongs-stat="offline">{{ e.offline }}</b>
+            <span>Unknown</span><b data-wm-belongs-stat="conn_unknown">{{ e.conn_unknown }}</b>
+            <span>Test</span><b data-wm-belongs-stat="test">{{ e.test }}</b>
+            <span>Maintain</span><b data-wm-belongs-stat="maintain">{{ e.maintain }}</b>
           </div>
         </div>
         {% endfor %}
       </div>
     </section>
-    <div class="env-filter-bar" id="wm-env-filters" role="toolbar" aria-label="Filter by environment">
-      <button type="button" class="env-filter-btn active" data-wm-env="" id="wm-env-all">Show all</button>
+    <div class="env-filter-bar" id="wm-env-filters" role="toolbar" aria-label="Filter by belongs">
+      <button type="button" class="env-filter-btn active" data-wm-belongs="" id="wm-env-all">Show all</button>
       {% for e in stats_env %}
-      <button type="button" class="env-filter-btn" data-wm-env="{{ e.environment|e }}">{{ e.environment }}</button>
+      <button type="button" class="env-filter-btn" data-wm-belongs="{{ e.belongs|e }}">{{ e.belongs }}</button>
       {% endfor %}
     </div>
     <div class="env-filter-bar row-filter-bar" id="wm-row-filters" role="toolbar" aria-label="Optional row filters (multi-select)">
@@ -265,7 +277,7 @@ _PAGE = """<!DOCTYPE html>
       <button type="button" class="env-filter-btn" data-wm-toggle="online">Online</button>
     </div>
     <div class="toolbar">
-      <input type="search" id="wm-search" placeholder="Search environment, machine, status, online…" autocomplete="off" aria-label="Filter machines"/>
+      <input type="search" id="wm-search" placeholder="Search belongs, machine, status, online…" autocomplete="off" aria-label="Filter machines"/>
       <span class="filter-hint" id="wm-filter-hint"></span>
     </div>
     <div class="table-wrap">
@@ -273,6 +285,7 @@ _PAGE = """<!DOCTYPE html>
       <thead>
         <tr>
           <th>Environment</th>
+          <th>Belongs</th>
           <th>Machine name</th>
           <th>Test</th>
           <th>Status</th>
@@ -281,12 +294,13 @@ _PAGE = """<!DOCTYPE html>
       </thead>
       <tbody id="wm-tbody">
         {% for r in rows %}
-        <tr data-env="{{ r.environment|e }}" data-name="{{ r.name|e }}" data-status="{{ r.status|e }}" data-online="{{ r.online_label|e }}"
+        <tr data-deployment="{{ r.environment|e }}" data-belongs="{{ r.belongs|e }}" data-name="{{ r.name|e }}" data-status="{{ r.status|e }}" data-online="{{ r.online_label|e }}"
             data-test="{% if r.is_test %}1{% else %}0{% endif %}"
             data-maint="{% if 'maintain' in ((r.status or '')|lower) %}1{% else %}0{% endif %}"
             data-offline="{% if r.pill_class == 'pill-offline' %}1{% else %}0{% endif %}"
             data-online1="{% if r.pill_class == 'pill-online' %}1{% else %}0{% endif %}">
           <td>{{ r.environment }}</td>
+          <td>{{ r.belongs }}</td>
           <td><strong>{{ r.name }}</strong></td>
           <td>{% if r.is_test %}<span class="pill pill-test">TEST</span>{% else %}<span class="muted">—</span>{% endif %}</td>
           <td>
@@ -313,18 +327,26 @@ _PAGE = """<!DOCTYPE html>
       var hint = document.getElementById("wm-filter-hint");
       var tbody = document.getElementById("wm-tbody");
       var bar = document.getElementById("wm-env-filters");
+      var depBar = document.getElementById("wm-dep-filters");
       var rowBar = document.getElementById("wm-row-filters");
+      var summary = document.getElementById("wm-summary-global");
+      var belongsCards = document.getElementById("wm-belongs-cards");
       if (!tbody) return;
-      var envSel = "";
+      var depSel = "PROD";
+      var belongsSel = "";
       var filt = { test: false, maintain: false, offline: false, online: false };
 
       function anyRowFilt() {
         return filt.test || filt.maintain || filt.offline || filt.online;
       }
 
-      function matchesEnv(tr) {
-        if (!envSel) return true;
-        return (tr.getAttribute("data-env") || "") === envSel;
+      function matchesDeployment(tr) {
+        return (tr.getAttribute("data-deployment") || "") === depSel;
+      }
+
+      function matchesBelongs(tr) {
+        if (!belongsSel) return true;
+        return (tr.getAttribute("data-belongs") || "") === belongsSel;
       }
 
       function matchesRowKind(tr) {
@@ -352,6 +374,63 @@ _PAGE = """<!DOCTYPE html>
         if (clearBtn) clearBtn.classList.toggle("active", !anyRowFilt());
       }
 
+      function rowVisible(tr, term) {
+        var hay = (tr.getAttribute("data-belongs") || "") + " " + (tr.getAttribute("data-name") || "") + " " +
+          (tr.getAttribute("data-status") || "") + " " + (tr.getAttribute("data-online") || "");
+        hay = hay.toLowerCase();
+        var textOk = !term || hay.indexOf(term) !== -1;
+        return textOk && matchesDeployment(tr) && matchesBelongs(tr) && matchesRowKind(tr);
+      }
+
+      function updateSummary() {
+        var rows = tbody.querySelectorAll("tr");
+        var g = { total: 0, online: 0, offline: 0, conn_unknown: 0, test: 0, maintain: 0 };
+        var byBelongs = {};
+        for (var i = 0; i < rows.length; i++) {
+          var tr = rows[i];
+          if (!matchesDeployment(tr)) continue;
+          var belongs = tr.getAttribute("data-belongs") || "—";
+          if (!byBelongs[belongs]) {
+            byBelongs[belongs] = { total: 0, online: 0, offline: 0, conn_unknown: 0, test: 0, maintain: 0 };
+          }
+          var bb = byBelongs[belongs];
+          g.total += 1;
+          bb.total += 1;
+          var off = tr.getAttribute("data-offline") === "1";
+          var on1 = tr.getAttribute("data-online1") === "1";
+          if (on1) { g.online += 1; bb.online += 1; }
+          else if (off) { g.offline += 1; bb.offline += 1; }
+          else { g.conn_unknown += 1; bb.conn_unknown += 1; }
+          if (tr.getAttribute("data-test") === "1") { g.test += 1; bb.test += 1; }
+          if (tr.getAttribute("data-maint") === "1") { g.maintain += 1; bb.maintain += 1; }
+        }
+        if (summary) {
+          summary.querySelectorAll("[data-wm-stat]").forEach(function (el) {
+            var k = el.getAttribute("data-wm-stat");
+            if (k && Object.prototype.hasOwnProperty.call(g, k)) el.textContent = String(g[k]);
+          });
+        }
+        if (belongsCards) {
+          belongsCards.querySelectorAll("[data-wm-belongs-card]").forEach(function (card) {
+            var key = card.getAttribute("data-wm-belongs-card") || "";
+            var stats = byBelongs[key] || { total: 0, online: 0, offline: 0, conn_unknown: 0, test: 0, maintain: 0 };
+            card.querySelectorAll("[data-wm-belongs-stat]").forEach(function (el) {
+              var k = el.getAttribute("data-wm-belongs-stat");
+              if (k && Object.prototype.hasOwnProperty.call(stats, k)) el.textContent = String(stats[k]);
+            });
+            card.style.display = stats.total ? "" : "none";
+          });
+        }
+        if (bar) {
+          bar.querySelectorAll("[data-wm-belongs]").forEach(function (btn) {
+            var key = btn.getAttribute("data-wm-belongs") || "";
+            if (!key) return;
+            var stats = byBelongs[key];
+            btn.style.display = stats && stats.total ? "" : "none";
+          });
+        }
+      }
+
       function apply() {
         var term = (inp && inp.value) ? inp.value.trim().toLowerCase() : "";
         var rows = tbody.querySelectorAll("tr");
@@ -359,22 +438,17 @@ _PAGE = """<!DOCTYPE html>
         var n = 0;
         for (var i = 0; i < rows.length; i++) {
           var tr = rows[i];
-          var hay = (tr.getAttribute("data-env") || "") + " " + (tr.getAttribute("data-name") || "") + " " +
-            (tr.getAttribute("data-status") || "") + " " + (tr.getAttribute("data-online") || "");
-          hay = hay.toLowerCase();
-          var textOk = !term || hay.indexOf(term) !== -1;
-          var envOk = matchesEnv(tr);
-          var rowOk = matchesRowKind(tr);
-          var show = textOk && envOk && rowOk;
+          var show = rowVisible(tr, term);
           tr.style.display = show ? "" : "none";
           if (show) n++;
         }
+        updateSummary();
         if (hint) {
-          if (!envSel && !term && !anyRowFilt()) {
+          if (!belongsSel && !term && !anyRowFilt()) {
             hint.textContent = "";
           } else {
-            var label = [];
-            if (envSel) label.push("env: " + envSel);
+            var label = [depSel];
+            if (belongsSel) label.push("belongs: " + belongsSel);
             if (filt.test) label.push("test");
             if (filt.maintain) label.push("maintain");
             if (filt.offline) label.push("offline");
@@ -385,11 +459,29 @@ _PAGE = """<!DOCTYPE html>
         }
       }
 
+      if (depBar) {
+        depBar.addEventListener("click", function (ev) {
+          var btn = ev.target.closest("[data-wm-deployment]");
+          if (!btn || !depBar.contains(btn)) return;
+          depSel = btn.getAttribute("data-wm-deployment") || "PROD";
+          belongsSel = "";
+          depBar.querySelectorAll(".env-filter-btn").forEach(function (b) {
+            b.classList.toggle("active", b === btn);
+          });
+          if (bar) {
+            var allBtn = bar.querySelector("#wm-env-all");
+            bar.querySelectorAll(".env-filter-btn").forEach(function (b) {
+              b.classList.toggle("active", b === allBtn);
+            });
+          }
+          apply();
+        });
+      }
       if (bar) {
         bar.addEventListener("click", function (ev) {
-          var btn = ev.target.closest("[data-wm-env]");
+          var btn = ev.target.closest("[data-wm-belongs]");
           if (!btn || !bar.contains(btn)) return;
-          envSel = btn.getAttribute("data-wm-env") || "";
+          belongsSel = btn.getAttribute("data-wm-belongs") || "";
           bar.querySelectorAll(".env-filter-btn").forEach(function (b) {
             b.classList.toggle("active", b === btn);
           });
@@ -418,6 +510,7 @@ _PAGE = """<!DOCTYPE html>
         inp.addEventListener("input", apply);
         inp.addEventListener("search", apply);
       }
+      apply();
     })();
     </script>
     {% else %}
@@ -1317,6 +1410,7 @@ def _persist_scrape_to_data_file(rows: list[dict]) -> None:
         payload = [
             {
                 "environment": r.get("environment"),
+                "belongs": r.get("belongs"),
                 "name": r.get("name"),
                 "status": r.get("status"),
                 "online": r.get("online_raw") or r.get("online_label"),
@@ -1363,6 +1457,14 @@ def _status_is_maintain(status: str) -> bool:
     return "maintain" in " ".join((status or "").lower().split())
 
 
+_KNOWN_DEPLOYMENTS = frozenset({"PROD", "QAT", "UAT"})
+
+
+def _filter_rows_by_deployment(rows: list[dict], deployment: str) -> list[dict]:
+    dep = (deployment or "PROD").strip().upper() or "PROD"
+    return [r for r in rows if str(r.get("environment") or "").upper() == dep]
+
+
 def _normalize_rows(raw: object) -> list[dict]:
     if raw is None:
         return []
@@ -1379,6 +1481,18 @@ def _normalize_rows(raw: object) -> list[dict]:
         if not isinstance(row, dict):
             continue
         env = _cell(row, "environment", "env", "site", "backend")
+        deployment = _cell(row, "deployment", "tier", "env_tier").upper()
+        belongs = _cell(row, "belongs", "venue", "site_belong", "site_code")
+        if deployment not in _KNOWN_DEPLOYMENTS:
+            if env.upper() in _KNOWN_DEPLOYMENTS:
+                deployment = env.upper()
+            else:
+                deployment = "PROD"
+        if not belongs:
+            if env and env.upper() not in _KNOWN_DEPLOYMENTS:
+                belongs = env
+            else:
+                belongs = _cell(row, "site", "backend") or "—"
         name = _cell(row, "name", "machine", "machine_name", "id")
         status = _cell(row, "status", "machine_status", "state_detail")
         online_raw = _cell(row, "online", "online_offline", "conn", "reachability")
@@ -1390,7 +1504,8 @@ def _normalize_rows(raw: object) -> list[dict]:
         is_test = _infer_is_test(row, name)
         out.append(
             {
-                "environment": env or "—",
+                "environment": deployment,
+                "belongs": belongs or "—",
                 "name": name or "—",
                 "status": status or "—",
                 "online_label": label,
@@ -1403,16 +1518,16 @@ def _normalize_rows(raw: object) -> list[dict]:
 
 
 def _compute_stats(rows: list[dict]) -> tuple[dict, list[dict]]:
-    """Global counts and per-environment counts (same keys)."""
+    """Global counts and per-belongs counts (same keys)."""
     g = {"total": 0, "online": 0, "offline": 0, "conn_unknown": 0, "test": 0, "maintain": 0}
     if not rows:
         return g, []
-    by_env: dict[str, dict] = {}
+    by_belongs: dict[str, dict] = {}
     for r in rows:
-        env = str(r.get("environment") or "—")
-        if env not in by_env:
-            by_env[env] = {
-                "environment": env,
+        label = str(r.get("belongs") or "—")
+        if label not in by_belongs:
+            by_belongs[label] = {
+                "belongs": label,
                 "total": 0,
                 "online": 0,
                 "offline": 0,
@@ -1420,7 +1535,7 @@ def _compute_stats(rows: list[dict]) -> tuple[dict, list[dict]]:
                 "test": 0,
                 "maintain": 0,
             }
-        be = by_env[env]
+        be = by_belongs[label]
         g["total"] += 1
         be["total"] += 1
         pc = str(r.get("pill_class") or "")
@@ -1439,8 +1554,8 @@ def _compute_stats(rows: list[dict]) -> tuple[dict, list[dict]]:
         if _status_is_maintain(str(r.get("status") or "")):
             g["maintain"] += 1
             be["maintain"] += 1
-    env_list = sorted(by_env.values(), key=lambda x: str(x["environment"]).lower())
-    return g, env_list
+    belongs_list = sorted(by_belongs.values(), key=lambda x: str(x["belongs"]).lower())
+    return g, belongs_list
 
 
 def _load_raw_json() -> tuple[list[dict], str]:
@@ -1477,7 +1592,7 @@ def _api_auth_ok() -> bool:
 def _run_scrape_once() -> None:
     global _scrape_rows, _scrape_errs, _scrape_ts
     try:
-        from smmachine import smachine_collect_machines_multi_sites
+        from smmachine import smachine_collect_machines_all_deployments
     except Exception as e:
         with _scrape_lock:
             _scrape_errs = {"_import": repr(e)}
@@ -1485,11 +1600,17 @@ def _run_scrape_once() -> None:
             _scrape_rows = []
         return
     try:
-        raw_rows, errs = smachine_collect_machines_multi_sites()
+        raw_rows, errs = smachine_collect_machines_all_deployments()
     except Exception as e:
         raw_rows, errs = [], {"_fatal": repr(e)}
     norm = _normalize_rows(raw_rows)
-    norm.sort(key=lambda r: ((r.get("environment") or "").lower(), (r.get("name") or "").lower()))
+    norm.sort(
+        key=lambda r: (
+            (r.get("environment") or "").lower(),
+            (r.get("belongs") or "").lower(),
+            (r.get("name") or "").lower(),
+        )
+    )
     with _scrape_lock:
         _scrape_rows = norm
         _scrape_errs = errs
@@ -1625,12 +1746,13 @@ def index():
             rows, _ = [], f"Error: {e}"
     else:
         rows, _ = _display_rows_and_provenance()
-    stats, stats_env = _compute_stats(rows)
+    prod_rows = _filter_rows_by_deployment(rows, "PROD")
+    stats, stats_env = _compute_stats(prod_rows)
     return render_template_string(
         _PAGE,
         title=title,
         rows=rows,
-        row_total=len(rows),
+        row_total=len(prod_rows),
         last_updated=_machines_last_updated_str(),
         stats=stats,
         stats_env=stats_env,
