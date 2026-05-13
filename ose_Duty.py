@@ -963,6 +963,20 @@ def _leave_rows_for_calendar(items: list[dict[str, Any]]) -> list[dict[str, Any]
     return rows
 
 
+def _record_approval_fields(fields: dict[str, Any]) -> dict[str, str]:
+    approval_dt = _parse_date_value(
+        _get_field_by_aliases(fields, ["Approval Date", "Approved Date", "ApprovalDate"])
+    )
+    return {
+        "status": _field_text(_get_field_by_aliases(fields, ["Status", "Approval Status"])),
+        "approver": _title_name(
+            _field_text(_get_field_by_aliases(fields, ["Approver", "Approved By", "Approval Person"]))
+        ),
+        "approval_date": _format_yyyymmdd(approval_dt),
+        "remarks": _field_text(_get_field_by_aliases(fields, ["Remarks", "Remark", "Approval Remarks"])),
+    }
+
+
 def get_ose_leave_records_list() -> dict[str, Any]:
     """All leave rows for the submit-leave page (LeaveID shown when present)."""
     token = get_tenant_access_token()
@@ -975,6 +989,7 @@ def get_ose_leave_records_list() -> dict[str, Any]:
             continue
         st = _parse_date_value(_get_field_by_aliases(f, ["Start Date", "Leave Start Date", "From"]))
         ed = _parse_date_value(_get_field_by_aliases(f, ["End Date", "Leave End Date", "To"]))
+        approval = _record_approval_fields(f)
         rows.append(
             {
                 "leave_id": _field_text(_get_field_by_aliases(f, ["LeaveID", "Leave ID", "Leave Id"])),
@@ -983,6 +998,10 @@ def get_ose_leave_records_list() -> dict[str, Any]:
                 "start_date": _format_yyyymmdd(st),
                 "end_date": _format_yyyymmdd(ed),
                 "reason": _field_text(_get_field_by_aliases(f, ["Reason"])),
+                "status": approval["status"],
+                "approver": approval["approver"],
+                "approval_date": approval["approval_date"],
+                "remarks": approval["remarks"],
             }
         )
     rows.sort(
@@ -1012,6 +1031,7 @@ def get_ose_offset_records_list() -> dict[str, Any]:
         od = _parse_date_value(_get_field_by_aliases(f, ["Original Date", "Date"]))
         xd = _parse_date_value(_get_field_by_aliases(f, ["Exchange Date", "Swap Date", "Target Date"]))
         rd = _parse_date_value(_get_field_by_aliases(f, ["Request Date", "Submitted Date", "Created Date"]))
+        approval = _record_approval_fields(f)
         rows.append(
             {
                 "request_id": _field_text(_get_field_by_aliases(f, ["Request ID", "RequestID", "Request Id"])),
@@ -1022,6 +1042,10 @@ def get_ose_offset_records_list() -> dict[str, Any]:
                 "original_date": _format_yyyymmdd(od),
                 "exchange_date": _format_yyyymmdd(xd),
                 "reason": _field_text(_get_field_by_aliases(f, ["Reason"])),
+                "approval_status": approval["status"],
+                "approver": approval["approver"],
+                "approval_date": approval["approval_date"],
+                "remarks": approval["remarks"],
             }
         )
     rows.sort(

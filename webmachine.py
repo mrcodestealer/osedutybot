@@ -1486,9 +1486,9 @@ _OSE_SUBMIT_LEAVE_PAGE = """<!DOCTYPE html>
       <div class="ose-records-wrap">
         <table class="ose-records-table">
           <thead>
-            <tr><th>Name</th><th>Leave Type</th><th>Start Date</th><th>End Date</th><th>Reason</th></tr>
+            <tr><th>Name</th><th>Leave Type</th><th>Start Date</th><th>End Date</th><th>Reason</th><th>Status</th><th>Approver</th><th>Approval Date</th><th>Remarks</th></tr>
           </thead>
-          <tbody id="ose-leave-list-body"><tr><td class="ose-records-empty" colspan="5">Loading…</td></tr></tbody>
+          <tbody id="ose-leave-list-body"><tr><td class="ose-records-empty" colspan="9">Loading…</td></tr></tbody>
         </table>
       </div>
     </section>
@@ -1518,13 +1518,13 @@ _OSE_SUBMIT_LEAVE_PAGE = """<!DOCTYPE html>
       if (!items.length) {
         var row = document.createElement("tr");
         var cell = document.createElement("td");
-        cell.className = "ose-records-empty"; cell.colSpan = 5; cell.textContent = "No leave records.";
+        cell.className = "ose-records-empty"; cell.colSpan = 9; cell.textContent = "No leave records.";
         row.appendChild(cell); body.appendChild(row); return;
       }
       for (var i = 0; i < items.length; i++) {
         var it = items[i];
         var tr = document.createElement("tr");
-        [it.name, it.leave_type, it.start_date, it.end_date, it.reason].forEach(function (val) {
+        [it.name, it.leave_type, it.start_date, it.end_date, it.reason, it.status, it.approver, it.approval_date, it.remarks].forEach(function (val) {
           var td = document.createElement("td");
           td.textContent = val || "";
           tr.appendChild(td);
@@ -1623,9 +1623,9 @@ _OSE_SUBMIT_OFFSET_PAGE = """<!DOCTYPE html>
       <div class="ose-records-wrap">
         <table class="ose-records-table">
           <thead>
-            <tr><th>Request Date</th><th>Request Person</th><th>Exchange Person</th><th>Shift</th><th>Original Date</th><th>Exchange Date</th><th>Reason</th></tr>
+            <tr><th>Request Date</th><th>Request Person</th><th>Exchange Person</th><th>Shift</th><th>Original Date</th><th>Exchange Date</th><th>Reason</th><th>Approval Status</th><th>Approver</th><th>Approval Date</th><th>Remarks</th></tr>
           </thead>
-          <tbody id="ose-offset-list-body"><tr><td class="ose-records-empty" colspan="7">Loading…</td></tr></tbody>
+          <tbody id="ose-offset-list-body"><tr><td class="ose-records-empty" colspan="11">Loading…</td></tr></tbody>
         </table>
       </div>
     </section>
@@ -1655,13 +1655,13 @@ _OSE_SUBMIT_OFFSET_PAGE = """<!DOCTYPE html>
       if (!items.length) {
         var row = document.createElement("tr");
         var cell = document.createElement("td");
-        cell.className = "ose-records-empty"; cell.colSpan = 7; cell.textContent = "No offset records.";
+        cell.className = "ose-records-empty"; cell.colSpan = 11; cell.textContent = "No offset records.";
         row.appendChild(cell); body.appendChild(row); return;
       }
       for (var i = 0; i < items.length; i++) {
         var it = items[i];
         var tr = document.createElement("tr");
-        [it.request_date, it.request_person, it.exchange_person, it.shift_type, it.original_date, it.exchange_date, it.reason].forEach(function (val) {
+        [it.request_date, it.request_person, it.exchange_person, it.shift_type, it.original_date, it.exchange_date, it.reason, it.approval_status, it.approver, it.approval_date, it.remarks].forEach(function (val) {
           var td = document.createElement("td");
           td.textContent = val || "";
           tr.appendChild(td);
