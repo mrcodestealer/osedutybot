@@ -71,6 +71,8 @@ except ImportError:
     pass
 
 from flask import Blueprint, Flask, jsonify, redirect, render_template_string, request, session, url_for
+from markupsafe import escape
+from werkzeug.exceptions import HTTPException
 
 wm_bp = Blueprint("wm", __name__)
 
@@ -2751,7 +2753,7 @@ _ADMIN_LOGIN_PAGE = """<!DOCTYPE html>
   <div class="adm-login-card">
     <h1>Admin login</h1>
     {% if error %}
-    <p class="adm-err">{{ error }}</p>
+    <p class="adm-err">{{ error|e }}</p>
     {% endif %}
     <form method="post" action="{{ admin_login_action }}" autocomplete="on">
       <label for="adm-login-id">ID</label>
@@ -4313,9 +4315,28 @@ def api_ose_duty_calendar():
 
 @wm_bp.get("/api/ose/submit-meta")
 def api_ose_submit_meta():
-    import ose_Duty as od
+    try:
+        import ose_Duty as od
 
-    return jsonify(ok=True, **od.get_ose_submit_form_options())
+        return jsonify(ok=True, **od.get_ose_submit_form_options())
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 400
+
+
+@wm_bp.errorhandler(Exception)
+def wm_uncaught_exception(err: Exception):
+    if isinstance(err, HTTPException):
+        return err
+    msg = str(err) or err.__class__.__name__
+    path = (request.path or "").lower()
+    if "/api/" in path:
+        return jsonify(ok=False, error=msg), 500
+    safe_msg = escape(msg)
+    return (
+        f'<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"/><title>Service error</title></head>'
+        f'<body><h1>Service error</h1><p>{safe_msg}</p></body></html>',
+        500,
+    )
 
 
 @wm_bp.get("/api/ose/leave-list")
