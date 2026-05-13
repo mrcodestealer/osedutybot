@@ -54,6 +54,7 @@ import calendar
 import importlib
 import json
 import os
+import requests
 import re
 import sys
 import threading
@@ -69,9 +70,69 @@ try:
 except ImportError:
     pass
 
-from flask import Blueprint, Flask, jsonify, redirect, render_template_string, request, url_for
+from flask import Blueprint, Flask, jsonify, redirect, render_template_string, request, session, url_for
 
 wm_bp = Blueprint("wm", __name__)
+
+_ADMIN_LOGIN_FAIL_LOCK = threading.Lock()
+_ADMIN_LOGIN_FAIL_BY_IP: dict[str, int] = {}
+_ADMIN_ALERT_CHAT_ID = "oc_9de3d63fc589df6feeb9b0bee9c45b72"
+_ADMIN_ALERT_AT_USER = "ou_5f660c0fb0769d184aca635d02209272"
+
+
+def _webapp_client_ip() -> str:
+    xff = (request.headers.get("X-Forwarded-For") or "").strip()
+    if xff:
+        return xff.split(",")[0].strip()
+    return (request.remote_addr or "").strip() or "unknown"
+
+
+def _track_admin_login_failure() -> int:
+    ip = _webapp_client_ip()
+    with _ADMIN_LOGIN_FAIL_LOCK:
+        _ADMIN_LOGIN_FAIL_BY_IP[ip] = int(_ADMIN_LOGIN_FAIL_BY_IP.get(ip, 0)) + 1
+        n = _ADMIN_LOGIN_FAIL_BY_IP[ip]
+    if n > 0 and n % 5 == 0:
+        _send_admin_login_bruteforce_lark(ip, n)
+    return n
+
+
+def _clear_admin_login_failures_for_current_ip() -> None:
+    ip = _webapp_client_ip()
+    with _ADMIN_LOGIN_FAIL_LOCK:
+        _ADMIN_LOGIN_FAIL_BY_IP.pop(ip, None)
+
+
+def _send_admin_login_bruteforce_lark(ip: str, total_failures: int) -> None:
+    try:
+        import ose_Duty as od
+
+        token = od.get_tenant_access_token()
+        text = (
+            f'<at user_id="{_ADMIN_ALERT_AT_USER}"></at> '
+            f"Webapp admin login: {total_failures} failed attempt(s) from IP {ip}."
+        )
+        url = "https://open.larksuite.com/open-apis/im/v1/messages"
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        body = {
+            "receive_id": _ADMIN_ALERT_CHAT_ID,
+            "msg_type": "text",
+            "content": json.dumps({"text": text}),
+        }
+        requests.post(url, headers=headers, params={"receive_id_type": "chat_id"}, json=body, timeout=20)
+    except Exception:
+        pass
+
+
+def _admin_session_who() -> str:
+    return (session.get("admin_whologin") or "").strip()
+
+
+def _ensure_admin_session_redirect():
+    if not _admin_session_who():
+        return redirect(url_for("wm.admin_login"))
+    return None
+
 
 _PAGE = """<!DOCTYPE html>
 <html lang="en">
@@ -113,6 +174,13 @@ _PAGE = """<!DOCTYPE html>
     a.wm-head-nav-btn:hover { text-decoration: none; }
     .wm-head-nav-group { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 0.5rem; flex-shrink: 0; }
     a.wm-head-nav-btn.active { border-color: var(--accent); background: rgba(59,130,246,.18); color: var(--text); }
+    a.wm-admin-btn {
+      border-color: #b91c1c !important; background: #dc2626 !important; color: #fff !important;
+    }
+    a.wm-admin-btn:hover {
+      border-color: #991b1b !important; background: #b91c1c !important; color: #fff !important;
+      text-decoration: none;
+    }
     .wm-head-top { display: flex; flex-direction: column; align-items: flex-start; gap: 0.55rem; }
     .wm-head-title { margin: 0; font-size: 1.35rem; font-weight: 700; letter-spacing: -0.02em; }
     .wm-head-title-btn {
@@ -221,6 +289,7 @@ _PAGE = """<!DOCTYPE html>
       <a class="wm-head-title-btn wm-head-nav-btn active" href="{{ machine_status_href }}">Machine status</a>
       <a class="wm-head-title-btn wm-head-nav-btn" href="{{ all_duty_href }}">All Duty</a>
       <a class="wm-head-title-btn wm-head-nav-btn" href="{{ machine_encoder_href }}">Machine encoder</a>
+      <a class="wm-head-title-btn wm-admin-btn" href="{{ admin_login_href }}">Admin Page</a>
     </div>
   </header>
   <main id="wm-main">
@@ -1457,6 +1526,13 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
     a.wm-head-title-btn:hover { border-color: var(--accent); background: rgba(59,130,246,.12); box-shadow: 0 0 0 3px rgba(59,130,246,.15); text-decoration: none; }
     .wm-head-nav-group { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 0.5rem; flex-shrink: 0; }
     a.wm-head-nav-btn.active { border-color: var(--accent); background: rgba(59,130,246,.18); color: var(--text); }
+    a.wm-admin-btn {
+      border-color: #b91c1c !important; background: #dc2626 !important; color: #fff !important;
+    }
+    a.wm-admin-btn:hover {
+      border-color: #991b1b !important; background: #b91c1c !important; color: #fff !important;
+      text-decoration: none;
+    }
     .duty-kind-bar {
       display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-bottom: 1rem;
       padding: 0.5rem 0.55rem; border-radius: 12px; border: 1px solid var(--line); background: rgba(21,27,38,.65);
@@ -1609,6 +1685,7 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
       <a class="wm-head-title-btn wm-head-nav-btn" href="{{ machine_status_href }}">Machine status</a>
       <a class="wm-head-title-btn wm-head-nav-btn active" href="{{ all_duty_href }}">All Duty</a>
       <a class="wm-head-title-btn wm-head-nav-btn" href="{{ machine_encoder_href }}">Machine encoder</a>
+      <a class="wm-head-title-btn wm-admin-btn" href="{{ admin_login_href }}">Admin Page</a>
     </div>
   </header>
   <main class="ose-main" id="ose-main">
@@ -2630,6 +2707,722 @@ _OSE_SUBMIT_OFFSET_PAGE = """<!DOCTYPE html>
 """
 
 
+_ADMIN_LOGIN_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Admin login</title>
+  <style>
+    :root {
+      --bg: #0b0f14; --card: #151b26; --elev: #1c2533; --text: #e8edf4; --muted: #8b9cb3;
+      --accent: #3b82f6; --line: #2a3544; --bad: #ef4444;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: radial-gradient(1200px 600px at 10% -10%, rgba(59,130,246,.12), transparent), var(--bg);
+      color: var(--text); display: flex; align-items: center; justify-content: center; padding: 1.25rem;
+    }
+    .adm-login-card {
+      width: 100%; max-width: 380px; background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+      padding: 1.35rem 1.25rem; box-shadow: 0 8px 32px rgba(0,0,0,.2);
+    }
+    .adm-login-card h1 { margin: 0 0 1rem; font-size: 1.2rem; font-weight: 700; letter-spacing: -0.02em; }
+    .adm-err {
+      margin: 0 0 1rem; padding: 0.55rem 0.7rem; border-radius: 8px; background: rgba(239,68,68,.12);
+      border: 1px solid rgba(239,68,68,.35); color: #fecaca; font-size: 0.88rem;
+    }
+    label { display: block; font-size: 0.78rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 0.35rem; }
+    input[type="text"], input[type="password"] {
+      width: 100%; padding: 0.55rem 0.75rem; border-radius: 10px; border: 1px solid var(--line);
+      background: #0f141c; color: var(--text); font-size: 0.95rem; outline: none; margin-bottom: 0.85rem;
+    }
+    input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(59,130,246,.2); }
+    button[type="submit"] {
+      width: 100%; margin-top: 0.35rem; font: inherit; font-weight: 650; font-size: 0.92rem;
+      padding: 0.58rem 1rem; border-radius: 10px; border: 1px solid var(--accent); background: rgba(59,130,246,.22);
+      color: var(--text); cursor: pointer;
+    }
+    button[type="submit"]:hover { background: rgba(59,130,246,.32); }
+  </style>
+</head>
+<body>
+  <div class="adm-login-card">
+    <h1>Admin login</h1>
+    {% if error %}
+    <p class="adm-err">{{ error }}</p>
+    {% endif %}
+    <form method="post" action="{{ admin_login_action }}" autocomplete="on">
+      <label for="adm-login-id">ID</label>
+      <input id="adm-login-id" name="login_id" type="text" required autocomplete="username"/>
+      <label for="adm-login-pw">Password</label>
+      <input id="adm-login-pw" name="password" type="password" required autocomplete="current-password"/>
+      <button type="submit">Sign in</button>
+    </form>
+  </div>
+</body>
+</html>
+"""
+
+
+_ADMIN_LEAVE_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Admin · Leave</title>
+  <style>
+    :root {
+      --bg: #0b0f14; --card: #151b26; --elev: #1c2533; --text: #e8edf4; --muted: #8b9cb3;
+      --accent: #3b82f6; --line: #2a3544; --ok: #22c55e; --bad: #ef4444; --warn: #eab308;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: radial-gradient(1200px 600px at 10% -10%, rgba(59,130,246,.12), transparent), var(--bg);
+      color: var(--text); min-height: 100vh;
+    }
+    header.adm-header {
+      padding: 1rem 1.35rem; border-bottom: 1px solid var(--line);
+      display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem;
+    }
+    .adm-header h1 { margin: 0; font-size: 1.15rem; font-weight: 700; }
+    .adm-nav { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; }
+    a.adm-nav-btn, button.adm-nav-btn {
+      font: inherit; font-size: 0.85rem; font-weight: 650; padding: 0.45rem 0.85rem; border-radius: 10px;
+      border: 1px solid var(--line); background: var(--elev); color: var(--text); cursor: pointer;
+      text-decoration: none; display: inline-block;
+    }
+    a.adm-nav-btn:hover, button.adm-nav-btn:hover { border-color: var(--accent); background: rgba(59,130,246,.12); text-decoration: none; }
+    a.adm-nav-btn.active { border-color: var(--accent); background: rgba(59,130,246,.18); }
+    button.adm-nav-btn.ghost { background: transparent; color: var(--muted); }
+    main { padding: 1rem 1.35rem 2rem; max-width: 1400px; margin: 0 auto; width: 100%; }
+    .adm-toolbar {
+      display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.65rem; margin-bottom: 0.85rem;
+    }
+    .adm-filters { display: flex; flex-wrap: wrap; gap: 0.45rem; align-items: center; }
+    .env-filter-btn {
+      font: inherit; font-size: 0.8rem; font-weight: 600;
+      padding: 0.4rem 0.8rem; border-radius: 999px; cursor: pointer; border: 1px solid var(--line);
+      background: var(--elev); color: var(--muted);
+    }
+    .env-filter-btn:hover { border-color: var(--accent); color: var(--text); }
+    .env-filter-btn.active { background: rgba(59,130,246,.25); border-color: var(--accent); color: var(--text); }
+    .adm-table-wrap { overflow-x: auto; border-radius: 12px; border: 1px solid var(--line); }
+    table { width: 100%; border-collapse: collapse; background: var(--elev); }
+    th, td { padding: 0.55rem 0.65rem; text-align: left; border-bottom: 1px solid var(--line); font-size: 0.84rem; vertical-align: middle; }
+    th {
+      background: #222b3a; font-size: 0.66rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+      position: sticky; top: 0; z-index: 1;
+    }
+    tr:last-child td { border-bottom: none; }
+    tbody tr:hover td { background: rgba(59,130,246,.06); }
+    .ose-pill {
+      display: inline-block; padding: 0.16rem 0.48rem; border-radius: 999px; font-size: 0.72rem; font-weight: 600;
+      border: 1px solid transparent;
+    }
+    .ose-pill-status.is-approved { background: rgba(34,197,94,0.14); color: #86efac; border-color: rgba(34,197,94,0.28); }
+    .ose-pill-status.is-pending { background: rgba(234,179,8,0.14); color: #fde68a; border-color: rgba(234,179,8,0.28); }
+    .ose-pill-status.is-rejected { background: rgba(239,68,68,0.14); color: #fca5a5; border-color: rgba(239,68,68,0.28); }
+    .ose-pill-status { background: rgba(139,156,179,0.16); color: #cbd5e1; border-color: rgba(139,156,179,0.28); }
+    .ose-pill-leave { background: rgba(167,139,250,.12); color: #ddd6fe; border-color: rgba(167,139,250,.28); }
+    .ose-cell-empty { color: var(--muted); opacity: 0.65; }
+    button.adm-act {
+      font: inherit; font-size: 0.72rem; font-weight: 650; padding: 0.28rem 0.55rem; border-radius: 8px;
+      border: 1px solid var(--line); background: var(--card); color: var(--muted); cursor: pointer; margin-right: 0.25rem;
+    }
+    button.adm-act-appr.selected { background: rgba(34,197,94,.18); border-color: rgba(34,197,94,.45); color: #86efac; }
+    button.adm-act-rej.selected { background: rgba(239,68,68,.18); border-color: rgba(239,68,68,.45); color: #fca5a5; }
+    button.adm-act-rmk { border-color: rgba(59,130,246,.4); color: var(--accent); }
+    .adm-modal-backdrop {
+      position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; align-items: center; justify-content: center;
+      z-index: 200; padding: 1rem;
+    }
+    .adm-modal-backdrop.show { display: flex; }
+    .adm-modal {
+      background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 1rem 1.1rem; max-width: 440px; width: 100%;
+      box-shadow: 0 16px 48px rgba(0,0,0,.35);
+    }
+    .adm-modal h2 { margin: 0 0 0.65rem; font-size: 1rem; }
+    .adm-modal textarea {
+      width: 100%; min-height: 6rem; padding: 0.55rem 0.65rem; border-radius: 10px; border: 1px solid var(--line);
+      background: #0f141c; color: var(--text); font-size: 0.88rem; resize: vertical;
+    }
+    .adm-modal-actions { display: flex; justify-content: flex-end; gap: 0.45rem; margin-top: 0.75rem; }
+    .adm-modal-actions button {
+      font: inherit; font-weight: 650; font-size: 0.85rem; padding: 0.45rem 0.85rem; border-radius: 10px; cursor: pointer; border: 1px solid var(--line);
+      background: var(--elev); color: var(--text);
+    }
+    .adm-modal-actions button.primary { border-color: var(--accent); background: rgba(59,130,246,.22); }
+    .adm-records-empty { text-align: center; color: var(--muted); padding: 2rem; }
+  </style>
+</head>
+<body>
+  <header class="adm-header">
+    <h1>Admin · Leave approvals</h1>
+    <nav class="adm-nav">
+      <a class="adm-nav-btn active" href="{{ admin_leave_href }}">Leave</a>
+      <a class="adm-nav-btn" href="{{ admin_offset_href }}">Offset</a>
+      <form method="post" action="{{ admin_logout_action }}" style="display:inline;margin:0;">
+        <button type="submit" class="adm-nav-btn ghost">Logout</button>
+      </form>
+    </nav>
+  </header>
+  <main>
+    <div class="adm-toolbar">
+      <div class="adm-filters">
+        <button type="button" class="env-filter-btn active" id="adm-filter-all" data-mode="all">ALL</button>
+        <button type="button" class="env-filter-btn" id="adm-filter-todo" data-mode="todo">TO DO LIST</button>
+      </div>
+      <button type="button" class="env-filter-btn" id="adm-refresh">Refresh</button>
+    </div>
+    <div class="adm-table-wrap">
+      <table>
+        <thead id="adm-thead"></thead>
+        <tbody id="adm-body"><tr><td class="adm-records-empty" colspan="20">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </main>
+  <div class="adm-modal-backdrop" id="adm-modal-backdrop" role="dialog" aria-modal="true">
+    <div class="adm-modal">
+      <h2>Remarks</h2>
+      <textarea id="adm-modal-ta" placeholder="Optional remarks"></textarea>
+      <div class="adm-modal-actions">
+        <button type="button" id="adm-modal-cancel">Cancel</button>
+        <button type="button" class="primary" id="adm-modal-confirm">Confirm</button>
+      </div>
+    </div>
+  </div>
+  <script>
+  (function () {
+    var API_LIST = {{ api_admin_leave_list_href | tojson }};
+    var API_APPROVE = {{ api_admin_leave_approve_href | tojson }};
+    var filterMode = "all";
+    var backdrop = document.getElementById("adm-modal-backdrop");
+    var modalTa = document.getElementById("adm-modal-ta");
+    var modalRecordId = "";
+    var modalStatus = "";
+    var tbody = document.getElementById("adm-body");
+    var thead = document.getElementById("adm-thead");
+
+    function statusCell(status) {
+      var td = document.createElement("td");
+      var s = String(status || "").trim();
+      if (!s) { td.className = "ose-cell-empty"; td.textContent = "—"; return td; }
+      var span = document.createElement("span");
+      span.className = "ose-pill ose-pill-status";
+      var k = s.toLowerCase();
+      if (k.indexOf("approv") >= 0) span.classList.add("is-approved");
+      else if (k.indexOf("pend") >= 0) span.classList.add("is-pending");
+      else if (k.indexOf("reject") >= 0) span.classList.add("is-rejected");
+      span.textContent = s;
+      td.appendChild(span);
+      return td;
+    }
+
+    function textCell(val, extra) {
+      var td = document.createElement("td");
+      if (extra) td.className = extra;
+      var s = String(val || "").trim();
+      if (!s) { td.classList.add("ose-cell-empty"); td.textContent = "—"; }
+      else { td.textContent = s; }
+      return td;
+    }
+
+    function typeCell(val) {
+      var td = document.createElement("td");
+      var s = String(val || "").trim();
+      if (!s) { td.className = "ose-cell-empty"; td.textContent = "—"; return td; }
+      var span = document.createElement("span");
+      span.className = "ose-pill ose-pill-leave";
+      span.textContent = s;
+      td.appendChild(span);
+      return td;
+    }
+
+    function setRowDecision(tr, st) {
+      tr.dataset.decision = st;
+      var a = tr.querySelector(".adm-act-appr");
+      var r = tr.querySelector(".adm-act-rej");
+      if (a) a.classList.toggle("selected", st === "Approved");
+      if (r) r.classList.toggle("selected", st === "Rejected");
+    }
+
+    function submitApprove(recordId, status, remarks, done) {
+      fetch(API_APPROVE, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ record_id: recordId, status: status, remarks: remarks || "" })
+      }).then(function (r) { return r.json(); }).then(function (data) {
+        if (!data || !data.ok) throw new Error((data && data.error) || "Approve failed");
+        done(null);
+      }).catch(function (e) { done(e); });
+    }
+
+    function render(data) {
+      var items = (data && data.items) || [];
+      tbody.innerHTML = "";
+      thead.innerHTML = "";
+      var hr = document.createElement("tr");
+      if (filterMode === "all") {
+        ["Name", "Leave type", "Start date", "End date", "Reason", "Status", "Approver", "Approval date", "Remarks"].forEach(function (h) {
+          var th = document.createElement("th"); th.textContent = h; hr.appendChild(th);
+        });
+        thead.appendChild(hr);
+        if (!items.length) {
+          var er = document.createElement("tr");
+          var ec = document.createElement("td"); ec.colSpan = 9; ec.className = "adm-records-empty"; ec.textContent = "No leave records.";
+          er.appendChild(ec); tbody.appendChild(er); return;
+        }
+        for (var i = 0; i < items.length; i++) {
+          var it = items[i];
+          var tr = document.createElement("tr");
+          tr.appendChild(textCell(it.name, "ose-cell-name"));
+          tr.appendChild(typeCell(it.leave_type));
+          tr.appendChild(textCell(it.start_date, "ose-cell-date"));
+          tr.appendChild(textCell(it.end_date, "ose-cell-date"));
+          tr.appendChild(textCell(it.reason, "ose-cell-note"));
+          tr.appendChild(statusCell(it.status));
+          tr.appendChild(textCell(it.approver, "ose-cell-name"));
+          tr.appendChild(textCell(it.approval_date, "ose-cell-date"));
+          tr.appendChild(textCell(it.remarks, "ose-cell-note"));
+          tbody.appendChild(tr);
+        }
+        return;
+      }
+      ["Name", "Leave type", "Start date", "End date", "Reason", "Status", "Approved", "Rejected", "Remarks"].forEach(function (h) {
+        var th = document.createElement("th"); th.textContent = h; hr.appendChild(th);
+      });
+      thead.appendChild(hr);
+      var pend = [];
+      for (var j = 0; j < items.length; j++) {
+        if (items[j].pending) pend.push(items[j]);
+      }
+      if (!pend.length) {
+        var er2 = document.createElement("tr");
+        var ec2 = document.createElement("td"); ec2.colSpan = 9; ec2.className = "adm-records-empty"; ec2.textContent = "No pending leave.";
+        er2.appendChild(ec2); tbody.appendChild(er2); return;
+      }
+      for (var k = 0; k < pend.length; k++) {
+        var p = pend[k];
+        var tr2 = document.createElement("tr");
+        tr2.dataset.recordId = String(p.record_id || "");
+        tr2.appendChild(textCell(p.name, "ose-cell-name"));
+        tr2.appendChild(typeCell(p.leave_type));
+        tr2.appendChild(textCell(p.start_date, "ose-cell-date"));
+        tr2.appendChild(textCell(p.end_date, "ose-cell-date"));
+        tr2.appendChild(textCell(p.reason, "ose-cell-note"));
+        tr2.appendChild(statusCell(p.status));
+        var tdA = document.createElement("td");
+        var bA = document.createElement("button"); bA.type = "button"; bA.className = "adm-act adm-act-appr"; bA.textContent = "Approved";
+        bA.addEventListener("click", function () { setRowDecision(tr2, "Approved"); });
+        tdA.appendChild(bA); tr2.appendChild(tdA);
+        var tdR = document.createElement("td");
+        var bR = document.createElement("button"); bR.type = "button"; bR.className = "adm-act adm-act-rej"; bR.textContent = "Rejected";
+        bR.addEventListener("click", function () { setRowDecision(tr2, "Rejected"); });
+        tdR.appendChild(bR); tr2.appendChild(tdR);
+        var tdM = document.createElement("td");
+        var bM = document.createElement("button"); bM.type = "button"; bM.className = "adm-act adm-act-rmk"; bM.textContent = "Remarks";
+        bM.addEventListener("click", function () {
+          var rid = tr2.dataset.recordId;
+          var dec = tr2.dataset.decision || "";
+          if (!dec) { window.alert("Choose Approved or Rejected first."); return; }
+          modalRecordId = rid; modalStatus = dec; modalTa.value = "";
+          backdrop.classList.add("show");
+        });
+        tdM.appendChild(bM); tr2.appendChild(tdM);
+        tbody.appendChild(tr2);
+      }
+    }
+
+    function loadList(forceRefresh) {
+      var url = API_LIST;
+      if (forceRefresh) url += (url.indexOf("?") >= 0 ? "&" : "?") + "refresh=1";
+      tbody.innerHTML = '<tr><td class="adm-records-empty" colspan="20">Loading…</td></tr>';
+      fetch(url).then(function (r) { return r.json(); }).then(function (data) {
+        if (!data || data.ok === false) throw new Error((data && data.error) || "Load failed");
+        render(data);
+      }).catch(function () {
+        render({ items: [] });
+      });
+    }
+
+    document.getElementById("adm-filter-all").addEventListener("click", function () {
+      filterMode = "all";
+      document.getElementById("adm-filter-all").classList.add("active");
+      document.getElementById("adm-filter-todo").classList.remove("active");
+      loadList(false);
+    });
+    document.getElementById("adm-filter-todo").addEventListener("click", function () {
+      filterMode = "todo";
+      document.getElementById("adm-filter-todo").classList.add("active");
+      document.getElementById("adm-filter-all").classList.remove("active");
+      loadList(false);
+    });
+    document.getElementById("adm-refresh").addEventListener("click", function () { loadList(true); });
+
+    document.getElementById("adm-modal-cancel").addEventListener("click", function () {
+      backdrop.classList.remove("show");
+    });
+    backdrop.addEventListener("click", function (ev) {
+      if (ev.target === backdrop) backdrop.classList.remove("show");
+    });
+    document.getElementById("adm-modal-confirm").addEventListener("click", function () {
+      var rid = modalRecordId;
+      var st = modalStatus;
+      if (!rid || !st) { backdrop.classList.remove("show"); return; }
+      var rm = modalTa.value || "";
+      var btn = document.getElementById("adm-modal-confirm");
+      btn.disabled = true;
+      submitApprove(rid, st, rm, function (err) {
+        btn.disabled = false;
+        backdrop.classList.remove("show");
+        if (err) window.alert(String(err));
+        else loadList(true);
+      });
+    });
+
+    loadList(false);
+  })();
+  </script>
+</body>
+</html>
+"""
+
+
+_ADMIN_OFFSET_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Admin · Offset</title>
+  <style>
+    :root {
+      --bg: #0b0f14; --card: #151b26; --elev: #1c2533; --text: #e8edf4; --muted: #8b9cb3;
+      --accent: #3b82f6; --line: #2a3544;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: radial-gradient(1200px 600px at 10% -10%, rgba(59,130,246,.12), transparent), var(--bg);
+      color: var(--text); min-height: 100vh;
+    }
+    header.adm-header {
+      padding: 1rem 1.35rem; border-bottom: 1px solid var(--line);
+      display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem;
+    }
+    .adm-header h1 { margin: 0; font-size: 1.15rem; font-weight: 700; }
+    .adm-nav { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; }
+    a.adm-nav-btn, button.adm-nav-btn {
+      font: inherit; font-size: 0.85rem; font-weight: 650; padding: 0.45rem 0.85rem; border-radius: 10px;
+      border: 1px solid var(--line); background: var(--elev); color: var(--text); cursor: pointer;
+      text-decoration: none; display: inline-block;
+    }
+    a.adm-nav-btn:hover, button.adm-nav-btn:hover { border-color: var(--accent); background: rgba(59,130,246,.12); text-decoration: none; }
+    a.adm-nav-btn.active { border-color: var(--accent); background: rgba(59,130,246,.18); }
+    button.adm-nav-btn.ghost { background: transparent; color: var(--muted); }
+    main { padding: 1rem 1.35rem 2rem; max-width: 1400px; margin: 0 auto; width: 100%; }
+    .adm-toolbar {
+      display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.65rem; margin-bottom: 0.85rem;
+    }
+    .adm-filters { display: flex; flex-wrap: wrap; gap: 0.45rem; align-items: center; }
+    .env-filter-btn {
+      font: inherit; font-size: 0.8rem; font-weight: 600;
+      padding: 0.4rem 0.8rem; border-radius: 999px; cursor: pointer; border: 1px solid var(--line);
+      background: var(--elev); color: var(--muted);
+    }
+    .env-filter-btn:hover { border-color: var(--accent); color: var(--text); }
+    .env-filter-btn.active { background: rgba(59,130,246,.25); border-color: var(--accent); color: var(--text); }
+    .adm-table-wrap { overflow-x: auto; border-radius: 12px; border: 1px solid var(--line); }
+    table { width: 100%; border-collapse: collapse; background: var(--elev); }
+    th, td { padding: 0.55rem 0.65rem; text-align: left; border-bottom: 1px solid var(--line); font-size: 0.84rem; vertical-align: middle; }
+    th {
+      background: #222b3a; font-size: 0.66rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+      position: sticky; top: 0; z-index: 1;
+    }
+    tr:last-child td { border-bottom: none; }
+    tbody tr:hover td { background: rgba(59,130,246,.06); }
+    .ose-pill {
+      display: inline-block; padding: 0.16rem 0.48rem; border-radius: 999px; font-size: 0.72rem; font-weight: 600;
+      border: 1px solid transparent;
+    }
+    .ose-pill-status.is-approved { background: rgba(34,197,94,0.14); color: #86efac; border-color: rgba(34,197,94,0.28); }
+    .ose-pill-status.is-pending { background: rgba(234,179,8,0.14); color: #fde68a; border-color: rgba(234,179,8,0.28); }
+    .ose-pill-status.is-rejected { background: rgba(239,68,68,0.14); color: #fca5a5; border-color: rgba(239,68,68,0.28); }
+    .ose-pill-status { background: rgba(139,156,179,0.16); color: #cbd5e1; border-color: rgba(139,156,179,0.28); }
+    .ose-pill-shift { background: rgba(96,165,250,.12); color: #93c5fd; border-color: rgba(96,165,250,.28); }
+    .ose-cell-empty { color: var(--muted); opacity: 0.65; }
+    button.adm-act {
+      font: inherit; font-size: 0.72rem; font-weight: 650; padding: 0.28rem 0.55rem; border-radius: 8px;
+      border: 1px solid var(--line); background: var(--card); color: var(--muted); cursor: pointer; margin-right: 0.25rem;
+    }
+    button.adm-act-appr.selected { background: rgba(34,197,94,.18); border-color: rgba(34,197,94,.45); color: #86efac; }
+    button.adm-act-rej.selected { background: rgba(239,68,68,.18); border-color: rgba(239,68,68,.45); color: #fca5a5; }
+    button.adm-act-rmk { border-color: rgba(59,130,246,.4); color: var(--accent); }
+    .adm-modal-backdrop {
+      position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; align-items: center; justify-content: center;
+      z-index: 200; padding: 1rem;
+    }
+    .adm-modal-backdrop.show { display: flex; }
+    .adm-modal {
+      background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 1rem 1.1rem; max-width: 440px; width: 100%;
+      box-shadow: 0 16px 48px rgba(0,0,0,.35);
+    }
+    .adm-modal h2 { margin: 0 0 0.65rem; font-size: 1rem; }
+    .adm-modal textarea {
+      width: 100%; min-height: 6rem; padding: 0.55rem 0.65rem; border-radius: 10px; border: 1px solid var(--line);
+      background: #0f141c; color: var(--text); font-size: 0.88rem; resize: vertical;
+    }
+    .adm-modal-actions { display: flex; justify-content: flex-end; gap: 0.45rem; margin-top: 0.75rem; }
+    .adm-modal-actions button {
+      font: inherit; font-weight: 650; font-size: 0.85rem; padding: 0.45rem 0.85rem; border-radius: 10px; cursor: pointer; border: 1px solid var(--line);
+      background: var(--elev); color: var(--text);
+    }
+    .adm-modal-actions button.primary { border-color: var(--accent); background: rgba(59,130,246,.22); }
+    .adm-records-empty { text-align: center; color: var(--muted); padding: 2rem; }
+  </style>
+</head>
+<body>
+  <header class="adm-header">
+    <h1>Admin · Offset approvals</h1>
+    <nav class="adm-nav">
+      <a class="adm-nav-btn" href="{{ admin_leave_href }}">Leave</a>
+      <a class="adm-nav-btn active" href="{{ admin_offset_href }}">Offset</a>
+      <form method="post" action="{{ admin_logout_action }}" style="display:inline;margin:0;">
+        <button type="submit" class="adm-nav-btn ghost">Logout</button>
+      </form>
+    </nav>
+  </header>
+  <main>
+    <div class="adm-toolbar">
+      <div class="adm-filters">
+        <button type="button" class="env-filter-btn active" id="adm-filter-all" data-mode="all">ALL</button>
+        <button type="button" class="env-filter-btn" id="adm-filter-todo" data-mode="todo">TO DO LIST</button>
+      </div>
+      <button type="button" class="env-filter-btn" id="adm-refresh">Refresh</button>
+    </div>
+    <div class="adm-table-wrap">
+      <table>
+        <thead id="adm-thead"></thead>
+        <tbody id="adm-body"><tr><td class="adm-records-empty" colspan="20">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </main>
+  <div class="adm-modal-backdrop" id="adm-modal-backdrop" role="dialog" aria-modal="true">
+    <div class="adm-modal">
+      <h2>Remarks</h2>
+      <textarea id="adm-modal-ta" placeholder="Optional remarks"></textarea>
+      <div class="adm-modal-actions">
+        <button type="button" id="adm-modal-cancel">Cancel</button>
+        <button type="button" class="primary" id="adm-modal-confirm">Confirm</button>
+      </div>
+    </div>
+  </div>
+  <script>
+  (function () {
+    var API_LIST = {{ api_admin_offset_list_href | tojson }};
+    var API_APPROVE = {{ api_admin_offset_approve_href | tojson }};
+    var filterMode = "all";
+    var backdrop = document.getElementById("adm-modal-backdrop");
+    var modalTa = document.getElementById("adm-modal-ta");
+    var modalRecordId = "";
+    var modalStatus = "";
+    var tbody = document.getElementById("adm-body");
+    var thead = document.getElementById("adm-thead");
+
+    function offStatus(it) {
+      return String(it.approval_status || it.status || "").trim();
+    }
+
+    function statusCell(it) {
+      var td = document.createElement("td");
+      var s = offStatus(it);
+      if (!s) { td.className = "ose-cell-empty"; td.textContent = "—"; return td; }
+      var span = document.createElement("span");
+      span.className = "ose-pill ose-pill-status";
+      var k = s.toLowerCase();
+      if (k.indexOf("approv") >= 0) span.classList.add("is-approved");
+      else if (k.indexOf("pend") >= 0) span.classList.add("is-pending");
+      else if (k.indexOf("reject") >= 0) span.classList.add("is-rejected");
+      span.textContent = s;
+      td.appendChild(span);
+      return td;
+    }
+
+    function textCell(val, extra) {
+      var td = document.createElement("td");
+      if (extra) td.className = extra;
+      var s = String(val || "").trim();
+      if (!s) { td.classList.add("ose-cell-empty"); td.textContent = "—"; }
+      else { td.textContent = s; }
+      return td;
+    }
+
+    function shiftCell(val) {
+      var td = document.createElement("td");
+      var s = String(val || "").trim();
+      if (!s) { td.className = "ose-cell-empty"; td.textContent = "—"; return td; }
+      var span = document.createElement("span");
+      span.className = "ose-pill ose-pill-shift";
+      span.textContent = s;
+      td.appendChild(span);
+      return td;
+    }
+
+    function setRowDecision(tr, st) {
+      tr.dataset.decision = st;
+      var a = tr.querySelector(".adm-act-appr");
+      var r = tr.querySelector(".adm-act-rej");
+      if (a) a.classList.toggle("selected", st === "Approved");
+      if (r) r.classList.toggle("selected", st === "Rejected");
+    }
+
+    function submitApprove(recordId, status, remarks, done) {
+      fetch(API_APPROVE, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ record_id: recordId, status: status, remarks: remarks || "" })
+      }).then(function (r) { return r.json(); }).then(function (data) {
+        if (!data || !data.ok) throw new Error((data && data.error) || "Approve failed");
+        done(null);
+      }).catch(function (e) { done(e); });
+    }
+
+    function render(data) {
+      var items = (data && data.items) || [];
+      tbody.innerHTML = "";
+      thead.innerHTML = "";
+      var hr = document.createElement("tr");
+      if (filterMode === "all") {
+        ["Req. date", "Request person", "Exchange person", "Shift", "Original date", "Exchange date", "Reason", "Status", "Approver", "Approval date", "Remarks"].forEach(function (h) {
+          var th = document.createElement("th"); th.textContent = h; hr.appendChild(th);
+        });
+        thead.appendChild(hr);
+        if (!items.length) {
+          var er = document.createElement("tr");
+          var ec = document.createElement("td"); ec.colSpan = 11; ec.className = "adm-records-empty"; ec.textContent = "No offset records.";
+          er.appendChild(ec); tbody.appendChild(er); return;
+        }
+        for (var i = 0; i < items.length; i++) {
+          var it = items[i];
+          var tr = document.createElement("tr");
+          tr.appendChild(textCell(it.request_date, "ose-cell-date"));
+          tr.appendChild(textCell(it.request_person, "ose-cell-name"));
+          tr.appendChild(textCell(it.exchange_person, "ose-cell-name"));
+          tr.appendChild(shiftCell(it.shift_type));
+          tr.appendChild(textCell(it.original_date, "ose-cell-date"));
+          tr.appendChild(textCell(it.exchange_date, "ose-cell-date"));
+          tr.appendChild(textCell(it.reason, "ose-cell-note"));
+          tr.appendChild(statusCell(it));
+          tr.appendChild(textCell(it.approver, "ose-cell-name"));
+          tr.appendChild(textCell(it.approval_date, "ose-cell-date"));
+          tr.appendChild(textCell(it.remarks, "ose-cell-note"));
+          tbody.appendChild(tr);
+        }
+        return;
+      }
+      ["Request person", "Exchange person", "Shift", "Original date", "Exchange date", "Reason", "Status", "Approved", "Rejected", "Remarks"].forEach(function (h) {
+        var th = document.createElement("th"); th.textContent = h; hr.appendChild(th);
+      });
+      thead.appendChild(hr);
+      var pend = [];
+      for (var j = 0; j < items.length; j++) {
+        if (items[j].pending) pend.push(items[j]);
+      }
+      if (!pend.length) {
+        var er2 = document.createElement("tr");
+        var ec2 = document.createElement("td"); ec2.colSpan = 10; ec2.className = "adm-records-empty"; ec2.textContent = "No pending offset.";
+        er2.appendChild(ec2); tbody.appendChild(er2); return;
+      }
+      for (var k = 0; k < pend.length; k++) {
+        var p = pend[k];
+        var tr2 = document.createElement("tr");
+        tr2.dataset.recordId = String(p.record_id || "");
+        tr2.appendChild(textCell(p.request_person, "ose-cell-name"));
+        tr2.appendChild(textCell(p.exchange_person, "ose-cell-name"));
+        tr2.appendChild(shiftCell(p.shift_type));
+        tr2.appendChild(textCell(p.original_date, "ose-cell-date"));
+        tr2.appendChild(textCell(p.exchange_date, "ose-cell-date"));
+        tr2.appendChild(textCell(p.reason, "ose-cell-note"));
+        tr2.appendChild(statusCell(p));
+        var tdA = document.createElement("td");
+        var bA = document.createElement("button"); bA.type = "button"; bA.className = "adm-act adm-act-appr"; bA.textContent = "Approved";
+        bA.addEventListener("click", function () { setRowDecision(tr2, "Approved"); });
+        tdA.appendChild(bA); tr2.appendChild(tdA);
+        var tdR = document.createElement("td");
+        var bR = document.createElement("button"); bR.type = "button"; bR.className = "adm-act adm-act-rej"; bR.textContent = "Rejected";
+        bR.addEventListener("click", function () { setRowDecision(tr2, "Rejected"); });
+        tdR.appendChild(bR); tr2.appendChild(tdR);
+        var tdM = document.createElement("td");
+        var bM = document.createElement("button"); bM.type = "button"; bM.className = "adm-act adm-act-rmk"; bM.textContent = "Remarks";
+        bM.addEventListener("click", function () {
+          var rid = tr2.dataset.recordId;
+          var dec = tr2.dataset.decision || "";
+          if (!dec) { window.alert("Choose Approved or Rejected first."); return; }
+          modalRecordId = rid; modalStatus = dec; modalTa.value = "";
+          backdrop.classList.add("show");
+        });
+        tdM.appendChild(bM); tr2.appendChild(tdM);
+        tbody.appendChild(tr2);
+      }
+    }
+
+    function loadList(forceRefresh) {
+      var url = API_LIST;
+      if (forceRefresh) url += (url.indexOf("?") >= 0 ? "&" : "?") + "refresh=1";
+      tbody.innerHTML = '<tr><td class="adm-records-empty" colspan="20">Loading…</td></tr>';
+      fetch(url).then(function (r) { return r.json(); }).then(function (data) {
+        if (!data || data.ok === false) throw new Error((data && data.error) || "Load failed");
+        render(data);
+      }).catch(function () {
+        render({ items: [] });
+      });
+    }
+
+    document.getElementById("adm-filter-all").addEventListener("click", function () {
+      filterMode = "all";
+      document.getElementById("adm-filter-all").classList.add("active");
+      document.getElementById("adm-filter-todo").classList.remove("active");
+      loadList(false);
+    });
+    document.getElementById("adm-filter-todo").addEventListener("click", function () {
+      filterMode = "todo";
+      document.getElementById("adm-filter-todo").classList.add("active");
+      document.getElementById("adm-filter-all").classList.remove("active");
+      loadList(false);
+    });
+    document.getElementById("adm-refresh").addEventListener("click", function () { loadList(true); });
+
+    document.getElementById("adm-modal-cancel").addEventListener("click", function () {
+      backdrop.classList.remove("show");
+    });
+    backdrop.addEventListener("click", function (ev) {
+      if (ev.target === backdrop) backdrop.classList.remove("show");
+    });
+    document.getElementById("adm-modal-confirm").addEventListener("click", function () {
+      var rid = modalRecordId;
+      var st = modalStatus;
+      if (!rid || !st) { backdrop.classList.remove("show"); return; }
+      var rm = modalTa.value || "";
+      var btn = document.getElementById("adm-modal-confirm");
+      btn.disabled = true;
+      submitApprove(rid, st, rm, function (err) {
+        btn.disabled = false;
+        backdrop.classList.remove("show");
+        if (err) window.alert(String(err));
+        else loadList(true);
+      });
+    });
+
+    loadList(false);
+  })();
+  </script>
+</body>
+</html>
+"""
+
+
 _ENCODER_PAGE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2660,6 +3453,13 @@ _ENCODER_PAGE = """<!DOCTYPE html>
     a.wm-head-title-btn:hover { border-color: var(--accent); background: rgba(59,130,246,.12); text-decoration: none; }
     .wm-head-nav-group { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 0.5rem; flex-shrink: 0; }
     a.wm-head-nav-btn.active { border-color: var(--accent); background: rgba(59,130,246,.18); color: var(--text); }
+    a.wm-admin-btn {
+      border-color: #b91c1c !important; background: #dc2626 !important; color: #fff !important;
+    }
+    a.wm-admin-btn:hover {
+      border-color: #991b1b !important; background: #b91c1c !important; color: #fff !important;
+      text-decoration: none;
+    }
     main { padding: 1rem 1.35rem 2.5rem; max-width: 1280px; margin: 0 auto; width: 100%; }
     .env-filter-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; margin-bottom: 0.75rem; }
     .env-filter-btn {
@@ -2698,6 +3498,7 @@ _ENCODER_PAGE = """<!DOCTYPE html>
       <a class="wm-head-title-btn wm-head-nav-btn" href="{{ machine_status_href }}">Machine status</a>
       <a class="wm-head-title-btn wm-head-nav-btn" href="{{ all_duty_href }}">All Duty</a>
       <a class="wm-head-title-btn wm-head-nav-btn active" href="{{ machine_encoder_href }}">Machine encoder</a>
+      <a class="wm-head-title-btn wm-admin-btn" href="{{ admin_login_href }}">Admin Page</a>
     </div>
   </header>
   <main>
@@ -3259,6 +4060,7 @@ def index():
         machine_status_href=url_for("wm.index"),
         all_duty_href=url_for("wm.all_duty"),
         machine_encoder_href=url_for("wm.machine_encoders"),
+        admin_login_href=url_for("wm.admin_login"),
     )
 
 
@@ -3270,6 +4072,7 @@ def machine_encoders():
         all_duty_href=url_for("wm.all_duty"),
         machine_encoder_href=url_for("wm.machine_encoders"),
         api_encoder_href=url_for("wm.api_encoders"),
+        admin_login_href=url_for("wm.admin_login"),
     )
 
 
@@ -3298,7 +4101,147 @@ def all_duty():
         ose_submit_leave_href=url_for("wm.ose_submit_leave_page"),
         ose_submit_offset_href=url_for("wm.ose_submit_offset_page"),
         initial_kind=raw,
+        admin_login_href=url_for("wm.admin_login"),
     )
+
+
+@wm_bp.get("/admin")
+def admin_login():
+    return render_template_string(
+        _ADMIN_LOGIN_PAGE,
+        error="",
+        admin_login_action=url_for("wm.admin_login_submit"),
+    )
+
+
+@wm_bp.post("/admin/login")
+def admin_login_submit():
+    login_id = (request.form.get("login_id") or "").strip()
+    password = request.form.get("password") or ""
+    try:
+        import ose_Duty as od
+
+        who = od.verify_webapp_admin_login(login_id, password)
+    except ValueError:
+        _track_admin_login_failure()
+        return render_template_string(
+            _ADMIN_LOGIN_PAGE,
+            error="Invalid ID or password.",
+            admin_login_action=url_for("wm.admin_login_submit"),
+        )
+    except RuntimeError as e:
+        return render_template_string(
+            _ADMIN_LOGIN_PAGE,
+            error=str(e),
+            admin_login_action=url_for("wm.admin_login_submit"),
+        )
+    session["admin_whologin"] = who
+    _clear_admin_login_failures_for_current_ip()
+    return redirect(url_for("wm.admin_leave"))
+
+
+@wm_bp.get("/admin/leave")
+def admin_leave():
+    redir = _ensure_admin_session_redirect()
+    if redir:
+        return redir
+    return render_template_string(
+        _ADMIN_LEAVE_PAGE,
+        admin_leave_href=url_for("wm.admin_leave"),
+        admin_offset_href=url_for("wm.admin_offset"),
+        admin_logout_action=url_for("wm.admin_logout"),
+        api_admin_leave_list_href=url_for("wm.api_admin_leave_list"),
+        api_admin_leave_approve_href=url_for("wm.api_admin_leave_approve"),
+    )
+
+
+@wm_bp.get("/admin/offset")
+def admin_offset():
+    redir = _ensure_admin_session_redirect()
+    if redir:
+        return redir
+    return render_template_string(
+        _ADMIN_OFFSET_PAGE,
+        admin_leave_href=url_for("wm.admin_leave"),
+        admin_offset_href=url_for("wm.admin_offset"),
+        admin_logout_action=url_for("wm.admin_logout"),
+        api_admin_offset_list_href=url_for("wm.api_admin_offset_list"),
+        api_admin_offset_approve_href=url_for("wm.api_admin_offset_approve"),
+    )
+
+
+@wm_bp.post("/admin/logout")
+def admin_logout():
+    session.pop("admin_whologin", None)
+    return redirect(url_for("wm.admin_login"))
+
+
+@wm_bp.get("/api/admin/leave-list")
+def api_admin_leave_list():
+    if not _admin_session_who():
+        return jsonify(ok=False, error="unauthorized"), 401
+    try:
+        import ose_Duty as od
+
+        if (request.args.get("refresh") or "").strip().lower() in ("1", "true", "yes"):
+            od.invalidate_ose_bitable_cache()
+        return jsonify(od.get_ose_leave_records_admin())
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 400
+
+
+@wm_bp.get("/api/admin/offset-list")
+def api_admin_offset_list():
+    if not _admin_session_who():
+        return jsonify(ok=False, error="unauthorized"), 401
+    try:
+        import ose_Duty as od
+
+        if (request.args.get("refresh") or "").strip().lower() in ("1", "true", "yes"):
+            od.invalidate_ose_bitable_cache()
+        return jsonify(od.get_ose_offset_records_admin())
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 400
+
+
+@wm_bp.post("/api/admin/leave/approve")
+def api_admin_leave_approve():
+    who = _admin_session_who()
+    if not who:
+        return jsonify(ok=False, error="unauthorized"), 401
+    body = request.get_json(silent=True) or {}
+    record_id = str(body.get("record_id") or "").strip()
+    status = str(body.get("status") or "").strip()
+    remarks = str(body.get("remarks") or "")
+    if not record_id:
+        return jsonify(ok=False, error="record_id is required"), 400
+    try:
+        import ose_Duty as od
+
+        out = od.update_ose_leave_approval(record_id=record_id, status=status, approver=who, remarks=remarks)
+        return jsonify(out)
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 400
+
+
+@wm_bp.post("/api/admin/offset/approve")
+def api_admin_offset_approve():
+    who = _admin_session_who()
+    if not who:
+        return jsonify(ok=False, error="unauthorized"), 401
+    body = request.get_json(silent=True) or {}
+    record_id = str(body.get("record_id") or "").strip()
+    status = str(body.get("status") or "").strip()
+    remarks = str(body.get("remarks") or "")
+    if not record_id:
+        return jsonify(ok=False, error="record_id is required"), 400
+    try:
+        import ose_Duty as od
+
+        out = od.update_ose_offset_approval(record_id=record_id, status=status, approver=who, remarks=remarks)
+        return jsonify(out)
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 400
 
 
 @wm_bp.get("/all-duty/ose/submit-leave")
@@ -3464,6 +4407,10 @@ def register_webapp(flask_app: Flask, *, url_prefix: str | None = None) -> None:
 
     Background scraping starts when :func:`start_background_scrape_loop` is called (see ``main.py`` / ``webapp.main``); scrape is **on by default** unless ``WEBMACHINE_SCRAPE=0``.
     """
+    flask_app.config.setdefault(
+        "SECRET_KEY",
+        os.environ.get("WEBAPP_SECRET_KEY") or os.environ.get("APP_SECRET") or "change-me",
+    )
     pref = (url_prefix or "").strip()
     if pref in ("", "/"):
         flask_app.register_blueprint(wm_bp)
@@ -3478,6 +4425,10 @@ register_webmachine = register_webapp
 
 
 app = Flask(__name__)
+app.config.setdefault(
+    "SECRET_KEY",
+    os.environ.get("WEBAPP_SECRET_KEY") or os.environ.get("APP_SECRET") or "change-me",
+)
 register_webapp(app, url_prefix=None)
 
 

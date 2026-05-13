@@ -943,6 +943,37 @@ def _bitable_create_record(token: str, table_id: str, fields: dict[str, Any]) ->
     return res
 
 
+def _bitable_update_record(
+    token: str,
+    table_id: str,
+    record_id: str,
+    fields: dict[str, Any],
+) -> dict[str, Any]:
+    rid = (record_id or "").strip()
+    if not rid:
+        raise ValueError("record_id is required")
+    url = (
+        f"https://open.larksuite.com/open-apis/bitable/v1/apps/"
+        f"{OSE_BASE_TOKEN}/tables/{table_id}/records/{rid}"
+    )
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    res = requests.put(
+        url,
+        headers=headers,
+        params={"user_id_type": "open_id"},
+        json={"fields": fields},
+        timeout=30,
+    ).json()
+    if res.get("code") != 0:
+        raise RuntimeError(f"Bitable update failed: {res}")
+    return res
+
+
+def _is_pending_approval(v: Any) -> bool:
+    s = _field_text(v).strip().lower()
+    return s in ("", "pending")
+
+
 def _person_item_open_id(item: Any) -> str:
     if not isinstance(item, dict):
         return ""
@@ -1184,6 +1215,182 @@ def get_ose_leave_records_list() -> dict[str, Any]:
         reverse=True,
     )
     return {"ok": True, "items": rows}
+
+
+def get_ose_leave_records_admin() -> dict[str, Any]:
+    """Leave rows for admin approval (includes Bitable record_id)."""
+    token = get_tenant_access_token()
+    items, _ = _get_bitable_raw_pair(token)
+    rows: list[dict[str, str]] = []
+    for it in items:
+        f = it.get("fields") or {}
+        name = _title_name(_field_text(_get_field_by_aliases(f, ["Name", "Employee Name", "Person"])))
+        if not name:
+            continue
+        st = _parse_date_value(_get_field_by_aliases(f, ["Start Date", "Leave Start Date", "From"]))
+        ed = _parse_date_value(_get_field_by_aliases(f, ["End Date", "Leave End Date", "To"]))
+        approval = _record_approval_fields(f)
+        rows.append(
+            {
+                "record_id": str(it.get("record_id") or "").strip(),
+                "leave_id": _field_text(_get_field_by_aliases(f, ["LeaveID", "Leave ID", "Leave Id"])),
+                "name": name,
+                "leave_type": _field_text(_get_field_by_aliases(f, ["Leave Type", "Type"])),
+                "start_date": _format_yyyymmdd(st),
+                "end_date": _format_yyyymmdd(ed),
+                "reason": _field_text(_get_field_by_aliases(f, ["Reason"])),
+                "status": approval["status"],
+                "approver": approval["approver"],
+                "approval_date": approval["approval_date"],
+                "remarks": approval["remarks"],
+                "pending": _is_pending_approval(_get_field_by_aliases(f, ["Status", "Approval Status"])),
+            }
+        )
+    rows.sort(
+        key=lambda r: (
+            r.get("start_date") or "",
+            r.get("end_date") or "",
+            r.get("name") or "",
+        ),
+        reverse=True,
+    )
+    return {"ok": True, "items": rows}
+
+
+def get_ose_offset_records_admin() -> dict[str, Any]:
+    """Offset rows for admin approval (includes Bitable record_id)."""
+    token = get_tenant_access_token()
+    _, items = _get_bitable_raw_pair(token)
+    rows: list[dict[str, str]] = []
+    for it in items:
+        f = it.get("fields") or {}
+        req = _title_name(
+            _field_text(_get_field_by_aliases(f, ["Request Person", "Requester", "Requester Person", "Name"]))
+        )
+        exc = _title_name(
+            _field_text(_get_field_by_aliases(f, ["Exchange Person", "Replacement", "Swap Person"]))
+        )
+        od = _parse_date_value(_get_field_by_aliases(f, ["Original Date", "Date"]))
+        xd = _parse_date_value(_get_field_by_aliases(f, ["Exchange Date", "Swap Date", "Target Date"]))
+        rd = _parse_date_value(_get_field_by_aliases(f, ["Request Date", "Submitted Date", "Created Date"]))
+        approval = _record_approval_fields(f)
+        rows.append(
+            {
+                "record_id": str(it.get("record_id") or "").strip(),
+                "request_id": _field_text(_get_field_by_aliases(f, ["Request ID", "RequestID", "Request Id"])),
+                "request_date": _format_yyyymmdd(rd),
+                "request_person": req,
+                "exchange_person": exc,
+                "shift_type": _field_text(_get_field_by_aliases(f, ["Shift Type", "Shift"])).upper(),
+                "original_date": _format_yyyymmdd(od),
+                "exchange_date": _format_yyyymmdd(xd),
+                "reason": _field_text(_get_field_by_aliases(f, ["Reason"])),
+                "approval_status": approval["status"],
+                "approver": approval["approver"],
+                "approval_date": approval["approval_date"],
+                "remarks": approval["remarks"],
+                "pending": _is_pending_approval(_get_field_by_aliases(f, ["Approval Status", "Status"])),
+            }
+        )
+    rows.sort(
+        key=lambda r: (
+            r.get("request_date") or "",
+            r.get("original_date") or "",
+            r.get("request_person") or "",
+        ),
+        reverse=True,
+    )
+    return {"ok": True, "items": rows}
+
+
+def update_ose_leave_approval(
+    *,
+    record_id: str,
+    status: str,
+    approver: str,
+    remarks: str = "",
+    approval_date: Optional[date] = None,
+) -> dict[str, Any]:
+    st = (status or "").strip().title()
+    if st not in ("Approved", "Rejected"):
+        raise ValueError("status must be Approved or Rejected")
+    approver_s = _title_name(approver)
+    if not approver_s:
+        raise ValueError("approver is required")
+    token = get_tenant_access_token()
+    fields: dict[str, Any] = {
+        "Status": st,
+        "Approver": approver_s,
+        "Approval Date": _bitable_date_ms(approval_date or date.today()),
+        "Remarks": (remarks or "").strip(),
+    }
+    _bitable_update_record(token, OSE_LEAVE_TABLE_ID, record_id, fields)
+    invalidate_ose_bitable_cache()
+    return {"ok": True, "record_id": record_id, "status": st}
+
+
+def update_ose_offset_approval(
+    *,
+    record_id: str,
+    status: str,
+    approver: str,
+    remarks: str = "",
+    approval_date: Optional[date] = None,
+) -> dict[str, Any]:
+    st = (status or "").strip().title()
+    if st not in ("Approved", "Rejected"):
+        raise ValueError("status must be Approved or Rejected")
+    approver_s = _title_name(approver)
+    if not approver_s:
+        raise ValueError("approver is required")
+    token = get_tenant_access_token()
+    fields: dict[str, Any] = {
+        "Approval Status": st,
+        "Approver": approver_s,
+        "Approval Date": _bitable_date_ms(approval_date or date.today()),
+        "Remarks": (remarks or "").strip(),
+    }
+    _bitable_update_record(token, OSE_OFFSET_TABLE_ID, record_id, fields)
+    invalidate_ose_bitable_cache()
+    return {"ok": True, "record_id": record_id, "status": st}
+
+
+def _admin_page_env() -> tuple[str, str]:
+    app_token = (
+        os.getenv("APPWEB_ADMINPAGETOKEN")
+        or os.getenv("appweb_adminpagetoken")
+        or ""
+    ).strip()
+    table_id = (
+        os.getenv("APPWEB_ADMINPAGESHEETID")
+        or os.getenv("appweb_adminpagesheetid")
+        or ""
+    ).strip()
+    if not app_token or not table_id:
+        raise RuntimeError("Admin page Bitable env is not configured")
+    return app_token, table_id
+
+
+def _load_webapp_admin_credential_row() -> tuple[str, str, str]:
+    app_token, table_id = _admin_page_env()
+    token = get_tenant_access_token()
+    records = _bitable_get_all_records(token, app_token, table_id)
+    if not records:
+        raise RuntimeError("Admin credential table has no rows")
+    f = records[0].get("fields") or {}
+    who = _field_text(_get_field_by_aliases(f, ["whologin", "Who Login", "WhoLogin"]))
+    login = _field_text(_get_field_by_aliases(f, ["ID", "Id"]))
+    pw = _field_text(_get_field_by_aliases(f, ["PASSWORD", "Password"]))
+    if not login or not pw:
+        raise RuntimeError("Admin credential row is missing ID or PASSWORD")
+    return who, login, pw
+
+
+def verify_webapp_admin_login(login_id: str, password: str) -> str:
+    who, expected_id, expected_pw = _load_webapp_admin_credential_row()
+    if (login_id or "").strip() != expected_id or (password or "") != expected_pw:
+        raise ValueError("Invalid admin ID or password")
+    return who or expected_id
 
 
 def get_ose_offset_records_list() -> dict[str, Any]:
