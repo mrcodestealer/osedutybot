@@ -4141,6 +4141,12 @@ def admin_login_submit():
             error=f"Cannot reach Lark to verify admin login. Check APP_ID/APP_SECRET and network/proxy. ({e})",
             admin_login_action=url_for("wm.admin_login_submit"),
         )
+    except Exception as e:
+        return render_template_string(
+            _ADMIN_LOGIN_PAGE,
+            error=f"Admin login failed: {e}",
+            admin_login_action=url_for("wm.admin_login_submit"),
+        )
     session["admin_whologin"] = who
     _clear_admin_login_failures_for_current_ip()
     return redirect(url_for("wm.admin_leave"))
