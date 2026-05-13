@@ -15,6 +15,7 @@ Column C: Backup duty person (same format)
 
 import re
 import sys
+import time
 import requests
 from datetime import datetime, timedelta
 import os
@@ -26,6 +27,13 @@ load_dotenv()
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
 SPREADSHEET_TOKEN = os.getenv("CPMS_SPREADSHEET_TOKEN")
+
+_WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+_month_duty_cache: dict[tuple[int, int], tuple[float, dict[str, tuple[str, str, str, str]]]] = {}
+try:
+    _MONTH_CACHE_SEC = max(0, int((os.getenv("CPMS_DUTY_CACHE_SEC") or "300").strip() or "300"))
+except ValueError:
+    _MONTH_CACHE_SEC = 300
 
 # ================= Helper Functions =================
 def get_tenant_access_token():
@@ -71,23 +79,83 @@ def get_range_values(token, sheet_id, range_str):
     return result.get("data", {}).get("valueRange", {}).get("values", [])
 
 def extract_text_from_cell(cell):
-    """将单元格内容（可能为富文本列表）转换为纯文本字符串"""
+    """将单元格内容（可能为富文本列表）转换为纯文本字符串，保留换行以便解析姓名/电话。"""
     if cell is None:
         return ""
     if isinstance(cell, str):
-        return cell
+        return cell.strip()
     if isinstance(cell, list):
         parts = []
         for item in cell:
-            if isinstance(item, dict) and 'text' in item:
-                parts.append(item['text'])
+            if isinstance(item, dict) and "text" in item:
+                parts.append(item["text"])
             elif isinstance(item, str):
                 parts.append(item)
-        # 移除可能存在的富文本标记，但保留基本文本
-        text = ''.join(parts)
-        # 清理多余的空白字符
-        return re.sub(r'\s+', ' ', text).strip()
-    return str(cell)
+        return "\n".join(parts).strip()
+    return str(cell).strip()
+
+
+def _normalize_weekday_label(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    low = raw.lower()
+    for day in _WEEKDAYS:
+        if low == day.lower():
+            return day
+    return raw
+
+
+def _parse_cpms_weekday_rows(values) -> dict[str, tuple[str, str, str, str]]:
+    """
+    从当月工作表 A:C 解析星期一到星期日的 CPMS / Backup 姓名与电话。
+    表头行（如 Days of the Week）会被跳过；仅匹配 Monday…Sunday。
+    """
+    weekday_map: dict[str, tuple[str, str, str, str]] = {}
+    if not values:
+        return weekday_map
+    for row in values:
+        if not row:
+            continue
+        day_cell = _normalize_weekday_label(extract_text_from_cell(row[0]) if len(row) > 0 else "")
+        if day_cell not in _WEEKDAYS:
+            continue
+        main_name, main_phone = parse_person_info(extract_text_from_cell(row[1]) if len(row) > 1 else "")
+        backup_name, backup_phone = parse_person_info(extract_text_from_cell(row[2]) if len(row) > 2 else "")
+        weekday_map[day_cell] = (main_name, main_phone, backup_name, backup_phone)
+    return weekday_map
+
+
+def get_cpms_weekday_duty_map(year: int, month: int) -> dict[str, tuple[str, str, str, str]]:
+    """
+    读取 ``MM-YYYY`` 工作表一次，返回 Monday…Sunday → (main, main_phone, backup, backup_phone)。
+    结果按 ``CPMS_DUTY_CACHE_SEC``（默认 300 秒）缓存，避免整月/多日查询重复打 Lark API。
+    """
+    key = (year, month)
+    now = time.time()
+    if _MONTH_CACHE_SEC > 0:
+        cached = _month_duty_cache.get(key)
+        if cached and now - cached[0] < _MONTH_CACHE_SEC:
+            return cached[1]
+
+    token = get_tenant_access_token()
+    sheet_id = get_sheet_id_for_month(token, year, month)
+    if not sheet_id:
+        raise Exception(f"未找到 {month:02d}-{year} 的工作表")
+
+    values = get_range_values(token, sheet_id, "A1:C100")
+    if values is None:
+        raise Exception("无法读取工作表数据")
+
+    weekday_map = _parse_cpms_weekday_rows(values)
+    if _MONTH_CACHE_SEC > 0:
+        _month_duty_cache[key] = (now, weekday_map)
+    return weekday_map
+
+
+def invalidate_cpms_duty_cache() -> None:
+    """清空按月值班缓存（测试或强制刷新时调用）。"""
+    _month_duty_cache.clear()
 
 def parse_person_info(cell_text):
     """
@@ -132,15 +200,16 @@ def cpms_check(month=None, year=None):
     days_in_month = (next_month_first - first_day).days
 
     missing = []
+    try:
+        weekday_map = get_cpms_weekday_duty_map(year, month)
+    except Exception:
+        weekday_map = {}
+
     for day in range(1, days_in_month + 1):
         target_date = datetime(year, month, day).date()
-        try:
-            _, main_name, _, backup_name, _ = get_cpms_duty_for_date(target_date)
-            # 如果主值班人和备份值班人都为空，则视为缺失
-            if not main_name and not backup_name:
-                missing.append(day)
-        except Exception:
-            # 例如找不到对应月份的工作表，也视为缺失
+        weekday = target_date.strftime("%A")
+        main_name, _, backup_name, _ = weekday_map.get(weekday, ("", "", "", ""))
+        if not main_name and not backup_name:
             missing.append(day)
 
     month_name = datetime(year, month, 1).strftime("%B %Y")
@@ -156,44 +225,9 @@ def get_cpms_duty_for_date(target_date):
     返回指定日期 target_date 的 CPMS 值班信息。
     返回格式: (date_obj, main_name, main_phone, backup_name, backup_phone)
     """
-    year = target_date.year
-    month = target_date.month
-    day = target_date.day
-    weekday = target_date.strftime("%A")  # 英文星期几，如 Monday
-    
-    token = get_tenant_access_token()
-    sheets = get_sheet_list(token)
-    print("Sheets found:", [s.get("title") for s in sheets])
-
-    try:
-        token = get_tenant_access_token()
-    except Exception as e:
-        raise Exception(f"获取访问令牌失败: {e}")
-
-    # 1. 找到对应月份的工作表
-    sheet_id = get_sheet_id_for_month(token, year, month)
-    if not sheet_id:
-        raise Exception(f"未找到 {month:02d}-{year} 的工作表")
-
-    # 2. 读取整个工作表的数据（假设最多到100行）
-    values = get_range_values(token, sheet_id, "A1:C100")
-    if not values:
-        raise Exception("无法读取工作表数据")
-
-    # 3. 在列A中查找星期几所在的行
-    main_name, main_phone, backup_name, backup_phone = "", "", "", ""
-    for row_idx, row in enumerate(values):
-        if not row:
-            continue
-        day_cell = extract_text_from_cell(row[0]) if len(row) > 0 else ""
-        if day_cell == weekday:
-            # 找到了对应的行
-            if len(row) > 1:  # 列B
-                main_name, main_phone = parse_person_info(extract_text_from_cell(row[1]))
-            if len(row) > 2:  # 列C
-                backup_name, backup_phone = parse_person_info(extract_text_from_cell(row[2]))
-            break
-
+    weekday = target_date.strftime("%A")
+    weekday_map = get_cpms_weekday_duty_map(target_date.year, target_date.month)
+    main_name, main_phone, backup_name, backup_phone = weekday_map.get(weekday, ("", "", "", ""))
     return target_date, main_name, main_phone, backup_name, backup_phone
 
 def get_cpms_three_days(start_date=None):

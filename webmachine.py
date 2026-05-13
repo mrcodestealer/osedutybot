@@ -648,27 +648,22 @@ def duty_calendar_payload(kind: str, year: int, month: int) -> dict[str, object]
         if kind == "cpms":
             import cpms_duty as cp
 
+            try:
+                weekday_map = cp.get_cpms_weekday_duty_map(year, month)
+            except Exception as e:
+                return {**base, "error": str(e), "month_label": month_label}
             cells = {}
             for d in range(1, last_day + 1):
                 dt = date(year, month, d)
-                try:
-                    _, main, mph, backup, bph = cp.get_cpms_duty_for_date(dt)
-                    cells[d] = {
-                        "day": d,
-                        "main": main or "",
-                        "main_phone": mph or "",
-                        "backup": backup or "",
-                        "backup_phone": bph or "",
-                    }
-                except Exception as e:
-                    cells[d] = {
-                        "day": d,
-                        "main": "",
-                        "main_phone": "",
-                        "backup": "",
-                        "backup_phone": "",
-                        "dutyNote": str(e),
-                    }
+                weekday = dt.strftime("%A")
+                main, mph, backup, bph = weekday_map.get(weekday, ("", "", "", ""))
+                cells[d] = {
+                    "day": d,
+                    "main": main or "",
+                    "main_phone": mph or "",
+                    "backup": backup or "",
+                    "backup_phone": bph or "",
+                }
             return {
                 "ok": True,
                 "error": None,
