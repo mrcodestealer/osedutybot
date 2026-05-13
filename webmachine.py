@@ -1413,11 +1413,62 @@ _OSE_FORM_PAGE_CSS = """
     }
     .ose-back-btn:hover { border-color: var(--accent); background: rgba(59,130,246,.12); text-decoration: none; }
     .ose-form-page-header h1 { margin: 0; font-size: 1.2rem; font-weight: 700; }
-    main.ose-form-page { padding: 1.1rem 1.35rem 2.5rem; max-width: min(1200px, 98vw); margin: 0 auto; width: 100%; }
+    main.ose-form-page { padding: 1.1rem 1.35rem 2.5rem; max-width: min(1400px, 98vw); margin: 0 auto; width: 100%; }
     .ose-form-card, .ose-records-card {
       background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 1rem 1.1rem; margin-bottom: 1rem;
     }
-    .ose-records-card h2 { margin: 0 0 0.75rem; font-size: 0.95rem; }
+    .ose-records-card h2 { margin: 0; font-size: 1rem; font-weight: 700; letter-spacing: -0.01em; }
+    .ose-records-hint { margin: 0.35rem 0 0.85rem; font-size: 0.75rem; color: var(--muted); line-height: 1.4; }
+    .ose-records-wrap {
+      overflow: auto; max-height: min(70vh, 760px);
+      border: 1px solid var(--line); border-radius: 12px;
+      background: rgba(10, 14, 20, 0.45);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+    }
+    .ose-records-table {
+      width: 100%; min-width: 980px; border-collapse: separate; border-spacing: 0;
+      background: transparent; font-size: 0.8rem;
+    }
+    .ose-records-table th, .ose-records-table td {
+      padding: 0.62rem 0.75rem; border-bottom: 1px solid rgba(42, 53, 68, 0.9);
+      text-align: left; vertical-align: middle;
+    }
+    .ose-records-table thead th {
+      position: sticky; top: 0; z-index: 2;
+      background: #1a2331; font-size: 0.72rem; font-weight: 650;
+      letter-spacing: 0.01em; color: #a8b7cc; white-space: nowrap;
+    }
+    .ose-records-table tbody tr:nth-child(odd) td { background: rgba(21, 27, 38, 0.55); }
+    .ose-records-table tbody tr:nth-child(even) td { background: rgba(26, 34, 46, 0.72); }
+    .ose-records-table tbody tr:hover td { background: rgba(59,130,246,0.1); }
+    .ose-records-table tbody tr:last-child td { border-bottom: none; }
+    .ose-records-table .col-name { min-width: 8.5rem; }
+    .ose-records-table .col-pill { min-width: 7.5rem; }
+    .ose-records-table .col-date { min-width: 6.5rem; }
+    .ose-records-table .col-note { min-width: 9rem; width: 18%; }
+    .ose-records-table .col-person { min-width: 7rem; }
+    .ose-records-table .col-shift { width: 4.5rem; text-align: center; }
+    .ose-records-table td.ose-cell-name { font-weight: 650; color: #f1f5f9; white-space: nowrap; }
+    .ose-records-table td.ose-cell-date {
+      white-space: nowrap; font-variant-numeric: tabular-nums; color: #c7d2e3; font-size: 0.78rem;
+    }
+    .ose-records-table td.ose-cell-person { white-space: nowrap; }
+    .ose-records-table td.ose-cell-note { max-width: 16rem; line-height: 1.45; word-break: break-word; }
+    .ose-records-table td.ose-cell-empty { color: rgba(139, 156, 179, 0.55); }
+    .ose-records-table td.ose-cell-pill { white-space: nowrap; }
+    .ose-records-table td.ose-cell-shift { text-align: center; }
+    .ose-pill {
+      display: inline-flex; align-items: center; justify-content: center;
+      padding: 0.2rem 0.55rem; border-radius: 999px; font-size: 0.72rem; font-weight: 650;
+      line-height: 1.2; border: 1px solid transparent; white-space: nowrap;
+    }
+    .ose-pill-leave { background: rgba(59,130,246,0.16); color: #bfdbfe; border-color: rgba(59,130,246,0.28); }
+    .ose-pill-status.is-approved { background: rgba(34,197,94,0.14); color: #86efac; border-color: rgba(34,197,94,0.28); }
+    .ose-pill-status.is-pending { background: rgba(234,179,8,0.14); color: #fde68a; border-color: rgba(234,179,8,0.28); }
+    .ose-pill-status.is-rejected { background: rgba(239,68,68,0.14); color: #fca5a5; border-color: rgba(239,68,68,0.28); }
+    .ose-pill-status { background: rgba(139,156,179,0.16); color: #cbd5e1; border-color: rgba(139,156,179,0.28); }
+    .ose-pill-shift { min-width: 1.75rem; background: rgba(124,58,237,0.16); color: #ddd6fe; border-color: rgba(124,58,237,0.28); }
+    .ose-records-empty { padding: 1.25rem; color: var(--muted); text-align: center; font-size: 0.84rem; }
     .ose-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.65rem 0.75rem; }
     .ose-form-grid .full { grid-column: 1 / -1; }
     .ose-form-grid label { display: flex; flex-direction: column; gap: 0.28rem; font-size: 0.72rem; color: var(--muted); }
@@ -1490,10 +1541,21 @@ _OSE_SUBMIT_LEAVE_PAGE = """<!DOCTYPE html>
     </section>
     <section class="ose-records-card">
       <h2>All leave records</h2>
+      <p class="ose-records-hint">Scroll horizontally if needed. Empty fields show as —.</p>
       <div class="ose-records-wrap">
         <table class="ose-records-table">
           <thead>
-            <tr><th>Name</th><th>Leave Type</th><th>Start Date</th><th>End Date</th><th>Reason</th><th>Status</th><th>Approver</th><th>Approval Date</th><th>Remarks</th></tr>
+            <tr>
+              <th scope="col" class="col-name">Name</th>
+              <th scope="col" class="col-pill">Leave type</th>
+              <th scope="col" class="col-date">Start date</th>
+              <th scope="col" class="col-date">End date</th>
+              <th scope="col" class="col-note">Reason</th>
+              <th scope="col" class="col-pill">Status</th>
+              <th scope="col" class="col-person">Approver</th>
+              <th scope="col" class="col-date">Approval date</th>
+              <th scope="col" class="col-note">Remarks</th>
+            </tr>
           </thead>
           <tbody id="ose-leave-list-body"><tr><td class="ose-records-empty" colspan="9">Loading…</td></tr></tbody>
         </table>
@@ -1549,6 +1611,53 @@ _OSE_SUBMIT_LEAVE_PAGE = """<!DOCTYPE html>
       });
     }
     initMonthDaySelects();
+    function appendTextCell(tr, val, extraClass) {
+      var td = document.createElement("td");
+      if (extraClass) td.className = extraClass;
+      var s = String(val || "").trim();
+      if (!s) {
+        td.classList.add("ose-cell-empty");
+        td.textContent = "—";
+      } else {
+        td.textContent = s;
+      }
+      tr.appendChild(td);
+    }
+    function appendPillCell(tr, val, pillClass) {
+      var td = document.createElement("td");
+      var s = String(val || "").trim();
+      if (!s) {
+        td.className = "ose-cell-empty";
+        td.textContent = "—";
+      } else {
+        td.className = "ose-cell-pill";
+        var span = document.createElement("span");
+        span.className = "ose-pill " + (pillClass || "");
+        span.textContent = s;
+        td.appendChild(span);
+      }
+      tr.appendChild(td);
+    }
+    function appendStatusCell(tr, val) {
+      var td = document.createElement("td");
+      var s = String(val || "").trim();
+      if (!s) {
+        td.className = "ose-cell-empty";
+        td.textContent = "—";
+      } else {
+        td.className = "ose-cell-pill";
+        var span = document.createElement("span");
+        var cls = "ose-pill ose-pill-status";
+        var k = s.toLowerCase();
+        if (k.indexOf("approv") >= 0) cls += " is-approved";
+        else if (k.indexOf("pend") >= 0) cls += " is-pending";
+        else if (k.indexOf("reject") >= 0) cls += " is-rejected";
+        span.className = cls;
+        span.textContent = s;
+        td.appendChild(span);
+      }
+      tr.appendChild(td);
+    }
     function renderLeaveList(data) {
       var body = document.getElementById("ose-leave-list-body");
       if (!body) return;
@@ -1563,11 +1672,15 @@ _OSE_SUBMIT_LEAVE_PAGE = """<!DOCTYPE html>
       for (var i = 0; i < items.length; i++) {
         var it = items[i];
         var tr = document.createElement("tr");
-        [it.name, it.leave_type, it.start_date, it.end_date, it.reason, it.status, it.approver, it.approval_date, it.remarks].forEach(function (val) {
-          var td = document.createElement("td");
-          td.textContent = val || "";
-          tr.appendChild(td);
-        });
+        appendTextCell(tr, it.name, "ose-cell-name");
+        appendPillCell(tr, it.leave_type, "ose-pill-leave");
+        appendTextCell(tr, it.start_date, "ose-cell-date");
+        appendTextCell(tr, it.end_date, "ose-cell-date");
+        appendTextCell(tr, it.reason, "ose-cell-note");
+        appendStatusCell(tr, it.status);
+        appendTextCell(tr, it.approver, "ose-cell-person");
+        appendTextCell(tr, it.approval_date, "ose-cell-date");
+        appendTextCell(tr, it.remarks, "ose-cell-note");
         body.appendChild(tr);
       }
     }
@@ -1668,10 +1781,23 @@ _OSE_SUBMIT_OFFSET_PAGE = """<!DOCTYPE html>
     </section>
     <section class="ose-records-card">
       <h2>All offset records</h2>
+      <p class="ose-records-hint">Scroll horizontally if needed. Empty fields show as —.</p>
       <div class="ose-records-wrap">
         <table class="ose-records-table">
           <thead>
-            <tr><th>Request Date</th><th>Request Person</th><th>Exchange Person</th><th>Shift</th><th>Original Date</th><th>Exchange Date</th><th>Reason</th><th>Approval Status</th><th>Approver</th><th>Approval Date</th><th>Remarks</th></tr>
+            <tr>
+              <th scope="col" class="col-date">Request date</th>
+              <th scope="col" class="col-person">Request person</th>
+              <th scope="col" class="col-person">Exchange person</th>
+              <th scope="col" class="col-shift">Shift</th>
+              <th scope="col" class="col-date">Original date</th>
+              <th scope="col" class="col-date">Exchange date</th>
+              <th scope="col" class="col-note">Reason</th>
+              <th scope="col" class="col-pill">Approval status</th>
+              <th scope="col" class="col-person">Approver</th>
+              <th scope="col" class="col-date">Approval date</th>
+              <th scope="col" class="col-note">Remarks</th>
+            </tr>
           </thead>
           <tbody id="ose-offset-list-body"><tr><td class="ose-records-empty" colspan="11">Loading…</td></tr></tbody>
         </table>
@@ -1727,6 +1853,54 @@ _OSE_SUBMIT_OFFSET_PAGE = """<!DOCTYPE html>
       });
     }
     initMonthDaySelects();
+    function appendTextCell(tr, val, extraClass) {
+      var td = document.createElement("td");
+      if (extraClass) td.className = extraClass;
+      var s = String(val || "").trim();
+      if (!s) {
+        td.classList.add("ose-cell-empty");
+        td.textContent = "—";
+      } else {
+        td.textContent = s;
+      }
+      tr.appendChild(td);
+    }
+    function appendPillCell(tr, val, pillClass, extraClass) {
+      var td = document.createElement("td");
+      if (extraClass) td.className = extraClass;
+      var s = String(val || "").trim();
+      if (!s) {
+        td.className = (extraClass ? extraClass + " " : "") + "ose-cell-empty";
+        td.textContent = "—";
+      } else {
+        td.className = ((extraClass ? extraClass + " " : "") + "ose-cell-pill").trim();
+        var span = document.createElement("span");
+        span.className = "ose-pill " + (pillClass || "");
+        span.textContent = s;
+        td.appendChild(span);
+      }
+      tr.appendChild(td);
+    }
+    function appendStatusCell(tr, val) {
+      var td = document.createElement("td");
+      var s = String(val || "").trim();
+      if (!s) {
+        td.className = "ose-cell-empty";
+        td.textContent = "—";
+      } else {
+        td.className = "ose-cell-pill";
+        var span = document.createElement("span");
+        var cls = "ose-pill ose-pill-status";
+        var k = s.toLowerCase();
+        if (k.indexOf("approv") >= 0) cls += " is-approved";
+        else if (k.indexOf("pend") >= 0) cls += " is-pending";
+        else if (k.indexOf("reject") >= 0) cls += " is-rejected";
+        span.className = cls;
+        span.textContent = s;
+        td.appendChild(span);
+      }
+      tr.appendChild(td);
+    }
     function renderOffsetList(data) {
       var body = document.getElementById("ose-offset-list-body");
       if (!body) return;
@@ -1741,11 +1915,17 @@ _OSE_SUBMIT_OFFSET_PAGE = """<!DOCTYPE html>
       for (var i = 0; i < items.length; i++) {
         var it = items[i];
         var tr = document.createElement("tr");
-        [it.request_date, it.request_person, it.exchange_person, it.shift_type, it.original_date, it.exchange_date, it.reason, it.approval_status, it.approver, it.approval_date, it.remarks].forEach(function (val) {
-          var td = document.createElement("td");
-          td.textContent = val || "";
-          tr.appendChild(td);
-        });
+        appendTextCell(tr, it.request_date, "ose-cell-date");
+        appendTextCell(tr, it.request_person, "ose-cell-person");
+        appendTextCell(tr, it.exchange_person, "ose-cell-person");
+        appendPillCell(tr, it.shift_type, "ose-pill-shift", "ose-cell-shift");
+        appendTextCell(tr, it.original_date, "ose-cell-date");
+        appendTextCell(tr, it.exchange_date, "ose-cell-date");
+        appendTextCell(tr, it.reason, "ose-cell-note");
+        appendStatusCell(tr, it.approval_status);
+        appendTextCell(tr, it.approver, "ose-cell-person");
+        appendTextCell(tr, it.approval_date, "ose-cell-date");
+        appendTextCell(tr, it.remarks, "ose-cell-note");
         body.appendChild(tr);
       }
     }
