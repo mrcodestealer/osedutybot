@@ -114,6 +114,7 @@ _PAGE = """<!DOCTYPE html>
     .wm-head-nav-group { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 0.5rem; flex-shrink: 0; }
     a.wm-head-nav-btn.active { border-color: var(--accent); background: rgba(59,130,246,.18); color: var(--text); }
     .wm-head-top { display: flex; flex-direction: column; align-items: flex-start; gap: 0.55rem; }
+    .wm-head-title { margin: 0; font-size: 1.35rem; font-weight: 700; letter-spacing: -0.02em; }
     .wm-head-title-btn {
       margin: 0; cursor: pointer; font: inherit;
       font-size: 1.2rem; font-weight: 650; letter-spacing: -0.02em; color: var(--text);
@@ -212,7 +213,7 @@ _PAGE = """<!DOCTYPE html>
 <body>
   <header class="wm-header-bar">
     <div class="wm-head-top">
-      <button type="button" class="wm-head-title-btn" id="wm-title-btn" aria-label="Scroll to dashboard content">{{ title }}</button>
+      <h1 class="wm-head-title">{{ title }}</h1>
       <p class="wm-head-total">Total <span class="count">{{ row_total }}</span> of machines detected</p>
       <p class="wm-head-updated">Last Updated : {{ last_updated }}</p>
     </div>
@@ -222,17 +223,6 @@ _PAGE = """<!DOCTYPE html>
       <a class="wm-head-title-btn wm-head-nav-btn" href="{{ machine_encoder_href }}">Machine encoder</a>
     </div>
   </header>
-  <script>
-  (function () {
-    var btn = document.getElementById("wm-title-btn");
-    var main = document.getElementById("wm-main");
-    if (btn && main) {
-      btn.addEventListener("click", function () {
-        main.scrollIntoView({ behavior: "smooth", block: "start" });
-      });
-    }
-  })();
-  </script>
   <main id="wm-main">
     {% if rows %}
     <section class="panel" aria-label="Deployment tier">
