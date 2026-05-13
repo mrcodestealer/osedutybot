@@ -994,8 +994,6 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
   <header class="wm-header-bar">
     <div class="ose-hero">
       <h1>All Duty</h1>
-      <p>Calendars use the same modules as the bot (see filenames below). <strong>Phone numbers</strong> show for every roster <em>except OSE</em>. OSE keeps morning/night + leave/offset only.</p>
-      <p style="margin-top:0.45rem"><code>ote_duty.py</code>, <code>ose_Duty.py</code>, <code>fpms_duty.py</code>, <code>ft.py</code>, <code>fe_duty.py</code>, <code>bi_duty.py</code>, <code>cpms_duty.py</code>, <code>db_duty.py</code>, <code>sre_Duty.py</code></p>
     </div>
     <a class="wm-head-title-btn" href="{{ back_href }}">Machine status</a>
   </header>
