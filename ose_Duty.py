@@ -1401,28 +1401,41 @@ def _admin_whologin_identity(v: Any) -> tuple[str, str]:
     return _title_name(_field_text(v)), ""
 
 
-def _load_webapp_admin_credential_row() -> tuple[str, str, str, str]:
-    app_token, table_id = _admin_page_env()
-    token = get_tenant_access_token()
-    records = _bitable_get_all_records(token, app_token, table_id)
-    if not records:
-        raise RuntimeError("Admin credential table has no rows")
-    f = records[0].get("fields") or {}
+def _parse_webapp_admin_credential_row(record: dict[str, Any]) -> tuple[str, str, str, str] | None:
+    f = record.get("fields") or {}
     who, open_id = _admin_whologin_identity(
         _get_field_by_aliases(f, ["whologin", "Who Login", "WhoLogin"])
     )
     login = _field_text(_get_field_by_aliases(f, ["ID", "Id"]))
     pw = _field_text(_get_field_by_aliases(f, ["PASSWORD", "Password"]))
     if not login or not pw:
-        raise RuntimeError("Admin credential row is missing ID or PASSWORD")
+        return None
     return who, login, pw, open_id
 
 
+def _load_webapp_admin_credentials() -> list[tuple[str, str, str, str]]:
+    app_token, table_id = _admin_page_env()
+    token = get_tenant_access_token()
+    records = _bitable_get_all_records(token, app_token, table_id)
+    if not records:
+        raise RuntimeError("Admin credential table has no rows")
+    rows: list[tuple[str, str, str, str]] = []
+    for record in records:
+        parsed = _parse_webapp_admin_credential_row(record)
+        if parsed:
+            rows.append(parsed)
+    if not rows:
+        raise RuntimeError("Admin credential table has no valid ID/PASSWORD rows")
+    return rows
+
+
 def verify_webapp_admin_login(login_id: str, password: str) -> dict[str, str]:
-    who, expected_id, expected_pw, open_id = _load_webapp_admin_credential_row()
-    if (login_id or "").strip() != expected_id or (password or "") != expected_pw:
-        raise ValueError("Invalid admin ID or password")
-    return {"who": who or expected_id, "open_id": open_id}
+    login_s = (login_id or "").strip()
+    password_s = password or ""
+    for who, expected_id, expected_pw, open_id in _load_webapp_admin_credentials():
+        if login_s == expected_id and password_s == expected_pw:
+            return {"who": who or login_s, "open_id": open_id}
+    raise ValueError("Invalid admin ID or password")
 
 
 def get_ose_offset_records_list() -> dict[str, Any]:
