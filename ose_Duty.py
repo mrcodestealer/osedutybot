@@ -547,7 +547,7 @@ def get_ose_month_calendar(year: int, month: int) -> dict[str, Any]:
 
 # Short-lived in-memory cache so morning card + /ose do not double-hit Bitable.
 # Set OSE_BITABLE_CACHE_SEC=0 to disable. Daily cron calls ``invalidate_ose_bitable_cache``.
-_OSE_BITABLE_RAW: dict[str, Any] = {"monotonic": 0.0, "leave": None, "offset": None}
+_OSE_BITABLE_RAW: dict[str, Any] = {"monotonic": 0.0, "leave": None, "offset": None, "person_ids": None}
 _OSE_BITABLE_TTL_SEC = int(os.getenv("OSE_BITABLE_CACHE_SEC", "120"))
 
 
@@ -555,6 +555,7 @@ def invalidate_ose_bitable_cache() -> None:
     """Clear cached leave/offset rows (e.g. after daily sync job)."""
     _OSE_BITABLE_RAW["leave"] = None
     _OSE_BITABLE_RAW["offset"] = None
+    _OSE_BITABLE_RAW["person_ids"] = None
     _OSE_BITABLE_RAW["monotonic"] = 0.0
 
 
@@ -923,15 +924,120 @@ def _bitable_create_record(token: str, table_id: str, fields: dict[str, Any]) ->
         f"{OSE_BASE_TOKEN}/tables/{table_id}/records"
     )
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    res = requests.post(url, headers=headers, json={"fields": fields}, timeout=30).json()
+    res = requests.post(
+        url,
+        headers=headers,
+        params={"user_id_type": "open_id"},
+        json={"fields": fields},
+        timeout=30,
+    ).json()
     if res.get("code") != 0:
         raise RuntimeError(f"Bitable create failed: {res}")
     return res
 
 
-def _person_field_value(name: str) -> list[dict[str, str]]:
-    n = _title_name(name)
-    return [{"name": n}]
+def _person_item_open_id(item: Any) -> str:
+    if not isinstance(item, dict):
+        return ""
+    return str(item.get("id") or item.get("open_id") or item.get("user_id") or "").strip()
+
+
+def _person_field_items(v: Any) -> list[dict[str, Any]]:
+    if isinstance(v, list):
+        return [it for it in v if isinstance(it, dict)]
+    if isinstance(v, dict):
+        return [v]
+    return []
+
+
+def _index_person_field_value(v: Any, idx: dict[str, str]) -> None:
+    for item in _person_field_items(v):
+        pid = _person_item_open_id(item)
+        if not pid:
+            continue
+        for raw_name in (
+            str(item.get("name") or "").strip(),
+            str(item.get("en_name") or "").strip(),
+        ):
+            if not raw_name:
+                continue
+            nm = _title_name(raw_name)
+            idx[nm] = pid
+            nk = _name_key(nm)
+            if nk:
+                idx[nk] = pid
+            for roster in OSE_LEAVE_FORM_NAMES:
+                if _names_same_person(roster, raw_name):
+                    roster_nm = _title_name(roster)
+                    idx[roster_nm] = pid
+                    roster_nk = _name_key(roster_nm)
+                    if roster_nk:
+                        idx[roster_nk] = pid
+
+
+def _build_ose_person_open_id_index(
+    leave_items: list[dict[str, Any]],
+    offset_items: list[dict[str, Any]],
+) -> dict[str, str]:
+    idx: dict[str, str] = {}
+    for it in leave_items:
+        f = it.get("fields") or {}
+        _index_person_field_value(_get_field_by_aliases(f, ["Name", "Employee Name", "Person"]), idx)
+        _index_person_field_value(
+            _get_field_by_aliases(f, ["Approver", "Approved By", "Approval Person"]),
+            idx,
+        )
+    for it in offset_items:
+        f = it.get("fields") or {}
+        _index_person_field_value(
+            _get_field_by_aliases(f, ["Request Person", "Requester", "Requester Person", "Name"]),
+            idx,
+        )
+        _index_person_field_value(
+            _get_field_by_aliases(f, ["Exchange Person", "Replacement", "Swap Person"]),
+            idx,
+        )
+        _index_person_field_value(
+            _get_field_by_aliases(f, ["Approver", "Approved By", "Approval Person"]),
+            idx,
+        )
+    return idx
+
+
+def _get_ose_person_open_id_index(token: str) -> dict[str, str]:
+    cached = _OSE_BITABLE_RAW.get("person_ids")
+    if isinstance(cached, dict):
+        return cached
+    leave, offset = _get_bitable_raw_pair(token)
+    idx = _build_ose_person_open_id_index(leave, offset)
+    _OSE_BITABLE_RAW["person_ids"] = idx
+    return idx
+
+
+def _lookup_person_open_id(name: str, idx: dict[str, str]) -> str:
+    nm = _title_name(name)
+    if not nm:
+        return ""
+    direct = idx.get(nm) or idx.get(_name_key(nm))
+    if direct:
+        return direct
+    for key, pid in idx.items():
+        if key.startswith("ou_"):
+            continue
+        if _names_same_person(nm, key):
+            return pid
+    return ""
+
+
+def _person_field_value(name: str, *, token: str) -> list[dict[str, str]]:
+    nm = _title_name(name)
+    open_id = _lookup_person_open_id(nm, _get_ose_person_open_id_index(token))
+    if not open_id:
+        raise ValueError(
+            f"Could not resolve Lark user id for {name!r}. "
+            "Pick a name that already appears in leave/offset records."
+        )
+    return [{"id": open_id}]
 
 
 def get_ose_submit_form_options() -> dict[str, Any]:
@@ -1143,7 +1249,7 @@ def submit_ose_leave(
         raise ValueError("Reason is required")
     token = get_tenant_access_token()
     fields: dict[str, Any] = {
-        "Name": _person_field_value(nm),
+        "Name": _person_field_value(nm, token=token),
         "Leave Type": lt,
         "Start Date": _bitable_date_ms(start_date),
         "End Date": _bitable_date_ms(end_date),
@@ -1178,8 +1284,8 @@ def submit_ose_offset(
     token = get_tenant_access_token()
     today = date.today()
     fields: dict[str, Any] = {
-        "Request Person": _person_field_value(req),
-        "Exchange Person": _person_field_value(exc),
+        "Request Person": _person_field_value(req, token=token),
+        "Exchange Person": _person_field_value(exc, token=token),
         "Shift Type": st,
         "Original Date": _bitable_date_ms(original_date),
         "Exchange Date": _bitable_date_ms(exchange_date),
