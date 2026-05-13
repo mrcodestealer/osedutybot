@@ -2747,9 +2747,17 @@ _ADMIN_LOGIN_PAGE = """<!DOCTYPE html>
       color: var(--text); cursor: pointer;
     }
     button[type="submit"]:hover { background: rgba(59,130,246,.32); }
+    .adm-back-btn {
+      position: fixed; top: 1rem; left: 1.25rem; z-index: 5;
+      text-decoration: none; display: inline-flex; align-items: center; gap: 0.35rem;
+      font-size: 0.9rem; font-weight: 650; padding: 0.45rem 0.85rem; border-radius: 10px;
+      border: 1px solid var(--line); background: var(--elev); color: var(--text);
+    }
+    .adm-back-btn:hover { border-color: var(--accent); background: rgba(59,130,246,.12); text-decoration: none; }
   </style>
 </head>
 <body>
+  <a class="adm-back-btn" href="{{ main_page_href }}">← Back</a>
   <div class="adm-login-card">
     <h1>Admin login</h1>
     {% if error %}
@@ -4113,6 +4121,7 @@ def admin_login():
         _ADMIN_LOGIN_PAGE,
         error="",
         admin_login_action=url_for("wm.admin_login_submit"),
+        main_page_href=url_for("wm.index"),
     )
 
 
@@ -4130,24 +4139,28 @@ def admin_login_submit():
             _ADMIN_LOGIN_PAGE,
             error="Invalid ID or password.",
             admin_login_action=url_for("wm.admin_login_submit"),
+            main_page_href=url_for("wm.index"),
         )
     except RuntimeError as e:
         return render_template_string(
             _ADMIN_LOGIN_PAGE,
             error=str(e),
             admin_login_action=url_for("wm.admin_login_submit"),
+            main_page_href=url_for("wm.index"),
         )
     except (requests.RequestException, OSError) as e:
         return render_template_string(
             _ADMIN_LOGIN_PAGE,
             error=f"Cannot reach Lark to verify admin login. Check APP_ID/APP_SECRET and network/proxy. ({e})",
             admin_login_action=url_for("wm.admin_login_submit"),
+            main_page_href=url_for("wm.index"),
         )
     except Exception as e:
         return render_template_string(
             _ADMIN_LOGIN_PAGE,
             error=f"Admin login failed: {e}",
             admin_login_action=url_for("wm.admin_login_submit"),
+            main_page_href=url_for("wm.index"),
         )
     session["admin_whologin"] = who
     _clear_admin_login_failures_for_current_ip()
@@ -4187,7 +4200,7 @@ def admin_offset():
 @wm_bp.post("/admin/logout")
 def admin_logout():
     session.pop("admin_whologin", None)
-    return redirect(url_for("wm.admin_login"))
+    return redirect(url_for("wm.index"))
 
 
 @wm_bp.get("/api/admin/leave-list")
