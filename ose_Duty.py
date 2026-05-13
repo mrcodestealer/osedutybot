@@ -264,6 +264,10 @@ def _format_ddmmyyyy(d: Optional[date]) -> str:
     return d.strftime("%d/%m/%Y") if isinstance(d, date) else "-"
 
 
+def _format_yyyymmdd(d: Optional[date]) -> str:
+    return d.strftime("%Y/%m/%d") if isinstance(d, date) else ""
+
+
 def col_index_to_letter(col_index: int) -> str:
     letters = ""
     while col_index > 0:
@@ -957,6 +961,78 @@ def _leave_rows_for_calendar(items: list[dict[str, Any]]) -> list[dict[str, Any]
             continue
         rows.append({"name": name, "start": st, "end": ed})
     return rows
+
+
+def get_ose_leave_records_list() -> dict[str, Any]:
+    """All leave rows for the submit-leave page (LeaveID shown when present)."""
+    token = get_tenant_access_token()
+    items, _ = _get_bitable_raw_pair(token)
+    rows: list[dict[str, str]] = []
+    for it in items:
+        f = it.get("fields") or {}
+        name = _title_name(_field_text(_get_field_by_aliases(f, ["Name", "Employee Name", "Person"])))
+        if not name:
+            continue
+        st = _parse_date_value(_get_field_by_aliases(f, ["Start Date", "Leave Start Date", "From"]))
+        ed = _parse_date_value(_get_field_by_aliases(f, ["End Date", "Leave End Date", "To"]))
+        rows.append(
+            {
+                "leave_id": _field_text(_get_field_by_aliases(f, ["LeaveID", "Leave ID", "Leave Id"])),
+                "name": name,
+                "leave_type": _field_text(_get_field_by_aliases(f, ["Leave Type", "Type"])),
+                "start_date": _format_yyyymmdd(st),
+                "end_date": _format_yyyymmdd(ed),
+                "reason": _field_text(_get_field_by_aliases(f, ["Reason"])),
+            }
+        )
+    rows.sort(
+        key=lambda r: (
+            r.get("start_date") or "",
+            r.get("end_date") or "",
+            r.get("name") or "",
+        ),
+        reverse=True,
+    )
+    return {"ok": True, "items": rows}
+
+
+def get_ose_offset_records_list() -> dict[str, Any]:
+    """All offset rows for the submit-offset page (Request ID shown when present)."""
+    token = get_tenant_access_token()
+    _, items = _get_bitable_raw_pair(token)
+    rows: list[dict[str, str]] = []
+    for it in items:
+        f = it.get("fields") or {}
+        req = _title_name(
+            _field_text(_get_field_by_aliases(f, ["Request Person", "Requester", "Requester Person", "Name"]))
+        )
+        exc = _title_name(
+            _field_text(_get_field_by_aliases(f, ["Exchange Person", "Replacement", "Swap Person"]))
+        )
+        od = _parse_date_value(_get_field_by_aliases(f, ["Original Date", "Date"]))
+        xd = _parse_date_value(_get_field_by_aliases(f, ["Exchange Date", "Swap Date", "Target Date"]))
+        rd = _parse_date_value(_get_field_by_aliases(f, ["Request Date", "Submitted Date", "Created Date"]))
+        rows.append(
+            {
+                "request_id": _field_text(_get_field_by_aliases(f, ["Request ID", "RequestID", "Request Id"])),
+                "request_date": _format_yyyymmdd(rd),
+                "request_person": req,
+                "exchange_person": exc,
+                "shift_type": _field_text(_get_field_by_aliases(f, ["Shift Type", "Shift"])).upper(),
+                "original_date": _format_yyyymmdd(od),
+                "exchange_date": _format_yyyymmdd(xd),
+                "reason": _field_text(_get_field_by_aliases(f, ["Reason"])),
+            }
+        )
+    rows.sort(
+        key=lambda r: (
+            r.get("request_date") or "",
+            r.get("original_date") or "",
+            r.get("request_person") or "",
+        ),
+        reverse=True,
+    )
+    return {"ok": True, "items": rows}
 
 
 def get_ose_leave_names_calendar(year: int, month: int) -> dict[str, Any]:

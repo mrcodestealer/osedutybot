@@ -978,40 +978,9 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
       font: inherit; font-size: 0.82rem; font-weight: 650; padding: 0.48rem 0.95rem; border-radius: 10px;
       border: 1px solid rgba(196, 181, 253, 0.55); background: var(--ose-purple-bg); color: var(--ose-purple);
       cursor: pointer; transition: border-color .15s, box-shadow .15s, background .15s;
+      text-decoration: none; display: inline-block;
     }
     .ose-submit-btn:hover { border-color: var(--ose-purple); box-shadow: var(--ose-glow); }
-    .ose-modal-backdrop {
-      position: fixed; inset: 0; z-index: 40; display: flex; align-items: center; justify-content: center;
-      padding: 1rem; background: rgba(5, 8, 12, 0.72); backdrop-filter: blur(4px);
-    }
-    .ose-modal-backdrop[hidden] { display: none !important; }
-    .ose-modal {
-      width: min(640px, 100%); max-height: min(92vh, 900px); overflow: auto;
-      background: var(--card); border: 1px solid var(--line); border-radius: 14px;
-      box-shadow: 0 20px 50px rgba(0,0,0,.45); padding: 1rem 1.1rem 1.1rem;
-    }
-    .ose-modal h3 { margin: 0 0 0.75rem; font-size: 1.05rem; }
-    .ose-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.65rem 0.75rem; }
-    .ose-form-grid .full { grid-column: 1 / -1; }
-    .ose-form-grid label { display: flex; flex-direction: column; gap: 0.28rem; font-size: 0.72rem; color: var(--muted); }
-    .ose-form-grid input, .ose-form-grid select, .ose-form-grid textarea {
-      font: inherit; font-size: 0.86rem; padding: 0.48rem 0.55rem; border-radius: 8px;
-      border: 1px solid var(--line); background: #0f141c; color: var(--text);
-    }
-    .ose-form-grid textarea { min-height: 4.5rem; resize: vertical; }
-    .ose-form-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.85rem; }
-    .ose-form-msg { margin: 0.55rem 0 0; font-size: 0.78rem; color: #f87171; min-height: 1.1rem; }
-    .ose-form-msg.ok { color: var(--ok); }
-    .ose-leave-cal-title { margin: 0.85rem 0 0.45rem; font-size: 0.72rem; font-weight: 650; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
-    .ose-leave-cal-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 0.28rem; }
-    .ose-leave-cal-grid .hd { text-align: center; font-size: 0.58rem; color: var(--muted); padding: 0.15rem 0; }
-    .ose-leave-cal-cell {
-      min-height: 3.2rem; border-radius: 8px; border: 1px solid var(--line); background: rgba(15,20,28,.65);
-      padding: 0.22rem 0.2rem; font-size: 0.58rem; line-height: 1.25; overflow: hidden;
-    }
-    .ose-leave-cal-cell.empty { background: transparent; border: none; min-height: 0; }
-    .ose-leave-cal-cell .dn { font-weight: 700; color: #cbd5e1; margin-bottom: 0.12rem; }
-    .ose-leave-cal-cell .nm { color: #94a3b8; word-break: break-word; }
     footer { padding: 1rem; text-align: center; color: var(--muted); font-size: 0.75rem; border-top: 1px solid var(--line); }
     a { color: var(--accent); }
     @media (min-width: 1200px) {
@@ -1044,8 +1013,8 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
       <button type="button" class="duty-kind-btn" data-kind="sre">SRE</button>
     </nav>
     <div class="ose-submit-bar" id="ose-submit-bar" hidden>
-      <button type="button" class="ose-submit-btn" id="ose-open-leave">Submit Leave</button>
-      <button type="button" class="ose-submit-btn" id="ose-open-offset">Submit Offset</button>
+      <a class="ose-submit-btn" id="ose-open-leave" href="{{ ose_submit_leave_href }}">Submit Leave</a>
+      <a class="ose-submit-btn" id="ose-open-offset" href="{{ ose_submit_offset_href }}">Submit Offset</a>
     </div>
     <div class="ose-year-row">
       <button type="button" class="ose-icon-btn" id="ose-y-prev" aria-label="Previous year">‹</button>
@@ -1061,77 +1030,11 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
       </div>
       <div class="ose-cal-weeks" id="ose-cal-root"><div class="ose-loading" id="ose-cal-loading">Loading calendar…</div></div>
     </div>
-    <div class="ose-modal-backdrop" id="ose-leave-modal" hidden>
-      <div class="ose-modal" role="dialog" aria-modal="true" aria-labelledby="ose-leave-title">
-        <h3 id="ose-leave-title">Submit Leave</h3>
-        <form id="ose-leave-form" class="ose-form-grid">
-          <label class="full">Name
-            <select name="name" id="ose-leave-name" required></select>
-          </label>
-          <label class="full">Leave Type
-            <select name="leave_type" id="ose-leave-type" required></select>
-          </label>
-          <label>Start Date
-            <input type="date" name="start_date" id="ose-leave-start" required/>
-          </label>
-          <label>End Date
-            <input type="date" name="end_date" id="ose-leave-end" required/>
-          </label>
-          <label class="full">Reason
-            <textarea name="reason" id="ose-leave-reason" required></textarea>
-          </label>
-          <div class="ose-form-actions full">
-            <button type="button" class="ose-submit-btn" data-ose-close="leave">Cancel</button>
-            <button type="submit" class="ose-submit-btn">Submit</button>
-          </div>
-        </form>
-        <p class="ose-form-msg" id="ose-leave-msg"></p>
-        <p class="ose-leave-cal-title">Leave on calendar (names only)</p>
-        <div class="ose-leave-cal-grid" id="ose-leave-cal-dow" aria-hidden="true">
-          <span class="hd">Mon</span><span class="hd">Tue</span><span class="hd">Wed</span><span class="hd">Thu</span><span class="hd">Fri</span><span class="hd">Sat</span><span class="hd">Sun</span>
-        </div>
-        <div class="ose-leave-cal-grid" id="ose-leave-cal-grid"></div>
-      </div>
-    </div>
-    <div class="ose-modal-backdrop" id="ose-offset-modal" hidden>
-      <div class="ose-modal" role="dialog" aria-modal="true" aria-labelledby="ose-offset-title">
-        <h3 id="ose-offset-title">Submit Offset</h3>
-        <form id="ose-offset-form" class="ose-form-grid">
-          <label>Request Person
-            <select name="request_person" id="ose-offset-req" required></select>
-          </label>
-          <label>Exchange Person
-            <select name="exchange_person" id="ose-offset-exc" required></select>
-          </label>
-          <label>Shift Type
-            <select name="shift_type" id="ose-offset-shift" required></select>
-          </label>
-          <label>Original Date
-            <input type="date" name="original_date" id="ose-offset-orig" required/>
-          </label>
-          <label>Exchange Date
-            <input type="date" name="exchange_date" id="ose-offset-xchg" required/>
-          </label>
-          <label class="full">Reason
-            <textarea name="reason" id="ose-offset-reason" required></textarea>
-          </label>
-          <div class="ose-form-actions full">
-            <button type="button" class="ose-submit-btn" data-ose-close="offset">Cancel</button>
-            <button type="submit" class="ose-submit-btn">Submit</button>
-          </div>
-        </form>
-        <p class="ose-form-msg" id="ose-offset-msg"></p>
-      </div>
-    </div>
   </main>
   <footer>API: <a id="duty-api-foot" href="#">api/duty-calendar</a> · <a href="{{ back_href }}">Machine list</a></footer>
   <script>
   (function () {
     var API = {{ api_calendar_href | tojson }};
-    var API_OSE_META = {{ api_ose_meta_href | tojson }};
-    var API_OSE_LEAVE_CAL = {{ api_ose_leave_cal_href | tojson }};
-    var API_OSE_SUBMIT_LEAVE = {{ api_ose_submit_leave_href | tojson }};
-    var API_OSE_SUBMIT_OFFSET = {{ api_ose_submit_offset_href | tojson }};
     var dutyKind = {{ initial_kind | tojson }};
     var validKinds = ["ote", "ose", "fpms", "ft", "fe", "bi", "cpms", "db", "sre"];
     if (validKinds.indexOf(dutyKind) < 0) dutyKind = "ose";
@@ -1147,122 +1050,11 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
     var loadingEl = document.getElementById("ose-cal-loading");
     var kindBar = document.getElementById("duty-kind-bar");
     var oseSubmitBar = document.getElementById("ose-submit-bar");
-    var oseMetaCache = null;
-
     function setYearLabel() { yearLabel.textContent = String(year); }
 
     function syncOseSubmitBar() {
       if (!oseSubmitBar) return;
       oseSubmitBar.hidden = dutyKind !== "ose";
-    }
-
-    function fillSelectOptions(sel, items, placeholder) {
-      if (!sel) return;
-      sel.innerHTML = "";
-      var ph = document.createElement("option");
-      ph.value = "";
-      ph.textContent = placeholder || "Select…";
-      ph.disabled = true;
-      ph.selected = true;
-      sel.appendChild(ph);
-      for (var i = 0; i < items.length; i++) {
-        var opt = document.createElement("option");
-        opt.value = items[i];
-        opt.textContent = items[i];
-        sel.appendChild(opt);
-      }
-    }
-
-    function ensureOseMeta(done) {
-      if (oseMetaCache) {
-        done(oseMetaCache);
-        return;
-      }
-      fetch(API_OSE_META).then(function (r) { return r.json(); }).then(function (data) {
-        if (!data || !data.ok) throw new Error((data && data.error) || "Failed to load options");
-        oseMetaCache = data;
-        done(data);
-      }).catch(function (e) {
-        done({ ok: false, error: String(e) });
-      });
-    }
-
-    function renderLeaveNamesCalendar(data) {
-      var grid = document.getElementById("ose-leave-cal-grid");
-      if (!grid) return;
-      grid.innerHTML = "";
-      var days = (data && data.days) || {};
-      var first = new Date(year, selectedMonth - 1, 1);
-      var startPad = (first.getDay() + 6) % 7;
-      var lastDay = new Date(year, selectedMonth, 0).getDate();
-      for (var p = 0; p < startPad; p++) {
-        var empty = document.createElement("div");
-        empty.className = "ose-leave-cal-cell empty";
-        grid.appendChild(empty);
-      }
-      for (var d = 1; d <= lastDay; d++) {
-        var cell = document.createElement("div");
-        cell.className = "ose-leave-cal-cell";
-        var dn = document.createElement("div");
-        dn.className = "dn";
-        dn.textContent = String(d);
-        cell.appendChild(dn);
-        var names = days[String(d)] || [];
-        for (var i = 0; i < names.length; i++) {
-          var nm = document.createElement("div");
-          nm.className = "nm";
-          nm.textContent = names[i];
-          cell.appendChild(nm);
-        }
-        grid.appendChild(cell);
-      }
-    }
-
-    function loadLeaveNamesCalendar() {
-      var url = API_OSE_LEAVE_CAL + "?year=" + encodeURIComponent(String(year)) + "&month=" + encodeURIComponent(String(selectedMonth));
-      fetch(url).then(function (r) { return r.json(); }).then(renderLeaveNamesCalendar).catch(function () {
-        renderLeaveNamesCalendar({ days: {} });
-      });
-    }
-
-    function openLeaveModal() {
-      var modal = document.getElementById("ose-leave-modal");
-      var msg = document.getElementById("ose-leave-msg");
-      if (!modal) return;
-      if (msg) { msg.textContent = ""; msg.className = "ose-form-msg"; }
-      ensureOseMeta(function (meta) {
-        if (!meta || !meta.ok) {
-          if (msg) msg.textContent = (meta && meta.error) || "Could not load form options";
-          return;
-        }
-        fillSelectOptions(document.getElementById("ose-leave-name"), meta.leave_names || [], "Select name");
-        fillSelectOptions(document.getElementById("ose-leave-type"), meta.leave_types || [], "Select leave type");
-      });
-      loadLeaveNamesCalendar();
-      modal.hidden = false;
-    }
-
-    function openOffsetModal() {
-      var modal = document.getElementById("ose-offset-modal");
-      var msg = document.getElementById("ose-offset-msg");
-      if (!modal) return;
-      if (msg) { msg.textContent = ""; msg.className = "ose-form-msg"; }
-      ensureOseMeta(function (meta) {
-        if (!meta || !meta.ok) {
-          if (msg) msg.textContent = (meta && meta.error) || "Could not load form options";
-          return;
-        }
-        fillSelectOptions(document.getElementById("ose-offset-req"), meta.offset_names || [], "Select request person");
-        fillSelectOptions(document.getElementById("ose-offset-exc"), meta.offset_names || [], "Select exchange person");
-        fillSelectOptions(document.getElementById("ose-offset-shift"), meta.shift_types || [], "Select shift");
-      });
-      modal.hidden = false;
-    }
-
-    function closeOseModal(which) {
-      var id = which === "offset" ? "ose-offset-modal" : "ose-leave-modal";
-      var modal = document.getElementById(id);
-      if (modal) modal.hidden = true;
     }
 
     function syncKindBar() {
@@ -1586,23 +1378,177 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
       loadMonth();
     });
 
-    var openLeaveBtn = document.getElementById("ose-open-leave");
-    var openOffsetBtn = document.getElementById("ose-open-offset");
-    if (openLeaveBtn) openLeaveBtn.addEventListener("click", openLeaveModal);
-    if (openOffsetBtn) openOffsetBtn.addEventListener("click", openOffsetModal);
-    document.querySelectorAll("[data-ose-close]").forEach(function (btn) {
-      btn.addEventListener("click", function () {
-        closeOseModal(btn.getAttribute("data-ose-close"));
+
+    syncKindBar();
+    setYearLabel();
+    buildMonthButtons();
+    loadMonth();
+  })();
+  </script>
+</body>
+</html>
+"""
+
+
+_OSE_FORM_PAGE_CSS = """
+    :root {
+      --bg: #0b0f14; --card: #151b26; --elev: #1c2533; --text: #e8edf4; --muted: #8b9cb3;
+      --accent: #3b82f6; --ok: #22c55e; --line: #2a3544;
+      --ose-purple: #c4b5fd; --ose-purple-bg: rgba(124, 58, 237, 0.12); --ose-glow: 0 0 0 1px rgba(167, 139, 250, 0.45), 0 0 20px rgba(124, 58, 237, 0.35);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: radial-gradient(1200px 600px at 10% -10%, rgba(59,130,246,.12), transparent), var(--bg);
+      color: var(--text); min-height: 100vh;
+    }
+    .ose-form-page-header {
+      padding: 1rem 1.35rem; border-bottom: 1px solid var(--line);
+      display: flex; align-items: center; gap: 0.85rem;
+    }
+    .ose-back-btn {
+      text-decoration: none; display: inline-flex; align-items: center; gap: 0.35rem;
+      font-size: 0.9rem; font-weight: 650; padding: 0.45rem 0.85rem; border-radius: 10px;
+      border: 1px solid var(--line); background: var(--elev); color: var(--text);
+    }
+    .ose-back-btn:hover { border-color: var(--accent); background: rgba(59,130,246,.12); text-decoration: none; }
+    .ose-form-page-header h1 { margin: 0; font-size: 1.2rem; font-weight: 700; }
+    main.ose-form-page { padding: 1.1rem 1.35rem 2.5rem; max-width: min(1200px, 98vw); margin: 0 auto; width: 100%; }
+    .ose-form-card, .ose-records-card {
+      background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 1rem 1.1rem; margin-bottom: 1rem;
+    }
+    .ose-records-card h2 { margin: 0 0 0.75rem; font-size: 0.95rem; }
+    .ose-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.65rem 0.75rem; }
+    .ose-form-grid .full { grid-column: 1 / -1; }
+    .ose-form-grid label { display: flex; flex-direction: column; gap: 0.28rem; font-size: 0.72rem; color: var(--muted); }
+    .ose-form-grid input, .ose-form-grid select, .ose-form-grid textarea {
+      font: inherit; font-size: 0.86rem; padding: 0.48rem 0.55rem; border-radius: 8px;
+      border: 1px solid var(--line); background: #0f141c; color: var(--text);
+    }
+    .ose-form-grid textarea { min-height: 4.5rem; resize: vertical; }
+    .ose-form-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.85rem; }
+    .ose-submit-btn {
+      font: inherit; font-size: 0.82rem; font-weight: 650; padding: 0.48rem 0.95rem; border-radius: 10px;
+      border: 1px solid rgba(196, 181, 253, 0.55); background: var(--ose-purple-bg); color: var(--ose-purple);
+      cursor: pointer;
+    }
+    .ose-submit-btn:hover { border-color: var(--ose-purple); box-shadow: var(--ose-glow); }
+    .ose-form-msg { margin: 0.55rem 0 0; font-size: 0.78rem; color: #f87171; min-height: 1.1rem; }
+    .ose-form-msg.ok { color: var(--ok); }
+    .ose-records-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 10px; }
+    .ose-records-table { width: 100%; border-collapse: collapse; background: var(--elev); font-size: 0.82rem; }
+    .ose-records-table th, .ose-records-table td { padding: 0.55rem 0.65rem; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    .ose-records-table th { background: #222b3a; font-size: 0.68rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+    .ose-records-table tbody tr:hover td { background: rgba(59,130,246,.07); }
+    .ose-records-empty { padding: 1rem; color: var(--muted); text-align: center; }
+    @media (max-width: 720px) { .ose-form-grid { grid-template-columns: 1fr; } }
+"""
+
+_OSE_SUBMIT_LEAVE_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Submit Leave</title>
+  <style>""" + _OSE_FORM_PAGE_CSS + """</style>
+</head>
+<body>
+  <header class="ose-form-page-header">
+    <a class="ose-back-btn" href="{{ back_href }}">← Back</a>
+    <h1>Submit Leave</h1>
+  </header>
+  <main class="ose-form-page">
+    <section class="ose-form-card">
+      <form id="ose-leave-form" class="ose-form-grid">
+        <label class="full">Name
+          <select name="name" id="ose-leave-name" required></select>
+        </label>
+        <label class="full">Leave Type
+          <select name="leave_type" id="ose-leave-type" required></select>
+        </label>
+        <label>Start Date
+          <input type="date" name="start_date" id="ose-leave-start" required/>
+        </label>
+        <label>End Date
+          <input type="date" name="end_date" id="ose-leave-end" required/>
+        </label>
+        <label class="full">Reason
+          <textarea name="reason" id="ose-leave-reason" required></textarea>
+        </label>
+        <div class="ose-form-actions full">
+          <button type="submit" class="ose-submit-btn">Submit</button>
+        </div>
+      </form>
+      <p class="ose-form-msg" id="ose-leave-msg"></p>
+    </section>
+    <section class="ose-records-card">
+      <h2>All leave records</h2>
+      <div class="ose-records-wrap">
+        <table class="ose-records-table">
+          <thead>
+            <tr><th>Name</th><th>Leave Type</th><th>Start Date</th><th>End Date</th><th>Reason</th></tr>
+          </thead>
+          <tbody id="ose-leave-list-body"><tr><td class="ose-records-empty" colspan="5">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+  <script>
+  (function () {
+    var API_META = {{ api_ose_meta_href | tojson }};
+    var API_LIST = {{ api_ose_leave_list_href | tojson }};
+    var API_SUBMIT = {{ api_ose_submit_leave_href | tojson }};
+    function fillSelectOptions(sel, items, placeholder) {
+      if (!sel) return;
+      sel.innerHTML = "";
+      var ph = document.createElement("option");
+      ph.value = ""; ph.textContent = placeholder || "Select…"; ph.disabled = true; ph.selected = true;
+      sel.appendChild(ph);
+      for (var i = 0; i < items.length; i++) {
+        var opt = document.createElement("option");
+        opt.value = items[i]; opt.textContent = items[i];
+        sel.appendChild(opt);
+      }
+    }
+    function renderLeaveList(data) {
+      var body = document.getElementById("ose-leave-list-body");
+      if (!body) return;
+      body.innerHTML = "";
+      var items = (data && data.items) || [];
+      if (!items.length) {
+        var row = document.createElement("tr");
+        var cell = document.createElement("td");
+        cell.className = "ose-records-empty"; cell.colSpan = 5; cell.textContent = "No leave records.";
+        row.appendChild(cell); body.appendChild(row); return;
+      }
+      for (var i = 0; i < items.length; i++) {
+        var it = items[i];
+        var tr = document.createElement("tr");
+        [it.name, it.leave_type, it.start_date, it.end_date, it.reason].forEach(function (val) {
+          var td = document.createElement("td");
+          td.textContent = val || "";
+          tr.appendChild(td);
+        });
+        body.appendChild(tr);
+      }
+    }
+    function loadLeaveList() {
+      fetch(API_LIST).then(function (r) { return r.json(); }).then(renderLeaveList).catch(function () {
+        renderLeaveList({ items: [] });
       });
+    }
+    fetch(API_META).then(function (r) { return r.json(); }).then(function (meta) {
+      if (!meta || !meta.ok) throw new Error((meta && meta.error) || "Failed to load options");
+      fillSelectOptions(document.getElementById("ose-leave-name"), meta.leave_names || [], "Select name");
+      fillSelectOptions(document.getElementById("ose-leave-type"), meta.leave_types || [], "Select leave type");
+    }).catch(function (e) {
+      var msg = document.getElementById("ose-leave-msg");
+      if (msg) msg.textContent = String(e);
     });
-    document.querySelectorAll(".ose-modal-backdrop").forEach(function (backdrop) {
-      backdrop.addEventListener("click", function (ev) {
-        if (ev.target === backdrop) backdrop.hidden = true;
-      });
-    });
-    var leaveForm = document.getElementById("ose-leave-form");
-    if (leaveForm) {
-      leaveForm.addEventListener("submit", function (ev) {
+    loadLeaveList();
+    var form = document.getElementById("ose-leave-form");
+    if (form) {
+      form.addEventListener("submit", function (ev) {
         ev.preventDefault();
         var msg = document.getElementById("ose-leave-msg");
         var payload = {
@@ -1612,24 +1558,135 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
           end_date: document.getElementById("ose-leave-end").value,
           reason: document.getElementById("ose-leave-reason").value
         };
-        fetch(API_OSE_SUBMIT_LEAVE, {
+        fetch(API_SUBMIT, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload)
         }).then(function (r) { return r.json(); }).then(function (data) {
           if (!data || !data.ok) throw new Error((data && data.error) || "Submit failed");
           if (msg) { msg.textContent = "Leave submitted."; msg.className = "ose-form-msg ok"; }
-          leaveForm.reset();
-          loadLeaveNamesCalendar();
-          loadMonth();
+          form.reset();
+          loadLeaveList();
         }).catch(function (e) {
           if (msg) { msg.textContent = String(e); msg.className = "ose-form-msg"; }
         });
       });
     }
-    var offsetForm = document.getElementById("ose-offset-form");
-    if (offsetForm) {
-      offsetForm.addEventListener("submit", function (ev) {
+  })();
+  </script>
+</body>
+</html>
+"""
+
+_OSE_SUBMIT_OFFSET_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Submit Offset</title>
+  <style>""" + _OSE_FORM_PAGE_CSS + """</style>
+</head>
+<body>
+  <header class="ose-form-page-header">
+    <a class="ose-back-btn" href="{{ back_href }}">← Back</a>
+    <h1>Submit Offset</h1>
+  </header>
+  <main class="ose-form-page">
+    <section class="ose-form-card">
+      <form id="ose-offset-form" class="ose-form-grid">
+        <label>Request Person
+          <select name="request_person" id="ose-offset-req" required></select>
+        </label>
+        <label>Exchange Person
+          <select name="exchange_person" id="ose-offset-exc" required></select>
+        </label>
+        <label>Shift Type
+          <select name="shift_type" id="ose-offset-shift" required></select>
+        </label>
+        <label>Original Date
+          <input type="date" name="original_date" id="ose-offset-orig" required/>
+        </label>
+        <label>Exchange Date
+          <input type="date" name="exchange_date" id="ose-offset-xchg" required/>
+        </label>
+        <label class="full">Reason
+          <textarea name="reason" id="ose-offset-reason" required></textarea>
+        </label>
+        <div class="ose-form-actions full">
+          <button type="submit" class="ose-submit-btn">Submit</button>
+        </div>
+      </form>
+      <p class="ose-form-msg" id="ose-offset-msg"></p>
+    </section>
+    <section class="ose-records-card">
+      <h2>All offset records</h2>
+      <div class="ose-records-wrap">
+        <table class="ose-records-table">
+          <thead>
+            <tr><th>Request Date</th><th>Request Person</th><th>Exchange Person</th><th>Shift</th><th>Original Date</th><th>Exchange Date</th><th>Reason</th></tr>
+          </thead>
+          <tbody id="ose-offset-list-body"><tr><td class="ose-records-empty" colspan="7">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+  <script>
+  (function () {
+    var API_META = {{ api_ose_meta_href | tojson }};
+    var API_LIST = {{ api_ose_offset_list_href | tojson }};
+    var API_SUBMIT = {{ api_ose_submit_offset_href | tojson }};
+    function fillSelectOptions(sel, items, placeholder) {
+      if (!sel) return;
+      sel.innerHTML = "";
+      var ph = document.createElement("option");
+      ph.value = ""; ph.textContent = placeholder || "Select…"; ph.disabled = true; ph.selected = true;
+      sel.appendChild(ph);
+      for (var i = 0; i < items.length; i++) {
+        var opt = document.createElement("option");
+        opt.value = items[i]; opt.textContent = items[i];
+        sel.appendChild(opt);
+      }
+    }
+    function renderOffsetList(data) {
+      var body = document.getElementById("ose-offset-list-body");
+      if (!body) return;
+      body.innerHTML = "";
+      var items = (data && data.items) || [];
+      if (!items.length) {
+        var row = document.createElement("tr");
+        var cell = document.createElement("td");
+        cell.className = "ose-records-empty"; cell.colSpan = 7; cell.textContent = "No offset records.";
+        row.appendChild(cell); body.appendChild(row); return;
+      }
+      for (var i = 0; i < items.length; i++) {
+        var it = items[i];
+        var tr = document.createElement("tr");
+        [it.request_date, it.request_person, it.exchange_person, it.shift_type, it.original_date, it.exchange_date, it.reason].forEach(function (val) {
+          var td = document.createElement("td");
+          td.textContent = val || "";
+          tr.appendChild(td);
+        });
+        body.appendChild(tr);
+      }
+    }
+    function loadOffsetList() {
+      fetch(API_LIST).then(function (r) { return r.json(); }).then(renderOffsetList).catch(function () {
+        renderOffsetList({ items: [] });
+      });
+    }
+    fetch(API_META).then(function (r) { return r.json(); }).then(function (meta) {
+      if (!meta || !meta.ok) throw new Error((meta && meta.error) || "Failed to load options");
+      fillSelectOptions(document.getElementById("ose-offset-req"), meta.offset_names || [], "Select request person");
+      fillSelectOptions(document.getElementById("ose-offset-exc"), meta.offset_names || [], "Select exchange person");
+      fillSelectOptions(document.getElementById("ose-offset-shift"), meta.shift_types || [], "Select shift");
+    }).catch(function (e) {
+      var msg = document.getElementById("ose-offset-msg");
+      if (msg) msg.textContent = String(e);
+    });
+    loadOffsetList();
+    var form = document.getElementById("ose-offset-form");
+    if (form) {
+      form.addEventListener("submit", function (ev) {
         ev.preventDefault();
         var msg = document.getElementById("ose-offset-msg");
         var payload = {
@@ -1640,25 +1697,20 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
           exchange_date: document.getElementById("ose-offset-xchg").value,
           reason: document.getElementById("ose-offset-reason").value
         };
-        fetch(API_OSE_SUBMIT_OFFSET, {
+        fetch(API_SUBMIT, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload)
         }).then(function (r) { return r.json(); }).then(function (data) {
           if (!data || !data.ok) throw new Error((data && data.error) || "Submit failed");
           if (msg) { msg.textContent = "Offset submitted."; msg.className = "ose-form-msg ok"; }
-          offsetForm.reset();
-          loadMonth();
+          form.reset();
+          loadOffsetList();
         }).catch(function (e) {
           if (msg) { msg.textContent = String(e); msg.className = "ose-form-msg"; }
         });
       });
     }
-
-    syncKindBar();
-    setYearLabel();
-    buildMonthButtons();
-    loadMonth();
   })();
   </script>
 </body>
@@ -2078,11 +2130,31 @@ def all_duty():
         _ALL_DUTY_PAGE,
         back_href=url_for("wm.index"),
         api_calendar_href=url_for("wm.api_duty_calendar"),
-        api_ose_meta_href=url_for("wm.api_ose_submit_meta"),
-        api_ose_leave_cal_href=url_for("wm.api_ose_leave_calendar"),
-        api_ose_submit_leave_href=url_for("wm.api_ose_submit_leave"),
-        api_ose_submit_offset_href=url_for("wm.api_ose_submit_offset"),
+        ose_submit_leave_href=url_for("wm.ose_submit_leave_page"),
+        ose_submit_offset_href=url_for("wm.ose_submit_offset_page"),
         initial_kind=raw,
+    )
+
+
+@wm_bp.get("/all-duty/ose/submit-leave")
+def ose_submit_leave_page():
+    return render_template_string(
+        _OSE_SUBMIT_LEAVE_PAGE,
+        back_href=url_for("wm.all_duty", kind="ose"),
+        api_ose_meta_href=url_for("wm.api_ose_submit_meta"),
+        api_ose_leave_list_href=url_for("wm.api_ose_leave_list"),
+        api_ose_submit_leave_href=url_for("wm.api_ose_submit_leave"),
+    )
+
+
+@wm_bp.get("/all-duty/ose/submit-offset")
+def ose_submit_offset_page():
+    return render_template_string(
+        _OSE_SUBMIT_OFFSET_PAGE,
+        back_href=url_for("wm.all_duty", kind="ose"),
+        api_ose_meta_href=url_for("wm.api_ose_submit_meta"),
+        api_ose_offset_list_href=url_for("wm.api_ose_offset_list"),
+        api_ose_submit_offset_href=url_for("wm.api_ose_submit_offset"),
     )
 
 
@@ -2122,6 +2194,26 @@ def api_ose_submit_meta():
     import ose_Duty as od
 
     return jsonify(ok=True, **od.get_ose_submit_form_options())
+
+
+@wm_bp.get("/api/ose/leave-list")
+def api_ose_leave_list():
+    try:
+        import ose_Duty as od
+
+        return jsonify(od.get_ose_leave_records_list())
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 400
+
+
+@wm_bp.get("/api/ose/offset-list")
+def api_ose_offset_list():
+    try:
+        import ose_Duty as od
+
+        return jsonify(od.get_ose_offset_records_list())
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 400
 
 
 @wm_bp.get("/api/ose/leave-calendar")
