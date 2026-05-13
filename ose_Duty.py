@@ -547,7 +547,13 @@ def get_ose_month_calendar(year: int, month: int) -> dict[str, Any]:
 
 # Short-lived in-memory cache so morning card + /ose do not double-hit Bitable.
 # Set OSE_BITABLE_CACHE_SEC=0 to disable. Daily cron calls ``invalidate_ose_bitable_cache``.
-_OSE_BITABLE_RAW: dict[str, Any] = {"monotonic": 0.0, "leave": None, "offset": None, "person_ids": None}
+_OSE_BITABLE_RAW: dict[str, Any] = {
+    "monotonic": 0.0,
+    "leave": None,
+    "offset": None,
+    "person_ids": None,
+    "offset_person_options": None,
+}
 _OSE_BITABLE_TTL_SEC = int(os.getenv("OSE_BITABLE_CACHE_SEC", "120"))
 
 
@@ -556,6 +562,7 @@ def invalidate_ose_bitable_cache() -> None:
     _OSE_BITABLE_RAW["leave"] = None
     _OSE_BITABLE_RAW["offset"] = None
     _OSE_BITABLE_RAW["person_ids"] = None
+    _OSE_BITABLE_RAW["offset_person_options"] = None
     _OSE_BITABLE_RAW["monotonic"] = 0.0
 
 
@@ -990,14 +997,6 @@ def _build_ose_person_open_id_index(
     for it in offset_items:
         f = it.get("fields") or {}
         _index_person_field_value(
-            _get_field_by_aliases(f, ["Request Person", "Requester", "Requester Person", "Name"]),
-            idx,
-        )
-        _index_person_field_value(
-            _get_field_by_aliases(f, ["Exchange Person", "Replacement", "Swap Person"]),
-            idx,
-        )
-        _index_person_field_value(
             _get_field_by_aliases(f, ["Approver", "Approved By", "Approval Person"]),
             idx,
         )
@@ -1038,6 +1037,72 @@ def _person_field_value(name: str, *, token: str) -> list[dict[str, str]]:
             "Pick a name that already appears in leave/offset records."
         )
     return [{"id": open_id}]
+
+
+def _index_offset_person_option_value(v: Any, idx: dict[str, str]) -> None:
+    if not isinstance(v, str):
+        return
+    opt = v.strip()
+    if not opt:
+        return
+    nm = _title_name(opt)
+    idx[nm] = opt
+    nk = _name_key(nm)
+    if nk:
+        idx[nk] = opt
+    for roster in OSE_LEAVE_FORM_NAMES:
+        if _names_same_person(roster, opt):
+            roster_nm = _title_name(roster)
+            idx[roster_nm] = opt
+            roster_nk = _name_key(roster_nm)
+            if roster_nk:
+                idx[roster_nk] = opt
+
+
+def _build_ose_offset_person_option_index(offset_items: list[dict[str, Any]]) -> dict[str, str]:
+    idx: dict[str, str] = {}
+    for it in offset_items:
+        f = it.get("fields") or {}
+        _index_offset_person_option_value(
+            _get_field_by_aliases(f, ["Request Person", "Requester", "Requester Person", "Name"]),
+            idx,
+        )
+        _index_offset_person_option_value(
+            _get_field_by_aliases(f, ["Exchange Person", "Replacement", "Swap Person"]),
+            idx,
+        )
+    return idx
+
+
+def _get_ose_offset_person_option_index(token: str) -> dict[str, str]:
+    cached = _OSE_BITABLE_RAW.get("offset_person_options")
+    if isinstance(cached, dict):
+        return cached
+    _, offset = _get_bitable_raw_pair(token)
+    idx = _build_ose_offset_person_option_index(offset)
+    _OSE_BITABLE_RAW["offset_person_options"] = idx
+    return idx
+
+
+def _lookup_offset_person_option(name: str, idx: dict[str, str]) -> str:
+    nm = _title_name(name)
+    if not nm:
+        return ""
+    direct = idx.get(nm) or idx.get(_name_key(nm))
+    if direct:
+        return direct
+    for key, opt in idx.items():
+        if _names_same_person(nm, key):
+            return opt
+    return ""
+
+
+def _offset_person_field_value(name: str, *, token: str) -> str:
+    nm = _title_name(name)
+    opt = _lookup_offset_person_option(nm, _get_ose_offset_person_option_index(token))
+    if opt:
+        return opt
+    return nm
 
 
 def get_ose_submit_form_options() -> dict[str, Any]:
@@ -1284,8 +1349,8 @@ def submit_ose_offset(
     token = get_tenant_access_token()
     today = date.today()
     fields: dict[str, Any] = {
-        "Request Person": _person_field_value(req, token=token),
-        "Exchange Person": _person_field_value(exc, token=token),
+        "Request Person": _offset_person_field_value(req, token=token),
+        "Exchange Person": _offset_person_field_value(exc, token=token),
         "Shift Type": st,
         "Original Date": _bitable_date_ms(original_date),
         "Exchange Date": _bitable_date_ms(exchange_date),
