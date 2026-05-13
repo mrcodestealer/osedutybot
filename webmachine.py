@@ -1426,6 +1426,7 @@ _OSE_FORM_PAGE_CSS = """
       border: 1px solid var(--line); background: #0f141c; color: var(--text);
     }
     .ose-form-grid textarea { min-height: 4.5rem; resize: vertical; }
+    .ose-date-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
     .ose-form-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.85rem; }
     .ose-submit-btn {
       font: inherit; font-size: 0.82rem; font-weight: 650; padding: 0.48rem 0.95rem; border-radius: 10px;
@@ -1467,10 +1468,16 @@ _OSE_SUBMIT_LEAVE_PAGE = """<!DOCTYPE html>
           <select name="leave_type" id="ose-leave-type" required></select>
         </label>
         <label>Start Date
-          <input type="date" name="start_date" id="ose-leave-start" required/>
+          <div class="ose-date-pair">
+            <select id="ose-leave-start-month" data-ose-month required aria-label="Start month"></select>
+            <select id="ose-leave-start-day" data-ose-day required aria-label="Start day"></select>
+          </div>
         </label>
         <label>End Date
-          <input type="date" name="end_date" id="ose-leave-end" required/>
+          <div class="ose-date-pair">
+            <select id="ose-leave-end-month" data-ose-month required aria-label="End month"></select>
+            <select id="ose-leave-end-day" data-ose-day required aria-label="End day"></select>
+          </div>
         </label>
         <label class="full">Reason
           <textarea name="reason" id="ose-leave-reason" required></textarea>
@@ -1502,14 +1509,46 @@ _OSE_SUBMIT_LEAVE_PAGE = """<!DOCTYPE html>
       if (!sel) return;
       sel.innerHTML = "";
       var ph = document.createElement("option");
-      ph.value = ""; ph.textContent = placeholder || "Select…"; ph.disabled = true; ph.selected = true;
+      ph.value = "";
+      ph.textContent = placeholder || "Select…";
+      ph.disabled = true;
+      ph.selected = true;
       sel.appendChild(ph);
       for (var i = 0; i < items.length; i++) {
         var opt = document.createElement("option");
-        opt.value = items[i]; opt.textContent = items[i];
+        opt.value = items[i];
+        opt.textContent = items[i];
         sel.appendChild(opt);
       }
     }
+    function initMonthDaySelects() {
+      var monthNames = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+      document.querySelectorAll("[data-ose-month]").forEach(function (sel) {
+        sel.innerHTML = "";
+        var mph = document.createElement("option");
+        mph.value = ""; mph.textContent = "Month"; mph.disabled = true; mph.selected = true;
+        sel.appendChild(mph);
+        for (var m = 1; m <= 12; m++) {
+          var mopt = document.createElement("option");
+          mopt.value = String(m);
+          mopt.textContent = monthNames[m - 1];
+          sel.appendChild(mopt);
+        }
+      });
+      document.querySelectorAll("[data-ose-day]").forEach(function (sel) {
+        sel.innerHTML = "";
+        var dph = document.createElement("option");
+        dph.value = ""; dph.textContent = "Day"; dph.disabled = true; dph.selected = true;
+        sel.appendChild(dph);
+        for (var d = 1; d <= 31; d++) {
+          var dopt = document.createElement("option");
+          dopt.value = String(d);
+          dopt.textContent = String(d);
+          sel.appendChild(dopt);
+        }
+      });
+    }
+    initMonthDaySelects();
     function renderLeaveList(data) {
       var body = document.getElementById("ose-leave-list-body");
       if (!body) return;
@@ -1554,8 +1593,10 @@ _OSE_SUBMIT_LEAVE_PAGE = """<!DOCTYPE html>
         var payload = {
           name: document.getElementById("ose-leave-name").value,
           leave_type: document.getElementById("ose-leave-type").value,
-          start_date: document.getElementById("ose-leave-start").value,
-          end_date: document.getElementById("ose-leave-end").value,
+          start_month: document.getElementById("ose-leave-start-month").value,
+          start_day: document.getElementById("ose-leave-start-day").value,
+          end_month: document.getElementById("ose-leave-end-month").value,
+          end_day: document.getElementById("ose-leave-end-day").value,
           reason: document.getElementById("ose-leave-reason").value
         };
         fetch(API_SUBMIT, {
@@ -1566,6 +1607,7 @@ _OSE_SUBMIT_LEAVE_PAGE = """<!DOCTYPE html>
           if (!data || !data.ok) throw new Error((data && data.error) || "Submit failed");
           if (msg) { msg.textContent = "Leave submitted."; msg.className = "ose-form-msg ok"; }
           form.reset();
+          initMonthDaySelects();
           loadLeaveList();
         }).catch(function (e) {
           if (msg) { msg.textContent = String(e); msg.className = "ose-form-msg"; }
@@ -1604,10 +1646,16 @@ _OSE_SUBMIT_OFFSET_PAGE = """<!DOCTYPE html>
           <select name="shift_type" id="ose-offset-shift" required></select>
         </label>
         <label>Original Date
-          <input type="date" name="original_date" id="ose-offset-orig" required/>
+          <div class="ose-date-pair">
+            <select id="ose-offset-orig-month" data-ose-month required aria-label="Original month"></select>
+            <select id="ose-offset-orig-day" data-ose-day required aria-label="Original day"></select>
+          </div>
         </label>
         <label>Exchange Date
-          <input type="date" name="exchange_date" id="ose-offset-xchg" required/>
+          <div class="ose-date-pair">
+            <select id="ose-offset-xchg-month" data-ose-month required aria-label="Exchange month"></select>
+            <select id="ose-offset-xchg-day" data-ose-day required aria-label="Exchange day"></select>
+          </div>
         </label>
         <label class="full">Reason
           <textarea name="reason" id="ose-offset-reason" required></textarea>
@@ -1639,14 +1687,46 @@ _OSE_SUBMIT_OFFSET_PAGE = """<!DOCTYPE html>
       if (!sel) return;
       sel.innerHTML = "";
       var ph = document.createElement("option");
-      ph.value = ""; ph.textContent = placeholder || "Select…"; ph.disabled = true; ph.selected = true;
+      ph.value = "";
+      ph.textContent = placeholder || "Select…";
+      ph.disabled = true;
+      ph.selected = true;
       sel.appendChild(ph);
       for (var i = 0; i < items.length; i++) {
         var opt = document.createElement("option");
-        opt.value = items[i]; opt.textContent = items[i];
+        opt.value = items[i];
+        opt.textContent = items[i];
         sel.appendChild(opt);
       }
     }
+    function initMonthDaySelects() {
+      var monthNames = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+      document.querySelectorAll("[data-ose-month]").forEach(function (sel) {
+        sel.innerHTML = "";
+        var mph = document.createElement("option");
+        mph.value = ""; mph.textContent = "Month"; mph.disabled = true; mph.selected = true;
+        sel.appendChild(mph);
+        for (var m = 1; m <= 12; m++) {
+          var mopt = document.createElement("option");
+          mopt.value = String(m);
+          mopt.textContent = monthNames[m - 1];
+          sel.appendChild(mopt);
+        }
+      });
+      document.querySelectorAll("[data-ose-day]").forEach(function (sel) {
+        sel.innerHTML = "";
+        var dph = document.createElement("option");
+        dph.value = ""; dph.textContent = "Day"; dph.disabled = true; dph.selected = true;
+        sel.appendChild(dph);
+        for (var d = 1; d <= 31; d++) {
+          var dopt = document.createElement("option");
+          dopt.value = String(d);
+          dopt.textContent = String(d);
+          sel.appendChild(dopt);
+        }
+      });
+    }
+    initMonthDaySelects();
     function renderOffsetList(data) {
       var body = document.getElementById("ose-offset-list-body");
       if (!body) return;
@@ -1693,8 +1773,10 @@ _OSE_SUBMIT_OFFSET_PAGE = """<!DOCTYPE html>
           request_person: document.getElementById("ose-offset-req").value,
           exchange_person: document.getElementById("ose-offset-exc").value,
           shift_type: document.getElementById("ose-offset-shift").value,
-          original_date: document.getElementById("ose-offset-orig").value,
-          exchange_date: document.getElementById("ose-offset-xchg").value,
+          original_month: document.getElementById("ose-offset-orig-month").value,
+          original_day: document.getElementById("ose-offset-orig-day").value,
+          exchange_month: document.getElementById("ose-offset-xchg-month").value,
+          exchange_day: document.getElementById("ose-offset-xchg-day").value,
           reason: document.getElementById("ose-offset-reason").value
         };
         fetch(API_SUBMIT, {
@@ -1705,6 +1787,7 @@ _OSE_SUBMIT_OFFSET_PAGE = """<!DOCTYPE html>
           if (!data || !data.ok) throw new Error((data && data.error) || "Submit failed");
           if (msg) { msg.textContent = "Offset submitted."; msg.className = "ose-form-msg ok"; }
           form.reset();
+          initMonthDaySelects();
           loadOffsetList();
         }).catch(function (e) {
           if (msg) { msg.textContent = String(e); msg.className = "ose-form-msg"; }
@@ -2240,8 +2323,16 @@ def api_ose_submit_leave():
         out = od.submit_ose_leave(
             name=str(body.get("name") or ""),
             leave_type=str(body.get("leave_type") or ""),
-            start_date=od._parse_iso_date(str(body.get("start_date") or "")),
-            end_date=od._parse_iso_date(str(body.get("end_date") or "")),
+            start_date=od._resolve_submit_date(
+                month=body.get("start_month"),
+                day=body.get("start_day"),
+                raw_date=str(body.get("start_date") or ""),
+            ),
+            end_date=od._resolve_submit_date(
+                month=body.get("end_month"),
+                day=body.get("end_day"),
+                raw_date=str(body.get("end_date") or ""),
+            ),
             reason=str(body.get("reason") or ""),
         )
         return jsonify(out)
@@ -2259,8 +2350,16 @@ def api_ose_submit_offset():
             request_person=str(body.get("request_person") or ""),
             exchange_person=str(body.get("exchange_person") or ""),
             shift_type=str(body.get("shift_type") or ""),
-            original_date=od._parse_iso_date(str(body.get("original_date") or "")),
-            exchange_date=od._parse_iso_date(str(body.get("exchange_date") or "")),
+            original_date=od._resolve_submit_date(
+                month=body.get("original_month"),
+                day=body.get("original_day"),
+                raw_date=str(body.get("original_date") or ""),
+            ),
+            exchange_date=od._resolve_submit_date(
+                month=body.get("exchange_month"),
+                day=body.get("exchange_day"),
+                raw_date=str(body.get("exchange_date") or ""),
+            ),
             reason=str(body.get("reason") or ""),
         )
         return jsonify(out)

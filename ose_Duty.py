@@ -1099,6 +1099,29 @@ def _parse_iso_date(raw: str) -> date:
         raise ValueError(f"invalid date {raw!r} (use YYYY-MM-DD)") from e
 
 
+def _parse_submit_day_month(*, month: Any, day: Any, year: Optional[int] = None) -> date:
+    try:
+        m = int(month)
+        d = int(day)
+    except (TypeError, ValueError) as e:
+        raise ValueError("month and day are required") from e
+    y = int(year) if year is not None else date.today().year
+    if m < 1 or m > 12:
+        raise ValueError("month must be 1–12")
+    _, last = calendar.monthrange(y, m)
+    if d < 1 or d > last:
+        raise ValueError(f"invalid day {d} for month {m}/{y}")
+    return date(y, m, d)
+
+
+def _resolve_submit_date(*, month: Any, day: Any, raw_date: str = "", year: Optional[int] = None) -> date:
+    m_s = "" if month is None else str(month).strip()
+    d_s = "" if day is None else str(day).strip()
+    if m_s and d_s:
+        return _parse_submit_day_month(month=m_s, day=d_s, year=year)
+    return _parse_iso_date(raw_date)
+
+
 def submit_ose_leave(
     *,
     name: str,
