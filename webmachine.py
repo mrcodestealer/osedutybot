@@ -51,8 +51,10 @@ Env: ``WEBMACHINE_PORT``, ``WEBMACHINE_HOST``, ``WEBMACHINE_TITLE``, ``WEBMACHIN
 from __future__ import annotations
 
 import calendar
+import importlib
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -109,6 +111,8 @@ _PAGE = """<!DOCTYPE html>
       text-decoration: none; display: inline-block; flex-shrink: 0; align-self: flex-start;
     }
     a.wm-head-nav-btn:hover { text-decoration: none; }
+    .wm-head-nav-group { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 0.5rem; flex-shrink: 0; }
+    a.wm-head-nav-btn.active { border-color: var(--accent); background: rgba(59,130,246,.18); color: var(--text); }
     .wm-head-top { display: flex; flex-direction: column; align-items: flex-start; gap: 0.55rem; }
     .wm-head-title-btn {
       margin: 0; cursor: pointer; font: inherit;
@@ -212,7 +216,11 @@ _PAGE = """<!DOCTYPE html>
       <p class="wm-head-total">Total <span class="count">{{ row_total }}</span> of machines detected</p>
       <p class="wm-head-updated">Last Updated : {{ last_updated }}</p>
     </div>
-    <a class="wm-head-title-btn wm-head-nav-btn" href="{{ all_duty_href }}">All Duty</a>
+    <div class="wm-head-nav-group">
+      <a class="wm-head-title-btn wm-head-nav-btn active" href="{{ machine_status_href }}">Machine status</a>
+      <a class="wm-head-title-btn wm-head-nav-btn" href="{{ all_duty_href }}">All Duty</a>
+      <a class="wm-head-title-btn wm-head-nav-btn" href="{{ machine_encoder_href }}">Machine encoder</a>
+    </div>
   </header>
   <script>
   (function () {
@@ -813,6 +821,337 @@ def duty_calendar_payload(kind: str, year: int, month: int) -> dict[str, object]
     return {**base, "error": f"Unhandled kind: {kind!r}", "month_label": month_label}
 
 
+_ENCODER_SITE_DEFS: tuple[dict[str, str], ...] = (
+    {"key": "cp", "label": "CP", "module": "cp", "prefix": "OSM", "id_keywords": "assets number"},
+    {"key": "dhs", "label": "DHS", "module": "dhs", "prefix": "DHS", "id_keywords": "asset id"},
+    {"key": "mdr", "label": "MDR", "module": "mdr", "prefix": "MDR", "id_keywords": "asset id"},
+    {"key": "nch", "label": "NCH", "module": "nch", "prefix": "NCH", "id_keywords": "asset id"},
+    {"key": "nwr", "label": "NP", "module": "nwr", "prefix": "NWR", "id_keywords": "asset"},
+    {"key": "tbp", "label": "TBP", "module": "tbp", "prefix": "TBP", "id_keywords": "asset id"},
+    {"key": "wf", "label": "WF", "module": "winford", "prefix": "WF", "id_keywords": "asset"},
+)
+
+_ENCODER_CACHE: dict[str, object] = {"mono": 0.0, "items": None, "errors": {}}
+_ENCODER_CACHE_SEC = int(os.getenv("WEBMACHINE_ENCODER_CACHE_SEC", "120"))
+_encoder_lock = threading.Lock()
+
+
+def _encoder_locate_header_row(data: list[list[object]], keywords: tuple[str, ...]) -> tuple[int | None, list[object]]:
+    for i, row in enumerate(data or []):
+        if not row:
+            continue
+        for cell in row:
+            s = str(cell or "").strip().lower()
+            if any(k in s for k in keywords):
+                return i, row
+    return None, []
+
+
+def _encoder_map_columns(headers: list[object], columns: dict[str, str], id_keywords: tuple[str, ...]) -> tuple[dict[str, int], int | None]:
+    col_indexes: dict[str, int] = {}
+    for col_name in columns.values():
+        col_indexes[col_name] = -1
+        for idx, cell in enumerate(headers):
+            if cell and isinstance(cell, str) and col_name.lower() in cell.lower():
+                col_indexes[col_name] = idx
+                break
+    asset_col = None
+    for idx, cell in enumerate(headers):
+        if not cell or not isinstance(cell, str):
+            continue
+        s = cell.strip().lower()
+        if any(k in s for k in id_keywords):
+            asset_col = idx
+            break
+    return col_indexes, asset_col
+
+
+def _encoder_item_from_row(
+    *,
+    site_key: str,
+    site_label: str,
+    machine_prefix: str,
+    row: list[object],
+    col_indexes: dict[str, int],
+    asset_col: int,
+    extract_cell_value,
+) -> dict[str, object] | None:
+    if asset_col is None or asset_col < 0 or len(row) <= asset_col:
+        return None
+    cell_val = extract_cell_value(row[asset_col])
+    match = re.search(r"\d+", cell_val or "")
+    if not match:
+        return None
+    asset_id = match.group()
+    machine = f"{machine_prefix}{asset_id}"
+    fields: list[dict[str, str]] = []
+    for label, idx in col_indexes.items():
+        if idx is None or idx < 0:
+            continue
+        value = extract_cell_value(row[idx]) if len(row) > idx else ""
+        if value:
+            fields.append({"label": label, "value": value})
+    return {
+        "site": site_key,
+        "site_label": site_label,
+        "machine": machine,
+        "asset_id": asset_id,
+        "fields": fields,
+    }
+
+
+def _encoder_rows_from_columns_module(mod, spec: dict[str, str]) -> list[dict[str, object]]:
+    columns = getattr(mod, "COLUMNS", {})
+    if not columns:
+        return []
+    token = mod.get_tenant_access_token()
+    data = mod.get_all_sheet_data(token, mod.SPREADSHEET_TOKEN, mod.SHEET_ID)
+    if not data:
+        return []
+    id_keywords = tuple(k.strip() for k in spec["id_keywords"].split(",") if k.strip())
+    header_row, headers = _encoder_locate_header_row(data, id_keywords)
+    if header_row is None:
+        return []
+    col_indexes, asset_col = _encoder_map_columns(headers, columns, id_keywords)
+    if asset_col is None:
+        return []
+    out: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for row in data[header_row + 1 :]:
+        item = _encoder_item_from_row(
+            site_key=spec["key"],
+            site_label=spec["label"],
+            machine_prefix=spec["prefix"],
+            row=row,
+            col_indexes=col_indexes,
+            asset_col=asset_col,
+            extract_cell_value=mod.extract_cell_value,
+        )
+        if not item:
+            continue
+        dedupe = f"{spec['key']}:{item['asset_id']}"
+        if dedupe in seen:
+            continue
+        seen.add(dedupe)
+        out.append(item)
+    return out
+
+
+def _encoder_rows_nwr(mod) -> list[dict[str, object]]:
+    token = mod.get_tenant_access_token()
+    sheets = [
+        {
+            "spreadsheet_token": mod.FIRST_SPREADSHEET_TOKEN,
+            "sheet_id": mod.FIRST_SHEET_ID,
+            "required_fields": [
+                "Top Encoder", "Main Encoder", "Mini PC", "CCTV",
+                "TOP Streaming URL", "Main Streaming URL", "CCTV URL",
+            ],
+            "id_column_name": "Asset id",
+            "top_url_field": "TOP Streaming URL",
+        },
+        {
+            "spreadsheet_token": mod.SECOND_SPREADSHEET_TOKEN,
+            "sheet_id": mod.SECOND_SHEET_ID,
+            "required_fields": [
+                "Top Encoder", "Main Encoder", "Mini PC", "CCTV",
+                "Pool Streaming URL", "Main Streaming URL", "CCTV URL",
+            ],
+            "id_column_name": "Asset ID",
+            "top_url_field": "Pool Streaming URL",
+        },
+    ]
+    out: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for sheet in sheets:
+        data = mod.get_all_sheet_data(token, sheet["spreadsheet_token"], sheet["sheet_id"])
+        if not data:
+            continue
+        header_row, headers = _encoder_locate_header_row(
+            data,
+            tuple(f.lower() for f in sheet["required_fields"]) + ("asset",),
+        )
+        if header_row is None:
+            continue
+        col_map: dict[str, int] = {}
+        for field in sheet["required_fields"]:
+            col_map[field] = -1
+            for idx, col_name in enumerate(headers):
+                if col_name and field.lower() == str(col_name).strip().lower():
+                    col_map[field] = idx
+                    break
+        id_col = None
+        for idx, col_name in enumerate(headers):
+            if col_name and sheet["id_column_name"].lower() in str(col_name).strip().lower():
+                id_col = idx
+                break
+        if id_col is None:
+            continue
+        for row in data[header_row + 1 :]:
+            cell_val = mod.extract_cell_value(row[id_col]) if len(row) > id_col else ""
+            match = re.search(r"\d+", cell_val or "")
+            if not match:
+                continue
+            asset_id = match.group()
+            dedupe = f"nwr:{asset_id}"
+            if dedupe in seen:
+                continue
+            seen.add(dedupe)
+            fields: list[dict[str, str]] = []
+            for field, idx in col_map.items():
+                if idx < 0:
+                    continue
+                value = mod.extract_cell_value(row[idx]) if len(row) > idx else ""
+                if value:
+                    fields.append({"label": field, "value": value})
+            out.append(
+                {
+                    "site": "nwr",
+                    "site_label": "NP",
+                    "machine": f"NWR{asset_id}",
+                    "asset_id": asset_id,
+                    "fields": fields,
+                }
+            )
+    return out
+
+
+def _encoder_rows_winford(mod) -> list[dict[str, object]]:
+    required_fields = [
+        "Top Encoder", "Main Encoder", "Mini PC", "CCTV",
+        "TOP video URL", "Main Video URL", "CCTV Link",
+    ]
+    token = mod.get_tenant_access_token()
+    data = mod.get_all_sheet_data(token)
+    if not data:
+        return []
+    header_row, headers = _encoder_locate_header_row(
+        data,
+        tuple(f.lower() for f in required_fields) + ("asset",),
+    )
+    if header_row is None:
+        return []
+    col_map: dict[str, int] = {}
+    for field in required_fields:
+        col_map[field] = -1
+        for idx, col_name in enumerate(headers):
+            if col_name and field.lower() == str(col_name).strip().lower():
+                col_map[field] = idx
+                break
+    asset_col = None
+    for idx, col_name in enumerate(headers):
+        if col_name and "asset" in str(col_name).strip().lower() and "id" in str(col_name).strip().lower():
+            asset_col = idx
+            break
+    if asset_col is None:
+        return []
+    out: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for row in data[header_row + 1 :]:
+        cell_val = mod.extract_cell_value(row[asset_col]) if len(row) > asset_col else ""
+        match = re.search(r"\d+", cell_val or "")
+        if not match:
+            continue
+        asset_id = match.group()
+        if asset_id in seen:
+            continue
+        seen.add(asset_id)
+        fields: list[dict[str, str]] = []
+        for field, idx in col_map.items():
+            if idx < 0:
+                continue
+            value = mod.extract_cell_value(row[idx]) if len(row) > idx else ""
+            if value:
+                fields.append({"label": field, "value": value})
+        out.append(
+            {
+                "site": "wf",
+                "site_label": "WF",
+                "machine": f"WF{asset_id}",
+                "asset_id": asset_id,
+                "fields": fields,
+            }
+        )
+    return out
+
+
+def _encoder_collect_all(*, force_refresh: bool = False) -> tuple[list[dict[str, object]], dict[str, str]]:
+    now = time.monotonic()
+    with _encoder_lock:
+        cached_items = _ENCODER_CACHE.get("items")
+        if (
+            not force_refresh
+            and isinstance(cached_items, list)
+            and now - float(_ENCODER_CACHE.get("mono") or 0.0) < _ENCODER_CACHE_SEC
+        ):
+            return list(cached_items), dict(_ENCODER_CACHE.get("errors") or {})
+    items: list[dict[str, object]] = []
+    errors: dict[str, str] = {}
+    for spec in _ENCODER_SITE_DEFS:
+        key = spec["key"]
+        try:
+            mod = importlib.import_module(spec["module"])
+            if key == "nwr":
+                part = _encoder_rows_nwr(mod)
+            elif key == "wf":
+                part = _encoder_rows_winford(mod)
+            else:
+                part = _encoder_rows_from_columns_module(mod, spec)
+            items.extend(part)
+        except Exception as e:
+            errors[key] = str(e)
+    items.sort(key=lambda r: (str(r.get("site_label") or ""), str(r.get("machine") or "")))
+    with _encoder_lock:
+        _ENCODER_CACHE["items"] = list(items)
+        _ENCODER_CACHE["errors"] = dict(errors)
+        _ENCODER_CACHE["mono"] = now
+    return items, errors
+
+
+def _encoder_filter_items(
+    items: list[dict[str, object]],
+    *,
+    site: str = "",
+    query: str = "",
+) -> list[dict[str, object]]:
+    site_key = (site or "").strip().lower()
+    q = (query or "").strip().lower()
+    out: list[dict[str, object]] = []
+    for item in items:
+        if site_key and str(item.get("site") or "").lower() != site_key:
+            continue
+        if q:
+            hay = " ".join(
+                [
+                    str(item.get("machine") or ""),
+                    str(item.get("site_label") or ""),
+                    " ".join(
+                        f"{f.get('label', '')} {f.get('value', '')}"
+                        for f in (item.get("fields") or [])
+                        if isinstance(f, dict)
+                    ),
+                ]
+            ).lower()
+            if q not in hay:
+                continue
+        out.append(item)
+    return out
+
+
+def machine_encoder_payload(*, site: str = "", query: str = "", force_refresh: bool = False) -> dict[str, object]:
+    items, errors = _encoder_collect_all(force_refresh=force_refresh)
+    filtered = _encoder_filter_items(items, site=site, query=query)
+    return {
+        "ok": True,
+        "count": len(filtered),
+        "total": len(items),
+        "items": filtered,
+        "errors": errors,
+        "sites": [{"key": s["key"], "label": s["label"]} for s in _ENCODER_SITE_DEFS],
+    }
+
+
+
 _ALL_DUTY_PAGE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -847,6 +1186,8 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
       transition: border-color .15s, background .15s, box-shadow .15s;
     }
     a.wm-head-title-btn:hover { border-color: var(--accent); background: rgba(59,130,246,.12); box-shadow: 0 0 0 3px rgba(59,130,246,.15); text-decoration: none; }
+    .wm-head-nav-group { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 0.5rem; flex-shrink: 0; }
+    a.wm-head-nav-btn.active { border-color: var(--accent); background: rgba(59,130,246,.18); color: var(--text); }
     .duty-kind-bar {
       display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-bottom: 1rem;
       padding: 0.5rem 0.55rem; border-radius: 12px; border: 1px solid var(--line); background: rgba(21,27,38,.65);
@@ -995,7 +1336,11 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
     <div class="ose-hero">
       <h1>All Duty</h1>
     </div>
-    <a class="wm-head-title-btn" href="{{ back_href }}">Machine status</a>
+    <div class="wm-head-nav-group">
+      <a class="wm-head-title-btn wm-head-nav-btn" href="{{ machine_status_href }}">Machine status</a>
+      <a class="wm-head-title-btn wm-head-nav-btn active" href="{{ all_duty_href }}">All Duty</a>
+      <a class="wm-head-title-btn wm-head-nav-btn" href="{{ machine_encoder_href }}">Machine encoder</a>
+    </div>
   </header>
   <main class="ose-main" id="ose-main">
     <nav class="duty-kind-bar" id="duty-kind-bar" aria-label="Duty roster">
@@ -2015,6 +2360,218 @@ _OSE_SUBMIT_OFFSET_PAGE = """<!DOCTYPE html>
 </html>
 """
 
+
+_ENCODER_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Machine encoder</title>
+  <style>
+    :root {
+      --bg: #0b0f14; --card: #151b26; --elev: #1c2533; --text: #e8edf4; --muted: #8b9cb3;
+      --accent: #3b82f6; --line: #2a3544;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: radial-gradient(1200px 600px at 10% -10%, rgba(59,130,246,.12), transparent), var(--bg);
+      color: var(--text); min-height: 100vh;
+    }
+    header.wm-header-bar {
+      padding: 1.1rem 1.35rem; border-bottom: 1px solid var(--line);
+      display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 1rem;
+    }
+    .wm-encoder-hero h1 { margin: 0; font-size: 1.35rem; font-weight: 700; letter-spacing: -0.02em; }
+    a.wm-head-title-btn {
+      text-decoration: none; display: inline-block; flex-shrink: 0;
+      margin: 0; cursor: pointer; font: inherit; font-size: 0.95rem; font-weight: 650;
+      padding: 0.5rem 1rem; border-radius: 10px; border: 1px solid var(--line); background: var(--elev); color: var(--text);
+    }
+    a.wm-head-title-btn:hover { border-color: var(--accent); background: rgba(59,130,246,.12); text-decoration: none; }
+    .wm-head-nav-group { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 0.5rem; flex-shrink: 0; }
+    a.wm-head-nav-btn.active { border-color: var(--accent); background: rgba(59,130,246,.18); color: var(--text); }
+    main { padding: 1rem 1.35rem 2.5rem; max-width: 1280px; margin: 0 auto; width: 100%; }
+    .env-filter-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; margin-bottom: 0.75rem; }
+    .env-filter-btn {
+      font: inherit; font-size: 0.8rem; font-weight: 600;
+      padding: 0.4rem 0.8rem; border-radius: 999px; cursor: pointer; border: 1px solid var(--line);
+      background: var(--elev); color: var(--muted);
+    }
+    .env-filter-btn:hover { border-color: var(--accent); color: var(--text); }
+    .env-filter-btn.active { background: rgba(59,130,246,.25); border-color: var(--accent); color: var(--text); }
+    .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.65rem; margin-bottom: 0.85rem; }
+    .toolbar input[type="search"] {
+      flex: 1 1 220px; max-width: 420px; min-width: 180px;
+      padding: 0.55rem 0.85rem; border-radius: 10px; border: 1px solid var(--line);
+      background: #0f141c; color: var(--text); font-size: 0.92rem; outline: none;
+    }
+    .toolbar input[type="search"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(59,130,246,.2); }
+    .filter-hint { font-size: 0.78rem; color: var(--muted); }
+    .encoder-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 0.75rem; }
+    .encoder-card {
+      background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 0.85rem 0.95rem;
+    }
+    .encoder-card h3 { margin: 0 0 0.35rem; font-size: 0.98rem; }
+    .encoder-card .site { font-size: 0.72rem; color: var(--muted); margin-bottom: 0.55rem; }
+    .encoder-card dl { margin: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.35rem; }
+    .encoder-card dt { font-size: 0.68rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+    .encoder-card dd { margin: 0 0 0.15rem; font-size: 0.82rem; word-break: break-word; }
+    .encoder-empty { color: var(--muted); padding: 2rem 1rem; text-align: center; }
+    .encoder-warn { color: #fbbf24; font-size: 0.78rem; margin: 0 0 0.75rem; }
+    footer { padding: 1rem; text-align: center; color: var(--muted); font-size: 0.75rem; border-top: 1px solid var(--line); }
+  </style>
+</head>
+<body>
+  <header class="wm-header-bar">
+    <div class="wm-encoder-hero"><h1>Machine encoder</h1></div>
+    <div class="wm-head-nav-group">
+      <a class="wm-head-title-btn wm-head-nav-btn" href="{{ machine_status_href }}">Machine status</a>
+      <a class="wm-head-title-btn wm-head-nav-btn" href="{{ all_duty_href }}">All Duty</a>
+      <a class="wm-head-title-btn wm-head-nav-btn active" href="{{ machine_encoder_href }}">Machine encoder</a>
+    </div>
+  </header>
+  <main>
+    <div class="env-filter-bar" id="wm-encoder-sites" role="toolbar" aria-label="Encoder site"></div>
+    <div class="toolbar">
+      <input type="search" id="wm-encoder-search" placeholder="Search machine, encoder IP, streaming URL…" autocomplete="off" aria-label="Search encoders"/>
+      <button type="button" class="env-filter-btn" id="wm-encoder-refresh">Refresh</button>
+      <span class="filter-hint" id="wm-encoder-hint"></span>
+    </div>
+    <p class="encoder-warn" id="wm-encoder-warn" hidden></p>
+    <div class="encoder-grid" id="wm-encoder-grid"><div class="encoder-empty">Loading encoder data…</div></div>
+  </main>
+  <footer>API: <a href="{{ api_encoder_href }}">api/encoders</a></footer>
+  <script>
+  (function () {
+    var API = {{ api_encoder_href | tojson }};
+    var siteBar = document.getElementById("wm-encoder-sites");
+    var grid = document.getElementById("wm-encoder-grid");
+    var searchEl = document.getElementById("wm-encoder-search");
+    var hintEl = document.getElementById("wm-encoder-hint");
+    var warnEl = document.getElementById("wm-encoder-warn");
+    var refreshBtn = document.getElementById("wm-encoder-refresh");
+    var allItems = [];
+    var siteKey = "";
+    var sites = [];
+    function renderSites() {
+      if (!siteBar) return;
+      siteBar.innerHTML = "";
+      var allBtn = document.createElement("button");
+      allBtn.type = "button";
+      allBtn.className = "env-filter-btn" + (siteKey ? "" : " active");
+      allBtn.textContent = "Show all";
+      allBtn.setAttribute("data-site", "");
+      siteBar.appendChild(allBtn);
+      for (var i = 0; i < sites.length; i++) {
+        var s = sites[i];
+        var btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "env-filter-btn" + (siteKey === s.key ? " active" : "");
+        btn.textContent = s.label;
+        btn.setAttribute("data-site", s.key);
+        siteBar.appendChild(btn);
+      }
+    }
+    function renderGrid() {
+      if (!grid) return;
+      var q = (searchEl && searchEl.value || "").trim().toLowerCase();
+      var shown = [];
+      for (var i = 0; i < allItems.length; i++) {
+        var it = allItems[i];
+        if (siteKey && String(it.site || "") !== siteKey) continue;
+        if (q) {
+          var hay = (String(it.machine || "") + " " + String(it.site_label || "")).toLowerCase();
+          var fields = it.fields || [];
+          for (var j = 0; j < fields.length; j++) {
+            hay += " " + String(fields[j].label || "") + " " + String(fields[j].value || "");
+          }
+          if (hay.toLowerCase().indexOf(q) < 0) continue;
+        }
+        shown.push(it);
+      }
+      grid.innerHTML = "";
+      if (!shown.length) {
+        var empty = document.createElement("div");
+        empty.className = "encoder-empty";
+        empty.textContent = "No encoder records match the current filters.";
+        grid.appendChild(empty);
+      } else {
+        for (var k = 0; k < shown.length; k++) {
+          var item = shown[k];
+          var card = document.createElement("article");
+          card.className = "encoder-card";
+          var h = document.createElement("h3");
+          h.textContent = item.machine || "";
+          card.appendChild(h);
+          var site = document.createElement("div");
+          site.className = "site";
+          site.textContent = item.site_label || item.site || "";
+          card.appendChild(site);
+          var dl = document.createElement("dl");
+          var fields2 = item.fields || [];
+          for (var f = 0; f < fields2.length; f++) {
+            var row = fields2[f];
+            var dt = document.createElement("dt");
+            dt.textContent = row.label || "";
+            var dd = document.createElement("dd");
+            dd.textContent = row.value || "";
+            dl.appendChild(dt);
+            dl.appendChild(dd);
+          }
+          card.appendChild(dl);
+          grid.appendChild(card);
+        }
+      }
+      if (hintEl) hintEl.textContent = "Showing " + shown.length + " of " + allItems.length;
+    }
+    function applyPayload(data) {
+      allItems = (data && data.items) || [];
+      sites = (data && data.sites) || [];
+      var errs = data && data.errors;
+      if (warnEl) {
+        var keys = errs ? Object.keys(errs) : [];
+        if (keys.length) {
+          warnEl.hidden = false;
+          warnEl.textContent = "Some sites failed to load: " + keys.map(function (k) { return k + ": " + errs[k]; }).join("; ");
+        } else {
+          warnEl.hidden = true;
+          warnEl.textContent = "";
+        }
+      }
+      renderSites();
+      renderGrid();
+    }
+    function loadEncoders(forceRefresh) {
+      var url = API;
+      if (forceRefresh) url += (url.indexOf("?") >= 0 ? "&" : "?") + "refresh=1";
+      if (grid) grid.innerHTML = '<div class="encoder-empty">Loading encoder data…</div>';
+      if (refreshBtn) refreshBtn.disabled = true;
+      fetch(url).then(function (r) { return r.json(); }).then(applyPayload).catch(function (e) {
+        if (grid) grid.innerHTML = '<div class="encoder-empty">' + String(e) + '</div>';
+      }).finally(function () {
+        if (refreshBtn) refreshBtn.disabled = false;
+      });
+    }
+    if (siteBar) {
+      siteBar.addEventListener("click", function (ev) {
+        var btn = ev.target.closest("[data-site]");
+        if (!btn || !siteBar.contains(btn)) return;
+        siteKey = btn.getAttribute("data-site") || "";
+        renderSites();
+        renderGrid();
+      });
+    }
+    if (searchEl) searchEl.addEventListener("input", renderGrid);
+    if (refreshBtn) refreshBtn.addEventListener("click", function () { loadEncoders(true); });
+    loadEncoders(false);
+  })();
+  </script>
+</body>
+</html>
+"""
+
+
 _scrape_lock = threading.Lock()
 _scrape_rows: list[dict] = []
 _scrape_errs: dict[str, str] = {}
@@ -2415,7 +2972,30 @@ def index():
         stats_env=stats_env,
         refresh_sec=refresh_sec,
         api_href=url_for("wm.api_machines"),
+        machine_status_href=url_for("wm.index"),
         all_duty_href=url_for("wm.all_duty"),
+        machine_encoder_href=url_for("wm.machine_encoders"),
+    )
+
+
+@wm_bp.get("/machine-encoders")
+def machine_encoders():
+    return render_template_string(
+        _ENCODER_PAGE,
+        machine_status_href=url_for("wm.index"),
+        all_duty_href=url_for("wm.all_duty"),
+        machine_encoder_href=url_for("wm.machine_encoders"),
+        api_encoder_href=url_for("wm.api_encoders"),
+    )
+
+
+@wm_bp.get("/api/encoders")
+def api_encoders():
+    site = (request.args.get("site") or "").strip()
+    query = (request.args.get("q") or request.args.get("query") or "").strip()
+    force_refresh = (request.args.get("refresh") or "").strip().lower() in ("1", "true", "yes")
+    return jsonify(
+        machine_encoder_payload(site=site, query=query, force_refresh=force_refresh)
     )
 
 
@@ -2427,6 +3007,9 @@ def all_duty():
     return render_template_string(
         _ALL_DUTY_PAGE,
         back_href=url_for("wm.index"),
+        machine_status_href=url_for("wm.index"),
+        all_duty_href=url_for("wm.all_duty", kind=raw),
+        machine_encoder_href=url_for("wm.machine_encoders"),
         api_calendar_href=url_for("wm.api_duty_calendar"),
         ose_submit_leave_href=url_for("wm.ose_submit_leave_page"),
         ose_submit_offset_href=url_for("wm.ose_submit_offset_page"),
