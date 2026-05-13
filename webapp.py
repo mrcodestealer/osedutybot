@@ -4431,6 +4431,16 @@ def api_ose_submit_offset():
         return jsonify(ok=False, error=str(e)), 400
 
 
+def _ensure_flask_secret_key(flask_app: Flask) -> None:
+    key = (
+        str(flask_app.config.get("SECRET_KEY") or "").strip()
+        or (os.environ.get("WEBAPP_SECRET_KEY") or "").strip()
+        or (os.environ.get("APP_SECRET") or "").strip()
+        or "change-me"
+    )
+    flask_app.config["SECRET_KEY"] = key
+
+
 def register_webapp(flask_app: Flask, *, url_prefix: str | None = None) -> None:
     """
     Register routes on an existing Flask app (e.g. Duty ``main.app``).
@@ -4444,6 +4454,7 @@ def register_webapp(flask_app: Flask, *, url_prefix: str | None = None) -> None:
         "SECRET_KEY",
         os.environ.get("WEBAPP_SECRET_KEY") or os.environ.get("APP_SECRET") or "change-me",
     )
+    _ensure_flask_secret_key(flask_app)
     pref = (url_prefix or "").strip()
     if pref in ("", "/"):
         flask_app.register_blueprint(wm_bp)
@@ -4458,10 +4469,7 @@ register_webmachine = register_webapp
 
 
 app = Flask(__name__)
-app.config.setdefault(
-    "SECRET_KEY",
-    os.environ.get("WEBAPP_SECRET_KEY") or os.environ.get("APP_SECRET") or "change-me",
-)
+_ensure_flask_secret_key(app)
 register_webapp(app, url_prefix=None)
 
 

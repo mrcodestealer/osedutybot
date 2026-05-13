@@ -114,6 +114,10 @@ OSE_BOT_GROUP = os.getenv("OSE_BOT_GROUP")
 LARK_LEGACY_CARD_V1_ALLOW_MISSING_VERIFICATION_TOKEN=1
 
 app = Flask(__name__)
+app.config.setdefault(
+    "SECRET_KEY",
+    (os.environ.get("WEBAPP_SECRET_KEY") or os.environ.get("APP_SECRET") or "change-me").strip() or "change-me",
+)
 
 if not VERIFICATION_TOKEN:
     print(
