@@ -2782,10 +2782,12 @@ _ENCODER_PAGE = """<!DOCTYPE html>
           var fields2 = item.fields || [];
           for (var f = 0; f < fields2.length; f++) {
             var row = fields2[f];
+            var value = String(row.value || "").trim();
+            if (!value) continue;
             var dt = document.createElement("dt");
             dt.textContent = row.label || "";
             var dd = document.createElement("dd");
-            dd.textContent = row.value || "";
+            dd.textContent = value;
             dl.appendChild(dt);
             dl.appendChild(dd);
           }
