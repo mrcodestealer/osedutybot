@@ -39,7 +39,7 @@ Data sources:
 3. **Inline JSON** — ``WEBMACHINE_JSON='[...]'`` overrides file for fallback display only (no auto-create / no persist).
 
 Row keys (first match wins): **environment** (``PROD`` / ``QAT`` / ``UAT``); **belongs** (venue, e.g. ``CP``, ``MDR``);
-**name** / ``machine``; **status**; **online** / ``online_offline`` / ``state``. Optional boolean **is_test** (or ``(TEST)`` in the name) for dashboard counts.
+**name** / ``machine``; **game_type** / ``game``; **status**; **online** / ``online_offline`` / ``state``. Optional boolean **is_test** (or ``(TEST)`` in the name) for dashboard counts.
 
 The HTML dashboard shows **deployment** tabs (PROD / QAT / UAT), **global and per-belongs** totals, and a **search** box; ``GET /api/machines`` includes a **stats** object with the same numbers.
 
@@ -229,6 +229,7 @@ _PAGE = """<!DOCTYPE html>
     {% if rows %}
     <section class="panel" aria-label="Deployment tier">
       <div class="deployment-filter-bar" id="wm-dep-filters" role="toolbar" aria-label="Deployment tier">
+        <button type="button" class="env-filter-btn" data-wm-deployment="ALL">ALL</button>
         <button type="button" class="env-filter-btn active" data-wm-deployment="PROD">PROD</button>
         <button type="button" class="env-filter-btn" data-wm-deployment="QAT">QAT</button>
         <button type="button" class="env-filter-btn" data-wm-deployment="UAT">UAT</button>
@@ -277,7 +278,7 @@ _PAGE = """<!DOCTYPE html>
       <button type="button" class="env-filter-btn" data-wm-toggle="online">Online</button>
     </div>
     <div class="toolbar">
-      <input type="search" id="wm-search" placeholder="Search belongs, machine, status, online…" autocomplete="off" aria-label="Filter machines"/>
+      <input type="search" id="wm-search" placeholder="Search belongs, machine, game type, status, online…" autocomplete="off" aria-label="Filter machines"/>
       <span class="filter-hint" id="wm-filter-hint"></span>
     </div>
     <div class="table-wrap">
@@ -287,6 +288,7 @@ _PAGE = """<!DOCTYPE html>
           <th>Environment</th>
           <th>Belongs</th>
           <th>Machine name</th>
+          <th>Game Type</th>
           <th>Test</th>
           <th>Status</th>
           <th>Online / Offline</th>
@@ -294,7 +296,7 @@ _PAGE = """<!DOCTYPE html>
       </thead>
       <tbody id="wm-tbody">
         {% for r in rows %}
-        <tr data-deployment="{{ r.environment|e }}" data-belongs="{{ r.belongs|e }}" data-name="{{ r.name|e }}" data-status="{{ r.status|e }}" data-online="{{ r.online_label|e }}"
+        <tr data-deployment="{{ r.environment|e }}" data-belongs="{{ r.belongs|e }}" data-name="{{ r.name|e }}" data-game-type="{{ r.game_type|e }}" data-status="{{ r.status|e }}" data-online="{{ r.online_label|e }}"
             data-test="{% if r.is_test %}1{% else %}0{% endif %}"
             data-maint="{% if 'maintain' in ((r.status or '')|lower) %}1{% else %}0{% endif %}"
             data-offline="{% if r.pill_class == 'pill-offline' %}1{% else %}0{% endif %}"
@@ -302,6 +304,7 @@ _PAGE = """<!DOCTYPE html>
           <td>{{ r.environment }}</td>
           <td>{{ r.belongs }}</td>
           <td><strong>{{ r.name }}</strong></td>
+          <td>{{ r.game_type }}</td>
           <td>{% if r.is_test %}<span class="pill pill-test">TEST</span>{% else %}<span class="muted">—</span>{% endif %}</td>
           <td>
             {% set st = (r.status or '')|lower %}
@@ -341,6 +344,7 @@ _PAGE = """<!DOCTYPE html>
       }
 
       function matchesDeployment(tr) {
+        if (!depSel || depSel === "ALL") return true;
         return (tr.getAttribute("data-deployment") || "") === depSel;
       }
 
@@ -376,6 +380,7 @@ _PAGE = """<!DOCTYPE html>
 
       function rowVisible(tr, term) {
         var hay = (tr.getAttribute("data-belongs") || "") + " " + (tr.getAttribute("data-name") || "") + " " +
+          (tr.getAttribute("data-game-type") || "") + " " +
           (tr.getAttribute("data-status") || "") + " " + (tr.getAttribute("data-online") || "");
         hay = hay.toLowerCase();
         var textOk = !term || hay.indexOf(term) !== -1;
@@ -447,7 +452,8 @@ _PAGE = """<!DOCTYPE html>
           if (!belongsSel && !term && !anyRowFilt()) {
             hint.textContent = "";
           } else {
-            var label = [depSel];
+            var label = [];
+            if (depSel) label.push(depSel);
             if (belongsSel) label.push("belongs: " + belongsSel);
             if (filt.test) label.push("test");
             if (filt.maintain) label.push("maintain");
@@ -1412,6 +1418,7 @@ def _persist_scrape_to_data_file(rows: list[dict]) -> None:
                 "environment": r.get("environment"),
                 "belongs": r.get("belongs"),
                 "name": r.get("name"),
+                "game_type": r.get("game_type"),
                 "status": r.get("status"),
                 "online": r.get("online_raw") or r.get("online_label"),
                 "is_test": bool(r.get("is_test")),
@@ -1494,6 +1501,7 @@ def _normalize_rows(raw: object) -> list[dict]:
             else:
                 belongs = _cell(row, "site", "backend") or "—"
         name = _cell(row, "name", "machine", "machine_name", "id")
+        game_type = _cell(row, "game_type", "game", "game_name", "gameType")
         status = _cell(row, "status", "machine_status", "state_detail")
         online_raw = _cell(row, "online", "online_offline", "conn", "reachability")
         if not online_raw:
@@ -1507,6 +1515,7 @@ def _normalize_rows(raw: object) -> list[dict]:
                 "environment": deployment,
                 "belongs": belongs or "—",
                 "name": name or "—",
+                "game_type": game_type or "—",
                 "status": status or "—",
                 "online_label": label,
                 "online_raw": online_raw or "—",

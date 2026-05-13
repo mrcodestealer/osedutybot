@@ -263,8 +263,8 @@ def smachine_collect_rows_at_backend(
     dep_label = (deployment or "PROD").strip().upper() or "PROD"
     belong_label = (belongs or "—").strip() or "—"
     collected: list[dict] = []
-    seen: set[tuple[str, str, str]] = set()
     trunc_msg: str | None = None
+    expected_total: int | None = None
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=hl)
@@ -309,19 +309,17 @@ def smachine_collect_rows_at_backend(
 
             _go_first_page(page, timeout_ms=timeout_ms, max_steps=limit)
             _wait_table_idle(page, timeout_ms)
+            expected_total = _pagination_total_entries(page)
 
             next_clicks = 0
             while True:
-                for mn, test, st, onl in _collect_visible_table_machine_rows(page, timeout_ms=timeout_ms):
-                    key = (dep_label, belong_label, mn)
-                    if key in seen:
-                        continue
-                    seen.add(key)
+                for mn, test, game_type, st, onl in _collect_visible_table_machine_rows(page, timeout_ms=timeout_ms):
                     collected.append(
                         {
                             "environment": dep_label,
                             "belongs": belong_label,
                             "name": mn,
+                            "game_type": game_type,
                             "status": st,
                             "online": onl,
                             "is_test": test,
@@ -343,6 +341,12 @@ def smachine_collect_rows_at_backend(
                 _click_pagination_next(page, timeout_ms=timeout_ms)
                 next_clicks += 1
                 _wait_table_idle(page, timeout_ms)
+            if expected_total is not None and len(collected) < expected_total:
+                note = (
+                    f"table reports {expected_total} entries but collected {len(collected)} "
+                    f"for {belong_label} @ {dep_label}"
+                )
+                trunc_msg = f"{trunc_msg}; {note}" if trunc_msg else note
         finally:
             browser.close()
 
@@ -596,10 +600,10 @@ def _row_summary_label(row, *, timeout_ms: int) -> str:
     return _row_display_name(row)
 
 
-def _row_report_fields(row, *, timeout_ms: int) -> tuple[str, bool, str, str]:
+def _row_report_fields(row, *, timeout_ms: int) -> tuple[str, bool, str, str, str]:
     """
-    Machine name (col 1), test mode (``span.test`` and/or literal ``(TEST)``), Status (col 7),
-    Online/Offline (col 8). Returns ``(machine_name, is_test_mode, status_text, online_or_offline)``.
+    Machine name (col 1), test mode, Game Type (col 2), Status (col 7),
+    Online/Offline (col 8). Returns ``(machine_name, is_test_mode, game_type, status_text, online_or_offline)``.
     """
     cells = row.locator("td.el-table__cell")
     try:
@@ -610,6 +614,7 @@ def _row_report_fields(row, *, timeout_ms: int) -> tuple[str, bool, str, str]:
         is_test, name = _machine_name_cell_test_mode_and_display(cells.nth(1), timeout_ms=timeout_ms)
     else:
         is_test, name = False, ""
+    game_type = _cell_text_one_line(cells.nth(2), timeout_ms=timeout_ms) if n >= 3 else ""
     status = _cell_text_one_line(cells.nth(6), timeout_ms=timeout_ms) if n >= 7 else ""
     online_raw = _cell_text_one_line(cells.nth(7), timeout_ms=timeout_ms) if n >= 8 else ""
     ol = " ".join((online_raw or "").lower().split())
@@ -619,7 +624,7 @@ def _row_report_fields(row, *, timeout_ms: int) -> tuple[str, bool, str, str]:
         online_disp = "online"
     else:
         online_disp = online_raw or "(unknown)"
-    return name, is_test, status, online_disp
+    return name, is_test, game_type, status, online_disp
 
 
 def _norm_online_word(onl: str) -> str:
@@ -708,7 +713,7 @@ def _scan_targets_report_only(
             row = _find_row_for_target(page, kind, key, timeout_ms)
             if row is None:
                 continue
-            mn, test, st, onl = _row_report_fields(row, timeout_ms=timeout_ms)
+            mn, test, _gt, st, onl = _row_report_fields(row, timeout_ms=timeout_ms)
             found[(kind, key)] = (mn, test, st, onl)
             matched_this_page.append(spec)
 
@@ -853,14 +858,29 @@ def _verify_row_checkbox_checked(page, row, *, timeout_ms: int) -> bool:
         return False
 
 
-def _collect_visible_table_machine_rows(page, *, timeout_ms: int) -> list[tuple[str, bool, str, str]]:
-    """All data rows on the current page: ``(machine_name, is_test, status, online_word)``."""
+def _pagination_total_entries(page) -> int | None:
+    """Parse Element UI footer text like ``Showing 1 to 200 of 247 entries``."""
+    try:
+        txt = _pagination_root(page).inner_text(timeout=5_000) or ""
+    except Exception:
+        return None
+    m = re.search(r"of\s+([\d,]+)\s+entries", txt, re.I)
+    if not m:
+        return None
+    try:
+        return int(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _collect_visible_table_machine_rows(page, *, timeout_ms: int) -> list[tuple[str, bool, str, str, str]]:
+    """All data rows on the current page: ``(machine_name, is_test, game_type, status, online_word)``."""
     rows = _table_body_rows(page)
     try:
         rows.first.wait_for(state="visible", timeout=min(15_000, timeout_ms))
     except Exception:
         pass
-    out: list[tuple[str, bool, str, str]] = []
+    out: list[tuple[str, bool, str, str, str]] = []
     try:
         n = rows.count()
     except Exception:
@@ -868,13 +888,13 @@ def _collect_visible_table_machine_rows(page, *, timeout_ms: int) -> list[tuple[
     for i in range(n):
         row = rows.nth(i)
         try:
-            mn, test, st, onl = _row_report_fields(row, timeout_ms=timeout_ms)
+            mn, test, game_type, st, onl = _row_report_fields(row, timeout_ms=timeout_ms)
         except Exception:
             continue
         name = (mn or "").strip()
         if not name:
             continue
-        out.append((name, test, (st or "").strip(), (onl or "").strip()))
+        out.append((name, test, (game_type or "").strip(), (st or "").strip(), (onl or "").strip()))
     return out
 
 
