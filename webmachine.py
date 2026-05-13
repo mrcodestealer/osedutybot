@@ -1418,7 +1418,18 @@ _OSE_FORM_PAGE_CSS = """
       background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 1rem 1.1rem; margin-bottom: 1rem;
     }
     .ose-records-card h2 { margin: 0; font-size: 1rem; font-weight: 700; letter-spacing: -0.01em; }
-    .ose-records-hint { margin: 0.35rem 0 0.85rem; font-size: 0.75rem; color: var(--muted); line-height: 1.4; }
+    .ose-records-head {
+      display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
+      margin-bottom: 0.35rem;
+    }
+    .ose-records-refresh-btn {
+      font: inherit; font-size: 0.78rem; font-weight: 650; padding: 0.38rem 0.8rem; border-radius: 9px;
+      border: 1px solid rgba(196, 181, 253, 0.55); background: var(--ose-purple-bg); color: var(--ose-purple);
+      cursor: pointer; flex-shrink: 0;
+    }
+    .ose-records-refresh-btn:hover { border-color: var(--ose-purple); box-shadow: var(--ose-glow); }
+    .ose-records-refresh-btn:disabled { opacity: 0.65; cursor: wait; }
+    .ose-records-hint { margin: 0 0 0.85rem; font-size: 0.75rem; color: var(--muted); line-height: 1.4; }
     .ose-records-wrap {
       overflow: auto; max-height: min(70vh, 760px);
       border: 1px solid var(--line); border-radius: 12px;
@@ -1540,7 +1551,10 @@ _OSE_SUBMIT_LEAVE_PAGE = """<!DOCTYPE html>
       <p class="ose-form-msg" id="ose-leave-msg"></p>
     </section>
     <section class="ose-records-card">
-      <h2>All leave records</h2>
+      <div class="ose-records-head">
+        <h2>All leave records</h2>
+        <button type="button" class="ose-records-refresh-btn" id="ose-leave-refresh">Refresh</button>
+      </div>
       <p class="ose-records-hint">Scroll horizontally if needed. Empty fields show as —.</p>
       <div class="ose-records-wrap">
         <table class="ose-records-table">
@@ -1684,9 +1698,17 @@ _OSE_SUBMIT_LEAVE_PAGE = """<!DOCTYPE html>
         body.appendChild(tr);
       }
     }
-    function loadLeaveList() {
-      fetch(API_LIST).then(function (r) { return r.json(); }).then(renderLeaveList).catch(function () {
+    function loadLeaveList(forceRefresh) {
+      var body = document.getElementById("ose-leave-list-body");
+      var refreshBtn = document.getElementById("ose-leave-refresh");
+      var url = API_LIST;
+      if (forceRefresh) url += (url.indexOf("?") >= 0 ? "&" : "?") + "refresh=1";
+      if (body) body.innerHTML = '<tr><td class="ose-records-empty" colspan="9">Loading…</td></tr>';
+      if (refreshBtn) refreshBtn.disabled = true;
+      fetch(url).then(function (r) { return r.json(); }).then(renderLeaveList).catch(function () {
         renderLeaveList({ items: [] });
+      }).finally(function () {
+        if (refreshBtn) refreshBtn.disabled = false;
       });
     }
     fetch(API_META).then(function (r) { return r.json(); }).then(function (meta) {
@@ -1698,6 +1720,8 @@ _OSE_SUBMIT_LEAVE_PAGE = """<!DOCTYPE html>
       if (msg) msg.textContent = String(e);
     });
     loadLeaveList();
+    var leaveRefreshBtn = document.getElementById("ose-leave-refresh");
+    if (leaveRefreshBtn) leaveRefreshBtn.addEventListener("click", function () { loadLeaveList(true); });
     var form = document.getElementById("ose-leave-form");
     if (form) {
       form.addEventListener("submit", function (ev) {
@@ -1721,7 +1745,7 @@ _OSE_SUBMIT_LEAVE_PAGE = """<!DOCTYPE html>
           if (msg) { msg.textContent = "Leave submitted."; msg.className = "ose-form-msg ok"; }
           form.reset();
           initMonthDaySelects();
-          loadLeaveList();
+          loadLeaveList(true);
         }).catch(function (e) {
           if (msg) { msg.textContent = String(e); msg.className = "ose-form-msg"; }
         });
@@ -1780,7 +1804,10 @@ _OSE_SUBMIT_OFFSET_PAGE = """<!DOCTYPE html>
       <p class="ose-form-msg" id="ose-offset-msg"></p>
     </section>
     <section class="ose-records-card">
-      <h2>All offset records</h2>
+      <div class="ose-records-head">
+        <h2>All offset records</h2>
+        <button type="button" class="ose-records-refresh-btn" id="ose-offset-refresh">Refresh</button>
+      </div>
       <p class="ose-records-hint">Scroll horizontally if needed. Empty fields show as —.</p>
       <div class="ose-records-wrap">
         <table class="ose-records-table">
@@ -1929,9 +1956,17 @@ _OSE_SUBMIT_OFFSET_PAGE = """<!DOCTYPE html>
         body.appendChild(tr);
       }
     }
-    function loadOffsetList() {
-      fetch(API_LIST).then(function (r) { return r.json(); }).then(renderOffsetList).catch(function () {
+    function loadOffsetList(forceRefresh) {
+      var body = document.getElementById("ose-offset-list-body");
+      var refreshBtn = document.getElementById("ose-offset-refresh");
+      var url = API_LIST;
+      if (forceRefresh) url += (url.indexOf("?") >= 0 ? "&" : "?") + "refresh=1";
+      if (body) body.innerHTML = '<tr><td class="ose-records-empty" colspan="11">Loading…</td></tr>';
+      if (refreshBtn) refreshBtn.disabled = true;
+      fetch(url).then(function (r) { return r.json(); }).then(renderOffsetList).catch(function () {
         renderOffsetList({ items: [] });
+      }).finally(function () {
+        if (refreshBtn) refreshBtn.disabled = false;
       });
     }
     fetch(API_META).then(function (r) { return r.json(); }).then(function (meta) {
@@ -1944,6 +1979,8 @@ _OSE_SUBMIT_OFFSET_PAGE = """<!DOCTYPE html>
       if (msg) msg.textContent = String(e);
     });
     loadOffsetList();
+    var offsetRefreshBtn = document.getElementById("ose-offset-refresh");
+    if (offsetRefreshBtn) offsetRefreshBtn.addEventListener("click", function () { loadOffsetList(true); });
     var form = document.getElementById("ose-offset-form");
     if (form) {
       form.addEventListener("submit", function (ev) {
@@ -1968,7 +2005,7 @@ _OSE_SUBMIT_OFFSET_PAGE = """<!DOCTYPE html>
           if (msg) { msg.textContent = "Offset submitted."; msg.className = "ose-form-msg ok"; }
           form.reset();
           initMonthDaySelects();
-          loadOffsetList();
+          loadOffsetList(true);
         }).catch(function (e) {
           if (msg) { msg.textContent = String(e); msg.className = "ose-form-msg"; }
         });
@@ -2464,6 +2501,8 @@ def api_ose_leave_list():
     try:
         import ose_Duty as od
 
+        if (request.args.get("refresh") or "").strip().lower() in ("1", "true", "yes"):
+            od.invalidate_ose_bitable_cache()
         return jsonify(od.get_ose_leave_records_list())
     except Exception as e:
         return jsonify(ok=False, error=str(e)), 400
@@ -2474,6 +2513,8 @@ def api_ose_offset_list():
     try:
         import ose_Duty as od
 
+        if (request.args.get("refresh") or "").strip().lower() in ("1", "true", "yes"):
+            od.invalidate_ose_bitable_cache()
         return jsonify(od.get_ose_offset_records_list())
     except Exception as e:
         return jsonify(ok=False, error=str(e)), 400
