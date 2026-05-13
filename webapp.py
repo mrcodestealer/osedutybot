@@ -130,6 +130,10 @@ def _admin_session_who() -> str:
     return (session.get("admin_whologin") or "").strip()
 
 
+def _admin_session_open_id() -> str:
+    return (session.get("admin_open_id") or "").strip()
+
+
 def _ensure_admin_session_redirect():
     if not _admin_session_who():
         return redirect(url_for("wm.admin_login"))
@@ -4132,7 +4136,7 @@ def admin_login_submit():
     try:
         import ose_Duty as od
 
-        who = od.verify_webapp_admin_login(login_id, password)
+        ident = od.verify_webapp_admin_login(login_id, password)
     except ValueError:
         _track_admin_login_failure()
         return render_template_string(
@@ -4162,7 +4166,12 @@ def admin_login_submit():
             admin_login_action=url_for("wm.admin_login_submit"),
             main_page_href=url_for("wm.index"),
         )
-    session["admin_whologin"] = who
+    session["admin_whologin"] = ident["who"]
+    open_id = (ident.get("open_id") or "").strip()
+    if open_id:
+        session["admin_open_id"] = open_id
+    else:
+        session.pop("admin_open_id", None)
     _clear_admin_login_failures_for_current_ip()
     return redirect(url_for("wm.admin_leave"))
 
@@ -4200,6 +4209,7 @@ def admin_offset():
 @wm_bp.post("/admin/logout")
 def admin_logout():
     session.pop("admin_whologin", None)
+    session.pop("admin_open_id", None)
     return redirect(url_for("wm.index"))
 
 
@@ -4245,7 +4255,13 @@ def api_admin_leave_approve():
     try:
         import ose_Duty as od
 
-        out = od.update_ose_leave_approval(record_id=record_id, status=status, approver=who, remarks=remarks)
+        out = od.update_ose_leave_approval(
+            record_id=record_id,
+            status=status,
+            approver=who,
+            remarks=remarks,
+            approver_open_id=_admin_session_open_id(),
+        )
         return jsonify(out)
     except Exception as e:
         return jsonify(ok=False, error=str(e)), 400
@@ -4265,7 +4281,13 @@ def api_admin_offset_approve():
     try:
         import ose_Duty as od
 
-        out = od.update_ose_offset_approval(record_id=record_id, status=status, approver=who, remarks=remarks)
+        out = od.update_ose_offset_approval(
+            record_id=record_id,
+            status=status,
+            approver=who,
+            remarks=remarks,
+            approver_open_id=_admin_session_open_id(),
+        )
         return jsonify(out)
     except Exception as e:
         return jsonify(ok=False, error=str(e)), 400

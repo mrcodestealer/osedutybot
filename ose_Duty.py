@@ -1070,6 +1070,18 @@ def _person_field_value(name: str, *, token: str) -> list[dict[str, str]]:
     return [{"id": open_id}]
 
 
+def _approver_field_value(
+    approver: str,
+    *,
+    token: str,
+    approver_open_id: str = "",
+) -> list[dict[str, str]]:
+    pid = (approver_open_id or "").strip()
+    if pid:
+        return [{"id": pid}]
+    return _person_field_value(approver, token=token)
+
+
 def _index_offset_person_option_value(v: Any, idx: dict[str, str]) -> None:
     if not isinstance(v, str):
         return
@@ -1310,6 +1322,7 @@ def update_ose_leave_approval(
     approver: str,
     remarks: str = "",
     approval_date: Optional[date] = None,
+    approver_open_id: str = "",
 ) -> dict[str, Any]:
     st = (status or "").strip().title()
     if st not in ("Approved", "Rejected"):
@@ -1320,7 +1333,11 @@ def update_ose_leave_approval(
     token = get_tenant_access_token()
     fields: dict[str, Any] = {
         "Status": st,
-        "Approver": approver_s,
+        "Approver": _approver_field_value(
+            approver_s,
+            token=token,
+            approver_open_id=approver_open_id,
+        ),
         "Approval Date": _bitable_date_ms(approval_date or date.today()),
         "Remarks": (remarks or "").strip(),
     }
@@ -1336,6 +1353,7 @@ def update_ose_offset_approval(
     approver: str,
     remarks: str = "",
     approval_date: Optional[date] = None,
+    approver_open_id: str = "",
 ) -> dict[str, Any]:
     st = (status or "").strip().title()
     if st not in ("Approved", "Rejected"):
@@ -1346,7 +1364,11 @@ def update_ose_offset_approval(
     token = get_tenant_access_token()
     fields: dict[str, Any] = {
         "Approval Status": st,
-        "Approver": approver_s,
+        "Approver": _approver_field_value(
+            approver_s,
+            token=token,
+            approver_open_id=approver_open_id,
+        ),
         "Approval Date": _bitable_date_ms(approval_date or date.today()),
         "Remarks": (remarks or "").strip(),
     }
@@ -1371,26 +1393,36 @@ def _admin_page_env() -> tuple[str, str]:
     return app_token, table_id
 
 
-def _load_webapp_admin_credential_row() -> tuple[str, str, str]:
+def _admin_whologin_identity(v: Any) -> tuple[str, str]:
+    for item in _person_field_items(v):
+        pid = _person_item_open_id(item)
+        if pid:
+            return _title_name(_field_text(item)) or pid, pid
+    return _title_name(_field_text(v)), ""
+
+
+def _load_webapp_admin_credential_row() -> tuple[str, str, str, str]:
     app_token, table_id = _admin_page_env()
     token = get_tenant_access_token()
     records = _bitable_get_all_records(token, app_token, table_id)
     if not records:
         raise RuntimeError("Admin credential table has no rows")
     f = records[0].get("fields") or {}
-    who = _field_text(_get_field_by_aliases(f, ["whologin", "Who Login", "WhoLogin"]))
+    who, open_id = _admin_whologin_identity(
+        _get_field_by_aliases(f, ["whologin", "Who Login", "WhoLogin"])
+    )
     login = _field_text(_get_field_by_aliases(f, ["ID", "Id"]))
     pw = _field_text(_get_field_by_aliases(f, ["PASSWORD", "Password"]))
     if not login or not pw:
         raise RuntimeError("Admin credential row is missing ID or PASSWORD")
-    return who, login, pw
+    return who, login, pw, open_id
 
 
-def verify_webapp_admin_login(login_id: str, password: str) -> str:
-    who, expected_id, expected_pw = _load_webapp_admin_credential_row()
+def verify_webapp_admin_login(login_id: str, password: str) -> dict[str, str]:
+    who, expected_id, expected_pw, open_id = _load_webapp_admin_credential_row()
     if (login_id or "").strip() != expected_id or (password or "") != expected_pw:
         raise ValueError("Invalid admin ID or password")
-    return who or expected_id
+    return {"who": who or expected_id, "open_id": open_id}
 
 
 def get_ose_offset_records_list() -> dict[str, Any]:
