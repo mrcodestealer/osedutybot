@@ -43,7 +43,7 @@ Env:
 - ``SM_MACHINE_HEADLESS=1`` — headless Chromium (default: headed unless Linux without DISPLAY).
 - ``SM_MACHINE_STRICT_BACKWARD=1`` — do not re-tick on backward verify if checkboxes were cleared by paging (Element UI tables often drop selection across pages unless ``reserve-selection`` is enabled).
 
-Programmatic read-only export (for dashboards / ``webmachine``):
+Programmatic read-only export (for dashboards / ``webapp``):
 
 - ``smachine_collect_all_machine_rows(site, …)`` — one backend, all table pages (read-only); returns ``(rows, truncation_warning)``.
 - ``smachine_collect_machines_multi_sites()`` — all default backends (deduped by EGM URL); ``WEBMACHINE_SITES`` overrides.
@@ -153,7 +153,7 @@ def _osmslot_admin_credentials() -> tuple[str, str]:
 
 
 def _nonprod_backend_specs(deployment: str) -> list[dict[str, str | bool]]:
-    """QAT / UAT EGM backends on ``*.osmslot.org`` (see webmachine deployment tabs)."""
+    """QAT / UAT EGM backends on ``*.osmslot.org`` (see webapp deployment tabs)."""
     dep = (deployment or "").strip().upper()
     if dep not in ("QAT", "UAT"):
         return []
@@ -234,7 +234,7 @@ def smachine_collect_rows_at_backend(
 ) -> tuple[list[dict], str | None]:
     """
     Log in to one explicit EGM origin, optionally dismiss the QAT warning dialog, walk
-    ``/egm/egmStatusList`` (read-only), and return normalized rows for webmachine.
+    ``/egm/egmStatusList`` (read-only), and return normalized rows for webapp.
     """
     try:
         from playwright.sync_api import sync_playwright

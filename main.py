@@ -3180,33 +3180,33 @@ def _register_lark_webhook_duplicate_paths():
 _register_lark_webhook_duplicate_paths()
 
 
-def _try_mount_webmachine_blueprint() -> None:
+def _try_mount_webapp_blueprint() -> None:
     # Default: mount dashboard on this Flask app. Opt-out with WEBMACHINE_MOUNT_IN_MAIN=0|false|no|off
     # (avoids 404 on /wm/ when operators forget to set the env on the server).
     _v = (os.environ.get("WEBMACHINE_MOUNT_IN_MAIN") or "").strip().lower()
     if _v in ("0", "false", "no", "off"):
         return
     try:
-        import webmachine as _wm
+        import webapp as _wm
     except Exception as e:
-        print("[webmachine] optional mount skipped (import failed): %r" % (e,), flush=True)
+        print("[webapp] optional mount skipped (import failed): %r" % (e,), flush=True)
         return
     prefix = (os.environ.get("WEBMACHINE_URL_PREFIX") or "/wm").strip()
     if prefix and not prefix.startswith("/"):
         prefix = "/" + prefix
     try:
-        _wm.register_webmachine(app, url_prefix=prefix)
+        _wm.register_webapp(app, url_prefix=prefix)
         _wm.start_background_scrape_loop()
         print(
-            "[webmachine] dashboard registered at prefix %r (live scrape on by default; WEBMACHINE_SCRAPE=0 to disable)"
+            "[webapp] dashboard registered at prefix %r (live scrape on by default; WEBMACHINE_SCRAPE=0 to disable)"
             % prefix,
             flush=True,
         )
     except Exception as e:
-        print("[webmachine] optional mount failed: %r" % (e,), flush=True)
+        print("[webapp] optional mount failed: %r" % (e,), flush=True)
 
 
-_try_mount_webmachine_blueprint()
+_try_mount_webapp_blueprint()
 
 scheduler.start()
 atexit.register(lambda: scheduler.shutdown())
