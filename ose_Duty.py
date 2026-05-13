@@ -871,6 +871,203 @@ def get_ose_today_duty() -> str:
     return str(get_ose_payload_for_now().get("text") or "")
 
 
+OSE_LEAVE_FORM_NAMES: tuple[str, ...] = (
+    "Louie",
+    "Bryan Peh",
+    "Eduard James",
+    "Chrisjames",
+    "Augustine Si Yew",
+    "Man Chung",
+    "Jan Rei",
+    "Katleen",
+    "Lynette",
+    "Chun Chee",
+    "Renzel",
+    "Jun Chen",
+    "Justine Miguel",
+    "Kenneth",
+    "Jewel",
+    "Kheng Kwan",
+    "Kris Ng",
+    "Jeno",
+    "Faye",
+    "Shie Ni",
+    "Kwang Ming",
+)
+
+OSE_LEAVE_TYPES: tuple[str, ...] = (
+    "Sick Leave",
+    "Annual Leave",
+    "Compassionate Leave",
+    "Hospitalisation Leave",
+    "Marriage Leave",
+    "Maternity Leave",
+    "Non Pay Leave",
+    "Replacement Leave",
+)
+
+OSE_SHIFT_TYPES: tuple[str, ...] = ("N", "D")
+
+
+def _bitable_date_ms(d: date) -> int:
+    return int(datetime.combine(d, datetime.min.time()).timestamp() * 1000)
+
+
+def _bitable_create_record(token: str, table_id: str, fields: dict[str, Any]) -> dict[str, Any]:
+    url = (
+        f"https://open.larksuite.com/open-apis/bitable/v1/apps/"
+        f"{OSE_BASE_TOKEN}/tables/{table_id}/records"
+    )
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    res = requests.post(url, headers=headers, json={"fields": fields}, timeout=30).json()
+    if res.get("code") != 0:
+        raise RuntimeError(f"Bitable create failed: {res}")
+    return res
+
+
+def _person_field_value(name: str) -> list[dict[str, str]]:
+    n = _title_name(name)
+    return [{"name": n}]
+
+
+def get_ose_submit_form_options() -> dict[str, Any]:
+    return {
+        "leave_names": list(OSE_LEAVE_FORM_NAMES),
+        "offset_names": list(OSE_LEAVE_FORM_NAMES),
+        "leave_types": list(OSE_LEAVE_TYPES),
+        "shift_types": list(OSE_SHIFT_TYPES),
+    }
+
+
+def _iter_days_in_month(year: int, month: int) -> list[date]:
+    _, last = calendar.monthrange(year, month)
+    return [date(year, month, d) for d in range(1, last + 1)]
+
+
+def _leave_rows_for_calendar(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for it in items:
+        f = it.get("fields") or {}
+        name = _title_name(_field_text(_get_field_by_aliases(f, ["Name", "Employee Name", "Person"])))
+        if not name:
+            continue
+        st = _parse_date_value(_get_field_by_aliases(f, ["Start Date", "Leave Start Date", "From"]))
+        ed = _parse_date_value(_get_field_by_aliases(f, ["End Date", "Leave End Date", "To"]))
+        if not st or not ed:
+            continue
+        rows.append({"name": name, "start": st, "end": ed})
+    return rows
+
+
+def get_ose_leave_names_calendar(year: int, month: int) -> dict[str, Any]:
+    """Per-day leave names for a month (all dated rows; LeaveID ignored)."""
+    if month < 1 or month > 12:
+        raise ValueError("month must be 1–12")
+    token = get_tenant_access_token()
+    items, _ = _get_bitable_raw_pair(token)
+    rows = _leave_rows_for_calendar(items)
+    month_start = date(year, month, 1)
+    _, last = calendar.monthrange(year, month)
+    month_end = date(year, month, last)
+    days: dict[str, list[str]] = {}
+    for d in range(1, last + 1):
+        days[str(d)] = []
+    for row in rows:
+        st: date = row["start"]
+        ed: date = row["end"]
+        if ed < month_start or st > month_end:
+            continue
+        cur = max(st, month_start)
+        end = min(ed, month_end)
+        while cur <= end:
+            key = str(cur.day)
+            if row["name"] not in days[key]:
+                days[key].append(row["name"])
+            cur += timedelta(days=1)
+    for key in days:
+        days[key].sort(key=lambda x: x.lower())
+    return {"ok": True, "year": year, "month": month, "days": days}
+
+
+def _parse_iso_date(raw: str) -> date:
+    s = (raw or "").strip()
+    if not s:
+        raise ValueError("date is required")
+    try:
+        return date.fromisoformat(s)
+    except ValueError as e:
+        raise ValueError(f"invalid date {raw!r} (use YYYY-MM-DD)") from e
+
+
+def submit_ose_leave(
+    *,
+    name: str,
+    leave_type: str,
+    start_date: date,
+    end_date: date,
+    reason: str,
+) -> dict[str, Any]:
+    if start_date > end_date:
+        raise ValueError("Start Date must be on or before End Date")
+    nm = _title_name(name)
+    if nm not in OSE_LEAVE_FORM_NAMES:
+        raise ValueError(f"Unknown name {name!r}")
+    lt = (leave_type or "").strip()
+    if lt not in OSE_LEAVE_TYPES:
+        raise ValueError(f"Unknown leave type {leave_type!r}")
+    reason_s = (reason or "").strip()
+    if not reason_s:
+        raise ValueError("Reason is required")
+    token = get_tenant_access_token()
+    fields: dict[str, Any] = {
+        "Name": _person_field_value(nm),
+        "Leave Type": lt,
+        "Start Date": _bitable_date_ms(start_date),
+        "End Date": _bitable_date_ms(end_date),
+        "Reason": reason_s,
+    }
+    res = _bitable_create_record(token, OSE_LEAVE_TABLE_ID, fields)
+    invalidate_ose_bitable_cache()
+    return {"ok": True, "record_id": (res.get("data") or {}).get("record", {}).get("record_id")}
+
+
+def submit_ose_offset(
+    *,
+    request_person: str,
+    exchange_person: str,
+    shift_type: str,
+    original_date: date,
+    exchange_date: date,
+    reason: str,
+) -> dict[str, Any]:
+    req = _title_name(request_person)
+    exc = _title_name(exchange_person)
+    if req not in OSE_LEAVE_FORM_NAMES:
+        raise ValueError(f"Unknown request person {request_person!r}")
+    if exc not in OSE_LEAVE_FORM_NAMES:
+        raise ValueError(f"Unknown exchange person {exchange_person!r}")
+    st = (shift_type or "").strip().upper()
+    if st not in OSE_SHIFT_TYPES:
+        raise ValueError("Shift Type must be N or D")
+    reason_s = (reason or "").strip()
+    if not reason_s:
+        raise ValueError("Reason is required")
+    token = get_tenant_access_token()
+    today = date.today()
+    fields: dict[str, Any] = {
+        "Request Person": _person_field_value(req),
+        "Exchange Person": _person_field_value(exc),
+        "Shift Type": st,
+        "Original Date": _bitable_date_ms(original_date),
+        "Exchange Date": _bitable_date_ms(exchange_date),
+        "Request Date": _bitable_date_ms(today),
+        "Reason": reason_s,
+    }
+    res = _bitable_create_record(token, OSE_OFFSET_TABLE_ID, fields)
+    invalidate_ose_bitable_cache()
+    return {"ok": True, "record_id": (res.get("data") or {}).get("record", {}).get("record_id")}
+
+
 if __name__ == "__main__":
     if "--debug" in sys.argv:
         DEBUG = True
