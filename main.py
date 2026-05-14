@@ -231,15 +231,22 @@ AMOUNT_LOSS_MAX_ATTEMPTS = 2
 AMOUNT_LOSS_RETRY_NOTICE = "Error occurred... Auto retry Please wait..."
 
 
-def run_amountloss_check(chat_id, date_str=None):
+def run_amountloss_check(chat_id, date_str=None, *, scheduled_9am=False):
     """在后台线程中执行 amount loss 检查，并将结果发送到指定 chat_id（失败自动重跑一轮）"""
     try:
-        from amountloss import fetch_fpms_data
+        from amountloss import amount_loss_9am_enabled, fetch_fpms_data
     except ImportError as e:
         send_message(
             chat_id,
             "❌ 无法加载 FPMS 抓取模块（fetch_fpms_data）。"
             f" 请把与开发环境一致的 fpms_fetcher.py 部署到服务器，并安装 playwright。\n{str(e)}",
+        )
+        return
+
+    if scheduled_9am and not amount_loss_9am_enabled():
+        print(
+            "[Amount Loss] 9:00 display/sheet fill skipped (temporarily disabled; AMOUNT_LOSS_9AM_ENABLED=1 to restore)",
+            flush=True,
         )
         return
 
@@ -250,6 +257,7 @@ def run_amountloss_check(chat_id, date_str=None):
                 target_date_str=date_str,
                 filterdata=True,
                 checklog=True,
+                scheduled_9am=scheduled_9am,
             )
             if isinstance(result, dict) and result.get("lark_card"):
                 sync_note = str(result.get("sync_note") or "").strip()
@@ -847,7 +855,19 @@ def scheduled_amountloss_check():
     """
     每日 9:00：与手动 `/al` 相同（filterdata + CHECKLOG + Lark sheet 同步 + 卡片 + TSV）。
     目标日期为昨天（与 fetch_fpms_data 默认一致）。
+    TEMPORARY: skipped unless AMOUNT_LOSS_9AM_ENABLED=1.
     """
+    try:
+        from amountloss import amount_loss_9am_enabled
+    except ImportError:
+        print("[Amount Loss] 9:00 job skipped (amountloss unavailable)", flush=True)
+        return
+    if not amount_loss_9am_enabled():
+        print(
+            "[Amount Loss] 9:00 display/sheet fill skipped (temporarily disabled; AMOUNT_LOSS_9AM_ENABLED=1 to restore)",
+            flush=True,
+        )
+        return
     target_chat_id = DUTY_CHAT_ID
     mention = f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>'
     send_message(
@@ -857,6 +877,7 @@ def scheduled_amountloss_check():
     threading.Thread(
         target=run_amountloss_check,
         args=(target_chat_id, None),
+        kwargs={"scheduled_9am": True},
         daemon=True,
     ).start()
     print(f"✅ Scheduled Amount Loss (9:00) started (run_amountloss_check) → {target_chat_id}")
@@ -1262,7 +1283,18 @@ scheduler = BackgroundScheduler()
 scheduler.add_job(func=ose_leave_offset_daily_sync, trigger="cron", hour=6, minute=50)
 scheduler.add_job(func=morning_reminder, trigger="cron", hour=7, minute=00)
 scheduler.add_job(func=evening_reminder, trigger="cron", hour=19, minute=0)
-scheduler.add_job(func=scheduled_amountloss_check,trigger="cron",hour=9,minute=0)
+try:
+    from amountloss import amount_loss_9am_enabled as _amount_loss_9am_enabled
+
+    if _amount_loss_9am_enabled():
+        scheduler.add_job(func=scheduled_amountloss_check, trigger="cron", hour=9, minute=0)
+    else:
+        print(
+            "[Amount Loss] 9:00 cron not registered (temporarily disabled; AMOUNT_LOSS_9AM_ENABLED=1 to restore)",
+            flush=True,
+        )
+except ImportError:
+    print("[Amount Loss] 9:00 cron not registered (amountloss unavailable)", flush=True)
 scheduler.add_job(func=myoseweeklymeeting, trigger="cron", day_of_week='tue', hour=17, minute=0)
 scheduler.add_job(func=monthly_duty_check, trigger="cron", day=1, hour=0, minute=0)
 scheduler.add_job(func=clean_pending_p0_confirmations, trigger="interval", minutes=5)

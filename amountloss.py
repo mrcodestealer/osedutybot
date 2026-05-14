@@ -116,6 +116,12 @@ def _env_first(*names: str) -> str:
     return ""
 
 
+def amount_loss_9am_enabled() -> bool:
+    # TEMPORARY: 9:00 Lark display + sheet fill. Set AMOUNT_LOSS_9AM_ENABLED=1 to restore.
+    flag = (_env_first("AMOUNT_LOSS_9AM_ENABLED") or "").strip().lower()
+    return flag in ("1", "true", "yes", "on")
+
+
 def _sls_assume_role_arn() -> str:
     """若配置了 AssumeRole，返回 STS AssumeRole 的目标 RAM Role ARN；否则空字符串。"""
     arn = _env_first("ALIYUN_SLS_ASSUME_ROLE_ARN", "ALIYUN_ASSUME_ROLE_ARN")
@@ -1503,11 +1509,108 @@ def _al_rows_by_game_from_checklog(eh, er):
     return buckets
 
 
-def _al_unknown_from_error_cell(err_text: str) -> str:
-    s = err_text or ""
-    if re.search(r"null\s*undefined", s, re.I):
+# Lark 第二张表 column G 下拉选项（须与表内选项字面一致）
+AL_ERROR_DROPDOWN_OPTIONS = [
+    "ECONNRESET",
+    "ESOCKETTIMEDOUT",
+    "ETIMEDOUT",
+    "FPMS request CPMS timeout",
+    "GAME API ERROR.",
+    "Lower or Greater than min or max transfer",
+    "No log",
+    "Request timeout( Request timeout )",
+    "socket hang up",
+    "timeout of 10000ms exceeded",
+    "timeout of 4000ms exceeded",
+    "UNKNOWN",
+    "timeout of 3000ms exceeded",
+]
+
+
+def _al_classify_error_text(err_text: str) -> str:
+    """
+    Map raw Error log cell text to one of ``AL_ERROR_DROPDOWN_OPTIONS`` for Lark column G.
+    """
+    s = (err_text or "").strip()
+    if not s:
+        return "No log"
+    sl = s.lower()
+    if "null" in sl and "undefined" in sl:
         return "UNKNOWN"
-    return ""
+    if "econnreset" in sl:
+        return "ECONNRESET"
+    if "esockettimedout" in sl:
+        return "ESOCKETTIMEDOUT"
+    if "etimedout" in sl:
+        return "ETIMEDOUT"
+    if "socket hang up" in sl or "sockethangup" in sl.replace(" ", ""):
+        return "socket hang up"
+    if "10000ms" in sl:
+        return "timeout of 10000ms exceeded"
+    if "4000ms" in sl:
+        return "timeout of 4000ms exceeded"
+    if "3000ms" in sl:
+        return "timeout of 3000ms exceeded"
+    if "fpms" in sl and "cpms" in sl:
+        return "FPMS request CPMS timeout"
+    if "game" in sl and "api" in sl:
+        return "GAME API ERROR."
+    if (
+        "transfer" in sl
+        and "min" in sl
+        and "max" in sl
+        and ("lower" in sl or "greater" in sl or "less" in sl)
+    ):
+        return "Lower or Greater than min or max transfer"
+    if "request timeout" in sl:
+        return "Request timeout( Request timeout )"
+    if "timeout" in sl:
+        return "Request timeout( Request timeout )"
+    return "UNKNOWN"
+
+
+def _al_set_lark_dropdown_validation(
+    token,
+    spreadsheet_token,
+    sheet_id,
+    col_letter,
+    row_start,
+    row_end,
+):
+    # type: (str, str, str, str, int, int) -> Tuple[bool, str]
+    """
+    POST sheets/v2/.../dataValidation — list dropdown on ``col_letter`` for rows row_start..row_end.
+    Returns (ok, err_detail). Lark forbids comma in option strings; ``AL_ERROR_DROPDOWN_OPTIONS`` must comply.
+    """
+    if row_end < row_start:
+        return True, ""
+    rng = "%s!%s%d:%s%d" % (sheet_id, col_letter, row_start, col_letter, row_end)
+    url = "%s/sheets/v2/spreadsheets/%s/dataValidation" % (
+        _al_open_api_base(),
+        spreadsheet_token,
+    )
+    opts = [str(x) for x in AL_ERROR_DROPDOWN_OPTIONS if "," not in str(x)]
+    body = {
+        "range": rng,
+        "dataValidationType": "list",
+        "dataValidation": {"conditionValues": opts},
+    }
+    resp = requests.post(
+        url,
+        headers={
+            "Authorization": "Bearer %s" % token,
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        json=body,
+        timeout=90,
+    )
+    try:
+        result = resp.json()
+    except Exception as ex:
+        return False, "bad JSON: %s" % ex
+    if result.get("code") != 0:
+        return False, str(result.get("msg") or result)
+    return True, ""
 
 
 def _al_append_primary_records_block(
@@ -1754,8 +1857,7 @@ def _al_sync_second_spreadsheet_by_game(token, target_day, eh, er):
         matrix = []
         for rv in rows:
             row6 = (list(rv) + [""] * 6)[:6]
-            unk = _al_unknown_from_error_cell(row6[5])
-            matrix.append(row6 + [unk])
+            matrix.append(row6 + [_al_classify_error_text(row6[5])])
 
         end_g = _al_col_num_to_letter(7)
         vr = [{"range": "%s!A%d:A%d" % (sid, date_row, date_row), "values": [[target_str]]}]
@@ -1807,6 +1909,19 @@ def _al_sync_second_spreadsheet_by_game(token, target_day, eh, er):
         except Exception as ex:
             notes.append("%s: style failed %s" % (title, ex))
 
+        if matrix:
+            r0 = content_start
+            r1 = content_start + len(matrix) - 1
+            dv_ok, dv_detail = _al_set_lark_dropdown_validation(
+                token, second_tok, sid, "G", r0, r1
+            )
+            if not dv_ok:
+                notes.append(
+                    "%s: column G dropdown validation not applied (%s); "
+                    "classified labels are still written — set dropdown manually in Lark if needed."
+                    % (title, dv_detail)
+                )
+
         notes.append("%s: OK (%d rows)" % (title, len(matrix)))
 
     # 飞书 OpenAPI 暂无 Excel 式「分组折叠」，此处仅写入数据与样式。
@@ -1822,6 +1937,8 @@ def amount_loss_sync_to_lark_sheet(
     target_date_str=None,
     detail_headers=None,
     detail_rows=None,
+    *,
+    scheduled_9am: bool = False,
 ):
     """
     在 FPMS 查询结束后写入 Lark 电子表格「Amount Loss YYYY」。
@@ -1829,6 +1946,8 @@ def amount_loss_sync_to_lark_sheet(
     wiki 示例: https://casinoplus.sg.larksuite.com/wiki/...?sheet=ixOcBO → token 取「关联表格」真实 spreadsheet token。
     国内飞书租户：设 LARK_OPEN_API_BASE=https://open.feishu.cn/open-apis（与 APP 上架区域一致）。
     """
+    if scheduled_9am and not amount_loss_9am_enabled():
+        return ""
     spreadsheet_token = (_env_first("AMOUNT_LOSS_SPREADSHEET_TOKEN") or "").strip()
     if not spreadsheet_token:
         note = (
@@ -2082,6 +2201,7 @@ def fetch_fpms_data(
     getdata=False,
     filterdata=False,
     checklog=False,
+    scheduled_9am=False,
 ):
     """
     main.py /al 调用: fetch_fpms_data(headless=True, target_date_str=date_str, filterdata=True, checklog=True)
@@ -2096,6 +2216,14 @@ def fetch_fpms_data(
     返回: 摘要行；若 getdata/filterdata/checklog 则在同一字符串内追加对应章节（与终端打印一致），供 main.py 发往 Lark。
     若设置 AMOUNT_LOSS_SPREADSHEET_TOKEN，且在 filterdata/checklog 流程成功解析 FPMS 表后，会写入 wiki 关联表格子表「Amount Loss YYYY」（详见 amount_loss_sync_to_lark_sheet）。
     """
+    if scheduled_9am and not amount_loss_9am_enabled():
+        return {
+            "text": "⏸️ Amount Loss 9:00 automation is temporarily disabled.",
+            "lark_card": None,
+            "sheet_tsv_all": "",
+            "sheet_tsv_game": "",
+            "sync_note": "",
+        }
     _ = save_state  # 保留与旧版 fpms_fetcher 相同的调用约定
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -2370,6 +2498,7 @@ def fetch_fpms_data(
                                         target_date_str=target_date_str,
                                         detail_headers=sync_detail_headers,
                                         detail_rows=sync_detail_rows,
+                                        scheduled_9am=scheduled_9am,
                                     )
                                     if sync_note:
                                         out = "%s\n\n%s" % (sync_note, out)
@@ -2402,6 +2531,7 @@ def fetch_fpms_data(
                         target_date_str=target_date_str,
                         detail_headers=sync_detail_headers,
                         detail_rows=sync_detail_rows,
+                        scheduled_9am=scheduled_9am,
                     )
                     if sync_note:
                         out = "%s\n\n%s" % (sync_note, out)
