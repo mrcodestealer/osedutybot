@@ -2094,6 +2094,7 @@ def lark_webhook():
                         sender_open_id=sender_id_ca or "",
                         chat_id=chat_id_ca,
                         send_message=send_message,
+                        webhook_data=data if isinstance(data, dict) else None,
                     ):
                         return
                 except Exception as e:

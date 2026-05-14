@@ -464,39 +464,74 @@ def _assert_owner(parsed: dict[str, Any], sender_open_id: str) -> tuple[str, str
     return owner, request_person
 
 
-def _event_message_id(event_obj: Any) -> str:
-    if not isinstance(event_obj, dict):
-        return ""
-    ctx = event_obj.get("context")
-    if isinstance(ctx, dict):
+def _event_message_id(event_obj: Any, webhook_data: Any = None) -> str:
+    for source in (event_obj, webhook_data):
+        if not isinstance(source, dict):
+            continue
+        ctx = source.get("context")
+        if isinstance(ctx, dict):
+            for key in ("open_message_id", "message_id"):
+                mid = str(ctx.get(key) or "").strip()
+                if mid:
+                    return mid
+        act = source.get("action")
+        if isinstance(act, dict):
+            for key in ("open_message_id", "message_id"):
+                mid = str(act.get(key) or "").strip()
+                if mid:
+                    return mid
+            act_ctx = act.get("context")
+            if isinstance(act_ctx, dict):
+                for key in ("open_message_id", "message_id"):
+                    mid = str(act_ctx.get(key) or "").strip()
+                    if mid:
+                        return mid
         for key in ("open_message_id", "message_id"):
-            mid = str(ctx.get(key) or "").strip()
+            mid = str(source.get(key) or "").strip()
             if mid:
                 return mid
-    for key in ("open_message_id", "message_id"):
-        mid = str(event_obj.get(key) or "").strip()
-        if mid:
-            return mid
+    if isinstance(webhook_data, dict):
+        ev = webhook_data.get("event")
+        if isinstance(ev, dict) and ev is not event_obj:
+            return _event_message_id(ev)
     return ""
 
 
 def _dismiss_ephemeral_form(message_id: str) -> None:
     mid = (message_id or "").strip()
     if not mid:
+        print("[offsetleave] dismiss skipped: missing ephemeral message_id", flush=True)
         return
     try:
         token = od.get_tenant_access_token()
-    except Exception:
+    except Exception as exc:
+        print(f"[offsetleave] dismiss ephemeral form token error: {exc!r}", flush=True)
         return
-    url = f"https://open.larksuite.com/open-apis/im/v1/messages/{mid}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json; charset=utf-8",
+    }
     try:
-        res = requests.delete(
-            url,
+        res = requests.post(
+            "https://open.larksuite.com/open-apis/ephemeral/v1/delete",
+            headers=headers,
+            json={"message_id": mid},
+            timeout=20,
+        ).json()
+        code = int(res.get("code", -1))
+        if code == 0:
+            print(f"[offsetleave] dismissed ephemeral form {mid}", flush=True)
+            return
+        if code == 18051:
+            return
+        print(f"[offsetleave] ephemeral delete failed: {res!r}", flush=True)
+        fallback = requests.delete(
+            f"https://open.larksuite.com/open-apis/im/v1/messages/{mid}",
             headers={"Authorization": f"Bearer {token}"},
             timeout=20,
         ).json()
-        if res.get("code") != 0:
-            print(f"[offsetleave] dismiss ephemeral form failed: {res}", flush=True)
+        if int(fallback.get("code", -1)) != 0:
+            print(f"[offsetleave] im delete fallback failed: {fallback!r}", flush=True)
     except Exception as exc:
         print(f"[offsetleave] dismiss ephemeral form error: {exc!r}", flush=True)
 
@@ -508,6 +543,7 @@ def handle_card_callback(
     sender_open_id: str,
     chat_id: str,
     send_message: Callable[..., dict[str, Any]],
+    webhook_data: Optional[dict[str, Any]] = None,
 ) -> bool:
     key = str(parsed.get("k") or "").strip().lower()
     if key not in (_OFFSET_SUBMIT_KEY, _LEAVE_SUBMIT_KEY):
@@ -536,7 +572,7 @@ def handle_card_callback(
                 reason=reason,
             )
             rid = str((out or {}).get("record_id") or "").strip()
-            _dismiss_ephemeral_form(_event_message_id(event_obj))
+            _dismiss_ephemeral_form(_event_message_id(event_obj, webhook_data))
             send_message(
                 chat_id,
                 f"✅ Offset submitted for {request_person} (record {rid or 'saved'}).",
@@ -556,7 +592,7 @@ def handle_card_callback(
             reason=reason,
         )
         rid = str((out or {}).get("record_id") or "").strip()
-        _dismiss_ephemeral_form(_event_message_id(event_obj))
+        _dismiss_ephemeral_form(_event_message_id(event_obj, webhook_data))
         send_message(
             chat_id,
             f"✅ Leave submitted for {request_person} (record {rid or 'saved'}).",
