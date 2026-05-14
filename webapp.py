@@ -2848,27 +2848,21 @@ _ADMIN_LEAVE_PAGE = """<!DOCTYPE html>
     }
     button.adm-act-appr.selected { background: rgba(34,197,94,.18); border-color: rgba(34,197,94,.45); color: #86efac; }
     button.adm-act-rej.selected { background: rgba(239,68,68,.18); border-color: rgba(239,68,68,.45); color: #fca5a5; }
-    button.adm-act-rmk { border-color: rgba(59,130,246,.4); color: var(--accent); }
-    .adm-modal-backdrop {
-      position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; align-items: center; justify-content: center;
-      z-index: 200; padding: 1rem;
+    .adm-remarks-cell { display: flex; align-items: center; gap: 0.45rem; min-width: 220px; }
+    .adm-remarks-ta {
+      flex: 1; min-width: 0; min-height: 2.1rem; max-height: 5rem; padding: 0.35rem 0.5rem;
+      border-radius: 8px; border: 1px solid var(--line); background: #0f141c; color: var(--text);
+      font: inherit; font-size: 0.78rem; resize: vertical;
     }
-    .adm-modal-backdrop.show { display: flex; }
-    .adm-modal {
-      background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 1rem 1.1rem; max-width: 440px; width: 100%;
-      box-shadow: 0 16px 48px rgba(0,0,0,.35);
+    button.adm-act-confirm {
+      flex-shrink: 0; font: inherit; font-size: 0.72rem; font-weight: 650; padding: 0.35rem 0.65rem;
+      border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--muted);
+      cursor: pointer;
     }
-    .adm-modal h2 { margin: 0 0 0.65rem; font-size: 1rem; }
-    .adm-modal textarea {
-      width: 100%; min-height: 6rem; padding: 0.55rem 0.65rem; border-radius: 10px; border: 1px solid var(--line);
-      background: #0f141c; color: var(--text); font-size: 0.88rem; resize: vertical;
+    button.adm-act-confirm:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.adm-act-confirm:not(:disabled) {
+      border-color: var(--accent); color: var(--text); background: rgba(59,130,246,.22);
     }
-    .adm-modal-actions { display: flex; justify-content: flex-end; gap: 0.45rem; margin-top: 0.75rem; }
-    .adm-modal-actions button {
-      font: inherit; font-weight: 650; font-size: 0.85rem; padding: 0.45rem 0.85rem; border-radius: 10px; cursor: pointer; border: 1px solid var(--line);
-      background: var(--elev); color: var(--text);
-    }
-    .adm-modal-actions button.primary { border-color: var(--accent); background: rgba(59,130,246,.22); }
     .adm-records-empty { text-align: center; color: var(--muted); padding: 2rem; }
   </style>
 </head>
@@ -2898,25 +2892,11 @@ _ADMIN_LEAVE_PAGE = """<!DOCTYPE html>
       </table>
     </div>
   </main>
-  <div class="adm-modal-backdrop" id="adm-modal-backdrop" role="dialog" aria-modal="true">
-    <div class="adm-modal">
-      <h2>Remarks</h2>
-      <textarea id="adm-modal-ta" placeholder="Optional remarks"></textarea>
-      <div class="adm-modal-actions">
-        <button type="button" id="adm-modal-cancel">Cancel</button>
-        <button type="button" class="primary" id="adm-modal-confirm">Confirm</button>
-      </div>
-    </div>
-  </div>
   <script>
   (function () {
     var API_LIST = {{ api_admin_leave_list_href | tojson }};
     var API_APPROVE = {{ api_admin_leave_approve_href | tojson }};
     var filterMode = "all";
-    var backdrop = document.getElementById("adm-modal-backdrop");
-    var modalTa = document.getElementById("adm-modal-ta");
-    var modalRecordId = "";
-    var modalStatus = "";
     var tbody = document.getElementById("adm-body");
     var thead = document.getElementById("adm-thead");
 
@@ -2955,12 +2935,20 @@ _ADMIN_LEAVE_PAGE = """<!DOCTYPE html>
       return td;
     }
 
+    function updateRowConfirm(tr) {
+      var btn = tr.querySelector(".adm-act-confirm");
+      if (!btn) return;
+      var dec = tr.dataset.decision || "";
+      btn.disabled = dec !== "Approved" && dec !== "Rejected";
+    }
+
     function setRowDecision(tr, st) {
       tr.dataset.decision = st;
       var a = tr.querySelector(".adm-act-appr");
       var r = tr.querySelector(".adm-act-rej");
       if (a) a.classList.toggle("selected", st === "Approved");
       if (r) r.classList.toggle("selected", st === "Rejected");
+      updateRowConfirm(tr);
     }
 
     function submitApprove(recordId, status, remarks, done) {
@@ -3019,7 +3007,7 @@ _ADMIN_LEAVE_PAGE = """<!DOCTYPE html>
         er2.appendChild(ec2); tbody.appendChild(er2); return;
       }
       for (var k = 0; k < pend.length; k++) {
-        var p = pend[k];
+        (function (p) {
         var tr2 = document.createElement("tr");
         tr2.dataset.recordId = String(p.record_id || "");
         tr2.appendChild(textCell(p.name, "ose-cell-name"));
@@ -3037,16 +3025,38 @@ _ADMIN_LEAVE_PAGE = """<!DOCTYPE html>
         bR.addEventListener("click", function () { setRowDecision(tr2, "Rejected"); });
         tdR.appendChild(bR); tr2.appendChild(tdR);
         var tdM = document.createElement("td");
-        var bM = document.createElement("button"); bM.type = "button"; bM.className = "adm-act adm-act-rmk"; bM.textContent = "Remarks";
-        bM.addEventListener("click", function () {
+        var wrap = document.createElement("div");
+        wrap.className = "adm-remarks-cell";
+        var ta = document.createElement("textarea");
+        ta.className = "adm-remarks-ta";
+        ta.rows = 2;
+        ta.placeholder = "Optional remarks";
+        var bC = document.createElement("button");
+        bC.type = "button";
+        bC.className = "adm-act-confirm";
+        bC.textContent = "Confirm";
+        bC.disabled = true;
+        bC.addEventListener("click", function () {
           var rid = tr2.dataset.recordId;
           var dec = tr2.dataset.decision || "";
-          if (!dec) { window.alert("Choose Approved or Rejected first."); return; }
-          modalRecordId = rid; modalStatus = dec; modalTa.value = "";
-          backdrop.classList.add("show");
+          if (!rid || !dec) return;
+          bC.disabled = true;
+          submitApprove(rid, dec, ta.value || "", function (err) {
+            if (err) {
+              bC.disabled = false;
+              updateRowConfirm(tr2);
+              window.alert(String(err));
+              return;
+            }
+            loadList(true);
+          });
         });
-        tdM.appendChild(bM); tr2.appendChild(tdM);
+        wrap.appendChild(ta);
+        wrap.appendChild(bC);
+        tdM.appendChild(wrap);
+        tr2.appendChild(tdM);
         tbody.appendChild(tr2);
+        })(pend[k]);
       }
     }
 
@@ -3075,27 +3085,6 @@ _ADMIN_LEAVE_PAGE = """<!DOCTYPE html>
       loadList(false);
     });
     document.getElementById("adm-refresh").addEventListener("click", function () { loadList(true); });
-
-    document.getElementById("adm-modal-cancel").addEventListener("click", function () {
-      backdrop.classList.remove("show");
-    });
-    backdrop.addEventListener("click", function (ev) {
-      if (ev.target === backdrop) backdrop.classList.remove("show");
-    });
-    document.getElementById("adm-modal-confirm").addEventListener("click", function () {
-      var rid = modalRecordId;
-      var st = modalStatus;
-      if (!rid || !st) { backdrop.classList.remove("show"); return; }
-      var rm = modalTa.value || "";
-      var btn = document.getElementById("adm-modal-confirm");
-      btn.disabled = true;
-      submitApprove(rid, st, rm, function (err) {
-        btn.disabled = false;
-        backdrop.classList.remove("show");
-        if (err) window.alert(String(err));
-        else loadList(true);
-      });
-    });
 
     loadList(false);
   })();
@@ -3173,27 +3162,21 @@ _ADMIN_OFFSET_PAGE = """<!DOCTYPE html>
     }
     button.adm-act-appr.selected { background: rgba(34,197,94,.18); border-color: rgba(34,197,94,.45); color: #86efac; }
     button.adm-act-rej.selected { background: rgba(239,68,68,.18); border-color: rgba(239,68,68,.45); color: #fca5a5; }
-    button.adm-act-rmk { border-color: rgba(59,130,246,.4); color: var(--accent); }
-    .adm-modal-backdrop {
-      position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; align-items: center; justify-content: center;
-      z-index: 200; padding: 1rem;
+    .adm-remarks-cell { display: flex; align-items: center; gap: 0.45rem; min-width: 220px; }
+    .adm-remarks-ta {
+      flex: 1; min-width: 0; min-height: 2.1rem; max-height: 5rem; padding: 0.35rem 0.5rem;
+      border-radius: 8px; border: 1px solid var(--line); background: #0f141c; color: var(--text);
+      font: inherit; font-size: 0.78rem; resize: vertical;
     }
-    .adm-modal-backdrop.show { display: flex; }
-    .adm-modal {
-      background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 1rem 1.1rem; max-width: 440px; width: 100%;
-      box-shadow: 0 16px 48px rgba(0,0,0,.35);
+    button.adm-act-confirm {
+      flex-shrink: 0; font: inherit; font-size: 0.72rem; font-weight: 650; padding: 0.35rem 0.65rem;
+      border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--muted);
+      cursor: pointer;
     }
-    .adm-modal h2 { margin: 0 0 0.65rem; font-size: 1rem; }
-    .adm-modal textarea {
-      width: 100%; min-height: 6rem; padding: 0.55rem 0.65rem; border-radius: 10px; border: 1px solid var(--line);
-      background: #0f141c; color: var(--text); font-size: 0.88rem; resize: vertical;
+    button.adm-act-confirm:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.adm-act-confirm:not(:disabled) {
+      border-color: var(--accent); color: var(--text); background: rgba(59,130,246,.22);
     }
-    .adm-modal-actions { display: flex; justify-content: flex-end; gap: 0.45rem; margin-top: 0.75rem; }
-    .adm-modal-actions button {
-      font: inherit; font-weight: 650; font-size: 0.85rem; padding: 0.45rem 0.85rem; border-radius: 10px; cursor: pointer; border: 1px solid var(--line);
-      background: var(--elev); color: var(--text);
-    }
-    .adm-modal-actions button.primary { border-color: var(--accent); background: rgba(59,130,246,.22); }
     .adm-records-empty { text-align: center; color: var(--muted); padding: 2rem; }
   </style>
 </head>
@@ -3223,25 +3206,11 @@ _ADMIN_OFFSET_PAGE = """<!DOCTYPE html>
       </table>
     </div>
   </main>
-  <div class="adm-modal-backdrop" id="adm-modal-backdrop" role="dialog" aria-modal="true">
-    <div class="adm-modal">
-      <h2>Remarks</h2>
-      <textarea id="adm-modal-ta" placeholder="Optional remarks"></textarea>
-      <div class="adm-modal-actions">
-        <button type="button" id="adm-modal-cancel">Cancel</button>
-        <button type="button" class="primary" id="adm-modal-confirm">Confirm</button>
-      </div>
-    </div>
-  </div>
   <script>
   (function () {
     var API_LIST = {{ api_admin_offset_list_href | tojson }};
     var API_APPROVE = {{ api_admin_offset_approve_href | tojson }};
     var filterMode = "all";
-    var backdrop = document.getElementById("adm-modal-backdrop");
-    var modalTa = document.getElementById("adm-modal-ta");
-    var modalRecordId = "";
-    var modalStatus = "";
     var tbody = document.getElementById("adm-body");
     var thead = document.getElementById("adm-thead");
 
@@ -3284,12 +3253,20 @@ _ADMIN_OFFSET_PAGE = """<!DOCTYPE html>
       return td;
     }
 
+    function updateRowConfirm(tr) {
+      var btn = tr.querySelector(".adm-act-confirm");
+      if (!btn) return;
+      var dec = tr.dataset.decision || "";
+      btn.disabled = dec !== "Approved" && dec !== "Rejected";
+    }
+
     function setRowDecision(tr, st) {
       tr.dataset.decision = st;
       var a = tr.querySelector(".adm-act-appr");
       var r = tr.querySelector(".adm-act-rej");
       if (a) a.classList.toggle("selected", st === "Approved");
       if (r) r.classList.toggle("selected", st === "Rejected");
+      updateRowConfirm(tr);
     }
 
     function submitApprove(recordId, status, remarks, done) {
@@ -3350,7 +3327,7 @@ _ADMIN_OFFSET_PAGE = """<!DOCTYPE html>
         er2.appendChild(ec2); tbody.appendChild(er2); return;
       }
       for (var k = 0; k < pend.length; k++) {
-        var p = pend[k];
+        (function (p) {
         var tr2 = document.createElement("tr");
         tr2.dataset.recordId = String(p.record_id || "");
         tr2.appendChild(textCell(p.request_person, "ose-cell-name"));
@@ -3369,16 +3346,38 @@ _ADMIN_OFFSET_PAGE = """<!DOCTYPE html>
         bR.addEventListener("click", function () { setRowDecision(tr2, "Rejected"); });
         tdR.appendChild(bR); tr2.appendChild(tdR);
         var tdM = document.createElement("td");
-        var bM = document.createElement("button"); bM.type = "button"; bM.className = "adm-act adm-act-rmk"; bM.textContent = "Remarks";
-        bM.addEventListener("click", function () {
+        var wrap = document.createElement("div");
+        wrap.className = "adm-remarks-cell";
+        var ta = document.createElement("textarea");
+        ta.className = "adm-remarks-ta";
+        ta.rows = 2;
+        ta.placeholder = "Optional remarks";
+        var bC = document.createElement("button");
+        bC.type = "button";
+        bC.className = "adm-act-confirm";
+        bC.textContent = "Confirm";
+        bC.disabled = true;
+        bC.addEventListener("click", function () {
           var rid = tr2.dataset.recordId;
           var dec = tr2.dataset.decision || "";
-          if (!dec) { window.alert("Choose Approved or Rejected first."); return; }
-          modalRecordId = rid; modalStatus = dec; modalTa.value = "";
-          backdrop.classList.add("show");
+          if (!rid || !dec) return;
+          bC.disabled = true;
+          submitApprove(rid, dec, ta.value || "", function (err) {
+            if (err) {
+              bC.disabled = false;
+              updateRowConfirm(tr2);
+              window.alert(String(err));
+              return;
+            }
+            loadList(true);
+          });
         });
-        tdM.appendChild(bM); tr2.appendChild(tdM);
+        wrap.appendChild(ta);
+        wrap.appendChild(bC);
+        tdM.appendChild(wrap);
+        tr2.appendChild(tdM);
         tbody.appendChild(tr2);
+        })(pend[k]);
       }
     }
 
@@ -3407,27 +3406,6 @@ _ADMIN_OFFSET_PAGE = """<!DOCTYPE html>
       loadList(false);
     });
     document.getElementById("adm-refresh").addEventListener("click", function () { loadList(true); });
-
-    document.getElementById("adm-modal-cancel").addEventListener("click", function () {
-      backdrop.classList.remove("show");
-    });
-    backdrop.addEventListener("click", function (ev) {
-      if (ev.target === backdrop) backdrop.classList.remove("show");
-    });
-    document.getElementById("adm-modal-confirm").addEventListener("click", function () {
-      var rid = modalRecordId;
-      var st = modalStatus;
-      if (!rid || !st) { backdrop.classList.remove("show"); return; }
-      var rm = modalTa.value || "";
-      var btn = document.getElementById("adm-modal-confirm");
-      btn.disabled = true;
-      submitApprove(rid, st, rm, function (err) {
-        btn.disabled = false;
-        backdrop.classList.remove("show");
-        if (err) window.alert(String(err));
-        else loadList(true);
-      });
-    });
 
     loadList(false);
   })();
