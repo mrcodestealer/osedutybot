@@ -1024,6 +1024,7 @@ def add_heart_reaction(message_id):
 def add_message_reaction(message_id, emoji_type, *, fallbacks: tuple[str, ...] = ()):
     mid = (message_id or "").strip()
     if not mid:
+        print("[lark] reaction skipped: missing message_id", flush=True)
         return None
     token = get_tenant_access_token()
     url = f"https://open.larksuite.com/open-apis/im/v1/messages/{mid}/reactions"
@@ -1034,15 +1035,27 @@ def add_message_reaction(message_id, emoji_type, *, fallbacks: tuple[str, ...] =
             continue
         payload = {"reaction_type": {"emoji_type": et}}
         response = requests.post(url, headers=headers, json=payload, timeout=20)
-        if response.status_code == 200:
+        try:
+            body = response.json()
+        except Exception:
+            body = {}
+        if response.status_code == 200 and int(body.get("code", -1)) == 0:
             print(f"✅ Added {et} reaction to message {mid}", flush=True)
-            return response.json()
-        print(f"⚠️ {et} reaction failed: {response.status_code} {response.text}", flush=True)
+            return body
+        print(
+            f"⚠️ {et} reaction failed: status={response.status_code} body={body!r}",
+            flush=True,
+        )
     return None
 
 
 def add_gotit_reaction(message_id):
-    return add_message_reaction(message_id, "GOTIT", fallbacks=("GotIt", "OnIt", "OK"))
+    primary = (os.getenv("OFFSET_ACK_EMOJI") or "OK").strip() or "OK"
+    return add_message_reaction(
+        message_id,
+        primary,
+        fallbacks=("LGTM", "OnIt", "CheckMark", "GOTIT", "GotIt"),
+    )
     
 def recall_message(message_id):
     token = get_tenant_access_token()
@@ -2499,6 +2512,9 @@ def lark_webhook():
     try:
         import offsetleave as _offsetleave
 
+        if _offsetleave.wants_offset_request(clean_text) and message_id:
+            add_gotit_reaction(message_id)
+
         if _offsetleave.handle_mention(
             clean_text,
             sender_open_id=sender_id or "",
@@ -2506,8 +2522,6 @@ def lark_webhook():
             chat_type=chat_type,
             send_message=send_message,
             get_token_func=get_tenant_access_token,
-            source_message_id=message_id,
-            react_message=add_gotit_reaction,
         ):
             return jsonify({"success": True})
     except Exception as e:

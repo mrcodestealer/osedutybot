@@ -318,6 +318,10 @@ def _deliver_private_card(
         raise RuntimeError(f"Failed to send form: {resp}")
 
 
+def wants_offset_request(text: str) -> bool:
+    return _wants_offset(text)
+
+
 def handle_mention(
     clean_text: str,
     *,
@@ -326,19 +330,12 @@ def handle_mention(
     chat_type: Optional[str],
     send_message: Callable[..., dict[str, Any]],
     get_token_func: Callable[[], str],
-    source_message_id: Optional[str] = None,
-    react_message: Optional[Callable[[str], Any]] = None,
 ) -> bool:
     text = (clean_text or "").strip()
     want_offset = _wants_offset(text)
     want_leave = _wants_leave(text)
     if not want_offset and not want_leave:
         return False
-    if want_offset and react_message and (source_message_id or "").strip():
-        try:
-            react_message((source_message_id or "").strip())
-        except Exception as exc:
-            print(f"[offsetleave] reaction failed: {exc!r}", flush=True)
     oid = (sender_open_id or "").strip()
     if not oid:
         send_message(chat_id, "❌ Could not identify your Lark user for a private form.")
