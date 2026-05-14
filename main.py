@@ -2057,6 +2057,20 @@ def lark_webhook():
                             daemon=True,
                         ).start()
                     return
+                try:
+                    import offsetleave as _offsetleave
+
+                    if isinstance(parsed_ca, dict) and _offsetleave.handle_card_callback(
+                        parsed_ca,
+                        ev_ca,
+                        sender_open_id=sender_id_ca or "",
+                        chat_id=chat_id_ca,
+                        send_message=send_message,
+                    ):
+                        return
+                except Exception as e:
+                    send_message(chat_id_ca, f"❌ Offset/leave submit failed: {e}")
+                    return
                 if isinstance(parsed_ca, dict) and str(parsed_ca.get("k") or "").strip().lower() == "rem_del":
                     rid = str(parsed_ca.get("id") or "").strip()
                     if not rid:
@@ -2466,6 +2480,22 @@ def lark_webhook():
         return jsonify({"success": True})
     
     
+
+    try:
+        import offsetleave as _offsetleave
+
+        if _offsetleave.handle_mention(
+            clean_text,
+            sender_open_id=sender_id or "",
+            chat_id=chat_id,
+            chat_type=chat_type,
+            send_message=send_message,
+            get_token_func=get_tenant_access_token,
+        ):
+            return jsonify({"success": True})
+    except Exception as e:
+        send_message(chat_id, f"❌ Offset/leave form failed: {e}")
+        return jsonify({"success": True})
 
     # 命令处理
     if clean_text.lower() == "/test":
