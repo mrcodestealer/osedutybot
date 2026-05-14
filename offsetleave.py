@@ -326,12 +326,19 @@ def handle_mention(
     chat_type: Optional[str],
     send_message: Callable[..., dict[str, Any]],
     get_token_func: Callable[[], str],
+    source_message_id: Optional[str] = None,
+    react_message: Optional[Callable[[str], Any]] = None,
 ) -> bool:
     text = (clean_text or "").strip()
     want_offset = _wants_offset(text)
     want_leave = _wants_leave(text)
     if not want_offset and not want_leave:
         return False
+    if want_offset and react_message and (source_message_id or "").strip():
+        try:
+            react_message((source_message_id or "").strip())
+        except Exception as exc:
+            print(f"[offsetleave] reaction failed: {exc!r}", flush=True)
     oid = (sender_open_id or "").strip()
     if not oid:
         send_message(chat_id, "❌ Could not identify your Lark user for a private form.")
@@ -460,6 +467,43 @@ def _assert_owner(parsed: dict[str, Any], sender_open_id: str) -> tuple[str, str
     return owner, request_person
 
 
+def _event_message_id(event_obj: Any) -> str:
+    if not isinstance(event_obj, dict):
+        return ""
+    ctx = event_obj.get("context")
+    if isinstance(ctx, dict):
+        for key in ("open_message_id", "message_id"):
+            mid = str(ctx.get(key) or "").strip()
+            if mid:
+                return mid
+    for key in ("open_message_id", "message_id"):
+        mid = str(event_obj.get(key) or "").strip()
+        if mid:
+            return mid
+    return ""
+
+
+def _dismiss_ephemeral_form(message_id: str) -> None:
+    mid = (message_id or "").strip()
+    if not mid:
+        return
+    try:
+        token = od.get_tenant_access_token()
+    except Exception:
+        return
+    url = f"https://open.larksuite.com/open-apis/im/v1/messages/{mid}"
+    try:
+        res = requests.delete(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=20,
+        ).json()
+        if res.get("code") != 0:
+            print(f"[offsetleave] dismiss ephemeral form failed: {res}", flush=True)
+    except Exception as exc:
+        print(f"[offsetleave] dismiss ephemeral form error: {exc!r}", flush=True)
+
+
 def handle_card_callback(
     parsed: dict[str, Any],
     event_obj: dict[str, Any],
@@ -495,6 +539,7 @@ def handle_card_callback(
                 reason=reason,
             )
             rid = str((out or {}).get("record_id") or "").strip()
+            _dismiss_ephemeral_form(_event_message_id(event_obj))
             send_message(
                 chat_id,
                 f"✅ Offset submitted for {request_person} (record {rid or 'saved'}).",
@@ -514,6 +559,7 @@ def handle_card_callback(
             reason=reason,
         )
         rid = str((out or {}).get("record_id") or "").strip()
+        _dismiss_ephemeral_form(_event_message_id(event_obj))
         send_message(
             chat_id,
             f"✅ Leave submitted for {request_person} (record {rid or 'saved'}).",

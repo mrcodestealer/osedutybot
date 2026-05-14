@@ -1018,16 +1018,31 @@ def add_random_reaction(message_id):
     return response.json()
 
 def add_heart_reaction(message_id):
+    return add_message_reaction(message_id, "HEART")
+
+
+def add_message_reaction(message_id, emoji_type, *, fallbacks: tuple[str, ...] = ()):
+    mid = (message_id or "").strip()
+    if not mid:
+        return None
     token = get_tenant_access_token()
-    url = f"https://open.larksuite.com/open-apis/im/v1/messages/{message_id}/reactions"
+    url = f"https://open.larksuite.com/open-apis/im/v1/messages/{mid}/reactions"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    payload = {"reaction_type": {"emoji_type": "HEART"}}
-    response = requests.post(url, headers=headers, json=payload)
-    if response.status_code == 200:
-        print(f"✅ Added heart reaction to message {message_id}")
-    else:
-        print(f"❌ Failed to add reaction: {response.text}")
-    return response.json()
+    for code in (emoji_type, *fallbacks):
+        et = (code or "").strip()
+        if not et:
+            continue
+        payload = {"reaction_type": {"emoji_type": et}}
+        response = requests.post(url, headers=headers, json=payload, timeout=20)
+        if response.status_code == 200:
+            print(f"✅ Added {et} reaction to message {mid}", flush=True)
+            return response.json()
+        print(f"⚠️ {et} reaction failed: {response.status_code} {response.text}", flush=True)
+    return None
+
+
+def add_gotit_reaction(message_id):
+    return add_message_reaction(message_id, "GOTIT", fallbacks=("GotIt", "OnIt", "OK"))
     
 def recall_message(message_id):
     token = get_tenant_access_token()
@@ -2491,6 +2506,8 @@ def lark_webhook():
             chat_type=chat_type,
             send_message=send_message,
             get_token_func=get_tenant_access_token,
+            source_message_id=message_id,
+            react_message=add_gotit_reaction,
         ):
             return jsonify({"success": True})
     except Exception as e:
