@@ -2513,6 +2513,13 @@ def lark_webhook():
     try:
         import offsetleave as _offsetleave
 
+        if _offsetleave.handle_showoffset(
+            clean_text,
+            chat_id=chat_id,
+            send_message=send_message,
+        ):
+            return jsonify({"success": True})
+
         if _offsetleave.wants_offset_request(clean_text) and message_id:
             add_gotit_reaction(message_id)
 

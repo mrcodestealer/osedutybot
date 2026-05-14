@@ -322,6 +322,28 @@ def wants_offset_request(text: str) -> bool:
     return _wants_offset(text)
 
 
+def handle_showoffset(
+    clean_text: str,
+    *,
+    chat_id: str,
+    send_message: Callable[..., dict[str, Any]],
+) -> bool:
+    try:
+        target = od.parse_showoffset_command(clean_text)
+    except ValueError as exc:
+        send_message(chat_id, f"❌ {exc}")
+        return True
+    if target is None:
+        return False
+    year, month = target
+    try:
+        card = od.build_ose_showoffset_card(year, month)
+        send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
+    except Exception as exc:
+        send_message(chat_id, f"❌ showoffset failed: {exc}")
+    return True
+
+
 def handle_mention(
     clean_text: str,
     *,

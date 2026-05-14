@@ -1482,6 +1482,90 @@ def get_ose_offset_records_list() -> dict[str, Any]:
     return {"ok": True, "items": rows}
 
 
+def parse_showoffset_command(text: str) -> Optional[tuple[int, int]]:
+    """Return ``(year, month)`` for ``showoffset`` / ``showoffset may`` / ``showoffset 5``."""
+    s = (text or "").strip()
+    m = re.match(r"^showoffset(?:\s+(.+))?\s*$", s, re.I)
+    if not m:
+        return None
+    today = date.today()
+    arg = (m.group(1) or "").strip()
+    if not arg:
+        return today.year, today.month
+    if re.fullmatch(r"\d{1,2}", arg):
+        month = int(arg)
+        if month < 1 or month > 12:
+            raise ValueError("month must be 1–12")
+        return today.year, month
+    for name, num in MONTH_MAP.items():
+        if name.lower() == arg.lower():
+            return today.year, num
+    raise ValueError(f"Unknown month {arg!r}. Use a month name or number (1–12).")
+
+
+def _collect_offset_month_summary(
+    year: int,
+    month: int,
+    *,
+    items: Optional[list[dict[str, Any]]] = None,
+) -> dict[str, tuple[list[int], list[int]]]:
+    if month < 1 or month > 12:
+        raise ValueError("month must be 1–12")
+    if items is None:
+        token = get_tenant_access_token()
+        _, items = _get_bitable_raw_pair(token)
+    by_person: dict[str, dict[str, set[int]]] = {}
+    for it in items:
+        f = it.get("fields") or {}
+        req = _title_name(
+            _field_text(_get_field_by_aliases(f, ["Request Person", "Requester", "Requester Person", "Name"]))
+        )
+        od = _parse_date_value(_get_field_by_aliases(f, ["Original Date", "Date"]))
+        xd = _parse_date_value(_get_field_by_aliases(f, ["Exchange Date", "Swap Date", "Target Date"]))
+        if not req or not od or not xd:
+            continue
+        if od.year != year or od.month != month:
+            continue
+        slot = by_person.setdefault(req, {"orig": set(), "exc": set()})
+        slot["orig"].add(od.day)
+        slot["exc"].add(xd.day)
+    out: dict[str, tuple[list[int], list[int]]] = {}
+    for person, days in by_person.items():
+        out[person] = (sorted(days["orig"]), sorted(days["exc"]))
+    return out
+
+
+def build_ose_showoffset_card(year: int, month: int) -> dict[str, Any]:
+    summary = _collect_offset_month_summary(year, month)
+    month_label = date(year, month, 1).strftime("%B")
+    lines = [f"**{month_label}**", ""]
+    if not summary:
+        lines.append("No offset requests this month.")
+    else:
+        for person in sorted(summary.keys(), key=lambda x: x.lower()):
+            orig_days, exc_days = summary[person]
+            orig_s = ", ".join(str(d) for d in orig_days)
+            exc_s = ", ".join(str(d) for d in exc_days)
+            lines.append(f"{person} {orig_s} --> {exc_s}")
+    content = "\n".join(lines).strip()
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": f"OSE offset — {month_label} {year}"},
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": content},
+                }
+            ]
+        },
+    }
+
+
 def get_ose_leave_names_calendar(year: int, month: int) -> dict[str, Any]:
     """Per-day leave names for a month (all dated rows; LeaveID ignored)."""
     if month < 1 or month > 12:
