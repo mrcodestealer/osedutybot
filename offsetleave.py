@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Lark DM forms for OSE leave / offset (private to the requester)."""
+"""Lark ephemeral group forms for OSE leave / offset (visible only to the requester)."""
 
 from __future__ import annotations
 
@@ -274,21 +274,30 @@ def build_leave_form_card(*, owner_open_id: str, request_person: str) -> dict[st
     }
 
 
-def _send_open_id_message(open_id: str, *, token: str, msg_type: str, content: str) -> dict[str, Any]:
-    url = "https://open.larksuite.com/open-apis/im/v1/messages"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    body = {
-        "receive_id": (open_id or "").strip(),
-        "msg_type": msg_type,
-        "content": content,
+def _send_ephemeral_card(
+    chat_id: str,
+    open_id: str,
+    card: dict[str, Any],
+    token: str,
+) -> None:
+    cid = (chat_id or "").strip()
+    oid = (open_id or "").strip()
+    if not cid or not oid:
+        raise ValueError("chat_id and open_id are required for a group-only form")
+    url = "https://open.larksuite.com/open-apis/ephemeral/v1/send"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json; charset=utf-8",
     }
-    return requests.post(
-        url,
-        headers=headers,
-        params={"receive_id_type": "open_id"},
-        json=body,
-        timeout=20,
-    ).json()
+    body = {
+        "chat_id": cid,
+        "open_id": oid,
+        "msg_type": "interactive",
+        "card": card,
+    }
+    res = requests.post(url, headers=headers, json=body, timeout=20).json()
+    if res.get("code") != 0:
+        raise RuntimeError(f"Failed to send group-only form: {res}")
 
 
 def _deliver_private_card(
@@ -300,16 +309,10 @@ def _deliver_private_card(
     send_message: Callable[..., dict[str, Any]],
     token: str,
 ) -> None:
-    card_json = json.dumps(card, ensure_ascii=False)
     if (chat_type or "").strip().lower() == "group":
-        resp = _send_open_id_message(owner_open_id, token=token, msg_type="interactive", content=card_json)
-        if int(resp.get("code", -1)) != 0:
-            raise RuntimeError(f"Failed to send private form: {resp}")
-        send_message(
-            group_chat_id,
-            f'<at user_id="{owner_open_id}"></at> I sent you a private form in bot DM.',
-        )
+        _send_ephemeral_card(group_chat_id, owner_open_id, card, token)
         return
+    card_json = json.dumps(card, ensure_ascii=False)
     resp = send_message(group_chat_id, card_json, msg_type="interactive")
     if isinstance(resp, dict) and int(resp.get("code", -1)) != 0:
         raise RuntimeError(f"Failed to send form: {resp}")
