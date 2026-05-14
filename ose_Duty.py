@@ -79,6 +79,16 @@ MONTH_MAP = {
     "Dec": 12,
 }
 
+OSE_SHOWOFFSET_NAMES: tuple[str, ...] = (
+    "Bryan Peh",
+    "Augustine Si yew",
+    "Man Chung",
+    "Chun Chee",
+    "Jun Chen",
+    "Kheng Kwan",
+    "Kris Ng",
+)
+
 DEBUG = False
 
 # In-memory OSE shift sheet (avoids one full-sheet fetch per day for calendar / repeated /ose).
@@ -1503,6 +1513,27 @@ def parse_showoffset_command(text: str) -> Optional[tuple[int, int]]:
     raise ValueError(f"Unknown month {arg!r}. Use a month name or number (1–12).")
 
 
+def _showoffset_canonical_name(name: str) -> Optional[str]:
+    nm = _title_name(name)
+    if not nm:
+        return None
+    for allowed in OSE_SHOWOFFSET_NAMES:
+        if _names_same_person(allowed, nm):
+            return _title_name(allowed)
+    return None
+
+
+def _add_showoffset_days(
+    by_person: dict[str, dict[str, set[int]]],
+    person: str,
+    orig_day: int,
+    exc_day: int,
+) -> None:
+    slot = by_person.setdefault(person, {"orig": set(), "exc": set()})
+    slot["orig"].add(orig_day)
+    slot["exc"].add(exc_day)
+
+
 def _collect_offset_month_summary(
     year: int,
     month: int,
@@ -1520,15 +1551,21 @@ def _collect_offset_month_summary(
         req = _title_name(
             _field_text(_get_field_by_aliases(f, ["Request Person", "Requester", "Requester Person", "Name"]))
         )
+        exc = _title_name(
+            _field_text(_get_field_by_aliases(f, ["Exchange Person", "Replacement", "Swap Person"]))
+        )
         od = _parse_date_value(_get_field_by_aliases(f, ["Original Date", "Date"]))
         xd = _parse_date_value(_get_field_by_aliases(f, ["Exchange Date", "Swap Date", "Target Date"]))
-        if not req or not od or not xd:
+        if not od or not xd:
             continue
         if od.year != year or od.month != month:
             continue
-        slot = by_person.setdefault(req, {"orig": set(), "exc": set()})
-        slot["orig"].add(od.day)
-        slot["exc"].add(xd.day)
+        req_person = _showoffset_canonical_name(req)
+        if req_person:
+            _add_showoffset_days(by_person, req_person, od.day, xd.day)
+        exc_person = _showoffset_canonical_name(exc)
+        if exc_person:
+            _add_showoffset_days(by_person, exc_person, xd.day, od.day)
     out: dict[str, tuple[list[int], list[int]]] = {}
     for person, days in by_person.items():
         out[person] = (sorted(days["orig"]), sorted(days["exc"]))
@@ -1542,7 +1579,9 @@ def build_ose_showoffset_card(year: int, month: int) -> dict[str, Any]:
     if not summary:
         lines.append("No offset requests this month.")
     else:
-        for person in sorted(summary.keys(), key=lambda x: x.lower()):
+        for person in OSE_SHOWOFFSET_NAMES:
+            if person not in summary:
+                continue
             orig_days, exc_days = summary[person]
             orig_s = ", ".join(str(d) for d in orig_days)
             exc_s = ", ".join(str(d) for d in exc_days)
