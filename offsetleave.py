@@ -21,6 +21,15 @@ _OFFSET_APPR_CONFIRM_KEY = "offsetleave_offset_appr_confirm"
 OFFSET_APPROVER_OPEN_ID = "ou_5f660c0fb0769d184aca635d02209272"
 OFFSET_APPROVAL_CALLBACK_KEYS = frozenset({_OFFSET_APPR_PICK_KEY, _OFFSET_APPR_CONFIRM_KEY})
 
+_OFFSET_EDIT_PICK_KEY = "offsetleave_offset_edit_pick"
+_OFFSET_EDIT_SUBMIT_KEY = "offsetleave_offset_edit_submit"
+_OFFSET_DELETE_KEY = "offsetleave_offset_delete"
+
+OFFSETLEAVE_CARD_CALLBACK_KEYS = frozenset(
+    set(OFFSET_APPROVAL_CALLBACK_KEYS)
+    | {_OFFSET_EDIT_PICK_KEY, _OFFSET_EDIT_SUBMIT_KEY, _OFFSET_DELETE_KEY}
+)
+
 
 def _wants_offset(text: str) -> bool:
     return bool(re.search(r"\boffset\b", text or "", re.I))
@@ -67,6 +76,29 @@ def resolve_request_person(open_id: str, token: str) -> str:
             "Ask admin to align your Lark profile with the duty roster."
         )
     return roster
+
+
+def wants_editoffset(text: str) -> bool:
+    return bool(re.match(r"^\s*editoffset\s*$", (text or "").strip(), re.I))
+
+
+def wants_deleteoffset(text: str) -> bool:
+    return bool(re.match(r"^\s*deleteoffset\s*$", (text or "").strip(), re.I))
+
+
+def _pending_offsets_for_request_person(request_person: str) -> list[dict[str, Any]]:
+    rp = od._title_name(request_person)
+    if not rp:
+        return []
+    data = od.get_ose_offset_records_admin()
+    out: list[dict[str, Any]] = []
+    for it in (data or {}).get("items") or []:
+        if not it.get("pending"):
+            continue
+        if od._title_name(str(it.get("request_person") or "")) != rp:
+            continue
+        out.append(dict(it))
+    return out
 
 
 def _select_options(values: tuple[str, ...] | list[str]) -> list[dict[str, Any]]:
@@ -280,6 +312,268 @@ def build_leave_form_card(*, owner_open_id: str, request_person: str) -> dict[st
     }
 
 
+def _short_cell(s: Any) -> str:
+    t = str(s or "").replace("\n", " ").replace("|", "/").strip()
+    if len(t) > 240:
+        return t[:240] + "…"
+    return t or "—"
+
+
+def _callback_payload_edit_submit(*, owner_open_id: str, request_person: str, record_id: str) -> dict[str, str]:
+    return {
+        "k": _OFFSET_EDIT_SUBMIT_KEY,
+        "owner": (owner_open_id or "").strip(),
+        "request_person": (request_person or "").strip(),
+        "record_id": (record_id or "").strip(),
+    }
+
+
+def _callback_payload_row_action(*, kind: str, owner_open_id: str, request_person: str, record_id: str) -> dict[str, str]:
+    return {
+        "k": kind,
+        "owner": (owner_open_id or "").strip(),
+        "request_person": (request_person or "").strip(),
+        "record_id": (record_id or "").strip(),
+    }
+
+
+def _row_datepicker_initial(cell: Any) -> str:
+    raw = str(cell or "").strip()
+    if not raw:
+        return ""
+    try:
+        return _parse_date_iso(raw).isoformat()
+    except Exception:
+        return ""
+
+
+def build_offset_edit_list_card(owner_open_id: str, request_person: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    cap = 15
+    sliced = rows[:cap]
+    elements: list[dict[str, Any]] = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": (
+                    f"**{request_person}** — pending offset requests you can **edit**.\n"
+                    "Approved / rejected rows are not listed."
+                ),
+            },
+        },
+    ]
+    if len(rows) > cap:
+        elements.append(
+            {
+                "tag": "div",
+                "text": {"tag": "plain_text", "content": f"(Showing first {cap} of {len(rows)} pending.)"},
+            }
+        )
+    for i, r in enumerate(sliced, start=1):
+        rid = str(r.get("record_id") or "").strip()
+        if not rid:
+            continue
+        summary = (
+            f"**{i}.** {_short_cell(r.get('exchange_person'))} · **{_short_cell(r.get('shift_type'))}** · "
+            f"{_short_cell(r.get('original_date'))} → {_short_cell(r.get('exchange_date'))}\n"
+            f"**Reason:** {_short_cell(r.get('reason'))}"
+        )
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": summary}})
+        elements.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "Edit"},
+                "type": "primary",
+                "behaviors": [
+                    {
+                        "type": "callback",
+                        "value": _callback_payload_row_action(
+                            _OFFSET_EDIT_PICK_KEY,
+                            owner_open_id=owner_open_id,
+                            request_person=request_person,
+                            record_id=rid,
+                        ),
+                    }
+                ],
+            }
+        )
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {"template": "blue", "title": {"tag": "plain_text", "content": "OSE offset — edit"}},
+        "body": {"elements": elements},
+    }
+
+
+def build_offset_delete_list_card(owner_open_id: str, request_person: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    cap = 15
+    sliced = rows[:cap]
+    elements: list[dict[str, Any]] = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": (
+                    f"**{request_person}** — pending offset requests you can **delete**.\n"
+                    "Approved / rejected rows are not listed."
+                ),
+            },
+        },
+    ]
+    if len(rows) > cap:
+        elements.append(
+            {
+                "tag": "div",
+                "text": {"tag": "plain_text", "content": f"(Showing first {cap} of {len(rows)} pending.)"},
+            }
+        )
+    for i, r in enumerate(sliced, start=1):
+        rid = str(r.get("record_id") or "").strip()
+        if not rid:
+            continue
+        summary = (
+            f"**{i}.** {_short_cell(r.get('exchange_person'))} · **{_short_cell(r.get('shift_type'))}** · "
+            f"{_short_cell(r.get('original_date'))} → {_short_cell(r.get('exchange_date'))}\n"
+            f"**Reason:** {_short_cell(r.get('reason'))}"
+        )
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": summary}})
+        elements.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "Delete"},
+                "type": "danger",
+                "behaviors": [
+                    {
+                        "type": "callback",
+                        "value": _callback_payload_row_action(
+                            _OFFSET_DELETE_KEY,
+                            owner_open_id=owner_open_id,
+                            request_person=request_person,
+                            record_id=rid,
+                        ),
+                    }
+                ],
+            }
+        )
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {"template": "orange", "title": {"tag": "plain_text", "content": "OSE offset — delete"}},
+        "body": {"elements": elements},
+    }
+
+
+def build_offset_edit_form_card(*, owner_open_id: str, request_person: str, row: dict[str, Any]) -> dict[str, Any]:
+    rid = str(row.get("record_id") or "").strip()
+    exchange_names = [n for n in od.OSE_LEAVE_FORM_NAMES if od._title_name(n) != od._title_name(request_person)]
+    o_ini = _row_datepicker_initial(row.get("original_date"))
+    x_ini = _row_datepicker_initial(row.get("exchange_date"))
+    original_dp: dict[str, Any] = {
+        "tag": "date_picker",
+        "name": "original_date",
+        "placeholder": {"tag": "plain_text", "content": "Pick original date"},
+        "required": True,
+    }
+    if o_ini:
+        original_dp["initial_date"] = o_ini
+    exchange_dp: dict[str, Any] = {
+        "tag": "date_picker",
+        "name": "exchange_date",
+        "placeholder": {"tag": "plain_text", "content": "Pick exchange date"},
+        "required": True,
+    }
+    if x_ini:
+        exchange_dp["initial_date"] = x_ini
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {"template": "blue", "title": {"tag": "plain_text", "content": "OSE offset — edit request"}},
+        "body": {
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": (
+                            f"**Request person:** {request_person}\n"
+                            f"**Record:** `{_short_cell(rid)}`\n"
+                            "Update the fields below, then tap **Save**."
+                        ),
+                    },
+                },
+                {
+                    "tag": "form",
+                    "name": "ose_offset_edit_form",
+                    "elements": [
+                        {
+                            "tag": "div",
+                            "text": {"tag": "plain_text", "content": "Exchange person"},
+                        },
+                        {
+                            "tag": "select_static",
+                            "name": "exchange_person",
+                            "placeholder": {"tag": "plain_text", "content": "Select exchange person"},
+                            "options": _select_options(exchange_names),
+                            "required": True,
+                        },
+                        {
+                            "tag": "div",
+                            "text": {"tag": "plain_text", "content": "Shift"},
+                        },
+                        {
+                            "tag": "select_static",
+                            "name": "shift_type",
+                            "placeholder": {"tag": "plain_text", "content": "N or D"},
+                            "options": _select_options(od.OSE_SHIFT_TYPES),
+                            "required": True,
+                        },
+                        {
+                            "tag": "div",
+                            "text": {"tag": "plain_text", "content": "Original date"},
+                        },
+                        original_dp,
+                        {
+                            "tag": "div",
+                            "text": {"tag": "plain_text", "content": "Exchange date"},
+                        },
+                        exchange_dp,
+                        {
+                            "tag": "input",
+                            "name": "reason",
+                            "input_type": "multiline_text",
+                            "rows": 4,
+                            "auto_resize": True,
+                            "width": "fill",
+                            "label": {"tag": "plain_text", "content": "Reason"},
+                            "label_position": "top",
+                            "placeholder": {"tag": "plain_text", "content": "Reason for offset"},
+                            "required": True,
+                            "max_length": 1000,
+                        },
+                        {
+                            "tag": "button",
+                            "name": "submit_ose_offset_edit",
+                            "text": {"tag": "plain_text", "content": "Save"},
+                            "type": "primary",
+                            "form_action_type": "submit",
+                            "behaviors": [
+                                {
+                                    "type": "callback",
+                                    "value": _callback_payload_edit_submit(
+                                        owner_open_id=owner_open_id,
+                                        request_person=request_person,
+                                        record_id=rid,
+                                    ),
+                                }
+                            ],
+                        },
+                    ],
+                },
+            ]
+        },
+    }
+
+
 def _send_ephemeral_card(
     chat_id: str,
     open_id: str,
@@ -347,6 +641,86 @@ def handle_showoffset(
         send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
     except Exception as exc:
         send_message(chat_id, f"❌ showoffset failed: {exc}")
+    return True
+
+
+def handle_editoffset_command(
+    clean_text: str,
+    *,
+    sender_open_id: str,
+    chat_id: str,
+    chat_type: Optional[str],
+    send_message: Callable[..., dict[str, Any]],
+    get_token_func: Callable[[], str],
+) -> bool:
+    if not wants_editoffset(clean_text):
+        return False
+    oid = (sender_open_id or "").strip()
+    if not oid:
+        send_message(chat_id, "❌ Could not identify your Lark user.")
+        return True
+    try:
+        token = get_token_func()
+        request_person = resolve_request_person(oid, token)
+        rows = _pending_offsets_for_request_person(request_person)
+        if not rows:
+            send_message(
+                chat_id,
+                "No offset found that you requested (no pending rows). "
+                "Already approved or rejected requests cannot be edited.",
+            )
+            return True
+        card = build_offset_edit_list_card(oid, request_person, rows)
+        _deliver_private_card(
+            owner_open_id=oid,
+            group_chat_id=chat_id,
+            chat_type=chat_type,
+            card=card,
+            send_message=send_message,
+            token=token,
+        )
+    except Exception as e:
+        send_message(chat_id, f"❌ editoffset: {e}")
+    return True
+
+
+def handle_deleteoffset_command(
+    clean_text: str,
+    *,
+    sender_open_id: str,
+    chat_id: str,
+    chat_type: Optional[str],
+    send_message: Callable[..., dict[str, Any]],
+    get_token_func: Callable[[], str],
+) -> bool:
+    if not wants_deleteoffset(clean_text):
+        return False
+    oid = (sender_open_id or "").strip()
+    if not oid:
+        send_message(chat_id, "❌ Could not identify your Lark user.")
+        return True
+    try:
+        token = get_token_func()
+        request_person = resolve_request_person(oid, token)
+        rows = _pending_offsets_for_request_person(request_person)
+        if not rows:
+            send_message(
+                chat_id,
+                "No offset found that you requested (no pending rows). "
+                "Already approved or rejected requests cannot be deleted.",
+            )
+            return True
+        card = build_offset_delete_list_card(oid, request_person, rows)
+        _deliver_private_card(
+            owner_open_id=oid,
+            group_chat_id=chat_id,
+            chat_type=chat_type,
+            card=card,
+            send_message=send_message,
+            token=token,
+        )
+    except Exception as e:
+        send_message(chat_id, f"❌ deleteoffset: {e}")
     return True
 
 
@@ -919,6 +1293,212 @@ def _notify_requester_offset_responded(
         print(f"[offsetleave] requester DM failed: {r!r}", flush=True)
 
 
+def _assert_owner_callback_session(
+    parsed: dict[str, Any],
+    sender_open_id: str,
+    token: str,
+) -> tuple[str, str]:
+    owner = str(parsed.get("owner") or "").strip()
+    rp_val = str(parsed.get("request_person") or "").strip()
+    sender = (sender_open_id or "").strip()
+    if not owner or owner != sender:
+        raise ValueError("This action is only for the user who opened the menu.")
+    rp_live = resolve_request_person(sender, token)
+    if od._title_name(rp_live) != od._title_name(rp_val):
+        raise ValueError("Identity mismatch for this action.")
+    return owner, rp_live
+
+
+def _build_offset_edit_empty_patch_card(request_person: str) -> dict[str, Any]:
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {"template": "grey", "title": {"tag": "plain_text", "content": "OSE offset — edit"}},
+        "body": {
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": f"No pending offset found that you requested ({request_person}).",
+                    },
+                }
+            ]
+        },
+    }
+
+
+def _build_offset_delete_empty_patch_card(request_person: str) -> dict[str, Any]:
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {"template": "grey", "title": {"tag": "plain_text", "content": "OSE offset — delete"}},
+        "body": {
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": f"No pending offset requests left to delete ({request_person}).",
+                    },
+                }
+            ]
+        },
+    }
+
+
+def _patch_my_offset_list_after_change(
+    *,
+    message_id: str,
+    mode: str,
+    owner_open_id: str,
+    request_person: str,
+) -> None:
+    mid = (message_id or "").strip()
+    if not mid:
+        return
+    rows = _pending_offsets_for_request_person(request_person)
+    m = (mode or "").strip().lower()
+    if m == "edit":
+        card = (
+            build_offset_edit_list_card(owner_open_id, request_person, rows)
+            if rows
+            else _build_offset_edit_empty_patch_card(request_person)
+        )
+    elif m == "delete":
+        card = (
+            build_offset_delete_list_card(owner_open_id, request_person, rows)
+            if rows
+            else _build_offset_delete_empty_patch_card(request_person)
+        )
+    else:
+        return
+    _patch_interactive_card_message(mid, card)
+
+
+def _handle_offset_edit_pick(
+    parsed: dict[str, Any],
+    event_obj: dict[str, Any],
+    *,
+    sender_open_id: str,
+    chat_id: str,
+    send_message: Callable[..., Any],
+    webhook_data: Optional[dict[str, Any]],
+) -> bool:
+    cid = (chat_id or "").strip()
+    mid = _event_message_id(event_obj, webhook_data)
+    try:
+        token = od.get_tenant_access_token()
+        owner, rp_live = _assert_owner_callback_session(parsed, sender_open_id, token)
+        rid = str(parsed.get("record_id") or "").strip()
+        if not rid:
+            raise ValueError("missing record id")
+        if not mid:
+            raise ValueError("missing message id")
+        row = _offset_admin_row_by_id(rid)
+        if not row.get("pending"):
+            raise ValueError("That request is no longer pending (already approved or rejected).")
+        if od._title_name(str(row.get("request_person") or "")) != od._title_name(rp_live):
+            raise ValueError("That offset is not yours to edit.")
+        _patch_interactive_card_message(
+            mid,
+            build_offset_edit_form_card(owner_open_id=owner, request_person=rp_live, row=row),
+        )
+    except Exception as e:
+        if cid:
+            send_message(chat_id, f"❌ {e}")
+        else:
+            print(f"[offsetleave] edit pick: {e!r}", flush=True)
+    return True
+
+
+def _handle_offset_edit_submit(
+    parsed: dict[str, Any],
+    event_obj: dict[str, Any],
+    *,
+    sender_open_id: str,
+    chat_id: str,
+    send_message: Callable[..., Any],
+    webhook_data: Optional[dict[str, Any]],
+) -> bool:
+    cid = (chat_id or "").strip()
+    mid = _event_message_id(event_obj, webhook_data)
+    try:
+        token = od.get_tenant_access_token()
+        owner, rp_live = _assert_owner_callback_session(parsed, sender_open_id, token)
+        rid = str(parsed.get("record_id") or "").strip()
+        if not rid:
+            raise ValueError("missing record id")
+        action = event_obj.get("action") if isinstance(event_obj.get("action"), dict) else {}
+        exchange_person = _get_form_field(action, parsed, event_obj, "exchange_person")
+        shift_type = _get_form_field(action, parsed, event_obj, "shift_type")
+        original_date = _parse_date_iso(_get_form_field(action, parsed, event_obj, "original_date"))
+        exchange_date = _parse_date_iso(_get_form_field(action, parsed, event_obj, "exchange_date"))
+        reason = _get_form_field(action, parsed, event_obj, "reason")
+        if not reason or not exchange_person or not shift_type:
+            raise ValueError("Please fill Exchange person, Shift, dates, and Reason.")
+        od.update_ose_offset_request(
+            record_id=rid,
+            request_person=rp_live,
+            exchange_person=exchange_person,
+            shift_type=shift_type,
+            original_date=original_date,
+            exchange_date=exchange_date,
+            reason=reason,
+        )
+        _patch_my_offset_list_after_change(
+            message_id=mid,
+            mode="edit",
+            owner_open_id=owner,
+            request_person=rp_live,
+        )
+        if cid and not mid:
+            send_message(chat_id, "✅ Offset request updated.")
+    except Exception as e:
+        if cid:
+            send_message(chat_id, f"❌ Save failed: {e}")
+        else:
+            print(f"[offsetleave] edit submit: {e!r}", flush=True)
+    return True
+
+
+def _handle_offset_delete_row(
+    parsed: dict[str, Any],
+    event_obj: dict[str, Any],
+    *,
+    sender_open_id: str,
+    chat_id: str,
+    send_message: Callable[..., Any],
+    webhook_data: Optional[dict[str, Any]],
+) -> bool:
+    cid = (chat_id or "").strip()
+    mid = _event_message_id(event_obj, webhook_data)
+    try:
+        token = od.get_tenant_access_token()
+        owner, rp_live = _assert_owner_callback_session(parsed, sender_open_id, token)
+        rid = str(parsed.get("record_id") or "").strip()
+        if not rid:
+            raise ValueError("missing record id")
+        row = _offset_admin_row_by_id(rid)
+        if not row.get("pending"):
+            raise ValueError("That request is no longer pending (already approved or rejected).")
+        if od._title_name(str(row.get("request_person") or "")) != od._title_name(rp_live):
+            raise ValueError("That offset is not yours to delete.")
+        od.delete_ose_offset_record(record_id=rid)
+        _patch_my_offset_list_after_change(
+            message_id=mid,
+            mode="delete",
+            owner_open_id=owner,
+            request_person=rp_live,
+        )
+    except Exception as e:
+        if cid:
+            send_message(chat_id, f"❌ Delete failed: {e}")
+        else:
+            print(f"[offsetleave] delete: {e!r}", flush=True)
+    return True
+
+
 def _handle_offset_approval_callback(
     parsed: dict[str, Any],
     event_obj: dict[str, Any],
@@ -1003,6 +1583,33 @@ def handle_card_callback(
     key = str(parsed.get("k") or "").strip().lower()
     if key in OFFSET_APPROVAL_CALLBACK_KEYS:
         return _handle_offset_approval_callback(
+            parsed,
+            event_obj,
+            sender_open_id=sender_open_id,
+            chat_id=chat_id,
+            send_message=send_message,
+            webhook_data=webhook_data,
+        )
+    if key == _OFFSET_EDIT_PICK_KEY:
+        return _handle_offset_edit_pick(
+            parsed,
+            event_obj,
+            sender_open_id=sender_open_id,
+            chat_id=chat_id,
+            send_message=send_message,
+            webhook_data=webhook_data,
+        )
+    if key == _OFFSET_EDIT_SUBMIT_KEY:
+        return _handle_offset_edit_submit(
+            parsed,
+            event_obj,
+            sender_open_id=sender_open_id,
+            chat_id=chat_id,
+            send_message=send_message,
+            webhook_data=webhook_data,
+        )
+    if key == _OFFSET_DELETE_KEY:
+        return _handle_offset_delete_row(
             parsed,
             event_obj,
             sender_open_id=sender_open_id,

@@ -2092,7 +2092,7 @@ def lark_webhook():
                         parsed_pref.get("k") or ""
                     ).strip().lower() in getattr(
                         _offsetleave_pref,
-                        "OFFSET_APPROVAL_CALLBACK_KEYS",
+                        "OFFSETLEAVE_CARD_CALLBACK_KEYS",
                         frozenset(),
                     )
                 except Exception:
@@ -2570,7 +2570,33 @@ def lark_webhook():
         ):
             return jsonify({"success": True})
 
+        if _offsetleave.handle_editoffset_command(
+            clean_text,
+            sender_open_id=sender_id or "",
+            chat_id=chat_id,
+            chat_type=chat_type,
+            send_message=send_message,
+            get_token_func=get_tenant_access_token,
+        ):
+            return jsonify({"success": True})
+
+        if _offsetleave.handle_deleteoffset_command(
+            clean_text,
+            sender_open_id=sender_id or "",
+            chat_id=chat_id,
+            chat_type=chat_type,
+            send_message=send_message,
+            get_token_func=get_tenant_access_token,
+        ):
+            return jsonify({"success": True})
+
         if _offsetleave.wants_offset_request(clean_text) and message_id:
+            add_gotit_reaction(message_id)
+
+        if _offsetleave.wants_editoffset(clean_text) and message_id:
+            add_gotit_reaction(message_id)
+
+        if _offsetleave.wants_deleteoffset(clean_text) and message_id:
             add_gotit_reaction(message_id)
 
         if _offsetleave.handle_mention(
