@@ -1789,8 +1789,13 @@ def _calendar_months_after(d: date, ref: date) -> int:
 
 
 def _offset_row_original_exchange_dates(fields: dict[str, Any]) -> tuple[Optional[date], Optional[date]]:
+    """
+    Swap dates for retention / purge. Must match :func:`get_ose_offset_records_admin`
+    (do **not** treat ``Request Date`` as Original Date — that is usually submission time
+    and would skip purging old March swaps while the row still displays correctly).
+    """
     f = fields or {}
-    od = _parse_date_value(_get_field_by_aliases(f, ["Original Date", "Request Date", "Date"]))
+    od = _parse_date_value(_get_field_by_aliases(f, ["Original Date", "Date"]))
     xd = _parse_date_value(_get_field_by_aliases(f, ["Exchange Date", "Swap Date", "Target Date"]))
     return od, xd
 
