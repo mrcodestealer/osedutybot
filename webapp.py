@@ -12,8 +12,8 @@ Mount inside Duty bot (same process, no second ``main.py``) — **on by default*
     # optional: WEBMACHINE_MOUNT_IN_MAIN=0   disable dashboard on this app
     # optional: WEBMACHINE_URL_PREFIX=/wm   (default /wm)
     # optional: WEBMACHINE_SCRAPE=0       disable live EGM scrape (default: **on** in code; no .env required)
-    # optional: WEBMACHINE_SCRAPE_INTERVAL_SEC=60   (0 = re-scrape ~every 3s after each run; min gap 5s when >0)
-    # optional: WEBMACHINE_LIVE_POLL_SEC=15        (browser JSON poll when live scrape on and no WEBMACHINE_API_TOKEN)
+    # optional: WEBMACHINE_SCRAPE_INTERVAL_SEC=30   (default 30s between runs; 0 = ~1s gap = near-continuous; min gap 3s when >0)
+    # optional: WEBMACHINE_LIVE_POLL_SEC=8         (default 8s; min 3s; 0 = disable browser poll; needs no WEBMACHINE_API_TOKEN)
     # optional: WEBMACHINE_SITES=nwr,nch,...  (default: ``smmachine.DEFAULT_WEBMACHINE_SITES`` — all backends; CP/OSM share one URL and are deduped)
     # optional: WEBMACHINE_DEPLOYMENTS=prod,qat,uat  (default: all three; QAT/UAT use ``*.osmslot.org`` hosts in ``smmachine``)
     # optional: WEBMACHINE_OSMSLOT_USER / WEBMACHINE_OSMSLOT_PASSWORD  (QAT/UAT login; default admin / 123456)
@@ -46,7 +46,7 @@ The HTML dashboard shows **deployment** tabs (PROD / QAT / UAT), **global and pe
 
 Optional: ``WEBMACHINE_API_TOKEN`` — ``GET /api/machines`` requires ``Authorization: Bearer <token>``.
 
-Env: ``WEBMACHINE_PORT``, ``WEBMACHINE_HOST``, ``WEBMACHINE_TITLE``, ``WEBMACHINE_REFRESH_SEC`` (default **0** = no auto page reload), ``WEBMACHINE_DEBUG``, ``WEBMACHINE_LIVE_POLL_SEC`` (dashboard JSON poll when scrape is on and no API token).
+Env: ``WEBMACHINE_PORT``, ``WEBMACHINE_HOST``, ``WEBMACHINE_TITLE``, ``WEBMACHINE_REFRESH_SEC`` (default **0** = no auto page reload), ``WEBMACHINE_DEBUG``, ``WEBMACHINE_SCRAPE_INTERVAL_SEC`` (seconds between scrapes), ``WEBMACHINE_LIVE_POLL_SEC`` (dashboard JSON poll when scrape is on and no API token).
 """
 
 from __future__ import annotations
@@ -844,7 +844,7 @@ _PAGE = """<!DOCTYPE html>
       apply();
 
       if (livePollSec > 0 && apiHrefPoll) {
-        setTimeout(pollTick, 1500);
+        setTimeout(pollTick, 400);
         setInterval(pollTick, livePollSec * 1000);
       }
     })();
@@ -4173,12 +4173,12 @@ def _live_poll_sec_for_machine_status() -> int:
     if (os.environ.get("WEBMACHINE_API_TOKEN") or "").strip():
         return 0
     try:
-        v = int((os.environ.get("WEBMACHINE_LIVE_POLL_SEC") or "15").strip() or "15")
+        v = int((os.environ.get("WEBMACHINE_LIVE_POLL_SEC") or "8").strip() or "8")
     except ValueError:
-        v = 15
+        v = 8
     if v <= 0:
         return 0
-    return max(5, min(v, 300))
+    return max(3, min(v, 300))
 
 
 def _background_worker() -> None:
@@ -4191,13 +4191,13 @@ def _background_worker() -> None:
                     _scrape_errs["_worker"] = repr(e)
                     _scrape_ts = time.time()
         try:
-            interval = int((os.environ.get("WEBMACHINE_SCRAPE_INTERVAL_SEC") or "60").strip() or "60")
+            interval = int((os.environ.get("WEBMACHINE_SCRAPE_INTERVAL_SEC") or "30").strip() or "30")
         except ValueError:
-            interval = 60
+            interval = 30
         if interval <= 0:
-            time.sleep(3)
+            time.sleep(1)
         else:
-            time.sleep(max(5, min(interval, 86400)))
+            time.sleep(max(3, min(interval, 86400)))
 
 
 def start_background_scrape_loop() -> None:
