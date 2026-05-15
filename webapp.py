@@ -12,7 +12,8 @@ Mount inside Duty bot (same process, no second ``main.py``) — **on by default*
     # optional: WEBMACHINE_MOUNT_IN_MAIN=0   disable dashboard on this app
     # optional: WEBMACHINE_URL_PREFIX=/wm   (default /wm)
     # optional: WEBMACHINE_SCRAPE=0       disable live EGM scrape (default: **on** in code; no .env required)
-    # optional: WEBMACHINE_SCRAPE_INTERVAL_SEC=900
+    # optional: WEBMACHINE_SCRAPE_INTERVAL_SEC=60   (0 = re-scrape ~every 3s after each run; min gap 5s when >0)
+    # optional: WEBMACHINE_LIVE_POLL_SEC=15        (browser JSON poll when live scrape on and no WEBMACHINE_API_TOKEN)
     # optional: WEBMACHINE_SITES=nwr,nch,...  (default: ``smmachine.DEFAULT_WEBMACHINE_SITES`` — all backends; CP/OSM share one URL and are deduped)
     # optional: WEBMACHINE_DEPLOYMENTS=prod,qat,uat  (default: all three; QAT/UAT use ``*.osmslot.org`` hosts in ``smmachine``)
     # optional: WEBMACHINE_OSMSLOT_USER / WEBMACHINE_OSMSLOT_PASSWORD  (QAT/UAT login; default admin / 123456)
@@ -45,7 +46,7 @@ The HTML dashboard shows **deployment** tabs (PROD / QAT / UAT), **global and pe
 
 Optional: ``WEBMACHINE_API_TOKEN`` — ``GET /api/machines`` requires ``Authorization: Bearer <token>``.
 
-Env: ``WEBMACHINE_PORT``, ``WEBMACHINE_HOST``, ``WEBMACHINE_TITLE``, ``WEBMACHINE_REFRESH_SEC`` (default **0** = no auto page reload), ``WEBMACHINE_DEBUG``.
+Env: ``WEBMACHINE_PORT``, ``WEBMACHINE_HOST``, ``WEBMACHINE_TITLE``, ``WEBMACHINE_REFRESH_SEC`` (default **0** = no auto page reload), ``WEBMACHINE_DEBUG``, ``WEBMACHINE_LIVE_POLL_SEC`` (dashboard JSON poll when scrape is on and no API token).
 """
 
 from __future__ import annotations
@@ -279,6 +280,12 @@ _PAGE = """<!DOCTYPE html>
     .pill-maint { background: rgba(248,113,113,.12); color: #fca5a5; }
     .pill-occupy { background: rgba(234,179,8,.14); color: var(--warn); }
     .empty { color: var(--muted); padding: 2.5rem 1rem; text-align: center; line-height: 1.6; }
+    .wm-offline-panel { display: none; margin-top: 0.75rem; }
+    .wm-offline-panel.wm-offline-panel-visible { display: block; }
+    .wm-offline-summary {
+      margin: 0; font-size: 0.92rem; line-height: 1.55; color: #fecaca;
+      word-break: break-word;
+    }
     footer { padding: 1rem; text-align: center; color: var(--muted); font-size: 0.75rem; border-top: 1px solid var(--line); }
     a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
     .muted { color: var(--muted); font-size: 0.85rem; }
@@ -288,8 +295,8 @@ _PAGE = """<!DOCTYPE html>
   <header class="wm-header-bar">
     <div class="wm-head-top">
       <h1 class="wm-head-title">{{ title }}</h1>
-      <p class="wm-head-total">Total <span class="count">{{ row_total }}</span> of machines detected</p>
-      <p class="wm-head-updated">Last Updated : {{ last_updated }}</p>
+      <p class="wm-head-total">Total <span class="count" id="wm-prod-total">{{ row_total }}</span> of machines detected</p>
+      <p class="wm-head-updated" id="wm-last-updated">Last Updated : {{ last_updated }}</p>
     </div>
     <div class="wm-head-nav-group">
       <a class="wm-head-title-btn wm-head-nav-btn active" href="{{ machine_status_href }}">Machine status</a>
@@ -397,8 +404,14 @@ _PAGE = """<!DOCTYPE html>
       </tbody>
     </table>
     </div>
+    <section class="panel wm-offline-panel" id="wm-offline-panel" aria-label="Offline machines in current view">
+      <h2 class="panel-title">Offline (current view)</h2>
+      <p id="wm-offline-summary" class="wm-offline-summary"></p>
+    </section>
     <script>
     (function () {
+      var livePollSec = {{ live_poll_sec|default(0)|int }};
+      var apiHrefPoll = {{ api_href|tojson }};
       var inp = document.getElementById("wm-search");
       var hint = document.getElementById("wm-filter-hint");
       var tbody = document.getElementById("wm-tbody");
@@ -509,6 +522,37 @@ _PAGE = """<!DOCTYPE html>
         }
       }
 
+      function offlineLabelForRow(tr) {
+        var b = (tr.getAttribute("data-belongs") || "").trim() || "—";
+        var n = (tr.getAttribute("data-name") || "").trim() || "—";
+        var prefix = b + "-";
+        if (n.slice(0, prefix.length) === prefix) return n;
+        return prefix + n;
+      }
+
+      function updateOfflineSummary() {
+        var panel = document.getElementById("wm-offline-panel");
+        var el = document.getElementById("wm-offline-summary");
+        if (!el || !panel) return;
+        var term = (inp && inp.value) ? inp.value.trim().toLowerCase() : "";
+        var labels = [];
+        var rows = tbody.querySelectorAll("tr");
+        for (var i = 0; i < rows.length; i++) {
+          var tr = rows[i];
+          if (!rowVisible(tr, term)) continue;
+          if (tr.getAttribute("data-offline") !== "1") continue;
+          labels.push(offlineLabelForRow(tr));
+        }
+        labels.sort();
+        if (labels.length === 0) {
+          el.textContent = "";
+          panel.classList.remove("wm-offline-panel-visible");
+          return;
+        }
+        el.textContent = labels.join(",") + " are offline";
+        panel.classList.add("wm-offline-panel-visible");
+      }
+
       function apply() {
         var term = (inp && inp.value) ? inp.value.trim().toLowerCase() : "";
         var rows = tbody.querySelectorAll("tr");
@@ -536,6 +580,7 @@ _PAGE = """<!DOCTYPE html>
             hint.textContent = "Showing " + n + " of " + total + " (" + label.join(", ") + ")";
           }
         }
+        updateOfflineSummary();
       }
 
       if (depBar) {
@@ -589,7 +634,190 @@ _PAGE = """<!DOCTYPE html>
         inp.addEventListener("input", apply);
         inp.addEventListener("search", apply);
       }
+
+      function statusCellPill(status) {
+        var st = (status || "").toLowerCase();
+        var td = document.createElement("td");
+        var s = status || "—";
+        if (st.indexOf("maintain") >= 0) {
+          var sp1 = document.createElement("span");
+          sp1.className = "pill pill-maint";
+          sp1.textContent = s;
+          td.appendChild(sp1);
+        } else if (st.indexOf("normal") >= 0) {
+          var sp2 = document.createElement("span");
+          sp2.className = "pill pill-online";
+          sp2.textContent = s;
+          td.appendChild(sp2);
+        } else if (st.indexOf("occupy") >= 0) {
+          var sp3 = document.createElement("span");
+          sp3.className = "pill pill-occupy";
+          sp3.textContent = s;
+          td.appendChild(sp3);
+        } else {
+          td.textContent = s;
+        }
+        return td;
+      }
+
+      function onlineCell(label, pillClass) {
+        var td = document.createElement("td");
+        var span = document.createElement("span");
+        span.className = "pill " + (pillClass || "pill-unknown");
+        span.textContent = label || "—";
+        td.appendChild(span);
+        return td;
+      }
+
+      function buildRow(r) {
+        var tr = document.createElement("tr");
+        var env = r.environment || "";
+        var belongs = r.belongs || "";
+        var name = r.name || "";
+        var gameType = r.game_type || "";
+        var status = r.status || "";
+        var onlineLabel = r.online_label || "—";
+        var pill = r.pill_class || "pill-unknown";
+        var isTest = !!r.is_test;
+        var stl = (status || "").toLowerCase();
+        var isMaint = stl.indexOf("maintain") >= 0;
+        var isOff = pill === "pill-offline";
+        var isOn = pill === "pill-online";
+        tr.setAttribute("data-deployment", env);
+        tr.setAttribute("data-belongs", belongs);
+        tr.setAttribute("data-name", name);
+        tr.setAttribute("data-game-type", gameType);
+        tr.setAttribute("data-status", status);
+        tr.setAttribute("data-online", onlineLabel);
+        tr.setAttribute("data-test", isTest ? "1" : "0");
+        tr.setAttribute("data-maint", isMaint ? "1" : "0");
+        tr.setAttribute("data-offline", isOff ? "1" : "0");
+        tr.setAttribute("data-online1", isOn ? "1" : "0");
+
+        function tdText(txt) {
+          var td = document.createElement("td");
+          td.textContent = txt;
+          return td;
+        }
+        tr.appendChild(tdText(env));
+        tr.appendChild(tdText(belongs));
+        var tdName = document.createElement("td");
+        var strong = document.createElement("strong");
+        strong.textContent = name;
+        tdName.appendChild(strong);
+        tr.appendChild(tdName);
+        tr.appendChild(tdText(gameType));
+
+        var tdTest = document.createElement("td");
+        if (isTest) {
+          var tsp = document.createElement("span");
+          tsp.className = "pill pill-test";
+          tsp.textContent = "TEST";
+          tdTest.appendChild(tsp);
+        } else {
+          var muted = document.createElement("span");
+          muted.className = "muted";
+          muted.textContent = "—";
+          tdTest.appendChild(muted);
+        }
+        tr.appendChild(tdTest);
+
+        tr.appendChild(statusCellPill(status));
+        tr.appendChild(onlineCell(onlineLabel, pill));
+        return tr;
+      }
+
+      function rebuildBelongsSection(byEnv) {
+        if (!byEnv || !belongsCards || !bar) return;
+        belongsCards.innerHTML = "";
+        for (var bi = 0; bi < byEnv.length; bi++) {
+          var e = byEnv[bi];
+          var card = document.createElement("div");
+          card.className = "env-card";
+          card.setAttribute("data-wm-belongs-card", e.belongs || "");
+          var h3 = document.createElement("h3");
+          h3.textContent = e.belongs || "—";
+          card.appendChild(h3);
+          var mini = document.createElement("div");
+          mini.className = "env-mini";
+          function addPair(label, bkey) {
+            var la = document.createElement("span");
+            la.textContent = label;
+            var bb = document.createElement("b");
+            bb.setAttribute("data-wm-belongs-stat", bkey);
+            bb.textContent = String(e[bkey] != null ? e[bkey] : 0);
+            mini.appendChild(la);
+            mini.appendChild(bb);
+          }
+          addPair("Total", "total");
+          addPair("Online", "online");
+          addPair("Offline", "offline");
+          addPair("Unknown", "conn_unknown");
+          addPair("Test", "test");
+          addPair("Maintain", "maintain");
+          card.appendChild(mini);
+          belongsCards.appendChild(card);
+        }
+        bar.querySelectorAll(".env-filter-btn[data-wm-belongs]:not(#wm-env-all)").forEach(function (b) {
+          bar.removeChild(b);
+        });
+        for (var bj = 0; bj < byEnv.length; bj++) {
+          var eb = byEnv[bj];
+          var bbtn = document.createElement("button");
+          bbtn.type = "button";
+          bbtn.className = "env-filter-btn";
+          bbtn.setAttribute("data-wm-belongs", eb.belongs || "");
+          bbtn.textContent = eb.belongs || "—";
+          bar.appendChild(bbtn);
+        }
+        belongsSel = "";
+        var allBtn2 = bar.querySelector("#wm-env-all");
+        if (allBtn2) {
+          bar.querySelectorAll(".env-filter-btn").forEach(function (b) {
+            b.classList.toggle("active", b === allBtn2);
+          });
+        }
+      }
+
+      function formatLocalTime(ts) {
+        if (!ts || ts <= 0) return "—";
+        var d = new Date(ts * 1000);
+        function p(n) { return n < 10 ? "0" + n : "" + n; }
+        return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+      }
+
+      function mergeFromApi(data) {
+        var machines = data.machines;
+        if (!Array.isArray(machines)) return;
+        tbody.innerHTML = "";
+        for (var mi = 0; mi < machines.length; mi++) {
+          tbody.appendChild(buildRow(machines[mi]));
+        }
+        var ix = data.index_stats;
+        if (ix && ix.by_environment) rebuildBelongsSection(ix.by_environment);
+        var pr = document.getElementById("wm-prod-total");
+        if (pr && ix && ix.prod_row_count != null) pr.textContent = String(ix.prod_row_count);
+        var lu = document.getElementById("wm-last-updated");
+        if (lu && data.scrape && data.scrape.ts) lu.textContent = "Last Updated : " + formatLocalTime(data.scrape.ts);
+        apply();
+      }
+
+      function pollTick() {
+        if (!apiHrefPoll) return;
+        fetch(apiHrefPoll, { credentials: "same-origin" })
+          .then(function (r) { return r.json(); })
+          .then(function (data) {
+            if (data && !data.error) mergeFromApi(data);
+          })
+          .catch(function () {});
+      }
+
       apply();
+
+      if (livePollSec > 0 && apiHrefPoll) {
+        setTimeout(pollTick, 1500);
+        setInterval(pollTick, livePollSec * 1000);
+      }
     })();
     </script>
     {% else %}
@@ -600,7 +828,7 @@ _PAGE = """<!DOCTYPE html>
     {% endif %}
   </main>
   <footer>
-    {% if refresh_sec > 0 %}Auto-refresh every {{ refresh_sec }}s · {% endif %}
+    {% if refresh_sec > 0 %}Auto-refresh every {{ refresh_sec }}s · {% elif live_poll_sec > 0 %}Live data every {{ live_poll_sec }}s · {% endif %}
     API: <a href="{{ api_href }}">api/machines</a>
   </footer>
 </body>
@@ -3909,6 +4137,21 @@ def _run_scrape_once() -> None:
     _persist_scrape_to_data_file(norm)
 
 
+def _live_poll_sec_for_machine_status() -> int:
+    """Browser poll interval for the machine dashboard (0 = disabled)."""
+    if not _scrape_enabled():
+        return 0
+    if (os.environ.get("WEBMACHINE_API_TOKEN") or "").strip():
+        return 0
+    try:
+        v = int((os.environ.get("WEBMACHINE_LIVE_POLL_SEC") or "15").strip() or "15")
+    except ValueError:
+        v = 15
+    if v <= 0:
+        return 0
+    return max(5, min(v, 300))
+
+
 def _background_worker() -> None:
     while True:
         if _scrape_enabled():
@@ -3919,10 +4162,13 @@ def _background_worker() -> None:
                     _scrape_errs["_worker"] = repr(e)
                     _scrape_ts = time.time()
         try:
-            interval = int((os.environ.get("WEBMACHINE_SCRAPE_INTERVAL_SEC") or "900").strip() or "900")
+            interval = int((os.environ.get("WEBMACHINE_SCRAPE_INTERVAL_SEC") or "60").strip() or "60")
         except ValueError:
-            interval = 900
-        time.sleep(max(60, interval))
+            interval = 60
+        if interval <= 0:
+            time.sleep(3)
+        else:
+            time.sleep(max(5, min(interval, 86400)))
 
 
 def start_background_scrape_loop() -> None:
@@ -4003,21 +4249,35 @@ def api_machines():
         except ValueError as e:
             return jsonify(error=str(e)), 400
         stats, stats_env = _compute_stats(rows)
+        prod_rows = _filter_rows_by_deployment(rows, "PROD")
+        stats_idx, stats_env_idx = _compute_stats(prod_rows)
         return jsonify(
             source=src,
             count=len(rows),
             machines=rows,
             scrape=scrape_meta,
             stats={"global": stats, "by_environment": stats_env},
+            index_stats={
+                "global": stats_idx,
+                "by_environment": stats_env_idx,
+                "prod_row_count": len(prod_rows),
+            },
         )
     rows, src = _display_rows_and_provenance()
     stats, stats_env = _compute_stats(rows)
+    prod_rows = _filter_rows_by_deployment(rows, "PROD")
+    stats_idx, stats_env_idx = _compute_stats(prod_rows)
     return jsonify(
         source=src,
         count=len(rows),
         machines=rows,
         scrape=scrape_meta,
         stats={"global": stats, "by_environment": stats_env},
+        index_stats={
+            "global": stats_idx,
+            "by_environment": stats_env_idx,
+            "prod_row_count": len(prod_rows),
+        },
     )
 
 
@@ -4039,6 +4299,7 @@ def index():
         rows, _ = _display_rows_and_provenance()
     prod_rows = _filter_rows_by_deployment(rows, "PROD")
     stats, stats_env = _compute_stats(prod_rows)
+    live_poll_sec = _live_poll_sec_for_machine_status()
     return render_template_string(
         _PAGE,
         title=title,
@@ -4048,6 +4309,7 @@ def index():
         stats=stats,
         stats_env=stats_env,
         refresh_sec=refresh_sec,
+        live_poll_sec=live_poll_sec,
         api_href=url_for("wm.api_machines"),
         machine_status_href=url_for("wm.index"),
         all_duty_href=url_for("wm.all_duty"),
