@@ -745,7 +745,7 @@ def build_offset_approver_confirm_card(row: dict[str, Any], decision: str) -> di
                             "label_position": "top",
                             "placeholder": {"tag": "plain_text", "content": "Optional remarks"},
                             "required": False,
-                            "max_length": 2000,
+                            "max_length": 1000,
                         },
                         {
                             "tag": "button",
