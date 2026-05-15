@@ -351,11 +351,13 @@ _PAGE = """<!DOCTYPE html>
       {% endfor %}
     </div>
     <div class="env-filter-bar row-filter-bar" id="wm-row-filters" role="toolbar" aria-label="Optional row filters (multi-select)">
-      <button type="button" class="env-filter-btn active" data-wm-clear="1" id="wm-row-all">Show all</button>
-      <button type="button" class="env-filter-btn" data-wm-toggle="test">Test</button>
-      <button type="button" class="env-filter-btn" data-wm-toggle="maintain">Maintain</button>
-      <button type="button" class="env-filter-btn" data-wm-toggle="offline">Offline</button>
+      <button type="button" class="env-filter-btn active" data-wm-clear="1" id="wm-row-all">Show All</button>
       <button type="button" class="env-filter-btn" data-wm-toggle="online">Online</button>
+      <button type="button" class="env-filter-btn" data-wm-toggle="offline">Offline</button>
+      <button type="button" class="env-filter-btn" data-wm-toggle="maintain">Maintain</button>
+      <button type="button" class="env-filter-btn" data-wm-toggle="no_maintain">No Maintain</button>
+      <button type="button" class="env-filter-btn" data-wm-toggle="test">Test</button>
+      <button type="button" class="env-filter-btn" data-wm-toggle="no_test">No Test</button>
     </div>
     <div class="toolbar">
       <input type="search" id="wm-search" placeholder="Search belongs, machine, game type, status, online…" autocomplete="off" aria-label="Filter machines"/>
@@ -423,10 +425,10 @@ _PAGE = """<!DOCTYPE html>
       if (!tbody) return;
       var depSel = "PROD";
       var belongsSel = "";
-      var filt = { test: false, maintain: false, offline: false, online: false };
+      var filt = { online: false, offline: false, maintain: false, no_maintain: false, test: false, no_test: false };
 
       function anyRowFilt() {
-        return filt.test || filt.maintain || filt.offline || filt.online;
+        return filt.online || filt.offline || filt.maintain || filt.no_maintain || filt.test || filt.no_test;
       }
 
       function matchesDeployment(tr) {
@@ -446,7 +448,9 @@ _PAGE = """<!DOCTYPE html>
         var off = tr.getAttribute("data-offline") || "0";
         var on1 = tr.getAttribute("data-online1") || "0";
         if (filt.test && t !== "1") return false;
+        if (filt.no_test && t === "1") return false;
         if (filt.maintain && m !== "1") return false;
+        if (filt.no_maintain && m === "1") return false;
         if (filt.offline && off !== "1") return false;
         if (filt.online && on1 !== "1") return false;
         return true;
@@ -576,10 +580,12 @@ _PAGE = """<!DOCTYPE html>
             var label = [];
             if (depSel) label.push(depSel);
             if (belongsSel) label.push("belongs: " + belongsSel);
-            if (filt.test) label.push("test");
-            if (filt.maintain) label.push("maintain");
-            if (filt.offline) label.push("offline");
             if (filt.online) label.push("online");
+            if (filt.offline) label.push("offline");
+            if (filt.maintain) label.push("maintain");
+            if (filt.no_maintain) label.push("no maintain");
+            if (filt.test) label.push("test");
+            if (filt.no_test) label.push("no test");
             if (term) label.push("search");
             hint.textContent = "Showing " + n + " of " + total + " (" + label.join(", ") + ")";
           }
@@ -622,7 +628,7 @@ _PAGE = """<!DOCTYPE html>
           var btn = ev.target.closest("button");
           if (!btn || !rowBar.contains(btn)) return;
           if (btn.getAttribute("data-wm-clear") === "1") {
-            filt.test = filt.maintain = filt.offline = filt.online = false;
+            filt.online = filt.offline = filt.maintain = filt.no_maintain = filt.test = filt.no_test = false;
             syncRowBarActive();
             apply();
             return;
@@ -630,6 +636,14 @@ _PAGE = """<!DOCTYPE html>
           var k = btn.getAttribute("data-wm-toggle");
           if (!k || !Object.prototype.hasOwnProperty.call(filt, k)) return;
           filt[k] = !filt[k];
+          if (filt[k]) {
+            if (k === "test") filt.no_test = false;
+            if (k === "no_test") filt.test = false;
+            if (k === "maintain") filt.no_maintain = false;
+            if (k === "no_maintain") filt.maintain = false;
+            if (k === "online") filt.offline = false;
+            if (k === "offline") filt.online = false;
+          }
           syncRowBarActive();
           apply();
         });
@@ -733,6 +747,7 @@ _PAGE = """<!DOCTYPE html>
 
       function rebuildBelongsSection(byEnv) {
         if (!byEnv || !belongsCards || !bar) return;
+        var prevBelongs = belongsSel;
         belongsCards.innerHTML = "";
         for (var bi = 0; bi < byEnv.length; bi++) {
           var e = byEnv[bi];
@@ -776,9 +791,19 @@ _PAGE = """<!DOCTYPE html>
         }
         belongsSel = "";
         var allBtn2 = bar.querySelector("#wm-env-all");
-        if (allBtn2) {
+        var activeBelongsBtn = allBtn2;
+        if (prevBelongs) {
+          bar.querySelectorAll(".env-filter-btn[data-wm-belongs]").forEach(function (b) {
+            var key = b.getAttribute("data-wm-belongs");
+            if (key && key === prevBelongs) {
+              belongsSel = prevBelongs;
+              activeBelongsBtn = b;
+            }
+          });
+        }
+        if (activeBelongsBtn) {
           bar.querySelectorAll(".env-filter-btn").forEach(function (b) {
-            b.classList.toggle("active", b === allBtn2);
+            b.classList.toggle("active", b === activeBelongsBtn);
           });
         }
       }
