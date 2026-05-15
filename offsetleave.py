@@ -776,6 +776,46 @@ def build_offset_approver_done_card(row: dict[str, Any], decision: str, remarks:
     }
 
 
+def build_offset_requester_responded_card(
+    row: dict[str, Any],
+    *,
+    approver_name: str,
+    decision: str,
+    remarks: str,
+) -> dict[str, Any]:
+    """Read-only message card for the requester (same layout style as approver done card, picture 2)."""
+    dec = (decision or "").strip().title()
+    an = _lark_md_cell(approver_name)
+    rd = _lark_md_cell(row.get("request_date"))
+    rp = _lark_md_cell(row.get("request_person"))
+    ex = _lark_md_cell(row.get("exchange_person"))
+    sh = _lark_md_cell(row.get("shift_type"))
+    od_ = _lark_md_cell(row.get("original_date"))
+    xd = _lark_md_cell(row.get("exchange_date"))
+    rs = _lark_md_cell(row.get("reason"))
+    st = _lark_md_cell((row.get("approval_status") or dec or "").strip() or dec)
+    rr = (remarks or "").strip()
+    remark_line = f"**Remarks:** {_lark_md_cell(rr) if rr else '—'}"
+    md = "\n".join(
+        [
+            f"**{an}** already responded to your offset request (**{dec}**).",
+            "",
+            "| REQ. DATE | REQUEST PERSON | EXCHANGE PERSON | SHIFT | ORIGINAL DATE | EXCHANGE DATE | REASON | STATUS |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            f"| {rd} | {rp} | {ex} | {sh} | {od_} | {xd} | {rs} | {st} |",
+            "",
+            remark_line,
+        ]
+    )
+    tpl = "green" if dec == "Approved" else "red"
+    return {
+        "schema": "2.0",
+        "config": {"width_mode": "fill"},
+        "header": {"template": tpl, "title": {"tag": "plain_text", "content": f"OSE offset — {dec}"}},
+        "body": {"elements": [{"tag": "div", "text": {"tag": "lark_md", "content": md}}]},
+    }
+
+
 def _build_offset_approval_denied_card() -> dict[str, Any]:
     return {
         "schema": "2.0",
@@ -852,33 +892,6 @@ def _requester_open_id_for_offset_row(request_person: str) -> str:
     return (od._lookup_person_open_id(nm, idx) or "").strip()
 
 
-def _format_requester_offset_responded_text(
-    *,
-    approver_name: str,
-    decision: str,
-    row: dict[str, Any],
-    remarks: str,
-) -> str:
-    dec = (decision or "").strip().title()
-    rmk = (remarks or "").strip()
-    lines = [
-        f"{approver_name} already responded to your offset request ({dec}).",
-        "",
-        "Details:",
-        f"• REQ. DATE: {row.get('request_date') or '—'}",
-        f"• REQUEST PERSON: {row.get('request_person') or '—'}",
-        f"• EXCHANGE PERSON: {row.get('exchange_person') or '—'}",
-        f"• SHIFT: {row.get('shift_type') or '—'}",
-        f"• ORIGINAL DATE: {row.get('original_date') or '—'}",
-        f"• EXCHANGE DATE: {row.get('exchange_date') or '—'}",
-        f"• REASON: {(row.get('reason') or '').strip() or '—'}",
-        f"• STATUS: {(row.get('approval_status') or dec).strip() or dec}",
-    ]
-    if rmk:
-        lines.append(f"• APPROVER REMARKS: {rmk}")
-    return "\n".join(lines)
-
-
 def _notify_requester_offset_responded(
     send_message: Callable[..., Any],
     row: dict[str, Any],
@@ -894,13 +907,14 @@ def _notify_requester_offset_responded(
     if not oid:
         print(f"[offsetleave] could not resolve Lark open_id for requester {request_person!r}", flush=True)
         return
-    text = _format_requester_offset_responded_text(
+    card = build_offset_requester_responded_card(
+        row,
         approver_name=approver_name,
         decision=decision,
-        row=row,
         remarks=remarks,
     )
-    r = send_message(oid, text, receive_id_type="open_id")
+    body = json.dumps(card, ensure_ascii=False)
+    r = send_message(oid, body, msg_type="interactive", receive_id_type="open_id")
     if isinstance(r, dict) and int(r.get("code", -1)) != 0:
         print(f"[offsetleave] requester DM failed: {r!r}", flush=True)
 
