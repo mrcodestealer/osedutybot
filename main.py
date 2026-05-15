@@ -349,7 +349,7 @@ def run_smscheckplayer_check(chat_id, player_id: str):
         print(f"[SMS check player] error: {e!r}")
 
 
-def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str, mode: str = "default"):
+def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str, mode: str = "default", navigator_logic_log_basename: Optional[str] = None):
     """Background: same as checkcredit + `--date`. Uses OSS HTTP if CHECKCREDIT_USE_OSS is set."""
     try:
         import checkcredit
@@ -367,6 +367,7 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str, mode: 
             user=checkcredit.DEFAULT_USER,
             pw=checkcredit.DEFAULT_PASS,
             source="oss" if use_oss else "navigator",
+            navigator_logic_log_basename=navigator_logic_log_basename,
         )
         text = (out.get("text") or "").strip()
         np = out.get("np_followup")
@@ -456,6 +457,7 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str, mode: 
                         same_last_line=same_last_line,
                         extra_md=extra_md,
                         extra_error_images=extra_error_images,
+                        navigator_same_day_multi_log=bool(np.get("navigator_same_day_multi_log")),
                     )
             except Exception as e:
                 preview_img_err = str(e)
@@ -500,6 +502,42 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str, mode: 
         cmd = "machineerror" if str(mode or "").strip().lower() == "error_only" else "checkcredit"
         send_message(chat_id, f"❌ {cmd} failed: {e}")
         print(f"[{cmd}] error: {e!r}")
+
+
+def run_checkcredit_navigator_next_log(chat_id: str) -> None:
+    """Open the next same-day logic log in LogNavigator (Duty Bot card **check another logs**)."""
+    use_oss = os.getenv("CHECKCREDIT_USE_OSS", "").strip().lower() in ("1", "true", "yes", "on")
+    if use_oss:
+        send_message(
+            chat_id,
+            "❌ Alternate logic logs only apply when **CHECKCREDIT_USE_OSS** is off (LogNavigator browser mode).",
+        )
+        return
+    pend = _get_checkcredit_np_pending(chat_id)
+    files = (pend or {}).get("navigator_logic_log_files") or []
+    opened = str((pend or {}).get("navigator_opened_logic_log_basename") or "").strip()
+    if not pend or len(files) < 2:
+        send_message(
+            chat_id,
+            "❌ No alternate LogNavigator files in context — run `/checkcreditdate …` again.",
+        )
+        return
+    try:
+        idx = files.index(opened) if opened in files else 0
+    except ValueError:
+        idx = 0
+    next_idx = (idx + 1) % len(files)
+    next_fn = str(files[next_idx] or "").strip()
+    if not next_fn:
+        send_message(chat_id, "❌ Could not resolve next log filename.")
+        return
+    mq = str((pend.get("machine_display") or "")).strip()
+    date_iso = str((pend.get("target_date") or "")).strip()
+    if not mq or not date_iso:
+        send_message(chat_id, "❌ Pending machine/date missing — run `/checkcreditdate …` again.")
+        return
+    send_message(chat_id, f"⏳ LogNavigator: opening `{next_fn}` …")
+    run_checkcredit_finderror(chat_id, mq, date_iso, mode="default", navigator_logic_log_basename=next_fn)
 
 
 def run_checkcredit_player_job(chat_id: str, machine: str, player_id: str, date_iso: str) -> None:
@@ -2129,6 +2167,13 @@ def lark_webhook():
                         print("⚠️ test_hi card: missing operator open_id", flush=True)
                         return
                     send_message(chat_id_ca, f'<at user_id="{at_id}"></at> hi')
+                    return
+                if isinstance(parsed_ca, dict) and str(parsed_ca.get("k") or "").strip().lower() == "np_check_alt_logs":
+                    threading.Thread(
+                        target=run_checkcredit_navigator_next_log,
+                        args=(chat_id_ca,),
+                        daemon=True,
+                    ).start()
                     return
                 if isinstance(parsed_ca, dict) and str(parsed_ca.get("k") or "").strip().lower() == "np_pick":
                     try:

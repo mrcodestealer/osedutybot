@@ -78,6 +78,7 @@ import html
 import os
 import re
 import sys
+from urllib.parse import unquote
 import tempfile
 import time
 import uuid
@@ -186,10 +187,20 @@ def fetch_log_via_navigator(
     user: str,
     pw: str,
     debug_headed: bool = False,
-) -> tuple[str, str, list[str]]:
+    logic_log_basename: str | None = None,
+) -> tuple[str, str, list[str], dict[str, Any]]:
     """
     Pull logic log text via LogNavigator UI (same as ``run_finderror`` when ``source=\"navigator\"``).
-    Returns ``(log_body, machine_display_from_selector, status_lines)``.
+    Returns ``(log_body, machine_display_from_selector, status_lines, navigator_meta)``.
+
+    ``navigator_meta`` may include:
+
+    - ``logic_same_day_log_files``: basenames under ``logic/`` for ``td`` (primary + rotated).
+    - ``logic_same_day_multi``: ``True`` when two or more such files exist.
+    - ``opened_logic_log_basename``: file that was opened and tailed.
+
+    Pass ``logic_log_basename`` (e.g. ``2026-05-16.2026-05-16_00-00-00_128232.log``) to open a non-default
+    file for that day; otherwise the primary ``YYYY-MM-DD.log`` is used when present.
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -201,6 +212,11 @@ def fetch_log_via_navigator(
     mq = (machine_query or "").strip()
     machine_display = mq
     text_parts: list[str] = []
+    nav_meta: dict[str, Any] = {
+        "logic_same_day_log_files": [],
+        "logic_same_day_multi": False,
+        "opened_logic_log_basename": "",
+    }
     headless = False if debug_headed else _playwright_headless()
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
@@ -222,18 +238,46 @@ def fetch_log_via_navigator(
             wait_for_logs_file_browser(page, timeout_ms=timeout_ms)
 
             navigate_to_logic_folder(page, timeout_ms=timeout_ms)
-            click_log_file_for_date(page, td, timeout_ms=timeout_ms)
+            date_primary = f"{td.strftime('%Y-%m-%d')}.log"
+            same_day = list_logic_log_basenames_for_date(page, td, timeout_ms=timeout_ms)
+            nav_meta["logic_same_day_log_files"] = same_day
+            nav_meta["logic_same_day_multi"] = len(same_day) >= 2
+            want = (logic_log_basename or "").strip()
+            if want and want not in same_day:
+                text_parts.append(
+                    f"⚠ Requested logic log `{want}` not listed for this day — using default selection."
+                )
+                want = ""
+            chosen = ""
+            if same_day:
+                if want:
+                    chosen = want
+                elif date_primary in same_day:
+                    chosen = date_primary
+                else:
+                    chosen = same_day[0]
+                click_logic_log_by_basename(page, chosen, timeout_ms=timeout_ms)
+            else:
+                click_log_file_for_date(page, td, timeout_ms=timeout_ms)
+                chosen = date_primary
+                nav_meta["logic_same_day_log_files"] = [date_primary]
+                nav_meta["logic_same_day_multi"] = False
+            nav_meta["opened_logic_log_basename"] = chosen
+            text_parts.append(f"→ Logic log file: {chosen}")
+            if nav_meta["logic_same_day_multi"]:
+                names = ", ".join(same_day)
+                text_parts.append(f"→ Same-day logic logs ({len(same_day)}): {names}")
             bump_tail_and_execute(page, timeout_ms=timeout_ms)
 
             pre = page.locator("section[role='results'] pre, pre.nofloat").first
             pre.wait_for(state="attached", timeout=timeout_ms)
             log_body = pre.inner_text() or ""
 
-            text_parts.append(f"→ Date file: {td.isoformat()}")
+            text_parts.append(f"→ Date (NP window): {td.isoformat()}")
         finally:
             browser.close()
 
-    return log_body, machine_display, text_parts
+    return log_body, machine_display, text_parts, nav_meta
 
 
 def resolve_machine_display_from_lognavigator(
@@ -520,7 +564,7 @@ def wait_for_logs_file_browser(page, *, timeout_ms: int) -> None:
     """After switching machine, wait until folder/file table or logic link is visible."""
     page.locator(
         '#resultsTable, table#resultsTable, a[href*="subPath=logic"], '
-        'a.text-warning[href*="logic"]'
+        'a.text-warning[href*="subPath=logic"]'
     ).first.wait_for(state="visible", timeout=timeout_ms)
 
 
@@ -534,6 +578,66 @@ def navigate_to_logic_folder(page, *, timeout_ms: int) -> None:
     link.click()
     page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
     page.wait_for_timeout(800)
+
+
+def _logic_basename_from_nav_href(href: str) -> str:
+    """Return ``YYYY-MM-DD.log`` or ``YYYY-MM-DD.…`` filename under ``logic/`` from a table link href."""
+    if not href:
+        return ""
+    h = unquote(href)
+    m = re.search(r"logic[/\\]([^?#&\"']+\.log)\b", h, re.I)
+    return (m.group(1) or "").strip() if m else ""
+
+
+def list_logic_log_basenames_for_date(page, target: date, *, timeout_ms: int) -> list[str]:
+    """
+    In the **logic/** file browser, collect ``.log`` basenames for ``target`` calendar day.
+
+    Includes the primary ``YYYY-MM-DD.log`` and rotated names like
+    ``YYYY-MM-DD.YYYY-MM-DD_00-00-00_….log``.
+    """
+    date_str = target.strftime("%Y-%m-%d")
+    links = page.locator('#resultsTable tbody a[href*=".log"]')
+    try:
+        links.first.wait_for(state="attached", timeout=min(15_000, timeout_ms))
+    except Exception:
+        pass
+    seen: set[str] = set()
+    out: list[str] = []
+    n = links.count()
+    for i in range(n):
+        href = links.nth(i).get_attribute("href") or ""
+        base = _logic_basename_from_nav_href(href)
+        if not base:
+            continue
+        if base == f"{date_str}.log" or base.startswith(f"{date_str}."):
+            if base not in seen:
+                seen.add(base)
+                out.append(base)
+
+    def _sort_key(fn: str) -> tuple[int, str]:
+        if fn == f"{date_str}.log":
+            return (0, fn)
+        return (1, fn)
+
+    out.sort(key=_sort_key)
+    return out
+
+
+def click_logic_log_by_basename(page, basename: str, *, timeout_ms: int) -> None:
+    """Open ``logic/<basename>`` from the results table (same folder as :func:`click_log_file_for_date`)."""
+    bn = (basename or "").strip()
+    if not bn:
+        raise ValueError("empty logic log basename")
+    row_link = page.locator(f'#resultsTable tbody a[href*="relativePath=logic/{bn}"]').first
+    if row_link.count() == 0:
+        row_link = page.locator(f'#resultsTable tbody a[href*="logic/{bn}"]').first
+    if row_link.count() == 0:
+        row_link = page.locator(f'#resultsTable tbody a[href*="{bn}"]').first
+    row_link.wait_for(state="visible", timeout=timeout_ms)
+    row_link.click()
+    page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+    page.wait_for_timeout(1000)
 
 
 def click_log_file_for_date(page, target: date, *, timeout_ms: int) -> None:
@@ -982,7 +1086,7 @@ def resolve_player_log_credit_snapshot(
             log_body, _meta = fetch_log_via_oss(mq, target_date, timeout_sec=timeout_sec)
             md = resolve_oss_machine_folder(mq)
         else:
-            log_body, md_nav, _parts = fetch_log_via_navigator(
+            log_body, md_nav, _parts, _nav = fetch_log_via_navigator(
                 mq,
                 target_date,
                 timeout_ms=timeout_ms,
@@ -1162,6 +1266,7 @@ def build_np_choice_lark_card(
     same_last_line: str = "",
     extra_md: str = "",
     extra_error_images: list[dict[str, str]] | None = None,
+    navigator_same_day_multi_log: bool = False,
 ) -> dict[str, Any]:
     """Lark card 2.0: log date + machine + players; buttons **1**..**N** (N = len(choices), max 4) or type digits in chat."""
     lines: list[str] = []
@@ -1186,6 +1291,9 @@ def build_np_choice_lark_card(
     ex = (extra_md or "").strip()
     if ex:
         lines.append(ex)
+        lines.append("")
+    if navigator_same_day_multi_log:
+        lines.append("**found another logs today** · **本日 LogNavigator 下另有 logic 日志文件**")
         lines.append("")
     for i, ch in enumerate(np_choices):
         uid = ch.get("user_id", "")
@@ -1237,15 +1345,29 @@ def build_np_choice_lark_card(
                 },
             }
         )
-        buttons = [
+    buttons: list[dict[str, Any]] = []
+    if n > 0:
+        buttons.extend(
+            [
+                _np_lark_v2_button(
+                    str(i),
+                    "primary" if i == 1 else "default",
+                    {"k": "np_pick", "i": i},
+                    element_id=f"npcc{i}"[:20],
+                )
+                for i in range(1, n + 1)
+            ]
+        )
+    if navigator_same_day_multi_log:
+        buttons.append(
             _np_lark_v2_button(
-                str(i),
-                "primary" if i == 1 else "default",
-                {"k": "np_pick", "i": i},
-                element_id=f"npcc{i}"[:20],
+                "check another logs",
+                "default",
+                {"k": "np_check_alt_logs"},
+                element_id="npcc_altlog",
             )
-            for i in range(1, n + 1)
-        ]
+        )
+    if buttons:
         body_elements.append(_np_lark_v2_button_row(buttons))
     return {
         "schema": "2.0",
@@ -2095,24 +2217,33 @@ def run_finderror(
     pw: str,
     source: str = "navigator",
     debug_headed: bool = False,
+    navigator_logic_log_basename: str | None = None,
 ) -> dict[str, Any]:
     """
     source:
       - \"oss\" — GET log from OSM_LOG_OSS_TEMPLATE (no browser).
       - \"navigator\" — LogNavigator UI + tail (Chromium; headless on Linux without DISPLAY).
     ``debug_headed`` (CLI ``--debug``): force visible LogNavigator Chromium regardless of env / DISPLAY.
+
+    ``navigator_logic_log_basename``: LogNavigator only — open ``logic/<basename>`` for ``target_date``
+    (e.g. rotated ``YYYY-MM-DD.YYYY-MM-DD_00-00-00_….log``) instead of the default ``YYYY-MM-DD.log``.
     """
     td = target_date or date.today()
     parsed: list[dict[str, Any]] = []
     text_parts: list[str] = []
     machine_display = (machine_query or "").strip()
+    nav_meta: dict[str, Any] = {
+        "logic_same_day_log_files": [],
+        "logic_same_day_multi": False,
+        "opened_logic_log_basename": "",
+    }
 
     if source == "oss":
         log_body, text_parts = fetch_log_via_oss(machine_query, td, timeout_sec=max(30.0, timeout_ms / 1000.0))
         machine_display = resolve_oss_machine_folder(machine_query)
         parsed = parse_user_blocks_full(log_body)
     else:
-        log_body, machine_display, nav_parts = fetch_log_via_navigator(
+        log_body, machine_display, nav_parts, nav_meta = fetch_log_via_navigator(
             machine_query,
             td,
             timeout_ms=timeout_ms,
@@ -2120,6 +2251,7 @@ def run_finderror(
             user=user,
             pw=pw,
             debug_headed=debug_headed,
+            logic_log_basename=navigator_logic_log_basename,
         )
         text_parts.extend(nav_parts)
         parsed = parse_user_blocks_full(log_body)
@@ -2139,6 +2271,16 @@ def run_finderror(
     np_followup = build_np_followup_payload(
         top2_any, top2_err, machine_display, td, merged_players_ordered
     )
+    if source != "oss":
+        np_followup["navigator_same_day_multi_log"] = bool(nav_meta.get("logic_same_day_multi"))
+        np_followup["navigator_logic_log_files"] = list(nav_meta.get("logic_same_day_log_files") or [])
+        np_followup["navigator_opened_logic_log_basename"] = str(
+            nav_meta.get("opened_logic_log_basename") or ""
+        )
+    else:
+        np_followup["navigator_same_day_multi_log"] = False
+        np_followup["navigator_logic_log_files"] = []
+        np_followup["navigator_opened_logic_log_basename"] = ""
     if isinstance(np_followup, dict):
         _be = str(np_followup.get("third_http_backend") or "").strip().upper() or "NP"
         if not le_uid:
@@ -2228,6 +2370,7 @@ def run_finderror(
             target_date_iso=str(np_followup.get("target_date") or ""),
             machine_display=str(np_followup.get("machine_display") or ""),
             third_http_backend=str(np_followup.get("third_http_backend") or "NP"),
+            navigator_same_day_multi_log=bool(np_followup.get("navigator_same_day_multi_log")),
         ),
         "lark_card_same_player": build_same_latest_players_card(
             machine_display=machine_display,

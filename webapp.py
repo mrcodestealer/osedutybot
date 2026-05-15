@@ -522,12 +522,16 @@ _PAGE = """<!DOCTYPE html>
         }
       }
 
+      function stripTrailingTestMarker(s) {
+        return String(s || "").replace(/\\s*\\(TEST\\)\\s*$/i, "").trim();
+      }
+
       function offlineLabelForRow(tr) {
         var b = (tr.getAttribute("data-belongs") || "").trim() || "—";
-        var n = (tr.getAttribute("data-name") || "").trim() || "—";
+        var n = stripTrailingTestMarker((tr.getAttribute("data-name") || "").trim() || "—");
         var prefix = b + "-";
-        if (n.slice(0, prefix.length) === prefix) return n;
-        return prefix + n;
+        var out = n.slice(0, prefix.length) === prefix ? n : prefix + n;
+        return stripTrailingTestMarker(out);
       }
 
       function updateOfflineSummary() {
