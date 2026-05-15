@@ -1808,6 +1808,11 @@ def update_ose_offset_request(
     if not reason_s:
         raise ValueError("Reason is required")
     token = get_tenant_access_token()
+    row_refresh = get_ose_offset_record_admin_row(record_id)
+    if not bool(row_refresh.get("pending")):
+        raise ValueError("Only pending offset requests can be edited (record may have been approved).")
+    if _title_name(str(row_refresh.get("request_person") or "")) != req:
+        raise ValueError("This offset request does not belong to you.")
     fields: dict[str, Any] = {
         "Exchange Person": _offset_person_field_value(exc, token=token),
         "Shift Type": st,

@@ -17,8 +17,14 @@ _LEAVE_SUBMIT_KEY = "offsetleave_leave_submit"
 _OFFSET_APPR_PICK_KEY = "offsetleave_offset_appr_pick"
 _OFFSET_APPR_CONFIRM_KEY = "offsetleave_offset_appr_confirm"
 
-# Lark open_id — receives an interactive **message card** to approve / reject offset requests.
-OFFSET_APPROVER_OPEN_ID = "ou_5f660c0fb0769d184aca635d02209272"
+# Lark open_ids — each receives the interactive approval card for new offset submissions.
+OFFSET_APPROVER_OPEN_IDS: frozenset[str] = frozenset(
+    {
+        "ou_c4346ace5927c14f51a89b2394b55338",
+        "ou_5f660c0fb0769d184aca635d02209272",
+    }
+)
+
 OFFSET_APPROVAL_CALLBACK_KEYS = frozenset({_OFFSET_APPR_PICK_KEY, _OFFSET_APPR_CONFIRM_KEY})
 
 _OFFSET_EDIT_PICK_KEY = "offsetleave_offset_edit_pick"
@@ -93,7 +99,7 @@ def _pending_offsets_for_request_person(request_person: str) -> list[dict[str, A
     data = od.get_ose_offset_records_admin()
     out: list[dict[str, Any]] = []
     for it in (data or {}).get("items") or []:
-        if not it.get("pending"):
+        if not bool(it.get("pending")):
             continue
         if od._title_name(str(it.get("request_person") or "")) != rp:
             continue
@@ -1235,15 +1241,22 @@ def _approver_display_for_bitable(operator_open_id: str) -> str:
     return "Approver"
 
 
+def _is_offset_approver_open_id(open_id: str) -> bool:
+    return (open_id or "").strip() in OFFSET_APPROVER_OPEN_IDS
+
+
 def _notify_offset_approver_pending(send_message: Callable[..., Any], row: dict[str, Any]) -> None:
-    oid = (OFFSET_APPROVER_OPEN_ID or "").strip()
-    if not oid:
+    if not OFFSET_APPROVER_OPEN_IDS:
         return
     card = build_offset_approver_initial_card(row)
     body = json.dumps(card, ensure_ascii=False)
-    r = send_message(oid, body, msg_type="interactive", receive_id_type="open_id")
-    if isinstance(r, dict) and int(r.get("code", -1)) != 0:
-        raise RuntimeError(str(r))
+    for oid in OFFSET_APPROVER_OPEN_IDS:
+        aid = (oid or "").strip()
+        if not aid:
+            continue
+        r = send_message(aid, body, msg_type="interactive", receive_id_type="open_id")
+        if isinstance(r, dict) and int(r.get("code", -1)) != 0:
+            print(f"[offsetleave] approver DM failed for {aid!r}: {r!r}", flush=True)
 
 
 def _toast_approval_problem(send_message: Callable[..., Any], chat_id: str, text: str) -> None:
@@ -1396,7 +1409,7 @@ def _handle_offset_edit_pick(
         if not mid:
             raise ValueError("missing message id")
         row = _offset_admin_row_by_id(rid)
-        if not row.get("pending"):
+        if not bool(row.get("pending")):
             raise ValueError("That request is no longer pending (already approved or rejected).")
         if od._title_name(str(row.get("request_person") or "")) != od._title_name(rp_live):
             raise ValueError("That offset is not yours to edit.")
@@ -1437,6 +1450,14 @@ def _handle_offset_edit_submit(
         reason = _get_form_field(action, parsed, event_obj, "reason")
         if not reason or not exchange_person or not shift_type:
             raise ValueError("Please fill Exchange person, Shift, dates, and Reason.")
+        row_chk = _offset_admin_row_by_id(rid)
+        if not bool(row_chk.get("pending")):
+            raise ValueError(
+                "This request is no longer pending (already approved or rejected). "
+                "Run editoffset again to refresh the list."
+            )
+        if od._title_name(str(row_chk.get("request_person") or "")) != od._title_name(rp_live):
+            raise ValueError("Not your request to edit.")
         od.update_ose_offset_request(
             record_id=rid,
             request_person=rp_live,
@@ -1479,11 +1500,14 @@ def _handle_offset_delete_row(
         rid = str(parsed.get("record_id") or "").strip()
         if not rid:
             raise ValueError("missing record id")
-        row = _offset_admin_row_by_id(rid)
-        if not row.get("pending"):
-            raise ValueError("That request is no longer pending (already approved or rejected).")
-        if od._title_name(str(row.get("request_person") or "")) != od._title_name(rp_live):
-            raise ValueError("That offset is not yours to delete.")
+        row_chk = _offset_admin_row_by_id(rid)
+        if not bool(row_chk.get("pending")):
+            raise ValueError(
+                "This request is no longer pending (already approved or rejected). "
+                "Run deleteoffset again to refresh the list."
+            )
+        if od._title_name(str(row_chk.get("request_person") or "")) != od._title_name(rp_live):
+            raise ValueError("Not your request to delete.")
         od.delete_ose_offset_record(record_id=rid)
         _patch_my_offset_list_after_change(
             message_id=mid,
@@ -1510,9 +1534,8 @@ def _handle_offset_approval_callback(
 ) -> bool:
     key = str(parsed.get("k") or "").strip().lower()
     operator = _operator_open_id(event_obj, sender_open_id)
-    approver_oid = (OFFSET_APPROVER_OPEN_ID or "").strip()
     mid = _event_message_id(event_obj, webhook_data)
-    if not approver_oid or operator != approver_oid:
+    if not OFFSET_APPROVER_OPEN_IDS or not _is_offset_approver_open_id(operator):
         try:
             if mid:
                 _patch_interactive_card_message(mid, _build_offset_approval_denied_card())
