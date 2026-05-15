@@ -1088,7 +1088,7 @@ def recall_message(message_id):
     else:
         print(f"❌ Failed to recall message {message_id}: {resp.text}")
         
-def send_message(chat_id, text, msg_type="text", mentions=None):
+def send_message(chat_id, text, msg_type="text", mentions=None, receive_id_type="chat_id"):
     token = get_tenant_access_token()
     url = "https://open.larksuite.com/open-apis/im/v1/messages"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -1106,7 +1106,8 @@ def send_message(chat_id, text, msg_type="text", mentions=None):
     }
     if mentions:
         body["mentions"] = mentions
-    params = {"receive_id_type": "chat_id"}
+    rid_type = (receive_id_type or "chat_id").strip() or "chat_id"
+    params = {"receive_id_type": rid_type}
     response = requests.post(url, headers=headers, params=params, json=body)
     return response.json()
 
@@ -2083,11 +2084,25 @@ def lark_webhook():
                 if eid_ca:
                     processed_messages.add(eid_ca)
             if not chat_id_ca:
-                print(
-                    f"⚠️ card action skipped: missing chat_id event_type={hdr_et!r}",
-                    flush=True,
-                )
-                return
+                parsed_pref = _lark_parse_card_action_value(val_ca)
+                try:
+                    import offsetleave as _offsetleave_pref
+
+                    ok_pref = isinstance(parsed_pref, dict) and str(
+                        parsed_pref.get("k") or ""
+                    ).strip().lower() in getattr(
+                        _offsetleave_pref,
+                        "OFFSET_APPROVAL_CALLBACK_KEYS",
+                        frozenset(),
+                    )
+                except Exception:
+                    ok_pref = False
+                if not ok_pref:
+                    print(
+                        f"⚠️ card action skipped: missing chat_id event_type={hdr_et!r}",
+                        flush=True,
+                    )
+                    return
             try:
                 ev_ca = data.get("event") if isinstance(data.get("event"), dict) else {}
                 op_ca = ev_ca.get("operator") if isinstance(ev_ca.get("operator"), dict) else {}
@@ -2130,7 +2145,10 @@ def lark_webhook():
                     ):
                         return
                 except Exception as e:
-                    send_message(chat_id_ca, f"❌ Offset/leave submit failed: {e}")
+                    if chat_id_ca:
+                        send_message(chat_id_ca, f"❌ Offset/leave submit failed: {e}")
+                    else:
+                        print(f"❌ Offset/leave submit failed (no chat_id): {e!r}", flush=True)
                     return
                 if isinstance(parsed_ca, dict) and str(parsed_ca.get("k") or "").strip().lower() == "rem_del":
                     rid = str(parsed_ca.get("id") or "").strip()

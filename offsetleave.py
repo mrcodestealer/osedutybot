@@ -14,6 +14,12 @@ import ose_Duty as od
 
 _OFFSET_SUBMIT_KEY = "offsetleave_offset_submit"
 _LEAVE_SUBMIT_KEY = "offsetleave_leave_submit"
+_OFFSET_APPR_PICK_KEY = "offsetleave_offset_appr_pick"
+_OFFSET_APPR_CONFIRM_KEY = "offsetleave_offset_appr_confirm"
+
+# Lark open_id — receives an interactive **message card** to approve / reject offset requests.
+OFFSET_APPROVER_OPEN_ID = "ou_5f660c0fb0769d184aca635d02209272"
+OFFSET_APPROVAL_CALLBACK_KEYS = frozenset({_OFFSET_APPR_PICK_KEY, _OFFSET_APPR_CONFIRM_KEY})
 
 
 def _wants_offset(text: str) -> bool:
@@ -558,6 +564,347 @@ def _dismiss_ephemeral_form(message_id: str) -> None:
         print(f"[offsetleave] dismiss ephemeral form error: {exc!r}", flush=True)
 
 
+def _operator_open_id(event_obj: dict[str, Any], fallback: str) -> str:
+    op = event_obj.get("operator") if isinstance(event_obj.get("operator"), dict) else {}
+    oid = (op.get("open_id") or "").strip()
+    if oid:
+        return oid
+    return (fallback or "").strip()
+
+
+def _lark_md_cell(s: Any) -> str:
+    t = str(s if s is not None else "").replace("\n", " ").replace("|", "/").strip()
+    if len(t) > 900:
+        return t[:900] + "…"
+    return t or "—"
+
+
+def _offset_approval_table_md(row: dict[str, Any], *, status: str) -> str:
+    rd = _lark_md_cell(row.get("request_date"))
+    rp = _lark_md_cell(row.get("request_person"))
+    ex = _lark_md_cell(row.get("exchange_person"))
+    sh = _lark_md_cell(row.get("shift_type"))
+    od_ = _lark_md_cell(row.get("original_date"))
+    xd = _lark_md_cell(row.get("exchange_date"))
+    rs = _lark_md_cell(row.get("reason"))
+    st = _lark_md_cell(status)
+    lines = [
+        "**Someone submitted an offset record.** Review the table, tap **Approve** or **Reject**, "
+        "then optional **Remarks**, then **Confirm**.",
+        "",
+        "| REQ. DATE | REQUEST PERSON | EXCHANGE PERSON | SHIFT | ORIGINAL DATE | EXCHANGE DATE | REASON | STATUS |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        f"| {rd} | {rp} | {ex} | {sh} | {od_} | {xd} | {rs} | {st} |",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _offset_admin_row_by_id(record_id: str) -> dict[str, Any]:
+    rid = (record_id or "").strip()
+    if not rid:
+        raise ValueError("missing record_id")
+    data = od.get_ose_offset_records_admin()
+    for it in (data or {}).get("items") or []:
+        if str(it.get("record_id") or "").strip() == rid:
+            return dict(it)
+    raise KeyError(f"offset record {rid!r}")
+
+
+def _local_pending_offset_row(
+    *,
+    record_id: str,
+    request_person: str,
+    exchange_person: str,
+    shift_type: str,
+    original_date: date,
+    exchange_date: date,
+    reason: str,
+) -> dict[str, Any]:
+    today = date.today()
+    return {
+        "record_id": record_id,
+        "request_id": "",
+        "request_date": od._format_yyyymmdd(today),
+        "request_person": od._title_name(request_person),
+        "exchange_person": od._title_name(exchange_person),
+        "shift_type": (shift_type or "").strip().upper(),
+        "original_date": od._format_yyyymmdd(original_date),
+        "exchange_date": od._format_yyyymmdd(exchange_date),
+        "reason": (reason or "").strip(),
+        "approval_status": "Pending",
+    }
+
+
+def _patch_interactive_card_message(message_id: str, card: dict[str, Any]) -> None:
+    mid = (message_id or "").strip()
+    if not mid:
+        raise ValueError("message_id required to patch card")
+    token = od.get_tenant_access_token()
+    url = f"https://open.larksuite.com/open-apis/im/v1/messages/{mid}"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"}
+    payload = {"msg_type": "interactive", "content": json.dumps(card, ensure_ascii=False)}
+    res = requests.patch(
+        url,
+        headers=headers,
+        params={"message_id_type": "open_message_id"},
+        json=payload,
+        timeout=25,
+    ).json()
+    if int(res.get("code", -1)) != 0:
+        raise RuntimeError(f"patch card failed: {res}")
+
+
+def _approval_pick_button_row(approve_val: dict[str, Any], reject_val: dict[str, Any]) -> dict[str, Any]:
+    def _btn(label: str, typ: str, val: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": label},
+            "type": typ,
+            "behaviors": [{"type": "callback", "value": val}],
+        }
+
+    return {
+        "tag": "column_set",
+        "flex_mode": "flow",
+        "background_style": "default",
+        "horizontal_spacing": "8px",
+        "columns": [
+            {
+                "tag": "column",
+                "width": "auto",
+                "weight": 1,
+                "vertical_align": "top",
+                "elements": [_btn("Approve", "primary", approve_val)],
+            },
+            {
+                "tag": "column",
+                "width": "auto",
+                "weight": 1,
+                "vertical_align": "top",
+                "elements": [_btn("Reject", "danger", reject_val)],
+            },
+        ],
+    }
+
+
+def build_offset_approver_initial_card(row: dict[str, Any]) -> dict[str, Any]:
+    rid = str(row.get("record_id") or "").strip()
+    st = (str(row.get("approval_status") or "").strip() or "Pending")
+    md = _offset_approval_table_md(row, status=st)
+    approve_val = {"k": _OFFSET_APPR_PICK_KEY, "record_id": rid, "decision": "Approved"}
+    reject_val = {"k": _OFFSET_APPR_PICK_KEY, "record_id": rid, "decision": "Rejected"}
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "wathet",
+            "title": {"tag": "plain_text", "content": "OSE offset — pending approval"},
+        },
+        "body": {"elements": [{"tag": "div", "text": {"tag": "lark_md", "content": md}}, _approval_pick_button_row(approve_val, reject_val)]},
+    }
+
+
+def build_offset_approver_confirm_card(row: dict[str, Any], decision: str) -> dict[str, Any]:
+    rid = str(row.get("record_id") or "").strip()
+    dec = (decision or "").strip().title()
+    st_show = f"{dec} (pending Confirm)"
+    md = _offset_approval_table_md(row, status=st_show)
+    confirm_val = {"k": _OFFSET_APPR_CONFIRM_KEY, "record_id": rid, "decision": dec}
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "wathet",
+            "title": {"tag": "plain_text", "content": "OSE offset — confirm approval"},
+        },
+        "body": {
+            "elements": [
+                {"tag": "div", "text": {"tag": "lark_md", "content": md}},
+                {
+                    "tag": "form",
+                    "name": "ose_offset_approval_confirm",
+                    "elements": [
+                        {
+                            "tag": "div",
+                            "text": {
+                                "tag": "lark_md",
+                                "content": (
+                                    f"You selected **{dec}**. Add optional **Remarks** below, then tap **Confirm**."
+                                ),
+                            },
+                        },
+                        {
+                            "tag": "input",
+                            "name": "approval_remarks",
+                            "input_type": "multiline_text",
+                            "rows": 2,
+                            "auto_resize": True,
+                            "width": "fill",
+                            "label": {"tag": "plain_text", "content": "Remarks (optional)"},
+                            "label_position": "top",
+                            "placeholder": {"tag": "plain_text", "content": "Optional remarks"},
+                            "required": False,
+                            "max_length": 2000,
+                        },
+                        {
+                            "tag": "button",
+                            "name": "confirm_offset_approval",
+                            "text": {"tag": "plain_text", "content": "Confirm"},
+                            "type": "primary",
+                            "form_action_type": "submit",
+                            "behaviors": [{"type": "callback", "value": confirm_val}],
+                        },
+                    ],
+                },
+            ]
+        },
+    }
+
+
+def build_offset_approver_done_card(row: dict[str, Any], decision: str, remarks: str) -> dict[str, Any]:
+    dec = (decision or "").strip().title()
+    rr = (remarks or "").strip()
+    extra = f"\n**Remarks:** {_lark_md_cell(rr) if rr else '—'}"
+    md = _offset_approval_table_md(row, status=dec) + extra
+    tpl = "green" if dec == "Approved" else "red"
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {"template": tpl, "title": {"tag": "plain_text", "content": f"OSE offset — {dec}"}},
+        "body": {"elements": [{"tag": "div", "text": {"tag": "lark_md", "content": md}}]},
+    }
+
+
+def _build_offset_approval_denied_card() -> dict[str, Any]:
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {"template": "red", "title": {"tag": "plain_text", "content": "Offset approval"}},
+        "body": {
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {"tag": "plain_text", "content": "Not authorized — only the assigned approver can use this card."},
+                }
+            ]
+        },
+    }
+
+
+def _build_offset_approval_error_card(message: str) -> dict[str, Any]:
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {"template": "red", "title": {"tag": "plain_text", "content": "Offset approval error"}},
+        "body": {"elements": [{"tag": "div", "text": {"tag": "plain_text", "content": _lark_md_cell(message)}}]},
+    }
+
+
+def _norm_offset_decision(raw: Any) -> str:
+    t = str(raw or "").strip().lower()
+    if t in ("approved", "approve"):
+        return "Approved"
+    if t in ("rejected", "reject"):
+        return "Rejected"
+    raise ValueError(f"invalid decision {raw!r}")
+
+
+def _approver_display_for_bitable(operator_open_id: str) -> str:
+    token = od.get_tenant_access_token()
+    display = _fetch_user_display_name(operator_open_id, token)
+    roster = _match_roster_name(display) if display else None
+    if roster:
+        return roster
+    if display:
+        return od._title_name(display)
+    return "Approver"
+
+
+def _notify_offset_approver_pending(send_message: Callable[..., Any], row: dict[str, Any]) -> None:
+    oid = (OFFSET_APPROVER_OPEN_ID or "").strip()
+    if not oid:
+        return
+    card = build_offset_approver_initial_card(row)
+    body = json.dumps(card, ensure_ascii=False)
+    r = send_message(oid, body, msg_type="interactive", receive_id_type="open_id")
+    if isinstance(r, dict) and int(r.get("code", -1)) != 0:
+        raise RuntimeError(str(r))
+
+
+def _toast_approval_problem(send_message: Callable[..., Any], chat_id: str, text: str) -> None:
+    cid = (chat_id or "").strip()
+    if cid:
+        try:
+            send_message(cid, text)
+        except Exception:
+            print(f"[offsetleave] approval notify failed: {text}", flush=True)
+    else:
+        print(f"[offsetleave] approval: {text}", flush=True)
+
+
+def _handle_offset_approval_callback(
+    parsed: dict[str, Any],
+    event_obj: dict[str, Any],
+    *,
+    sender_open_id: str,
+    chat_id: str,
+    send_message: Callable[..., Any],
+    webhook_data: Optional[dict[str, Any]],
+) -> bool:
+    key = str(parsed.get("k") or "").strip().lower()
+    operator = _operator_open_id(event_obj, sender_open_id)
+    approver_oid = (OFFSET_APPROVER_OPEN_ID or "").strip()
+    mid = _event_message_id(event_obj, webhook_data)
+    if not approver_oid or operator != approver_oid:
+        try:
+            if mid:
+                _patch_interactive_card_message(mid, _build_offset_approval_denied_card())
+        except Exception:
+            pass
+        _toast_approval_problem(send_message, chat_id, "❌ Only the assigned approver can act on this card.")
+        return True
+    try:
+        if key == _OFFSET_APPR_PICK_KEY:
+            rid = str(parsed.get("record_id") or "").strip()
+            dec = _norm_offset_decision(parsed.get("decision"))
+            if not rid:
+                raise ValueError("missing record_id")
+            row = _offset_admin_row_by_id(rid)
+            if not mid:
+                raise ValueError("missing message id for card update")
+            _patch_interactive_card_message(mid, build_offset_approver_confirm_card(row, dec))
+            return True
+        if key == _OFFSET_APPR_CONFIRM_KEY:
+            rid = str(parsed.get("record_id") or "").strip()
+            dec = _norm_offset_decision(parsed.get("decision"))
+            action = event_obj.get("action") if isinstance(event_obj.get("action"), dict) else {}
+            remarks = _get_form_field(action, parsed, event_obj, "approval_remarks")
+            if not rid:
+                raise ValueError("missing record_id")
+            _offset_admin_row_by_id(rid)
+            approver_name = _approver_display_for_bitable(operator)
+            od.update_ose_offset_approval(
+                record_id=rid,
+                status=dec,
+                approver=approver_name,
+                remarks=remarks,
+                approver_open_id=operator,
+            )
+            fresh = _offset_admin_row_by_id(rid)
+            if mid:
+                _patch_interactive_card_message(mid, build_offset_approver_done_card(fresh, dec, remarks))
+            return True
+    except Exception as exc:
+        try:
+            if mid:
+                _patch_interactive_card_message(mid, _build_offset_approval_error_card(str(exc)))
+        except Exception:
+            pass
+        _toast_approval_problem(send_message, chat_id, f"❌ Offset approval failed: {exc}")
+    return True
+
+
 def handle_card_callback(
     parsed: dict[str, Any],
     event_obj: dict[str, Any],
@@ -568,14 +915,25 @@ def handle_card_callback(
     webhook_data: Optional[dict[str, Any]] = None,
 ) -> bool:
     key = str(parsed.get("k") or "").strip().lower()
+    if key in OFFSET_APPROVAL_CALLBACK_KEYS:
+        return _handle_offset_approval_callback(
+            parsed,
+            event_obj,
+            sender_open_id=sender_open_id,
+            chat_id=chat_id,
+            send_message=send_message,
+            webhook_data=webhook_data,
+        )
     if key not in (_OFFSET_SUBMIT_KEY, _LEAVE_SUBMIT_KEY):
         return False
+    cid = (chat_id or "").strip()
     try:
         _, request_person = _assert_owner(parsed, sender_open_id)
         action = event_obj.get("action") if isinstance(event_obj.get("action"), dict) else {}
         reason = _get_form_field(action, parsed, event_obj, "reason")
         if not reason:
-            send_message(chat_id, "❌ Reason is required.")
+            if cid:
+                send_message(chat_id, "❌ Reason is required.")
             return True
         if key == _OFFSET_SUBMIT_KEY:
             exchange_person = _get_form_field(action, parsed, event_obj, "exchange_person")
@@ -583,7 +941,8 @@ def handle_card_callback(
             original_date = _parse_date_iso(_get_form_field(action, parsed, event_obj, "original_date"))
             exchange_date = _parse_date_iso(_get_form_field(action, parsed, event_obj, "exchange_date"))
             if not exchange_person or not shift_type:
-                send_message(chat_id, "❌ Please fill Exchange person and Shift.")
+                if cid:
+                    send_message(chat_id, "❌ Please fill Exchange person and Shift.")
                 return True
             out = od.submit_ose_offset(
                 request_person=request_person,
@@ -595,16 +954,35 @@ def handle_card_callback(
             )
             rid = str((out or {}).get("record_id") or "").strip()
             _dismiss_ephemeral_form(_event_message_id(event_obj, webhook_data))
-            send_message(
-                chat_id,
-                f"✅ Offset submitted for {request_person} (record {rid or 'saved'}).",
-            )
+            if cid:
+                send_message(
+                    chat_id,
+                    f"✅ Offset submitted for {request_person} (record {rid or 'saved'}).",
+                )
+            if rid:
+                try:
+                    try:
+                        row = _offset_admin_row_by_id(rid)
+                    except Exception:
+                        row = _local_pending_offset_row(
+                            record_id=rid,
+                            request_person=request_person,
+                            exchange_person=exchange_person,
+                            shift_type=shift_type,
+                            original_date=original_date,
+                            exchange_date=exchange_date,
+                            reason=reason,
+                        )
+                    _notify_offset_approver_pending(send_message, row)
+                except Exception as exc:
+                    print(f"[offsetleave] approver DM failed: {exc!r}", flush=True)
             return True
         leave_type = _get_form_field(action, parsed, event_obj, "leave_type")
         start_date = _parse_date_iso(_get_form_field(action, parsed, event_obj, "start_date"))
         end_date = _parse_date_iso(_get_form_field(action, parsed, event_obj, "end_date"))
         if not leave_type:
-            send_message(chat_id, "❌ Please choose a leave type.")
+            if cid:
+                send_message(chat_id, "❌ Please choose a leave type.")
             return True
         out = od.submit_ose_leave(
             name=request_person,
@@ -615,10 +993,14 @@ def handle_card_callback(
         )
         rid = str((out or {}).get("record_id") or "").strip()
         _dismiss_ephemeral_form(_event_message_id(event_obj, webhook_data))
-        send_message(
-            chat_id,
-            f"✅ Leave submitted for {request_person} (record {rid or 'saved'}).",
-        )
+        if cid:
+            send_message(
+                chat_id,
+                f"✅ Leave submitted for {request_person} (record {rid or 'saved'}).",
+            )
     except Exception as e:
-        send_message(chat_id, f"❌ Submit failed: {e}")
+        if cid:
+            send_message(chat_id, f"❌ Submit failed: {e}")
+        else:
+            print(f"[offsetleave] submit failed (no chat_id): {e!r}", flush=True)
     return True
