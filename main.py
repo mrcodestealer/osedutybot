@@ -2925,7 +2925,8 @@ def lark_webhook():
     
     cmd_parts = clean_text.split()
     if not cmd_parts:
-        return
+        # Whitespace-only / stripped-empty body — must still return a valid response for Lark.
+        return jsonify({"success": True})
     cmd = cmd_parts[0].lower()
     if cmd == '/ecsre':
         game_name = cmd_parts[1] if len(cmd_parts) > 1 else None
