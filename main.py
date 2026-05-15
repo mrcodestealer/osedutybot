@@ -1258,6 +1258,18 @@ def ose_leave_offset_daily_sync():
     """Refresh OSE Lark Bitable leave/offset cache once per day (same host TZ as morning OSE)."""
     line = ose_Duty.sync_ose_leave_offset_bitable()
     print(f"[OSE Bitable] {line}", flush=True)
+    try:
+        pur = ose_Duty.purge_stale_ose_offset_bitable_rows()
+        if pur.get("deleted"):
+            print(
+                f"[OSE Bitable] stale offset purge: deleted {pur['deleted']} row(s) "
+                f"(scanned {pur.get('scanned')}, ref {pur.get('ref_date')})",
+                flush=True,
+            )
+        if pur.get("errors"):
+            print(f"[OSE Bitable] stale offset purge errors: {pur['errors']!r}", flush=True)
+    except Exception as exc:
+        print(f"[OSE Bitable] stale offset purge failed: {exc!r}", flush=True)
 
 
 # def amountloss():

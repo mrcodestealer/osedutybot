@@ -1756,7 +1756,7 @@ def get_ose_offset_record_admin_row(record_id: str) -> dict[str, Any]:
     raise KeyError(f"unknown offset record {rid!r}")
 
 
-def delete_ose_offset_record(*, record_id: str) -> dict[str, Any]:
+def delete_ose_offset_record(*, record_id: str, skip_cache_invalidate: bool = False) -> dict[str, Any]:
     """Delete an offset Bitable row (caller must enforce pending + ownership)."""
     rid = (record_id or "").strip()
     if not rid:
@@ -1775,8 +1775,65 @@ def delete_ose_offset_record(*, record_id: str) -> dict[str, Any]:
     ).json()
     if res.get("code") != 0:
         raise RuntimeError(f"Bitable delete failed: {res}")
-    invalidate_ose_bitable_cache()
+    if not skip_cache_invalidate:
+        invalidate_ose_bitable_cache()
     return {"ok": True, "record_id": rid}
+
+
+def _calendar_months_after(d: date, ref: date) -> int:
+    """
+    Whole calendar months from ``d``'s month to ``ref``'s month (same month → 0).
+    Examples: May→June=1, May→July=2, May→May=0.
+    """
+    return (ref.year - d.year) * 12 + (ref.month - d.month)
+
+
+def _offset_row_original_exchange_dates(fields: dict[str, Any]) -> tuple[Optional[date], Optional[date]]:
+    f = fields or {}
+    od = _parse_date_value(_get_field_by_aliases(f, ["Original Date", "Request Date", "Date"]))
+    xd = _parse_date_value(_get_field_by_aliases(f, ["Exchange Date", "Swap Date", "Target Date"]))
+    return od, xd
+
+
+def purge_stale_ose_offset_bitable_rows(*, ref_date: Optional[date] = None) -> dict[str, Any]:
+    """
+    Delete offset Bitable rows whose **Original Date** and **Exchange Date** are each
+    at least **two calendar months** before ``ref_date``'s month.
+
+    Example: if today is July, May rows are removed; if today is June, May rows stay
+    (only one month behind June).
+    """
+    ref = ref_date or date.today()
+    token = get_tenant_access_token()
+    items = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_OFFSET_TABLE_ID)
+    to_delete: list[str] = []
+    for it in items:
+        f = it.get("fields") or {}
+        od, xd = _offset_row_original_exchange_dates(f)
+        if not od or not xd:
+            continue
+        if _calendar_months_after(od, ref) >= 2 and _calendar_months_after(xd, ref) >= 2:
+            rid = str(it.get("record_id") or "").strip()
+            if rid:
+                to_delete.append(rid)
+    deleted: list[str] = []
+    errors: list[str] = []
+    for rid in to_delete:
+        try:
+            delete_ose_offset_record(record_id=rid, skip_cache_invalidate=True)
+            deleted.append(rid)
+        except Exception as exc:
+            errors.append(f"{rid}: {exc}")
+    if deleted or errors:
+        invalidate_ose_bitable_cache()
+    return {
+        "ok": not errors,
+        "ref_date": ref.isoformat(),
+        "scanned": len(items),
+        "eligible": len(to_delete),
+        "deleted": len(deleted),
+        "errors": errors,
+    }
 
 
 def update_ose_offset_request(
@@ -1823,6 +1880,42 @@ def update_ose_offset_request(
     _bitable_update_record(token, OSE_OFFSET_TABLE_ID, record_id, fields)
     invalidate_ose_bitable_cache()
     return {"ok": True, "record_id": record_id}
+
+
+def update_ose_offset_record_fields(
+    *,
+    record_id: str,
+    exchange_person: str,
+    shift_type: str,
+    original_date: date,
+    exchange_date: date,
+    reason: str,
+) -> dict[str, Any]:
+    """Update offset swap fields for **any** status (caller must enforce approver-only / authorization)."""
+    rid = (record_id or "").strip()
+    if not rid:
+        raise ValueError("record_id is required")
+    get_ose_offset_record_admin_row(rid)
+    exc = _title_name(exchange_person)
+    if exc not in OSE_LEAVE_FORM_NAMES:
+        raise ValueError(f"Unknown exchange person {exchange_person!r}")
+    st = (shift_type or "").strip().upper()
+    if st not in OSE_SHIFT_TYPES:
+        raise ValueError("Shift Type must be N or D")
+    reason_s = (reason or "").strip()
+    if not reason_s:
+        raise ValueError("Reason is required")
+    token = get_tenant_access_token()
+    fields: dict[str, Any] = {
+        "Exchange Person": _offset_person_field_value(exc, token=token),
+        "Shift Type": st,
+        "Original Date": _bitable_date_ms(original_date),
+        "Exchange Date": _bitable_date_ms(exchange_date),
+        "Reason": reason_s,
+    }
+    _bitable_update_record(token, OSE_OFFSET_TABLE_ID, rid, fields)
+    invalidate_ose_bitable_cache()
+    return {"ok": True, "record_id": rid}
 
 
 if __name__ == "__main__":

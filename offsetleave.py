@@ -107,6 +107,30 @@ def _pending_offsets_for_request_person(request_person: str) -> list[dict[str, A
     return out
 
 
+def _non_pending_offsets_all() -> list[dict[str, Any]]:
+    """Approved / rejected rows (for approver edit/delete lists)."""
+    data = od.get_ose_offset_records_admin()
+    out: list[dict[str, Any]] = []
+    for it in (data or {}).get("items") or []:
+        if bool(it.get("pending")):
+            continue
+        out.append(dict(it))
+    out.sort(
+        key=lambda r: (r.get("request_date") or "", r.get("record_id") or ""),
+        reverse=True,
+    )
+    return out
+
+
+def _parsed_admin_flag(parsed: dict[str, Any]) -> bool:
+    a = parsed.get("admin")
+    if a is True:
+        return True
+    if isinstance(a, (int, float)) and int(a) == 1:
+        return True
+    return str(a or "").strip().lower() in ("1", "true", "yes")
+
+
 def _select_options(values: tuple[str, ...] | list[str]) -> list[dict[str, Any]]:
     return [
         {"text": {"tag": "plain_text", "content": str(v)}, "value": str(v)}
@@ -325,22 +349,43 @@ def _short_cell(s: Any) -> str:
     return t or "—"
 
 
-def _callback_payload_edit_submit(*, owner_open_id: str, request_person: str, record_id: str) -> dict[str, str]:
-    return {
+def _callback_payload_edit_submit(
+    *,
+    owner_open_id: str,
+    record_id: str,
+    request_person: str = "",
+    admin: bool = False,
+) -> dict[str, Any]:
+    d: dict[str, Any] = {
         "k": _OFFSET_EDIT_SUBMIT_KEY,
         "owner": (owner_open_id or "").strip(),
-        "request_person": (request_person or "").strip(),
         "record_id": (record_id or "").strip(),
     }
+    rp = (request_person or "").strip()
+    if rp:
+        d["request_person"] = rp
+    if admin:
+        d["admin"] = 1
+    return d
 
 
-def _callback_payload_row_action(kind: str, *, owner_open_id: str, request_person: str, record_id: str) -> dict[str, str]:
-    return {
+def _callback_payload_row_action(
+    kind: str,
+    *,
+    owner_open_id: str,
+    request_person: str,
+    record_id: str,
+    admin: bool = False,
+) -> dict[str, Any]:
+    d: dict[str, Any] = {
         "k": kind,
         "owner": (owner_open_id or "").strip(),
         "request_person": (request_person or "").strip(),
         "record_id": (record_id or "").strip(),
     }
+    if admin:
+        d["admin"] = 1
+    return d
 
 
 def _row_datepicker_initial(cell: Any) -> str:
@@ -353,36 +398,43 @@ def _row_datepicker_initial(cell: Any) -> str:
         return ""
 
 
-def build_offset_edit_list_card(owner_open_id: str, request_person: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+def build_offset_edit_list_card(
+    owner_open_id: str,
+    request_person: str,
+    rows: list[dict[str, Any]],
+    *,
+    is_admin: bool = False,
+) -> dict[str, Any]:
     cap = 15
     sliced = rows[:cap]
-    elements: list[dict[str, Any]] = [
-        {
-            "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": (
-                    f"**{request_person}** — pending offset requests you can **edit**.\n"
-                    "Approved / rejected rows are not listed."
-                ),
-            },
-        },
-    ]
+    if is_admin:
+        intro = "**Approver** — edit **approved** or **rejected** offsets (all requesters)."
+        cap_note = "non-pending"
+    else:
+        intro = (
+            f"**{request_person}** — pending offset requests you can **edit**.\n"
+            "Approved / rejected rows are not listed."
+        )
+        cap_note = "pending"
+    elements: list[dict[str, Any]] = [{"tag": "div", "text": {"tag": "lark_md", "content": intro}}]
     if len(rows) > cap:
         elements.append(
             {
                 "tag": "div",
-                "text": {"tag": "plain_text", "content": f"(Showing first {cap} of {len(rows)} pending.)"},
+                "text": {"tag": "plain_text", "content": f"(Showing first {cap} of {len(rows)} {cap_note}.)"},
             }
         )
     for i, r in enumerate(sliced, start=1):
         rid = str(r.get("record_id") or "").strip()
         if not rid:
             continue
+        extra = ""
+        if is_admin:
+            extra = f"\n**Requester:** {_short_cell(r.get('request_person'))} · **Status:** {_short_cell(r.get('approval_status'))}"
         summary = (
             f"**{i}.** {_short_cell(r.get('exchange_person'))} · **{_short_cell(r.get('shift_type'))}** · "
             f"{_short_cell(r.get('original_date'))} → {_short_cell(r.get('exchange_date'))}\n"
-            f"**Reason:** {_short_cell(r.get('reason'))}"
+            f"**Reason:** {_short_cell(r.get('reason'))}{extra}"
         )
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": summary}})
         elements.append(
@@ -398,49 +450,58 @@ def build_offset_edit_list_card(owner_open_id: str, request_person: str, rows: l
                             owner_open_id=owner_open_id,
                             request_person=request_person,
                             record_id=rid,
+                            admin=is_admin,
                         ),
                     }
                 ],
             }
         )
+    title = "OSE offset — edit (approver)" if is_admin else "OSE offset — edit"
     return {
         "schema": "2.0",
         "config": {"update_multi": True, "width_mode": "fill"},
-        "header": {"template": "blue", "title": {"tag": "plain_text", "content": "OSE offset — edit"}},
+        "header": {"template": "blue", "title": {"tag": "plain_text", "content": title}},
         "body": {"elements": elements},
     }
 
 
-def build_offset_delete_list_card(owner_open_id: str, request_person: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+def build_offset_delete_list_card(
+    owner_open_id: str,
+    request_person: str,
+    rows: list[dict[str, Any]],
+    *,
+    is_admin: bool = False,
+) -> dict[str, Any]:
     cap = 15
     sliced = rows[:cap]
-    elements: list[dict[str, Any]] = [
-        {
-            "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": (
-                    f"**{request_person}** — pending offset requests you can **delete**.\n"
-                    "Approved / rejected rows are not listed."
-                ),
-            },
-        },
-    ]
+    if is_admin:
+        intro = "**Approver** — delete **approved** or **rejected** offsets (removes the Bitable row)."
+        cap_note = "non-pending"
+    else:
+        intro = (
+            f"**{request_person}** — pending offset requests you can **delete**.\n"
+            "Approved / rejected rows are not listed."
+        )
+        cap_note = "pending"
+    elements: list[dict[str, Any]] = [{"tag": "div", "text": {"tag": "lark_md", "content": intro}}]
     if len(rows) > cap:
         elements.append(
             {
                 "tag": "div",
-                "text": {"tag": "plain_text", "content": f"(Showing first {cap} of {len(rows)} pending.)"},
+                "text": {"tag": "plain_text", "content": f"(Showing first {cap} of {len(rows)} {cap_note}.)"},
             }
         )
     for i, r in enumerate(sliced, start=1):
         rid = str(r.get("record_id") or "").strip()
         if not rid:
             continue
+        extra = ""
+        if is_admin:
+            extra = f"\n**Requester:** {_short_cell(r.get('request_person'))} · **Status:** {_short_cell(r.get('approval_status'))}"
         summary = (
             f"**{i}.** {_short_cell(r.get('exchange_person'))} · **{_short_cell(r.get('shift_type'))}** · "
             f"{_short_cell(r.get('original_date'))} → {_short_cell(r.get('exchange_date'))}\n"
-            f"**Reason:** {_short_cell(r.get('reason'))}"
+            f"**Reason:** {_short_cell(r.get('reason'))}{extra}"
         )
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": summary}})
         elements.append(
@@ -456,22 +517,31 @@ def build_offset_delete_list_card(owner_open_id: str, request_person: str, rows:
                             owner_open_id=owner_open_id,
                             request_person=request_person,
                             record_id=rid,
+                            admin=is_admin,
                         ),
                     }
                 ],
             }
         )
+    title = "OSE offset — delete (approver)" if is_admin else "OSE offset — delete"
     return {
         "schema": "2.0",
         "config": {"update_multi": True, "width_mode": "fill"},
-        "header": {"template": "orange", "title": {"tag": "plain_text", "content": "OSE offset — delete"}},
+        "header": {"template": "orange", "title": {"tag": "plain_text", "content": title}},
         "body": {"elements": elements},
     }
 
 
-def build_offset_edit_form_card(*, owner_open_id: str, request_person: str, row: dict[str, Any]) -> dict[str, Any]:
+def build_offset_edit_form_card(
+    *,
+    owner_open_id: str,
+    request_person: str,
+    row: dict[str, Any],
+    is_admin: bool = False,
+) -> dict[str, Any]:
     rid = str(row.get("record_id") or "").strip()
-    exchange_names = [n for n in od.OSE_LEAVE_FORM_NAMES if od._title_name(n) != od._title_name(request_person)]
+    req_on_row = str(row.get("request_person") or request_person or "").strip()
+    exchange_names = [n for n in od.OSE_LEAVE_FORM_NAMES if od._title_name(n) != od._title_name(req_on_row)]
     o_ini = _row_datepicker_initial(row.get("original_date"))
     x_ini = _row_datepicker_initial(row.get("exchange_date"))
     original_dp: dict[str, Any] = {
@@ -490,10 +560,16 @@ def build_offset_edit_form_card(*, owner_open_id: str, request_person: str, row:
     }
     if x_ini:
         exchange_dp["initial_date"] = x_ini
+    status_line = ""
+    if is_admin:
+        status_line = f"\n**Status:** {_short_cell(row.get('approval_status'))}"
     return {
         "schema": "2.0",
         "config": {"update_multi": True, "width_mode": "fill"},
-        "header": {"template": "blue", "title": {"tag": "plain_text", "content": "OSE offset — edit request"}},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": "OSE offset — edit request (approver)" if is_admin else "OSE offset — edit request"},
+        },
         "body": {
             "elements": [
                 {
@@ -501,8 +577,8 @@ def build_offset_edit_form_card(*, owner_open_id: str, request_person: str, row:
                     "text": {
                         "tag": "lark_md",
                         "content": (
-                            f"**Request person:** {request_person}\n"
-                            f"**Record:** `{_short_cell(rid)}`\n"
+                            f"**Request person:** {req_on_row}\n"
+                            f"**Record:** `{_short_cell(rid)}`{status_line}\n"
                             "Update the fields below, then tap **Save**."
                         ),
                     },
@@ -567,8 +643,9 @@ def build_offset_edit_form_card(*, owner_open_id: str, request_person: str, row:
                                     "type": "callback",
                                     "value": _callback_payload_edit_submit(
                                         owner_open_id=owner_open_id,
-                                        request_person=request_person,
                                         record_id=rid,
+                                        request_person=req_on_row,
+                                        admin=is_admin,
                                     ),
                                 }
                             ],
@@ -667,16 +744,31 @@ def handle_editoffset_command(
         return True
     try:
         token = get_token_func()
-        request_person = resolve_request_person(oid, token)
-        rows = _pending_offsets_for_request_person(request_person)
-        if not rows:
-            send_message(
-                chat_id,
-                "No offset found that you requested (no pending rows). "
-                "Already approved or rejected requests cannot be edited.",
-            )
-            return True
-        card = build_offset_edit_list_card(oid, request_person, rows)
+        if _is_offset_approver_open_id(oid):
+            request_person = resolve_request_person(oid, token)
+            own_pending = _pending_offsets_for_request_person(request_person)
+            if own_pending:
+                card = build_offset_edit_list_card(oid, request_person, own_pending, is_admin=False)
+            else:
+                rows = _non_pending_offsets_all()
+                if not rows:
+                    send_message(
+                        chat_id,
+                        "No approved or rejected offset records found to edit, and you have no pending requests as requester.",
+                    )
+                    return True
+                card = build_offset_edit_list_card(oid, "", rows, is_admin=True)
+        else:
+            request_person = resolve_request_person(oid, token)
+            rows = _pending_offsets_for_request_person(request_person)
+            if not rows:
+                send_message(
+                    chat_id,
+                    "No offset found that you requested (no pending rows). "
+                    "Already approved or rejected requests cannot be edited here — offset approvers use editoffset for those.",
+                )
+                return True
+            card = build_offset_edit_list_card(oid, request_person, rows, is_admin=False)
         _deliver_private_card(
             owner_open_id=oid,
             group_chat_id=chat_id,
@@ -707,16 +799,31 @@ def handle_deleteoffset_command(
         return True
     try:
         token = get_token_func()
-        request_person = resolve_request_person(oid, token)
-        rows = _pending_offsets_for_request_person(request_person)
-        if not rows:
-            send_message(
-                chat_id,
-                "No offset found that you requested (no pending rows). "
-                "Already approved or rejected requests cannot be deleted.",
-            )
-            return True
-        card = build_offset_delete_list_card(oid, request_person, rows)
+        if _is_offset_approver_open_id(oid):
+            request_person = resolve_request_person(oid, token)
+            own_pending = _pending_offsets_for_request_person(request_person)
+            if own_pending:
+                card = build_offset_delete_list_card(oid, request_person, own_pending, is_admin=False)
+            else:
+                rows = _non_pending_offsets_all()
+                if not rows:
+                    send_message(
+                        chat_id,
+                        "No approved or rejected offset records found to delete, and you have no pending requests as requester.",
+                    )
+                    return True
+                card = build_offset_delete_list_card(oid, "", rows, is_admin=True)
+        else:
+            request_person = resolve_request_person(oid, token)
+            rows = _pending_offsets_for_request_person(request_person)
+            if not rows:
+                send_message(
+                    chat_id,
+                    "No offset found that you requested (no pending rows). "
+                    "Already approved or rejected requests are removed with the approver deleteoffset list.",
+                )
+                return True
+            card = build_offset_delete_list_card(oid, request_person, rows, is_admin=False)
         _deliver_private_card(
             owner_open_id=oid,
             group_chat_id=chat_id,
@@ -1306,20 +1413,65 @@ def _notify_requester_offset_responded(
         print(f"[offsetleave] requester DM failed: {r!r}", flush=True)
 
 
-def _assert_owner_callback_session(
+def _assert_offset_card_actor(
     parsed: dict[str, Any],
     sender_open_id: str,
     token: str,
-) -> tuple[str, str]:
+) -> tuple[str, Optional[str], bool]:
+    """Return (owner_open_id, request_person_roster_or_None, is_approver_admin_flow)."""
     owner = str(parsed.get("owner") or "").strip()
-    rp_val = str(parsed.get("request_person") or "").strip()
     sender = (sender_open_id or "").strip()
     if not owner or owner != sender:
         raise ValueError("This action is only for the user who opened the menu.")
+    if _parsed_admin_flag(parsed):
+        if not _is_offset_approver_open_id(sender):
+            raise ValueError("Only configured offset approvers can use this admin action.")
+        return owner, None, True
+    rp_val = str(parsed.get("request_person") or "").strip()
+    if not rp_val:
+        raise ValueError("Missing session.")
     rp_live = resolve_request_person(sender, token)
     if od._title_name(rp_live) != od._title_name(rp_val):
         raise ValueError("Identity mismatch for this action.")
-    return owner, rp_live
+    return owner, rp_live, False
+
+
+def _build_offset_edit_approver_empty_patch_card() -> dict[str, Any]:
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {"template": "grey", "title": {"tag": "plain_text", "content": "OSE offset — edit (approver)"}},
+        "body": {
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "No approved or rejected offset records left to edit.",
+                    },
+                }
+            ]
+        },
+    }
+
+
+def _build_offset_delete_approver_empty_patch_card() -> dict[str, Any]:
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {"template": "grey", "title": {"tag": "plain_text", "content": "OSE offset — delete (approver)"}},
+        "body": {
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "No approved or rejected offset records left to delete.",
+                    },
+                }
+            ]
+        },
+    }
 
 
 def _build_offset_edit_empty_patch_card(request_person: str) -> dict[str, Any]:
@@ -1370,17 +1522,32 @@ def _patch_my_offset_list_after_change(
     mid = (message_id or "").strip()
     if not mid:
         return
-    rows = _pending_offsets_for_request_person(request_person)
     m = (mode or "").strip().lower()
-    if m == "edit":
+    if m == "edit_admin":
+        rows = _non_pending_offsets_all()
         card = (
-            build_offset_edit_list_card(owner_open_id, request_person, rows)
+            build_offset_edit_list_card(owner_open_id, "", rows, is_admin=True)
+            if rows
+            else _build_offset_edit_approver_empty_patch_card()
+        )
+    elif m == "delete_admin":
+        rows = _non_pending_offsets_all()
+        card = (
+            build_offset_delete_list_card(owner_open_id, "", rows, is_admin=True)
+            if rows
+            else _build_offset_delete_approver_empty_patch_card()
+        )
+    elif m == "edit":
+        rows = _pending_offsets_for_request_person(request_person)
+        card = (
+            build_offset_edit_list_card(owner_open_id, request_person, rows, is_admin=False)
             if rows
             else _build_offset_edit_empty_patch_card(request_person)
         )
     elif m == "delete":
+        rows = _pending_offsets_for_request_person(request_person)
         card = (
-            build_offset_delete_list_card(owner_open_id, request_person, rows)
+            build_offset_delete_list_card(owner_open_id, request_person, rows, is_admin=False)
             if rows
             else _build_offset_delete_empty_patch_card(request_person)
         )
@@ -1402,21 +1569,43 @@ def _handle_offset_edit_pick(
     mid = _event_message_id(event_obj, webhook_data)
     try:
         token = od.get_tenant_access_token()
-        owner, rp_live = _assert_owner_callback_session(parsed, sender_open_id, token)
+        owner, rp_live, is_admin = _assert_offset_card_actor(parsed, sender_open_id, token)
         rid = str(parsed.get("record_id") or "").strip()
         if not rid:
             raise ValueError("missing record id")
         if not mid:
             raise ValueError("missing message id")
         row = _offset_admin_row_by_id(rid)
-        if not bool(row.get("pending")):
-            raise ValueError("That request is no longer pending (already approved or rejected).")
-        if od._title_name(str(row.get("request_person") or "")) != od._title_name(rp_live):
-            raise ValueError("That offset is not yours to edit.")
-        _patch_interactive_card_message(
-            mid,
-            build_offset_edit_form_card(owner_open_id=owner, request_person=rp_live, row=row),
-        )
+        if is_admin:
+            if bool(row.get("pending")):
+                raise ValueError(
+                    "This record is still pending. Approver editoffset is for approved/rejected rows only; "
+                    "use your normal editoffset as the requester for pending items."
+                )
+            req_disp = str(row.get("request_person") or "").strip()
+            _patch_interactive_card_message(
+                mid,
+                build_offset_edit_form_card(
+                    owner_open_id=owner,
+                    request_person=req_disp,
+                    row=row,
+                    is_admin=True,
+                ),
+            )
+        else:
+            if not bool(row.get("pending")):
+                raise ValueError("That request is no longer pending (already approved or rejected).")
+            if od._title_name(str(row.get("request_person") or "")) != od._title_name(rp_live or ""):
+                raise ValueError("That offset is not yours to edit.")
+            _patch_interactive_card_message(
+                mid,
+                build_offset_edit_form_card(
+                    owner_open_id=owner,
+                    request_person=rp_live or "",
+                    row=row,
+                    is_admin=False,
+                ),
+            )
     except Exception as e:
         if cid:
             send_message(chat_id, f"❌ {e}")
@@ -1438,7 +1627,7 @@ def _handle_offset_edit_submit(
     mid = _event_message_id(event_obj, webhook_data)
     try:
         token = od.get_tenant_access_token()
-        owner, rp_live = _assert_owner_callback_session(parsed, sender_open_id, token)
+        owner, rp_live, is_admin = _assert_offset_card_actor(parsed, sender_open_id, token)
         rid = str(parsed.get("record_id") or "").strip()
         if not rid:
             raise ValueError("missing record id")
@@ -1450,29 +1639,48 @@ def _handle_offset_edit_submit(
         reason = _get_form_field(action, parsed, event_obj, "reason")
         if not reason or not exchange_person or not shift_type:
             raise ValueError("Please fill Exchange person, Shift, dates, and Reason.")
-        row_chk = _offset_admin_row_by_id(rid)
-        if not bool(row_chk.get("pending")):
-            raise ValueError(
-                "This request is no longer pending (already approved or rejected). "
-                "Run editoffset again to refresh the list."
+        if is_admin:
+            row_chk = _offset_admin_row_by_id(rid)
+            if bool(row_chk.get("pending")):
+                raise ValueError("Cannot use approver save on a pending row.")
+            od.update_ose_offset_record_fields(
+                record_id=rid,
+                exchange_person=exchange_person,
+                shift_type=shift_type,
+                original_date=original_date,
+                exchange_date=exchange_date,
+                reason=reason,
             )
-        if od._title_name(str(row_chk.get("request_person") or "")) != od._title_name(rp_live):
-            raise ValueError("Not your request to edit.")
-        od.update_ose_offset_request(
-            record_id=rid,
-            request_person=rp_live,
-            exchange_person=exchange_person,
-            shift_type=shift_type,
-            original_date=original_date,
-            exchange_date=exchange_date,
-            reason=reason,
-        )
-        _patch_my_offset_list_after_change(
-            message_id=mid,
-            mode="edit",
-            owner_open_id=owner,
-            request_person=rp_live,
-        )
+            _patch_my_offset_list_after_change(
+                message_id=mid,
+                mode="edit_admin",
+                owner_open_id=owner,
+                request_person="",
+            )
+        else:
+            row_chk = _offset_admin_row_by_id(rid)
+            if not bool(row_chk.get("pending")):
+                raise ValueError(
+                    "This request is no longer pending (already approved or rejected). "
+                    "Run editoffset again to refresh the list."
+                )
+            if od._title_name(str(row_chk.get("request_person") or "")) != od._title_name(rp_live or ""):
+                raise ValueError("Not your request to edit.")
+            od.update_ose_offset_request(
+                record_id=rid,
+                request_person=rp_live or "",
+                exchange_person=exchange_person,
+                shift_type=shift_type,
+                original_date=original_date,
+                exchange_date=exchange_date,
+                reason=reason,
+            )
+            _patch_my_offset_list_after_change(
+                message_id=mid,
+                mode="edit",
+                owner_open_id=owner,
+                request_person=rp_live or "",
+            )
         if cid and not mid:
             send_message(chat_id, "✅ Offset request updated.")
     except Exception as e:
@@ -1496,25 +1704,39 @@ def _handle_offset_delete_row(
     mid = _event_message_id(event_obj, webhook_data)
     try:
         token = od.get_tenant_access_token()
-        owner, rp_live = _assert_owner_callback_session(parsed, sender_open_id, token)
+        owner, rp_live, is_admin = _assert_offset_card_actor(parsed, sender_open_id, token)
         rid = str(parsed.get("record_id") or "").strip()
         if not rid:
             raise ValueError("missing record id")
         row_chk = _offset_admin_row_by_id(rid)
-        if not bool(row_chk.get("pending")):
-            raise ValueError(
-                "This request is no longer pending (already approved or rejected). "
-                "Run deleteoffset again to refresh the list."
+        if is_admin:
+            if bool(row_chk.get("pending")):
+                raise ValueError(
+                    "Cannot delete a pending row from the approver list. "
+                    "The requester should use deleteoffset for pending requests."
+                )
+            od.delete_ose_offset_record(record_id=rid)
+            _patch_my_offset_list_after_change(
+                message_id=mid,
+                mode="delete_admin",
+                owner_open_id=owner,
+                request_person="",
             )
-        if od._title_name(str(row_chk.get("request_person") or "")) != od._title_name(rp_live):
-            raise ValueError("Not your request to delete.")
-        od.delete_ose_offset_record(record_id=rid)
-        _patch_my_offset_list_after_change(
-            message_id=mid,
-            mode="delete",
-            owner_open_id=owner,
-            request_person=rp_live,
-        )
+        else:
+            if not bool(row_chk.get("pending")):
+                raise ValueError(
+                    "This request is no longer pending (already approved or rejected). "
+                    "Run deleteoffset again to refresh the list."
+                )
+            if od._title_name(str(row_chk.get("request_person") or "")) != od._title_name(rp_live or ""):
+                raise ValueError("Not your request to delete.")
+            od.delete_ose_offset_record(record_id=rid)
+            _patch_my_offset_list_after_change(
+                message_id=mid,
+                mode="delete",
+                owner_open_id=owner,
+                request_person=rp_live or "",
+            )
     except Exception as e:
         if cid:
             send_message(chat_id, f"❌ Delete failed: {e}")
