@@ -1041,6 +1041,14 @@ def _build_ose_person_open_id_index(
             _get_field_by_aliases(f, ["Approver", "Approved By", "Approval Person"]),
             idx,
         )
+        _index_person_field_value(
+            _get_field_by_aliases(f, ["Request Person", "Requester", "Requester Person", "Name"]),
+            idx,
+        )
+        _index_person_field_value(
+            _get_field_by_aliases(f, ["Exchange Person", "Replacement", "Swap Person"]),
+            idx,
+        )
     return idx
 
 
@@ -1735,6 +1743,81 @@ def submit_ose_offset(
     res = _bitable_create_record(token, OSE_OFFSET_TABLE_ID, fields)
     invalidate_ose_bitable_cache()
     return {"ok": True, "record_id": (res.get("data") or {}).get("record", {}).get("record_id")}
+
+
+def get_ose_offset_record_admin_row(record_id: str) -> dict[str, Any]:
+    """Single offset row (same shape as :func:`get_ose_offset_records_admin` items)."""
+    rid = (record_id or "").strip()
+    if not rid:
+        raise ValueError("record_id is required")
+    for r in get_ose_offset_records_admin().get("items") or []:
+        if str(r.get("record_id") or "").strip() == rid:
+            return dict(r)
+    raise KeyError(f"unknown offset record {rid!r}")
+
+
+def delete_ose_offset_record(*, record_id: str) -> dict[str, Any]:
+    """Delete an offset Bitable row (caller must enforce pending + ownership)."""
+    rid = (record_id or "").strip()
+    if not rid:
+        raise ValueError("record_id is required")
+    token = get_tenant_access_token()
+    url = (
+        f"https://open.larksuite.com/open-apis/bitable/v1/apps/"
+        f"{OSE_BASE_TOKEN}/tables/{OSE_OFFSET_TABLE_ID}/records/{rid}"
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    res = requests.delete(
+        url,
+        headers=headers,
+        params={"user_id_type": "open_id"},
+        timeout=30,
+    ).json()
+    if res.get("code") != 0:
+        raise RuntimeError(f"Bitable delete failed: {res}")
+    invalidate_ose_bitable_cache()
+    return {"ok": True, "record_id": rid}
+
+
+def update_ose_offset_request(
+    *,
+    record_id: str,
+    request_person: str,
+    exchange_person: str,
+    shift_type: str,
+    original_date: date,
+    exchange_date: date,
+    reason: str,
+) -> dict[str, Any]:
+    """Update a **pending** offset row (exchange/shift/dates/reason only)."""
+    row = get_ose_offset_record_admin_row(record_id)
+    if not row.get("pending"):
+        raise ValueError("Only pending offset requests can be edited.")
+    req = _title_name(request_person)
+    if _title_name(str(row.get("request_person") or "")) != req:
+        raise ValueError("This offset request does not belong to you.")
+    exc = _title_name(exchange_person)
+    if req not in OSE_LEAVE_FORM_NAMES:
+        raise ValueError(f"Unknown request person {request_person!r}")
+    if exc not in OSE_LEAVE_FORM_NAMES:
+        raise ValueError(f"Unknown exchange person {exchange_person!r}")
+    st = (shift_type or "").strip().upper()
+    if st not in OSE_SHIFT_TYPES:
+        raise ValueError("Shift Type must be N or D")
+    reason_s = (reason or "").strip()
+    if not reason_s:
+        raise ValueError("Reason is required")
+    token = get_tenant_access_token()
+    fields: dict[str, Any] = {
+        "Exchange Person": _offset_person_field_value(exc, token=token),
+        "Shift Type": st,
+        "Original Date": _bitable_date_ms(original_date),
+        "Exchange Date": _bitable_date_ms(exchange_date),
+        "Reason": reason_s,
+    }
+    _bitable_update_record(token, OSE_OFFSET_TABLE_ID, record_id, fields)
+    invalidate_ose_bitable_cache()
+    return {"ok": True, "record_id": record_id}
 
 
 if __name__ == "__main__":
