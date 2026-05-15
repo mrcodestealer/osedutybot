@@ -843,6 +843,68 @@ def _toast_approval_problem(send_message: Callable[..., Any], chat_id: str, text
         print(f"[offsetleave] approval: {text}", flush=True)
 
 
+def _requester_open_id_for_offset_row(request_person: str) -> str:
+    nm = (request_person or "").strip()
+    if not nm:
+        return ""
+    token = od.get_tenant_access_token()
+    idx = od._get_ose_person_open_id_index(token)
+    return (od._lookup_person_open_id(nm, idx) or "").strip()
+
+
+def _format_requester_offset_responded_text(
+    *,
+    approver_name: str,
+    decision: str,
+    row: dict[str, Any],
+    remarks: str,
+) -> str:
+    dec = (decision or "").strip().title()
+    rmk = (remarks or "").strip()
+    lines = [
+        f"{approver_name} already responded to your offset request ({dec}).",
+        "",
+        "Details:",
+        f"• REQ. DATE: {row.get('request_date') or '—'}",
+        f"• REQUEST PERSON: {row.get('request_person') or '—'}",
+        f"• EXCHANGE PERSON: {row.get('exchange_person') or '—'}",
+        f"• SHIFT: {row.get('shift_type') or '—'}",
+        f"• ORIGINAL DATE: {row.get('original_date') or '—'}",
+        f"• EXCHANGE DATE: {row.get('exchange_date') or '—'}",
+        f"• REASON: {(row.get('reason') or '').strip() or '—'}",
+        f"• STATUS: {(row.get('approval_status') or dec).strip() or dec}",
+    ]
+    if rmk:
+        lines.append(f"• APPROVER REMARKS: {rmk}")
+    return "\n".join(lines)
+
+
+def _notify_requester_offset_responded(
+    send_message: Callable[..., Any],
+    row: dict[str, Any],
+    *,
+    approver_name: str,
+    decision: str,
+    remarks: str,
+) -> None:
+    request_person = str(row.get("request_person") or "").strip()
+    if not request_person:
+        return
+    oid = _requester_open_id_for_offset_row(request_person)
+    if not oid:
+        print(f"[offsetleave] could not resolve Lark open_id for requester {request_person!r}", flush=True)
+        return
+    text = _format_requester_offset_responded_text(
+        approver_name=approver_name,
+        decision=decision,
+        row=row,
+        remarks=remarks,
+    )
+    r = send_message(oid, text, receive_id_type="open_id")
+    if isinstance(r, dict) and int(r.get("code", -1)) != 0:
+        print(f"[offsetleave] requester DM failed: {r!r}", flush=True)
+
+
 def _handle_offset_approval_callback(
     parsed: dict[str, Any],
     event_obj: dict[str, Any],
@@ -894,6 +956,16 @@ def _handle_offset_approval_callback(
             fresh = _offset_admin_row_by_id(rid)
             if mid:
                 _patch_interactive_card_message(mid, build_offset_approver_done_card(fresh, dec, remarks))
+            try:
+                _notify_requester_offset_responded(
+                    send_message,
+                    fresh,
+                    approver_name=approver_name,
+                    decision=dec,
+                    remarks=remarks,
+                )
+            except Exception as exc:
+                print(f"[offsetleave] requester notify failed: {exc!r}", flush=True)
             return True
     except Exception as exc:
         try:
