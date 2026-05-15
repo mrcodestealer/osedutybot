@@ -1780,12 +1780,15 @@ def delete_ose_offset_record(*, record_id: str, skip_cache_invalidate: bool = Fa
     return {"ok": True, "record_id": rid}
 
 
-def _calendar_months_after(d: date, ref: date) -> int:
-    """
-    Whole calendar months from ``d``'s month to ``ref``'s month (same month → 0).
-    Examples: May→June=1, May→July=2, May→May=0.
-    """
-    return (ref.year - d.year) * 12 + (ref.month - d.month)
+def _subtract_calendar_months(d: date, months: int) -> date:
+    """Subtract whole calendar months from ``d`` (day clamped to end of target month)."""
+    y, m = d.year, d.month
+    m -= months
+    while m <= 0:
+        m += 12
+        y -= 1
+    last = calendar.monthrange(y, m)[1]
+    return date(y, m, min(d.day, last))
 
 
 def _offset_row_original_exchange_dates(fields: dict[str, Any]) -> tuple[Optional[date], Optional[date]]:
@@ -1797,13 +1800,20 @@ def _offset_row_original_exchange_dates(fields: dict[str, Any]) -> tuple[Optiona
 
 def purge_stale_ose_offset_bitable_rows(*, ref_date: Optional[date] = None) -> dict[str, Any]:
     """
-    Delete offset Bitable rows whose **Original Date** and **Exchange Date** are each
-    at least **two calendar months** before ``ref_date``'s month.
+    Delete offset Bitable rows whose swap is **fully older than two calendar months**
+    measured from ``ref_date``.
 
-    Example: if today is July, May rows are removed; if today is June, May rows stay
-    (only one month behind June).
+    Cutoff is ``ref_date`` minus two whole calendar months (same day-of-month, clamped
+    to month end). A row is removed only if ``max(Original Date, Exchange Date)`` is
+    **strictly before** that cutoff.
+
+    Examples (``ref_date`` = 16 May): cutoff = 16 March — a row 26–30 March is kept
+    (30 Mar is not before 16 Mar). ``ref_date`` = 15 June: May rows are kept (cutoff
+    15 Apr; May dates are not before Apr). ``ref_date`` = 16 July: cutoff 16 May —
+    May swap dates before that day are removed.
     """
     ref = ref_date or date.today()
+    cutoff = _subtract_calendar_months(ref, 2)
     token = get_tenant_access_token()
     items = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_OFFSET_TABLE_ID)
     to_delete: list[str] = []
@@ -1812,7 +1822,8 @@ def purge_stale_ose_offset_bitable_rows(*, ref_date: Optional[date] = None) -> d
         od, xd = _offset_row_original_exchange_dates(f)
         if not od or not xd:
             continue
-        if _calendar_months_after(od, ref) >= 2 and _calendar_months_after(xd, ref) >= 2:
+        last_swap_day = max(od, xd)
+        if last_swap_day < cutoff:
             rid = str(it.get("record_id") or "").strip()
             if rid:
                 to_delete.append(rid)
@@ -1829,6 +1840,7 @@ def purge_stale_ose_offset_bitable_rows(*, ref_date: Optional[date] = None) -> d
     return {
         "ok": not errors,
         "ref_date": ref.isoformat(),
+        "cutoff": cutoff.isoformat(),
         "scanned": len(items),
         "eligible": len(to_delete),
         "deleted": len(deleted),
