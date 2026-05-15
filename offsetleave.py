@@ -328,7 +328,7 @@ def _callback_payload_edit_submit(*, owner_open_id: str, request_person: str, re
     }
 
 
-def _callback_payload_row_action(*, kind: str, owner_open_id: str, request_person: str, record_id: str) -> dict[str, str]:
+def _callback_payload_row_action(kind: str, *, owner_open_id: str, request_person: str, record_id: str) -> dict[str, str]:
     return {
         "k": kind,
         "owner": (owner_open_id or "").strip(),
