@@ -14,6 +14,11 @@ _CHBOX_DIR = os.path.dirname(os.path.abspath(__file__))
 if _CHBOX_DIR not in sys.path:
     sys.path.insert(0, _CHBOX_DIR)
 
+# ``python main.py`` loads this file as ``__main__``. Lazy ``import main`` (e.g. jenkinsupdate)
+# would otherwise execute module-level code again and start a second APScheduler → duplicate cron.
+if __name__ == "__main__":
+    sys.modules.setdefault("main", sys.modules["__main__"])
+
 # Load .env from the project directory (works under systemd when CWD is not the app folder)
 load_dotenv(os.path.join(_CHBOX_DIR, ".env"))
 
@@ -1292,22 +1297,31 @@ def evening_reminder():
     print(f"⏰ OSE evening card sent to {DUTY_CHAT_ID}")
 
 
+_ose_bitable_sync_lock = threading.Lock()
+
+
 def ose_leave_offset_daily_sync():
     """Refresh OSE Lark Bitable leave/offset cache once per day (same host TZ as morning OSE)."""
-    line = ose_Duty.sync_ose_leave_offset_bitable()
-    print(f"[OSE Bitable] {line}", flush=True)
+    if not _ose_bitable_sync_lock.acquire(blocking=False):
+        print("[OSE Bitable] sync skipped (already running)", flush=True)
+        return
     try:
-        pur = ose_Duty.purge_stale_ose_offset_bitable_rows()
-        if pur.get("deleted"):
-            print(
-                f"[OSE Bitable] stale offset purge: deleted {pur['deleted']} row(s) "
-                f"(scanned {pur.get('scanned')}, ref {pur.get('ref_date')})",
-                flush=True,
-            )
-        if pur.get("errors"):
-            print(f"[OSE Bitable] stale offset purge errors: {pur['errors']!r}", flush=True)
-    except Exception as exc:
-        print(f"[OSE Bitable] stale offset purge failed: {exc!r}", flush=True)
+        line = ose_Duty.sync_ose_leave_offset_bitable()
+        print(f"[OSE Bitable] {line}", flush=True)
+        try:
+            pur = ose_Duty.purge_stale_ose_offset_bitable_rows()
+            if pur.get("deleted"):
+                print(
+                    f"[OSE Bitable] stale offset purge: deleted {pur['deleted']} row(s) "
+                    f"(scanned {pur.get('scanned')}, ref {pur.get('ref_date')})",
+                    flush=True,
+                )
+            if pur.get("errors"):
+                print(f"[OSE Bitable] stale offset purge errors: {pur['errors']!r}", flush=True)
+        except Exception as exc:
+            print(f"[OSE Bitable] stale offset purge failed: {exc!r}", flush=True)
+    finally:
+        _ose_bitable_sync_lock.release()
 
 
 # def amountloss():
@@ -1330,15 +1344,29 @@ def clean_pending_p1_confirmations():
         print(f"🧹 Cleaned {len(expired)} expired P1 confirmations")
 
 scheduler = BackgroundScheduler()
+
+
+def _add_scheduler_job(job_id: str, func, trigger: str, **trigger_kwargs) -> None:
+    scheduler.add_job(
+        func=func,
+        trigger=trigger,
+        id=job_id,
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        **trigger_kwargs,
+    )
+
+
 # Lark leave/offset: clear in-process cache + prefetch before morning OSE card (same TZ as hour=7 job).
-scheduler.add_job(func=ose_leave_offset_daily_sync, trigger="cron", hour=6, minute=50)
-scheduler.add_job(func=morning_reminder, trigger="cron", hour=7, minute=00)
-scheduler.add_job(func=evening_reminder, trigger="cron", hour=19, minute=0)
+_add_scheduler_job("ose_leave_offset_daily_sync", ose_leave_offset_daily_sync, "cron", hour=6, minute=50)
+_add_scheduler_job("morning_reminder", morning_reminder, "cron", hour=7, minute=0)
+_add_scheduler_job("evening_reminder", evening_reminder, "cron", hour=19, minute=0)
 try:
     from amountloss import amount_loss_9am_enabled as _amount_loss_9am_enabled
 
     if _amount_loss_9am_enabled():
-        scheduler.add_job(func=scheduled_amountloss_check, trigger="cron", hour=9, minute=0)
+        _add_scheduler_job("scheduled_amountloss_check", scheduled_amountloss_check, "cron", hour=9, minute=0)
     else:
         print(
             "[Amount Loss] 9:00 cron not registered (temporarily disabled; AMOUNT_LOSS_9AM_ENABLED=1 to restore)",
@@ -1346,10 +1374,10 @@ try:
         )
 except ImportError:
     print("[Amount Loss] 9:00 cron not registered (amountloss unavailable)", flush=True)
-scheduler.add_job(func=myoseweeklymeeting, trigger="cron", day_of_week='tue', hour=17, minute=0)
-scheduler.add_job(func=monthly_duty_check, trigger="cron", day=1, hour=0, minute=0)
-scheduler.add_job(func=clean_pending_p0_confirmations, trigger="interval", minutes=5)
-scheduler.add_job(func=clean_pending_p1_confirmations, trigger="interval", minutes=5)
+_add_scheduler_job("myoseweeklymeeting", myoseweeklymeeting, "cron", day_of_week="tue", hour=17, minute=0)
+_add_scheduler_job("monthly_duty_check", monthly_duty_check, "cron", day=1, hour=0, minute=0)
+_add_scheduler_job("clean_pending_p0_confirmations", clean_pending_p0_confirmations, "interval", minutes=5)
+_add_scheduler_job("clean_pending_p1_confirmations", clean_pending_p1_confirmations, "interval", minutes=5)
 
 PENDING_RESTART_FILE = "restart_pending.json"
 
@@ -3439,8 +3467,9 @@ def _try_mount_webapp_blueprint() -> None:
 
 _try_mount_webapp_blueprint()
 
-scheduler.start()
-atexit.register(lambda: scheduler.shutdown())
+if not scheduler.running:
+    scheduler.start()
+    atexit.register(lambda: scheduler.shutdown(wait=False))
 # Load daily reminder jobs from Lark Sheet at startup.
 try:
     _cnt, _total = reminder.sync_sheet_daily_reminders(
