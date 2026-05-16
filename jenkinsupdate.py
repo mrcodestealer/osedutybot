@@ -33,9 +33,9 @@ Job URL: https://jenkins.client8.me/job/FPMS/job/FPMS_UAT_BRANCH_UPDATE/build?de
 
 Credentials: ``JENKINS_USERNAME`` / ``JENKINS_PASSWORD`` (recommended), else defaults below.
 
-**Lark bot screenshots** (all automated ``/jenkinsupdate`` jobs): YES/NO card is sent first; PNGs upload
-in the background. ``JENKINSUPDATE_FORM_SCREENSHOT=0`` disables. ``JENKINSUPDATE_FORM_SCREENSHOT_QUICK=0`` uploads
-every parameter row (slower). ``JENKINSUPDATE_BOT_SINGLE_VERIFY=0`` restores two on-page re-checks.
+**Lark bot screenshots** (all automated ``/jenkinsupdate`` jobs): YES/NO card first; **one** whole-form PNG
+uploads in the background. ``JENKINSUPDATE_FORM_SCREENSHOT=0`` disables. ``JENKINSUPDATE_FORM_SCREENSHOT_ROWS=1``
+adds per-parameter row images. ``JENKINSUPDATE_BOT_SINGLE_VERIFY=0`` restores two on-page re-checks.
 
 Usage::
 
@@ -5712,7 +5712,7 @@ def _fpms_lark_verification_card_json(
     md_checks = "\n".join(verify_lines)
     footer_ok = (
         "✅ All checks **OK** — tap **YES** or **NO** below (or type **yes** / **no**). "
-        "Screenshots may arrive in chat right after this card."
+        "One form screenshot may arrive in chat right after this card."
     )
     footer_bad = (
         "⚠️ At least one line shows **❌**. **Build** stays disabled until every line is ✅. "
@@ -5833,10 +5833,10 @@ def _jenkins_form_screenshot_enabled(bot_lark_gate: dict | None) -> bool:
     return raw not in ("0", "false", "no", "off")
 
 
-def _jenkins_form_screenshot_quick_mode() -> bool:
-    """Fewer PNGs (overview + key rows) so the YES/NO card is not delayed."""
-    raw = os.environ.get("JENKINSUPDATE_FORM_SCREENSHOT_QUICK", "1").strip().lower()
-    return raw not in ("0", "false", "no", "off")
+def _jenkins_form_screenshot_include_rows() -> bool:
+    """When true, also capture per-parameter row PNGs (default: one whole-form image only)."""
+    raw = os.environ.get("JENKINSUPDATE_FORM_SCREENSHOT_ROWS", "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
 
 
 def _jenkins_bot_single_verify_enabled() -> bool:
@@ -5873,7 +5873,9 @@ def capture_jenkins_build_parameters_screenshots(
     job_profile: str,
 ) -> tuple[list[str], str]:
     """
-    PNG screenshots of the filled Jenkins build-parameters form.
+    One PNG of the filled Jenkins build-parameters form (whole form in frame).
+
+    Set ``JENKINSUPDATE_FORM_SCREENSHOT_ROWS=1`` to also capture per-parameter row close-ups.
 
     Returns ``(file_paths, temp_dir)`` — caller should delete ``temp_dir`` after upload.
     """
@@ -5888,8 +5890,8 @@ def capture_jenkins_build_parameters_screenshots(
         pass
     _safe_page_wait(page, max(300, min(800, _MS_POST_FILL_VERIFY)))
 
-    overview = os.path.join(out_dir, f"{prof}_{ts}_00_overview.png")
-    captured_overview = False
+    form_png = os.path.join(out_dir, f"{prof}_{ts}_form.png")
+    captured = False
     for sel in (
         "form[name='parameters']",
         ".jenkins-form",
@@ -5900,39 +5902,37 @@ def capture_jenkins_build_parameters_screenshots(
         try:
             loc.wait_for(state="visible", timeout=8_000)
             loc.scroll_into_view_if_needed(timeout=8_000)
-            loc.screenshot(path=overview, animations="disabled")
-            paths.append(overview)
-            captured_overview = True
-            print(f"→ Jenkins form overview screenshot: {overview}", flush=True)
+            loc.screenshot(path=form_png, animations="disabled")
+            paths.append(form_png)
+            captured = True
+            print(f"→ Jenkins whole-form screenshot: {form_png}", flush=True)
             break
         except Exception:
             continue
-    if not captured_overview:
-        page.screenshot(path=overview, full_page=True, animations="disabled")
-        paths.append(overview)
-        print(f"→ Jenkins full-page overview screenshot: {overview}", flush=True)
+    if not captured:
+        page.screenshot(path=form_png, full_page=True, animations="disabled")
+        paths.append(form_png)
+        print(f"→ Jenkins full-page form screenshot: {form_png}", flush=True)
 
-    row_labels = _jenkins_parameter_labels_for_profile(job_profile)
-    if _jenkins_form_screenshot_quick_mode():
-        # Overview + at most two row close-ups (enough to verify Command / Environment).
-        row_labels = row_labels[:2]
-
-    for i, label in enumerate(row_labels, start=1):
-        safe_label = re.sub(r"[^\w.-]+", "_", label)
-        pth = os.path.join(out_dir, f"{prof}_{ts}_{i:02d}_{safe_label}.png")
-        try:
-            row = _form_row(page, label)
-            row.wait_for(state="visible", timeout=15_000)
-            row.scroll_into_view_if_needed(timeout=15_000)
-            _safe_page_wait(page, 250)
-            row.screenshot(path=pth, animations="disabled")
-            paths.append(pth)
-            print(f"→ Jenkins parameter screenshot ({label}): {pth}", flush=True)
-        except Exception as ex:
-            print(
-                f"→ Parameter row screenshot skipped ({label!r}): {ex!r}",
-                flush=True,
-            )
+    if _jenkins_form_screenshot_include_rows():
+        for i, label in enumerate(
+            _jenkins_parameter_labels_for_profile(job_profile), start=1
+        ):
+            safe_label = re.sub(r"[^\w.-]+", "_", label)
+            pth = os.path.join(out_dir, f"{prof}_{ts}_{i:02d}_{safe_label}.png")
+            try:
+                row = _form_row(page, label)
+                row.wait_for(state="visible", timeout=15_000)
+                row.scroll_into_view_if_needed(timeout=15_000)
+                _safe_page_wait(page, 250)
+                row.screenshot(path=pth, animations="disabled")
+                paths.append(pth)
+                print(f"→ Jenkins parameter screenshot ({label}): {pth}", flush=True)
+            except Exception as ex:
+                print(
+                    f"→ Parameter row screenshot skipped ({label!r}): {ex!r}",
+                    flush=True,
+                )
 
     return paths, out_dir
 
@@ -5989,8 +5989,10 @@ def _fpms_lark_send_parameter_screenshots(
             continue
         if i < len(paths):
             time.sleep(0.12)
-    if sent:
-        send(chat_id, f"📸 **{prof_label}** — {sent} Jenkins form screenshot(s) (filled parameters).")
+    if sent == 1:
+        send(chat_id, f"📸 **{prof_label}** — Jenkins filled form (1 screenshot).")
+    elif sent:
+        send(chat_id, f"📸 **{prof_label}** — {sent} Jenkins form screenshot(s).")
     else:
         send(chat_id, f"⚠️ Could not send Jenkins screenshots for **{prof_label}**.")
 
