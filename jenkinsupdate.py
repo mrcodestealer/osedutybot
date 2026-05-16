@@ -6980,16 +6980,8 @@ def handle_lark_jenkins_update_message(
                         if isinstance(ev2, threading.Event):
                             ev2.set()
                 return True
-            if not sess.get("jenkins_wait_nag_sent"):
-                sess["jenkins_wait_nag_sent"] = True
-                with _fpms_lark_sessions_lock:
-                    _fpms_lark_sessions[key] = sess
-                send(
-                    chat_id,
-                    "⏳ Waiting for **YES** / **NO** on the card above (or type **yes** / **no**). "
-                    "Send a new full `/jenkinsupdate` block to replace this run, or **cancel**.",
-                )
-            return True
+            # /fpms, /date, etc. — do not consume; YES/NO card already shown above.
+            return False
         if st in ("jenkins_post_gate", "jenkins_cancelled"):
             # Browser thread finishing — do not block /fpms and other commands.
             return False
