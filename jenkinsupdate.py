@@ -3517,6 +3517,9 @@ def normalize_parameter_text(value: str) -> str:
 
 def fill_text_parameter(page, label: str, value: str) -> None:
     value = normalize_parameter_text(value)
+    if (label or "").strip().casefold() == "command":
+        value = normalize_fpms_prod_script_command(value)
+        _fpms_prod_script_command_must_start_with_node(value)
     row = _form_row(page, label)
     row.wait_for(state="visible", timeout=30_000)
     inp = row.locator(
@@ -3528,6 +3531,22 @@ def fill_text_parameter(page, label: str, value: str) -> None:
     inp.click()
     inp.fill("")
     inp.fill(value)
+    if (label or "").strip().casefold() == "command":
+        try:
+            got = normalize_fpms_prod_script_command(read_text_parameter_value(page, label))
+        except Exception:
+            got = ""
+        if got != value:
+            inp.click()
+            inp.fill("")
+            inp.fill(value)
+            got = normalize_fpms_prod_script_command(read_text_parameter_value(page, label))
+        if got != value:
+            raise RuntimeError(
+                "Jenkins Command field does not match input after fill.\n"
+                f"  page:     {got!r}\n"
+                f"  expected: {value!r}"
+            )
     print(f"→ {label} filled in browser: {value!r}")
 
 
@@ -4046,6 +4065,7 @@ def verify_fpms_prod_script_parameters_display(
     ok_all = ok_all and env_ok
     lines.append(f"{'✅' if env_ok else '❌'} Environment — page: {got_env!r} — expected: {want_env!r}")
 
+    read_failed = False
     try:
         got_cmd = normalize_fpms_prod_script_command(
             read_text_parameter_value(page, "Command")
@@ -4053,15 +4073,27 @@ def verify_fpms_prod_script_parameters_display(
     except Exception as ex:
         got_cmd = f"(read failed: {ex})"
         cmd_ok = False
+        read_failed = True
     else:
-        cmd_ok = got_cmd == want_cmd
+        cmd_ok = fpms_prod_script_commands_equal(want_cmd, got_cmd)
     ok_all = ok_all and cmd_ok
     em = "✅" if cmd_ok else "❌"
+    match_note = "exact match (character-for-character)" if cmd_ok else "NOT an exact match"
     lines.append(
-        f"{em} Command\n\n"
-        f"Page: {got_cmd!r}\n\n"
-        f"Expected: {want_cmd!r}"
+        f"{em} Command — {match_note}\n\n"
+        f"**Jenkins field:**\n```\n{got_cmd}\n```\n\n"
+        f"**Your input (canonical, no outer \" quotes):**\n```\n{want_cmd}\n```"
     )
+    if not cmd_ok and not read_failed:
+        if len(got_cmd) != len(want_cmd):
+            lines.append(f"\nLength: page {len(got_cmd)} vs expected {len(want_cmd)}")
+        else:
+            for i, (a, b) in enumerate(zip(got_cmd, want_cmd)):
+                if a != b:
+                    lines.append(
+                        f"\nFirst difference at position {i}: page `{a!r}` vs expected `{b!r}`"
+                    )
+                    break
     return ok_all, lines
 
 
@@ -5175,15 +5207,37 @@ def _sms_uat_bot_build_config_block(data: dict, resolved_ids: list[str]) -> str:
     )
 
 
+_FPMS_CMD_OUTER_QUOTES = frozenset(
+    "\"'\"\u201c\u201d\u2018\u2019\u00ab\u00bb"  # ASCII + smart / guillemet quotes
+)
+
+
 def normalize_fpms_prod_script_command(cmd: str) -> str:
     """
-  Strip leading/trailing whitespace and remove **outer** quote wrappers users paste in Lark
-  (e.g. ``"node Server/... 'true' …"`` → ``node Server/... 'true' …``). Inner ``'true'`` args stay.
+    Strip leading/trailing whitespace and remove **outer** quote wrappers users paste in Lark
+    (e.g. ``"node Server/... 'true' …"`` → ``node Server/... 'true' …``). Inner ``'true'`` args stay.
     """
     t = (cmd or "").strip()
-    while len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'":
+    while len(t) >= 2 and t[0] in _FPMS_CMD_OUTER_QUOTES and t[-1] in _FPMS_CMD_OUTER_QUOTES:
         t = t[1:-1].strip()
     return t
+
+
+def _fpms_prod_script_command_must_start_with_node(cmd: str) -> None:
+    """Raise if canonical command does not begin with ``node`` (Jenkins PROD SCRIPT convention)."""
+    c = normalize_fpms_prod_script_command(cmd)
+    if not c.casefold().startswith("node"):
+        raise ValueError(
+            "Command must start with `node` (no leading/trailing spaces or outer \" quotes). "
+            "Example: node Server/dataPatch/scriptModule.js …"
+        )
+
+
+def fpms_prod_script_commands_equal(expected: str, actual: str) -> bool:
+    """Exact match after canonical normalization (outer quotes stripped on both sides)."""
+    return normalize_fpms_prod_script_command(expected) == normalize_fpms_prod_script_command(
+        actual
+    )
 
 
 def _jenkins_update_strip_job_aliases(text: str) -> str:
@@ -5256,6 +5310,7 @@ def parse_fpms_prod_script_bot_block(text: str) -> dict:
         raise ValueError("Missing command line.")
     if cmd != cmd.strip():
         raise ValueError("Command has leading/trailing spaces; remove spaces at front/end.")
+    _fpms_prod_script_command_must_start_with_node(cmd)
     return {
         "_job_kind": "fpms_prod_script",
         "environment": "fpms-prod",
@@ -5299,6 +5354,10 @@ def parse_fpms_prod_script_run_config_block(text: str) -> tuple[str, str]:
         raise ConfigBlockError("FPMS PROD SCRIPT config: missing command: line.")
     if cmd != cmd.strip():
         raise ConfigBlockError("FPMS PROD SCRIPT config: command has leading/trailing spaces.")
+    try:
+        _fpms_prod_script_command_must_start_with_node(cmd)
+    except ValueError as ex:
+        raise ConfigBlockError(str(ex)) from ex
     return env, cmd
 
 
@@ -7391,6 +7450,7 @@ def run(
             elif is_prod_script:
                 # FPMS PROD SCRIPT RUN: Environment + Command only.
                 select_environment_by_value(page, environment)
+                command = normalize_fpms_prod_script_command(command)
                 fill_text_parameter(page, "Command", command)
             else:
                 try:
