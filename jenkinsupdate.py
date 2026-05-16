@@ -3877,6 +3877,19 @@ def read_text_parameter_value(page, label: str) -> str:
     return normalize_parameter_text(inp.input_value() or "")
 
 
+def _verify_fmt_value(v: object) -> str:
+    """Display value in Lark/terminal verify lines (no Python ``!r`` quotes)."""
+    if v is None:
+        return "(empty)"
+    s = str(v).strip()
+    return s if s else "(empty)"
+
+
+def _verify_page_expected_line(ok: bool, label: str, got: object, want: object) -> str:
+    em = "✅" if ok else "❌"
+    return f"{em} {label} — page:{_verify_fmt_value(got)} — expected:{_verify_fmt_value(want)}"
+
+
 def verify_fpms_parameters_display(
     page,
     environment: str,
@@ -3911,8 +3924,7 @@ def verify_fpms_parameters_display(
     else:
         env_ok = got_env == want_env
     ok_all = ok_all and env_ok
-    em = "✅" if env_ok else "❌"
-    lines.append(f"{em} Environment — page: {got_env!r} — expected: {want_env!r}")
+    lines.append(_verify_page_expected_line(env_ok, "Environment", got_env, want_env))
 
     if update_all_services:
         st_name = _jenkins_update_all_stapler_name()
@@ -3929,7 +3941,7 @@ def verify_fpms_parameters_display(
             got_svc = sorted(set(read_services_checked_values(page)))
         except Exception as ex:
             got_svc = []
-            lines.append(f"❌ Services — read failed: {ex!r}")
+            lines.append(f"❌ Services — read failed: {ex}")
             ok_all = False
         else:
             svc_ok = got_svc == want_svc
@@ -3959,8 +3971,7 @@ def verify_fpms_parameters_display(
     else:
         br_ok = got_br.casefold() == want_br.casefold()
     ok_all = ok_all and br_ok
-    em = "✅" if br_ok else "❌"
-    lines.append(f"{em} Branch — page: {got_br!r} — expected: {want_br!r}")
+    lines.append(_verify_page_expected_line(br_ok, "Branch", got_br, want_br))
 
     try:
         got_ver = read_text_parameter_value(page, "Version")
@@ -3970,8 +3981,7 @@ def verify_fpms_parameters_display(
     else:
         ver_ok = got_ver == want_ver
     ok_all = ok_all and ver_ok
-    em = "✅" if ver_ok else "❌"
-    lines.append(f"{em} Version — page: {got_ver!r} — expected: {want_ver!r}")
+    lines.append(_verify_page_expected_line(ver_ok, "Version", got_ver, want_ver))
 
     return ok_all, lines
 
@@ -4007,7 +4017,7 @@ def verify_fnt_rc_parameters_display(
             got_svc = sorted(set(read_fnt_rc_services_checked_values(page)))
         except Exception as ex:
             got_svc = []
-            lines.append(f"❌ Services — read failed: {ex!r}")
+            lines.append(f"❌ Services — read failed: {ex}")
             ok_all = False
         else:
             svc_ok = got_svc == want_svc
@@ -4036,8 +4046,7 @@ def verify_fnt_rc_parameters_display(
     else:
         br_ok = got_br.casefold() == want_br.casefold()
     ok_all = ok_all and br_ok
-    em = "✅" if br_ok else "❌"
-    lines.append(f"{em} Branch — page: {got_br!r} — expected: {want_br!r}")
+    lines.append(_verify_page_expected_line(br_ok, "Branch", got_br, want_br))
     try:
         got_ver = read_text_parameter_value(page, "Version")
     except Exception as ex:
@@ -4046,8 +4055,7 @@ def verify_fnt_rc_parameters_display(
     else:
         ver_ok = got_ver == want_ver
     ok_all = ok_all and ver_ok
-    em = "✅" if ver_ok else "❌"
-    lines.append(f"{em} Version — page: {got_ver!r} — expected: {want_ver!r}")
+    lines.append(_verify_page_expected_line(ver_ok, "Version", got_ver, want_ver))
     return ok_all, lines
 
 
@@ -4070,7 +4078,7 @@ def verify_fpms_prod_script_parameters_display(
     else:
         env_ok = got_env == want_env
     ok_all = ok_all and env_ok
-    lines.append(f"{'✅' if env_ok else '❌'} Environment — page: {got_env!r} — expected: {want_env!r}")
+    lines.append(_verify_page_expected_line(env_ok, "Environment", got_env, want_env))
 
     read_failed = False
     try:
@@ -4084,21 +4092,15 @@ def verify_fpms_prod_script_parameters_display(
     else:
         cmd_ok = fpms_prod_script_commands_equal(want_cmd, got_cmd)
     ok_all = ok_all and cmd_ok
-    em = "✅" if cmd_ok else "❌"
-    match_note = "exact match (character-for-character)" if cmd_ok else "NOT an exact match"
-    lines.append(
-        f"{em} Command — {match_note}\n\n"
-        f"**Jenkins field:**\n```\n{got_cmd}\n```\n\n"
-        f"**Your input (canonical, no outer \" quotes):**\n```\n{want_cmd}\n```"
-    )
+    lines.append(_verify_page_expected_line(cmd_ok, "Command", got_cmd, want_cmd))
     if not cmd_ok and not read_failed:
         if len(got_cmd) != len(want_cmd):
-            lines.append(f"\nLength: page {len(got_cmd)} vs expected {len(want_cmd)}")
+            lines.append(f"Length: page {len(got_cmd)} vs expected {len(want_cmd)}")
         else:
             for i, (a, b) in enumerate(zip(got_cmd, want_cmd)):
                 if a != b:
                     lines.append(
-                        f"\nFirst difference at position {i}: page `{a!r}` vs expected `{b!r}`"
+                        f"First difference at position {i}: page `{a}` vs expected `{b}`"
                     )
                     break
     return ok_all, lines
@@ -4125,7 +4127,7 @@ def verify_bi_api_update_parameters_display(
     else:
         repo_ok = _bi_repo_canonical(got_repo) == _bi_repo_canonical(want_repo)
     ok_all = ok_all and repo_ok
-    lines.append(f"{'✅' if repo_ok else '❌'} Repository — page: {got_repo!r} — expected: {want_repo!r}")
+    lines.append(_verify_page_expected_line(repo_ok, "Repository", got_repo, want_repo))
 
     try:
         got_env = read_choice_parameter_value(page, "ENVIRONMENT")
@@ -4135,7 +4137,7 @@ def verify_bi_api_update_parameters_display(
     else:
         env_ok = got_env.casefold() == want_env
     ok_all = ok_all and env_ok
-    lines.append(f"{'✅' if env_ok else '❌'} Environment — page: {got_env!r} — expected: {want_env!r}")
+    lines.append(_verify_page_expected_line(env_ok, "Environment", got_env, want_env))
 
     try:
         got_branch = read_text_parameter_value(page, "SOURCE_BRANCH")
@@ -4146,7 +4148,7 @@ def verify_bi_api_update_parameters_display(
         branch_ok = got_branch.casefold() == want_branch.casefold()
     ok_all = ok_all and branch_ok
     lines.append(
-        f"{'✅' if branch_ok else '❌'} Source Branch — page: {got_branch!r} — expected: {want_branch!r}"
+        _verify_page_expected_line(branch_ok, "Source Branch", got_branch, want_branch)
     )
     return ok_all, lines
 
