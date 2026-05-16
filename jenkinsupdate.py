@@ -6815,6 +6815,45 @@ def _fpms_lark_with_sender_union_scope(fn):
 
 
 @_fpms_lark_with_sender_union_scope
+def _jenkins_message_has_config_block(text: str) -> bool:
+    """True when the message looks like a full parameter paste (not only a job keyword)."""
+    raw = (text or "").replace("\r\n", "\n")
+    if not JENKINS_UPDATE_CMD_RE.search(raw):
+        return False
+    has_branch = bool(re.search(r"\bbranch\s*:", raw, re.I))
+    has_version = bool(re.search(r"\bversion\s*:", raw, re.I))
+    has_svc = bool(re.search(r"\bservices?\s*:", raw, re.I))
+    return has_branch and has_version and has_svc
+
+
+def _fpms_lark_release_build_wait_session(
+    session_key: str,
+    *,
+    notify: str | None = None,
+    send=None,
+    chat_id: str | None = None,
+) -> bool:
+    """
+    Unblock a Playwright thread stuck on ``jenkins_wait_build`` and remove the session row.
+    Returns True if a build-wait session was released.
+    """
+    released = False
+    with _fpms_lark_sessions_lock:
+        s = _fpms_lark_sessions.get(session_key)
+        if isinstance(s, dict) and s.get("state") == "jenkins_wait_build":
+            ev = s.get("build_gate_event")
+            s["state"] = "jenkins_cancelled"
+            s["lark_cancel"] = True
+            s["approve_build"] = False
+            if isinstance(ev, threading.Event):
+                ev.set()
+            _fpms_lark_sessions.pop(session_key, None)
+            released = True
+    if released and notify and send and chat_id:
+        send(chat_id, notify)
+    return released
+
+
 def handle_lark_jenkins_update_message(
     chat_id: str,
     sender_id: str,
@@ -6830,7 +6869,8 @@ def handle_lark_jenkins_update_message(
     then either post job link(s) or run the FPMS UAT branch parameter automation.
 
     ``allow_start`` — in **group** chats, only **True** when the bot was @mentioned (first message).
-    **cancel** works anytime.
+    **cancel** works anytime. A new ``/jenkinsupdate`` with ``branch:`` / ``version:`` / ``service:`` while
+    YES/NO is pending auto-cancels the old run and starts fresh (no re-@mention required).
 
     ``lark_sender_union_id`` — optional **union_id** from ``im.message.receive_v1`` so card taps can
     resolve sessions when Feishu sends ``union_id`` but not ``open_id`` on ``card.action.trigger``.
@@ -6839,31 +6879,33 @@ def handle_lark_jenkins_update_message(
     """
     key = _fpms_lark_session_key(chat_id, sender_id)
     low = (clean_text or "").strip().casefold()
+    body_early = (original_text or clean_text or "").replace("\r\n", "\n").strip()
 
     if low == "cancel":
-        released_build_wait = False
-        had_other = False
-        with _fpms_lark_sessions_lock:
-            s = _fpms_lark_sessions.get(key)
-            if isinstance(s, dict) and s.get("state") == "jenkins_wait_build":
-                ev = s.get("build_gate_event")
-                if isinstance(ev, threading.Event):
-                    s["state"] = "jenkins_cancelled"
-                    s["lark_cancel"] = True
-                    s["approve_build"] = False
-                    ev.set()
-                released_build_wait = True
-            elif key in _fpms_lark_sessions:
-                had_other = True
-                _fpms_lark_sessions.pop(key, None)
-        if released_build_wait:
-            # One user-facing outcome: the Playwright thread sends the final line after the gate.
+        if _fpms_lark_release_build_wait_session(key):
             return True
+        with _fpms_lark_sessions_lock:
+            had_other = key in _fpms_lark_sessions
+            if had_other:
+                _fpms_lark_sessions.pop(key, None)
         if had_other:
             send(chat_id, "⏹️ **All `/jenkinsupdate` steps cancelled.**")
         else:
             send(chat_id, "ℹ️ No active `/jenkinsupdate` session to cancel.")
         return True
+
+    # New full config while YES/NO is pending → cancel old run and start over (no re-@mention).
+    if _jenkins_message_has_config_block(body_early):
+        if _fpms_lark_release_build_wait_session(
+            key,
+            notify=(
+                "⏹️ Previous Jenkins **YES/NO** cancelled. "
+                "Processing your new `/jenkinsupdate`…"
+            ),
+            send=send,
+            chat_id=chat_id,
+        ):
+            allow_start = True
 
     with _fpms_lark_sessions_lock:
         sess = _fpms_lark_sessions.get(key)
@@ -6944,15 +6986,13 @@ def handle_lark_jenkins_update_message(
                     _fpms_lark_sessions[key] = sess
                 send(
                     chat_id,
-                    "⏳ Waiting for **YES** / **NO** on the card above (or type **yes** / **no**).",
+                    "⏳ Waiting for **YES** / **NO** on the card above (or type **yes** / **no**). "
+                    "Send a new full `/jenkinsupdate` block to replace this run, or **cancel**.",
                 )
             return True
-        if st == "jenkins_post_gate":
-            # YES/NO (or card tap) already submitted; worker may still be in ``wait_review`` — do not nag.
-            return True
-        if st == "jenkins_cancelled":
-            # User said **cancel** during ``jenkins_wait_build``; keep quiet until worker closes session.
-            return True
+        if st in ("jenkins_post_gate", "jenkins_cancelled"):
+            # Browser thread finishing — do not block /fpms and other commands.
+            return False
 
         if st == "pick":
             ranked: list[str] = sess["current_ranked"]
@@ -7115,16 +7155,6 @@ def handle_lark_jenkins_update_message(
             BI_API_UPDATE_BUILD_URL,
             send,
         )
-
-    with _fpms_lark_sessions_lock:
-        prev = _fpms_lark_sessions.get(key)
-        if isinstance(prev, dict) and prev.get("state") == "jenkins_wait_build":
-            send(
-                chat_id,
-                "⏳ A Jenkins **Build** confirmation is already waiting for you in this chat. "
-                "**Tap YES/NO** on that card (or type **yes** / **no**), or say **cancel** before starting a new run.",
-            )
-            return True
 
     head_line = _jenkins_update_first_non_empty_line(body)
     ties_h: list[tuple[str, float, str, str]] = []
