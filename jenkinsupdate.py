@@ -33,6 +33,9 @@ Job URL: https://jenkins.client8.me/job/FPMS/job/FPMS_UAT_BRANCH_UPDATE/build?de
 
 Credentials: ``JENKINS_USERNAME`` / ``JENKINS_PASSWORD`` (recommended), else defaults below.
 
+**Lark bot screenshots** (all automated ``/jenkinsupdate`` jobs): after fill, PNG overview + per-parameter
+row images are uploaded to the chat before the YES/NO card. Set ``JENKINSUPDATE_FORM_SCREENSHOT=0`` to disable.
+
 Usage::
 
   python3 updateJenkins.py
@@ -95,9 +98,12 @@ import json
 import os
 import re
 import secrets
+import shutil
 import sys
+import tempfile
 import threading
 import time
+from datetime import datetime
 from collections.abc import Sequence
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
@@ -5212,14 +5218,21 @@ _FPMS_CMD_OUTER_QUOTES = frozenset(
 )
 
 
+def _fpms_prod_script_join_command_lines(parts: list[str]) -> str:
+    """Jenkins Command is a single text field — join Lark continuation lines with spaces."""
+    return " ".join((p or "").strip() for p in parts if (p or "").strip())
+
+
 def normalize_fpms_prod_script_command(cmd: str) -> str:
     """
     Strip leading/trailing whitespace and remove **outer** quote wrappers users paste in Lark
     (e.g. ``"node Server/... 'true' …"`` → ``node Server/... 'true' …``). Inner ``'true'`` args stay.
+    Newlines inside the command become spaces (one Jenkins input line).
     """
     t = (cmd or "").strip()
     while len(t) >= 2 and t[0] in _FPMS_CMD_OUTER_QUOTES and t[-1] in _FPMS_CMD_OUTER_QUOTES:
         t = t[1:-1].strip()
+    t = re.sub(r"\s+", " ", t).strip()
     return t
 
 
@@ -5296,7 +5309,7 @@ def parse_fpms_prod_script_bot_block(text: str) -> dict:
         if not cmd and line:
             cmd_lines.append(line)
     if cmd_lines:
-        cmd = "\n".join(cmd_lines).strip()
+        cmd = _fpms_prod_script_join_command_lines(cmd_lines)
 
     if not cmd:
         head_rest = _jenkins_update_strip_job_aliases(
@@ -5334,6 +5347,7 @@ def parse_fpms_prod_script_run_config_block(text: str) -> tuple[str, str]:
         raise ConfigBlockError("Internal FPMS PROD SCRIPT config must start with FPMS_PROD_SCRIPT_RUN_V1.")
     env = "fpms-prod"
     cmd = ""
+    cmd_parts: list[str] = []
     cmd_key_re = re.compile(
         r"^(?:[>\-\*\u2022]\s*)*(?:`+|\*{1,2})?command(?:`+|\*{1,2})?\s*[:\-–—]\s*(?P<rest>.*)$",
         re.I,
@@ -5348,7 +5362,14 @@ def parse_fpms_prod_script_run_config_block(text: str) -> tuple[str, str]:
             continue
         cm = cmd_key_re.match(line.strip())
         if cm:
-            cmd = _clean_key_rest(cm.group("rest") or "")
+            rest = _clean_key_rest(cm.group("rest") or "")
+            if rest:
+                cmd_parts.append(rest)
+            continue
+        if cmd_parts:
+            cmd_parts.append(line)
+    if cmd_parts:
+        cmd = _fpms_prod_script_join_command_lines(cmd_parts)
     cmd = normalize_fpms_prod_script_command(cmd)
     if not cmd:
         raise ConfigBlockError("FPMS PROD SCRIPT config: missing command: line.")
@@ -5804,6 +5825,174 @@ def _fpms_lark_verification_plain_fallback(
     return "\n".join(lines)
 
 
+def _jenkins_form_screenshot_enabled(bot_lark_gate: dict | None) -> bool:
+    if not bot_lark_gate:
+        return False
+    raw = os.environ.get("JENKINSUPDATE_FORM_SCREENSHOT", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _jenkins_parameter_labels_for_profile(job_profile: str) -> list[str]:
+    """Form row labels to capture as close-up screenshots (all automated Jenkins update jobs)."""
+    jp = (job_profile or "fpms").strip()
+    if jp == "fpms_prod_script":
+        return ["Environment", "Command"]
+    if jp == "bi_api_update":
+        return ["REPOSITORY", "ENVIRONMENT", "SOURCE_BRANCH"]
+    if jp in ("fnt_rc", "sms_uat"):
+        return ["Branch", "Version", "Services"]
+    return ["Environment", "Services", "Branch", "Version"]
+
+
+def _jenkins_job_profile_display(job_profile: str) -> str:
+    jp = (job_profile or "fpms").strip()
+    return {
+        "fpms": "FPMS UAT",
+        "pms_uat": "PMS UAT",
+        "fnt_rc": "FNT RC UAT",
+        "sms_uat": "SMS UAT",
+        "fpms_prod_script": "FPMS PROD SCRIPT",
+        "bi_api_update": "BI API UPDATE",
+    }.get(jp, jp.upper().replace("_", " "))
+
+
+def capture_jenkins_build_parameters_screenshots(
+    page,
+    job_profile: str,
+) -> tuple[list[str], str]:
+    """
+    PNG screenshots of the filled Jenkins build-parameters form.
+
+    Returns ``(file_paths, temp_dir)`` — caller should delete ``temp_dir`` after upload.
+    """
+    out_dir = tempfile.mkdtemp(prefix="jenkinsupdate_shot_")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    prof = re.sub(r"[^\w.-]+", "_", (job_profile or "fpms").strip())[:40]
+    paths: list[str] = []
+
+    try:
+        page.evaluate("() => window.scrollTo(0, 0)")
+    except Exception:
+        pass
+    _safe_page_wait(page, max(300, min(800, _MS_POST_FILL_VERIFY)))
+
+    overview = os.path.join(out_dir, f"{prof}_{ts}_00_overview.png")
+    captured_overview = False
+    for sel in (
+        "form[name='parameters']",
+        ".jenkins-form",
+        "#main-panel .jenkins-form",
+        "#main-panel",
+    ):
+        loc = page.locator(sel).first
+        try:
+            loc.wait_for(state="visible", timeout=8_000)
+            loc.scroll_into_view_if_needed(timeout=8_000)
+            loc.screenshot(path=overview, animations="disabled")
+            paths.append(overview)
+            captured_overview = True
+            print(f"→ Jenkins form overview screenshot: {overview}", flush=True)
+            break
+        except Exception:
+            continue
+    if not captured_overview:
+        page.screenshot(path=overview, full_page=True, animations="disabled")
+        paths.append(overview)
+        print(f"→ Jenkins full-page overview screenshot: {overview}", flush=True)
+
+    for i, label in enumerate(_jenkins_parameter_labels_for_profile(job_profile), start=1):
+        safe_label = re.sub(r"[^\w.-]+", "_", label)
+        pth = os.path.join(out_dir, f"{prof}_{ts}_{i:02d}_{safe_label}.png")
+        try:
+            row = _form_row(page, label)
+            row.wait_for(state="visible", timeout=15_000)
+            row.scroll_into_view_if_needed(timeout=15_000)
+            _safe_page_wait(page, 250)
+            row.screenshot(path=pth, animations="disabled")
+            paths.append(pth)
+            print(f"→ Jenkins parameter screenshot ({label}): {pth}", flush=True)
+        except Exception as ex:
+            print(
+                f"→ Parameter row screenshot skipped ({label!r}): {ex!r}",
+                flush=True,
+            )
+
+    return paths, out_dir
+
+
+def _fpms_lark_resolve_image_upload_helpers(bot_lark_gate: dict | None) -> tuple:
+    """``(upload_image_lark, send_image_message)`` or ``(None, None)``."""
+    if isinstance(bot_lark_gate, dict):
+        up = bot_lark_gate.get("upload_image")
+        si = bot_lark_gate.get("send_image")
+        if callable(up) and callable(si):
+            return up, si
+    try:
+        import main as _main_mod  # lazy — Duty Bot already loaded main
+
+        return (
+            getattr(_main_mod, "upload_image_lark", None),
+            getattr(_main_mod, "send_image_message", None),
+        )
+    except Exception:
+        return None, None
+
+
+def _fpms_lark_send_parameter_screenshots(
+    chat_id: str,
+    send,
+    paths: list[str],
+    *,
+    job_profile: str,
+    bot_lark_gate: dict | None = None,
+) -> None:
+    """Upload PNGs to Lark so operators can visually confirm filled Jenkins fields."""
+    if not paths:
+        return
+    upload_fn, send_img_fn = _fpms_lark_resolve_image_upload_helpers(bot_lark_gate)
+    if not callable(upload_fn) or not callable(send_img_fn):
+        send(
+            chat_id,
+            "⚠️ Jenkins form screenshots were captured but Lark image upload is unavailable on this host.",
+        )
+        return
+
+    prof_label = _jenkins_job_profile_display(job_profile)
+    send(chat_id, f"📸 **{prof_label}** — Jenkins parameters screenshots (check filled values):")
+    sent = 0
+    for i, pth in enumerate(paths, start=1):
+        base = os.path.basename(pth)
+        title = base.replace("_", " ").rsplit(".", 1)[0]
+        key = upload_fn(pth)
+        if not key:
+            print(f"[jenkinsupdate] screenshot upload failed: {pth}", flush=True)
+            continue
+        resp = send_img_fn(chat_id, key)
+        if isinstance(resp, dict) and resp.get("code") == 0:
+            sent += 1
+        else:
+            print(f"[jenkinsupdate] screenshot send failed: {pth} resp={resp!r}", flush=True)
+            continue
+        if i < len(paths):
+            time.sleep(0.35)
+    if sent:
+        send(
+            chat_id,
+            f"✅ Sent **{sent}** screenshot(s) for **{prof_label}** "
+            f"(overview + each parameter row). Compare with the verification card below.",
+        )
+    else:
+        send(chat_id, f"⚠️ Could not send Jenkins screenshots for **{prof_label}**.")
+
+
+def _fpms_lark_cleanup_screenshot_dir(temp_dir: str) -> None:
+    if temp_dir and os.path.isdir(temp_dir):
+        try:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+
 def _fpms_lark_send_verification_summary(
     send,
     chat_id: str,
@@ -6066,6 +6255,16 @@ def _fpms_lark_spawn_run(
     ju = (jenkins_build_url or BUILD_URL).strip()
     jp = (job_profile or "fpms").strip() or "fpms"
 
+    upload_image_fn = None
+    send_image_fn = None
+    try:
+        import main as _main_mod
+
+        upload_image_fn = getattr(_main_mod, "upload_image_lark", None)
+        send_image_fn = getattr(_main_mod, "send_image_message", None)
+    except Exception:
+        pass
+
     def _job() -> None:
         try:
             run(
@@ -6083,6 +6282,8 @@ def _fpms_lark_spawn_run(
                     "prompt_echo": raw_prompt_body,
                     "build_url": ju,
                     "job_profile": jp,
+                    "upload_image": upload_image_fn,
+                    "send_image": send_image_fn,
                 },
                 jenkins_build_url=ju,
                 job_profile=jp,
@@ -7609,6 +7810,30 @@ def run(
                 build_url = str(bot_lark_gate.get("build_url") or BUILD_URL)
                 prompt_echo = str(bot_lark_gate.get("prompt_echo") or "")
                 next_build_number = _predict_next_build_number_from_history(page)
+                shot_dir = ""
+                if _jenkins_form_screenshot_enabled(bot_lark_gate):
+                    try:
+                        shot_paths, shot_dir = capture_jenkins_build_parameters_screenshots(
+                            page, jp
+                        )
+                        _fpms_lark_send_parameter_screenshots(
+                            cid,
+                            send,
+                            shot_paths,
+                            job_profile=jp,
+                            bot_lark_gate=bot_lark_gate,
+                        )
+                    except Exception as shot_ex:
+                        try:
+                            send(
+                                cid,
+                                f"⚠️ Jenkins form screenshot failed (verification continues):\n```\n{shot_ex}\n```",
+                            )
+                        except Exception:
+                            pass
+                        print(f"[jenkinsupdate] form screenshot failed: {shot_ex!r}", flush=True)
+                    finally:
+                        _fpms_lark_cleanup_screenshot_dir(shot_dir)
                 _fpms_lark_send_verification_summary(
                     send,
                     cid,
