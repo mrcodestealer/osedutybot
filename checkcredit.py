@@ -777,6 +777,12 @@ def _parse_enter_game_credit(line: str) -> tuple[float, str] | None:
     return (val, tshort)
 
 
+def _credit_time_sort_key(lc: dict[str, Any]) -> tuple[str, int]:
+    """Sort key for latest credit: log time (HH:MM:SS.mmm) then line index."""
+    ts = (lc.get("time_short") or "00:00:00.000").strip()
+    return (ts, int(lc.get("line_idx", 0)))
+
+
 def _resolve_latest_credit(
     *,
     best_aft_fail: dict[str, Any] | None,
@@ -786,31 +792,30 @@ def _resolve_latest_credit(
     has_enter_timeout: bool,
 ) -> dict[str, Any] | None:
     """
-    Pick ``latest_credit`` for a player block.
+    Pick ``latest_credit`` for a player block (newest log time wins across sources).
 
     When enter-game timed out (``errorJson`` time-out / ``enter game time out``) and a later
     ``aft interrogation faild`` reports ``amount: 0``, use the last ``httpaft:enter_game``
-    ``add_num`` / ``target`` instead of zero.
+    ``add_num`` / ``target`` instead of zero (even if that aft line is newer by time).
     """
+    pool: list[dict[str, Any]] = []
+    for cand in (best_reduce, best_coin, best_enter):
+        if cand is not None:
+            pool.append(cand)
     if best_aft_fail is not None:
         try:
             aft_val = float(best_aft_fail.get("value", 0))
         except (TypeError, ValueError):
             aft_val = 0.0
         if aft_val != 0.0:
-            return best_aft_fail
-        if has_enter_timeout and best_enter is not None:
-            return best_enter
-        return best_aft_fail
-    if best_reduce is not None:
-        return best_reduce
-    if has_enter_timeout and best_enter is not None:
-        return best_enter
-    if best_coin is not None:
-        return best_coin
-    if best_enter is not None:
-        return best_enter
-    return None
+            pool.append(best_aft_fail)
+        elif has_enter_timeout and best_enter is not None:
+            pass  # amount 0 + timeout → use enter add_num, not zero
+        else:
+            pool.append(best_aft_fail)
+    if not pool:
+        return None
+    return max(pool, key=_credit_time_sort_key)
 
 
 def parse_user_blocks_full(log_text: str) -> list[dict[str, Any]]:
@@ -825,8 +830,8 @@ def parse_user_blocks_full(log_text: str) -> list[dict[str, Any]]:
     ``target`` when there is no ``successJson`` ``cur_coin``. If a later ``aft interrogation faild``
     has ``amount: 0``, still prefer that ``add_num`` / ``target`` over zero.
 
-    **reduce_num first:** if the block has any parsed ``reduce_num`` credit line, that wins over
-    ``cur_coin`` and ``enter_game`` for ``latest_credit`` (last ``reduce_num`` in the block by line order).
+    **Newest time wins:** among ``reduce_num``, ``cur_coin``, ``enter_game`` / ``target``, and
+    ``aft interrogation faild`` amount, pick the latest by log timestamp (not fixed reduce_num priority).
     """
     raw = log_text.splitlines()
     blocks: list[tuple[str, list[tuple[int, str]]]] = []
@@ -1037,24 +1042,13 @@ def merge_players_full(payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
         errs = by_uid[uid]["errors"][:]
         errs.sort(key=_error_line_time_key, reverse=True)
         d = by_uid[uid]
-        if d["_lc_aft_fail"] is not None:
-            aft = d["_lc_aft_fail"]
-            try:
-                aft_val = float(aft.get("value", 0))
-            except (TypeError, ValueError):
-                aft_val = 0.0
-            if aft_val != 0.0:
-                lc_final = aft
-            elif d.get("_has_enter_timeout") and d["_lc_enter"] is not None:
-                lc_final = d["_lc_enter"]
-            else:
-                lc_final = aft
-        elif d["_lc_reduce"] is not None:
-            lc_final = d["_lc_reduce"]
-        else:
-            lc_cands = [d["_lc_coin"], d["_lc_enter"]]
-            lc_cands = [c for c in lc_cands if c is not None]
-            lc_final = max(lc_cands, key=lambda x: int(x["line_idx"])) if lc_cands else None
+        lc_final = _resolve_latest_credit(
+            best_aft_fail=d["_lc_aft_fail"],
+            best_reduce=d["_lc_reduce"],
+            best_coin=d["_lc_coin"],
+            best_enter=d["_lc_enter"],
+            has_enter_timeout=bool(d.get("_has_enter_timeout")),
+        )
         merged.append(
             {
                 "user_id": uid,
