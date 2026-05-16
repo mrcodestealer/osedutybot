@@ -777,6 +777,42 @@ def _parse_enter_game_credit(line: str) -> tuple[float, str] | None:
     return (val, tshort)
 
 
+def _resolve_latest_credit(
+    *,
+    best_aft_fail: dict[str, Any] | None,
+    best_reduce: dict[str, Any] | None,
+    best_coin: dict[str, Any] | None,
+    best_enter: dict[str, Any] | None,
+    has_enter_timeout: bool,
+) -> dict[str, Any] | None:
+    """
+    Pick ``latest_credit`` for a player block.
+
+    When enter-game timed out (``errorJson`` time-out / ``enter game time out``) and a later
+    ``aft interrogation faild`` reports ``amount: 0``, use the last ``httpaft:enter_game``
+    ``add_num`` / ``target`` instead of zero.
+    """
+    if best_aft_fail is not None:
+        try:
+            aft_val = float(best_aft_fail.get("value", 0))
+        except (TypeError, ValueError):
+            aft_val = 0.0
+        if aft_val != 0.0:
+            return best_aft_fail
+        if has_enter_timeout and best_enter is not None:
+            return best_enter
+        return best_aft_fail
+    if best_reduce is not None:
+        return best_reduce
+    if has_enter_timeout and best_enter is not None:
+        return best_enter
+    if best_coin is not None:
+        return best_coin
+    if best_enter is not None:
+        return best_enter
+    return None
+
+
 def parse_user_blocks_full(log_text: str) -> list[dict[str, Any]]:
     """
     Split by extra1/extra2/extra3 userid markers; lines until the next marker belong to that player.
@@ -786,7 +822,8 @@ def parse_user_blocks_full(log_text: str) -> list[dict[str, Any]]:
 
     **Enter-game AFT timeout:** if the block contains ``enter game time out`` / ``errorJson`` time-out
     etc., ``latest_credit`` can fall back to the last ``httpaft:enter_game`` line with ``add_num`` /
-    ``target`` when there is no ``successJson`` ``cur_coin``.
+    ``target`` when there is no ``successJson`` ``cur_coin``. If a later ``aft interrogation faild``
+    has ``amount: 0``, still prefer that ``add_num`` / ``target`` over zero.
 
     **reduce_num first:** if the block has any parsed ``reduce_num`` credit line, that wins over
     ``cur_coin`` and ``enter_game`` for ``latest_credit`` (last ``reduce_num`` in the block by line order).
@@ -901,18 +938,15 @@ def parse_user_blocks_full(log_text: str) -> list[dict[str, Any]]:
             "block_max_line": block_max_line,
         }
         has_enter_timeout = _block_has_enter_game_timeout(blines)
-        if best_aft_fail is not None:
-            latest_credit: dict[str, Any] | None = best_aft_fail
-        elif best_reduce is not None:
-            latest_credit: dict[str, Any] | None = best_reduce
-        elif has_enter_timeout and best_enter is not None:
-            latest_credit = best_enter
-        elif best_coin is not None:
-            latest_credit = best_coin
-        elif best_enter is not None:
-            latest_credit = best_enter
-        else:
-            latest_credit = None
+        latest_credit = _resolve_latest_credit(
+            best_aft_fail=best_aft_fail,
+            best_reduce=best_reduce,
+            best_coin=best_coin,
+            best_enter=best_enter,
+            has_enter_timeout=has_enter_timeout,
+        )
+        if has_enter_timeout:
+            row["has_enter_game_timeout"] = True
         if latest_credit:
             row["latest_credit"] = latest_credit
         out.append(row)
@@ -973,9 +1007,12 @@ def merge_players_full(payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "_lc_coin": None,
                 "_lc_reduce": None,
                 "_lc_enter": None,
+                "_has_enter_timeout": False,
                 "max_line_idx": -1,
             }
         by_uid[uid]["errors"].extend(blk.get("errors") or [])
+        if blk.get("has_enter_game_timeout"):
+            by_uid[uid]["_has_enter_timeout"] = True
         lc = blk.get("latest_credit")
         if lc:
             src = (lc.get("source") or "").strip()
@@ -1000,9 +1037,18 @@ def merge_players_full(payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
         errs = by_uid[uid]["errors"][:]
         errs.sort(key=_error_line_time_key, reverse=True)
         d = by_uid[uid]
-        # Prefer aft_interrogation_faild amount, then reduce_num, then cur_coin / enter_game.
         if d["_lc_aft_fail"] is not None:
-            lc_final = d["_lc_aft_fail"]
+            aft = d["_lc_aft_fail"]
+            try:
+                aft_val = float(aft.get("value", 0))
+            except (TypeError, ValueError):
+                aft_val = 0.0
+            if aft_val != 0.0:
+                lc_final = aft
+            elif d.get("_has_enter_timeout") and d["_lc_enter"] is not None:
+                lc_final = d["_lc_enter"]
+            else:
+                lc_final = aft
         elif d["_lc_reduce"] is not None:
             lc_final = d["_lc_reduce"]
         else:
