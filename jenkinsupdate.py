@@ -4032,7 +4032,7 @@ def verify_fpms_prod_script_parameters_display(
 ) -> tuple[bool, list[str]]:
     """Re-read Environment + Command for FPMS PROD SCRIPT RUN."""
     want_env = normalize_parameter_text(environment_expected)
-    want_cmd = normalize_parameter_text(command_expected)
+    want_cmd = normalize_fpms_prod_script_command(command_expected)
     lines: list[str] = []
     ok_all = True
 
@@ -4047,7 +4047,9 @@ def verify_fpms_prod_script_parameters_display(
     lines.append(f"{'✅' if env_ok else '❌'} Environment — page: {got_env!r} — expected: {want_env!r}")
 
     try:
-        got_cmd = read_text_parameter_value(page, "Command")
+        got_cmd = normalize_fpms_prod_script_command(
+            read_text_parameter_value(page, "Command")
+        )
     except Exception as ex:
         got_cmd = f"(read failed: {ex})"
         cmd_ok = False
@@ -5173,9 +5175,35 @@ def _sms_uat_bot_build_config_block(data: dict, resolved_ids: list[str]) -> str:
     )
 
 
+def normalize_fpms_prod_script_command(cmd: str) -> str:
+    """
+  Strip leading/trailing whitespace and remove **outer** quote wrappers users paste in Lark
+  (e.g. ``"node Server/... 'true' …"`` → ``node Server/... 'true' …``). Inner ``'true'`` args stay.
+    """
+    t = (cmd or "").strip()
+    while len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'":
+        t = t[1:-1].strip()
+    return t
+
+
+def _jenkins_update_strip_job_aliases(text: str) -> str:
+    """Remove a leading Jenkins job keyword (longest registry alias first), e.g. ``fpms prod script``."""
+    rest = (text or "").strip()
+    if not rest:
+        return ""
+    low = rest.casefold()
+    for alias in sorted(JENKINS_UPDATE_JOB_REGISTRY.keys(), key=len, reverse=True):
+        a = alias.casefold()
+        if low.startswith(a):
+            tail = rest[len(alias) :].lstrip(" :：-—–")
+            return tail.strip()
+    return rest
+
+
 def parse_fpms_prod_script_bot_block(text: str) -> dict:
     """
     Parse:
+      /jenkinsupdate fpms prod script node ...
       /jenkinsupdate --fpmsprodscript
       Command: node ...
     or
@@ -5216,6 +5244,14 @@ def parse_fpms_prod_script_bot_block(text: str) -> dict:
     if cmd_lines:
         cmd = "\n".join(cmd_lines).strip()
 
+    if not cmd:
+        head_rest = _jenkins_update_strip_job_aliases(
+            JENKINS_UPDATE_CMD_RE.sub("", head, count=1).strip()
+        )
+        if head_rest:
+            cmd = head_rest
+
+    cmd = normalize_fpms_prod_script_command(cmd)
     if not cmd:
         raise ValueError("Missing command line.")
     if cmd != cmd.strip():
@@ -5258,6 +5294,7 @@ def parse_fpms_prod_script_run_config_block(text: str) -> tuple[str, str]:
         cm = cmd_key_re.match(line.strip())
         if cm:
             cmd = _clean_key_rest(cm.group("rest") or "")
+    cmd = normalize_fpms_prod_script_command(cmd)
     if not cmd:
         raise ConfigBlockError("FPMS PROD SCRIPT config: missing command: line.")
     if cmd != cmd.strip():
@@ -6074,7 +6111,8 @@ def _fpms_lark_dispatch_fpms_prod_script_parameter_flow(
             chat_id,
             "❌ Could not parse FPMS PROD script block.\n```\n%s\n```\n"
             "请直接再发一次（可不带 `/jenkinsupdate`）：\n"
-            "Command: node Server/dataPatch/scriptModule.js \"createTestUserFG.js\" \"true\" \"50\" \"1\" \"999\" \"888888\" \"fangting01\" \"2000000\" \"639018101\" \"0\" \"false\" \"false\""
+            "Command: node Server/dataPatch/scriptModule.js revertLossRebateScript 'true' lossRebateRevert_20260516_gap\n"
+            "_Do not wrap the whole command in extra `\"` … `\"` — only quote individual script args if needed._"
             % ex,
         )
         return True
@@ -7220,7 +7258,9 @@ def run(
             services = []
             branch = ""
             version = ""
-            command = normalize_parameter_text(prompt_text("What Command?"))
+            command = normalize_fpms_prod_script_command(
+                prompt_text("What Command?")
+            )
         else:
             environment = prompt_environment()
             prompted_update_all = False
@@ -7832,7 +7872,7 @@ Slower / more stable Jenkins UI: ``FPMS_STABLE_FILL=1 %(prog)s …``
         run_job_profile = "fpms_prod_script"
         run_build_url = FPMS_PROD_SCRIPT_BUILD_URL
         if config_block is None:
-            cmd = normalize_parameter_text(
+            cmd = normalize_fpms_prod_script_command(
                 prompt_text(
                     "What Command? (must not have leading/trailing spaces)"
                 )
