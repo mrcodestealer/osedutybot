@@ -33,8 +33,9 @@ Job URL: https://jenkins.client8.me/job/FPMS/job/FPMS_UAT_BRANCH_UPDATE/build?de
 
 Credentials: ``JENKINS_USERNAME`` / ``JENKINS_PASSWORD`` (recommended), else defaults below.
 
-**Lark bot screenshots** (all automated ``/jenkinsupdate`` jobs): after fill, PNG overview + per-parameter
-row images are uploaded to the chat before the YES/NO card. Set ``JENKINSUPDATE_FORM_SCREENSHOT=0`` to disable.
+**Lark bot screenshots** (all automated ``/jenkinsupdate`` jobs): YES/NO card is sent first; PNGs upload
+in the background. ``JENKINSUPDATE_FORM_SCREENSHOT=0`` disables. ``JENKINSUPDATE_FORM_SCREENSHOT_QUICK=0`` uploads
+every parameter row (slower). ``JENKINSUPDATE_BOT_SINGLE_VERIFY=0`` restores two on-page re-checks.
 
 Usage::
 
@@ -5710,8 +5711,8 @@ def _fpms_lark_verification_card_json(
     safe = _fpms_lark_safe_code_fence(prompt_echo) or "(empty)"
     md_checks = "\n".join(verify_lines)
     footer_ok = (
-        "✅ All lines above are **OK**. Tap **YES** / **NO** below (or type **yes** / **no**) to click "
-        "**Build** in Jenkins or skip."
+        "✅ All checks **OK** — tap **YES** or **NO** below (or type **yes** / **no**). "
+        "Screenshots may arrive in chat right after this card."
     )
     footer_bad = (
         "⚠️ At least one line shows **❌**. **Build** stays disabled until every line is ✅. "
@@ -5832,6 +5833,17 @@ def _jenkins_form_screenshot_enabled(bot_lark_gate: dict | None) -> bool:
     return raw not in ("0", "false", "no", "off")
 
 
+def _jenkins_form_screenshot_quick_mode() -> bool:
+    """Fewer PNGs (overview + key rows) so the YES/NO card is not delayed."""
+    raw = os.environ.get("JENKINSUPDATE_FORM_SCREENSHOT_QUICK", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _jenkins_bot_single_verify_enabled() -> bool:
+    raw = os.environ.get("JENKINSUPDATE_BOT_SINGLE_VERIFY", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
 def _jenkins_parameter_labels_for_profile(job_profile: str) -> list[str]:
     """Form row labels to capture as close-up screenshots (all automated Jenkins update jobs)."""
     jp = (job_profile or "fpms").strip()
@@ -5900,7 +5912,12 @@ def capture_jenkins_build_parameters_screenshots(
         paths.append(overview)
         print(f"→ Jenkins full-page overview screenshot: {overview}", flush=True)
 
-    for i, label in enumerate(_jenkins_parameter_labels_for_profile(job_profile), start=1):
+    row_labels = _jenkins_parameter_labels_for_profile(job_profile)
+    if _jenkins_form_screenshot_quick_mode():
+        # Overview + at most two row close-ups (enough to verify Command / Environment).
+        row_labels = row_labels[:2]
+
+    for i, label in enumerate(row_labels, start=1):
         safe_label = re.sub(r"[^\w.-]+", "_", label)
         pth = os.path.join(out_dir, f"{prof}_{ts}_{i:02d}_{safe_label}.png")
         try:
@@ -5958,11 +5975,8 @@ def _fpms_lark_send_parameter_screenshots(
         return
 
     prof_label = _jenkins_job_profile_display(job_profile)
-    send(chat_id, f"📸 **{prof_label}** — Jenkins parameters screenshots (check filled values):")
     sent = 0
     for i, pth in enumerate(paths, start=1):
-        base = os.path.basename(pth)
-        title = base.replace("_", " ").rsplit(".", 1)[0]
         key = upload_fn(pth)
         if not key:
             print(f"[jenkinsupdate] screenshot upload failed: {pth}", flush=True)
@@ -5974,13 +5988,9 @@ def _fpms_lark_send_parameter_screenshots(
             print(f"[jenkinsupdate] screenshot send failed: {pth} resp={resp!r}", flush=True)
             continue
         if i < len(paths):
-            time.sleep(0.35)
+            time.sleep(0.12)
     if sent:
-        send(
-            chat_id,
-            f"✅ Sent **{sent}** screenshot(s) for **{prof_label}** "
-            f"(overview + each parameter row). Compare with the verification card below.",
-        )
+        send(chat_id, f"📸 **{prof_label}** — {sent} Jenkins form screenshot(s) (filled parameters).")
     else:
         send(chat_id, f"⚠️ Could not send Jenkins screenshots for **{prof_label}**.")
 
@@ -5991,6 +6001,42 @@ def _fpms_lark_cleanup_screenshot_dir(temp_dir: str) -> None:
             shutil.rmtree(temp_dir, ignore_errors=True)
         except Exception:
             pass
+
+
+def _fpms_lark_upload_screenshots_background(
+    chat_id: str,
+    send,
+    paths: list[str],
+    shot_dir: str,
+    *,
+    job_profile: str,
+    bot_lark_gate: dict | None,
+) -> None:
+    """Upload PNGs after the YES/NO card so the user is not blocked on Lark image API latency."""
+
+    def _job() -> None:
+        try:
+            _fpms_lark_send_parameter_screenshots(
+                chat_id,
+                send,
+                paths,
+                job_profile=job_profile,
+                bot_lark_gate=bot_lark_gate,
+            )
+        except Exception as ex:
+            try:
+                send(chat_id, f"⚠️ Jenkins screenshot upload failed:\n```\n{ex}\n```")
+            except Exception:
+                pass
+            print(f"[jenkinsupdate] background screenshot upload failed: {ex!r}", flush=True)
+        finally:
+            _fpms_lark_cleanup_screenshot_dir(shot_dir)
+
+    threading.Thread(
+        target=_job,
+        name="jenkinsupdate-screenshots",
+        daemon=True,
+    ).start()
 
 
 def _fpms_lark_send_verification_summary(
@@ -6204,7 +6250,7 @@ def _fpms_lark_begin_jenkins_run(
             if bot_headless
             else "\n\n⏳ Starting **visible browser** Jenkins — filling **all** parameters, running **two** on-page "
         )
-        + "re-checks, then you will be asked here to click **Build** or skip. Say **cancel** anytime."
+        + "re-check, then a **YES/NO** card (screenshots upload in parallel). Say **cancel** anytime."
         + (
             "\n\nℹ️ Auto-switched to **headless** because this Linux host has no `$DISPLAY` (no X server)."
             if (raw_headless in ("0", "false", "no", "off") and sys.platform.startswith("linux") and not os.environ.get("DISPLAY"))
@@ -6268,7 +6314,7 @@ def _fpms_lark_spawn_run(
     def _job() -> None:
         try:
             run(
-                review_seconds=float(os.environ.get("FPMS_BOT_REVIEW_SECONDS", "12")),
+                review_seconds=float(os.environ.get("FPMS_BOT_REVIEW_SECONDS", "2")),
                 headless=headless,
                 browser=os.environ.get("FPMS_PLAYWRIGHT_BROWSER", "chromium"),
                 config_block=config_block,
@@ -6888,10 +6934,14 @@ def handle_lark_jenkins_update_message(
                         if isinstance(ev2, threading.Event):
                             ev2.set()
                 return True
-            send(
-                chat_id,
-                "**Tap YES / NO** on the card (or type **yes** / **no**) — Build vs skip **Build** (browser closes after).",
-            )
+            if not sess.get("jenkins_wait_nag_sent"):
+                sess["jenkins_wait_nag_sent"] = True
+                with _fpms_lark_sessions_lock:
+                    _fpms_lark_sessions[key] = sess
+                send(
+                    chat_id,
+                    "⏳ Waiting for **YES** / **NO** on the card above (or type **yes** / **no**).",
+                )
             return True
         if st == "jenkins_post_gate":
             # YES/NO (or card tap) already submitted; worker may still be in ``wait_review`` — do not nag.
@@ -7738,37 +7788,42 @@ def run(
                 print("\n→ ===== First parameter re-check (page vs your choices) =====")
                 for ln in lines_first:
                     print(f"    {ln}")
-                _safe_page_wait(page, max(250, min(800, _MS_POST_FILL_VERIFY)))
-                if is_bi_api_update:
-                    ok_second, verify_lines = verify_bi_api_update_parameters_display(
-                        page, repository, environment, branch
-                    )
-                elif is_prod_script:
-                    ok_second, verify_lines = verify_fpms_prod_script_parameters_display(
-                        page, environment, command
-                    )
-                elif skip_env:
-                    ok_second, verify_lines = verify_fnt_rc_parameters_display(
-                        page,
-                        services,
-                        branch,
-                        version,
-                        update_all_services=update_all_services,
-                    )
+                if _jenkins_bot_single_verify_enabled():
+                    verify_lines = lines_first
+                    ok_all = ok_first
+                    print("→ Bot: single on-page re-check (skipping second pass for speed).")
                 else:
-                    ok_second, verify_lines = verify_fpms_parameters_display(
-                        page,
-                        environment,
-                        services,
-                        branch,
-                        version,
-                        update_all_services=update_all_services,
-                    )
-                print("\n→ ===== Second parameter re-check (page vs your choices) =====")
-                for ln in verify_lines:
-                    print(f"    {ln}")
+                    _safe_page_wait(page, max(250, min(800, _MS_POST_FILL_VERIFY)))
+                    if is_bi_api_update:
+                        ok_second, verify_lines = verify_bi_api_update_parameters_display(
+                            page, repository, environment, branch
+                        )
+                    elif is_prod_script:
+                        ok_second, verify_lines = verify_fpms_prod_script_parameters_display(
+                            page, environment, command
+                        )
+                    elif skip_env:
+                        ok_second, verify_lines = verify_fnt_rc_parameters_display(
+                            page,
+                            services,
+                            branch,
+                            version,
+                            update_all_services=update_all_services,
+                        )
+                    else:
+                        ok_second, verify_lines = verify_fpms_parameters_display(
+                            page,
+                            environment,
+                            services,
+                            branch,
+                            version,
+                            update_all_services=update_all_services,
+                        )
+                    print("\n→ ===== Second parameter re-check (page vs your choices) =====")
+                    for ln in verify_lines:
+                        print(f"    {ln}")
+                    ok_all = ok_first and ok_second
                 print("→ =====================================================\n")
-                ok_all = ok_first and ok_second
             else:
                 if is_bi_api_update:
                     ok_all, verify_lines = verify_bi_api_update_parameters_display(
@@ -7810,30 +7865,25 @@ def run(
                 build_url = str(bot_lark_gate.get("build_url") or BUILD_URL)
                 prompt_echo = str(bot_lark_gate.get("prompt_echo") or "")
                 next_build_number = _predict_next_build_number_from_history(page)
+                shot_paths: list[str] = []
                 shot_dir = ""
                 if _jenkins_form_screenshot_enabled(bot_lark_gate):
                     try:
                         shot_paths, shot_dir = capture_jenkins_build_parameters_screenshots(
                             page, jp
                         )
-                        _fpms_lark_send_parameter_screenshots(
-                            cid,
-                            send,
-                            shot_paths,
-                            job_profile=jp,
-                            bot_lark_gate=bot_lark_gate,
-                        )
                     except Exception as shot_ex:
                         try:
                             send(
                                 cid,
-                                f"⚠️ Jenkins form screenshot failed (verification continues):\n```\n{shot_ex}\n```",
+                                f"⚠️ Jenkins form screenshot capture failed (card still sent):\n```\n{shot_ex}\n```",
                             )
                         except Exception:
                             pass
                         print(f"[jenkinsupdate] form screenshot failed: {shot_ex!r}", flush=True)
-                    finally:
+                        shot_paths = []
                         _fpms_lark_cleanup_screenshot_dir(shot_dir)
+                        shot_dir = ""
                 _fpms_lark_send_verification_summary(
                     send,
                     cid,
@@ -7844,6 +7894,15 @@ def run(
                     job_profile=jp,
                     next_build_number=next_build_number,
                 )
+                if shot_paths and shot_dir:
+                    _fpms_lark_upload_screenshots_background(
+                        cid,
+                        send,
+                        shot_paths,
+                        shot_dir,
+                        job_profile=jp,
+                        bot_lark_gate=bot_lark_gate,
+                    )
                 with _fpms_lark_sessions_lock:
                     gate = _fpms_lark_sessions.get(sk)
                     ev = gate.get("build_gate_event") if isinstance(gate, dict) else None
