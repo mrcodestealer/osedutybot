@@ -54,12 +54,16 @@ from __future__ import annotations
 import calendar
 import importlib
 import json
+import logging
 import os
 import requests
+
+logger = logging.getLogger(__name__)
 import re
 import sys
 import threading
 import time
+import uuid
 from datetime import date, datetime
 from pathlib import Path
 
@@ -75,12 +79,149 @@ from flask import Blueprint, Flask, jsonify, redirect, render_template_string, r
 from markupsafe import escape
 from werkzeug.exceptions import HTTPException
 
+from wm_prod_set import PROD_SET_PAGE
+
 wm_bp = Blueprint("wm", __name__)
 
 _ADMIN_LOGIN_FAIL_LOCK = threading.Lock()
 _ADMIN_LOGIN_FAIL_BY_IP: dict[str, int] = {}
 _ADMIN_ALERT_CHAT_ID = "oc_9de3d63fc589df6feeb9b0bee9c45b72"
 _ADMIN_ALERT_AT_USER = "ou_5f660c0fb0769d184aca635d02209272"
+
+_PROD_SET_JOBS: dict[str, dict] = {}
+_PROD_SET_JOBS_LOCK = threading.Lock()
+_PROD_SET_LARK_CHAT_ID = "oc_9de3d63fc589df6feeb9b0bee9c45b72"
+
+
+def _prod_set_public_base() -> str:
+    return (os.environ.get("WEBMACHINE_PUBLIC_BASE_URL") or "").strip().rstrip("/")
+
+
+def _send_prod_set_lark_text(text: str) -> None:
+    try:
+        from ose_Duty import get_tenant_access_token
+
+        token = get_tenant_access_token()
+        if not token:
+            return
+        requests.post(
+            "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={
+                "receive_id": _PROD_SET_LARK_CHAT_ID,
+                "msg_type": "text",
+                "content": json.dumps({"text": text[:4000]}, ensure_ascii=False),
+            },
+            timeout=15,
+        )
+    except Exception as e:
+        logger.warning("prod-set Lark text failed: %s", e)
+
+
+def _send_prod_set_lark_card(title: str, body_md: str, cancel_url: str | None = None) -> None:
+    try:
+        from ose_Duty import get_tenant_access_token
+
+        token = get_tenant_access_token()
+        if not token:
+            return
+        elements: list[dict] = [
+            {"tag": "div", "text": {"tag": "lark_md", "content": body_md[:4000]}},
+        ]
+        if cancel_url:
+            elements.append(
+                {
+                    "tag": "action",
+                    "actions": [
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "Cancel"},
+                            "type": "danger",
+                            "url": cancel_url,
+                        }
+                    ],
+                }
+            )
+        card = {
+            "config": {"wide_screen_mode": True},
+            "header": {"title": {"tag": "plain_text", "content": title[:80]}},
+            "elements": elements,
+        }
+        requests.post(
+            "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={
+                "receive_id": _PROD_SET_LARK_CHAT_ID,
+                "msg_type": "interactive",
+                "content": json.dumps(card, ensure_ascii=False),
+            },
+            timeout=15,
+        )
+    except Exception as e:
+        logger.warning("prod-set Lark card failed: %s", e)
+
+
+def _prod_set_cancel_message(action: str) -> str:
+    from prod_machine_batch import ACTION_LABELS
+
+    label = ACTION_LABELS.get(action, action)
+    return f"Already stop {label.lower()} to selected machines."
+
+
+def _run_prod_set_job_thread(job_id: str, action: str, remark: str, machines: list[dict]) -> None:
+    from prod_machine_batch import ACTION_LABELS, run_prod_batch_job
+
+    def cancel_check() -> bool:
+        with _PROD_SET_JOBS_LOCK:
+            j = _PROD_SET_JOBS.get(job_id) or {}
+            return bool(j.get("cancel_requested"))
+
+    def manual_stop_check() -> bool:
+        with _PROD_SET_JOBS_LOCK:
+            j = _PROD_SET_JOBS.get(job_id) or {}
+            return bool(j.get("manual_stop"))
+
+    def on_manual(summary: dict) -> None:
+        with _PROD_SET_JOBS_LOCK:
+            if job_id in _PROD_SET_JOBS:
+                _PROD_SET_JOBS[job_id]["status"] = "awaiting_manual"
+                _PROD_SET_JOBS[job_id]["manual_summary"] = summary
+                _PROD_SET_JOBS[job_id]["message"] = "Some machines failed (may have players inside)."
+
+    try:
+        summary = run_prod_batch_job(
+            action,
+            machines,
+            remark=remark,
+            cancel_check=cancel_check,
+            manual_stop_check=manual_stop_check,
+            on_manual_stop=on_manual,
+        )
+        with _PROD_SET_JOBS_LOCK:
+            if job_id in _PROD_SET_JOBS:
+                if _PROD_SET_JOBS[job_id].get("cancel_requested"):
+                    _PROD_SET_JOBS[job_id]["status"] = "cancelled"
+                    _PROD_SET_JOBS[job_id]["message"] = _prod_set_cancel_message(action)
+                else:
+                    _PROD_SET_JOBS[job_id]["status"] = "done"
+                    _PROD_SET_JOBS[job_id]["summary"] = summary
+                    _PROD_SET_JOBS[job_id]["message"] = "Batch operation finished."
+        if summary and not cancel_check():
+            ok_n = len(summary.get("success") or [])
+            fail_n = len(summary.get("failed") or [])
+            lines = [f"**SUMMARY — {ACTION_LABELS.get(action, action)}**", f"Success: {ok_n}", f"Failed: {fail_n}"]
+            for m in (summary.get("success") or [])[:30]:
+                lines.append(f"✓ {m.get('belongs')} — {m.get('machine')}")
+            for m in (summary.get("failed") or [])[:30]:
+                lines.append(f"✗ {m.get('belongs')} — {m.get('machine')}")
+            _send_prod_set_lark_text("\n".join(lines))
+    except Exception as e:
+        logger.exception("prod-set job %s failed", job_id)
+        with _PROD_SET_JOBS_LOCK:
+            if job_id in _PROD_SET_JOBS:
+                _PROD_SET_JOBS[job_id]["status"] = "done"
+                _PROD_SET_JOBS[job_id]["message"] = str(e)
+                _PROD_SET_JOBS[job_id]["error"] = str(e)
 
 
 def _webapp_client_ip() -> str:
@@ -300,6 +441,7 @@ _PAGE = """<!DOCTYPE html>
     </div>
     <div class="wm-head-nav-group">
       <a class="wm-head-title-btn wm-head-nav-btn active" href="{{ machine_status_href }}">Machine status</a>
+      <a class="wm-head-title-btn wm-head-nav-btn" href="{{ prod_set_href }}">SET PROD MACHINE</a>
       <a class="wm-head-title-btn wm-head-nav-btn" href="{{ all_duty_href }}">All Duty</a>
       <a class="wm-head-title-btn wm-head-nav-btn" href="{{ machine_encoder_href }}">Machine encoder</a>
       <a class="wm-head-title-btn wm-admin-btn" href="{{ admin_login_href }}">Admin Page</a>
@@ -1946,6 +2088,7 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
     </div>
     <div class="wm-head-nav-group">
       <a class="wm-head-title-btn wm-head-nav-btn" href="{{ machine_status_href }}">Machine status</a>
+      <a class="wm-head-title-btn wm-head-nav-btn" href="{{ prod_set_href }}">SET PROD MACHINE</a>
       <a class="wm-head-title-btn wm-head-nav-btn active" href="{{ all_duty_href }}">All Duty</a>
       <a class="wm-head-title-btn wm-head-nav-btn" href="{{ machine_encoder_href }}">Machine encoder</a>
       <a class="wm-head-title-btn wm-admin-btn" href="{{ admin_login_href }}">Admin Page</a>
@@ -3745,6 +3888,7 @@ _ENCODER_PAGE = """<!DOCTYPE html>
     <div class="wm-encoder-hero"><h1>Machine encoder</h1></div>
     <div class="wm-head-nav-group">
       <a class="wm-head-title-btn wm-head-nav-btn" href="{{ machine_status_href }}">Machine status</a>
+      <a class="wm-head-title-btn wm-head-nav-btn" href="{{ prod_set_href }}">SET PROD MACHINE</a>
       <a class="wm-head-title-btn wm-head-nav-btn" href="{{ all_duty_href }}">All Duty</a>
       <a class="wm-head-title-btn wm-head-nav-btn active" href="{{ machine_encoder_href }}">Machine encoder</a>
       <a class="wm-head-title-btn wm-admin-btn" href="{{ admin_login_href }}">Admin Page</a>
@@ -4266,6 +4410,129 @@ def healthz():
     return jsonify(ok=True, service="webapp", **meta)
 
 
+@wm_bp.get("/prod-set")
+def prod_set_page():
+    if not _api_auth_ok():
+        return redirect(url_for("wm.login", next=request.path))
+    env_codes = ["CP", "DHS", "MDR", "NCH", "NP", "TBP", "TBR", "WF"]
+    return render_template_string(
+        PROD_SET_PAGE,
+        title="SET PROD MACHINE",
+        prod_set_href=url_for("wm.prod_set_page"),
+        machine_status_href=url_for("wm.index"),
+        all_duty_href=url_for("wm.all_duty"),
+        machine_encoder_href=url_for("wm.machine_encoders"),
+        admin_login_href=url_for("wm.admin_login"),
+        env_codes=env_codes,
+        env_codes_json=json.dumps(env_codes),
+        api_machines_json=json.dumps(url_for("wm.api_machines")),
+        api_job_url=url_for("wm.api_prod_set_jobs"),
+        api_cancel_url=url_for("wm.api_prod_set_job_cancel", job_id="JOB_ID"),
+    )
+
+
+@wm_bp.post("/api/prod-set/jobs")
+def api_prod_set_start_job():
+    if not _api_auth_ok():
+        return jsonify(error="unauthorized"), 401
+    data = request.get_json(silent=True) or {}
+    action = (data.get("action") or "").strip()
+    remark = (data.get("remark") or "").strip()
+    machines = data.get("machines") or []
+    if not action:
+        return jsonify(error="action required"), 400
+    if not isinstance(machines, list) or not machines:
+        return jsonify(error="machines required"), 400
+    from prod_machine_batch import ACTION_BUTTONS, LARK_INTRO
+
+    if action not in ACTION_BUTTONS:
+        return jsonify(error="invalid action"), 400
+    job_id = uuid.uuid4().hex
+    with _PROD_SET_JOBS_LOCK:
+        _PROD_SET_JOBS[job_id] = {
+            "status": "running",
+            "action": action,
+            "remark": remark,
+            "machines": machines,
+            "cancel_requested": False,
+            "created_at": datetime.now().isoformat(),
+        }
+    intro = LARK_INTRO.get(action, action)
+    lines = [intro, ""]
+    for m in machines[:80]:
+        nm = m.get("name") or m.get("machine") or ""
+        lines.append(f"• {m.get('belongs', '')} — {nm}")
+    if len(machines) > 80:
+        lines.append(f"... and {len(machines) - 80} more")
+    base = _prod_set_public_base()
+    cancel_url = f"{base}/api/prod-set/jobs/{job_id}/cancel" if base else None
+    from prod_machine_batch import ACTION_LABELS
+
+    _send_prod_set_lark_card(
+        ACTION_LABELS.get(action, action),
+        "\n".join(lines),
+        cancel_url=cancel_url,
+    )
+    t = threading.Thread(
+        target=_run_prod_set_job_thread,
+        args=(job_id, action, remark, machines),
+        daemon=True,
+    )
+    t.start()
+    return jsonify(ok=True, job_id=job_id)
+
+
+@wm_bp.get("/api/prod-set/jobs/<job_id>")
+def api_prod_set_job_status(job_id: str):
+    if not _api_auth_ok():
+        return jsonify(error="unauthorized"), 401
+    with _PROD_SET_JOBS_LOCK:
+        job = _PROD_SET_JOBS.get(job_id)
+        if not job:
+            return jsonify(error="not found"), 404
+        summ = job.get("summary") or job.get("manual_summary") or {}
+        failed = summ.get("failed") or []
+        return jsonify(
+            ok=True,
+            job_id=job_id,
+            status=job.get("status"),
+            message=job.get("message"),
+            summary=summ,
+            failed=failed,
+            manual_summary=job.get("manual_summary"),
+            error=job.get("error"),
+        )
+
+
+@wm_bp.post("/api/prod-set/jobs/<job_id>/cancel")
+def api_prod_set_cancel(job_id: str):
+    if not _api_auth_ok():
+        return jsonify(error="unauthorized"), 401
+    with _PROD_SET_JOBS_LOCK:
+        job = _PROD_SET_JOBS.get(job_id)
+        if not job:
+            return jsonify(error="not found"), 404
+        job["cancel_requested"] = True
+        action = job.get("action", "")
+    _send_prod_set_lark_text(_prod_set_cancel_message(action))
+    return jsonify(ok=True, message="Cancellation requested")
+
+
+@wm_bp.post("/api/prod-set/jobs/<job_id>/manual")
+def api_prod_set_manual(job_id: str):
+    if not _api_auth_ok():
+        return jsonify(error="unauthorized"), 401
+    with _PROD_SET_JOBS_LOCK:
+        job = _PROD_SET_JOBS.get(job_id)
+        if not job:
+            return jsonify(error="not found"), 404
+        job["manual_stop"] = True
+        job["status"] = "done"
+        job["message"] = "Stopped retry — see summary."
+        summary = job.get("manual_summary") or job.get("summary") or {}
+    return jsonify(ok=True, summary=summary)
+
+
 @wm_bp.get("/api/machines")
 def api_machines():
     if not _api_auth_ok():
@@ -4341,6 +4608,7 @@ def index():
         live_poll_sec=live_poll_sec,
         api_href=url_for("wm.api_machines"),
         machine_status_href=url_for("wm.index"),
+        prod_set_href=url_for("wm.prod_set_page"),
         all_duty_href=url_for("wm.all_duty"),
         machine_encoder_href=url_for("wm.machine_encoders"),
         admin_login_href=url_for("wm.admin_login"),
@@ -4352,6 +4620,7 @@ def machine_encoders():
     return render_template_string(
         _ENCODER_PAGE,
         machine_status_href=url_for("wm.index"),
+        prod_set_href=url_for("wm.prod_set_page"),
         all_duty_href=url_for("wm.all_duty"),
         machine_encoder_href=url_for("wm.machine_encoders"),
         api_encoder_href=url_for("wm.api_encoders"),
@@ -4378,6 +4647,7 @@ def all_duty():
         _ALL_DUTY_PAGE,
         back_href=url_for("wm.index"),
         machine_status_href=url_for("wm.index"),
+        prod_set_href=url_for("wm.prod_set_page"),
         all_duty_href=url_for("wm.all_duty", kind=raw),
         machine_encoder_href=url_for("wm.machine_encoders"),
         api_calendar_href=url_for("wm.api_duty_calendar"),
