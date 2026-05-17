@@ -90,6 +90,8 @@ _ADMIN_ALERT_AT_USER = "ou_5f660c0fb0769d184aca635d02209272"
 
 _PROD_SET_JOBS: dict[str, dict] = {}
 _PROD_SET_JOBS_LOCK = threading.Lock()
+_PROD_SET_REFRESH_JOBS: dict[str, dict] = {}
+_PROD_SET_REFRESH_JOBS_LOCK = threading.Lock()
 _PROD_SET_LARK_CHAT_ID = "oc_9de3d63fc589df6feeb9b0bee9c45b72"
 
 
@@ -4419,9 +4421,15 @@ _PROD_BELONGS_SITE: dict[str, str] = {
 _PROD_SET_REFRESH_LOCK = threading.Lock()
 
 
+def _refresh_storage_belongs(belongs: str) -> str:
+    """Scraped rows use ``NP`` for the NWR backend; refresh key ``NWR`` maps to that."""
+    b = (belongs or "").strip().upper()
+    return "NP" if b == "NWR" else b
+
+
 def _merge_prod_belongs_rows(new_prod_rows: list[dict], belongs: str) -> None:
     """Replace PROD rows for one belongs (or all PROD) in memory cache and JSON snapshot."""
-    bf = (belongs or "").strip().upper()
+    bf = _refresh_storage_belongs(belongs)
     with _scrape_lock:
         global _scrape_rows, _scrape_ts
         if bf == "ALL":
@@ -4465,7 +4473,7 @@ def healthz():
 @wm_bp.get("/prod-set")
 def prod_set_page():
     if not _api_auth_ok():
-        return redirect(url_for("wm.login", next=request.path))
+        return redirect(url_for("wm.index"))
     env_codes = ["CP", "DHS", "MDR", "NCH", "NWR", "TBP", "TBR", "WF"]
     return render_template_string(
         PROD_SET_PAGE,
@@ -4481,14 +4489,42 @@ def prod_set_page():
         api_job_url=url_for("wm.api_prod_set_start_job"),
         api_cancel_url=url_for("wm.api_prod_set_cancel", job_id="JOB_ID"),
         api_refresh_json=json.dumps(url_for("wm.api_prod_set_refresh")),
+        api_refresh_status_json=json.dumps(
+            url_for("wm.api_prod_set_refresh_status", refresh_id="RID")
+        ),
     )
+
+
+def _run_prod_set_refresh_thread(refresh_id: str, belongs: str) -> None:
+    try:
+        prod_rows, errs = _scrape_prod_belongs_live(belongs)
+        _merge_prod_belongs_rows(prod_rows, belongs)
+        site_key = _PROD_BELONGS_SITE.get(belongs) if belongs != "ALL" else "all"
+        err_msg = errs.get(site_key) if site_key and site_key != "all" else None
+        if not err_msg and errs:
+            err_msg = "; ".join(f"{k}: {v}" for k, v in list(errs.items())[:3])
+        stamp = _machines_last_updated_str()
+        payload = {
+            "status": "done",
+            "belongs": belongs,
+            "count": len(prod_rows),
+            "source": f"live EGM scrape @ {stamp}",
+            "warning": err_msg,
+            "message": f"Loaded {len(prod_rows)} machine(s) for {belongs}",
+        }
+    except Exception as e:
+        logger.exception("prod-set refresh %s failed", belongs)
+        payload = {"status": "error", "belongs": belongs, "error": str(e), "message": str(e)}
+    with _PROD_SET_REFRESH_JOBS_LOCK:
+        _PROD_SET_REFRESH_JOBS[refresh_id] = payload
+    _PROD_SET_REFRESH_LOCK.release()
 
 
 @wm_bp.post("/api/prod-set/refresh")
 def api_prod_set_refresh():
     """
-    Scrape live EGM status for one PROD belongs (CP, WF, …) or ALL, merge into cache + JSON file.
-    Does not rely on stale ``webmachine_data.json`` — opens the real backend in Playwright.
+    Start background Playwright scrape for one PROD site (returns immediately).
+    Poll :func:`api_prod_set_refresh_status` for completion.
     """
     if not _api_auth_ok():
         return jsonify(error="unauthorized"), 401
@@ -4502,30 +4538,35 @@ def api_prod_set_refresh():
     if not _PROD_SET_REFRESH_LOCK.acquire(blocking=False):
         return jsonify(error="another refresh is already running"), 409
 
-    try:
-        prod_rows, errs = _scrape_prod_belongs_live(belongs)
-        _merge_prod_belongs_rows(prod_rows, belongs)
-        site_key = _PROD_BELONGS_SITE.get(belongs) if belongs != "ALL" else "all"
-        err_msg = errs.get(site_key) if site_key and site_key != "all" else None
-        if not err_msg and errs:
-            err_msg = "; ".join(f"{k}: {v}" for k, v in list(errs.items())[:3])
-        stamp = _machines_last_updated_str()
-        return jsonify(
-            ok=True,
-            belongs=belongs,
-            count=len(prod_rows),
-            machines=prod_rows,
-            source=f"live EGM scrape @ {stamp}",
-            scrape_errors=errs,
-            warning=err_msg,
-        )
-    except ValueError as e:
-        return jsonify(error=str(e)), 400
-    except Exception as e:
-        logger.exception("prod-set refresh %s failed", belongs)
-        return jsonify(error=str(e)), 500
-    finally:
-        _PROD_SET_REFRESH_LOCK.release()
+    refresh_id = uuid.uuid4().hex
+    with _PROD_SET_REFRESH_JOBS_LOCK:
+        _PROD_SET_REFRESH_JOBS[refresh_id] = {
+            "status": "running",
+            "belongs": belongs,
+            "message": f"Refreshing {belongs} from live EGM…",
+        }
+    threading.Thread(
+        target=_run_prod_set_refresh_thread,
+        args=(refresh_id, belongs),
+        daemon=True,
+    ).start()
+    return jsonify(
+        ok=True,
+        refresh_id=refresh_id,
+        status="running",
+        message=f"Refresh {belongs} started",
+    )
+
+
+@wm_bp.get("/api/prod-set/refresh/<refresh_id>")
+def api_prod_set_refresh_status(refresh_id: str):
+    if not _api_auth_ok():
+        return jsonify(error="unauthorized"), 401
+    with _PROD_SET_REFRESH_JOBS_LOCK:
+        job = _PROD_SET_REFRESH_JOBS.get(refresh_id)
+    if not job:
+        return jsonify(error="not found"), 404
+    return jsonify(ok=True, refresh_id=refresh_id, **job)
 
 
 @wm_bp.post("/api/prod-set/jobs")

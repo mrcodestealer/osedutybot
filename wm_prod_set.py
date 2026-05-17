@@ -191,6 +191,7 @@ PROD_SET_PAGE = """<!DOCTYPE html>
   <script>
     const API_MACHINES = {{ api_machines_json|safe }};
     const API_REFRESH = {{ api_refresh_json|safe }};
+    const API_REFRESH_STATUS = {{ api_refresh_status_json|safe }};
     const API_JOB = "{{ api_job_url }}";
     const API_CANCEL = "{{ api_cancel_url }}";
     const PS_ENVS = {{ env_codes_json|safe }};
@@ -231,7 +232,7 @@ PROD_SET_PAGE = """<!DOCTYPE html>
     function machineEnvFromName(machineName) {
       const raw = String(machineName || "").trim();
       if (!raw) return null;
-      const seg = raw.replace(/\\/g, "/").split("/").pop().trim();
+      const seg = raw.split(/[/\\\\]/).pop().trim();
       const alnum = seg.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
       if (/^DHS/i.test(seg) || alnum.startsWith("DHS")) return "DHS";
       if (/^NCH/i.test(seg) || alnum.startsWith("NCH")) return "NCH";
@@ -240,7 +241,7 @@ PROD_SET_PAGE = """<!DOCTYPE html>
       if (/^MDR/i.test(seg) || alnum.startsWith("MDR")) return "MDR";
       if (/^TBR/i.test(seg) || alnum.startsWith("TBR")) return "TBR";
       if (/^TBP/i.test(seg) || alnum.startsWith("TBP")) return "TBP";
-      if (/^NWR/i.test(seg) || alnum.startsWith("NWR") || /NWR\\d/.test(alnum)) return "NWR";
+      if (/^NWR/i.test(seg) || alnum.startsWith("NWR") || /NWR[0-9]/.test(alnum)) return "NWR";
       if (/winford/i.test(raw)) return "WF";
       if (/^WF/i.test(seg) || alnum.startsWith("WF")) return "WF";
       return null;
@@ -341,6 +342,29 @@ PROD_SET_PAGE = """<!DOCTYPE html>
     }
 
     let refreshInFlight = false;
+    let refreshPollTimer = null;
+
+    function setRefreshButtonsDisabled(disabled) {
+      document.querySelectorAll("[data-refresh-belongs]").forEach(b => { b.disabled = disabled; });
+    }
+
+    async function pollRefreshStatus(refreshId, label) {
+      const url = API_REFRESH_STATUS.replace("RID", encodeURIComponent(refreshId));
+      const res = await fetch(url);
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || "status poll failed");
+      if (data.status === "running") {
+        setLoadStatus(data.message || `Refreshing ${label}…`);
+        return false;
+      }
+      if (data.status === "error") throw new Error(data.message || data.error || "refresh failed");
+      let msg = data.message || `Loaded ${data.count || 0} machine(s) for ${label}`;
+      if (data.source) msg += " · " + data.source;
+      if (data.warning) msg += " · " + data.warning;
+      setLoadStatus(msg);
+      await loadMachines();
+      return true;
+    }
 
     async function refreshBelongs(belongs, btn) {
       if (refreshInFlight) {
@@ -349,33 +373,48 @@ PROD_SET_PAGE = """<!DOCTYPE html>
       }
       const label = belongs === "ALL" ? "all PROD sites" : belongs;
       refreshInFlight = true;
-      const allRefreshBtns = document.querySelectorAll("[data-refresh-belongs]");
-      allRefreshBtns.forEach(b => { b.disabled = true; });
-      setLoadStatus(`Refreshing ${label} from live EGM (Playwright)… this may take a few minutes.`);
+      setRefreshButtonsDisabled(true);
+      setLoadStatus(`Starting refresh ${label}…`);
       try {
-        const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), 600000);
         const res = await fetch(API_REFRESH, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ belongs }),
-          signal: ctrl.signal,
         });
-        clearTimeout(timer);
         const data = await res.json();
         if (!res.ok || data.error) throw new Error(data.error || "refresh failed");
-        let msg = `Loaded ${data.count} machine(s) for ${belongs} · ${data.source || "live scrape"}`;
-        if (data.warning) msg += ` · ${data.warning}`;
-        setLoadStatus(msg);
-        await loadMachines();
+        if (!data.refresh_id) throw new Error("server did not return refresh_id");
+        setLoadStatus(data.message || `Refreshing ${label}…`);
+        if (refreshPollTimer) clearInterval(refreshPollTimer);
+        refreshPollTimer = setInterval(async () => {
+          try {
+            const done = await pollRefreshStatus(data.refresh_id, label);
+            if (done) {
+              clearInterval(refreshPollTimer);
+              refreshPollTimer = null;
+              refreshInFlight = false;
+              setRefreshButtonsDisabled(false);
+            }
+          } catch (e) {
+            clearInterval(refreshPollTimer);
+            refreshPollTimer = null;
+            refreshInFlight = false;
+            setRefreshButtonsDisabled(false);
+            setLoadStatus("Refresh failed: " + e.message, true);
+          }
+        }, 2500);
+        await pollRefreshStatus(data.refresh_id, label).then(done => {
+          if (done) {
+            clearInterval(refreshPollTimer);
+            refreshPollTimer = null;
+            refreshInFlight = false;
+            setRefreshButtonsDisabled(false);
+          }
+        });
       } catch (e) {
-        const msg = e.name === "AbortError"
-          ? "Refresh timed out (10 min). Try one site at a time."
-          : ("Refresh failed: " + e.message);
-        setLoadStatus(msg, true);
-      } finally {
+        setLoadStatus("Refresh failed: " + e.message, true);
         refreshInFlight = false;
-        allRefreshBtns.forEach(b => { b.disabled = false; });
+        setRefreshButtonsDisabled(false);
       }
     }
 
@@ -512,8 +551,11 @@ PROD_SET_PAGE = """<!DOCTYPE html>
     });
 
     document.querySelectorAll("[data-refresh-belongs]").forEach(btn => {
-      btn.addEventListener("click", () => {
-        refreshBelongs(btn.getAttribute("data-refresh-belongs"), btn);
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        const code = btn.getAttribute("data-refresh-belongs");
+        setLoadStatus("Clicked Refresh " + (code === "ALL" ? "all PROD" : code) + "…");
+        refreshBelongs(code, btn);
       });
     });
 
