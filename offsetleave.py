@@ -148,7 +148,7 @@ def _callback_payload(kind: str, *, owner_open_id: str, request_person: str) -> 
 
 
 def build_offset_form_card(*, owner_open_id: str, request_person: str) -> dict[str, Any]:
-    exchange_names = [n for n in od.OSE_LEAVE_FORM_NAMES if od._title_name(n) != od._title_name(request_person)]
+    exchange_names = list(od.ose_offset_form_exchange_names(exclude_person=request_person))
     return {
         "schema": "2.0",
         "config": {"update_multi": True, "width_mode": "fill"},
@@ -542,7 +542,7 @@ def build_offset_edit_form_card(
 ) -> dict[str, Any]:
     rid = str(row.get("record_id") or "").strip()
     req_on_row = str(row.get("request_person") or request_person or "").strip()
-    exchange_names = [n for n in od.OSE_LEAVE_FORM_NAMES if od._title_name(n) != od._title_name(req_on_row)]
+    exchange_names = list(od.ose_offset_form_exchange_names(exclude_person=req_on_row))
     o_ini = _row_datepicker_initial(row.get("original_date"))
     x_ini = _row_datepicker_initial(row.get("exchange_date"))
     original_dp: dict[str, Any] = {
