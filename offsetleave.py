@@ -18,6 +18,7 @@ _OFFSET_APPR_PICK_KEY = "offsetleave_offset_appr_pick"
 _OFFSET_APPR_CONFIRM_KEY = "offsetleave_offset_appr_confirm"
 
 # Lark open_ids — each receives the interactive approval card for new offset submissions.
+# Keep in sync with ``main.OFFSET_APPROVER_OPEN_IDS``.
 OFFSET_APPROVER_OPEN_IDS: frozenset[str] = frozenset(
     {
         "ou_c4346ace5927c14f51a89b2394b55338",
@@ -1303,6 +1304,47 @@ def build_offset_requester_responded_card(
     }
 
 
+def build_offset_other_approver_responded_card(
+    row: dict[str, Any],
+    *,
+    approver_name: str,
+    decision: str,
+    remarks: str,
+) -> dict[str, Any]:
+    """Read-only card for the other approver(s) after one peer has confirmed."""
+    dec = (decision or "").strip().title()
+    verb = "approved" if dec == "Approved" else "rejected"
+    an = _lark_md_cell(approver_name)
+    rd = _lark_md_cell(row.get("request_date"))
+    rp = _lark_md_cell(row.get("request_person"))
+    ex = _lark_md_cell(row.get("exchange_person"))
+    sh = _lark_md_cell(row.get("shift_type"))
+    od_ = _lark_md_cell(row.get("original_date"))
+    xd = _lark_md_cell(row.get("exchange_date"))
+    rs = _lark_md_cell(row.get("reason"))
+    st = _lark_md_cell((row.get("approval_status") or dec or "").strip() or dec)
+    rr = (remarks or "").strip()
+    remark_line = f"**Remarks:** {_lark_md_cell(rr) if rr else '—'}"
+    md = "\n".join(
+        [
+            f"**{an}** already **{verb}** this offset request. No further action is needed on your pending card.",
+            "",
+            "| REQ. DATE | REQUEST PERSON | EXCHANGE PERSON | SHIFT | ORIGINAL DATE | EXCHANGE DATE | REASON | STATUS |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            f"| {rd} | {rp} | {ex} | {sh} | {od_} | {xd} | {rs} | {st} |",
+            "",
+            remark_line,
+        ]
+    )
+    tpl = "green" if dec == "Approved" else "red"
+    return {
+        "schema": "2.0",
+        "config": {"width_mode": "fill"},
+        "header": {"template": tpl, "title": {"tag": "plain_text", "content": f"OSE offset — {dec} (by {approver_name})"}},
+        "body": {"elements": [{"tag": "div", "text": {"tag": "lark_md", "content": md}}]},
+    }
+
+
 def _build_offset_approval_denied_card() -> dict[str, Any]:
     return {
         "schema": "2.0",
@@ -1411,6 +1453,32 @@ def _notify_requester_offset_responded(
     r = send_message(oid, body, msg_type="interactive", receive_id_type="open_id")
     if isinstance(r, dict) and int(r.get("code", -1)) != 0:
         print(f"[offsetleave] requester DM failed: {r!r}", flush=True)
+
+
+def _notify_other_offset_approvers_responded(
+    send_message: Callable[..., Any],
+    row: dict[str, Any],
+    *,
+    acting_approver_open_id: str,
+    approver_name: str,
+    decision: str,
+    remarks: str,
+) -> None:
+    actor = (acting_approver_open_id or "").strip()
+    card = build_offset_other_approver_responded_card(
+        row,
+        approver_name=approver_name,
+        decision=decision,
+        remarks=remarks,
+    )
+    body = json.dumps(card, ensure_ascii=False)
+    for oid in OFFSET_APPROVER_OPEN_IDS:
+        aid = (oid or "").strip()
+        if not aid or aid == actor:
+            continue
+        r = send_message(aid, body, msg_type="interactive", receive_id_type="open_id")
+        if isinstance(r, dict) and int(r.get("code", -1)) != 0:
+            print(f"[offsetleave] peer approver DM failed for {aid!r}: {r!r}", flush=True)
 
 
 def _assert_offset_card_actor(
@@ -1805,6 +1873,17 @@ def _handle_offset_approval_callback(
                 )
             except Exception as exc:
                 print(f"[offsetleave] requester notify failed: {exc!r}", flush=True)
+            try:
+                _notify_other_offset_approvers_responded(
+                    send_message,
+                    fresh,
+                    acting_approver_open_id=operator,
+                    approver_name=approver_name,
+                    decision=dec,
+                    remarks=remarks,
+                )
+            except Exception as exc:
+                print(f"[offsetleave] peer approver notify failed: {exc!r}", flush=True)
             return True
     except Exception as exc:
         try:

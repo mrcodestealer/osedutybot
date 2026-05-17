@@ -1325,6 +1325,14 @@ REMINDER_TARGET_CHAT_ID = os.getenv(
     "oc_9de3d63fc589df6feeb9b0bee9c45b72",
 ).strip() or "oc_9de3d63fc589df6feeb9b0bee9c45b72"
 
+# OSE offset approvers (Lark open_id) — each receives pending approval message cards.
+OFFSET_APPROVER_OPEN_IDS: frozenset[str] = frozenset(
+    {
+        "ou_c4346ace5927c14f51a89b2394b55338",
+        "ou_5f660c0fb0769d184aca635d02209272",
+    }
+)
+
 def send_shift_reminder(chat_id, message):
     send_message(chat_id, message)
     print(f"⏰ Shift reminder sent to {chat_id}: {message}")
