@@ -35,12 +35,20 @@ PROD_SET_PAGE = """<!DOCTYPE html>
     .env-filter-btn.active { background: rgba(59,130,246,.25); border-color: var(--accent); color: var(--text); }
     .env-refresh-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.5rem; margin-top: 0.65rem; padding-top: 0.65rem; border-top: 1px solid var(--line); }
     .env-refresh-btn {
-      font: inherit; font-size: 0.72rem; font-weight: 600; padding: 0.32rem 0.65rem; border-radius: 8px;
-      border: 1px solid var(--line); background: #0f141c; color: var(--muted); cursor: pointer;
+      font: inherit; font-size: 0.72rem; font-weight: 600; padding: 0.35rem 0.7rem; border-radius: 8px;
+      border: 1px solid rgba(59,130,246,.45); background: rgba(59,130,246,.12); color: var(--text);
+      cursor: pointer; pointer-events: auto;
     }
-    .env-refresh-btn:hover:not(:disabled) { border-color: var(--ok); color: var(--ok); }
-    .env-refresh-btn:disabled { opacity: 0.55; cursor: wait; }
-    .env-refresh-btn.refresh-all { border-color: rgba(34,197,94,.45); color: var(--ok); }
+    .env-refresh-btn:hover:not(:disabled) {
+      border-color: var(--accent); background: rgba(59,130,246,.28); color: #fff;
+    }
+    .env-refresh-btn:disabled { opacity: 0.5; cursor: wait; pointer-events: none; }
+    .env-refresh-btn.refresh-all {
+      border-color: rgba(34,197,94,.55); background: rgba(34,197,94,.15); color: var(--ok);
+    }
+    .env-refresh-btn.refresh-all:hover:not(:disabled) {
+      border-color: var(--ok); background: rgba(34,197,94,.32); color: #fff;
+    }
     #ps-load-status { margin: 0 0 0.75rem; font-size: 0.85rem; color: var(--muted); min-height: 1.25rem; }
     #ps-load-status.err { color: #fca5a5; }
     .toolbar-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 0.75rem; margin-bottom: 0.75rem; }
@@ -332,17 +340,28 @@ PROD_SET_PAGE = """<!DOCTYPE html>
       renderTable();
     }
 
+    let refreshInFlight = false;
+
     async function refreshBelongs(belongs, btn) {
+      if (refreshInFlight) {
+        setLoadStatus("A refresh is already running — wait for it to finish.", true);
+        return;
+      }
       const label = belongs === "ALL" ? "all PROD sites" : belongs;
-      if (btn) btn.disabled = true;
-      document.querySelectorAll("[data-refresh-belongs]").forEach(b => { b.disabled = true; });
+      refreshInFlight = true;
+      const allRefreshBtns = document.querySelectorAll("[data-refresh-belongs]");
+      allRefreshBtns.forEach(b => { b.disabled = true; });
       setLoadStatus(`Refreshing ${label} from live EGM (Playwright)… this may take a few minutes.`);
       try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 600000);
         const res = await fetch(API_REFRESH, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ belongs }),
+          signal: ctrl.signal,
         });
+        clearTimeout(timer);
         const data = await res.json();
         if (!res.ok || data.error) throw new Error(data.error || "refresh failed");
         let msg = `Loaded ${data.count} machine(s) for ${belongs} · ${data.source || "live scrape"}`;
@@ -350,9 +369,13 @@ PROD_SET_PAGE = """<!DOCTYPE html>
         setLoadStatus(msg);
         await loadMachines();
       } catch (e) {
-        setLoadStatus("Refresh failed: " + e.message, true);
+        const msg = e.name === "AbortError"
+          ? "Refresh timed out (10 min). Try one site at a time."
+          : ("Refresh failed: " + e.message);
+        setLoadStatus(msg, true);
       } finally {
-        document.querySelectorAll("[data-refresh-belongs]").forEach(b => { b.disabled = false; });
+        refreshInFlight = false;
+        allRefreshBtns.forEach(b => { b.disabled = false; });
       }
     }
 
