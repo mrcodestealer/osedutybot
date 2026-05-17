@@ -6209,26 +6209,6 @@ def _predict_next_build_number_from_history(page) -> int | None:
     return None
 
 
-def _fpms_lark_ack_user_message(message_id: str | None) -> None:
-    """Lark **Got It** reaction on the user's message (no config / status chat spam)."""
-    mid = (message_id or "").strip()
-    if not mid:
-        return
-    try:
-        import main as _main_mod
-
-        react = getattr(_main_mod, "add_message_reaction", None)
-        if callable(react):
-            # Official emoji_type is **Get** (UI label "GotIt"); do not fall back to **OK**.
-            react(mid, "Get", fallbacks=("GotIt", "GOTIT", "LGTM", "OnIt", "CheckMark"))
-            return
-        gotit = getattr(_main_mod, "add_gotit_reaction", None)
-        if callable(gotit):
-            gotit(mid)
-    except Exception as ex:
-        print(f"[jenkinsupdate] GotIt reaction failed: {ex!r}", flush=True)
-
-
 def _fpms_lark_begin_jenkins_run(
     chat_id: str,
     session_key: str,
@@ -6270,7 +6250,7 @@ def _fpms_lark_begin_jenkins_run(
     # Server safety: headed Chromium on Linux needs X11/$DISPLAY.
     if (not bot_headless) and sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
         bot_headless = True
-    _fpms_lark_ack_user_message(lark_message_id)
+    # Got It reaction is added globally in main.py before any reply.
 
     _fpms_lark_spawn_run(
         chat_id,

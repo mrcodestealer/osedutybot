@@ -2529,7 +2529,11 @@ def lark_webhook():
             return _lark_http_card_callback_ok()
         print("❌ Could not extract chat_id or text")
         return jsonify({"error": "Missing data"}), 400
-    
+
+    # React **Got It** (`Get`) on the user's message before any bot reply in this request.
+    if message_id:
+        add_gotit_reaction(message_id)
+
     if text == "我要验牌":
         reply = f'<at user_id="{sender_id}"></at> 给我擦皮鞋'
         send_message(chat_id, reply)
@@ -2679,15 +2683,6 @@ def lark_webhook():
             get_token_func=get_tenant_access_token,
         ):
             return jsonify({"success": True})
-
-        if _offsetleave.wants_offset_request(clean_text) and message_id:
-            add_gotit_reaction(message_id)
-
-        if _offsetleave.wants_editoffset(clean_text) and message_id:
-            add_gotit_reaction(message_id)
-
-        if _offsetleave.wants_deleteoffset(clean_text) and message_id:
-            add_gotit_reaction(message_id)
 
         if _offsetleave.handle_mention(
             clean_text,
