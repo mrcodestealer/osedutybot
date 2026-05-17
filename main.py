@@ -1,3 +1,4 @@
+import contextvars
 import json
 import re
 import sys
@@ -1124,7 +1125,60 @@ def add_gotit_reaction(message_id):
             message_id, override, fallbacks=("Get", *_GOT_IT_REACTION_FALLBACKS)
         )
     return add_message_reaction(message_id, "Get", fallbacks=_GOT_IT_REACTION_FALLBACKS)
-    
+
+
+_DONE_REACTION_FALLBACKS = ("Done", "CheckMark", "JIAYI")
+
+
+def add_done_reaction(message_id):
+    return add_message_reaction(message_id, "DONE", fallbacks=_DONE_REACTION_FALLBACKS)
+
+
+_lark_user_message_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_lark_user_message_id", default=None
+)
+_lark_defer_done_reaction: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_lark_defer_done_reaction", default=False
+)
+
+
+def set_lark_incoming_message(message_id: str | None) -> None:
+    mid = (message_id or "").strip() or None
+    _lark_user_message_id.set(mid)
+    _lark_defer_done_reaction.set(False)
+
+
+def defer_lark_done_reaction() -> None:
+    """Background work will call :func:`mark_lark_process_done` when finished."""
+    _lark_defer_done_reaction.set(True)
+
+
+def mark_lark_process_done(message_id: str | None = None) -> None:
+    mid = (message_id or _lark_user_message_id.get() or "").strip()
+    if mid:
+        add_done_reaction(mid)
+
+
+def finish_lark_incoming_message_if_sync() -> None:
+    if _lark_defer_done_reaction.get():
+        return
+    mark_lark_process_done()
+
+
+def lark_background_task(fn, *args, **kwargs):
+    """Run ``fn`` in a thread; add **DONE** on the triggering user message when it returns."""
+    defer_lark_done_reaction()
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        mark_lark_process_done()
+
+
+def _lark_im_done():
+    finish_lark_incoming_message_if_sync()
+    return jsonify({"success": True})
+
+
 def recall_message(message_id):
     token = get_tenant_access_token()
     url = f"https://open.larksuite.com/open-apis/im/v1/messages/{message_id}"
@@ -2502,7 +2556,7 @@ def lark_webhook():
     else:
         het = _lark_header_event_type(data)
         if _lark_ack_only_event_type(het):
-            return jsonify({"success": True})
+            return _lark_im_done()
         print("⚠️ Unknown webhook branch hdr_et=%r (not im.message / event_callback)" % (het,), flush=True)
         # Card callbacks need HTTP 200 + ``{}`` (or toast). **Do not** use that ACK for every schema-2.0
         # event — bot menu / approvals etc. expect ``{"success": true}`` or they show ``code: undefined``.
@@ -2510,12 +2564,12 @@ def lark_webhook():
             het and het.lower().startswith("card.action")
         ):
             return _lark_http_card_callback_ok()
-        return jsonify({"success": True})
+        return _lark_im_done()
 
     with processed_lock:
         if message_id and message_id in processed_messages:
             print(f"⏭️ Duplicate message {message_id} ignored")
-            return jsonify({"success": True})
+            return _lark_im_done()
         if message_id:
             processed_messages.add(message_id)
 
@@ -2530,14 +2584,15 @@ def lark_webhook():
         print("❌ Could not extract chat_id or text")
         return jsonify({"error": "Missing data"}), 400
 
-    # React **Got It** (`Get`) on the user's message before any bot reply in this request.
+    # React **Got It** (`Get`) on start; **DONE** when this request finishes (or background task ends).
+    set_lark_incoming_message(message_id)
     if message_id:
         add_gotit_reaction(message_id)
 
     if text == "我要验牌":
         reply = f'<at user_id="{sender_id}"></at> 给我擦皮鞋'
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     
     if text == "good luck" or text == "Good luck":
         add_heart_reaction(message_id)
@@ -2547,7 +2602,7 @@ def lark_webhook():
         
     if text == "spamreact":
         add_all_reactions(message_id)
-        return jsonify({"success": True})
+        return _lark_im_done()
 
     original_text = text
     print(f"📝 Original text: {repr(original_text)}")
@@ -2577,14 +2632,14 @@ def lark_webhook():
     if handled_p0:
         if p0_reply:
             send_message(chat_id, p0_reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
 
     # ================= 跨群组 P1 交互确认 =================
     handled_p1, p1_reply = handle_p1_confirmation(chat_id, sender_id, clean_text, original_text, send_message)
     if handled_p1:
         if p1_reply:
             send_message(chat_id, p1_reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
 
     # Reply **1**–**4** after `/checkcreditdate` NP prompt — works in group **without** @bot
     stripped_choice = clean_text.strip()
@@ -2594,11 +2649,11 @@ def lark_webhook():
         idx_np = int(stripped_choice)
         if pend_np and 1 <= idx_np <= len(choices_np):
             threading.Thread(
-                target=run_np_third_http_by_choice,
-                args=(chat_id, idx_np),
+                target=lark_background_task,
+                args=(run_np_third_http_by_choice, chat_id, idx_np),
                 daemon=True,
             ).start()
-            return jsonify({"success": True})
+            return _lark_im_done()
 
     # ================= 群组 @bot（后续命令需要提及；FPMS 多步会话中跟帖可不 @） =================
     bot_mentioned = chat_type != "group"
@@ -2633,11 +2688,11 @@ def lark_webhook():
         lark_sender_union_id=sender_union_id,
         lark_message_id=message_id,
     ):
-        return jsonify({"success": True})
+        return _lark_im_done()
 
     if chat_type == "group" and not bot_mentioned and not jenkins_sess_active:
         print("⏭️ Bot not mentioned in group chat – ignoring further commands")
-        return jsonify({"success": True})
+        return _lark_im_done()
 
     # 初始化回复变量
     reply = ""
@@ -2650,7 +2705,7 @@ def lark_webhook():
                 except Exception as e:
                     print(f"⚠️ Could not cancel job {job_id}: {e}")
             send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     
     
 
@@ -2662,7 +2717,7 @@ def lark_webhook():
             chat_id=chat_id,
             send_message=send_message,
         ):
-            return jsonify({"success": True})
+            return _lark_im_done()
 
         if _offsetleave.handle_editoffset_command(
             clean_text,
@@ -2672,7 +2727,7 @@ def lark_webhook():
             send_message=send_message,
             get_token_func=get_tenant_access_token,
         ):
-            return jsonify({"success": True})
+            return _lark_im_done()
 
         if _offsetleave.handle_deleteoffset_command(
             clean_text,
@@ -2682,7 +2737,7 @@ def lark_webhook():
             send_message=send_message,
             get_token_func=get_tenant_access_token,
         ):
-            return jsonify({"success": True})
+            return _lark_im_done()
 
         if _offsetleave.handle_mention(
             clean_text,
@@ -2692,15 +2747,15 @@ def lark_webhook():
             send_message=send_message,
             get_token_func=get_tenant_access_token,
         ):
-            return jsonify({"success": True})
+            return _lark_im_done()
     except Exception as e:
         send_message(chat_id, f"❌ Offset/leave form failed: {e}")
-        return jsonify({"success": True})
+        return _lark_im_done()
 
     # 命令处理
     if clean_text.lower() == "/test":
         send_message(chat_id, _lark_test_card_json(), msg_type="interactive")
-        return jsonify({"success": True})
+        return _lark_im_done()
 
     if clean_text.lower() == '/cancelp1':
         if sender_id in active_p1_reminders:
@@ -2714,7 +2769,7 @@ def lark_webhook():
         else:
             reply = "ℹ️ No active P1 reminder to cancel."
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     
     elif len(clean_text) >= 3 and clean_text[:3].lower() == '/s ':
         query = clean_text[3:].strip()
@@ -2741,7 +2796,7 @@ def lark_webhook():
                 send_message(chat_id, f"❌ Failed to send cat picture: {result}")
         else:
             send_message(chat_id, "❌ Failed to upload cat picture.")
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower() == '/fpmsp0':
         reply = fpms_duty.fpmsp0()
     elif clean_text.lower() == '/otpp0':
@@ -2765,7 +2820,7 @@ def lark_webhook():
         else:
             reply = fpms_duty.fpms_check()
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower() == '/pms':
         reply = pms_duty.dutyNextDay()
     elif clean_text.lower().startswith('/pmscheck'):
@@ -2785,7 +2840,7 @@ def lark_webhook():
         else:
             reply = pms_duty.pmsCheck()
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower() == '/bi':
         reply = bi_duty.get_bi_today_duty()
     elif clean_text.lower().startswith('/bicheck'):
@@ -2805,7 +2860,7 @@ def lark_webhook():
         else:
             reply = bi_duty.bi_check()
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower() == '/fe':
         reply = fe_duty.get_fe_next_three_duty()
     elif clean_text.lower().startswith('/fecheck'):
@@ -2825,12 +2880,12 @@ def lark_webhook():
         else:
             reply = fe_duty.fe_check()
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower() == '/cpms':
         results = cpms_duty.get_cpms_three_days()
         formatted = cpms_duty.format_output(results)
         send_message(chat_id, formatted)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower().startswith('/cpmscheck'):
         parts = clean_text.split()
         if len(parts) > 1:
@@ -2848,7 +2903,7 @@ def lark_webhook():
         else:
             reply = cpms_duty.cpms_check()
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower() == '/sre':
         reply = sre_Duty.get_sre_week_duty()
     elif clean_text.lower().startswith('/srecheck'):
@@ -2868,7 +2923,7 @@ def lark_webhook():
         else:
             reply = sre_Duty.sre_check()
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower() == '/db':
         reply = db_duty.get_three_weeks_summary()
     elif clean_text.lower().startswith('/dbcheck'):
@@ -2888,7 +2943,7 @@ def lark_webhook():
         else:
             reply = db_duty.db_check()
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower() == '/liveslot':
         reply = liveslot_duty.get_three_weeks_summary()
     elif clean_text.lower().startswith('/liveslotcheck'):
@@ -2908,7 +2963,7 @@ def lark_webhook():
         else:
             reply = liveslot_duty.liveslot_check()
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower() == '/ote':
         reply = ote_duty.get_three_weeks_summary()
     elif clean_text.lower().startswith('/otecheck'):
@@ -2928,7 +2983,7 @@ def lark_webhook():
         else:
             reply = ote_duty.ote_check()
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower() == '/ft':
         duty_schedule = ft.get_ft_three_days()
         send_message(chat_id, duty_schedule)   
@@ -2939,7 +2994,7 @@ def lark_webhook():
         Winson Hong   - Try to spam 
         """
         send_message(chat_id, fyi_message)
-        return jsonify({"success": True})  
+        return _lark_im_done()
     elif clean_text.lower().startswith('/ftcheck'):
         parts = clean_text.split()
         if len(parts) > 1:
@@ -2957,24 +3012,24 @@ def lark_webhook():
         else:
             reply = ft.ft_check()
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text == '/ose':
         payload = ose_Duty.get_ose_payload_for_now(include_tag=False)
         _send_ose_payload(chat_id, payload)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.startswith('/osedate'):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
             payload = ose_Duty.get_ose_payload_for_now(include_tag=False)
             _send_ose_payload(chat_id, payload)
-            return jsonify({"success": True})
+            return _lark_im_done()
         else:
             date_str = parts[1].strip()
             try:
                 target_date = datetime.strptime(date_str, "%d/%m/%Y").date()
                 payload = ose_Duty.get_ose_payload_for_date(target_date, mode="date", include_tag=False)
                 _send_ose_payload(chat_id, payload)
-                return jsonify({"success": True})
+                return _lark_im_done()
             except ValueError:
                 reply = "❌ Invalid date format. Please use DD/MM/YYYY (e.g., 12/12/2026)"
     elif clean_text.lower().startswith('/dutycheckall'):
@@ -2994,18 +3049,18 @@ def lark_webhook():
         else:
             reply = get_all_duty_check()
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     
     cmd_parts = clean_text.split()
     if not cmd_parts:
         # Whitespace-only / stripped-empty body — must still return a valid response for Lark.
-        return jsonify({"success": True})
+        return _lark_im_done()
     cmd = cmd_parts[0].lower()
     if cmd == '/ecsre':
         game_name = cmd_parts[1] if len(cmd_parts) > 1 else None
         reply = ecsre.get_responsible_games(game_name)
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif cmd == '/ec':
         game_name = cmd_parts[1] if len(cmd_parts) > 1 else None
         result = emergency.get_emergency_contacts_payload(game_name)
@@ -3016,11 +3071,11 @@ def lark_webhook():
                 send_message(chat_id, result.get("text") or str(result))
         else:
             send_message(chat_id, result.get("text") if isinstance(result, dict) else str(result))
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text == '/cashout':
         reply = f'the player has been get back his credit. @On-Duty-OSM-Lavie(Podium1) kindly manual cashout the credit and reboot the machine. After that, @Xavier (CS OSM) kindly unset and test the machine thanks'
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower().startswith('/update'):
         parts = clean_text.split(maxsplit=1)
         args = parts[1].strip() if len(parts) > 1 else ""
@@ -3030,11 +3085,11 @@ def lark_webhook():
         else:
             reply = up.handle_update(args)
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text == '/restartA':
         reply = f'cd /home/pi/osm && ./stopallserver.sh && ./startserver.sh'
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif re.search(
         r"(?:^|\s)/(maintenance|maintenanceshort|m)\s+",
         clean_text,
@@ -3068,7 +3123,7 @@ def lark_webhook():
                 "Please paste email content after the command.\n"
                 "Examples: `/m …`, `/maintenance …`, `/maintenanceshort …`",
             )
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower().startswith('/nch'):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
@@ -3077,7 +3132,7 @@ def lark_webhook():
             query = parts[1]
             reply = nch.get_nch_info(query)
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower().startswith('/nwr'):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
@@ -3086,7 +3141,7 @@ def lark_webhook():
             query = parts[1]
             reply = nwr.get_nwr_info(query)
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower().startswith('/wf'):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
@@ -3095,7 +3150,7 @@ def lark_webhook():
             query = parts[1]
             reply = winford.get_winford_info(query)
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower().startswith('/tbp'):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
@@ -3104,7 +3159,7 @@ def lark_webhook():
             query = parts[1]
             reply = tbp.get_tbp_info(query)
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower().startswith('/cp'):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
@@ -3113,7 +3168,7 @@ def lark_webhook():
             query = parts[1]
             reply = cp.get_cp_info(query)
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower().startswith('/dhs'):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
@@ -3122,7 +3177,7 @@ def lark_webhook():
             query = parts[1]
             reply = dhs.get_dhs_info(query)
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower().startswith('/mdr'):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
@@ -3131,7 +3186,7 @@ def lark_webhook():
             query = parts[1]
             reply = mdr.get_mdr_info(query)
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower().startswith('/secret1'):
         match = re.search(r'<at open_id="([^"]+)"[^>]*>([^<]+)</at>', original_text)
         if match:
@@ -3158,14 +3213,18 @@ def lark_webhook():
             else:
                 reply = "❌ No user mentioned correctly. Use `/secret1 @user` (mention the user)."
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif re.match(r"^/al(?:\s+\d{1,2}/\d{1,2})?\s*$", clean_text.lower()):
             # /al or /al DD/MM: run Amount Loss checklog flow in background, return interactive card + TSV.
             parts = clean_text.split()
             date_param = parts[1].strip() if len(parts) > 1 else None
             send_message(chat_id, "⏳ Checking Amount Loss (CHECKLOG), please wait...")
-            threading.Thread(target=run_amountloss_check, args=(chat_id, date_param), daemon=True).start()
-            return jsonify({"success": True})
+            threading.Thread(
+                target=lark_background_task,
+                args=(run_amountloss_check, chat_id, date_param),
+                daemon=True,
+            ).start()
+            return _lark_im_done()
     elif re.match(r"^/cctv\b", clean_text, re.I):
         m_cv = re.match(r"^/cctv\s+(\S+)", clean_text.strip(), re.I)
         if not m_cv:
@@ -3174,21 +3233,21 @@ def lark_webhook():
                 "❌ Usage: `/cctv <machine>` — EGM **CCTV** only (no credit check).\n"
                 "Example: `@Duty Bot /cctv OSMCP181` · `/cctv Dragons-0181`",
             )
-            return jsonify({"success": True})
+            return _lark_im_done()
         threading.Thread(
-            target=run_cctv_screenshot_job,
-            args=(chat_id, m_cv.group(1)),
+            target=lark_background_task,
+            args=(run_cctv_screenshot_job, chat_id, m_cv.group(1)),
             daemon=True,
         ).start()
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower().startswith("/npthirdhttp"):
         parts = clean_text.split()
         threading.Thread(
-            target=run_np_third_http_job,
-            args=(chat_id, parts[1:]),
+            target=lark_background_task,
+            args=(run_np_third_http_job, chat_id, parts[1:]),
             daemon=True,
         ).start()
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif re.match(r"^/checkcreditdate\s*$", clean_text, re.I):
         # Bare `/checkcreditdate` — interactive card (machine + player + date). With a machine token, use the branch below.
         try:
@@ -3198,7 +3257,7 @@ def lark_webhook():
             send_message(chat_id, json.dumps(card_cp), msg_type="interactive")
         except Exception as e:
             send_message(chat_id, f"❌ checkcredit date card failed: {e}")
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif re.search(r"/(?:checkcreditdate|checkcredit|machineerror)\b", clean_text, re.I):
         # Longer token first in alternation so `/checkcreditdate` is not parsed as `/checkcredit` + `date`.
         # Optional date defaults to **today** (server local) when omitted — e.g. `@Duty Bot /checkcredit 1171`.
@@ -3218,7 +3277,7 @@ def lark_webhook():
                 "Examples: `@Duty Bot /checkcredit 1171` · `/checkcreditdate 2074 2026-04-27`\n"
                 "(same as `python3 checkcredit.py --finderror … --date YYYY-MM-DD`)",
             )
-            return jsonify({"success": True})
+            return _lark_im_done()
         cmd_cc = (m_cc.group(1) or "").strip().lower()
         machine_q = m_cc.group(2).strip()
         date_arg = (m_cc.group(3) or "").strip()
@@ -3231,7 +3290,7 @@ def lark_webhook():
                 chat_id,
                 "❌ Date must be `YYYY-MM-DD` (e.g. `2026-04-27`).",
             )
-            return jsonify({"success": True})
+            return _lark_im_done()
         use_oss_wait = os.getenv("CHECKCREDIT_USE_OSS", "").strip().lower() in ("1", "true", "yes", "on")
         send_message(
             chat_id,
@@ -3246,15 +3305,25 @@ def lark_webhook():
             )
         )
         threading.Thread(
-            target=run_checkcredit_finderror,
-            args=(chat_id, machine_q, date_arg, "error_only" if cmd_cc == "machineerror" else "default"),
+            target=lark_background_task,
+            args=(
+                run_checkcredit_finderror,
+                chat_id,
+                machine_q,
+                date_arg,
+                "error_only" if cmd_cc == "machineerror" else "default",
+            ),
             daemon=True,
         ).start()
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower().startswith("/smsfail"):
         send_message(chat_id, "⏳ Running SMS gateway OTP log check, please wait...")
-        threading.Thread(target=run_smsfail_check, args=(chat_id,), daemon=True).start()
-        return jsonify({"success": True})
+        threading.Thread(
+            target=lark_background_task,
+            args=(run_smsfail_check, chat_id),
+            daemon=True,
+        ).start()
+        return _lark_im_done()
     elif clean_text.lower().startswith("/smscheckplayer"):
         parts = clean_text.split(maxsplit=1)
         if len(parts) < 2 or not parts[1].strip():
@@ -3262,18 +3331,18 @@ def lark_webhook():
                 chat_id,
                 "❌ Usage: `/smscheckplayer <player_id(s)>` — today 00:00—now, up to 3 newest logs per player; e.g. `/smscheckplayer 127317237` or `/smscheckplayer 7052472, 1069954565` (commas / spaces / newlines OK)",
             )
-            return jsonify({"success": True})
+            return _lark_im_done()
         payload = parts[1].strip()
         send_message(
             chat_id,
             "⏳ Running SMS OTP log check for player(s) (today 00:00—now, up to 3 newest rows each), please wait...",
         )
         threading.Thread(
-            target=run_smscheckplayer_check,
-            args=(chat_id, payload),
+            target=lark_background_task,
+            args=(run_smscheckplayer_check, chat_id, payload),
             daemon=True,
         ).start()
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower().startswith('/pid'):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
@@ -3282,7 +3351,7 @@ def lark_webhook():
             query = parts[1]
             reply = providerid.get_provider_info(query)
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower() == '/secret2':
         reply = f"当前群组的 ID 是：{chat_id}"
         result = send_message(chat_id, reply)
@@ -3290,7 +3359,7 @@ def lark_webhook():
         if message_id:
             run_date = datetime.now() + timedelta(seconds=8)
             scheduler.add_job(func=recall_message, trigger='date', run_date=run_date, args=[message_id])
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower() in ['/memorytest']:
         number = game.start_game(sender_id)
         send_result = send_message(chat_id, f"🧠 **Memory Game**\nRemember this number: **{number}**\nYou have 5 seconds to type it back.")
@@ -3299,7 +3368,7 @@ def lark_webhook():
             run_date = datetime.now() + timedelta(seconds=2)
             job = scheduler.add_job(func=recall_message, trigger='date', run_date=run_date, args=[message_id])
             game.set_game_job(sender_id, job.id)
-        return jsonify({"success": True}) 
+        return _lark_im_done()
     elif clean_text.lower().startswith('/reminder'):
         parts = clean_text.split()
         if len(parts) < 3:
@@ -3348,7 +3417,7 @@ def lark_webhook():
             else:
                 reply = "❌ Invalid format. Please specify a time/duration and a message."
         send_message(chat_id, reply)
-        return jsonify({"success": True})
+        return _lark_im_done()
     elif clean_text.lower().startswith('/addreminder'):
         parts = clean_text.split(maxsplit=4)
         if len(parts) < 5:
@@ -3356,7 +3425,7 @@ def lark_webhook():
                 send_func=send_message,
                 chat_id=chat_id,
             )
-            return jsonify({"success": True})
+            return _lark_im_done()
         start_raw = parts[1].strip()
         end_raw = parts[2].strip()
         time_raw = parts[3].strip()
@@ -3408,7 +3477,7 @@ def lark_webhook():
             time.sleep(1)
             os._exit(0)
         threading.Thread(target=delayed_exit).start()
-        return jsonify({"success": True})
+        return _lark_im_done()
 
     # 如果前面没有任何命令匹配，并且 reply 为空，则忽略
     if reply:
@@ -3417,7 +3486,7 @@ def lark_webhook():
     else:
         print(f"⚠️ No command matched and no reply generated for chat {chat_id}")
 
-    return jsonify({"success": True})
+    return _lark_im_done()
 
 def _register_lark_webhook_duplicate_paths():
     """

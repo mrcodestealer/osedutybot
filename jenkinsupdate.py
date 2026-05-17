@@ -6209,6 +6209,18 @@ def _predict_next_build_number_from_history(page) -> int | None:
     return None
 
 
+def _fpms_lark_mark_trigger_message_done(message_id: str | None = None) -> None:
+    """**DONE** reaction on the user's trigger message when Jenkins automation finishes."""
+    try:
+        import main as _main_mod
+
+        mark = getattr(_main_mod, "mark_lark_process_done", None)
+        if callable(mark):
+            mark((message_id or "").strip() or None)
+    except Exception as ex:
+        print(f"[jenkinsupdate] DONE reaction failed: {ex!r}", flush=True)
+
+
 def _fpms_lark_begin_jenkins_run(
     chat_id: str,
     session_key: str,
@@ -6235,6 +6247,15 @@ def _fpms_lark_begin_jenkins_run(
         cfg = _fpms_bot_build_config_block(data, resolved)
     ev = threading.Event()
     ju = (jenkins_build_url or BUILD_URL).strip()
+    trigger_mid = (lark_message_id or "").strip() or None
+    try:
+        import main as _main_mod
+
+        defer_fn = getattr(_main_mod, "defer_lark_done_reaction", None)
+        if callable(defer_fn):
+            defer_fn()
+    except Exception:
+        pass
     _fpms_lark_sessions_put_chat_key(
         session_key,
         {
@@ -6242,6 +6263,7 @@ def _fpms_lark_begin_jenkins_run(
             "build_gate_event": ev,
             "approve_build": None,
             "lark_cancel": False,
+            "lark_trigger_message_id": trigger_mid,
         },
     )
     update_all = bool(data.get("update_all_services"))
@@ -6262,6 +6284,7 @@ def _fpms_lark_begin_jenkins_run(
         job_profile=jp,
         update_all_services=update_all,
         headless=bot_headless,
+        lark_message_id=trigger_mid,
     )
 
 
@@ -6289,11 +6312,13 @@ def _fpms_lark_spawn_run(
     job_profile: str = "fpms",
     update_all_services: bool = False,
     headless: bool = True,
+    lark_message_id: str | None = None,
 ) -> None:
     """``session_key`` must already hold ``jenkins_wait_build`` with ``build_gate_event``."""
 
     ju = (jenkins_build_url or BUILD_URL).strip()
     jp = (job_profile or "fpms").strip() or "fpms"
+    trigger_mid = (lark_message_id or "").strip() or None
 
     upload_image_fn = None
     send_image_fn = None
@@ -6324,6 +6349,7 @@ def _fpms_lark_spawn_run(
                     "job_profile": jp,
                     "upload_image": upload_image_fn,
                     "send_image": send_image_fn,
+                    "lark_message_id": trigger_mid,
                 },
                 jenkins_build_url=ju,
                 job_profile=jp,
@@ -6335,6 +6361,7 @@ def _fpms_lark_spawn_run(
                 pass
             print(f"[jenkinsupdate bot] run failed: {ex!r}", flush=True)
         finally:
+            _fpms_lark_mark_trigger_message_done(trigger_mid)
             _fpms_lark_clear_session_key(session_key)
 
     threading.Thread(target=_job, name="fpms-uat-jenkins", daemon=True).start()
