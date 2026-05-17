@@ -44,7 +44,6 @@ TARGET_NAMES = [
     "Katleen",
     "Lynette",
     "Chun Chee",
-    "Renzel",
     "Jun Chen",
     "Kenneth",
     "Jewel",
@@ -904,7 +903,6 @@ OSE_LEAVE_FORM_NAMES: tuple[str, ...] = (
     "Katleen",
     "Lynette",
     "Chun Chee",
-    "Renzel",
     "Jun Chen",
     "Justine Miguel",
     "Kenneth",
@@ -916,6 +914,38 @@ OSE_LEAVE_FORM_NAMES: tuple[str, ...] = (
     "Shie Ni",
     "Kwang Ming",
 )
+
+# Excluded from offset form "Exchange person" dropdown only (leave form & OTE duty unchanged).
+OSE_OFFSET_FORM_EXCHANGE_EXCLUDED: frozenset[str] = frozenset(
+    _title_name(n)
+    for n in (
+        "Renzel",
+        "Faye",
+        "Shie Ni",
+        "Jeno",
+        "Kwang Ming",
+    )
+)
+
+
+def ose_offset_form_exchange_names(*, exclude_person: str = "") -> tuple[str, ...]:
+    """Roster names allowed as Exchange person on the Lark offset request/edit form."""
+    skip = _title_name(exclude_person) if (exclude_person or "").strip() else ""
+    return tuple(
+        n
+        for n in OSE_LEAVE_FORM_NAMES
+        if _title_name(n) not in OSE_OFFSET_FORM_EXCHANGE_EXCLUDED
+        and (not skip or _title_name(n) != skip)
+    )
+
+
+def _validate_offset_exchange_person(exchange_person: str) -> str:
+    exc = _title_name(exchange_person)
+    allowed = {_title_name(n) for n in ose_offset_form_exchange_names()}
+    if exc not in allowed:
+        raise ValueError(f"Unknown or disallowed exchange person {exchange_person!r}")
+    return exc
+
 
 OSE_LEAVE_TYPES: tuple[str, ...] = (
     "Sick Leave",
@@ -1718,11 +1748,9 @@ def submit_ose_offset(
     reason: str,
 ) -> dict[str, Any]:
     req = _title_name(request_person)
-    exc = _title_name(exchange_person)
     if req not in OSE_LEAVE_FORM_NAMES:
         raise ValueError(f"Unknown request person {request_person!r}")
-    if exc not in OSE_LEAVE_FORM_NAMES:
-        raise ValueError(f"Unknown exchange person {exchange_person!r}")
+    exc = _validate_offset_exchange_person(exchange_person)
     st = (shift_type or "").strip().upper()
     if st not in OSE_SHIFT_TYPES:
         raise ValueError("Shift Type must be N or D")
@@ -1863,11 +1891,9 @@ def update_ose_offset_request(
     req = _title_name(request_person)
     if _title_name(str(row.get("request_person") or "")) != req:
         raise ValueError("This offset request does not belong to you.")
-    exc = _title_name(exchange_person)
     if req not in OSE_LEAVE_FORM_NAMES:
         raise ValueError(f"Unknown request person {request_person!r}")
-    if exc not in OSE_LEAVE_FORM_NAMES:
-        raise ValueError(f"Unknown exchange person {exchange_person!r}")
+    exc = _validate_offset_exchange_person(exchange_person)
     st = (shift_type or "").strip().upper()
     if st not in OSE_SHIFT_TYPES:
         raise ValueError("Shift Type must be N or D")
@@ -1906,9 +1932,7 @@ def update_ose_offset_record_fields(
     if not rid:
         raise ValueError("record_id is required")
     get_ose_offset_record_admin_row(rid)
-    exc = _title_name(exchange_person)
-    if exc not in OSE_LEAVE_FORM_NAMES:
-        raise ValueError(f"Unknown exchange person {exchange_person!r}")
+    exc = _validate_offset_exchange_person(exchange_person)
     st = (shift_type or "").strip().upper()
     if st not in OSE_SHIFT_TYPES:
         raise ValueError("Shift Type must be N or D")
