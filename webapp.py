@@ -4426,8 +4426,8 @@ def prod_set_page():
         env_codes=env_codes,
         env_codes_json=json.dumps(env_codes),
         api_machines_json=json.dumps(url_for("wm.api_machines")),
-        api_job_url=url_for("wm.api_prod_set_jobs"),
-        api_cancel_url=url_for("wm.api_prod_set_job_cancel", job_id="JOB_ID"),
+        api_job_url=url_for("wm.api_prod_set_start_job"),
+        api_cancel_url=url_for("wm.api_prod_set_cancel", job_id="JOB_ID"),
     )
 
 
