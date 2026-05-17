@@ -1134,7 +1134,7 @@ def add_done_reaction(message_id):
     return add_message_reaction(message_id, "DONE", fallbacks=_DONE_REACTION_FALLBACKS)
 
 
-_lark_user_message_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+_lark_user_message_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "_lark_user_message_id", default=None
 )
 _lark_defer_done_reaction: contextvars.ContextVar[bool] = contextvars.ContextVar(
@@ -1142,7 +1142,7 @@ _lark_defer_done_reaction: contextvars.ContextVar[bool] = contextvars.ContextVar
 )
 
 
-def set_lark_incoming_message(message_id: str | None) -> None:
+def set_lark_incoming_message(message_id: Optional[str] = None) -> None:
     mid = (message_id or "").strip() or None
     _lark_user_message_id.set(mid)
     _lark_defer_done_reaction.set(False)
@@ -1153,7 +1153,7 @@ def defer_lark_done_reaction() -> None:
     _lark_defer_done_reaction.set(True)
 
 
-def mark_lark_process_done(message_id: str | None = None) -> None:
+def mark_lark_process_done(message_id: Optional[str] = None) -> None:
     mid = (message_id or _lark_user_message_id.get() or "").strip()
     if mid:
         add_done_reaction(mid)
