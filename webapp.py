@@ -4427,8 +4427,13 @@ def _refresh_storage_belongs(belongs: str) -> str:
     return "NP" if b == "NWR" else b
 
 
-def _merge_prod_belongs_rows(new_prod_rows: list[dict], belongs: str) -> None:
-    """Replace PROD rows for one belongs (or all PROD) in memory cache and JSON snapshot."""
+def _merge_prod_belongs_rows(new_prod_rows: list[dict], belongs: str) -> bool:
+    """
+    Replace PROD rows for one belongs (or all PROD) in memory cache and JSON snapshot.
+    Returns False without changing cache when scrape returned no rows (avoids wiping good data).
+    """
+    if not new_prod_rows:
+        return False
     bf = _refresh_storage_belongs(belongs)
     with _scrape_lock:
         global _scrape_rows, _scrape_ts
@@ -4445,6 +4450,7 @@ def _merge_prod_belongs_rows(new_prod_rows: list[dict], belongs: str) -> None:
         _scrape_ts = time.time()
         snapshot = list(_scrape_rows)
     _persist_scrape_to_data_file(snapshot)
+    return True
 
 
 def _scrape_prod_belongs_live(belongs: str) -> tuple[list[dict], dict[str, str]]:
@@ -4498,20 +4504,43 @@ def prod_set_page():
 def _run_prod_set_refresh_thread(refresh_id: str, belongs: str) -> None:
     try:
         prod_rows, errs = _scrape_prod_belongs_live(belongs)
-        _merge_prod_belongs_rows(prod_rows, belongs)
+        merged = _merge_prod_belongs_rows(prod_rows, belongs)
         site_key = _PROD_BELONGS_SITE.get(belongs) if belongs != "ALL" else "all"
         err_msg = errs.get(site_key) if site_key and site_key != "all" else None
         if not err_msg and errs:
             err_msg = "; ".join(f"{k}: {v}" for k, v in list(errs.items())[:3])
         stamp = _machines_last_updated_str()
-        payload = {
-            "status": "done",
-            "belongs": belongs,
-            "count": len(prod_rows),
-            "source": f"live EGM scrape @ {stamp}",
-            "warning": err_msg,
-            "message": f"Loaded {len(prod_rows)} machine(s) for {belongs}",
-        }
+        if not prod_rows:
+            payload = {
+                "status": "error",
+                "belongs": belongs,
+                "count": 0,
+                "scrape_errors": errs,
+                "error": err_msg or "scrape returned 0 machines (credentials/login?)",
+                "message": (
+                    f"Refresh {belongs}: 0 machines — kept previous data. "
+                    + (err_msg or "Check CP_BACKEND_* / WF_BACKEND_* / … env creds.")
+                ),
+            }
+        elif not merged:
+            payload = {
+                "status": "done",
+                "belongs": belongs,
+                "count": len(prod_rows),
+                "scrape_errors": errs,
+                "warning": err_msg,
+                "message": f"Loaded {len(prod_rows)} machine(s) for {belongs}",
+            }
+        else:
+            payload = {
+                "status": "done",
+                "belongs": belongs,
+                "count": len(prod_rows),
+                "scrape_errors": errs,
+                "source": f"live EGM scrape @ {stamp}",
+                "warning": err_msg,
+                "message": f"Loaded {len(prod_rows)} machine(s) for {belongs}",
+            }
     except Exception as e:
         logger.exception("prod-set refresh %s failed", belongs)
         payload = {"status": "error", "belongs": belongs, "error": str(e), "message": str(e)}

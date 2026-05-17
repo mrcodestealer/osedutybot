@@ -256,9 +256,17 @@ PROD_SET_PAGE = """<!DOCTYPE html>
       return null;
     }
 
+    /** NWR = machine name only. Other envs = scraped ``belongs`` column (CP, WF, …). */
     function rowMatchesEnv(r, envCode) {
       if (envCode === "ALL") return true;
-      return machineEnvFromName(r.machine) === envCode;
+      const b = String(r.belongs || "").toUpperCase();
+      if (envCode === "NWR") {
+        return machineEnvFromName(r.machine) === "NWR";
+      }
+      if (envCode === "CP") {
+        return b === "CP" || b === "OSM" || machineEnvFromName(r.machine) === "CP";
+      }
+      return b === envCode || machineEnvFromName(r.machine) === envCode;
     }
 
     function rowMatches(r) {
@@ -338,8 +346,14 @@ PROD_SET_PAGE = """<!DOCTYPE html>
         }));
       const src = data.source || "";
       const n = allRows.length;
+      const byBelongs = {};
+      allRows.forEach(r => {
+        const k = String(r.belongs || "—").toUpperCase();
+        byBelongs[k] = (byBelongs[k] || 0) + 1;
+      });
+      const breakdown = Object.keys(byBelongs).sort().map(k => k + ":" + byBelongs[k]).join(" ");
       if (n) {
-        setLoadStatus(`${n} PROD machine(s)${src ? " · " + src : ""}`);
+        setLoadStatus(`${n} PROD machine(s)${breakdown ? " (" + breakdown + ")" : ""}${src ? " · " + src : ""}`);
       } else {
         setLoadStatus(
           (src && !src.includes("Waiting"))
@@ -370,7 +384,10 @@ PROD_SET_PAGE = """<!DOCTYPE html>
       let msg = data.message || `Loaded ${data.count || 0} machine(s) for ${label}`;
       if (data.source) msg += " · " + data.source;
       if (data.warning) msg += " · " + data.warning;
-      setLoadStatus(msg);
+      if (data.scrape_errors && Object.keys(data.scrape_errors).length) {
+        msg += " · errors: " + JSON.stringify(data.scrape_errors);
+      }
+      setLoadStatus(msg, false);
       await loadMachines();
       return true;
     }
