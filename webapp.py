@@ -190,6 +190,25 @@ def _run_prod_set_job_thread(job_id: str, action: str, remark: str, machines: li
                 _PROD_SET_JOBS[job_id]["manual_summary"] = summary
                 _PROD_SET_JOBS[job_id]["message"] = "Some machines failed (may have players inside)."
 
+    def on_phase_retry(step_verify: str, attempt: int, failed: list) -> None:
+        from prod_machine_batch import PHASE_LABELS
+
+        label = PHASE_LABELS.get(step_verify, step_verify)
+        lines = [
+            f"**{label} — failed ({len(failed)} machine(s))**",
+            "Often caused by **Game is currently running** (player still inside).",
+            f"Will retry automatically (attempt {attempt}) unless you tap **Cancel** on the start card.",
+            "",
+        ]
+        for m in failed[:30]:
+            nm = m.get("machine") or m.get("name") or ""
+            err = (m.get("error") or "").strip()
+            suffix = f" — {err}" if err else ""
+            lines.append(f"• {m.get('belongs', '')} — {nm}{suffix}")
+        if len(failed) > 30:
+            lines.append(f"... and {len(failed) - 30} more")
+        _send_prod_set_lark_text("\n".join(lines))
+
     try:
         summary = run_prod_batch_job(
             action,
@@ -198,6 +217,7 @@ def _run_prod_set_job_thread(job_id: str, action: str, remark: str, machines: li
             cancel_check=cancel_check,
             manual_stop_check=manual_stop_check,
             on_manual_stop=on_manual,
+            on_phase_retry=on_phase_retry,
         )
         with _PROD_SET_JOBS_LOCK:
             if job_id in _PROD_SET_JOBS:
@@ -211,11 +231,23 @@ def _run_prod_set_job_thread(job_id: str, action: str, remark: str, machines: li
         if summary and not cancel_check():
             ok_n = len(summary.get("success") or [])
             fail_n = len(summary.get("failed") or [])
-            lines = [f"**SUMMARY — {ACTION_LABELS.get(action, action)}**", f"Success: {ok_n}", f"Failed: {fail_n}"]
+            lines = [
+                f"**SUMMARY — {ACTION_LABELS.get(action, action)}**",
+                f"Success: {ok_n}",
+                f"Failed: {fail_n}",
+                "",
+            ]
             for m in (summary.get("success") or [])[:30]:
                 lines.append(f"✓ {m.get('belongs')} — {m.get('machine')}")
+            if fail_n:
+                lines.append("")
+                lines.append("**Still failed:**")
             for m in (summary.get("failed") or [])[:30]:
-                lines.append(f"✗ {m.get('belongs')} — {m.get('machine')}")
+                err = (m.get("error") or "").strip()
+                suffix = f" ({err})" if err else ""
+                lines.append(f"✗ {m.get('belongs')} — {m.get('machine')}{suffix}")
+            if fail_n > 30:
+                lines.append(f"... and {fail_n - 30} more failed")
             _send_prod_set_lark_text("\n".join(lines))
     except Exception as e:
         logger.exception("prod-set job %s failed", job_id)
