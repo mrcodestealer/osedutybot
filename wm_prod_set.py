@@ -35,6 +35,16 @@ PROD_SET_PAGE = """<!DOCTYPE html>
       border: 1px solid var(--line); background: var(--elev); color: var(--muted); cursor: pointer;
     }
     .env-filter-btn.active { background: rgba(59,130,246,.25); border-color: var(--accent); color: var(--text); }
+    .env-refresh-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.5rem; margin-top: 0.65rem; padding-top: 0.65rem; border-top: 1px solid var(--line); }
+    .env-refresh-btn {
+      font: inherit; font-size: 0.72rem; font-weight: 600; padding: 0.32rem 0.65rem; border-radius: 8px;
+      border: 1px solid var(--line); background: #0f141c; color: var(--muted); cursor: pointer;
+    }
+    .env-refresh-btn:hover:not(:disabled) { border-color: var(--ok); color: var(--ok); }
+    .env-refresh-btn:disabled { opacity: 0.55; cursor: wait; }
+    .env-refresh-btn.refresh-all { border-color: rgba(34,197,94,.45); color: var(--ok); }
+    #ps-load-status { margin: 0 0 0.75rem; font-size: 0.85rem; color: var(--muted); min-height: 1.25rem; }
+    #ps-load-status.err { color: #fca5a5; }
     .toolbar-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 0.75rem; margin-bottom: 0.75rem; }
     .toolbar-row input[type="search"] {
       flex: 1 1 280px; min-width: 200px; padding: 0.55rem 0.85rem; border-radius: 10px;
@@ -119,9 +129,16 @@ PROD_SET_PAGE = """<!DOCTYPE html>
         </span>
         {% endfor %}
       </div>
+      <div class="env-refresh-row" id="ps-refresh-row">
+        <button type="button" class="env-refresh-btn refresh-all" data-refresh-belongs="ALL">Refresh all PROD</button>
+        {% for code in env_codes %}
+        <button type="button" class="env-refresh-btn" data-refresh-belongs="{{ code }}">Refresh {{ code }}</button>
+        {% endfor %}
+      </div>
     </section>
     <section class="panel">
       <h2 class="panel-title">Machines</h2>
+      <p id="ps-load-status" role="status"></p>
       <div class="toolbar-row">
         <input type="search" id="ps-search" placeholder="Search belongs, machine, game type, status, online…" autocomplete="off"/>
         <div class="action-col">
@@ -170,6 +187,7 @@ PROD_SET_PAGE = """<!DOCTYPE html>
 
   <script>
     const API_MACHINES = {{ api_machines_json|safe }};
+    const API_REFRESH = {{ api_refresh_json|safe }};
     const API_JOB = "{{ api_job_url }}";
     const API_CANCEL = "{{ api_cancel_url }}";
     const PS_ENVS = {{ env_codes_json|safe }};
@@ -213,10 +231,23 @@ PROD_SET_PAGE = """<!DOCTYPE html>
       return allRows.filter(rowMatches);
     }
 
+    function setLoadStatus(msg, isErr) {
+      const el = document.getElementById("ps-load-status");
+      if (!el) return;
+      el.textContent = msg || "";
+      el.classList.toggle("err", !!isErr);
+    }
+
     function renderTable() {
       const tbody = document.getElementById("ps-tbody");
       const vis = visibleRows();
-      document.getElementById("ps-empty").style.display = vis.length ? "none" : "block";
+      const emptyEl = document.getElementById("ps-empty");
+      emptyEl.style.display = vis.length ? "none" : "block";
+      if (!vis.length && !allRows.length) {
+        emptyEl.textContent = "No PROD machines loaded. Use Refresh CP / WF / … above to pull live data from EGM.";
+      } else if (!vis.length) {
+        emptyEl.textContent = "No machines match filters.";
+      }
       tbody.innerHTML = vis.map(r => {
         const key = `${r.belongs}::${r.machine}`;
         return `<tr data-key="${esc(key)}" data-belongs="${esc(r.belongs)}" data-machine="${esc(r.machine)}">
@@ -271,9 +302,44 @@ PROD_SET_PAGE = """<!DOCTYPE html>
           status: r.status || "",
           online: r.online_label || r.online || "",
           maintain: r.maintain || "",
-          test: r.test || "",
+          test: r.is_test || r.test || "",
         }));
+      const src = data.source || "";
+      const n = allRows.length;
+      if (n) {
+        setLoadStatus(`${n} PROD machine(s)${src ? " · " + src : ""}`);
+      } else {
+        setLoadStatus(
+          (src && !src.includes("Waiting"))
+            ? `0 PROD machines (${src}). Click Refresh … to scrape live EGM.`
+            : "No data yet — click Refresh CP / WF / … to load from live EGM backends."
+        );
+      }
       renderTable();
+    }
+
+    async function refreshBelongs(belongs, btn) {
+      const label = belongs === "ALL" ? "all PROD sites" : belongs;
+      if (btn) btn.disabled = true;
+      document.querySelectorAll("[data-refresh-belongs]").forEach(b => { b.disabled = true; });
+      setLoadStatus(`Refreshing ${label} from live EGM (Playwright)… this may take a few minutes.`);
+      try {
+        const res = await fetch(API_REFRESH, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ belongs }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || "refresh failed");
+        let msg = `Loaded ${data.count} machine(s) for ${belongs} · ${data.source || "live scrape"}`;
+        if (data.warning) msg += ` · ${data.warning}`;
+        setLoadStatus(msg);
+        await loadMachines();
+      } catch (e) {
+        setLoadStatus("Refresh failed: " + e.message, true);
+      } finally {
+        document.querySelectorAll("[data-refresh-belongs]").forEach(b => { b.disabled = false; });
+      }
     }
 
     function openRemarkModal(action) {
@@ -409,6 +475,12 @@ PROD_SET_PAGE = """<!DOCTYPE html>
       const remark = document.getElementById("remark-input").value.trim();
       closeRemarkModal();
       if (action) startJob(action, remark);
+    });
+
+    document.querySelectorAll("[data-refresh-belongs]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        refreshBelongs(btn.getAttribute("data-refresh-belongs"), btn);
+      });
     });
 
     loadMachines().catch(e => {

@@ -4396,11 +4396,62 @@ def _display_rows_and_provenance() -> tuple[list[dict], str]:
             err_note = f" · site errors: {serrs}"
         if srows:
             return srows, f"EGM scrape @ {stamp}{err_note}"
+        if json_rows:
+            return json_rows, f"{json_src} (live cache empty; showing file){err_note}"
         return [], f"EGM scrape @ {stamp} (0 rows){err_note}"
 
     if json_rows:
         return json_rows, f"{json_src} (stale until first scrape)"
     return [], "Waiting for first EGM scrape to finish…"
+
+
+_PROD_BELONGS_SITE: dict[str, str] = {
+    "NP": "nwr",
+    "NCH": "nch",
+    "TBR": "tbr",
+    "TBP": "tbp",
+    "MDR": "mdr",
+    "DHS": "dhs",
+    "CP": "cp",
+    "WF": "wf",
+}
+_PROD_SET_REFRESH_LOCK = threading.Lock()
+
+
+def _merge_prod_belongs_rows(new_prod_rows: list[dict], belongs: str) -> None:
+    """Replace PROD rows for one belongs (or all PROD) in memory cache and JSON snapshot."""
+    bf = (belongs or "").strip().upper()
+    with _scrape_lock:
+        global _scrape_rows, _scrape_ts
+        if bf == "ALL":
+            kept = [r for r in _scrape_rows if str(r.get("environment") or "").upper() != "PROD"]
+        else:
+            kept = [
+                r
+                for r in _scrape_rows
+                if str(r.get("environment") or "").upper() != "PROD"
+                or str(r.get("belongs") or "").upper() != bf
+            ]
+        _scrape_rows = kept + new_prod_rows
+        _scrape_ts = time.time()
+        snapshot = list(_scrape_rows)
+    _persist_scrape_to_data_file(snapshot)
+
+
+def _scrape_prod_belongs_live(belongs: str) -> tuple[list[dict], dict[str, str]]:
+    """Playwright scrape one PROD venue (or all) directly from its EGM backend."""
+    from smmachine import smachine_collect_machines_multi_sites
+
+    bf = (belongs or "").strip().upper()
+    if bf == "ALL":
+        raw, errs = smachine_collect_machines_multi_sites()
+    else:
+        site = _PROD_BELONGS_SITE.get(bf)
+        if not site:
+            raise ValueError(f"unknown belongs {belongs!r}")
+        raw, errs = smachine_collect_machines_multi_sites(sites=[site])
+    norm = _normalize_rows(raw)
+    return _filter_rows_by_deployment(norm, "PROD"), errs
 
 
 @wm_bp.get("/healthz")
@@ -4428,7 +4479,52 @@ def prod_set_page():
         api_machines_json=json.dumps(url_for("wm.api_machines")),
         api_job_url=url_for("wm.api_prod_set_start_job"),
         api_cancel_url=url_for("wm.api_prod_set_cancel", job_id="JOB_ID"),
+        api_refresh_json=json.dumps(url_for("wm.api_prod_set_refresh")),
     )
+
+
+@wm_bp.post("/api/prod-set/refresh")
+def api_prod_set_refresh():
+    """
+    Scrape live EGM status for one PROD belongs (CP, WF, …) or ALL, merge into cache + JSON file.
+    Does not rely on stale ``webmachine_data.json`` — opens the real backend in Playwright.
+    """
+    if not _api_auth_ok():
+        return jsonify(error="unauthorized"), 401
+    data = request.get_json(silent=True) or {}
+    belongs = (data.get("belongs") or request.args.get("belongs") or "").strip().upper()
+    if not belongs:
+        return jsonify(error="belongs required (e.g. CP, WF, or ALL)"), 400
+    if belongs != "ALL" and belongs not in _PROD_BELONGS_SITE:
+        return jsonify(error=f"invalid belongs {belongs!r}"), 400
+
+    if not _PROD_SET_REFRESH_LOCK.acquire(blocking=False):
+        return jsonify(error="another refresh is already running"), 409
+
+    try:
+        prod_rows, errs = _scrape_prod_belongs_live(belongs)
+        _merge_prod_belongs_rows(prod_rows, belongs)
+        site_key = _PROD_BELONGS_SITE.get(belongs) if belongs != "ALL" else "all"
+        err_msg = errs.get(site_key) if site_key and site_key != "all" else None
+        if not err_msg and errs:
+            err_msg = "; ".join(f"{k}: {v}" for k, v in list(errs.items())[:3])
+        stamp = _machines_last_updated_str()
+        return jsonify(
+            ok=True,
+            belongs=belongs,
+            count=len(prod_rows),
+            machines=prod_rows,
+            source=f"live EGM scrape @ {stamp}",
+            scrape_errors=errs,
+            warning=err_msg,
+        )
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    except Exception as e:
+        logger.exception("prod-set refresh %s failed", belongs)
+        return jsonify(error=str(e)), 500
+    finally:
+        _PROD_SET_REFRESH_LOCK.release()
 
 
 @wm_bp.post("/api/prod-set/jobs")
