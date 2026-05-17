@@ -4407,6 +4407,7 @@ def _display_rows_and_provenance() -> tuple[list[dict], str]:
 
 _PROD_BELONGS_SITE: dict[str, str] = {
     "NP": "nwr",
+    "NWR": "nwr",
     "NCH": "nch",
     "TBR": "tbr",
     "TBP": "tbp",
@@ -4465,7 +4466,7 @@ def healthz():
 def prod_set_page():
     if not _api_auth_ok():
         return redirect(url_for("wm.login", next=request.path))
-    env_codes = ["CP", "DHS", "MDR", "NCH", "NP", "TBP", "TBR", "WF"]
+    env_codes = ["CP", "DHS", "MDR", "NCH", "NWR", "TBP", "TBR", "WF"]
     return render_template_string(
         PROD_SET_PAGE,
         title="SET PROD MACHINE",

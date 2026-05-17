@@ -28,8 +28,6 @@ PROD_SET_PAGE = """<!DOCTYPE html>
     .panel { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 1rem; margin-bottom: 1rem; }
     .panel-title { margin: 0 0 0.75rem; font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
     .env-filter-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.65rem; margin-bottom: 0.75rem; }
-    .env-filter-item { display: inline-flex; align-items: center; gap: 0.35rem; }
-    .env-filter-item input[type="checkbox"] { width: 1rem; height: 1rem; accent-color: var(--accent); cursor: pointer; }
     .env-filter-btn {
       font: inherit; font-size: 0.8rem; font-weight: 600; padding: 0.4rem 0.85rem; border-radius: 999px;
       border: 1px solid var(--line); background: var(--elev); color: var(--muted); cursor: pointer;
@@ -123,10 +121,7 @@ PROD_SET_PAGE = """<!DOCTYPE html>
       <div class="env-filter-row" id="ps-env-filters">
         <button type="button" class="env-filter-btn active" data-ps-env="ALL">Show all</button>
         {% for code in env_codes %}
-        <span class="env-filter-item" data-ps-env-item="{{ code }}">
-          <input type="checkbox" class="ps-env-select-all" data-ps-env="{{ code }}" title="Select all visible machines in {{ code }}"/>
-          <button type="button" class="env-filter-btn" data-ps-env="{{ code }}">{{ code }}</button>
-        </span>
+        <button type="button" class="env-filter-btn" data-ps-env="{{ code }}">{{ code }}</button>
         {% endfor %}
       </div>
       <div class="env-refresh-row" id="ps-refresh-row">
@@ -220,8 +215,36 @@ PROD_SET_PAGE = """<!DOCTYPE html>
       return `<span class="pill ${cls}">${esc(s || "—")}</span>`;
     }
 
+    /**
+     * Classify machine by display name (not belongs column).
+     * WF = WF* or winford only — never NWR.
+     * NWR = NWR* / NWR+digits in name.
+     */
+    function machineEnvFromName(machineName) {
+      const raw = String(machineName || "").trim();
+      if (!raw) return null;
+      const seg = raw.replace(/\\/g, "/").split("/").pop().trim();
+      const alnum = seg.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+      if (/^DHS/i.test(seg) || alnum.startsWith("DHS")) return "DHS";
+      if (/^NCH/i.test(seg) || alnum.startsWith("NCH")) return "NCH";
+      if (/^OSM/i.test(seg) || alnum.startsWith("OSM")) return "CP";
+      if (/^CP/i.test(seg) || alnum.startsWith("CP")) return "CP";
+      if (/^MDR/i.test(seg) || alnum.startsWith("MDR")) return "MDR";
+      if (/^TBR/i.test(seg) || alnum.startsWith("TBR")) return "TBR";
+      if (/^TBP/i.test(seg) || alnum.startsWith("TBP")) return "TBP";
+      if (/^NWR/i.test(seg) || alnum.startsWith("NWR") || /NWR\\d/.test(alnum)) return "NWR";
+      if (/winford/i.test(raw)) return "WF";
+      if (/^WF/i.test(seg) || alnum.startsWith("WF")) return "WF";
+      return null;
+    }
+
+    function rowMatchesEnv(r, envCode) {
+      if (envCode === "ALL") return true;
+      return machineEnvFromName(r.machine) === envCode;
+    }
+
     function rowMatches(r) {
-      if (activeEnv !== "ALL" && String(r.belongs || "").toUpperCase() !== activeEnv) return false;
+      if (!rowMatchesEnv(r, activeEnv)) return false;
       if (!searchQ) return true;
       const hay = [r.belongs, r.machine, r.game_type, r.status, r.online, r.maintain, r.test].join(" ").toLowerCase();
       return hay.includes(searchQ);
@@ -277,15 +300,6 @@ PROD_SET_PAGE = """<!DOCTYPE html>
         keys.add(cb.getAttribute("data-key"));
       });
       return allRows.filter(r => keys.has(`${r.belongs}::${r.machine}`));
-    }
-
-  function selectAllVisibleInEnv(env, checked) {
-      document.querySelectorAll("#ps-tbody tr").forEach(tr => {
-        if (tr.classList.contains("row-hidden")) return;
-        if (env !== "ALL" && tr.getAttribute("data-belongs") !== env) return;
-        const cb = tr.querySelector(".ps-row-cb");
-        if (cb) cb.checked = checked;
-      });
     }
 
     async function loadMachines() {
@@ -444,9 +458,6 @@ PROD_SET_PAGE = """<!DOCTYPE html>
 
     document.querySelectorAll(".env-filter-btn[data-ps-env]").forEach(btn => {
       btn.addEventListener("click", () => setEnvActive(btn.getAttribute("data-ps-env")));
-    });
-    document.querySelectorAll(".ps-env-select-all").forEach(cb => {
-      cb.addEventListener("change", () => selectAllVisibleInEnv(cb.getAttribute("data-ps-env"), cb.checked));
     });
     document.getElementById("ps-search").addEventListener("input", e => {
       searchQ = e.target.value.trim().toLowerCase();
