@@ -33,7 +33,11 @@ PROD_SET_PAGE = """<!DOCTYPE html>
       border: 1px solid var(--line); background: var(--elev); color: var(--muted); cursor: pointer;
     }
     .env-filter-btn.active { background: rgba(59,130,246,.25); border-color: var(--accent); color: var(--text); }
-    .env-refresh-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.5rem; margin-top: 0.65rem; padding-top: 0.65rem; border-top: 1px solid var(--line); }
+    .env-refresh-row {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.5rem;
+      margin-top: 0.65rem; padding-top: 0.65rem; border-top: 1px solid var(--line);
+      position: relative; z-index: 5;
+    }
     .env-refresh-btn {
       font: inherit; font-size: 0.72rem; font-weight: 600; padding: 0.35rem 0.7rem; border-radius: 8px;
       border: 1px solid rgba(59,130,246,.45); background: rgba(59,130,246,.12); color: var(--text);
@@ -133,9 +137,9 @@ PROD_SET_PAGE = """<!DOCTYPE html>
         {% endfor %}
       </div>
       <div class="env-refresh-row" id="ps-refresh-row">
-        <button type="button" class="env-refresh-btn refresh-all" data-refresh-belongs="ALL">Refresh all PROD</button>
+        <button type="button" class="env-refresh-btn refresh-all" data-refresh-belongs="ALL" onclick="window.psDoRefresh('ALL')">Refresh all PROD</button>
         {% for code in env_codes %}
-        <button type="button" class="env-refresh-btn" data-refresh-belongs="{{ code }}">Refresh {{ code }}</button>
+        <button type="button" class="env-refresh-btn" data-refresh-belongs="{{ code }}" onclick="window.psDoRefresh('{{ code }}')">Refresh {{ code }}</button>
         {% endfor %}
       </div>
     </section>
@@ -189,6 +193,11 @@ PROD_SET_PAGE = """<!DOCTYPE html>
   </div>
 
   <script>
+    window.psDoRefresh = function(belongs) {
+      var el = document.getElementById("ps-load-status");
+      if (el) el.textContent = "Clicked Refresh " + (belongs === "ALL" ? "all PROD" : belongs) + "…";
+      if (typeof refreshBelongs === "function") refreshBelongs(belongs, null);
+    };
     const API_MACHINES = {{ api_machines_json|safe }};
     const API_REFRESH = {{ api_refresh_json|safe }};
     const API_REFRESH_STATUS = {{ api_refresh_status_json|safe }};
@@ -476,7 +485,7 @@ PROD_SET_PAGE = """<!DOCTYPE html>
       if (data.status === "awaiting_manual") {
         let html = `<strong>${esc(data.message || "Some machines failed")}</strong>`;
         if (data.failed && data.failed.length) {
-          html += "<ul class=\"fail-list\">" + data.failed.map(f =>
+          html += '<ul class="fail-list">' + data.failed.map(f =>
             `<li>${esc(f.belongs)} — ${esc(f.machine)} (${esc(f.reason || "failed")})</li>`
           ).join("") + "</ul>";
         }
