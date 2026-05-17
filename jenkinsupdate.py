@@ -3887,7 +3887,11 @@ def _verify_fmt_value(v: object) -> str:
 
 def _verify_page_expected_line(ok: bool, label: str, got: object, want: object) -> str:
     em = "✅" if ok else "❌"
-    return f"{em} {label} — page:{_verify_fmt_value(got)} — expected:{_verify_fmt_value(want)}"
+    return (
+        f"{em} {label} —\n"
+        f"page:{_verify_fmt_value(got)}\n"
+        f"expected:{_verify_fmt_value(want)}"
+    )
 
 
 def verify_fpms_parameters_display(
@@ -6205,6 +6209,25 @@ def _predict_next_build_number_from_history(page) -> int | None:
     return None
 
 
+def _fpms_lark_ack_user_message(message_id: str | None) -> None:
+    """Lark **Got It** reaction on the user's message (no config / status chat spam)."""
+    mid = (message_id or "").strip()
+    if not mid:
+        return
+    try:
+        import main as _main_mod
+
+        react = getattr(_main_mod, "add_message_reaction", None)
+        if callable(react):
+            react(mid, "GotIt", fallbacks=("GOTIT", "OK", "LGTM", "OnIt", "CheckMark"))
+            return
+        gotit = getattr(_main_mod, "add_gotit_reaction", None)
+        if callable(gotit):
+            gotit(mid)
+    except Exception as ex:
+        print(f"[jenkinsupdate] GotIt reaction failed: {ex!r}", flush=True)
+
+
 def _fpms_lark_begin_jenkins_run(
     chat_id: str,
     session_key: str,
@@ -6215,8 +6238,9 @@ def _fpms_lark_begin_jenkins_run(
     *,
     jenkins_build_url: str | None = None,
     job_profile: str = "fpms",
+    lark_message_id: str | None = None,
 ) -> None:
-    """Install ``jenkins_wait_build`` gate, post preview + start message, spawn Playwright thread."""
+    """Install ``jenkins_wait_build`` gate, react **Got It** on the trigger message, spawn Playwright."""
     jp = (job_profile or "fpms").strip() or "fpms"
     if jp == "fnt_rc":
         cfg = _fnt_rc_bot_build_config_block(data, resolved)
@@ -6245,23 +6269,8 @@ def _fpms_lark_begin_jenkins_run(
     # Server safety: headed Chromium on Linux needs X11/$DISPLAY.
     if (not bot_headless) and sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
         bot_headless = True
-    preview = _fpms_format_config_preview(data, resolved)
-    send(
-        chat_id,
-        preview
-        + (
-            "\n\n⏳ Starting **headless** Jenkins — filling **all** parameters, running **two** on-page "
-            if bot_headless
-            else "\n\n⏳ Starting **visible browser** Jenkins — filling **all** parameters, running **two** on-page "
-        )
-        + "re-check, then a **YES/NO** card (screenshots upload in parallel). Say **cancel** anytime."
-        + (
-            "\n\nℹ️ Auto-switched to **headless** because this Linux host has no `$DISPLAY` (no X server)."
-            if (raw_headless in ("0", "false", "no", "off") and sys.platform.startswith("linux") and not os.environ.get("DISPLAY"))
-            else ""
-        ),
-    )
-    
+    _fpms_lark_ack_user_message(lark_message_id)
+
     _fpms_lark_spawn_run(
         chat_id,
         session_key,
@@ -6356,6 +6365,8 @@ def _fpms_lark_dispatch_job_row(
     body: str,
     row: tuple[str, float, str, str],
     send,
+    *,
+    lark_message_id: str | None = None,
 ) -> bool:
     """After a Jenkins job alias is chosen: link-only jobs vs automated parameter jobs."""
     alias, _sc, label, url_raw = row
@@ -6378,26 +6389,32 @@ def _fpms_lark_dispatch_job_row(
     ju = _jenkins_update_primary_url(url_raw)
     if prof == "fnt_rc":
         return _fpms_lark_dispatch_fnt_rc_parameter_flow(
-            chat_id, session_key, body, ju, send
+            chat_id, session_key, body, ju, send, lark_message_id=lark_message_id
         )
     if prof == "sms_uat":
         return _fpms_lark_dispatch_sms_uat_parameter_flow(
-            chat_id, session_key, body, ju, send
+            chat_id, session_key, body, ju, send, lark_message_id=lark_message_id
         )
     if prof == "fpms_prod_script":
         return _fpms_lark_dispatch_fpms_prod_script_parameter_flow(
-            chat_id, session_key, body, ju, send
+            chat_id, session_key, body, ju, send, lark_message_id=lark_message_id
         )
     if prof == "bi_api_update":
         return _fpms_lark_dispatch_bi_api_update_parameter_flow(
-            chat_id, session_key, body, ju, send
+            chat_id, session_key, body, ju, send, lark_message_id=lark_message_id
         )
     if prof == "pms_uat":
         return _fpms_lark_dispatch_fpms_parameter_flow(
-            chat_id, session_key, body, ju, send, job_profile="pms_uat"
+            chat_id,
+            session_key,
+            body,
+            ju,
+            send,
+            job_profile="pms_uat",
+            lark_message_id=lark_message_id,
         )
     return _fpms_lark_dispatch_fpms_parameter_flow(
-        chat_id, session_key, body, ju, send
+        chat_id, session_key, body, ju, send, lark_message_id=lark_message_id
     )
 
 
@@ -6407,6 +6424,8 @@ def _fpms_lark_dispatch_fpms_prod_script_parameter_flow(
     body: str,
     jenkins_build_url: str,
     send,
+    *,
+    lark_message_id: str | None = None,
 ) -> bool:
     """Parse FPMS PROD SCRIPT block; ask follow-up command block if missing; then headless run."""
     try:
@@ -6436,6 +6455,7 @@ def _fpms_lark_dispatch_fpms_prod_script_parameter_flow(
         raw_prompt_body=body,
         jenkins_build_url=jenkins_build_url,
         job_profile="fpms_prod_script",
+        lark_message_id=lark_message_id,
     )
     return True
 
@@ -6446,6 +6466,8 @@ def _fpms_lark_dispatch_fnt_rc_parameter_flow(
     body: str,
     jenkins_build_url: str,
     send,
+    *,
+    lark_message_id: str | None = None,
 ) -> bool:
     """Parse FNT RC block; fuzzy-pick services from ``FNT_RC_UAT_MASTER_SERVICES``; then headless run."""
     try:
@@ -6485,6 +6507,7 @@ def _fpms_lark_dispatch_fnt_rc_parameter_flow(
             raw_prompt_body=body,
             jenkins_build_url=jenkins_build_url,
             job_profile="fnt_rc",
+            lark_message_id=lark_message_id,
         )
         return True
     resolved_ids: list[str] = []
@@ -6510,6 +6533,7 @@ def _fpms_lark_dispatch_fnt_rc_parameter_flow(
             raw_prompt_body=body,
             jenkins_build_url=jenkins_build_url,
             job_profile="fnt_rc",
+            lark_message_id=lark_message_id,
         )
         return True
     first = tokens_to_pick[0]
@@ -6541,6 +6565,8 @@ def _fpms_lark_dispatch_sms_uat_parameter_flow(
     body: str,
     jenkins_build_url: str,
     send,
+    *,
+    lark_message_id: str | None = None,
 ) -> bool:
     """Parse SMS UAT block; fuzzy-pick services from ``SMS_UAT_UPDATE_SERVICES``; then headless run."""
     try:
@@ -6572,6 +6598,7 @@ def _fpms_lark_dispatch_sms_uat_parameter_flow(
             raw_prompt_body=body,
             jenkins_build_url=jenkins_build_url,
             job_profile="sms_uat",
+            lark_message_id=lark_message_id,
         )
         return True
     resolved_ids: list[str] = []
@@ -6597,6 +6624,7 @@ def _fpms_lark_dispatch_sms_uat_parameter_flow(
             raw_prompt_body=body,
             jenkins_build_url=jenkins_build_url,
             job_profile="sms_uat",
+            lark_message_id=lark_message_id,
         )
         return True
     first = tokens_to_pick[0]
@@ -6630,6 +6658,7 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
     send,
     *,
     job_profile: str = "fpms",
+    lark_message_id: str | None = None,
 ) -> bool:
     """Parse FPMS block, resolve services, then headless run or service pick session."""
     jp = (job_profile or "fpms").strip() or "fpms"
@@ -6679,6 +6708,7 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
             raw_prompt_body=body,
             jenkins_build_url=jenkins_build_url,
             job_profile=jp,
+            lark_message_id=lark_message_id,
         )
         return True
     resolved_ids: list[str] = []
@@ -6716,6 +6746,7 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
             raw_prompt_body=body,
             jenkins_build_url=jenkins_build_url,
             job_profile=jp,
+            lark_message_id=lark_message_id,
         )
         return True
     first = tokens_to_pick[0]
@@ -6765,6 +6796,8 @@ def _fpms_lark_dispatch_bi_api_update_parameter_flow(
     body: str,
     jenkins_build_url: str,
     send,
+    *,
+    lark_message_id: str | None = None,
 ) -> bool:
     """Parse BI API UPDATE block from `/jenkinsupdate`, then run headless Jenkins fill."""
     try:
@@ -6795,6 +6828,7 @@ def _fpms_lark_dispatch_bi_api_update_parameter_flow(
         raw_prompt_body=body,
         jenkins_build_url=jenkins_build_url,
         job_profile="bi_api_update",
+        lark_message_id=lark_message_id,
     )
     return True
 
@@ -6863,6 +6897,7 @@ def handle_lark_jenkins_update_message(
     *,
     allow_start: bool,
     lark_sender_union_id: str | None = None,
+    lark_message_id: str | None = None,
 ) -> bool:
     """
     Lark ``/jenkinsupdate``: match a registered Jenkins job from keywords (or ask 1–N),
@@ -6920,7 +6955,7 @@ def handle_lark_jenkins_update_message(
             with _fpms_lark_sessions_lock:
                 _fpms_lark_sessions.pop(key, None)
             return _fpms_lark_dispatch_fpms_prod_script_parameter_flow(
-                chat_id, key, body2, ju, send
+                chat_id, key, body2, ju, send, lark_message_id=lark_message_id
             )
         if st == "fnt_rc_need_block":
             # 允许用户只发 branch/version/services，不强制再写 /jenkinsupdate
@@ -6931,7 +6966,7 @@ def handle_lark_jenkins_update_message(
             with _fpms_lark_sessions_lock:
                 _fpms_lark_sessions.pop(key, None)
             return _fpms_lark_dispatch_fnt_rc_parameter_flow(
-                chat_id, key, body2, ju, send
+                chat_id, key, body2, ju, send, lark_message_id=lark_message_id
             )
         if st == "choose_job":
             cands = sess.get("job_candidates")
@@ -6954,7 +6989,9 @@ def handle_lark_jenkins_update_message(
                 return True
             row = cands[idx - 1]
             _fpms_lark_clear_session(chat_id, sender_id)
-            return _fpms_lark_dispatch_job_row(chat_id, key, pending, row, send)
+            return _fpms_lark_dispatch_job_row(
+                chat_id, key, pending, row, send, lark_message_id=lark_message_id
+            )
         if st == "jenkins_wait_build":
             if not isinstance(sess.get("build_gate_event"), threading.Event):
                 _fpms_lark_clear_session(chat_id, sender_id)
@@ -7020,6 +7057,7 @@ def handle_lark_jenkins_update_message(
                     raw_prompt_body=raw_pb,
                     jenkins_build_url=ju_pick,
                     job_profile=jp_sess,
+                    lark_message_id=lark_message_id,
                 )
 
             if sess["pick_index"] >= len(sess["service_tokens"]):
@@ -7130,6 +7168,7 @@ def handle_lark_jenkins_update_message(
             body,
             FPMS_PROD_SCRIPT_BUILD_URL,
             send,
+            lark_message_id=lark_message_id,
         )
 
     # BI API UPDATE shortcut:
@@ -7146,6 +7185,7 @@ def handle_lark_jenkins_update_message(
             body,
             BI_API_UPDATE_BUILD_URL,
             send,
+            lark_message_id=lark_message_id,
         )
 
     head_line = _jenkins_update_first_non_empty_line(body)
@@ -7191,7 +7231,9 @@ def handle_lark_jenkins_update_message(
         except TypeError:
             send(chat_id, _fpms_format_jenkins_job_menu(ties))
         return True
-    return _fpms_lark_dispatch_job_row(chat_id, key, body, ties[0], send)
+    return _fpms_lark_dispatch_job_row(
+        chat_id, key, body, ties[0], send, lark_message_id=lark_message_id
+    )
 
 
 def _fpms_lark_handle_service_pick_callbacks(

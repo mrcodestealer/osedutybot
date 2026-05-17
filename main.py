@@ -1114,11 +1114,11 @@ def add_message_reaction(message_id, emoji_type, *, fallbacks: tuple[str, ...] =
 
 
 def add_gotit_reaction(message_id):
-    primary = (os.getenv("OFFSET_ACK_EMOJI") or "OK").strip() or "OK"
+    primary = (os.getenv("OFFSET_ACK_EMOJI") or "GotIt").strip() or "GotIt"
     return add_message_reaction(
         message_id,
         primary,
-        fallbacks=("LGTM", "OnIt", "CheckMark", "GOTIT", "GotIt"),
+        fallbacks=("GOTIT", "OK", "LGTM", "OnIt", "CheckMark"),
     )
     
 def recall_message(message_id):
@@ -2623,6 +2623,7 @@ def lark_webhook():
         send_message,
         allow_start=bot_mentioned,
         lark_sender_union_id=sender_union_id,
+        lark_message_id=message_id,
     ):
         return jsonify({"success": True})
 
