@@ -6219,7 +6219,8 @@ def _fpms_lark_ack_user_message(message_id: str | None) -> None:
 
         react = getattr(_main_mod, "add_message_reaction", None)
         if callable(react):
-            react(mid, "GotIt", fallbacks=("GOTIT", "OK", "LGTM", "OnIt", "CheckMark"))
+            # Official emoji_type is **Get** (UI label "GotIt"); do not fall back to **OK**.
+            react(mid, "Get", fallbacks=("GotIt", "GOTIT", "LGTM", "OnIt", "CheckMark"))
             return
         gotit = getattr(_main_mod, "add_gotit_reaction", None)
         if callable(gotit):

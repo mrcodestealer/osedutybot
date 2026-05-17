@@ -1113,13 +1113,17 @@ def add_message_reaction(message_id, emoji_type, *, fallbacks: tuple[str, ...] =
     return None
 
 
+# Lark UI tooltip may say "GotIt"; official emoji_type is **Get** (see im message-reaction emojis doc).
+_GOT_IT_REACTION_FALLBACKS = ("GotIt", "GOTIT", "LGTM", "OnIt", "CheckMark")
+
+
 def add_gotit_reaction(message_id):
-    primary = (os.getenv("OFFSET_ACK_EMOJI") or "GotIt").strip() or "GotIt"
-    return add_message_reaction(
-        message_id,
-        primary,
-        fallbacks=("GOTIT", "OK", "LGTM", "OnIt", "CheckMark"),
-    )
+    override = (os.getenv("OFFSET_ACK_EMOJI") or "").strip()
+    if override and override not in ("GotIt", "GOTIT", "OK"):
+        return add_message_reaction(
+            message_id, override, fallbacks=("Get", *_GOT_IT_REACTION_FALLBACKS)
+        )
+    return add_message_reaction(message_id, "Get", fallbacks=_GOT_IT_REACTION_FALLBACKS)
     
 def recall_message(message_id):
     token = get_tenant_access_token()
