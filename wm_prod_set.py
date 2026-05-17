@@ -55,7 +55,12 @@ PROD_SET_PAGE = """<!DOCTYPE html>
     }
     #ps-load-status { margin: 0 0 0.75rem; font-size: 0.85rem; color: var(--muted); min-height: 1.25rem; }
     #ps-load-status.err { color: #fca5a5; }
-    .toolbar-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 0.75rem; margin-bottom: 0.75rem; }
+    .toolbar-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 0.75rem; margin-bottom: 0.5rem; }
+    .env-filter-bar {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem;
+      margin-bottom: 0.75rem;
+    }
+    .row-filter-bar { margin-top: 0; }
     .toolbar-row input[type="search"] {
       flex: 1 1 280px; min-width: 200px; padding: 0.55rem 0.85rem; border-radius: 10px;
       border: 1px solid var(--line); background: #0f141c; color: var(--text); font-size: 0.92rem;
@@ -161,6 +166,15 @@ PROD_SET_PAGE = """<!DOCTYPE html>
           </div>
         </div>
       </div>
+      <div class="env-filter-bar row-filter-bar" id="ps-row-filters" role="toolbar" aria-label="Status filters">
+        <button type="button" class="env-filter-btn active" data-ps-clear="1" id="ps-row-all">Show All</button>
+        <button type="button" class="env-filter-btn" data-ps-toggle="online">Online</button>
+        <button type="button" class="env-filter-btn" data-ps-toggle="offline">Offline</button>
+        <button type="button" class="env-filter-btn" data-ps-toggle="maintain">Maintain</button>
+        <button type="button" class="env-filter-btn" data-ps-toggle="no_maintain">No Maintain</button>
+        <button type="button" class="env-filter-btn" data-ps-toggle="test">Test</button>
+        <button type="button" class="env-filter-btn" data-ps-toggle="no_test">No Test</button>
+      </div>
       <div class="table-wrap">
         <table id="ps-table">
           <thead>
@@ -207,6 +221,10 @@ PROD_SET_PAGE = """<!DOCTYPE html>
     let allRows = [];
     let activeEnv = "ALL";
     let searchQ = "";
+    let rowFilt = {
+      online: false, offline: false, maintain: false,
+      no_maintain: false, test: false, no_test: false
+    };
     let pendingAction = null;
     let pollTimer = null;
     let currentJobId = null;
@@ -256,6 +274,58 @@ PROD_SET_PAGE = """<!DOCTYPE html>
       return null;
     }
 
+    function anyRowFilt() {
+      return rowFilt.online || rowFilt.offline || rowFilt.maintain ||
+        rowFilt.no_maintain || rowFilt.test || rowFilt.no_test;
+    }
+
+    function isRowTest(r) {
+      const v = r.test;
+      if (v === true || v === 1 || v === "1") return true;
+      if (String(v || "").toLowerCase() === "true") return true;
+      return /\(TEST\)/i.test(String(r.machine || ""));
+    }
+
+    function isRowMaint(r) {
+      const st = String(r.status || "").toLowerCase();
+      return st.includes("maintain") || st.includes("metercheck");
+    }
+
+    function isRowOnline(r) {
+      const ol = String(r.online || "").toLowerCase();
+      return ol.includes("online") && !ol.includes("offline");
+    }
+
+    function isRowOffline(r) {
+      return String(r.online || "").toLowerCase().includes("offline");
+    }
+
+    function matchesRowFilt(r) {
+      if (!anyRowFilt()) return true;
+      const t = isRowTest(r);
+      const m = isRowMaint(r);
+      if (rowFilt.test && !t) return false;
+      if (rowFilt.no_test && t) return false;
+      if (rowFilt.maintain && !m) return false;
+      if (rowFilt.no_maintain && m) return false;
+      if (rowFilt.offline && !isRowOffline(r)) return false;
+      if (rowFilt.online && !isRowOnline(r)) return false;
+      return true;
+    }
+
+    function syncRowFiltBar() {
+      const bar = document.getElementById("ps-row-filters");
+      if (!bar) return;
+      const clearBtn = document.getElementById("ps-row-all");
+      bar.querySelectorAll("[data-ps-toggle]").forEach(b => {
+        const k = b.getAttribute("data-ps-toggle");
+        if (k && Object.prototype.hasOwnProperty.call(rowFilt, k)) {
+          b.classList.toggle("active", !!rowFilt[k]);
+        }
+      });
+      if (clearBtn) clearBtn.classList.toggle("active", !anyRowFilt());
+    }
+
     /** NWR = machine name only. Other envs = scraped ``belongs`` column (CP, WF, …). */
     function rowMatchesEnv(r, envCode) {
       if (envCode === "ALL") return true;
@@ -271,6 +341,7 @@ PROD_SET_PAGE = """<!DOCTYPE html>
 
     function rowMatches(r) {
       if (!rowMatchesEnv(r, activeEnv)) return false;
+      if (!matchesRowFilt(r)) return false;
       if (!searchQ) return true;
       const hay = [r.belongs, r.machine, r.game_type, r.status, r.online, r.maintain, r.test].join(" ").toLowerCase();
       return hay.includes(searchQ);
@@ -547,6 +618,34 @@ PROD_SET_PAGE = """<!DOCTYPE html>
     document.querySelectorAll(".env-filter-btn[data-ps-env]").forEach(btn => {
       btn.addEventListener("click", () => setEnvActive(btn.getAttribute("data-ps-env")));
     });
+    const rowFiltBar = document.getElementById("ps-row-filters");
+    if (rowFiltBar) {
+      syncRowFiltBar();
+      rowFiltBar.addEventListener("click", ev => {
+        const btn = ev.target.closest("button");
+        if (!btn || !rowFiltBar.contains(btn)) return;
+        if (btn.getAttribute("data-ps-clear") === "1") {
+          rowFilt.online = rowFilt.offline = rowFilt.maintain = false;
+          rowFilt.no_maintain = rowFilt.test = rowFilt.no_test = false;
+          syncRowFiltBar();
+          renderTable();
+          return;
+        }
+        const k = btn.getAttribute("data-ps-toggle");
+        if (!k || !Object.prototype.hasOwnProperty.call(rowFilt, k)) return;
+        rowFilt[k] = !rowFilt[k];
+        if (rowFilt[k]) {
+          if (k === "test") rowFilt.no_test = false;
+          if (k === "no_test") rowFilt.test = false;
+          if (k === "maintain") rowFilt.no_maintain = false;
+          if (k === "no_maintain") rowFilt.maintain = false;
+          if (k === "online") rowFilt.offline = false;
+          if (k === "offline") rowFilt.online = false;
+        }
+        syncRowFiltBar();
+        renderTable();
+      });
+    }
     document.getElementById("ps-search").addEventListener("input", e => {
       searchQ = e.target.value.trim().toLowerCase();
       renderTable();
