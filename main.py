@@ -1162,6 +1162,8 @@ def mark_lark_process_done(message_id: Optional[str] = None) -> None:
 def finish_lark_incoming_message_if_sync() -> None:
     if _lark_defer_done_reaction.get():
         return
+    if not (_lark_user_message_id.get() or "").strip():
+        return
     mark_lark_process_done()
 
 
@@ -2584,11 +2586,6 @@ def lark_webhook():
         print("❌ Could not extract chat_id or text")
         return jsonify({"error": "Missing data"}), 400
 
-    # React **Got It** (`Get`) on start; **DONE** when this request finishes (or background task ends).
-    set_lark_incoming_message(message_id)
-    if message_id:
-        add_gotit_reaction(message_id)
-
     if text == "我要验牌":
         reply = f'<at user_id="{sender_id}"></at> 给我擦皮鞋'
         send_message(chat_id, reply)
@@ -2617,17 +2614,35 @@ def lark_webhook():
     clean_text = text
     print(f"🧹 Cleaned text (repr): {repr(clean_text)}")
 
-        # 清理提及占位符（先做清理，便于后续命令处理）
-    mention_keys = [m.get("key", "") for m in mentions if m.get("key")]
-    for key in mention_keys:
-        text = text.replace(key, "")
-    text = re.sub(r'@_user_\d+', '', text)
-    text = re.sub(r'<[^>]+>', '', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    clean_text = text
-    print(f"🧹 Cleaned text (repr): {repr(clean_text)}")
+    # Group: Got It / DONE only when the bot is @mentioned; p2p always.
+    bot_mentioned = chat_type != "group"
+    if chat_type == "group":
+        bot_mentioned = False
+        for mention in mentions:
+            mention_id_obj = mention.get("id")
+            if isinstance(mention_id_obj, dict):
+                mention_id = mention_id_obj.get("open_id", "")
+            else:
+                mention_id = mention_id_obj
+            print(f"🔍 Mention open_id: {mention_id}")
+            if mention_id == BOT_OPEN_ID:
+                bot_mentioned = True
+                print(f"✅ Bot mentioned by open_id: {mention_id}")
+                break
+        if not bot_mentioned and is_mention_old:
+            bot_mentioned = True
+            print("✅ Bot mentioned (old schema via is_mention flag)")
 
-        # ================= 跨群组 P0 交互确认 =================
+    lark_reactions_enabled = bool(message_id) and (
+        chat_type != "group" or bot_mentioned
+    )
+    if lark_reactions_enabled:
+        set_lark_incoming_message(message_id)
+        add_gotit_reaction(message_id)
+    else:
+        set_lark_incoming_message(None)
+
+    # ================= 跨群组 P0 交互确认 =================
     handled_p0, p0_reply = handle_p0_confirmation(chat_id, sender_id, clean_text, original_text, send_message)
     if handled_p0:
         if p0_reply:
@@ -2655,25 +2670,6 @@ def lark_webhook():
             ).start()
             return _lark_im_done()
 
-    # ================= 群组 @bot（后续命令需要提及；FPMS 多步会话中跟帖可不 @） =================
-    bot_mentioned = chat_type != "group"
-    if chat_type == "group":
-        bot_mentioned = False
-        for mention in mentions:
-            mention_id_obj = mention.get("id")
-            if isinstance(mention_id_obj, dict):
-                mention_id = mention_id_obj.get("open_id", "")
-            else:
-                mention_id = mention_id_obj
-            print(f"🔍 Mention open_id: {mention_id}")
-            if mention_id == BOT_OPEN_ID:
-                bot_mentioned = True
-                print(f"✅ Bot mentioned by open_id: {mention_id}")
-                break
-        if not bot_mentioned and is_mention_old:
-            bot_mentioned = True
-            print("✅ Bot mentioned (old schema via is_mention flag)")
-
     ju = _get_jenkinsupdate()
     jenkins_sess_active = (
         ju.jenkins_update_has_active_lark_session(chat_id, sender_id) if ju else False
@@ -2686,7 +2682,7 @@ def lark_webhook():
         send_message,
         allow_start=bot_mentioned,
         lark_sender_union_id=sender_union_id,
-        lark_message_id=message_id,
+        lark_message_id=message_id if lark_reactions_enabled else None,
     ):
         return _lark_im_done()
 
