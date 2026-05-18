@@ -2037,24 +2037,6 @@ def handle_card_callback(
                     chat_id,
                     f"✅ Offset submitted for {request_person} (record {rid or 'saved'}).",
                 )
-            if rid:
-                try:
-                    fb = _local_pending_offset_row(
-                        record_id=rid,
-                        request_person=request_person,
-                        exchange_person=exchange_person,
-                        shift_type=shift_type,
-                        original_date=original_date,
-                        exchange_date=exchange_date,
-                        reason=reason,
-                    )
-                    notify_offset_approvers_for_record(
-                        rid,
-                        send_message=send_message,
-                        fallback_row=fb,
-                    )
-                except Exception as exc:
-                    print(f"[offsetleave] approver DM failed: {exc!r}", flush=True)
             return True
         leave_type = _get_form_field(action, parsed, event_obj, "leave_type")
         start_date = _parse_date_iso(_get_form_field(action, parsed, event_obj, "start_date"))

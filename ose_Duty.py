@@ -1770,7 +1770,30 @@ def submit_ose_offset(
     }
     res = _bitable_create_record(token, OSE_OFFSET_TABLE_ID, fields)
     invalidate_ose_bitable_cache()
-    return {"ok": True, "record_id": (res.get("data") or {}).get("record", {}).get("record_id")}
+    record_id = (res.get("data") or {}).get("record", {}).get("record_id")
+    rid = str(record_id or "").strip()
+    if rid:
+        try:
+            import offsetleave as ol
+
+            ol.notify_offset_approvers_for_record(
+                rid,
+                fallback_row={
+                    "record_id": rid,
+                    "request_date": today.isoformat(),
+                    "request_person": req,
+                    "exchange_person": exc,
+                    "shift_type": st,
+                    "original_date": original_date.isoformat(),
+                    "exchange_date": exchange_date.isoformat(),
+                    "reason": reason_s,
+                    "approval_status": "Pending",
+                    "pending": True,
+                },
+            )
+        except Exception as exc:
+            print(f"[ose_Duty] offset approver notify failed: {exc!r}", flush=True)
+    return {"ok": True, "record_id": record_id}
 
 
 def get_ose_offset_record_admin_row(record_id: str) -> dict[str, Any]:
