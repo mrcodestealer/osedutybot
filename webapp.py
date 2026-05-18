@@ -5199,6 +5199,14 @@ def api_ose_submit_offset():
             ),
             reason=str(body.get("reason") or ""),
         )
+        rid = str((out or {}).get("record_id") or "").strip()
+        if rid:
+            try:
+                import offsetleave as ol
+
+                ol.notify_offset_approvers_for_record(rid)
+            except Exception as exc:
+                logger.warning("offset approver notify after web submit failed: %s", exc)
         return jsonify(out)
     except Exception as e:
         return jsonify(ok=False, error=str(e)), 400

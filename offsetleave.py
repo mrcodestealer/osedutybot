@@ -1394,6 +1394,39 @@ def _is_offset_approver_open_id(open_id: str) -> bool:
     return (open_id or "").strip() in OFFSET_APPROVER_OPEN_IDS
 
 
+def _lark_im_send_message(
+    receive_id: str,
+    text: str,
+    msg_type: str = "text",
+    mentions: Any = None,
+    receive_id_type: str = "chat_id",
+) -> dict[str, Any]:
+    """Send Lark IM when ``main.send_message`` is unavailable (e.g. web offset submit)."""
+    token = od.get_tenant_access_token()
+    url = "https://open.larksuite.com/open-apis/im/v1/messages"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    if msg_type == "interactive":
+        content = text if isinstance(text, str) else json.dumps(text)
+    else:
+        content = json.dumps({"text": text})
+    body: dict[str, Any] = {
+        "receive_id": receive_id,
+        "msg_type": msg_type,
+        "content": content,
+    }
+    if mentions:
+        body["mentions"] = mentions
+    rid_type = (receive_id_type or "chat_id").strip() or "chat_id"
+    response = requests.post(
+        url,
+        headers=headers,
+        params={"receive_id_type": rid_type},
+        json=body,
+        timeout=30,
+    )
+    return response.json()
+
+
 def _notify_offset_approver_pending(send_message: Callable[..., Any], row: dict[str, Any]) -> None:
     if not OFFSET_APPROVER_OPEN_IDS:
         return
@@ -1406,6 +1439,34 @@ def _notify_offset_approver_pending(send_message: Callable[..., Any], row: dict[
         r = send_message(aid, body, msg_type="interactive", receive_id_type="open_id")
         if isinstance(r, dict) and int(r.get("code", -1)) != 0:
             print(f"[offsetleave] approver DM failed for {aid!r}: {r!r}", flush=True)
+
+
+def notify_offset_approvers_for_record(
+    record_id: str,
+    *,
+    send_message: Optional[Callable[..., Any]] = None,
+    row: Optional[dict[str, Any]] = None,
+    fallback_row: Optional[dict[str, Any]] = None,
+) -> None:
+    """DM pending-approval cards to all configured approvers (Lark bot or web submit)."""
+    rid = (record_id or "").strip()
+    if not rid:
+        return
+    send = send_message or _lark_im_send_message
+    resolved = row
+    if resolved is None:
+        try:
+            resolved = _offset_admin_row_by_id(rid)
+        except Exception:
+            if fallback_row:
+                resolved = fallback_row
+            else:
+                try:
+                    resolved = od.get_ose_offset_record_admin_row(rid)
+                except Exception as exc:
+                    print(f"[offsetleave] approver notify: no row for {rid!r}: {exc!r}", flush=True)
+                    return
+    _notify_offset_approver_pending(send, resolved)
 
 
 def _toast_approval_problem(send_message: Callable[..., Any], chat_id: str, text: str) -> None:
@@ -1978,19 +2039,20 @@ def handle_card_callback(
                 )
             if rid:
                 try:
-                    try:
-                        row = _offset_admin_row_by_id(rid)
-                    except Exception:
-                        row = _local_pending_offset_row(
-                            record_id=rid,
-                            request_person=request_person,
-                            exchange_person=exchange_person,
-                            shift_type=shift_type,
-                            original_date=original_date,
-                            exchange_date=exchange_date,
-                            reason=reason,
-                        )
-                    _notify_offset_approver_pending(send_message, row)
+                    fb = _local_pending_offset_row(
+                        record_id=rid,
+                        request_person=request_person,
+                        exchange_person=exchange_person,
+                        shift_type=shift_type,
+                        original_date=original_date,
+                        exchange_date=exchange_date,
+                        reason=reason,
+                    )
+                    notify_offset_approvers_for_record(
+                        rid,
+                        send_message=send_message,
+                        fallback_row=fb,
+                    )
                 except Exception as exc:
                     print(f"[offsetleave] approver DM failed: {exc!r}", flush=True)
             return True
