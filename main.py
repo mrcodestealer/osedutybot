@@ -1368,6 +1368,19 @@ def evening_reminder():
 _ose_bitable_sync_lock = threading.Lock()
 
 
+def poll_offset_approver_notifications_from_bitable():
+    """Notify approvers for pending offsets created directly in Bitable (manual base rows)."""
+    try:
+        import offsetleave as ol
+
+        stats = ol.scan_bitable_pending_offsets_for_approver_notify()
+        n = int((stats or {}).get("notified") or 0)
+        if n:
+            print(f"[offsetleave] bitable poll: notified approvers for {n} pending offset(s)", flush=True)
+    except Exception as exc:
+        print(f"[offsetleave] bitable approver poll failed: {exc!r}", flush=True)
+
+
 def ose_leave_offset_daily_sync():
     """Refresh OSE Lark Bitable leave/offset cache once per day (same host TZ as morning OSE)."""
     if not _ose_bitable_sync_lock.acquire(blocking=False):
@@ -1430,6 +1443,13 @@ def _add_scheduler_job(job_id: str, func, trigger: str, **trigger_kwargs) -> Non
 _add_scheduler_job("ose_leave_offset_daily_sync", ose_leave_offset_daily_sync, "cron", hour=6, minute=50)
 _add_scheduler_job("morning_reminder", morning_reminder, "cron", hour=7, minute=0)
 _add_scheduler_job("evening_reminder", evening_reminder, "cron", hour=19, minute=0)
+_offset_approver_poll_min = int(os.getenv("OSE_OFFSET_APPROVER_POLL_MIN", "3"))
+_add_scheduler_job(
+    "poll_offset_approver_notifications",
+    poll_offset_approver_notifications_from_bitable,
+    "interval",
+    minutes=max(1, _offset_approver_poll_min),
+)
 try:
     from amountloss import amount_loss_9am_enabled as _amount_loss_9am_enabled
 
@@ -3543,6 +3563,7 @@ _try_mount_webapp_blueprint()
 if not scheduler.running:
     scheduler.start()
     atexit.register(lambda: scheduler.shutdown(wait=False))
+    threading.Thread(target=poll_offset_approver_notifications_from_bitable, daemon=True).start()
 # Load daily reminder jobs from Lark Sheet at startup.
 try:
     _cnt, _total = reminder.sync_sheet_daily_reminders(

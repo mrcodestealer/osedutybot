@@ -4,13 +4,19 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import threading
 from datetime import date, datetime
 from typing import Any, Callable, Optional
 
 import requests
 
 import ose_Duty as od
+
+_CHBOX_DIR = os.path.dirname(os.path.abspath(__file__))
+_OFFSET_APPROVER_NOTIFIED_PATH = os.path.join(_CHBOX_DIR, "offset_approver_notified.json")
+_OFFSET_APPROVER_NOTIFIED_LOCK = threading.Lock()
 
 _OFFSET_SUBMIT_KEY = "offsetleave_offset_submit"
 _LEAVE_SUBMIT_KEY = "offsetleave_leave_submit"
@@ -1467,6 +1473,78 @@ def notify_offset_approvers_for_record(
                     print(f"[offsetleave] approver notify: no row for {rid!r}: {exc!r}", flush=True)
                     return
     _notify_offset_approver_pending(send, resolved)
+    _mark_offset_record_notified(rid)
+
+
+def _load_notified_offset_record_ids_unlocked() -> set[str]:
+    try:
+        with open(_OFFSET_APPROVER_NOTIFIED_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return set()
+    except Exception:
+        return set()
+    ids = data.get("record_ids") if isinstance(data, dict) else data
+    if not isinstance(ids, list):
+        return set()
+    return {str(x).strip() for x in ids if str(x).strip()}
+
+
+def _load_notified_offset_record_ids() -> set[str]:
+    with _OFFSET_APPROVER_NOTIFIED_LOCK:
+        return _load_notified_offset_record_ids_unlocked()
+
+
+def _mark_offset_record_notified(record_id: str) -> None:
+    rid = (record_id or "").strip()
+    if not rid:
+        return
+    with _OFFSET_APPROVER_NOTIFIED_LOCK:
+        known = _load_notified_offset_record_ids_unlocked()
+        if rid in known:
+            return
+        known.add(rid)
+        tmp = f"{_OFFSET_APPROVER_NOTIFIED_PATH}.tmp"
+        payload = {"record_ids": sorted(known)}
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, _OFFSET_APPROVER_NOTIFIED_PATH)
+
+
+def _offset_row_ready_for_approver_notify(row: dict[str, Any]) -> bool:
+    if not bool(row.get("pending")):
+        return False
+    if not str(row.get("request_person") or "").strip():
+        return False
+    if not str(row.get("exchange_person") or "").strip():
+        return False
+    return True
+
+
+def scan_bitable_pending_offsets_for_approver_notify() -> dict[str, int]:
+    """
+    Find pending offset rows added directly in Bitable (not via submit_ose_offset)
+    and DM approvers. Uses ``offset_approver_notified.json`` to avoid duplicate cards.
+    """
+    od.invalidate_ose_bitable_cache()
+    items = (od.get_ose_offset_records_admin() or {}).get("items") or []
+    notified_ids = _load_notified_offset_record_ids()
+    sent = 0
+    for row in items:
+        if not isinstance(row, dict):
+            continue
+        rid = str(row.get("record_id") or "").strip()
+        if not rid or rid in notified_ids:
+            continue
+        if not _offset_row_ready_for_approver_notify(row):
+            continue
+        try:
+            notify_offset_approvers_for_record(rid, row=dict(row))
+            sent += 1
+            notified_ids.add(rid)
+        except Exception as exc:
+            print(f"[offsetleave] bitable scan notify failed for {rid!r}: {exc!r}", flush=True)
+    return {"scanned": len(items), "notified": sent}
 
 
 def _toast_approval_problem(send_message: Callable[..., Any], chat_id: str, text: str) -> None:
