@@ -18,6 +18,10 @@ _CHBOX_DIR = os.path.dirname(os.path.abspath(__file__))
 _OFFSET_APPROVER_NOTIFIED_PATH = os.path.join(_CHBOX_DIR, "offset_approver_notified.json")
 _OFFSET_APPROVER_NOTIFIED_LOCK = threading.Lock()
 
+# Prevent opening multiple edit forms for the same pending record (double-tap Edit).
+_OFFSET_EDIT_OPEN_LOCK = threading.Lock()
+_OFFSET_EDIT_OPEN: dict[str, str] = {}
+
 _OFFSET_SUBMIT_KEY = "offsetleave_offset_submit"
 _LEAVE_SUBMIT_KEY = "offsetleave_leave_submit"
 _OFFSET_APPR_PICK_KEY = "offsetleave_offset_appr_pick"
@@ -93,6 +97,87 @@ def resolve_request_person(open_id: str, token: str) -> str:
 
 def wants_editoffset(text: str) -> bool:
     return bool(re.match(r"^\s*editoffset\s*$", (text or "").strip(), re.I))
+
+
+def _edit_form_session_key(owner_open_id: str, record_id: str) -> str:
+    return f"{(owner_open_id or '').strip()}:{(record_id or '').strip()}"
+
+
+def _clear_edit_forms_for_owner(owner_open_id: str) -> None:
+    oid = (owner_open_id or "").strip()
+    if not oid:
+        return
+    prefix = f"{oid}:"
+    with _OFFSET_EDIT_OPEN_LOCK:
+        for key in list(_OFFSET_EDIT_OPEN.keys()):
+            if key.startswith(prefix):
+                _OFFSET_EDIT_OPEN.pop(key, None)
+
+
+def _is_edit_form_open(owner_open_id: str, record_id: str) -> bool:
+    return _edit_form_session_key(owner_open_id, record_id) in _OFFSET_EDIT_OPEN
+
+
+def _mark_edit_form_open(owner_open_id: str, record_id: str, message_id: str = "") -> None:
+    key = _edit_form_session_key(owner_open_id, record_id)
+    if not key or key == ":":
+        return
+    with _OFFSET_EDIT_OPEN_LOCK:
+        _OFFSET_EDIT_OPEN[key] = (message_id or "open").strip() or "open"
+
+
+def _clear_edit_form_open(owner_open_id: str, record_id: str) -> None:
+    key = _edit_form_session_key(owner_open_id, record_id)
+    with _OFFSET_EDIT_OPEN_LOCK:
+        _OFFSET_EDIT_OPEN.pop(key, None)
+
+
+def _deliver_requester_offset_edit_menu(
+    *,
+    owner_open_id: str,
+    request_person: str,
+    group_chat_id: str,
+    chat_type: Optional[str],
+    send_message: Callable[..., dict[str, Any]],
+    token: str,
+) -> None:
+    """editoffset in group/DM: only this user's pending rows (never approver admin list)."""
+    rows = _pending_offsets_for_request_person(request_person)
+    if not rows:
+        send_message(
+            group_chat_id,
+            f"No pending offset found for **{request_person}**. "
+            "Approved or rejected requests cannot be edited with editoffset.",
+        )
+        return
+    if len(rows) == 1:
+        card = build_offset_edit_form_card(
+            owner_open_id=owner_open_id,
+            request_person=request_person,
+            row=rows[0],
+            is_admin=False,
+        )
+        _deliver_private_card(
+            owner_open_id=owner_open_id,
+            group_chat_id=group_chat_id,
+            chat_type=chat_type,
+            card=card,
+            send_message=send_message,
+            token=token,
+        )
+        rid = str(rows[0].get("record_id") or "").strip()
+        if rid:
+            _mark_edit_form_open(owner_open_id, rid)
+        return
+    card = build_offset_edit_list_card(owner_open_id, request_person, rows, is_admin=False)
+    _deliver_private_card(
+        owner_open_id=owner_open_id,
+        group_chat_id=group_chat_id,
+        chat_type=chat_type,
+        card=card,
+        send_message=send_message,
+        token=token,
+    )
 
 
 def wants_deleteoffset(text: str) -> bool:
@@ -751,36 +836,13 @@ def handle_editoffset_command(
         return True
     try:
         token = get_token_func()
-        if _is_offset_approver_open_id(oid):
-            request_person = resolve_request_person(oid, token)
-            own_pending = _pending_offsets_for_request_person(request_person)
-            if own_pending:
-                card = build_offset_edit_list_card(oid, request_person, own_pending, is_admin=False)
-            else:
-                rows = _non_pending_offsets_all()
-                if not rows:
-                    send_message(
-                        chat_id,
-                        "No approved or rejected offset records found to edit, and you have no pending requests as requester.",
-                    )
-                    return True
-                card = build_offset_edit_list_card(oid, "", rows, is_admin=True)
-        else:
-            request_person = resolve_request_person(oid, token)
-            rows = _pending_offsets_for_request_person(request_person)
-            if not rows:
-                send_message(
-                    chat_id,
-                    "No offset found that you requested (no pending rows). "
-                    "Already approved or rejected requests cannot be edited here — offset approvers use editoffset for those.",
-                )
-                return True
-            card = build_offset_edit_list_card(oid, request_person, rows, is_admin=False)
-        _deliver_private_card(
+        _clear_edit_forms_for_owner(oid)
+        request_person = resolve_request_person(oid, token)
+        _deliver_requester_offset_edit_menu(
             owner_open_id=oid,
+            request_person=request_person,
             group_chat_id=chat_id,
             chat_type=chat_type,
-            card=card,
             send_message=send_message,
             token=token,
         )
@@ -1310,6 +1372,28 @@ def build_offset_requester_responded_card(
     }
 
 
+def build_offset_requester_edited_notify_card(
+    row: dict[str, Any],
+    *,
+    requester_name: str,
+) -> dict[str, Any]:
+    """Card for approvers when a requester updates a pending offset."""
+    rn = _lark_md_cell(requester_name)
+    md = _offset_approval_table_md(row, status="Pending")
+    body_md = (
+        f"**{rn}** updated a **pending** offset request. Please review the details below.\n\n{md}"
+    )
+    return {
+        "schema": "2.0",
+        "config": {"width_mode": "fill"},
+        "header": {
+            "template": "wathet",
+            "title": {"tag": "plain_text", "content": "OSE offset — request updated"},
+        },
+        "body": {"elements": [{"tag": "div", "text": {"tag": "lark_md", "content": body_md}}]},
+    }
+
+
 def build_offset_other_approver_responded_card(
     row: dict[str, Any],
     *,
@@ -1594,6 +1678,23 @@ def _notify_requester_offset_responded(
         print(f"[offsetleave] requester DM failed: {r!r}", flush=True)
 
 
+def _notify_offset_approvers_requester_edited(
+    send_message: Callable[..., Any],
+    row: dict[str, Any],
+    *,
+    requester_name: str,
+) -> None:
+    card = build_offset_requester_edited_notify_card(row, requester_name=requester_name)
+    body = json.dumps(card, ensure_ascii=False)
+    for oid in OFFSET_APPROVER_OPEN_IDS:
+        aid = (oid or "").strip()
+        if not aid:
+            continue
+        r = send_message(aid, body, msg_type="interactive", receive_id_type="open_id")
+        if isinstance(r, dict) and int(r.get("code", -1)) != 0:
+            print(f"[offsetleave] requester-edit notify failed for {aid!r}: {r!r}", flush=True)
+
+
 def _notify_other_offset_approvers_responded(
     send_message: Callable[..., Any],
     row: dict[str, Any],
@@ -1780,10 +1881,18 @@ def _handle_offset_edit_pick(
         rid = str(parsed.get("record_id") or "").strip()
         if not rid:
             raise ValueError("missing record id")
-        if not mid:
-            raise ValueError("missing message id")
+        if not is_admin and _is_edit_form_open(owner, rid):
+            _toast_approval_problem(
+                send_message,
+                cid,
+                "You already opened the edit form for this request. "
+                "Finish **Save** on that form, or run **editoffset** again to start over.",
+            )
+            return True
         row = _offset_admin_row_by_id(rid)
         if is_admin:
+            if not mid:
+                raise ValueError("missing message id")
             if bool(row.get("pending")):
                 raise ValueError(
                     "This record is still pending. Approver editoffset is for approved/rejected rows only; "
@@ -1804,15 +1913,20 @@ def _handle_offset_edit_pick(
                 raise ValueError("That request is no longer pending (already approved or rejected).")
             if od._title_name(str(row.get("request_person") or "")) != od._title_name(rp_live or ""):
                 raise ValueError("That offset is not yours to edit.")
-            _patch_interactive_card_message(
-                mid,
-                build_offset_edit_form_card(
-                    owner_open_id=owner,
-                    request_person=rp_live or "",
-                    row=row,
-                    is_admin=False,
-                ),
+            form_card = build_offset_edit_form_card(
+                owner_open_id=owner,
+                request_person=rp_live or "",
+                row=row,
+                is_admin=False,
             )
+            if mid:
+                _patch_interactive_card_message(mid, form_card)
+                _mark_edit_form_open(owner, rid, mid)
+            elif cid:
+                _send_ephemeral_card(cid, owner, form_card, token)
+                _mark_edit_form_open(owner, rid)
+            else:
+                raise ValueError("missing message id")
     except Exception as e:
         if cid:
             send_message(chat_id, f"❌ {e}")
@@ -1858,6 +1972,7 @@ def _handle_offset_edit_submit(
                 exchange_date=exchange_date,
                 reason=reason,
             )
+            _clear_edit_form_open(owner, rid)
             _patch_my_offset_list_after_change(
                 message_id=mid,
                 mode="edit_admin",
@@ -1882,6 +1997,16 @@ def _handle_offset_edit_submit(
                 exchange_date=exchange_date,
                 reason=reason,
             )
+            _clear_edit_form_open(owner, rid)
+            fresh = _offset_admin_row_by_id(rid)
+            try:
+                _notify_offset_approvers_requester_edited(
+                    send_message,
+                    fresh,
+                    requester_name=rp_live or str(fresh.get("request_person") or ""),
+                )
+            except Exception as exc:
+                print(f"[offsetleave] requester-edit approver notify failed: {exc!r}", flush=True)
             _patch_my_offset_list_after_change(
                 message_id=mid,
                 mode="edit",
