@@ -7,6 +7,7 @@ import json
 import os
 import re
 import threading
+import time
 from datetime import date, datetime
 from typing import Any, Callable, Optional
 
@@ -21,6 +22,12 @@ _OFFSET_APPROVER_NOTIFIED_LOCK = threading.Lock()
 # Prevent opening multiple edit forms for the same pending record (double-tap Edit).
 _OFFSET_EDIT_OPEN_LOCK = threading.Lock()
 _OFFSET_EDIT_OPEN: dict[str, str] = {}
+
+# Prevent double-tap Submit creating duplicate Bitable rows (Lark + web).
+_OFFSET_SUBMIT_LOCK = threading.Lock()
+_OFFSET_SUBMIT_IN_FLIGHT: set[str] = set()
+_OFFSET_SUBMIT_RECENT: dict[str, float] = {}
+_OFFSET_SUBMIT_DEDUPE_SEC = int(os.getenv("OSE_OFFSET_SUBMIT_DEDUPE_SEC", "60"))
 
 _OFFSET_SUBMIT_KEY = "offsetleave_offset_submit"
 _LEAVE_SUBMIT_KEY = "offsetleave_leave_submit"
@@ -337,6 +344,93 @@ def build_offset_form_card(*, owner_open_id: str, request_person: str) -> dict[s
                         },
                     ],
                 },
+            ]
+        },
+    }
+
+
+def offset_submit_fingerprint(
+    *,
+    request_person: str,
+    exchange_person: str,
+    shift_type: str,
+    original_date: date,
+    exchange_date: date,
+    reason: str,
+) -> str:
+    parts = [
+        od._title_name(request_person),
+        od._title_name(exchange_person),
+        (shift_type or "").strip().upper(),
+        original_date.isoformat(),
+        exchange_date.isoformat(),
+        (reason or "").strip().lower(),
+    ]
+    return "|".join(parts)
+
+
+def try_begin_offset_submit(actor_key: str, fingerprint: str) -> Optional[str]:
+    """
+    Reserve a submit slot for ``actor_key`` (Lark open_id or ``web:{name}``).
+    Returns an error message when duplicate / in-flight; ``None`` if OK to proceed.
+    """
+    actor = (actor_key or "").strip()
+    if not actor:
+        actor = "unknown"
+    fp = (fingerprint or "").strip()
+    dedupe_key = f"{actor}:{fp}"
+    now = time.monotonic()
+    with _OFFSET_SUBMIT_LOCK:
+        if actor in _OFFSET_SUBMIT_IN_FLIGHT:
+            return "Your offset submit is already processing. Please wait."
+        last = _OFFSET_SUBMIT_RECENT.get(dedupe_key, 0.0)
+        if fp and now - last < _OFFSET_SUBMIT_DEDUPE_SEC:
+            return (
+                "Duplicate submit ignored — the same offset was just saved. "
+                "Check your pending list or wait a minute before submitting again."
+            )
+        _OFFSET_SUBMIT_IN_FLIGHT.add(actor)
+    return None
+
+
+def release_offset_submit(actor_key: str, fingerprint: str, *, success: bool) -> None:
+    actor = (actor_key or "").strip() or "unknown"
+    fp = (fingerprint or "").strip()
+    dedupe_key = f"{actor}:{fp}"
+    with _OFFSET_SUBMIT_LOCK:
+        _OFFSET_SUBMIT_IN_FLIGHT.discard(actor)
+        if success and fp:
+            _OFFSET_SUBMIT_RECENT[dedupe_key] = time.monotonic()
+            stale_before = time.monotonic() - max(_OFFSET_SUBMIT_DEDUPE_SEC * 4, 120)
+            for k, ts in list(_OFFSET_SUBMIT_RECENT.items()):
+                if ts < stale_before:
+                    _OFFSET_SUBMIT_RECENT.pop(k, None)
+
+
+def build_offset_submit_done_card(
+    *,
+    request_person: str,
+    record_id: str,
+    message: str,
+) -> dict[str, Any]:
+    rid = (record_id or "").strip() or "—"
+    body = (message or "Offset submitted.").strip()
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "green",
+            "title": {"tag": "plain_text", "content": "OSE offset — submitted"},
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"**Request person:** {_lark_md_cell(request_person)}\n\n{body}\n\n**Record:** `{_lark_md_cell(rid)}`",
+                    },
+                }
             ]
         },
     }
@@ -1135,7 +1229,12 @@ def _lark_md_cell(s: Any) -> str:
     return t or "—"
 
 
-def _offset_approval_table_md(row: dict[str, Any], *, status: str) -> str:
+def _offset_approval_table_md(
+    row: dict[str, Any],
+    *,
+    status: str,
+    intro: Optional[str] = None,
+) -> str:
     rd = _lark_md_cell(row.get("request_date"))
     rp = _lark_md_cell(row.get("request_person"))
     ex = _lark_md_cell(row.get("exchange_person"))
@@ -1144,9 +1243,12 @@ def _offset_approval_table_md(row: dict[str, Any], *, status: str) -> str:
     xd = _lark_md_cell(row.get("exchange_date"))
     rs = _lark_md_cell(row.get("reason"))
     st = _lark_md_cell(status)
-    lines = [
+    intro_line = intro or (
         "**Someone submitted an offset record.** Review the table, tap **Approve** or **Reject**, "
-        "then optional **Remarks**, then **Confirm**.",
+        "then optional **Remarks**, then **Confirm**."
+    )
+    lines = [
+        intro_line,
         "",
         "| REQ. DATE | REQUEST PERSON | EXCHANGE PERSON | SHIFT | ORIGINAL DATE | EXCHANGE DATE | REASON | STATUS |",
         "| --- | --- | --- | --- | --- | --- | --- | --- |",
@@ -1377,20 +1479,29 @@ def build_offset_requester_edited_notify_card(
     *,
     requester_name: str,
 ) -> dict[str, Any]:
-    """Card for approvers when a requester updates a pending offset."""
+    """Interactive card for approvers when a requester updates a pending offset (re-approve/reject)."""
+    rid = str(row.get("record_id") or "").strip()
     rn = _lark_md_cell(requester_name)
-    md = _offset_approval_table_md(row, status="Pending")
-    body_md = (
-        f"**{rn}** updated a **pending** offset request. Please review the details below.\n\n{md}"
+    intro = (
+        f"**{rn}** updated a **pending** offset request. Please **review again** — "
+        "tap **Approve** or **Reject**, then optional **Remarks**, then **Confirm**."
     )
+    md = _offset_approval_table_md(row, status="Pending", intro=intro)
+    approve_val = {"k": _OFFSET_APPR_PICK_KEY, "record_id": rid, "decision": "Approved"}
+    reject_val = {"k": _OFFSET_APPR_PICK_KEY, "record_id": rid, "decision": "Rejected"}
     return {
         "schema": "2.0",
-        "config": {"width_mode": "fill"},
+        "config": {"update_multi": True, "width_mode": "fill"},
         "header": {
             "template": "wathet",
-            "title": {"tag": "plain_text", "content": "OSE offset — request updated"},
+            "title": {"tag": "plain_text", "content": "OSE offset — request updated (re-review)"},
         },
-        "body": {"elements": [{"tag": "div", "text": {"tag": "lark_md", "content": body_md}}]},
+        "body": {
+            "elements": [
+                {"tag": "div", "text": {"tag": "lark_md", "content": md}},
+                _approval_pick_button_row(approve_val, reject_val),
+            ]
+        },
     }
 
 
@@ -2209,7 +2320,7 @@ def handle_card_callback(
         return False
     cid = (chat_id or "").strip()
     try:
-        _, request_person = _assert_owner(parsed, sender_open_id)
+        owner, request_person = _assert_owner(parsed, sender_open_id)
         action = event_obj.get("action") if isinstance(event_obj.get("action"), dict) else {}
         reason = _get_form_field(action, parsed, event_obj, "reason")
         if not reason:
@@ -2225,7 +2336,7 @@ def handle_card_callback(
                 if cid:
                     send_message(chat_id, "❌ Please fill Exchange person and Shift.")
                 return True
-            out = od.submit_ose_offset(
+            fp = offset_submit_fingerprint(
                 request_person=request_person,
                 exchange_person=exchange_person,
                 shift_type=shift_type,
@@ -2233,13 +2344,54 @@ def handle_card_callback(
                 exchange_date=exchange_date,
                 reason=reason,
             )
-            rid = str((out or {}).get("record_id") or "").strip()
-            _dismiss_ephemeral_form(_event_message_id(event_obj, webhook_data))
-            if cid:
-                send_message(
-                    chat_id,
-                    f"✅ Offset submitted for {request_person} (record {rid or 'saved'}).",
+            dup_err = try_begin_offset_submit(owner, fp)
+            mid = _event_message_id(event_obj, webhook_data)
+            if dup_err:
+                _toast_approval_problem(send_message, cid, f"❌ {dup_err}")
+                if mid:
+                    try:
+                        _patch_interactive_card_message(
+                            mid,
+                            build_offset_submit_done_card(
+                                request_person=request_person,
+                                record_id="",
+                                message=dup_err,
+                            ),
+                        )
+                    except Exception:
+                        pass
+                return True
+            _dismiss_ephemeral_form(mid)
+            try:
+                out = od.submit_ose_offset(
+                    request_person=request_person,
+                    exchange_person=exchange_person,
+                    shift_type=shift_type,
+                    original_date=original_date,
+                    exchange_date=exchange_date,
+                    reason=reason,
                 )
+                rid = str((out or {}).get("record_id") or "").strip()
+                release_offset_submit(owner, fp, success=True)
+                done_msg = f"✅ Offset submitted for {request_person} (record {rid or 'saved'})."
+                if mid:
+                    try:
+                        _patch_interactive_card_message(
+                            mid,
+                            build_offset_submit_done_card(
+                                request_person=request_person,
+                                record_id=rid,
+                                message=done_msg,
+                            ),
+                        )
+                    except Exception:
+                        if cid:
+                            send_message(chat_id, done_msg)
+                elif cid:
+                    send_message(chat_id, done_msg)
+            except Exception as submit_exc:
+                release_offset_submit(owner, fp, success=False)
+                raise submit_exc
             return True
         leave_type = _get_form_field(action, parsed, event_obj, "leave_type")
         start_date = _parse_date_iso(_get_form_field(action, parsed, event_obj, "start_date"))

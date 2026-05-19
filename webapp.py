@@ -3112,9 +3112,12 @@ _OSE_SUBMIT_OFFSET_PAGE = """<!DOCTYPE html>
     if (offsetRefreshBtn) offsetRefreshBtn.addEventListener("click", function () { loadOffsetList(true); });
     var form = document.getElementById("ose-offset-form");
     if (form) {
+      var offsetSubmitting = false;
       form.addEventListener("submit", function (ev) {
         ev.preventDefault();
+        if (offsetSubmitting) return;
         var msg = document.getElementById("ose-offset-msg");
+        var submitBtn = form.querySelector('button[type="submit"]');
         var payload = {
           request_person: document.getElementById("ose-offset-req").value,
           exchange_person: document.getElementById("ose-offset-exc").value,
@@ -3125,18 +3128,24 @@ _OSE_SUBMIT_OFFSET_PAGE = """<!DOCTYPE html>
           exchange_day: document.getElementById("ose-offset-xchg-day").value,
           reason: document.getElementById("ose-offset-reason").value
         };
+        offsetSubmitting = true;
+        if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = "Submitting…"; }
+        if (msg) { msg.textContent = "Submitting…"; msg.className = "ose-form-msg"; }
         fetch(API_SUBMIT, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload)
         }).then(function (r) { return r.json(); }).then(function (data) {
-          if (!data || !data.ok) throw new Error((data && data.error) || "Submit failed");
+          if (!data || (data.ok === false && data.error)) throw new Error((data && data.error) || "Submit failed");
           if (msg) { msg.textContent = "Offset submitted."; msg.className = "ose-form-msg ok"; }
           form.reset();
           initMonthDaySelects();
           loadOffsetList(true);
         }).catch(function (e) {
           if (msg) { msg.textContent = String(e); msg.className = "ose-form-msg"; }
+        }).finally(function () {
+          offsetSubmitting = false;
+          if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = "Submit"; }
         });
       });
     }
@@ -5182,24 +5191,48 @@ def api_ose_submit_offset():
     body = request.get_json(silent=True) or {}
     try:
         import ose_Duty as od
+        import offsetleave as ol
 
-        out = od.submit_ose_offset(
-            request_person=str(body.get("request_person") or ""),
-            exchange_person=str(body.get("exchange_person") or ""),
-            shift_type=str(body.get("shift_type") or ""),
-            original_date=od._resolve_submit_date(
-                month=body.get("original_month"),
-                day=body.get("original_day"),
-                raw_date=str(body.get("original_date") or ""),
-            ),
-            exchange_date=od._resolve_submit_date(
-                month=body.get("exchange_month"),
-                day=body.get("exchange_day"),
-                raw_date=str(body.get("exchange_date") or ""),
-            ),
-            reason=str(body.get("reason") or ""),
+        request_person = str(body.get("request_person") or "")
+        exchange_person = str(body.get("exchange_person") or "")
+        shift_type = str(body.get("shift_type") or "")
+        original_date = od._resolve_submit_date(
+            month=body.get("original_month"),
+            day=body.get("original_day"),
+            raw_date=str(body.get("original_date") or ""),
         )
-        return jsonify(out)
+        exchange_date = od._resolve_submit_date(
+            month=body.get("exchange_month"),
+            day=body.get("exchange_day"),
+            raw_date=str(body.get("exchange_date") or ""),
+        )
+        reason = str(body.get("reason") or "")
+        actor = f"web:{od._title_name(request_person)}"
+        fp = ol.offset_submit_fingerprint(
+            request_person=request_person,
+            exchange_person=exchange_person,
+            shift_type=shift_type,
+            original_date=original_date,
+            exchange_date=exchange_date,
+            reason=reason,
+        )
+        dup_err = ol.try_begin_offset_submit(actor, fp)
+        if dup_err:
+            return jsonify(ok=False, error=dup_err), 400
+        try:
+            out = od.submit_ose_offset(
+                request_person=request_person,
+                exchange_person=exchange_person,
+                shift_type=shift_type,
+                original_date=original_date,
+                exchange_date=exchange_date,
+                reason=reason,
+            )
+            ol.release_offset_submit(actor, fp, success=True)
+            return jsonify(out)
+        except Exception:
+            ol.release_offset_submit(actor, fp, success=False)
+            raise
     except Exception as e:
         return jsonify(ok=False, error=str(e)), 400
 
