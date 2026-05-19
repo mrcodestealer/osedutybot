@@ -23,6 +23,10 @@ _OFFSET_APPROVER_NOTIFIED_LOCK = threading.Lock()
 _OFFSET_EDIT_OPEN_LOCK = threading.Lock()
 _OFFSET_EDIT_OPEN: dict[str, str] = {}
 
+# Prevent double-tap Delete on the same row (duplicate callbacks / impatient clicks).
+_OFFSET_DELETE_LOCK = threading.Lock()
+_OFFSET_DELETE_IN_FLIGHT: set[str] = {}
+
 # Prevent double-tap Submit creating duplicate Bitable rows (Lark + web).
 _OFFSET_SUBMIT_LOCK = threading.Lock()
 _OFFSET_SUBMIT_IN_FLIGHT: set[str] = set()
@@ -137,6 +141,27 @@ def _clear_edit_form_open(owner_open_id: str, record_id: str) -> None:
     key = _edit_form_session_key(owner_open_id, record_id)
     with _OFFSET_EDIT_OPEN_LOCK:
         _OFFSET_EDIT_OPEN.pop(key, None)
+
+
+def _delete_session_key(owner_open_id: str, record_id: str) -> str:
+    return f"{(owner_open_id or '').strip()}:{(record_id or '').strip()}"
+
+
+def _try_begin_offset_delete(owner_open_id: str, record_id: str) -> Optional[str]:
+    key = _delete_session_key(owner_open_id, record_id)
+    if not key or key == ":":
+        return "missing record"
+    with _OFFSET_DELETE_LOCK:
+        if key in _OFFSET_DELETE_IN_FLIGHT:
+            return "Delete already in progress for this request — please wait."
+        _OFFSET_DELETE_IN_FLIGHT.add(key)
+    return None
+
+
+def _end_offset_delete(owner_open_id: str, record_id: str) -> None:
+    key = _delete_session_key(owner_open_id, record_id)
+    with _OFFSET_DELETE_LOCK:
+        _OFFSET_DELETE_IN_FLIGHT.discard(key)
 
 
 def _deliver_requester_offset_edit_menu(
@@ -1328,15 +1353,37 @@ def _offset_approval_table_md(
     return "\n".join(lines)
 
 
+def _lookup_offset_row(record_id: str, *, bust_cache: bool = False) -> Optional[dict[str, Any]]:
+    """Find offset row by Bitable record_id; optionally force a fresh Bitable read."""
+    rid = (record_id or "").strip()
+    if not rid:
+        return None
+
+    def _scan() -> Optional[dict[str, Any]]:
+        for it in (od.get_ose_offset_records_admin().get("items") or []):
+            if str(it.get("record_id") or "").strip() == rid:
+                return dict(it)
+        return None
+
+    if bust_cache:
+        od.invalidate_ose_bitable_cache()
+    row = _scan()
+    if row is not None:
+        return row
+    if not bust_cache:
+        od.invalidate_ose_bitable_cache()
+        return _scan()
+    return None
+
+
 def _offset_admin_row_by_id(record_id: str) -> dict[str, Any]:
     rid = (record_id or "").strip()
     if not rid:
         raise ValueError("missing record_id")
-    data = od.get_ose_offset_records_admin()
-    for it in (data or {}).get("items") or []:
-        if str(it.get("record_id") or "").strip() == rid:
-            return dict(it)
-    raise KeyError(f"offset record {rid!r}")
+    row = _lookup_offset_row(rid, bust_cache=True)
+    if row is None:
+        raise KeyError(f"offset record {rid!r}")
+    return row
 
 
 def _local_pending_offset_row(
@@ -2236,26 +2283,30 @@ def _handle_offset_delete_row(
 ) -> bool:
     cid = (chat_id or "").strip()
     mid = _event_message_id(event_obj, webhook_data)
+    owner = ""
+    rid = ""
     try:
         token = od.get_tenant_access_token()
         owner, rp_live, is_admin = _assert_offset_card_actor(parsed, sender_open_id, token)
         rid = str(parsed.get("record_id") or "").strip()
         if not rid:
             raise ValueError("missing record id")
-        row_chk = _offset_admin_row_by_id(rid)
+        busy = _try_begin_offset_delete(owner, rid)
+        if busy:
+            _toast_approval_problem(send_message, cid, f"⏳ {busy}")
+            return True
+        row_chk = _lookup_offset_row(rid, bust_cache=True)
+        if row_chk is None:
+            raise ValueError(
+                "This record was already deleted or is no longer in the table. "
+                "Run **deleteoffset** to refresh the list."
+            )
         if is_admin:
             if bool(row_chk.get("pending")):
                 raise ValueError(
                     "Cannot delete a pending row from the approver list. "
                     "The requester should use deleteoffset for pending requests."
                 )
-            od.delete_ose_offset_record(record_id=rid)
-            _patch_my_offset_list_after_change(
-                message_id=mid,
-                mode="delete_admin",
-                owner_open_id=owner,
-                request_person="",
-            )
         else:
             if not bool(row_chk.get("pending")):
                 raise ValueError(
@@ -2264,18 +2315,55 @@ def _handle_offset_delete_row(
                 )
             if od._title_name(str(row_chk.get("request_person") or "")) != od._title_name(rp_live or ""):
                 raise ValueError("Not your request to delete.")
+        try:
             od.delete_ose_offset_record(record_id=rid)
-            _patch_my_offset_list_after_change(
-                message_id=mid,
-                mode="delete",
-                owner_open_id=owner,
-                request_person=rp_live or "",
+        except RuntimeError as exc:
+            err = str(exc).lower()
+            if "not found" in err or "record not exist" in err or "125404" in err:
+                od.invalidate_ose_bitable_cache()
+            else:
+                raise
+        od.invalidate_ose_bitable_cache()
+        if is_admin:
+            rows = _non_pending_offsets_all()
+            card = (
+                build_offset_delete_list_card(owner, "", rows, is_admin=True)
+                if rows
+                else _build_offset_delete_approver_empty_patch_card()
             )
+            fallback = "✅ Offset record deleted."
+        else:
+            rp = rp_live or str(row_chk.get("request_person") or "")
+            rows = _pending_offsets_for_request_person(rp)
+            card = (
+                build_offset_delete_list_card(owner, rp, rows, is_admin=False)
+                if rows
+                else _build_offset_delete_empty_patch_card(rp)
+            )
+            fallback = f"✅ Deleted pending offset for {rp}."
+        _finish_ephemeral_card_ui(
+            owner_open_id=owner,
+            chat_id=cid,
+            card=card,
+            message_id=mid,
+            send_message=send_message,
+            token=token,
+            fallback_text=fallback,
+        )
+    except KeyError:
+        _toast_approval_problem(
+            send_message,
+            cid,
+            "❌ This record is no longer available (may already be deleted). Run **deleteoffset** again.",
+        )
     except Exception as e:
         if cid:
             send_message(chat_id, f"❌ Delete failed: {e}")
         else:
             print(f"[offsetleave] delete: {e!r}", flush=True)
+    finally:
+        if owner and rid:
+            _end_offset_delete(owner, rid)
     return True
 
 
