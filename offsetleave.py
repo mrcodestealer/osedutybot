@@ -25,7 +25,7 @@ _OFFSET_EDIT_OPEN: dict[str, str] = {}
 
 # Prevent double-tap Delete on the same row (duplicate callbacks / impatient clicks).
 _OFFSET_DELETE_LOCK = threading.Lock()
-_OFFSET_DELETE_IN_FLIGHT: set[str] = {}
+_OFFSET_DELETE_IN_FLIGHT: set[str] = set()
 
 # Prevent double-tap Submit creating duplicate Bitable rows (Lark + web).
 _OFFSET_SUBMIT_LOCK = threading.Lock()
