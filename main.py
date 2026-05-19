@@ -1328,8 +1328,8 @@ REMINDER_TARGET_CHAT_ID = os.getenv(
 # OSE offset approvers (Lark open_id) — each receives pending approval message cards.
 OFFSET_APPROVER_OPEN_IDS: frozenset[str] = frozenset(
     {
+        "ou_540944d83349cda961ec6124425cdfb4",
         "ou_c4346ace5927c14f51a89b2394b55338",
-        "ou_5f660c0fb0769d184aca635d02209272",
     }
 )
 
