@@ -2763,6 +2763,16 @@ def lark_webhook():
         ):
             return _lark_im_done()
 
+        if _offsetleave.handle_pendingoffset_command(
+            clean_text,
+            sender_open_id=sender_id or "",
+            chat_id=chat_id,
+            chat_type=chat_type,
+            send_message=send_message,
+            get_token_func=get_tenant_access_token,
+        ):
+            return _lark_im_done()
+
         if _offsetleave.handle_mention(
             clean_text,
             sender_open_id=sender_id or "",

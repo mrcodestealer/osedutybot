@@ -216,6 +216,10 @@ def wants_deleteoffset(text: str) -> bool:
     return bool(re.match(r"^\s*deleteoffset\s*$", (text or "").strip(), re.I))
 
 
+def wants_pendingoffset(text: str) -> bool:
+    return bool(re.match(r"^\s*pendingoffset\s*$", (text or "").strip(), re.I))
+
+
 def _pending_offsets_for_request_person(request_person: str) -> list[dict[str, Any]]:
     rp = od._title_name(request_person)
     if not rp:
@@ -241,6 +245,25 @@ def _non_pending_offsets_all() -> list[dict[str, Any]]:
         out.append(dict(it))
     out.sort(
         key=lambda r: (r.get("request_date") or "", r.get("record_id") or ""),
+        reverse=True,
+    )
+    return out
+
+
+def _all_pending_offsets() -> list[dict[str, Any]]:
+    """All pending offset rows (for approver pendingoffset command)."""
+    od.invalidate_ose_bitable_cache()
+    data = od.get_ose_offset_records_admin()
+    out: list[dict[str, Any]] = []
+    for it in (data or {}).get("items") or []:
+        if bool(it.get("pending")):
+            out.append(dict(it))
+    out.sort(
+        key=lambda r: (
+            r.get("request_date") or "",
+            r.get("original_date") or "",
+            r.get("request_person") or "",
+        ),
         reverse=True,
     )
     return out
@@ -813,6 +836,67 @@ def build_offset_delete_list_card(
     }
 
 
+def build_offset_pending_list_card(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Approver view of all pending offsets (read + Approve/Reject per row)."""
+    cap = 12
+    total = len(rows)
+    sliced = rows[:cap]
+    intro = (
+        f"**{total} pending offset request(s)** awaiting approval.\n"
+        "Tap **Approve** or **Reject** on a row, add optional **Remarks**, then **Confirm**."
+    )
+    elements: list[dict[str, Any]] = [{"tag": "div", "text": {"tag": "lark_md", "content": intro}}]
+    if total > cap:
+        elements.append(
+            {
+                "tag": "motion",
+                "elements": [
+                    {
+                        "tag": "div",
+                        "text": {
+                            "tag": "plain_text",
+                            "content": f"(Showing first {cap} of {total} pending — run pendingoffset again after clearing some.)",
+                        },
+                    }
+                ],
+            }
+        )
+    if not sliced:
+        elements.append(
+            {
+                "tag": "div",
+                "text": {"tag": "plain_text", "content": "No pending offset requests right now."},
+            }
+        )
+    for i, r in enumerate(sliced, start=1):
+        rid = str(r.get("record_id") or "").strip()
+        if not rid:
+            continue
+        rp = _short_cell(r.get("request_person"))
+        summary = (
+            f"**{i}. {rp}** · {_short_cell(r.get('exchange_person'))} · "
+            f"**{_short_cell(r.get('shift_type'))}** · "
+            f"{_short_cell(r.get('original_date'))} → {_short_cell(r.get('exchange_date'))}\n"
+            f"**Req. date:** {_short_cell(r.get('request_date'))} · **Reason:** {_short_cell(r.get('reason'))}"
+        )
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": summary}})
+        approve_val = {"k": _OFFSET_APPR_PICK_KEY, "record_id": rid, "decision": "Approved"}
+        reject_val = {"k": _OFFSET_APPR_PICK_KEY, "record_id": rid, "decision": "Rejected"}
+        elements.append(_approval_pick_button_row(approve_val, reject_val))
+        elements.append({"tag": "hr"})
+    if elements and elements[-1].get("tag") == "hr":
+        elements.pop()
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "wathet",
+            "title": {"tag": "plain_text", "content": "OSE offset — pending queue"},
+        },
+        "body": {"elements": elements},
+    }
+
+
 def build_offset_edit_form_card(
     *,
     owner_open_id: str,
@@ -1092,6 +1176,44 @@ def handle_deleteoffset_command(
         )
     except Exception as e:
         send_message(chat_id, f"❌ deleteoffset: {e}")
+    return True
+
+
+def handle_pendingoffset_command(
+    clean_text: str,
+    *,
+    sender_open_id: str,
+    chat_id: str,
+    chat_type: Optional[str],
+    send_message: Callable[..., dict[str, Any]],
+    get_token_func: Callable[[], str],
+) -> bool:
+    if not wants_pendingoffset(clean_text):
+        return False
+    oid = (sender_open_id or "").strip()
+    if not oid:
+        send_message(chat_id, "❌ Could not identify your Lark user.")
+        return True
+    if not _is_offset_approver_open_id(oid):
+        send_message(chat_id, "❌ **pendingoffset** is for configured offset approvers only.")
+        return True
+    try:
+        token = get_token_func()
+        rows = _all_pending_offsets()
+        if not rows:
+            send_message(chat_id, "✅ No pending offset requests — the queue is empty.")
+            return True
+        card = build_offset_pending_list_card(rows)
+        _deliver_private_card(
+            owner_open_id=oid,
+            group_chat_id=chat_id,
+            chat_type=chat_type,
+            card=card,
+            send_message=send_message,
+            token=token,
+        )
+    except Exception as e:
+        send_message(chat_id, f"❌ pendingoffset: {e}")
     return True
 
 
@@ -1602,6 +1724,29 @@ def build_offset_requester_responded_card(
     }
 
 
+def build_offset_requester_deleted_notify_card(
+    row: dict[str, Any],
+    *,
+    requester_name: str,
+) -> dict[str, Any]:
+    """Read-only card for approvers when a requester deletes a pending offset."""
+    rn = _lark_md_cell(requester_name)
+    intro = (
+        f"**{rn}** **deleted** a **pending** offset request. "
+        "No approval action is needed — the request was withdrawn and removed from the table."
+    )
+    md = _offset_approval_table_md(row, status="Withdrawn", intro=intro)
+    return {
+        "schema": "2.0",
+        "config": {"width_mode": "fill"},
+        "header": {
+            "template": "grey",
+            "title": {"tag": "plain_text", "content": "OSE offset — pending request deleted"},
+        },
+        "body": {"elements": [{"tag": "div", "text": {"tag": "lark_md", "content": md}}]},
+    }
+
+
 def build_offset_requester_edited_notify_card(
     row: dict[str, Any],
     *,
@@ -1834,6 +1979,23 @@ def _mark_offset_record_notified(record_id: str) -> None:
         os.replace(tmp, _OFFSET_APPROVER_NOTIFIED_PATH)
 
 
+def _unmark_offset_record_notified(record_id: str) -> None:
+    """Drop record from poll dedupe file after requester deletes a pending row."""
+    rid = (record_id or "").strip()
+    if not rid:
+        return
+    with _OFFSET_APPROVER_NOTIFIED_LOCK:
+        known = _load_notified_offset_record_ids_unlocked()
+        if rid not in known:
+            return
+        known.discard(rid)
+        tmp = f"{_OFFSET_APPROVER_NOTIFIED_PATH}.tmp"
+        payload = {"record_ids": sorted(known)}
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, _OFFSET_APPROVER_NOTIFIED_PATH)
+
+
 def _offset_row_ready_for_approver_notify(row: dict[str, Any]) -> bool:
     if not bool(row.get("pending")):
         return False
@@ -1932,6 +2094,25 @@ def _notify_offset_approvers_requester_edited(
         r = send_message(aid, body, msg_type="interactive", receive_id_type="open_id")
         if isinstance(r, dict) and int(r.get("code", -1)) != 0:
             print(f"[offsetleave] requester-edit notify failed for {aid!r}: {r!r}", flush=True)
+
+
+def _notify_offset_approvers_requester_deleted(
+    send_message: Callable[..., Any],
+    row: dict[str, Any],
+    *,
+    requester_name: str,
+) -> None:
+    if not OFFSET_APPROVER_OPEN_IDS:
+        return
+    card = build_offset_requester_deleted_notify_card(row, requester_name=requester_name)
+    body = json.dumps(card, ensure_ascii=False)
+    for oid in OFFSET_APPROVER_OPEN_IDS:
+        aid = (oid or "").strip()
+        if not aid:
+            continue
+        r = send_message(aid, body, msg_type="interactive", receive_id_type="open_id")
+        if isinstance(r, dict) and int(r.get("code", -1)) != 0:
+            print(f"[offsetleave] requester-delete notify failed for {aid!r}: {r!r}", flush=True)
 
 
 def _notify_other_offset_approvers_responded(
@@ -2334,6 +2515,16 @@ def _handle_offset_delete_row(
             fallback = "✅ Offset record deleted."
         else:
             rp = rp_live or str(row_chk.get("request_person") or "")
+            deleted_snapshot = dict(row_chk)
+            try:
+                _notify_offset_approvers_requester_deleted(
+                    send_message,
+                    deleted_snapshot,
+                    requester_name=rp,
+                )
+                _unmark_offset_record_notified(rid)
+            except Exception as exc:
+                print(f"[offsetleave] requester-delete approver notify failed: {exc!r}", flush=True)
             rows = _pending_offsets_for_request_person(rp)
             card = (
                 build_offset_delete_list_card(owner, rp, rows, is_admin=False)
