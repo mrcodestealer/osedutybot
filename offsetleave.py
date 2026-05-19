@@ -407,6 +407,76 @@ def release_offset_submit(actor_key: str, fingerprint: str, *, success: bool) ->
                     _OFFSET_SUBMIT_RECENT.pop(k, None)
 
 
+def build_offset_edit_saved_card(
+    *,
+    request_person: str,
+    row: dict[str, Any],
+) -> dict[str, Any]:
+    md = _offset_approval_table_md(
+        row,
+        status=str(row.get("approval_status") or "Pending"),
+        intro=f"**{_lark_md_cell(request_person)}** — your pending offset was **saved**.",
+    )
+    return {
+        "schema": "2.0",
+        "config": {"width_mode": "fill"},
+        "header": {
+            "template": "green",
+            "title": {"tag": "plain_text", "content": "OSE offset — saved"},
+        },
+        "body": {"elements": [{"tag": "div", "text": {"tag": "lark_md", "content": md}}]},
+    }
+
+
+def _finish_ephemeral_card_ui(
+    *,
+    owner_open_id: str,
+    chat_id: str,
+    card: dict[str, Any],
+    message_id: str,
+    send_message: Callable[..., Any],
+    token: str,
+    fallback_text: str,
+) -> None:
+    """Show result after save/submit — group ephemeral cards often cannot be PATCHed."""
+    mid = (message_id or "").strip()
+    if _try_patch_interactive_card_message(mid, card):
+        return
+    _dismiss_ephemeral_form(mid)
+    cid = (chat_id or "").strip()
+    oid = (owner_open_id or "").strip()
+    if cid and oid:
+        try:
+            _send_ephemeral_card(cid, oid, card, token)
+            return
+        except Exception as exc:
+            print(f"[offsetleave] ephemeral result card failed: {exc!r}", flush=True)
+    if cid and fallback_text:
+        send_message(chat_id, fallback_text)
+
+
+def _finish_offset_edit_saved_ui(
+    *,
+    owner_open_id: str,
+    request_person: str,
+    row: dict[str, Any],
+    message_id: str,
+    chat_id: str,
+    send_message: Callable[..., Any],
+    token: str,
+) -> None:
+    card = build_offset_edit_saved_card(request_person=request_person, row=row)
+    _finish_ephemeral_card_ui(
+        owner_open_id=owner_open_id,
+        chat_id=chat_id,
+        card=card,
+        message_id=message_id,
+        send_message=send_message,
+        token=token,
+        fallback_text=f"✅ Offset updated for {request_person}.",
+    )
+
+
 def build_offset_submit_done_card(
     *,
     request_person: str,
@@ -1294,23 +1364,34 @@ def _local_pending_offset_row(
     }
 
 
-def _patch_interactive_card_message(message_id: str, card: dict[str, Any]) -> None:
+def _try_patch_interactive_card_message(message_id: str, card: dict[str, Any]) -> bool:
+    """PATCH card in place. Ephemeral group cards often cannot be patched (returns False)."""
     mid = (message_id or "").strip()
     if not mid:
-        raise ValueError("message_id required to patch card")
+        return False
     token = od.get_tenant_access_token()
     url = f"https://open.larksuite.com/open-apis/im/v1/messages/{mid}"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"}
     payload = {"msg_type": "interactive", "content": json.dumps(card, ensure_ascii=False)}
-    res = requests.patch(
-        url,
-        headers=headers,
-        params={"message_id_type": "open_message_id"},
-        json=payload,
-        timeout=25,
-    ).json()
-    if int(res.get("code", -1)) != 0:
-        raise RuntimeError(f"patch card failed: {res}")
+    last_res: dict[str, Any] = {}
+    for id_type in ("open_message_id", ""):
+        params = {"message_id_type": id_type} if id_type else {}
+        last_res = requests.patch(
+            url,
+            headers=headers,
+            params=params,
+            json=payload,
+            timeout=25,
+        ).json()
+        if int(last_res.get("code", -1)) == 0:
+            return True
+    print(f"[offsetleave] patch card skipped for {mid!r}: {last_res!r}", flush=True)
+    return False
+
+
+def _patch_interactive_card_message(message_id: str, card: dict[str, Any]) -> None:
+    if not _try_patch_interactive_card_message(message_id, card):
+        raise RuntimeError(f"patch card failed for message_id={message_id!r}")
 
 
 def _approval_pick_button_row(approve_val: dict[str, Any], reject_val: dict[str, Any]) -> dict[str, Any]:
@@ -1972,7 +2053,8 @@ def _patch_my_offset_list_after_change(
         )
     else:
         return
-    _patch_interactive_card_message(mid, card)
+    if not _try_patch_interactive_card_message(mid, card):
+        print(f"[offsetleave] list refresh patch skipped ({m})", flush=True)
 
 
 def _handle_offset_edit_pick(
@@ -2010,15 +2092,17 @@ def _handle_offset_edit_pick(
                     "use your normal editoffset as the requester for pending items."
                 )
             req_disp = str(row.get("request_person") or "").strip()
-            _patch_interactive_card_message(
-                mid,
-                build_offset_edit_form_card(
-                    owner_open_id=owner,
-                    request_person=req_disp,
-                    row=row,
-                    is_admin=True,
-                ),
+            form_card = build_offset_edit_form_card(
+                owner_open_id=owner,
+                request_person=req_disp,
+                row=row,
+                is_admin=True,
             )
+            if not _try_patch_interactive_card_message(mid, form_card):
+                if cid:
+                    _send_ephemeral_card(cid, owner, form_card, token)
+                else:
+                    raise ValueError("Could not open edit form — run editoffset again.")
         else:
             if not bool(row.get("pending")):
                 raise ValueError("That request is no longer pending (already approved or rejected).")
@@ -2030,14 +2114,16 @@ def _handle_offset_edit_pick(
                 row=row,
                 is_admin=False,
             )
-            if mid:
-                _patch_interactive_card_message(mid, form_card)
+            opened = False
+            if mid and _try_patch_interactive_card_message(mid, form_card):
                 _mark_edit_form_open(owner, rid, mid)
+                opened = True
             elif cid:
                 _send_ephemeral_card(cid, owner, form_card, token)
                 _mark_edit_form_open(owner, rid)
-            else:
-                raise ValueError("missing message id")
+                opened = True
+            if not opened:
+                raise ValueError("Could not open edit form — run editoffset again.")
     except Exception as e:
         if cid:
             send_message(chat_id, f"❌ {e}")
@@ -2084,11 +2170,15 @@ def _handle_offset_edit_submit(
                 reason=reason,
             )
             _clear_edit_form_open(owner, rid)
-            _patch_my_offset_list_after_change(
-                message_id=mid,
-                mode="edit_admin",
+            fresh_admin = _offset_admin_row_by_id(rid)
+            _finish_offset_edit_saved_ui(
                 owner_open_id=owner,
-                request_person="",
+                request_person=str(fresh_admin.get("request_person") or ""),
+                row=fresh_admin,
+                message_id=mid,
+                chat_id=cid,
+                send_message=send_message,
+                token=token,
             )
         else:
             row_chk = _offset_admin_row_by_id(rid)
@@ -2118,14 +2208,15 @@ def _handle_offset_edit_submit(
                 )
             except Exception as exc:
                 print(f"[offsetleave] requester-edit approver notify failed: {exc!r}", flush=True)
-            _patch_my_offset_list_after_change(
-                message_id=mid,
-                mode="edit",
+            _finish_offset_edit_saved_ui(
                 owner_open_id=owner,
-                request_person=rp_live or "",
+                request_person=rp_live or str(fresh.get("request_person") or ""),
+                row=fresh,
+                message_id=mid,
+                chat_id=cid,
+                send_message=send_message,
+                token=token,
             )
-        if cid and not mid:
-            send_message(chat_id, "✅ Offset request updated.")
     except Exception as e:
         if cid:
             send_message(chat_id, f"❌ Save failed: {e}")
@@ -2349,17 +2440,14 @@ def handle_card_callback(
             if dup_err:
                 _toast_approval_problem(send_message, cid, f"❌ {dup_err}")
                 if mid:
-                    try:
-                        _patch_interactive_card_message(
-                            mid,
-                            build_offset_submit_done_card(
-                                request_person=request_person,
-                                record_id="",
-                                message=dup_err,
-                            ),
-                        )
-                    except Exception:
-                        pass
+                    _try_patch_interactive_card_message(
+                        mid,
+                        build_offset_submit_done_card(
+                            request_person=request_person,
+                            record_id="",
+                            message=dup_err,
+                        ),
+                    )
                 return True
             _dismiss_ephemeral_form(mid)
             try:
@@ -2374,21 +2462,20 @@ def handle_card_callback(
                 rid = str((out or {}).get("record_id") or "").strip()
                 release_offset_submit(owner, fp, success=True)
                 done_msg = f"✅ Offset submitted for {request_person} (record {rid or 'saved'})."
-                if mid:
-                    try:
-                        _patch_interactive_card_message(
-                            mid,
-                            build_offset_submit_done_card(
-                                request_person=request_person,
-                                record_id=rid,
-                                message=done_msg,
-                            ),
-                        )
-                    except Exception:
-                        if cid:
-                            send_message(chat_id, done_msg)
-                elif cid:
-                    send_message(chat_id, done_msg)
+                done_card = build_offset_submit_done_card(
+                    request_person=request_person,
+                    record_id=rid,
+                    message=done_msg,
+                )
+                _finish_ephemeral_card_ui(
+                    owner_open_id=owner,
+                    chat_id=cid,
+                    card=done_card,
+                    message_id=mid,
+                    send_message=send_message,
+                    token=od.get_tenant_access_token(),
+                    fallback_text=done_msg,
+                )
             except Exception as submit_exc:
                 release_offset_submit(owner, fp, success=False)
                 raise submit_exc
