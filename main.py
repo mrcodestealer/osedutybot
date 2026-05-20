@@ -86,6 +86,7 @@ def _get_update():
 
 
 import otpp1
+import bot_help
 
 # amountloss / jenkinsupdate pull playwright — avoid top-level import so startup survives flaky browsers.
 
@@ -2787,6 +2788,14 @@ def lark_webhook():
         return _lark_im_done()
 
     # 命令处理
+    if bot_help.handle_help_command(
+        clean_text,
+        chat_id=chat_id,
+        send_message=send_message,
+        jenkins_available=_get_jenkinsupdate() is not None,
+    ):
+        return _lark_im_done()
+
     if clean_text.lower() == "/test":
         send_message(chat_id, _lark_test_card_json(), msg_type="interactive")
         return _lark_im_done()
