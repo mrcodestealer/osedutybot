@@ -214,64 +214,40 @@ def _card_shell(
     }
 
 
-def _pack_sections_into_cards(
-    sections: list[HelpSection],
-    *,
-    max_section_chars: int = 3200,
-) -> list[dict[str, Any]]:
-    """Build one or more help cards, splitting when markdown gets long."""
+def _pack_sections_into_cards(sections: list[HelpSection]) -> list[dict[str, Any]]:
+    """
+    One help card with every section.
+
+    Sending multiple interactive cards in a row often leaves only the last message
+    visible in Lark, so we keep the full list on a single card (~6KB JSON).
+    """
     intro = (
         "**Group chats:** @mention the bot, then type a command.\n"
         "**群聊：** 先 **@ 机器人**，再输入命令。\n"
         "Tip: `/help jenkins` for build keywords · `/help jenkins` 查看构建关键字"
     )
 
-    cards: list[dict[str, Any]] = []
-    chunk_sections: list[HelpSection] = []
-    chunk_chars = 0
-    part = 1
-
-    def flush_chunk() -> None:
-        nonlocal part, chunk_sections, chunk_chars
-        if not chunk_sections:
-            return
-        elements: list[dict[str, Any]] = []
-        for _key, title, emoji, _tpl, rows in chunk_sections:
-            elements.append(
-                {
-                    "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": _section_markdown(title, emoji, rows),
-                    },
-                }
-            )
-            elements.append({"tag": "hr"})
-        title = "Duty Bot — Commands"
-        if len(cards) > 0 or part > 1:
-            title = f"Duty Bot — Commands ({part})"
-        cards.append(
-            _card_shell(
-                title=title,
-                template="indigo" if part == 1 else "wathet",
-                subtitle=intro if part == 1 else "",
-                elements=elements,
-            )
+    elements: list[dict[str, Any]] = []
+    for _key, title, emoji, _tpl, rows in sections:
+        elements.append(
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": _section_markdown(title, emoji, rows),
+                },
+            }
         )
-        part += 1
-        chunk_sections = []
-        chunk_chars = 0
+        elements.append({"tag": "hr"})
 
-    for sec in sections:
-        _key, title, emoji, _tpl, rows = sec
-        block_len = len(_section_markdown(title, emoji, rows))
-        if chunk_sections and chunk_chars + block_len > max_section_chars:
-            flush_chunk()
-        chunk_sections.append(sec)
-        chunk_chars += block_len
-
-    flush_chunk()
-    return cards
+    return [
+        _card_shell(
+            title="Duty Bot — Commands",
+            template="indigo",
+            subtitle=intro,
+            elements=elements,
+        )
+    ]
 
 
 def _jenkins_keywords() -> list[str]:
@@ -338,7 +314,6 @@ def handle_help_command(
         send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
         return True
 
-    cards = build_help_cards(jenkins_available=jenkins_available)
-    for card in cards:
-        send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
+    card = build_help_cards(jenkins_available=jenkins_available)[0]
+    send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
     return True
