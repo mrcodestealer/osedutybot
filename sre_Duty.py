@@ -35,6 +35,7 @@ TARGET_NAMES = [
 # 表格中出现的姓名形式 → CSV 中的标准姓名（用于电话查询）
 TABLE_TO_CSV = {
     "WeiSiong": "Wei Siong",
+    "Wei Siong": "Wei Siong",
     "Bowei": "Bo Wei",
     "BoWei": "Bo Wei",
     "Kai Xuan": "Kai Xuan",
