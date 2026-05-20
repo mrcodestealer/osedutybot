@@ -27,7 +27,7 @@ DUTY_LIST_PATH = "dutyList.csv"
 
 # Target names as they appear in column A (case‑insensitive start‑match)
 TARGET_NAMES = [
-    "Alex Tai", "Kelvin", "WeiSiong", "Bowei", "Jay",
+    "Alex Tai", "Kelvin", "Wei Siong", "Bowei", "Jay",
     "Linus Lim", "Jeng Liang", "Misa", "Kai Xuan", "Yoon Hong",
     "Adrian","Clarence","Khai Xuan"
 ]
