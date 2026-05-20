@@ -190,13 +190,8 @@ def _card_shell(
     if subtitle:
         body_els.append(
             {
-                "tag": "motion",
-                "elements": [
-                    {
-                        "tag": "div",
-                        "text": {"tag": "lark_md", "content": subtitle},
-                    }
-                ],
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": subtitle},
             }
         )
         body_els.append({"tag": "hr"})
@@ -243,7 +238,7 @@ def _pack_sections_into_cards(sections: list[HelpSection]) -> list[dict[str, Any
     return [
         _card_shell(
             title="Duty Bot — Commands",
-            template="indigo",
+            template="blue",
             subtitle=intro,
             elements=elements,
         )
@@ -276,7 +271,7 @@ def build_jenkins_help_card() -> dict[str, Any]:
 
     return _card_shell(
         title="Jenkins — job keywords",
-        template="indigo",
+        template="blue",
         subtitle="",
         elements=[
             {
@@ -290,6 +285,40 @@ def build_jenkins_help_card() -> dict[str, Any]:
 def build_help_cards(*, jenkins_available: bool = True) -> list[dict[str, Any]]:
     sections = _help_sections(jenkins_available=jenkins_available)
     return _pack_sections_into_cards(sections)
+
+
+def build_help_plain_text(*, jenkins_available: bool = True) -> str:
+    """Fallback when the interactive card API rejects the payload."""
+    lines = [
+        "📖 Duty Bot — commands",
+        "Group: @mention bot first · 群聊请先 @ 机器人",
+        "",
+    ]
+    for _key, title, emoji, _tpl, rows in _help_sections(jenkins_available=jenkins_available):
+        lines.append(_section_markdown(title, emoji, rows))
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def _send_help_card(
+    chat_id: str,
+    card: dict[str, Any],
+    send_message: Callable[..., dict],
+    *,
+    plain_fallback: str,
+) -> None:
+    payload = json.dumps(card, ensure_ascii=False)
+    try:
+        resp = send_message(chat_id, payload, msg_type="interactive")
+    except Exception as exc:
+        print(f"[help] send_message raised: {exc!r}", flush=True)
+        send_message(chat_id, plain_fallback)
+        return
+    if not isinstance(resp, dict) or resp.get("code") != 0:
+        print(f"[help] interactive card rejected: {resp!r}", flush=True)
+        send_message(chat_id, plain_fallback)
+        return
+    print(f"[help] interactive card sent chat_id={chat_id}", flush=True)
 
 
 def handle_help_command(
@@ -309,11 +338,16 @@ def handle_help_command(
     if low.startswith("/help "):
         topic = raw.split(maxsplit=1)[1].strip().lower()
 
+    fallback = build_help_plain_text(jenkins_available=jenkins_available)
+
     if topic in ("jenkins", "jenkinsupdate", "ju"):
-        card = build_jenkins_help_card()
-        send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
+        _send_help_card(chat_id, build_jenkins_help_card(), send_message, plain_fallback=fallback)
         return True
 
-    card = build_help_cards(jenkins_available=jenkins_available)[0]
-    send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
+    _send_help_card(
+        chat_id,
+        build_help_cards(jenkins_available=jenkins_available)[0],
+        send_message,
+        plain_fallback=fallback,
+    )
     return True
