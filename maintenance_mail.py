@@ -71,13 +71,32 @@ IMAP_USE_SSL = (os.getenv("MAINTENANCE_MAIL_IMAP_SSL", "").strip() or "1") not i
     "no",
     "off",
 )
+# On connect, also scan already-read INBOX mail (not only UNSEEN). Needed for mail opened before bot started.
+BACKFILL_ON_START = (os.getenv("MAINTENANCE_MAIL_BACKFILL_ON_START", "").strip() or "1") not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
+BACKFILL_LIMIT = int(os.getenv("MAINTENANCE_MAIL_BACKFILL_LIMIT", "").strip() or "50")
 
 _state_lock = threading.Lock()
 _watcher_started = False
 
 
-def subject_matches(subject: str) -> bool:
+def _normalize_subject(subject: str) -> str:
+    """Strip Re:/Fwd:/FW: prefixes so ``Re: TINC-…`` still matches."""
     s = (subject or "").strip()
+    for _ in range(8):
+        m = re.match(r"^(?:Re|Fwd|FW|Aw):\s*", s, re.IGNORECASE)
+        if not m:
+            break
+        s = s[m.end() :].strip()
+    return s
+
+
+def subject_matches(subject: str) -> bool:
+    s = _normalize_subject(subject)
     if not s:
         return False
     if re.match(r"^TINC-", s, re.IGNORECASE):
@@ -267,6 +286,17 @@ class MaintenanceMailWatcher:
         self._get_token = get_token_func
         self._stop = threading.Event()
 
+    def _send_lark(self, chat_id: str, text: str) -> None:
+        try:
+            resp = self._send(chat_id, text)
+            if isinstance(resp, dict) and resp.get("code") not in (None, 0):
+                print(
+                    f"[maint-mail] send_message failed chat={chat_id}: {resp}",
+                    flush=True,
+                )
+        except Exception as ex:
+            print(f"[maint-mail] send_message error: {ex!r}", flush=True)
+
     def _connect(self) -> imaplib.IMAP4:
         if not MAIL_PASSWORD:
             raise RuntimeError(
@@ -301,6 +331,20 @@ class MaintenanceMailWatcher:
                 f"network/firewall/DNS or wrong host/port (not a password error). "
                 f"Original: {ex!r}"
             ) from ex
+        except imaplib.IMAP4.error as ex:
+            err = (ex.args[0] if ex.args else b"") or b""
+            if isinstance(err, bytes):
+                err_s = err.decode("utf-8", errors="replace").lower()
+            else:
+                err_s = str(err).lower()
+            if "wrong authorization" in err_s or "authentication failed" in err_s:
+                raise RuntimeError(
+                    "Lark IMAP login rejected (wrong authorization code). "
+                    f"Use a Lark Mail **client/app password** for {MAIL_USER} — "
+                    "not the normal web-login password. "
+                    "Lark desktop → Email → Settings → Third-party client / 专用密码."
+                ) from ex
+            raise
         return mail
 
     def _process_one(
@@ -326,6 +370,10 @@ class MaintenanceMailWatcher:
         msg = email.message_from_bytes(raw)
         subject = _decode_mime_header(msg.get("Subject"))
         if not subject_matches(subject):
+            print(
+                f"[maint-mail] skip uid={uid_s} (subject not TINC- / [Service Desk]): {subject!r}",
+                flush=True,
+            )
             return
 
         if _already_processed_uid(entries, uid_s):
@@ -338,7 +386,7 @@ class MaintenanceMailWatcher:
         dup = _find_duplicate_title_content(entries, subject, chash)
         if dup:
             notice = format_duplicate_notice(subject, dup.get("title") or subject)
-            self._send(TARGET_CHAT_ID, notice)
+            self._send_lark(TARGET_CHAT_ID, notice)
             _record_processed(
                 entries,
                 imap_uid=uid_s,
@@ -366,9 +414,9 @@ class MaintenanceMailWatcher:
 
         header = format_incoming_header(subject, from_addr, when)
         if (first_reply or "").strip():
-            self._send(TARGET_CHAT_ID, header + first_reply)
+            self._send_lark(TARGET_CHAT_ID, header + first_reply)
         if (second_reply or "").strip():
-            self._send(TARGET_CHAT_ID, second_reply)
+            self._send_lark(TARGET_CHAT_ID, second_reply)
 
         _record_processed(
             entries,
@@ -380,15 +428,11 @@ class MaintenanceMailWatcher:
         mail.uid("store", uid, "+FLAGS", "(\\Seen)")
         print(f"[maint-mail] processed uid={uid_s} title={subject!r}", flush=True)
 
-    def _poll_unseen(self, mail: imaplib.IMAP4_SSL) -> None:
-        mail.select("INBOX", readonly=False)
-        typ, data = mail.uid("search", None, "UNSEEN")
-        if typ != "OK" or not data or not data[0]:
-            return
-        uids = data[0].split()
+    def _process_uid_list(self, mail: imaplib.IMAP4, uids: list[bytes], *, label: str) -> None:
         if not uids:
+            print(f"[maint-mail] {label}: 0 message(s) to check", flush=True)
             return
-
+        print(f"[maint-mail] {label}: checking {len(uids)} message(s)", flush=True)
         with _state_lock:
             state = _load_state()
             for uid in uids:
@@ -399,6 +443,31 @@ class MaintenanceMailWatcher:
                 except Exception as ex:
                     print(f"[maint-mail] process error uid={uid!r}: {ex!r}", flush=True)
             _save_state(state)
+
+    def _poll_unseen(self, mail: imaplib.IMAP4) -> None:
+        mail.select("INBOX", readonly=False)
+        typ, data = mail.uid("search", None, "UNSEEN")
+        if typ != "OK" or not data or not data[0]:
+            print("[maint-mail] poll UNSEEN: 0 (or search failed)", flush=True)
+            return
+        uids = data[0].split()
+        self._process_uid_list(mail, uids, label="UNSEEN")
+
+    def _backfill_inbox(self, mail: imaplib.IMAP4) -> None:
+        """Process matching INBOX mail already marked read (skipped by UNSEEN-only poll)."""
+        if not BACKFILL_ON_START:
+            return
+        mail.select("INBOX", readonly=False)
+        typ, data = mail.uid("search", None, "ALL")
+        if typ != "OK" or not data or not data[0]:
+            print("[maint-mail] backfill: search ALL failed", flush=True)
+            return
+        uids = data[0].split()
+        if not uids:
+            return
+        # Newest first, cap volume
+        uids = list(reversed(uids))[:BACKFILL_LIMIT]
+        self._process_uid_list(mail, uids, label=f"backfill (last {len(uids)})")
 
     def _run_idle_or_poll(self, mail: imaplib.IMAP4_SSL) -> None:
         """Use IMAP IDLE when available; otherwise tight UNSEEN polling."""
@@ -440,6 +509,7 @@ class MaintenanceMailWatcher:
                     f"→ chat {TARGET_CHAT_ID}",
                     flush=True,
                 )
+                self._backfill_inbox(mail)
                 self._poll_unseen(mail)
                 backoff = POLL_SECONDS
                 self._run_idle_or_poll(mail)
