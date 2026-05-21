@@ -209,6 +209,8 @@ def _normalize_subject(subject: str) -> str:
 
 
 def subject_matches(subject: str) -> bool:
+    if _maint_mod.subject_should_ignore(subject):
+        return False
     s = _normalize_subject(subject)
     if not s:
         return False
@@ -651,6 +653,7 @@ class MaintenanceMailWatcher:
             "imap_hits": len(uids),
             "already_done": 0,
             "not_today": 0,
+            "ignored": 0,
             "not_maintenance": 0,
             "todo": 0,
         }
@@ -661,6 +664,14 @@ class MaintenanceMailWatcher:
                 stats["already_done"] += 1
                 continue
             subject, when = self._fetch_header_preview(mail, uid)
+            if _maint_mod.subject_should_ignore(subject):
+                stats["ignored"] += 1
+                if MAIL_VERBOSE:
+                    print(
+                        f"[maint-mail] ignore uid={uid_s} (subject filter): {subject!r}",
+                        flush=True,
+                    )
+                continue
             if not subject_matches(subject):
                 stats["not_maintenance"] += 1
                 continue
@@ -693,6 +704,7 @@ class MaintenanceMailWatcher:
                     f"[maint-mail] {label}: "
                     f"imap={stats['imap_hits']} "
                     f"done={stats['already_done']} "
+                    f"ignored={stats['ignored']} "
                     f"not_today={stats['not_today']} "
                     f"not_maint={stats['not_maintenance']} "
                     f"→ 0 to process",

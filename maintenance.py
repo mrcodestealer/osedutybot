@@ -36,6 +36,28 @@ GAMELIST_SHEET_ID = (
 
 _CARD_HEADER_TITLE_MAX = 100
 
+# Substrings in email subject/title → skip (no card, no pipeline).
+_SUBJECT_IGNORE_MARKERS = ("c88live_ow.ph",)
+
+
+def subject_should_ignore(subject: str | None) -> bool:
+    """True when this maintenance email should be skipped (e.g. C88live_ow.ph tickets)."""
+    s = (subject or "").lower()
+    if not s:
+        return False
+    for marker in _SUBJECT_IGNORE_MARKERS:
+        if marker in s:
+            return True
+    extra = (
+        os.getenv("MAINTENANCE_IGNORE_SUBJECT_CONTAINS", "").strip()
+        or os.getenv("maintenance_ignore_subject_contains", "").strip()
+    )
+    for token in extra.split(","):
+        t = token.strip().lower()
+        if t and t in s:
+            return True
+    return False
+
 
 def normalize_display_subject(subject: str) -> str:
     """

@@ -3155,6 +3155,12 @@ def lark_webhook():
         if email_text:
             token = get_tenant_access_token()
             subj = maintenance.parse_subject_from_pasted_email(email_text) or "Maintenance (/m)"
+            if maintenance.subject_should_ignore(subj):
+                send_message(
+                    chat_id,
+                    f"⏭️ Skipped — subject contains ignored marker (e.g. `C88live_ow.ph`).\n\n`{subj}`",
+                )
+                return _lark_im_done()
             first_reply, second_reply = maintenance.process_maintenance_pipeline(
                 email_text,
                 token,
