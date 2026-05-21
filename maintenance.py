@@ -16,8 +16,9 @@ from __future__ import annotations
 import sys
 import re
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 from urllib.parse import quote
 
 import requests
@@ -59,11 +60,37 @@ def format_received_at(when: str | None) -> str:
     if not (when or "").strip():
         return ""
     raw = when.strip()
+    tz_name = (
+        os.getenv("MAINTENANCE_MAIL_TZ", "").strip()
+        or os.getenv("maintenance_mail_tz", "").strip()
+        or "Asia/Shanghai"
+    )
     try:
         dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        return dt.strftime("%d/%b/%y %H:%M UTC")
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        try:
+            dt = dt.astimezone(ZoneInfo(tz_name))
+        except Exception:
+            pass
+        return dt.strftime("%d/%b/%y %H:%M")
     except ValueError:
         return raw
+
+
+def lark_card_at_open_id(open_id: str) -> str:
+    """@mention inside interactive card ``lark_md`` — use ``<at id=ou_…></at>`` not ``user_id``."""
+    oid = (open_id or "").strip()
+    return f"<at id={oid}></at>" if oid else ""
+
+
+def lark_md_for_card(text: str) -> str:
+    """Convert plain-message ``<at user_id=…>`` tags to card-compatible ``<at id=…></at>``."""
+    return re.sub(
+        r'<at\s+user_id="([^"]+)"[^>]*>[^<]*</at>',
+        lambda m: lark_card_at_open_id(m.group(1)),
+        text or "",
+    )
 
 
 def _cell_norm(c: Any) -> str:
@@ -370,7 +397,9 @@ def generate_output(
         affected_lines.append("Unknown")
 
     output = [
-        f'Hi <at user_id="{qa_os_local_id}">QA OS Local</at> <at user_id="{cs_team_id}">CS (Team)</at> , kindly check this email. Thank you.',
+        "Hi "
+        f'{lark_card_at_open_id(qa_os_local_id)} '
+        f'{lark_card_at_open_id(cs_team_id)} , kindly check this email. Thank you.',
         "",
         *affected_lines,
         f"Reason : {info['reason']}",
@@ -392,15 +421,16 @@ def build_maintenance_card(
     summary_section: str = "",
     header_template: str = "orange",
 ) -> dict[str, Any]:
-    """Lark interactive card: header title = normalized subject + received time."""
+    """Lark interactive card: header title = email received time; subject in body."""
     display_subj = normalize_display_subject(email_subject) or "Maintenance email"
     rcv = format_received_at(received_at)
-    header_title = f"{display_subj} | {rcv}" if rcv else display_subj
+    header_title = rcv or "Received time unknown"
     if len(header_title) > _CARD_HEADER_TITLE_MAX:
         header_title = header_title[: _CARD_HEADER_TITLE_MAX - 3] + "..."
 
     elements: list[dict[str, Any]] = []
     meta_lines: list[str] = []
+    meta_lines.append(f"**Subject:** {display_subj}")
     if from_addr:
         meta_lines.append(f"**From:** {from_addr}")
     if rcv:
@@ -415,7 +445,10 @@ def build_maintenance_card(
         elements.append(
             {
                 "tag": "div",
-                "text": {"tag": "lark_md", "content": gamelist_section.strip()},
+                "text": {
+                    "tag": "lark_md",
+                    "content": lark_md_for_card(gamelist_section.strip()),
+                },
             }
         )
         elements.append({"tag": "hr"})
@@ -424,7 +457,10 @@ def build_maintenance_card(
         elements.append(
             {
                 "tag": "div",
-                "text": {"tag": "lark_md", "content": summary_section.strip()},
+                "text": {
+                    "tag": "lark_md",
+                    "content": lark_md_for_card(summary_section.strip()),
+                },
             }
         )
 

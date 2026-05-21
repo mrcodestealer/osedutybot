@@ -21,7 +21,8 @@ import re
 import ssl
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable
@@ -80,14 +81,34 @@ BACKFILL_ON_START = (os.getenv("MAINTENANCE_MAIL_BACKFILL_ON_START", "").strip()
     "off",
 )
 BACKFILL_LIMIT = int(os.getenv("MAINTENANCE_MAIL_BACKFILL_LIMIT", "").strip() or "50")
-BACKFILL_DAYS = int(os.getenv("MAINTENANCE_MAIL_BACKFILL_DAYS", "").strip() or "14")
+MAIL_TZ = (os.getenv("MAINTENANCE_MAIL_TZ", "").strip() or "Asia/Shanghai")
 
 _state_lock = threading.Lock()
 
 
-def _imap_since_date(days: int) -> str:
-    d = datetime.now(timezone.utc) - timedelta(days=max(1, days))
-    return d.strftime("%d-%b-%Y")
+def _imap_since_today() -> str:
+    """IMAP SINCE date for local calendar day (mailbox ``SINCE`` is midnight on that date)."""
+    try:
+        tz = ZoneInfo(MAIL_TZ)
+    except Exception:
+        tz = timezone.utc
+    return datetime.now(tz).strftime("%d-%b-%Y")
+
+
+def _received_today(when: str | None) -> bool:
+    if not (when or "").strip():
+        return False
+    try:
+        dt = datetime.fromisoformat(when.strip().replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        try:
+            tz = ZoneInfo(MAIL_TZ)
+        except Exception:
+            tz = timezone.utc
+        return dt.astimezone(tz).date() == datetime.now(tz).date()
+    except ValueError:
+        return False
 
 
 def _uid_search(mail: imaplib.IMAP4, criteria: str) -> list[bytes]:
@@ -472,6 +493,13 @@ class MaintenanceMailWatcher:
         except Exception:
             when = None
 
+        if not _received_today(when):
+            print(
+                f"[maint-mail] skip uid={uid_s} (not today in {MAIL_TZ}): {when!r}",
+                flush=True,
+            )
+            return
+
         token = self._get_token()
         first_reply, second_reply = maintenance.process_maintenance_pipeline(
             pipeline_in,
@@ -525,7 +553,7 @@ class MaintenanceMailWatcher:
         if not BACKFILL_ON_START:
             return
         mail.select("INBOX", readonly=False)
-        since = _imap_since_date(BACKFILL_DAYS)
+        since = _imap_since_today()
         queries = [
             f'(SINCE {since} SUBJECT "TINC")',
             f'(SINCE {since} SUBJECT "[Service Desk]")',
@@ -536,13 +564,15 @@ class MaintenanceMailWatcher:
                 seen.add(u)
         if not seen:
             print(
-                f"[maint-mail] backfill: 0 match in last {BACKFILL_DAYS}d "
-                f"(SUBJECT TINC / [Service Desk])",
+                f"[maint-mail] backfill: 0 match today ({MAIL_TZ}, SINCE {since}) "
+                f"TINC / [Service Desk]",
                 flush=True,
             )
             return
         uids = sorted(seen, key=lambda u: int(u))[-BACKFILL_LIMIT:]
-        self._process_uid_list(mail, uids, label=f"backfill ({len(uids)} in last {BACKFILL_DAYS}d)")
+        self._process_uid_list(
+            mail, uids, label=f"backfill today ({len(uids)}, SINCE {since})"
+        )
 
     def _run_idle_or_poll(self, mail: imaplib.IMAP4_SSL) -> None:
         """Use IMAP IDLE when available; otherwise tight UNSEEN polling."""
