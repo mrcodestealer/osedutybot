@@ -227,7 +227,9 @@ def _html_to_text(html: str) -> str:
     t = re.sub(r"(?is)<br\s*/?>", "\n", t)
     t = re.sub(r"(?is)</p\s*>", "\n", t)
     t = re.sub(r"<[^>]+>", "", t)
-    return _normalize_body(html_mod.unescape(t))
+    t = html_mod.unescape(t)
+    t = re.sub(r"(?m)^\s*>\s*", "", t)
+    return _normalize_body(t)
 
 
 def extract_body_from_message(msg: email.message.Message) -> str:

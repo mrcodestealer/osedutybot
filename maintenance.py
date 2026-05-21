@@ -196,11 +196,54 @@ def _row_launched_for_game(
     return last
 
 
+def _clean_email_line(line: str) -> str:
+    """Strip HTML/plain-text quote markers (``> ``) from a line."""
+    return re.sub(r"^>\s*", "", (line or "").strip())
+
+
+def _is_plausible_game_name(name: str) -> bool:
+    """Reject summary lines / URLs mistaken as table names."""
+    t = (name or "").strip()
+    if not t or len(t) > 80:
+        return False
+    low = t.lower()
+    if re.search(r"https?://|@|\.com\b|evolution\b", low):
+        return False
+    if ":" in t and not re.search(r"privé|priv", t, re.I):
+        return False
+    junk = (
+        "maintenance",
+        "availability",
+        "affected",
+        "regards",
+        "inform",
+        "accomplished",
+        "apologize",
+        "inconvenience",
+        "summary",
+        "casino team",
+        "service desk",
+        "following tables",
+        "unavailable",
+        "downtime",
+        "utc",
+        "you may find",
+        "best regards",
+        "dear casino",
+        "once maintenance",
+    )
+    if any(j in low for j in junk):
+        return False
+    if len(t.split()) > 8:
+        return False
+    return True
+
+
 def _table_block_stop_line(line: str) -> bool:
     """True if this line ends the “list of tables” block (not a table name row)."""
     if not line or not line.strip():
         return False
-    ln = line.strip()
+    ln = _clean_email_line(line)
     if re.match(
         r"^(?:You may find summary|Start time:|End time:|Reason:|Table availability:|\[Service Desk\])",
         ln,
@@ -210,7 +253,8 @@ def _table_block_stop_line(line: str) -> bool:
     if re.match(r"^(?:TINC-|SD-\d)", ln, re.I):
         return True
     if re.match(
-        r"^(?:This is to inform|During which|Please |Kindly |Note:)",
+        r"^(?:This is to inform|During which|Please |Kindly |Note:|Once maintenance|"
+        r"We apologize|Best regards|Dear Casino|http)",
         ln,
         re.I,
     ):
@@ -234,12 +278,13 @@ def _parse_table_block_after_heading(
         j += 1
     names: list[str] = []
     while j < n:
-        chunk = lines[j].strip()
+        chunk = _clean_email_line(lines[j])
         if not chunk:
             break
         if _table_block_stop_line(chunk):
             break
-        names.append(chunk)
+        if _is_plausible_game_name(chunk):
+            names.append(chunk)
         j += 1
     return names, j
 
@@ -256,8 +301,8 @@ def extract_info(text: str, *, email_subject: str | None = None):
         'reference': 'Unknown',
     }
 
-    lines = [line.strip() for line in text.splitlines()]
-    table_availability_affected = False
+    lines = [_clean_email_line(line) for line in text.splitlines()]
+    table_availability_value: str | None = None
 
     i = 0
     n = len(lines)
@@ -267,8 +312,16 @@ def extract_info(text: str, *, email_subject: str | None = None):
             i += 1
             continue
 
-        # ---- Table detection ----
-        if re.search(r'^table\s+', line, re.IGNORECASE):
+        # ---- Table availability → Status (before ``table …`` detection) ----
+        elif re.search(r'^Table availability\s*:', line, re.IGNORECASE):
+            match = re.search(r'^Table availability\s*:\s*(.*)$', line, re.IGNORECASE)
+            if match:
+                val = match.group(1).strip()
+                if val:
+                    table_availability_value = val
+
+        # ---- Table detection (not ``Table availability:``) ----
+        elif re.search(r'^table\s+(?!availability\b)', line, re.IGNORECASE):
             match = re.search(r'table\s+([^\.]+?)\s+in', line, re.IGNORECASE)
             if match:
                 info['table'] = match.group(1).strip()
@@ -306,12 +359,6 @@ def extract_info(text: str, *, email_subject: str | None = None):
             match = re.search(r'^Status:\s*(.*)$', line, re.IGNORECASE)
             if match:
                 info['status'] = match.group(1).strip()
-
-        # ---- Table availability (new format status) ----
-        elif re.search(r'^Table availability:', line, re.IGNORECASE):
-            match = re.search(r'^Table availability:\s*(.*)$', line, re.IGNORECASE)
-            if match and match.group(1).strip().lower() == 'affected':
-                table_availability_affected = True
 
         # ---- Start time ----
         elif re.search(r'^Start time:', line, re.IGNORECASE):
@@ -364,10 +411,12 @@ def extract_info(text: str, *, email_subject: str | None = None):
         ]
     # Do NOT fallback to first line for reference; leave as "Unknown" if not found
 
-    # Set status based on table availability (only if not already set)
-    if info['status'] == 'Unknown' and table_availability_affected:
-        info['status'] = 'Affected'
-    elif info['status'] == 'Unknown' and re.search(r'successfully accomplished', text, re.IGNORECASE):
+    # Status: explicit ``Status:`` line wins; else ``Table availability: …`` → Status.
+    if info['status'] == 'Unknown' and table_availability_value:
+        info['status'] = table_availability_value
+    if info['status'] == 'Unknown' and re.search(
+        r'successfully accomplished', text, re.IGNORECASE
+    ):
         info['status'] = 'Fixed'
 
     if info["reference"] == "Unknown" and (email_subject or "").strip():
@@ -489,7 +538,7 @@ def get_table_name(text):
     """Extract just the affected table name for the first tag message."""
     lines = [line.strip() for line in text.splitlines()]
     for i, line in enumerate(lines):
-        if re.search(r'^table\s+', line, re.IGNORECASE):
+        if re.search(r'^table\s+(?!availability\b)', line, re.IGNORECASE):
             match = re.search(r'table\s+([^\.]+?)\s+in', line, re.IGNORECASE)
             if match:
                 return match.group(1).strip()
@@ -516,40 +565,26 @@ def get_table_name(text):
 
 
 def extract_candidate_game_names(text: str) -> list[str]:
-    """Collect possible game/table names from maintenance email text."""
+    """Table names from structured sections only (not random ``table … in`` in HTML)."""
+    info = extract_info(text)
     seen: set[str] = set()
     out: list[str] = []
 
     def add(raw: str) -> None:
-        for part in re.split(r"[,;，、]", raw):
-            t = part.strip()
-            if not t or t.lower() == "unknown":
-                continue
-            key = _cell_norm(t).replace(" ", "")
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            out.append(t)
+        t = (raw or "").strip()
+        if not _is_plausible_game_name(t):
+            return
+        key = _cell_norm(t).replace(" ", "")
+        if not key or key in seen:
+            return
+        seen.add(key)
+        out.append(t)
 
-    primary = get_table_name(text)
-    if primary and primary.strip().lower() != "unknown":
-        add(primary)
-
-    for m in re.finditer(r"table\s+([^\.]+?)\s+in", text, re.IGNORECASE):
-        add(m.group(1).strip())
-
-    lines = [line.strip() for line in text.splitlines()]
-    for i, line in enumerate(lines):
-        if re.search(r"^Affected table/-s:", line, re.IGNORECASE):
-            block_names, _ = _parse_table_block_after_heading(lines, i)
-            for nm in block_names:
-                add(nm)
-            break
-        if re.search(r"following tables will be unavailable:", line, re.IGNORECASE):
-            block_names, _ = _parse_table_block_after_heading(lines, i)
-            for nm in block_names:
-                add(nm)
-            break
+    for nm in info.get("table_names") or []:
+        add(nm)
+    if not out and info.get("table") not in (None, "", "Unknown"):
+        for part in re.split(r"[,;，、]", str(info["table"])):
+            add(part.strip())
 
     return out
 
@@ -621,14 +656,7 @@ def process_maintenance_pipeline(
         elif verdict is False:
             not_launched_list.append(g)
         else:
-            if not has_headers:
-                unknown_list.append(
-                    f"{g}（gamelist 子表未找到「游戏名称/游戏状态」表头）"
-                )
-            else:
-                unknown_list.append(
-                    f"{g}（「游戏名称」列无匹配行或状态单元格无法判定上线）"
-                )
+            unknown_list.append(g)
 
     lines1 = ["📋 **游戏上线状态（对照 gamelist 表格）**"]
     lines1.append(
@@ -640,19 +668,26 @@ def process_maintenance_pipeline(
         + (", ".join(not_launched_list) if not_launched_list else "（无）")
     )
     if unknown_list:
-        lines1.append("❓ **未匹配子表或状态未知：** " + ", ".join(unknown_list))
+        lines1.append("❓ **未匹配 / 状态未知：** " + ", ".join(unknown_list))
 
     msg1 = "\n".join(lines1)
 
+    info = extract_info(email_text, **subj_kw)
+    summary_tables = list(info.get("table_names") or [])
+    if not summary_tables and info.get("table") not in (None, "", "Unknown"):
+        summary_tables = [
+            x.strip()
+            for x in str(info["table"]).split(",")
+            if _is_plausible_game_name(x.strip())
+        ]
     if launched_list:
-        msg2 = process_email(
-            email_text, affected_launched_only=launched_list, **subj_kw
-        )
-    else:
-        msg2 = (
-            "📭 **第二段（已过滤）：** 邮件中识别的游戏均未处于「上线 Launched」，"
-            "已跳过 QA/CS 摘要。"
-        )
+        summary_tables = launched_list
+
+    msg2 = process_email(
+        email_text,
+        affected_launched_only=summary_tables or None,
+        **subj_kw,
+    )
 
     return msg1, msg2
 
