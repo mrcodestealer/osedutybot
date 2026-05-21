@@ -46,7 +46,7 @@ MAIL_PASSWORD = (
 MAIL_IMAP_HOST = (
     os.getenv("MAINTENANCE_MAIL_IMAP_HOST", "").strip()
     or os.getenv("maintenance_mail_imap_host", "").strip()
-    or "mail.hotelstotsenberg.com"
+    or "imap.larksuite.com"
 )
 MAIL_IMAP_PORT = int(
     os.getenv("MAINTENANCE_MAIL_IMAP_PORT", "").strip()
