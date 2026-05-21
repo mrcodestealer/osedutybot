@@ -73,14 +73,12 @@ IMAP_USE_SSL = (os.getenv("MAINTENANCE_MAIL_IMAP_SSL", "").strip() or "1") not i
     "no",
     "off",
 )
-# On connect, also scan already-read INBOX mail (not only UNSEEN). Needed for mail opened before bot started.
-BACKFILL_ON_START = (os.getenv("MAINTENANCE_MAIL_BACKFILL_ON_START", "").strip() or "1") not in (
-    "0",
-    "false",
-    "no",
-    "off",
+# Max messages per poll (today + TINC / [Service Desk], seen and unread).
+POLL_LIMIT = int(
+    os.getenv("MAINTENANCE_MAIL_POLL_LIMIT", "").strip()
+    or os.getenv("MAINTENANCE_MAIL_BACKFILL_LIMIT", "").strip()
+    or "50"
 )
-BACKFILL_LIMIT = int(os.getenv("MAINTENANCE_MAIL_BACKFILL_LIMIT", "").strip() or "50")
 MAIL_TZ = (os.getenv("MAINTENANCE_MAIL_TZ", "").strip() or "Asia/Shanghai")
 
 _state_lock = threading.Lock()
@@ -120,7 +118,7 @@ def _uid_search(mail: imaplib.IMAP4, criteria: str) -> list[bytes]:
         if "1000000" in err or "too large" in err:
             print(
                 f"[maint-mail] UID SEARCH response too large (criteria={criteria!r}); "
-                "narrow MAINTENANCE_MAIL_BACKFILL_DAYS or disable backfill.",
+                "narrow date/subject search or reduce MAINTENANCE_MAIL_POLL_LIMIT.",
                 flush=True,
             )
             return []
@@ -552,40 +550,41 @@ class MaintenanceMailWatcher:
                     print(f"[maint-mail] process error uid={uid!r}: {ex!r}", flush=True)
             _save_state(state)
 
-    def _poll_unseen(self, mail: imaplib.IMAP4) -> None:
-        mail.select("INBOX", readonly=False)
-        since = _imap_since_today()
-        uids = _uid_search(mail, f"(UNSEEN SINCE {since})")
-        self._process_uid_list(mail, uids, label=f"UNSEEN today (SINCE {since})")
-
-    def _backfill_inbox(self, mail: imaplib.IMAP4) -> None:
-        """Scan recent INBOX by subject (avoid UID SEARCH ALL — huge mailboxes exceed 1MB)."""
-        if not BACKFILL_ON_START:
-            return
-        mail.select("INBOX", readonly=False)
+    def _uids_today_matching(self, mail: imaplib.IMAP4) -> list[bytes]:
+        """Today's INBOX with TINC / [Service Desk] in subject (read or unread)."""
         since = _imap_since_today()
         queries = [
             f'(SINCE {since} SUBJECT "TINC")',
             f'(SINCE {since} SUBJECT "[Service Desk]")',
         ]
-        seen: set[bytes] = set()
+        found: set[bytes] = set()
         for q in queries:
             for u in _uid_search(mail, q):
-                seen.add(u)
-        if not seen:
+                found.add(u)
+        if not found:
+            return []
+        return sorted(found, key=lambda u: int(u))[-POLL_LIMIT:]
+
+    def _poll_today_inbox(self, mail: imaplib.IMAP4) -> None:
+        """Poll today only — includes seen and unread; no UNSEEN filter."""
+        mail.select("INBOX", readonly=False)
+        since = _imap_since_today()
+        uids = self._uids_today_matching(mail)
+        if not uids:
             print(
-                f"[maint-mail] backfill: 0 match today ({MAIL_TZ}, SINCE {since}) "
-                f"TINC / [Service Desk]",
+                f"[maint-mail] today: 0 match ({MAIL_TZ}, SINCE {since}) "
+                "TINC / [Service Desk]",
                 flush=True,
             )
             return
-        uids = sorted(seen, key=lambda u: int(u))[-BACKFILL_LIMIT:]
         self._process_uid_list(
-            mail, uids, label=f"backfill today ({len(uids)}, SINCE {since})"
+            mail,
+            uids,
+            label=f"today seen+unread ({len(uids)}, SINCE {since})",
         )
 
-    def _run_idle_or_poll(self, mail: imaplib.IMAP4_SSL) -> None:
-        """Use IMAP IDLE when available; otherwise tight UNSEEN polling."""
+    def _run_idle_or_poll(self, mail: imaplib.IMAP4) -> None:
+        """Use IMAP IDLE when available; otherwise poll today's matching mail."""
         if hasattr(mail, "idle") and hasattr(mail, "idle_done"):
             while not self._stop.is_set():
                 try:
@@ -601,7 +600,7 @@ class MaintenanceMailWatcher:
                         mail.idle_done()
                     except Exception:
                         pass
-                    self._poll_unseen(mail)
+                    self._poll_today_inbox(mail)
                 except Exception as ex:
                     print(f"[maint-mail] IDLE loop error: {ex!r}", flush=True)
                     if self._stop.wait(timeout=POLL_SECONDS):
@@ -609,7 +608,7 @@ class MaintenanceMailWatcher:
             return
 
         while not self._stop.is_set():
-            self._poll_unseen(mail)
+            self._poll_today_inbox(mail)
             if self._stop.wait(timeout=POLL_SECONDS):
                 break
 
@@ -624,8 +623,7 @@ class MaintenanceMailWatcher:
                     f"→ chat {TARGET_CHAT_ID}",
                     flush=True,
                 )
-                self._backfill_inbox(mail)
-                self._poll_unseen(mail)
+                self._poll_today_inbox(mail)
                 backoff = POLL_SECONDS
                 self._run_idle_or_poll(mail)
             except Exception as ex:
