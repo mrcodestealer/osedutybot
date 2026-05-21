@@ -3164,6 +3164,7 @@ def lark_webhook():
                 email_subject=subj,
                 gamelist_section=first_reply or "",
                 summary_section=second_reply or "",
+                email_body=email_text,
             )
             send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
         else:

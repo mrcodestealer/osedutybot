@@ -583,6 +583,7 @@ class MaintenanceMailWatcher:
             from_addr=from_addr,
             gamelist_section=first_reply or "",
             summary_section=second_reply or "",
+            email_body=text,
         )
         self._send_lark_card(TARGET_CHAT_ID, card)
 

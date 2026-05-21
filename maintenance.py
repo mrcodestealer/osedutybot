@@ -56,6 +56,23 @@ def normalize_display_subject(subject: str) -> str:
     return s
 
 
+def extract_ticket_card_title(subject: str, extra_text: str | None = None) -> str | None:
+    """
+    Card header: ``SD-7041104`` or ``TINC-704380`` when subject/body contains
+    SD/TINC + ticket number (6+ digits).
+    """
+    haystack = f"{subject or ''}\n{extra_text or ''}"
+    for prefix in ("TINC", "SD"):
+        m = re.search(
+            rf"(?:{prefix})[-\s]?(\d{{6,8}})\b",
+            haystack,
+            re.IGNORECASE,
+        )
+        if m:
+            return f"{prefix.upper()}-{m.group(1)}"
+    return None
+
+
 def format_received_at(when: str | None) -> str:
     if not (when or "").strip():
         return ""
@@ -480,11 +497,13 @@ def build_maintenance_card(
     gamelist_section: str = "",
     summary_section: str = "",
     header_template: str = "orange",
+    email_body: str | None = None,
 ) -> dict[str, Any]:
-    """Lark interactive card: header title = email received time; subject in body."""
+    """Lark interactive card: header title = SD-/TINC- ticket id; subject/time in body."""
     display_subj = normalize_display_subject(email_subject) or "Maintenance email"
     rcv = format_received_at(received_at)
-    header_title = rcv or "Received time unknown"
+    ticket = extract_ticket_card_title(email_subject, email_body)
+    header_title = ticket or rcv or "Maintenance"
     if len(header_title) > _CARD_HEADER_TITLE_MAX:
         header_title = header_title[: _CARD_HEADER_TITLE_MAX - 3] + "..."
 
