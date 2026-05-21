@@ -398,23 +398,36 @@ class MaintenanceMailWatcher:
             raise
         return mail
 
-    def _fetch_subject(self, mail: imaplib.IMAP4, uid: bytes) -> str:
+    def _fetch_header_preview(
+        self, mail: imaplib.IMAP4, uid: bytes
+    ) -> tuple[str, str | None]:
+        """Lightweight SUBJECT + DATE peek (before downloading full RFC822)."""
         uid_s = uid.decode() if isinstance(uid, bytes) else str(uid)
         try:
-            typ, data = mail.uid("fetch", uid, "(BODY.PEEK[HEADER.FIELDS (SUBJECT)])")
+            typ, data = mail.uid(
+                "fetch", uid, "(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE)])"
+            )
         except imaplib.IMAP4.error as ex:
             print(f"[maint-mail] header fetch failed uid={uid_s}: {ex!r}", flush=True)
-            return ""
+            return "", None
         if typ != "OK" or not data:
-            return ""
+            return "", None
         for part in data:
             if not isinstance(part, tuple) or len(part) < 2:
                 continue
             chunk = part[1]
             if isinstance(chunk, (bytes, bytearray)) and chunk:
                 msg = email.message_from_bytes(chunk)
-                return _decode_mime_header(msg.get("Subject"))
-        return ""
+                subj = _decode_mime_header(msg.get("Subject"))
+                when: str | None = None
+                try:
+                    dt = parsedate_to_datetime(msg.get("Date") or "")
+                    if dt:
+                        when = dt.isoformat()
+                except Exception:
+                    when = None
+                return subj, when
+        return "", None
 
     def _process_one(
         self,
@@ -430,7 +443,10 @@ class MaintenanceMailWatcher:
         if _already_processed_uid(entries, uid_s):
             return
 
-        subject = self._fetch_subject(mail, uid)
+        subject, when = self._fetch_header_preview(mail, uid)
+        if not _received_today(when):
+            return
+
         if not subject_matches(subject):
             if subject:
                 print(
@@ -477,28 +493,21 @@ class MaintenanceMailWatcher:
                 entries,
                 imap_uid=uid_s,
                 message_id=msg.get("Message-ID") or "",
-                title=subject,
+                title=display_subj,
                 content_hash=chash,
             )
             mail.uid("store", uid, "+FLAGS", "(\\Seen)")
-            print(f"[maint-mail] duplicate ignored uid={uid_s} title={subject!r}", flush=True)
+            print(f"[maint-mail] duplicate ignored uid={uid_s} title={display_subj!r}", flush=True)
             return
 
         from_addr = _decode_mime_header(msg.get("From"))
-        when: str | None = None
-        try:
-            dt = parsedate_to_datetime(msg.get("Date") or "")
-            if dt:
-                when = dt.isoformat()
-        except Exception:
-            when = None
-
-        if not _received_today(when):
-            print(
-                f"[maint-mail] skip uid={uid_s} (not today in {MAIL_TZ}): {when!r}",
-                flush=True,
-            )
-            return
+        if not when:
+            try:
+                dt = parsedate_to_datetime(msg.get("Date") or "")
+                if dt:
+                    when = dt.isoformat()
+            except Exception:
+                when = None
 
         token = self._get_token()
         first_reply, second_reply = maintenance.process_maintenance_pipeline(
@@ -545,8 +554,9 @@ class MaintenanceMailWatcher:
 
     def _poll_unseen(self, mail: imaplib.IMAP4) -> None:
         mail.select("INBOX", readonly=False)
-        uids = _uid_search(mail, "UNSEEN")
-        self._process_uid_list(mail, uids, label="UNSEEN")
+        since = _imap_since_today()
+        uids = _uid_search(mail, f"(UNSEEN SINCE {since})")
+        self._process_uid_list(mail, uids, label=f"UNSEEN today (SINCE {since})")
 
     def _backfill_inbox(self, mail: imaplib.IMAP4) -> None:
         """Scan recent INBOX by subject (avoid UID SEARCH ALL — huge mailboxes exceed 1MB)."""
