@@ -5,10 +5,10 @@ Supports multiple email formats, including ongoing maintenance.
 
 Env (optional):
   gamelist / GAMELIST — Lark **spreadsheet token** for the game list workbook.
-  Sheets must include header columns ``游戏名称 / Games Name`` and
-  ``游戏状态 / Game Status`` (often on **row 2**). **Tab title** may differ from the
-  game name: we match each email game against the **游戏名称** column across all
-  sheets when the tab name does not match.
+  gamelistsheetid / GAMELISTSHEETID — single worksheet id (only this sheet is read).
+  Sheet must include header columns ``游戏名称 / Games Name`` and
+  ``游戏状态 / Game Status`` (often on **row 2**). Each email game is matched
+  against the **游戏名称** column on that sheet only.
 """
 
 from __future__ import annotations
@@ -26,6 +26,10 @@ load_dotenv()
 
 GAMELIST_SPREADSHEET_TOKEN = (
     os.getenv("gamelist", "").strip() or os.getenv("GAMELIST", "").strip()
+)
+GAMELIST_SHEET_ID = (
+    os.getenv("gamelistsheetid", "").strip()
+    or os.getenv("GAMELISTSHEETID", "").strip()
 )
 
 
@@ -47,23 +51,6 @@ def _is_launched_status(cell: Any) -> bool:
     raw = str(cell or "")
     low = raw.lower()
     return ("上线" in raw) and ("launched" in low)
-
-
-def _fetch_spreadsheet_sheets(tenant_token: str, spreadsheet_token: str) -> list[dict[str, Any]]:
-    url = f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/metainfo"
-    headers = {"Authorization": f"Bearer {tenant_token}"}
-    resp = requests.get(url, headers=headers, timeout=60)
-    data = resp.json()
-    if data.get("code") != 0:
-        raise RuntimeError(str(data.get("msg", data)))
-    sheets = data.get("data", {}).get("sheets", [])
-    out: list[dict[str, Any]] = []
-    for sh in sheets:
-        sid = sh.get("sheet_id") or sh.get("sheetId")
-        title = sh.get("title") or sh.get("sheet_title") or ""
-        if sid:
-            out.append({"sheet_id": str(sid), "title": str(title)})
-    return out
 
 
 def _fetch_sheet_values(
@@ -147,27 +134,6 @@ def _row_launched_for_game(
         st = r[ci_status] if len(r) > ci_status else ""
         return _is_launched_status(st)
     return last
-
-
-def _best_sheet_match(sheets: list[dict[str, Any]], game_name: str) -> dict[str, Any] | None:
-    gn = _cell_norm(game_name).replace(" ", "")
-    if not gn:
-        return None
-    best: dict[str, Any] | None = None
-    best_score = -1
-    for sh in sheets:
-        title = str(sh.get("title") or "")
-        tn = _cell_norm(title).replace(" ", "")
-        if not tn:
-            continue
-        if gn == tn:
-            return sh
-        if gn in tn or tn in gn:
-            score = min(len(gn), len(tn))
-            if score > best_score:
-                best_score = score
-                best = sh
-    return best
 
 
 def _table_block_stop_line(line: str) -> bool:
@@ -473,15 +439,16 @@ def process_maintenance_pipeline(
     1) Launched vs not launched vs unknown (from gamelist spreadsheet).
     2) Full QA/CS summary only if at least one candidate is 「上线 Launched」.
 
-    If ``gamelist`` env or token is missing, returns ("", process_email(...)).
+    If ``gamelist`` / ``gamelistsheetid`` or tenant token is missing, returns ("", process_email(...)).
     """
     tok = (tenant_access_token or "").strip()
     ss = GAMELIST_SPREADSHEET_TOKEN
-    if not ss or not tok:
+    sid = GAMELIST_SHEET_ID
+    if not ss or not sid or not tok:
         return "", process_email(email_text)
 
     try:
-        sheets = _fetch_spreadsheet_sheets(tok, ss)
+        grid = _fetch_sheet_values(tok, ss, sid)
     except Exception as e:
         return (
             f"⚠️ **Gamelist 表格**读取失败（仍发送下方原始摘要）: `{e}`",
@@ -495,54 +462,22 @@ def process_maintenance_pipeline(
             process_email(email_text),
         )
 
+    has_headers = _find_header_row_and_cols(grid) is not None
+
     launched_list: list[str] = []
     not_launched_list: list[str] = []
     unknown_list: list[str] = []
 
-    grid_cache: dict[str, list[list[Any]]] = {}
-
-    def _cached_grid(sheet_id: str) -> list[list[Any]]:
-        if sheet_id not in grid_cache:
-            grid_cache[sheet_id] = _fetch_sheet_values(tok, ss, sheet_id)
-        return grid_cache[sheet_id]
-
     for g in candidates:
-        verdict: bool | None = None
-        sh = _best_sheet_match(sheets, g)
-        if sh:
-            try:
-                grid0 = _cached_grid(sh["sheet_id"])
-                verdict = _row_launched_for_game(grid0, g, sh.get("title") or "")
-            except Exception:
-                unknown_list.append(
-                    f"{g}（读表失败：子表「{sh.get('title') or sh['sheet_id']}」）"
-                )
-                continue
-
-        if verdict is None:
-            any_headers = False
-            for sh2 in sheets:
-                sid = sh2["sheet_id"]
-                try:
-                    grid = _cached_grid(sid)
-                except Exception:
-                    continue
-                if _find_header_row_and_cols(grid) is None:
-                    continue
-                any_headers = True
-                v = _row_launched_for_game(grid, g, "")
-                if v is not None:
-                    verdict = v
-                    break
-
+        verdict = _row_launched_for_game(grid, g, "")
         if verdict is True:
             launched_list.append(g)
         elif verdict is False:
             not_launched_list.append(g)
         else:
-            if not any_headers:
+            if not has_headers:
                 unknown_list.append(
-                    f"{g}（gamelist 各子表未找到「游戏名称/游戏状态」表头或无法读表）"
+                    f"{g}（gamelist 子表未找到「游戏名称/游戏状态」表头）"
                 )
             else:
                 unknown_list.append(
