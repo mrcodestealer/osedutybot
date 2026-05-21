@@ -61,6 +61,16 @@ TARGET_CHAT_ID = (
 POLL_SECONDS = float(
     os.getenv("MAINTENANCE_MAIL_POLL_SECONDS", "").strip() or "3"
 )
+IMAP_TIMEOUT = float(
+    os.getenv("MAINTENANCE_MAIL_IMAP_TIMEOUT", "").strip() or "30"
+)
+# 1 = IMAP4_SSL on 993 (default). 0 = plain IMAP + STARTTLS (often port 143).
+IMAP_USE_SSL = (os.getenv("MAINTENANCE_MAIL_IMAP_SSL", "").strip() or "1") not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
 
 _state_lock = threading.Lock()
 _watcher_started = False
@@ -257,14 +267,40 @@ class MaintenanceMailWatcher:
         self._get_token = get_token_func
         self._stop = threading.Event()
 
-    def _connect(self) -> imaplib.IMAP4_SSL:
+    def _connect(self) -> imaplib.IMAP4:
         if not MAIL_PASSWORD:
             raise RuntimeError(
                 "MAINTENANCE_MAIL_PASSWORD is not set in .env"
             )
         ctx = ssl.create_default_context()
-        mail = imaplib.IMAP4_SSL(MAIL_IMAP_HOST, MAIL_IMAP_PORT, ssl_context=ctx)
-        mail.login(MAIL_USER, MAIL_PASSWORD)
+        mode = "SSL" if IMAP_USE_SSL else "STARTTLS"
+        print(
+            f"[maint-mail] connecting {MAIL_USER} → {MAIL_IMAP_HOST}:{MAIL_IMAP_PORT} "
+            f"({mode}, timeout={IMAP_TIMEOUT}s)",
+            flush=True,
+        )
+        try:
+            if IMAP_USE_SSL:
+                mail = imaplib.IMAP4_SSL(
+                    MAIL_IMAP_HOST,
+                    MAIL_IMAP_PORT,
+                    ssl_context=ctx,
+                    timeout=IMAP_TIMEOUT,
+                )
+            else:
+                mail = imaplib.IMAP4(
+                    MAIL_IMAP_HOST,
+                    MAIL_IMAP_PORT,
+                    timeout=IMAP_TIMEOUT,
+                )
+                mail.starttls(ssl_context=ctx)
+            mail.login(MAIL_USER, MAIL_PASSWORD)
+        except OSError as ex:
+            raise OSError(
+                f"Cannot reach IMAP {MAIL_IMAP_HOST}:{MAIL_IMAP_PORT} ({mode}) — "
+                f"network/firewall/DNS or wrong host/port (not a password error). "
+                f"Original: {ex!r}"
+            ) from ex
         return mail
 
     def _process_one(
@@ -408,7 +444,10 @@ class MaintenanceMailWatcher:
                 backoff = POLL_SECONDS
                 self._run_idle_or_poll(mail)
             except Exception as ex:
-                print(f"[maint-mail] connection error: {ex!r}", flush=True)
+                print(
+                    f"[maint-mail] connection error ({MAIL_IMAP_HOST}:{MAIL_IMAP_PORT}): {ex!r}",
+                    flush=True,
+                )
                 if self._stop.wait(timeout=min(backoff, 60)):
                     break
                 backoff = min(backoff * 2, 120)
