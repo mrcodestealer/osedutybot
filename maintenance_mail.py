@@ -58,7 +58,7 @@ MAIL_IMAP_PORT = int(
 TARGET_CHAT_ID = (
     os.getenv("MAINTENANCE_MAIL_TARGET_CHAT_ID", "").strip()
     or os.getenv("maintenance_mail_target_chat_id", "").strip()
-    or "oc_ad9b5bdbb2826ba2ee9730920ef25432"
+    or "oc_9de3d63fc589df6feeb9b0bee9c45b72"
 )
 POLL_SECONDS = float(
     os.getenv("MAINTENANCE_MAIL_POLL_SECONDS", "").strip() or "3"
