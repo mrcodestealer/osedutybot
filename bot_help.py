@@ -63,7 +63,7 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
                 ("/cpmscheck [MM/YYYY]", "CPMS missing-duty report", "CPMS 缺勤检查"),
                 ("/sre", "SRE this & next week", "SRE 本周与下周"),
                 ("/srecheck [MM/YYYY]", "SRE missing-duty report", "SRE 缺勤检查"),
-                ("/db", "DB duty (3 weeks)", "DB 三周值班"),
+                ("/db", "DB duty (3 weeks); alias /dba", "DB 三周值班（别名 /dba）"),
                 ("/dbcheck [MM/YYYY]", "DB missing-duty report", "DB 缺勤检查"),
                 ("/liveslot", "Liveslot (3 weeks)", "Liveslot 三周值班"),
                 ("/liveslotcheck [MM/YYYY]", "Liveslot missing-duty", "Liveslot 缺勤检查"),

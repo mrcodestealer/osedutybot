@@ -2967,7 +2967,7 @@ def lark_webhook():
             reply = sre_Duty.sre_check()
         send_message(chat_id, reply)
         return _lark_im_done()
-    elif clean_text.lower() == '/db':
+    elif clean_text.lower() in ('/db', '/dba'):
         reply = db_duty.get_three_weeks_summary()
     elif clean_text.lower().startswith('/dbcheck'):
         parts = clean_text.split()
