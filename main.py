@@ -3154,12 +3154,18 @@ def lark_webhook():
             email_text = ""
         if email_text:
             token = get_tenant_access_token()
+            subj = maintenance.parse_subject_from_pasted_email(email_text) or "Maintenance (/m)"
             first_reply, second_reply = maintenance.process_maintenance_pipeline(
-                email_text, token
+                email_text,
+                token,
+                email_subject=subj,
             )
-            if (first_reply or "").strip():
-                send_message(chat_id, first_reply)
-            send_message(chat_id, second_reply)
+            card = maintenance.build_maintenance_card(
+                email_subject=subj,
+                gamelist_section=first_reply or "",
+                summary_section=second_reply or "",
+            )
+            send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
         else:
             send_message(
                 chat_id,

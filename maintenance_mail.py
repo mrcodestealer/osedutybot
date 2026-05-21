@@ -15,6 +15,7 @@ import email
 import hashlib
 import imaplib
 import json
+import maintenance as _maint_mod
 import os
 import re
 import ssl
@@ -113,7 +114,7 @@ def _normalize_subject(subject: str) -> str:
     """Strip Re:/Fwd:/FW: prefixes so ``Re: TINC-…`` still matches."""
     s = (subject or "").strip()
     for _ in range(8):
-        m = re.match(r"^(?:Re|Fwd|FW|Aw):\s*", s, re.IGNORECASE)
+        m = re.match(r"^(?:Re|Fwd|FW|Fw|Aw):\s*", s, re.IGNORECASE)
         if not m:
             break
         s = s[m.end() :].strip()
@@ -282,22 +283,14 @@ def _record_processed(
 
 
 def format_duplicate_notice(new_title: str, old_title: str) -> str:
+    n = _maint_mod.normalize_display_subject(new_title)
+    o = _maint_mod.normalize_display_subject(old_title)
     return (
         "⚠️ **Ignored new email** — subject already processed with **identical content**.\n\n"
-        f"**New title:** `{new_title}`\n"
-        f"**Previous title:** `{old_title}`\n\n"
+        f"**New title:** `{n}`\n"
+        f"**Previous title:** `{o}`\n\n"
         "Kindly check and provide what email titles."
     )
-
-
-def format_incoming_header(subject: str, from_addr: str, when: str | None) -> str:
-    lines = ["📧 **Maintenance email (auto)**", f"**Subject:** {subject}"]
-    if from_addr:
-        lines.append(f"**From:** {from_addr}")
-    if when:
-        lines.append(f"**Date:** {when}")
-    lines.append("")
-    return "\n".join(lines)
 
 
 class MaintenanceMailWatcher:
@@ -321,6 +314,18 @@ class MaintenanceMailWatcher:
                 )
         except Exception as ex:
             print(f"[maint-mail] send_message error: {ex!r}", flush=True)
+
+    def _send_lark_card(self, chat_id: str, card: dict[str, Any]) -> None:
+        try:
+            payload = json.dumps(card, ensure_ascii=False)
+            resp = self._send(chat_id, payload, msg_type="interactive")
+            if isinstance(resp, dict) and resp.get("code") not in (None, 0):
+                print(
+                    f"[maint-mail] interactive card failed chat={chat_id}: {resp}",
+                    flush=True,
+                )
+        except Exception as ex:
+            print(f"[maint-mail] send card error: {ex!r}", flush=True)
 
     def _connect(self) -> imaplib.IMAP4:
         if not MAIL_PASSWORD:
@@ -437,13 +442,15 @@ class MaintenanceMailWatcher:
         if not subject_matches(subject):
             return
 
+        display_subj = maintenance.normalize_display_subject(subject)
+
         body = extract_body_from_message(msg)
         pipeline_in = build_pipeline_input(subject, body)
         chash = _content_hash(pipeline_in)
 
-        dup = _find_duplicate_title_content(entries, subject, chash)
+        dup = _find_duplicate_title_content(entries, display_subj, chash)
         if dup:
-            notice = format_duplicate_notice(subject, dup.get("title") or subject)
+            notice = format_duplicate_notice(display_subj, dup.get("title") or display_subj)
             self._send_lark(TARGET_CHAT_ID, notice)
             _record_processed(
                 entries,
@@ -467,20 +474,26 @@ class MaintenanceMailWatcher:
 
         token = self._get_token()
         first_reply, second_reply = maintenance.process_maintenance_pipeline(
-            pipeline_in, token
+            pipeline_in,
+            token,
+            email_subject=display_subj,
+            received_at=when,
         )
 
-        header = format_incoming_header(subject, from_addr, when)
-        if (first_reply or "").strip():
-            self._send_lark(TARGET_CHAT_ID, header + first_reply)
-        if (second_reply or "").strip():
-            self._send_lark(TARGET_CHAT_ID, second_reply)
+        card = maintenance.build_maintenance_card(
+            email_subject=display_subj,
+            received_at=when,
+            from_addr=from_addr,
+            gamelist_section=first_reply or "",
+            summary_section=second_reply or "",
+        )
+        self._send_lark_card(TARGET_CHAT_ID, card)
 
         _record_processed(
             entries,
             imap_uid=uid_s,
             message_id=msg.get("Message-ID") or "",
-            title=subject,
+            title=display_subj,
             content_hash=chash,
         )
         mail.uid("store", uid, "+FLAGS", "(\\Seen)")

@@ -16,6 +16,7 @@ from __future__ import annotations
 import sys
 import re
 import os
+from datetime import datetime
 from typing import Any
 from urllib.parse import quote
 
@@ -31,6 +32,38 @@ GAMELIST_SHEET_ID = (
     os.getenv("gamelistsheetid", "").strip()
     or os.getenv("GAMELISTSHEETID", "").strip()
 )
+
+_CARD_HEADER_TITLE_MAX = 100
+
+
+def normalize_display_subject(subject: str) -> str:
+    """
+    Display subject from ``[Service Desk]`` or ``TINC-`` onward (drop leading Fw:/Re:/Fwd:).
+    """
+    s = (subject or "").strip()
+    for _ in range(12):
+        if re.match(r"^(?:TINC-|\[Service Desk\])", s, re.IGNORECASE):
+            return s
+        m = re.match(r"^(?:Re|Fwd|FW|Fw|Aw):\s*", s, re.IGNORECASE)
+        if m:
+            s = s[m.end() :].strip()
+            continue
+        hit = re.search(r"(\[Service Desk\]|TINC-)", s, re.IGNORECASE)
+        if hit:
+            return s[hit.start() :].strip()
+        break
+    return s
+
+
+def format_received_at(when: str | None) -> str:
+    if not (when or "").strip():
+        return ""
+    raw = when.strip()
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return dt.strftime("%d/%b/%y %H:%M UTC")
+    except ValueError:
+        return raw
 
 
 def _cell_norm(c: Any) -> str:
@@ -184,7 +217,7 @@ def _parse_table_block_after_heading(
     return names, j
 
 
-def extract_info(text):
+def extract_info(text: str, *, email_subject: str | None = None):
     """Parse email text line by line to extract fields."""
     info = {
         'table': 'Unknown',
@@ -310,6 +343,9 @@ def extract_info(text):
     elif info['status'] == 'Unknown' and re.search(r'successfully accomplished', text, re.IGNORECASE):
         info['status'] = 'Fixed'
 
+    if info["reference"] == "Unknown" and (email_subject or "").strip():
+        info["reference"] = normalize_display_subject(email_subject)
+
     return info
 
 def generate_output(
@@ -345,6 +381,73 @@ def generate_output(
         f"REF EMAIL:{info['reference']}"
     ]
     return "\n".join(output)
+
+
+def build_maintenance_card(
+    *,
+    email_subject: str,
+    received_at: str | None = None,
+    from_addr: str | None = None,
+    gamelist_section: str = "",
+    summary_section: str = "",
+    header_template: str = "orange",
+) -> dict[str, Any]:
+    """Lark interactive card: header title = normalized subject + received time."""
+    display_subj = normalize_display_subject(email_subject) or "Maintenance email"
+    rcv = format_received_at(received_at)
+    header_title = f"{display_subj} | {rcv}" if rcv else display_subj
+    if len(header_title) > _CARD_HEADER_TITLE_MAX:
+        header_title = header_title[: _CARD_HEADER_TITLE_MAX - 3] + "..."
+
+    elements: list[dict[str, Any]] = []
+    meta_lines: list[str] = []
+    if from_addr:
+        meta_lines.append(f"**From:** {from_addr}")
+    if rcv:
+        meta_lines.append(f"**Received:** {rcv}")
+    if meta_lines:
+        elements.append(
+            {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(meta_lines)}}
+        )
+        elements.append({"tag": "hr"})
+
+    if (gamelist_section or "").strip():
+        elements.append(
+            {
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": gamelist_section.strip()},
+            }
+        )
+        elements.append({"tag": "hr"})
+
+    if (summary_section or "").strip():
+        elements.append(
+            {
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": summary_section.strip()},
+            }
+        )
+
+    while elements and elements[-1].get("tag") == "hr":
+        elements.pop()
+    if not elements:
+        elements.append(
+            {
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": "_No content._"},
+            }
+        )
+
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": header_template,
+            "title": {"tag": "plain_text", "content": header_title},
+        },
+        "body": {"elements": elements},
+    }
+
 
 def get_table_name(text):
     """Extract just the affected table name for the first tag message."""
@@ -419,12 +522,13 @@ def process_email(
     text: str,
     *,
     affected_launched_only: list[str] | None = None,
+    email_subject: str | None = None,
 ) -> str:
     """
     Format QA/CS summary. If ``affected_launched_only`` is set (e.g. from ``/m``
     pipeline), **Affected table** lists only those names, one per line.
     """
-    info = extract_info(text)
+    info = extract_info(text, email_subject=email_subject)
     return generate_output(
         info,
         affected_tables=affected_launched_only,
@@ -432,7 +536,11 @@ def process_email(
 
 
 def process_maintenance_pipeline(
-    email_text: str, tenant_access_token: str | None
+    email_text: str,
+    tenant_access_token: str | None,
+    *,
+    email_subject: str | None = None,
+    received_at: str | None = None,
 ) -> tuple[str, str]:
     """
     Two-part reply for bot:
@@ -444,22 +552,24 @@ def process_maintenance_pipeline(
     tok = (tenant_access_token or "").strip()
     ss = GAMELIST_SPREADSHEET_TOKEN
     sid = GAMELIST_SHEET_ID
+    subj_kw = {"email_subject": email_subject}
+
     if not ss or not sid or not tok:
-        return "", process_email(email_text)
+        return "", process_email(email_text, **subj_kw)
 
     try:
         grid = _fetch_sheet_values(tok, ss, sid)
     except Exception as e:
         return (
             f"⚠️ **Gamelist 表格**读取失败（仍发送下方原始摘要）: `{e}`",
-            process_email(email_text),
+            process_email(email_text, **subj_kw),
         )
 
     candidates = extract_candidate_game_names(email_text)
     if not candidates:
         return (
             "⚠️ 未能从邮件中识别游戏/表名（仍发送下方原始摘要）。",
-            process_email(email_text),
+            process_email(email_text, **subj_kw),
         )
 
     has_headers = _find_header_row_and_cols(grid) is not None
@@ -499,7 +609,9 @@ def process_maintenance_pipeline(
     msg1 = "\n".join(lines1)
 
     if launched_list:
-        msg2 = process_email(email_text, affected_launched_only=launched_list)
+        msg2 = process_email(
+            email_text, affected_launched_only=launched_list, **subj_kw
+        )
     else:
         msg2 = (
             "📭 **第二段（已过滤）：** 邮件中识别的游戏均未处于「上线 Launched」，"
@@ -507,6 +619,15 @@ def process_maintenance_pipeline(
         )
 
     return msg1, msg2
+
+
+def parse_subject_from_pasted_email(text: str) -> str | None:
+    """If pasted text starts with ``Subject:``, return that line's value."""
+    for line in text.splitlines()[:8]:
+        m = re.match(r"^Subject:\s*(.+)$", line.strip(), re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+    return None
 
 
 def main():
