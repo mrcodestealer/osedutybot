@@ -80,6 +80,12 @@ POLL_LIMIT = int(
     or "50"
 )
 MAIL_TZ = (os.getenv("MAINTENANCE_MAIL_TZ", "").strip() or "Asia/Shanghai")
+MAIL_VERBOSE = (os.getenv("MAINTENANCE_MAIL_VERBOSE", "").strip() or "0") in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 # Comma-separated IMAP mailboxes (Lark folder names; quote not needed in .env).
 MAIL_IMAP_FOLDERS = [
     f.strip()
@@ -154,6 +160,17 @@ def _received_today(when: str | None) -> bool:
         return dt.astimezone(tz).date() == datetime.now(tz).date()
     except ValueError:
         return False
+
+
+def _merge_uid_lists(*groups: list[bytes]) -> list[bytes]:
+    seen: set[bytes] = set()
+    out: list[bytes] = []
+    for group in groups:
+        for u in group:
+            if u not in seen:
+                seen.add(u)
+                out.append(u)
+    return sorted(out, key=lambda x: int(x))
 
 
 def _uid_search(mail: imaplib.IMAP4, criteria: str) -> list[bytes]:
@@ -501,13 +518,19 @@ class MaintenanceMailWatcher:
             return
 
         subject, when = self._fetch_header_preview(mail, uid)
-        if not _received_today(when):
-            return
 
         if not subject_matches(subject):
-            if subject:
+            if subject and MAIL_VERBOSE:
                 print(
                     f"[maint-mail] skip uid={uid_s} (subject not TINC- / [Service Desk]): {subject!r}",
+                    flush=True,
+                )
+            return
+
+        if when and not _received_today(when):
+            if MAIL_VERBOSE:
+                print(
+                    f"[maint-mail] skip uid={uid_s} (not local today {MAIL_TZ}): {subject!r}",
                     flush=True,
                 )
             return
@@ -569,6 +592,14 @@ class MaintenanceMailWatcher:
             except Exception:
                 when = None
 
+        if when and not _received_today(when):
+            if MAIL_VERBOSE:
+                print(
+                    f"[maint-mail] skip uid={uid_s} (not local today {MAIL_TZ}): {display_subj!r}",
+                    flush=True,
+                )
+            return
+
         token = self._get_token()
         first_reply, second_reply = maintenance.process_maintenance_pipeline(
             pipeline_in,
@@ -583,7 +614,7 @@ class MaintenanceMailWatcher:
             from_addr=from_addr,
             gamelist_section=first_reply or "",
             summary_section=second_reply or "",
-            email_body=text,
+            email_body=body,
         )
         self._send_lark_card(TARGET_CHAT_ID, card)
 
@@ -623,29 +654,62 @@ class MaintenanceMailWatcher:
                     print(f"[maint-mail] process error uid={uid!r}: {ex!r}", flush=True)
             _save_state(state)
 
-    def _uids_today_matching(self, mail: imaplib.IMAP4) -> list[bytes]:
-        """
-        Fetch today's INBOX (seen + unread). Lark IMAP often ignores SUBJECT with ``[…]``,
-        so we only use SINCE and filter TINC- / [Service Desk] in code.
-        """
-        since_today = _imap_since_today()
-        uids = _uid_search(mail, f"(SINCE {since_today})")
-        if not uids:
-            since_lb = _imap_since_lookback()
-            print(
-                f"[maint-mail] SINCE {since_today} → 0; retry SINCE {since_lb} "
-                f"(UTC/internal-date skew, still filter {MAIL_TZ} today in code)",
-                flush=True,
-            )
-            uids = _uid_search(mail, f"(SINCE {since_lb})")
+    def _uids_maintenance_subject_search(
+        self, mail: imaplib.IMAP4, since: str
+    ) -> list[bytes]:
+        """IMAP SUBJECT search for TINC / Service Desk (small result set)."""
+        return _merge_uid_lists(
+            _uid_search(mail, f'(SINCE {since} SUBJECT "TINC")'),
+            _uid_search(mail, f'(SINCE {since} SUBJECT "[Service Desk]")'),
+            _uid_search(mail, f'(SINCE {since} SUBJECT "Service Desk")'),
+        )
+
+    def _uids_broad_since(self, mail: imaplib.IMAP4, since: str) -> list[bytes]:
+        """Fallback when SUBJECT search returns nothing (some Lark setups)."""
+        uids = _uid_search(mail, f"(SINCE {since})")
         if not uids:
             return []
         print(
-            f"[maint-mail] IMAP candidates: {len(uids)} (cap {POLL_LIMIT}), "
-            "filter → TINC- / [Service Desk] + local today",
+            f"[maint-mail] broad SINCE {since}: {len(uids)} mail(s) (cap {POLL_LIMIT}), "
+            "filter TINC- / [Service Desk] in code",
             flush=True,
         )
-        return sorted(uids, key=lambda u: int(u))[-POLL_LIMIT:]
+        return uids[-POLL_LIMIT:]
+
+    def _uids_today_matching(self, mail: imaplib.IMAP4) -> list[bytes]:
+        """
+        Prefer IMAP SUBJECT search (fast, only maintenance mail).
+        Fall back to broad SINCE + in-code filter if the server ignores bracket subjects.
+        """
+        since_today = _imap_since_today()
+        uids = self._uids_maintenance_subject_search(mail, since_today)
+        if not uids:
+            since_lb = _imap_since_lookback()
+            print(
+                f"[maint-mail] maintenance search SINCE {since_today} → 0; "
+                f"retry SINCE {since_lb} ({MAIL_TZ} today still enforced in code)",
+                flush=True,
+            )
+            uids = self._uids_maintenance_subject_search(mail, since_lb)
+        if not uids:
+            for since in (_imap_since_today(), _imap_since_lookback()):
+                uids = self._uids_broad_since(mail, since)
+                if uids:
+                    break
+        if not uids:
+            return []
+        if len(uids) > POLL_LIMIT:
+            print(
+                f"[maint-mail] maintenance UIDs: {len(uids)} → cap {POLL_LIMIT} (newest)",
+                flush=True,
+            )
+            uids = uids[-POLL_LIMIT:]
+        else:
+            print(
+                f"[maint-mail] maintenance UIDs: {len(uids)} (TINC / [Service Desk] search)",
+                flush=True,
+            )
+        return uids
 
     def _poll_today_folders(self, mail: imaplib.IMAP4) -> None:
         """Poll today in each configured folder (seen + unread)."""
