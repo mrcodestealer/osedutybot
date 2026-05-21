@@ -20,7 +20,7 @@ import re
 import ssl
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable
@@ -79,8 +79,33 @@ BACKFILL_ON_START = (os.getenv("MAINTENANCE_MAIL_BACKFILL_ON_START", "").strip()
     "off",
 )
 BACKFILL_LIMIT = int(os.getenv("MAINTENANCE_MAIL_BACKFILL_LIMIT", "").strip() or "50")
+BACKFILL_DAYS = int(os.getenv("MAINTENANCE_MAIL_BACKFILL_DAYS", "").strip() or "14")
 
 _state_lock = threading.Lock()
+
+
+def _imap_since_date(days: int) -> str:
+    d = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+    return d.strftime("%d-%b-%Y")
+
+
+def _uid_search(mail: imaplib.IMAP4, criteria: str) -> list[bytes]:
+    """Run UID SEARCH; return [] if the mailbox response exceeds imaplib 1MB line limit."""
+    try:
+        typ, data = mail.uid("search", None, criteria)
+    except imaplib.IMAP4.error as ex:
+        err = str(ex).lower()
+        if "1000000" in err or "too large" in err:
+            print(
+                f"[maint-mail] UID SEARCH response too large (criteria={criteria!r}); "
+                "narrow MAINTENANCE_MAIL_BACKFILL_DAYS or disable backfill.",
+                flush=True,
+            )
+            return []
+        raise
+    if typ != "OK" or not data or not data[0]:
+        return []
+    return data[0].split()
 _watcher_started = False
 
 
@@ -347,9 +372,27 @@ class MaintenanceMailWatcher:
             raise
         return mail
 
+    def _fetch_subject(self, mail: imaplib.IMAP4, uid: bytes) -> str:
+        uid_s = uid.decode() if isinstance(uid, bytes) else str(uid)
+        try:
+            typ, data = mail.uid("fetch", uid, "(BODY.PEEK[HEADER.FIELDS (SUBJECT)])")
+        except imaplib.IMAP4.error as ex:
+            print(f"[maint-mail] header fetch failed uid={uid_s}: {ex!r}", flush=True)
+            return ""
+        if typ != "OK" or not data:
+            return ""
+        for part in data:
+            if not isinstance(part, tuple) or len(part) < 2:
+                continue
+            chunk = part[1]
+            if isinstance(chunk, (bytes, bytearray)) and chunk:
+                msg = email.message_from_bytes(chunk)
+                return _decode_mime_header(msg.get("Subject"))
+        return ""
+
     def _process_one(
         self,
-        mail: imaplib.IMAP4_SSL,
+        mail: imaplib.IMAP4,
         uid: bytes,
         state: dict[str, Any],
     ) -> None:
@@ -358,7 +401,29 @@ class MaintenanceMailWatcher:
         uid_s = uid.decode() if isinstance(uid, bytes) else str(uid)
         entries: list[dict[str, Any]] = state["entries"]
 
-        typ, data = mail.uid("fetch", uid, "(RFC822)")
+        if _already_processed_uid(entries, uid_s):
+            return
+
+        subject = self._fetch_subject(mail, uid)
+        if not subject_matches(subject):
+            if subject:
+                print(
+                    f"[maint-mail] skip uid={uid_s} (subject not TINC- / [Service Desk]): {subject!r}",
+                    flush=True,
+                )
+            return
+
+        try:
+            typ, data = mail.uid("fetch", uid, "(RFC822)")
+        except imaplib.IMAP4.error as ex:
+            err = str(ex).lower()
+            if "1000000" in err:
+                print(
+                    f"[maint-mail] skip uid={uid_s} (message >1MB IMAP limit): {subject!r}",
+                    flush=True,
+                )
+                return
+            raise
         if typ != "OK" or not data or not data[0]:
             print(f"[maint-mail] fetch failed uid={uid_s}", flush=True)
             return
@@ -368,15 +433,8 @@ class MaintenanceMailWatcher:
             return
 
         msg = email.message_from_bytes(raw)
-        subject = _decode_mime_header(msg.get("Subject"))
+        subject = _decode_mime_header(msg.get("Subject")) or subject
         if not subject_matches(subject):
-            print(
-                f"[maint-mail] skip uid={uid_s} (subject not TINC- / [Service Desk]): {subject!r}",
-                flush=True,
-            )
-            return
-
-        if _already_processed_uid(entries, uid_s):
             return
 
         body = extract_body_from_message(msg)
@@ -446,28 +504,32 @@ class MaintenanceMailWatcher:
 
     def _poll_unseen(self, mail: imaplib.IMAP4) -> None:
         mail.select("INBOX", readonly=False)
-        typ, data = mail.uid("search", None, "UNSEEN")
-        if typ != "OK" or not data or not data[0]:
-            print("[maint-mail] poll UNSEEN: 0 (or search failed)", flush=True)
-            return
-        uids = data[0].split()
+        uids = _uid_search(mail, "UNSEEN")
         self._process_uid_list(mail, uids, label="UNSEEN")
 
     def _backfill_inbox(self, mail: imaplib.IMAP4) -> None:
-        """Process matching INBOX mail already marked read (skipped by UNSEEN-only poll)."""
+        """Scan recent INBOX by subject (avoid UID SEARCH ALL — huge mailboxes exceed 1MB)."""
         if not BACKFILL_ON_START:
             return
         mail.select("INBOX", readonly=False)
-        typ, data = mail.uid("search", None, "ALL")
-        if typ != "OK" or not data or not data[0]:
-            print("[maint-mail] backfill: search ALL failed", flush=True)
+        since = _imap_since_date(BACKFILL_DAYS)
+        queries = [
+            f'(SINCE {since} SUBJECT "TINC")',
+            f'(SINCE {since} SUBJECT "[Service Desk]")',
+        ]
+        seen: set[bytes] = set()
+        for q in queries:
+            for u in _uid_search(mail, q):
+                seen.add(u)
+        if not seen:
+            print(
+                f"[maint-mail] backfill: 0 match in last {BACKFILL_DAYS}d "
+                f"(SUBJECT TINC / [Service Desk])",
+                flush=True,
+            )
             return
-        uids = data[0].split()
-        if not uids:
-            return
-        # Newest first, cap volume
-        uids = list(reversed(uids))[:BACKFILL_LIMIT]
-        self._process_uid_list(mail, uids, label=f"backfill (last {len(uids)})")
+        uids = sorted(seen, key=lambda u: int(u))[-BACKFILL_LIMIT:]
+        self._process_uid_list(mail, uids, label=f"backfill ({len(uids)} in last {BACKFILL_DAYS}d)")
 
     def _run_idle_or_poll(self, mail: imaplib.IMAP4_SSL) -> None:
         """Use IMAP IDLE when available; otherwise tight UNSEEN polling."""
