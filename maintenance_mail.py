@@ -380,17 +380,6 @@ def _record_processed(
     )
 
 
-def format_duplicate_notice(new_title: str, old_title: str) -> str:
-    n = _maint_mod.normalize_display_subject(new_title)
-    o = _maint_mod.normalize_display_subject(old_title)
-    return (
-        "⚠️ **Ignored new email** — subject already processed with **identical content**.\n\n"
-        f"**New title:** `{n}`\n"
-        f"**Previous title:** `{o}`\n\n"
-        "Kindly check and provide what email titles."
-    )
-
-
 class MaintenanceMailWatcher:
     def __init__(
         self,
@@ -573,8 +562,6 @@ class MaintenanceMailWatcher:
 
         dup = _find_duplicate_title_content(entries, display_subj, chash)
         if dup:
-            notice = format_duplicate_notice(display_subj, dup.get("title") or display_subj)
-            self._send_lark(TARGET_CHAT_ID, notice)
             _record_processed(
                 entries,
                 imap_uid=store_key,
