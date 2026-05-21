@@ -21,7 +21,7 @@ import re
 import ssl
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
@@ -84,13 +84,25 @@ MAIL_TZ = (os.getenv("MAINTENANCE_MAIL_TZ", "").strip() or "Asia/Shanghai")
 _state_lock = threading.Lock()
 
 
-def _imap_since_today() -> str:
-    """IMAP SINCE date for local calendar day (mailbox ``SINCE`` is midnight on that date)."""
+def _local_tz() -> ZoneInfo | timezone:
     try:
-        tz = ZoneInfo(MAIL_TZ)
+        return ZoneInfo(MAIL_TZ)
     except Exception:
-        tz = timezone.utc
-    return datetime.now(tz).strftime("%d-%b-%Y")
+        return timezone.utc
+
+
+def _imap_since_today() -> str:
+    """IMAP SINCE = start of local calendar day."""
+    return datetime.now(_local_tz()).strftime("%d-%b-%Y")
+
+
+def _imap_since_lookback() -> str:
+    """
+    IMAP internal dates are often UTC — mail at 01:32 CST may still be «yesterday» in UTC.
+    Search from (local today − 1 day); keep only local-today in ``_received_today``.
+    """
+    d = datetime.now(_local_tz()).date() - timedelta(days=1)
+    return d.strftime("%d-%b-%Y")
 
 
 def _received_today(when: str | None) -> bool:
@@ -551,19 +563,28 @@ class MaintenanceMailWatcher:
             _save_state(state)
 
     def _uids_today_matching(self, mail: imaplib.IMAP4) -> list[bytes]:
-        """Today's INBOX with TINC / [Service Desk] in subject (read or unread)."""
-        since = _imap_since_today()
-        queries = [
-            f'(SINCE {since} SUBJECT "TINC")',
-            f'(SINCE {since} SUBJECT "[Service Desk]")',
-        ]
-        found: set[bytes] = set()
-        for q in queries:
-            for u in _uid_search(mail, q):
-                found.add(u)
-        if not found:
+        """
+        Fetch today's INBOX (seen + unread). Lark IMAP often ignores SUBJECT with ``[…]``,
+        so we only use SINCE and filter TINC- / [Service Desk] in code.
+        """
+        since_today = _imap_since_today()
+        uids = _uid_search(mail, f"(SINCE {since_today})")
+        if not uids:
+            since_lb = _imap_since_lookback()
+            print(
+                f"[maint-mail] SINCE {since_today} → 0; retry SINCE {since_lb} "
+                f"(UTC/internal-date skew, still filter {MAIL_TZ} today in code)",
+                flush=True,
+            )
+            uids = _uid_search(mail, f"(SINCE {since_lb})")
+        if not uids:
             return []
-        return sorted(found, key=lambda u: int(u))[-POLL_LIMIT:]
+        print(
+            f"[maint-mail] IMAP candidates: {len(uids)} (cap {POLL_LIMIT}), "
+            f"filter → TINC- / [Service Desk] + local today",
+            flush=True,
+        )
+        return sorted(uids, key=lambda u: int(u))[-POLL_LIMIT:]
 
     def _poll_today_inbox(self, mail: imaplib.IMAP4) -> None:
         """Poll today only — includes seen and unread; no UNSEEN filter."""
@@ -572,15 +593,14 @@ class MaintenanceMailWatcher:
         uids = self._uids_today_matching(mail)
         if not uids:
             print(
-                f"[maint-mail] today: 0 match ({MAIL_TZ}, SINCE {since}) "
-                "TINC / [Service Desk]",
+                f"[maint-mail] today: 0 INBOX mail since {since} ({MAIL_TZ})",
                 flush=True,
             )
             return
         self._process_uid_list(
             mail,
             uids,
-            label=f"today seen+unread ({len(uids)}, SINCE {since})",
+            label=f"today seen+unread ({len(uids)})",
         )
 
     def _run_idle_or_poll(self, mail: imaplib.IMAP4) -> None:
