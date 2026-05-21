@@ -78,6 +78,49 @@ def normalize_display_subject(subject: str) -> str:
     return s
 
 
+def extract_status_for_card(subject: str, extra_text: str | None = None) -> str | None:
+    """Status for card header — from subject/body ``Table availability:`` / ``Status:``."""
+    hay = f"{subject or ''}\n{extra_text or ''}"
+    for pattern in (
+        r"Table\s+availability\s*:\s*([A-Za-z][A-Za-z\s\-]*)",
+        r"(?<![\w])Status\s*:\s*([A-Za-z][A-Za-z\s\-]*)",
+    ):
+        m = re.search(pattern, hay, re.IGNORECASE)
+        if m:
+            val = m.group(1).strip().rstrip("/").strip()
+            if val and val.lower() != "unknown":
+                return val
+    if (extra_text or "").strip():
+        info = extract_info(extra_text, email_subject=subject)
+        st = (info.get("status") or "").strip()
+        if st and st.lower() != "unknown":
+            return st
+    return None
+
+
+def build_card_header_title(
+    subject: str,
+    *,
+    email_body: str | None = None,
+    received_at: str | None = None,
+) -> str:
+    """Card header: ``SD-7040923 · Status : Affected`` (ticket + status when known)."""
+    ticket = extract_ticket_card_title(subject, email_body)
+    status_raw = extract_status_for_card(subject, email_body)
+    parts: list[str] = []
+    if ticket:
+        parts.append(ticket)
+    if status_raw:
+        parts.append(f"Status : {format_status_display(status_raw)}")
+    if parts:
+        title = " · ".join(parts)
+    else:
+        title = format_received_at(received_at) or "Maintenance"
+    if len(title) > _CARD_HEADER_TITLE_MAX:
+        title = title[: _CARD_HEADER_TITLE_MAX - 3] + "..."
+    return title
+
+
 def extract_ticket_card_title(subject: str, extra_text: str | None = None) -> str | None:
     """
     Card header: ``SD-7041104`` or ``TINC-704380`` when subject/body contains
@@ -521,13 +564,14 @@ def build_maintenance_card(
     header_template: str = "orange",
     email_body: str | None = None,
 ) -> dict[str, Any]:
-    """Lark interactive card: header title = SD-/TINC- ticket id; subject/time in body."""
+    """Lark interactive card: header = ticket id + Status; subject/time in body."""
     display_subj = normalize_display_subject(email_subject) or "Maintenance email"
     rcv = format_received_at(received_at)
-    ticket = extract_ticket_card_title(email_subject, email_body)
-    header_title = ticket or rcv or "Maintenance"
-    if len(header_title) > _CARD_HEADER_TITLE_MAX:
-        header_title = header_title[: _CARD_HEADER_TITLE_MAX - 3] + "..."
+    header_title = build_card_header_title(
+        email_subject,
+        email_body=email_body,
+        received_at=received_at,
+    )
 
     elements: list[dict[str, Any]] = []
     meta_lines: list[str] = []
