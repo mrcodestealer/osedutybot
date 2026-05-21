@@ -3597,6 +3597,16 @@ except Exception as _e:
     print(f"⚠️ Reminder sheet sync failed on startup: {_e!r}")
 send_restart_ready()
 
+try:
+    import maintenance_mail as _maint_mail
+
+    _maint_mail.start_maintenance_mail_watcher(
+        send_message_func=send_message,
+        get_token_func=get_tenant_access_token,
+    )
+except Exception as _mail_e:
+    print(f"⚠️ Maintenance mail watcher failed to start: {_mail_e!r}", flush=True)
+
 def _run_main_entry() -> int:
     """
     Same startup guard style as legacy ``run_larkbot.py``:
