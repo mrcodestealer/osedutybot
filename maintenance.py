@@ -424,6 +424,17 @@ def extract_info(text: str, *, email_subject: str | None = None):
 
     return info
 
+def format_status_display(status: str) -> str:
+    """Append maintenance action hint for Fixed / In progress statuses."""
+    raw = (status or "").strip() or "Unknown"
+    low = raw.lower()
+    if low == "fixed":
+        return "Fixed (Kindly Unset Maintenance)"
+    if low in ("in progress", "in-progress", "inprogress"):
+        return "In progress (Kindly Set Maintenance)"
+    return raw
+
+
 def generate_output(
     info: dict[str, Any],
     *,
@@ -452,7 +463,7 @@ def generate_output(
         "",
         *affected_lines,
         f"Reason : {info['reason']}",
-        f"Status: {info['status']}",
+        f"Status: {format_status_display(info['status'])}",
         f"Start time: {info['start_time']}",
         f"End time : {info['end_time']}",
         "",
