@@ -80,8 +80,43 @@ POLL_LIMIT = int(
     or "50"
 )
 MAIL_TZ = (os.getenv("MAINTENANCE_MAIL_TZ", "").strip() or "Asia/Shanghai")
+# Comma-separated IMAP mailboxes (Lark folder names; quote not needed in .env).
+MAIL_IMAP_FOLDERS = [
+    f.strip()
+    for f in (
+        os.getenv("MAINTENANCE_MAIL_IMAP_FOLDERS", "").strip()
+        or os.getenv("maintenance_mail_imap_folders", "").strip()
+        or "INBOX,OSE Pending"
+    ).split(",")
+    if f.strip()
+]
 
 _state_lock = threading.Lock()
+
+
+def _imap_mailbox_name(folder: str) -> str:
+    """Quote folder names with spaces for IMAP SELECT."""
+    name = (folder or "").strip() or "INBOX"
+    if re.search(r'[\s"\']', name):
+        return '"' + name.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return name
+
+
+def _select_mail_folder(mail: imaplib.IMAP4, folder: str) -> bool:
+    mailbox = _imap_mailbox_name(folder)
+    try:
+        typ, data = mail.select(mailbox, readonly=False)
+    except Exception as ex:
+        print(f"[maint-mail] SELECT {folder!r} failed: {ex!r}", flush=True)
+        return False
+    if typ != "OK":
+        print(f"[maint-mail] SELECT {folder!r} not OK: {data!r}", flush=True)
+        return False
+    return True
+
+
+def _uid_key(folder: str, uid: str) -> str:
+    return f"{folder}:{uid}"
 
 
 def _local_tz() -> ZoneInfo | timezone:
@@ -289,9 +324,16 @@ def _find_duplicate_title_content(
     return None
 
 
-def _already_processed_uid(entries: list[dict[str, Any]], imap_uid: str) -> bool:
-    uid = str(imap_uid)
-    return any(str(e.get("imap_uid")) == uid for e in entries)
+def _already_processed_uid(entries: list[dict[str, Any]], uid_key: str) -> bool:
+    key = str(uid_key)
+    for e in entries:
+        stored = str(e.get("imap_uid") or "")
+        if stored == key:
+            return True
+        # Legacy entries: bare uid only (assume INBOX)
+        if ":" not in stored and key.endswith(":" + stored):
+            return True
+    return False
 
 
 def _record_processed(
@@ -444,13 +486,16 @@ class MaintenanceMailWatcher:
         mail: imaplib.IMAP4,
         uid: bytes,
         state: dict[str, Any],
+        *,
+        folder: str = "INBOX",
     ) -> None:
         import maintenance
 
         uid_s = uid.decode() if isinstance(uid, bytes) else str(uid)
         entries: list[dict[str, Any]] = state["entries"]
+        store_key = _uid_key(folder, uid_s)
 
-        if _already_processed_uid(entries, uid_s):
+        if _already_processed_uid(entries, store_key):
             return
 
         subject, when = self._fetch_header_preview(mail, uid)
@@ -501,13 +546,16 @@ class MaintenanceMailWatcher:
             self._send_lark(TARGET_CHAT_ID, notice)
             _record_processed(
                 entries,
-                imap_uid=uid_s,
+                imap_uid=store_key,
                 message_id=msg.get("Message-ID") or "",
                 title=display_subj,
                 content_hash=chash,
             )
             mail.uid("store", uid, "+FLAGS", "(\\Seen)")
-            print(f"[maint-mail] duplicate ignored uid={uid_s} title={display_subj!r}", flush=True)
+            print(
+                f"[maint-mail] duplicate ignored {folder} uid={uid_s} title={display_subj!r}",
+                flush=True,
+            )
             return
 
         from_addr = _decode_mime_header(msg.get("From"))
@@ -538,15 +586,25 @@ class MaintenanceMailWatcher:
 
         _record_processed(
             entries,
-            imap_uid=uid_s,
+            imap_uid=store_key,
             message_id=msg.get("Message-ID") or "",
             title=display_subj,
             content_hash=chash,
         )
         mail.uid("store", uid, "+FLAGS", "(\\Seen)")
-        print(f"[maint-mail] processed uid={uid_s} title={subject!r}", flush=True)
+        print(
+            f"[maint-mail] processed {folder} uid={uid_s} title={display_subj!r}",
+            flush=True,
+        )
 
-    def _process_uid_list(self, mail: imaplib.IMAP4, uids: list[bytes], *, label: str) -> None:
+    def _process_uid_list(
+        self,
+        mail: imaplib.IMAP4,
+        uids: list[bytes],
+        *,
+        label: str,
+        folder: str = "INBOX",
+    ) -> None:
         if not uids:
             print(f"[maint-mail] {label}: 0 message(s) to check", flush=True)
             return
@@ -557,7 +615,7 @@ class MaintenanceMailWatcher:
                 if self._stop.is_set():
                     break
                 try:
-                    self._process_one(mail, uid, state)
+                    self._process_one(mail, uid, state, folder=folder)
                 except Exception as ex:
                     print(f"[maint-mail] process error uid={uid!r}: {ex!r}", flush=True)
             _save_state(state)
@@ -581,34 +639,53 @@ class MaintenanceMailWatcher:
             return []
         print(
             f"[maint-mail] IMAP candidates: {len(uids)} (cap {POLL_LIMIT}), "
-            f"filter → TINC- / [Service Desk] + local today",
+            "filter → TINC- / [Service Desk] + local today",
             flush=True,
         )
         return sorted(uids, key=lambda u: int(u))[-POLL_LIMIT:]
 
-    def _poll_today_inbox(self, mail: imaplib.IMAP4) -> None:
-        """Poll today only — includes seen and unread; no UNSEEN filter."""
-        mail.select("INBOX", readonly=False)
+    def _poll_today_folders(self, mail: imaplib.IMAP4) -> None:
+        """Poll today in each configured folder (seen + unread)."""
         since = _imap_since_today()
-        uids = self._uids_today_matching(mail)
-        if not uids:
+        any_mail = False
+        for folder in MAIL_IMAP_FOLDERS:
+            if not _select_mail_folder(mail, folder):
+                continue
+            uids = self._uids_today_matching(mail)
+            if not uids:
+                print(
+                    f"[maint-mail] {folder}: 0 mail since {since} ({MAIL_TZ})",
+                    flush=True,
+                )
+                continue
+            any_mail = True
+            self._process_uid_list(
+                mail,
+                uids,
+                label=f"{folder} today ({len(uids)})",
+                folder=folder,
+            )
+        if not any_mail:
             print(
-                f"[maint-mail] today: 0 INBOX mail since {since} ({MAIL_TZ})",
+                f"[maint-mail] all folders empty for today ({MAIL_TZ}): {MAIL_IMAP_FOLDERS!r}",
                 flush=True,
             )
-            return
-        self._process_uid_list(
-            mail,
-            uids,
-            label=f"today seen+unread ({len(uids)})",
-        )
 
     def _run_idle_or_poll(self, mail: imaplib.IMAP4) -> None:
-        """Use IMAP IDLE when available; otherwise poll today's matching mail."""
-        if hasattr(mail, "idle") and hasattr(mail, "idle_done"):
+        """Poll all configured folders; IDLE only when a single folder is set."""
+        use_idle = (
+            len(MAIL_IMAP_FOLDERS) == 1
+            and hasattr(mail, "idle")
+            and hasattr(mail, "idle_done")
+        )
+        if use_idle:
+            folder = MAIL_IMAP_FOLDERS[0]
             while not self._stop.is_set():
                 try:
-                    mail.select("INBOX", readonly=False)
+                    if not _select_mail_folder(mail, folder):
+                        if self._stop.wait(timeout=POLL_SECONDS):
+                            break
+                        continue
                     mail.idle()
                     if self._stop.wait(timeout=0.5):
                         try:
@@ -620,7 +697,7 @@ class MaintenanceMailWatcher:
                         mail.idle_done()
                     except Exception:
                         pass
-                    self._poll_today_inbox(mail)
+                    self._poll_today_folders(mail)
                 except Exception as ex:
                     print(f"[maint-mail] IDLE loop error: {ex!r}", flush=True)
                     if self._stop.wait(timeout=POLL_SECONDS):
@@ -628,7 +705,7 @@ class MaintenanceMailWatcher:
             return
 
         while not self._stop.is_set():
-            self._poll_today_inbox(mail)
+            self._poll_today_folders(mail)
             if self._stop.wait(timeout=POLL_SECONDS):
                 break
 
@@ -640,10 +717,10 @@ class MaintenanceMailWatcher:
                 mail = self._connect()
                 print(
                     f"[maint-mail] connected {MAIL_USER}@{MAIL_IMAP_HOST}:{MAIL_IMAP_PORT} "
-                    f"→ chat {TARGET_CHAT_ID}",
+                    f"→ chat {TARGET_CHAT_ID} folders={MAIL_IMAP_FOLDERS!r}",
                     flush=True,
                 )
-                self._poll_today_inbox(mail)
+                self._poll_today_folders(mail)
                 backoff = POLL_SECONDS
                 self._run_idle_or_poll(mail)
             except Exception as ex:
