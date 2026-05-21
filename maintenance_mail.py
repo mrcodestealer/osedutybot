@@ -79,6 +79,10 @@ POLL_LIMIT = int(
     or os.getenv("MAINTENANCE_MAIL_BACKFILL_LIMIT", "").strip()
     or "50"
 )
+# Max UIDs from tight SUBJECT search (TINC- / [Service Desk]); no arbitrary «newest 50» drop.
+SUBJECT_SEARCH_MAX = int(
+    os.getenv("MAINTENANCE_MAIL_SUBJECT_MAX", "").strip() or "300"
+)
 MAIL_TZ = (os.getenv("MAINTENANCE_MAIL_TZ", "").strip() or "Asia/Shanghai")
 MAIL_VERBOSE = (os.getenv("MAINTENANCE_MAIL_VERBOSE", "").strip() or "0") in (
     "1",
@@ -631,6 +635,42 @@ class MaintenanceMailWatcher:
             flush=True,
         )
 
+    def _prefilter_uids(
+        self,
+        mail: imaplib.IMAP4,
+        uids: list[bytes],
+        entries: list[dict[str, Any]],
+        *,
+        folder: str,
+    ) -> tuple[list[bytes], dict[str, int]]:
+        """
+        Header-only pass (oldest first). Only UIDs that match TINC- / [Service Desk]
+        and local-today (if Date known) proceed to full fetch.
+        """
+        stats = {
+            "imap_hits": len(uids),
+            "already_done": 0,
+            "not_today": 0,
+            "not_maintenance": 0,
+            "todo": 0,
+        }
+        todo: list[bytes] = []
+        for uid in uids:
+            uid_s = uid.decode() if isinstance(uid, bytes) else str(uid)
+            if _already_processed_uid(entries, _uid_key(folder, uid_s)):
+                stats["already_done"] += 1
+                continue
+            subject, when = self._fetch_header_preview(mail, uid)
+            if not subject_matches(subject):
+                stats["not_maintenance"] += 1
+                continue
+            if when and not _received_today(when):
+                stats["not_today"] += 1
+                continue
+            todo.append(uid)
+        stats["todo"] = len(todo)
+        return todo, stats
+
     def _process_uid_list(
         self,
         mail: imaplib.IMAP4,
@@ -640,12 +680,32 @@ class MaintenanceMailWatcher:
         folder: str = "INBOX",
     ) -> None:
         if not uids:
-            print(f"[maint-mail] {label}: 0 message(s) to check", flush=True)
+            print(f"[maint-mail] {label}: 0 IMAP hit(s)", flush=True)
             return
-        print(f"[maint-mail] {label}: checking {len(uids)} message(s)", flush=True)
         with _state_lock:
             state = _load_state()
-            for uid in uids:
+            entries: list[dict[str, Any]] = state["entries"]
+            todo, stats = self._prefilter_uids(
+                mail, uids, entries, folder=folder
+            )
+            if not todo:
+                print(
+                    f"[maint-mail] {label}: "
+                    f"imap={stats['imap_hits']} "
+                    f"done={stats['already_done']} "
+                    f"not_today={stats['not_today']} "
+                    f"not_maint={stats['not_maintenance']} "
+                    f"→ 0 to process",
+                    flush=True,
+                )
+                _save_state(state)
+                return
+            print(
+                f"[maint-mail] {label}: "
+                f"imap={stats['imap_hits']} → process {len(todo)}",
+                flush=True,
+            )
+            for uid in todo:
                 if self._stop.is_set():
                     break
                 try:
@@ -657,11 +717,10 @@ class MaintenanceMailWatcher:
     def _uids_maintenance_subject_search(
         self, mail: imaplib.IMAP4, since: str
     ) -> list[bytes]:
-        """IMAP SUBJECT search for TINC / Service Desk (small result set)."""
+        """IMAP SUBJECT search — tight tokens only (avoid broad «Service Desk»)."""
         return _merge_uid_lists(
-            _uid_search(mail, f'(SINCE {since} SUBJECT "TINC")'),
+            _uid_search(mail, f'(SINCE {since} SUBJECT "TINC-")'),
             _uid_search(mail, f'(SINCE {since} SUBJECT "[Service Desk]")'),
-            _uid_search(mail, f'(SINCE {since} SUBJECT "Service Desk")'),
         )
 
     def _uids_broad_since(self, mail: imaplib.IMAP4, since: str) -> list[bytes]:
@@ -698,15 +757,16 @@ class MaintenanceMailWatcher:
                     break
         if not uids:
             return []
-        if len(uids) > POLL_LIMIT:
+        if len(uids) > SUBJECT_SEARCH_MAX:
             print(
-                f"[maint-mail] maintenance UIDs: {len(uids)} → cap {POLL_LIMIT} (newest)",
+                f"[maint-mail] IMAP subject hits: {len(uids)} → cap {SUBJECT_SEARCH_MAX} "
+                "(oldest first; raise MAINTENANCE_MAIL_SUBJECT_MAX if needed)",
                 flush=True,
             )
-            uids = uids[-POLL_LIMIT:]
+            uids = uids[:SUBJECT_SEARCH_MAX]
         else:
             print(
-                f"[maint-mail] maintenance UIDs: {len(uids)} (TINC / [Service Desk] search)",
+                f"[maint-mail] IMAP subject hits: {len(uids)} (TINC- / [Service Desk])",
                 flush=True,
             )
         return uids
