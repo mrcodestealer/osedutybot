@@ -407,31 +407,38 @@ def _already_processed_uid(entries: list[dict[str, Any]], uid_key: str) -> bool:
     return False
 
 
-def forward_maintenance_email(*, subject: str) -> None:
+def forward_maintenance_email(*, subject: str, to_cp: bool = True) -> None:
     """
-    Send blank-body forward via SMTP (same Lark account as IMAP).
-    To: evolive.maintenance@…, Cc: om@…
+    SMTP forward from om@…
+
+    ``to_cp=True``: blank body → evolive.maintenance@…, Cc om@…
+    ``to_cp=False``: body ``NOT IN CP WEBSITE`` → om@ only (no evolive).
     """
     if not MAIL_PASSWORD:
         raise RuntimeError("MAINTENANCE_MAIL_PASSWORD not set")
     subj = (subject or "").strip() or "Maintenance"
-    msg = MIMEText("", "plain", "utf-8")
+    body = "" if to_cp else _maint_mod.NOT_IN_CP_WEBSITE_BODY
+    msg = MIMEText(body, "plain", "utf-8")
     msg["Subject"] = Header(subj, "utf-8")
     msg["From"] = formataddr((FORWARD_FROM_NAME, MAIL_USER))
-    msg["To"] = formataddr((FORWARD_TO_NAME, FORWARD_TO))
-    msg["Cc"] = FORWARD_CC
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid()
 
-    recipients = [FORWARD_TO, FORWARD_CC]
+    if to_cp:
+        msg["To"] = formataddr((FORWARD_TO_NAME, FORWARD_TO))
+        msg["Cc"] = FORWARD_CC
+        recipients = [FORWARD_TO, FORWARD_CC]
+        route = f"{FORWARD_TO} cc={FORWARD_CC}"
+    else:
+        msg["To"] = formataddr((FORWARD_FROM_NAME, FORWARD_CC))
+        recipients = [FORWARD_CC]
+        route = f"{FORWARD_CC} only (NOT IN CP WEBSITE)"
+
     ctx = ssl.create_default_context()
     with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=IMAP_TIMEOUT, context=ctx) as smtp:
         smtp.login(MAIL_USER, MAIL_PASSWORD)
         smtp.sendmail(MAIL_USER, recipients, msg.as_string())
-    print(
-        f"[maint-mail] forwarded {subj!r} → {FORWARD_TO} cc={FORWARD_CC}",
-        flush=True,
-    )
+    print(f"[maint-mail] forwarded {subj!r} → {route}", flush=True)
 
 
 def _record_processed(
@@ -724,9 +731,19 @@ class MaintenanceMailWatcher:
                 )
             return
 
+        token = self._get_token()
+        to_cp, launched_names = maintenance.gamelist_has_launched(
+            pipeline_in, token
+        )
+        if MAIL_VERBOSE and launched_names:
+            print(
+                f"[maint-mail] gamelist launched: {launched_names!r} to_cp={to_cp}",
+                flush=True,
+            )
+
         if FORWARD_ENABLED:
             try:
-                forward_maintenance_email(subject=subject)
+                forward_maintenance_email(subject=subject, to_cp=to_cp)
             except Exception as ex:
                 print(
                     f"[maint-mail] forward failed uid={uid_s} ticket={ticket_id!r}: {ex!r}",
@@ -734,7 +751,9 @@ class MaintenanceMailWatcher:
                 )
                 return
 
-        done_card = maintenance.build_forward_done_card(subject, body)
+        done_card = maintenance.build_forward_done_card(
+            subject, body, to_cp=to_cp
+        )
         self._send_lark_card(TARGET_CHAT_ID, done_card)
 
         _record_processed(

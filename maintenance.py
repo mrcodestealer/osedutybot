@@ -130,6 +130,39 @@ def extract_status_for_card(subject: str, extra_text: str | None = None) -> str 
 FORWARD_DONE_BODY = (
     "Done forward to evolive.maintenance@om.hotelstotsenberg.com"
 )
+NOT_IN_CP_WEBSITE_BODY = "NOT IN CP WEBSITE"
+FORWARD_DONE_NOT_CP_BODY = (
+    "NOT IN CP WEBSITE — sent to om@hotelstotsenberg.com only "
+    "(no launched games on gamelist · 遊戲入口圖=1)."
+)
+
+
+def gamelist_has_launched(
+    email_text: str, tenant_access_token: str | None
+) -> tuple[bool, list[str]]:
+    """
+    True when at least one affected table has 遊戲入口圖 = 1 on gamelist.
+    False when none launched, gamelist missing, or no table names found.
+    """
+    tok = (tenant_access_token or "").strip()
+    ss = GAMELIST_SPREADSHEET_TOKEN
+    sid = GAMELIST_SHEET_ID
+    if not ss or not sid or not tok:
+        return False, []
+    try:
+        grid = _fetch_sheet_values(tok, ss, sid)
+    except Exception:
+        return False, []
+    if _find_header_row_and_cols(grid) is None:
+        return False, []
+    candidates = extract_candidate_game_names(email_text)
+    if not candidates:
+        return False, []
+    launched: list[str] = []
+    for g in candidates:
+        if _row_launched_for_game(grid, g, "") is True:
+            launched.append(g)
+    return (len(launched) > 0, launched)
 
 
 def build_forward_done_title(
@@ -144,7 +177,10 @@ def build_forward_done_title(
 
 
 def build_forward_done_card(
-    subject: str, email_body: str | None = None
+    subject: str,
+    email_body: str | None = None,
+    *,
+    to_cp: bool = True,
 ) -> dict[str, Any]:
     """Small card after SMTP forward succeeds."""
     title = build_forward_done_title(subject, email_body)
@@ -153,7 +189,7 @@ def build_forward_done_card(
     return {
         "config": {"wide_screen_mode": True},
         "header": {
-            "template": "green",
+            "template": "green" if to_cp else "orange",
             "title": {"tag": "plain_text", "content": title},
         },
         "elements": [
@@ -161,7 +197,7 @@ def build_forward_done_card(
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": FORWARD_DONE_BODY,
+                    "content": FORWARD_DONE_BODY if to_cp else FORWARD_DONE_NOT_CP_BODY,
                 },
             }
         ],
