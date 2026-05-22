@@ -698,19 +698,27 @@ def generate_output(
     else:
         affected_lines.append("Unknown")
 
+    reason = (info.get("reason") or "").strip()
+    show_reason = bool(reason) and reason.lower() != "unknown"
+
     output = [
         "Hi "
         f'{lark_card_at_open_id(qa_os_local_id)} '
         f'{lark_card_at_open_id(cs_team_id)} , kindly check this email. Thank you.',
         "",
         *affected_lines,
-        f"Reason : {info['reason']}",
-        f"Status: {format_status_display(info['status'])}",
-        f"Start time: {info['start_time']}",
-        f"End time : {info['end_time']}",
-        "",
-        f"REF EMAIL:{info['reference']}"
     ]
+    if show_reason:
+        output.append(f"Reason : {reason}")
+    output.extend(
+        [
+            f"Status: {format_status_display(info['status'])}",
+            f"Start time: {info['start_time']}",
+            f"End time : {info['end_time']}",
+            "",
+            f"REF EMAIL:{info['reference']}",
+        ]
+    )
     return "\n".join(output)
 
 
