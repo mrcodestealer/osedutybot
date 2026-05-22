@@ -72,7 +72,9 @@ PROD_SET_PAGE = """<!DOCTYPE html>
       border: 1px solid var(--accent); background: rgba(59,130,246,.15); color: var(--text); cursor: pointer;
     }
     .btn-action:hover { background: rgba(59,130,246,.3); }
-    .btn-action:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn-action:disabled { opacity: 0.45; cursor: not-allowed; pointer-events: none; }
+    .ps-action-hint { margin: 0 0 0.65rem; font-size: 0.82rem; color: var(--muted); min-height: 1.1rem; }
+    .ps-action-hint.warn { color: var(--warn); }
     .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; }
     table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
     th, td { padding: 0.5rem 0.65rem; border-bottom: 1px solid var(--line); text-align: left; }
@@ -166,6 +168,7 @@ PROD_SET_PAGE = """<!DOCTYPE html>
           </div>
         </div>
       </div>
+      <p id="ps-action-hint" class="ps-action-hint warn" role="status">Select one or more machines in the table below, then choose an action.</p>
       <div class="env-filter-bar row-filter-bar" id="ps-row-filters" role="toolbar" aria-label="Status filters">
         <button type="button" class="env-filter-btn active" data-ps-clear="1" id="ps-row-all">Show All</button>
         <button type="button" class="env-filter-btn" data-ps-toggle="online">Online</button>
@@ -358,6 +361,35 @@ PROD_SET_PAGE = """<!DOCTYPE html>
       el.classList.toggle("err", !!isErr);
     }
 
+    function fetchOpts(extra) {
+      return Object.assign({
+        headers: { "ngrok-skip-browser-warning": "1" },
+      }, extra || {});
+    }
+
+    function updateActionButtons() {
+      const n = selectedMachines().length;
+      const hasRows = allRows.length > 0;
+      document.querySelectorAll(".btn-action").forEach(btn => {
+        btn.disabled = n === 0;
+        btn.title = n === 0
+          ? (hasRows ? "Tick checkbox(es) in the table first" : "Load machines first (Refresh all PROD), then tick checkbox(es)")
+          : "";
+      });
+      const hint = document.getElementById("ps-action-hint");
+      if (!hint) return;
+      if (!hasRows) {
+        hint.textContent = "No machines loaded yet — click Refresh all PROD above, wait for the count, then select rows.";
+        hint.classList.add("warn");
+      } else if (n === 0) {
+        hint.textContent = "Tick one or more checkboxes in the table, then click an action button.";
+        hint.classList.add("warn");
+      } else {
+        hint.textContent = `${n} machine(s) selected — choose an action above.`;
+        hint.classList.remove("warn");
+      }
+    }
+
     function renderTable() {
       const tbody = document.getElementById("ps-tbody");
       const vis = visibleRows();
@@ -379,6 +411,7 @@ PROD_SET_PAGE = """<!DOCTYPE html>
           <td>${onlinePill(r.online)}</td>
         </tr>`;
       }).join("");
+      updateActionButtons();
     }
 
     function setEnvActive(code) {
@@ -400,9 +433,10 @@ PROD_SET_PAGE = """<!DOCTYPE html>
     }
 
     async function loadMachines() {
-      const res = await fetch(API_MACHINES);
+      setLoadStatus("Loading machines…");
+      const res = await fetch(API_MACHINES, fetchOpts());
       const data = await res.json();
-      if (data.error) throw new Error(data.error || "load failed");
+      if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
       const raw = data.machines || data.rows || [];
       allRows = raw
         .filter(r => (r.environment || "PROD").toUpperCase() === "PROD")
@@ -444,7 +478,7 @@ PROD_SET_PAGE = """<!DOCTYPE html>
 
     async function pollRefreshStatus(refreshId, label) {
       const url = API_REFRESH_STATUS.replace("RID", encodeURIComponent(refreshId));
-      const res = await fetch(url);
+      const res = await fetch(url, fetchOpts());
       const data = await res.json();
       if (!res.ok || data.error) throw new Error(data.error || "status poll failed");
       if (data.status === "running") {
@@ -473,11 +507,11 @@ PROD_SET_PAGE = """<!DOCTYPE html>
       setRefreshButtonsDisabled(true);
       setLoadStatus(`Starting refresh ${label}…`);
       try {
-        const res = await fetch(API_REFRESH, {
+        const res = await fetch(API_REFRESH, fetchOpts({
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "1" },
           body: JSON.stringify({ belongs }),
-        });
+        }));
         const data = await res.json();
         if (!res.ok || data.error) throw new Error(data.error || "refresh failed");
         if (!data.refresh_id) throw new Error("server did not return refresh_id");
@@ -542,11 +576,11 @@ PROD_SET_PAGE = """<!DOCTYPE html>
         alert("Select at least one machine in the list.");
         return;
       }
-      const res = await fetch(API_JOB, {
+      const res = await fetch(API_JOB, fetchOpts({
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "1" },
         body: JSON.stringify({ action, remark, machines }),
-      });
+      }));
       const data = await res.json();
       if (data.error) {
         alert(data.error || "Failed to start job");
@@ -561,7 +595,7 @@ PROD_SET_PAGE = """<!DOCTYPE html>
 
     async function pollJob() {
       if (!currentJobId) return;
-      const res = await fetch(API_JOB.replace("/jobs", "/jobs/" + encodeURIComponent(currentJobId)));
+      const res = await fetch(API_JOB.replace("/jobs", "/jobs/" + encodeURIComponent(currentJobId)), fetchOpts());
       const data = await res.json();
       if (!data.ok) return;
       if (data.status === "running" || data.status === "pending") {
@@ -673,13 +707,14 @@ PROD_SET_PAGE = """<!DOCTYPE html>
           if (cb) cb.checked = e.target.checked;
         }
       });
+      updateActionButtons();
+    });
+    document.getElementById("ps-tbody").addEventListener("change", e => {
+      if (e.target && e.target.classList.contains("ps-row-cb")) updateActionButtons();
     });
     document.querySelectorAll(".btn-action").forEach(btn => {
       btn.addEventListener("click", () => {
-        if (!selectedMachines().length) {
-          alert("Select at least one machine.");
-          return;
-        }
+        if (btn.disabled || !selectedMachines().length) return;
         openRemarkModal(btn.getAttribute("data-action"));
       });
     });
@@ -700,9 +735,12 @@ PROD_SET_PAGE = """<!DOCTYPE html>
       });
     });
 
+    updateActionButtons();
     loadMachines().catch(e => {
       document.getElementById("ps-empty").style.display = "block";
       document.getElementById("ps-empty").textContent = "Failed to load machines: " + e.message;
+      setLoadStatus("Failed to load: " + e.message, true);
+      updateActionButtons();
     });
   </script>
 </body>
