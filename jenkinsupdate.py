@@ -989,12 +989,28 @@ def _environment_hint_from_banner(line: str) -> str | None:
         " ", ""
     ):
         return "fpms-uat2-branch"
+    if re.search(r"\bpms\b", s) and re.search(r"\buat\b", s):
+        return "pms-uat"
     if re.search(r"\bfpms[\s-]*uat\b", s) or re.search(r"\buat\b", s):
         return "fpms-uat-branch"
     return None
 
 
-def _service_ids_from_service_block_lines(lines: list[str]) -> list[str]:
+def _catalog_exact_service_id(tok: str, catalog: Sequence[str]) -> str | None:
+    """Return canonical Jenkins checkbox id when ``tok`` matches ``catalog`` after normalize."""
+    k = _normalize_service_query_key(tok)
+    for s in catalog:
+        if _normalize_service_query_key(s) == k:
+            return s
+    return None
+
+
+def _service_ids_from_service_block_lines(
+    lines: list[str],
+    *,
+    service_catalog: Sequence[str] | None = None,
+    port_to_id: dict[int, str] | None = None,
+) -> list[str]:
     """
     ``services:`` payload: deploy ports (``3000``), fuzzy names (``MGNT_API_server``, ``mgnt_web``),
     or ``name,1,2`` where ``1``/``2`` pick 1-based rows from the fuzzy rank list for ``name``.
@@ -1002,6 +1018,8 @@ def _service_ids_from_service_block_lines(lines: list[str]) -> list[str]:
     If stdin/stdout are a **TTY** and a text token has **no** trailing rank numbers, the user is shown
     a numbered near-match list and must pick ``1`` / ``1 2 3`` (unless ``FPMS_CONFIG_SERVICE_TEXT_AUTO=1``).
     """
+    catalog = list(service_catalog or FPMS_UAT_BRANCH_SERVICES)
+    ports = port_to_id if port_to_id is not None else SERVICE_PORT_TO_ID
     port_tokens = re.compile(r"\b(\d{3,5})\b")
     seen: set[str] = set()
     out: list[str] = []
@@ -1020,12 +1038,17 @@ def _service_ids_from_service_block_lines(lines: list[str]) -> list[str]:
         while i < len(toks):
             tok = toks[i]
             if re.fullmatch(r"\d{3,5}", tok):
+                if not ports:
+                    raise ConfigBlockError(
+                        f"Port {tok!r} is not used for this Jenkins job — use an exact service id "
+                        f"(e.g. {catalog[0]!r})."
+                    )
                 port = int(tok)
-                sid = SERVICE_PORT_TO_ID.get(port)
+                sid = ports.get(port)
                 if sid is None:
                     raise ConfigBlockError(
                         f"Unknown port {tok}; known: "
-                        f"{', '.join(str(p) for p in sorted(SERVICE_PORT_TO_ID))}"
+                        f"{', '.join(str(p) for p in sorted(ports))}"
                     )
                 if sid not in seen:
                     seen.add(sid)
@@ -1037,8 +1060,17 @@ def _service_ids_from_service_block_lines(lines: list[str]) -> list[str]:
                     f"Token {tok!r} looks like a rank but it must follow a **name** token "
                     "in the same comma-separated list (e.g. ``MGNT_API,1,2``)."
                 )
+            exact = _catalog_exact_service_id(tok, catalog)
+            if exact is not None:
+                if exact not in seen:
+                    seen.add(exact)
+                    out.append(exact)
+                i += 1
+                continue
             q = tok.replace("_", "-")
-            ranked = _rank_services_by_query(q, limit=min(30, len(FPMS_UAT_BRANCH_SERVICES)))
+            ranked = _rank_catalog_services_by_query(
+                catalog, q, limit=min(30, len(catalog))
+            )
             if not ranked:
                 raise ConfigBlockError(f"No Jenkins service matches token {tok!r}.")
             j = i + 1
@@ -1060,7 +1092,9 @@ def _service_ids_from_service_block_lines(lines: list[str]) -> list[str]:
                 continue
 
             if _stdin_stdout_interactive() and not _config_text_service_auto_pick():
-                ranked_menu = _rank_services_by_query(q, limit=12, for_menu=True)
+                ranked_menu = _rank_catalog_services_by_query(
+                    catalog, q, limit=12, for_menu=True
+                )
                 picked = _prompt_service_ids_for_config_text_token(tok, ranked_menu, seen)
                 for sid in picked:
                     if sid in seen:
@@ -1145,6 +1179,8 @@ def parse_fpms_config_block(
     text: str,
     *,
     preserve_branch_case: bool = False,
+    service_catalog: Sequence[str] | None = None,
+    port_to_id: dict[int, str] | None = None,
 ) -> tuple[str, list[str], str, str, bool]:
     """
     Parse a pasted block (``branch:``, ``version:``, ``Service(s):``, ``environment:``).
@@ -1281,17 +1317,31 @@ def parse_fpms_config_block(
         services = []
         update_all = True
     else:
-        services = _service_ids_from_service_block_lines(service_lines)
+        _cat = list(service_catalog or FPMS_UAT_BRANCH_SERVICES)
+        _ports = port_to_id
+        if _ports is None:
+            _ports = (
+                SERVICE_PORT_TO_ID
+                if _cat is FPMS_UAT_BRANCH_SERVICES
+                else {}
+            )
+        services = _service_ids_from_service_block_lines(
+            service_lines, service_catalog=_cat, port_to_id=_ports
+        )
         update_all = False
     if env is None:
         if env_from_banner is not None:
             env = env_from_banner
             print(f"→ Using environment from banner/title: {env!r}", flush=True)
         else:
-            env = normalize_parameter_text(
-                os.environ.get("FPMS_DEFAULT_ENVIRONMENT", "fpms-uat-branch")
+            _cat = list(service_catalog or FPMS_UAT_BRANCH_SERVICES)
+            _default_env = (
+                "pms-uat"
+                if _cat is PMS_UAT_UPDATE_SERVICES
+                else os.environ.get("FPMS_DEFAULT_ENVIRONMENT", "fpms-uat-branch")
             )
-            if env not in ENVIRONMENTS:
+            env = normalize_parameter_text(_default_env)
+            if env not in ENVIRONMENTS and env != "pms-uat":
                 env = ENVIRONMENTS[0]
             print(
                 f"→ No environment: in block — using {env!r} "
@@ -6402,7 +6452,8 @@ def _fpms_lark_spawn_run(
             )
         except Exception as ex:
             try:
-                send(chat_id, f"❌ FPMS Jenkins automation failed:\n```\n{ex}\n```")
+                prof_lbl = _jenkins_job_profile_display(jp)
+                send(chat_id, f"❌ {prof_lbl} Jenkins automation failed:\n```\n{ex}\n```")
             except Exception:
                 pass
             print(f"[jenkinsupdate bot] run failed: {ex!r}", flush=True)
@@ -7708,9 +7759,12 @@ def run(
                 f"    command:     {command!r}\n"
             )
         else:
+            _pms = jp == "pms_uat"
             environment, services, branch, version, parsed_update_all = parse_fpms_config_block(
                 config_block,
-                preserve_branch_case=(jp == "pms_uat"),
+                preserve_branch_case=_pms,
+                service_catalog=PMS_UAT_UPDATE_SERVICES if _pms else None,
+                port_to_id={} if _pms else None,
             )
             svc_note = (
                 f"update-all ({_jenkins_update_all_stapler_name()})"
