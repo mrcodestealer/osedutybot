@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from email.header import Header
 from email.header import decode_header
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr, formatdate, make_msgid, parsedate_to_datetime
 from typing import Any, Callable
@@ -273,8 +274,11 @@ def _content_hash(body: str) -> str:
     return hashlib.sha256(_normalize_body(body).encode("utf-8")).hexdigest()
 
 
-def _format_forward_date(msg: email.message.Message) -> str:
-    """e.g. ``Fri, 22 May 2026 08:07:10 +0000 (UTC)``"""
+_FORWARD_SEP = "---------- Forwarded message ----------"
+
+
+def _format_forward_date_lark(msg: email.message.Message) -> str:
+    """Display date like manual Lark forward: ``Fri, May 22, 2026, 15:25``."""
     raw = (msg.get("Date") or "").strip()
     if not raw:
         return ""
@@ -282,32 +286,55 @@ def _format_forward_date(msg: email.message.Message) -> str:
         dt = parsedate_to_datetime(raw)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        tz = dt.strftime("%z") or "+0000"
-        line = dt.strftime(f"%a, %d %b %Y %H:%M:%S {tz}")
-        if tz == "+0000":
-            line += " (UTC)"
-        return line
+        local = dt.astimezone(ZoneInfo(MAIL_TZ))
+        return local.strftime("%a, %b %d, %Y, %H:%M")
     except Exception:
         return raw
 
 
-def build_forwarded_message_body(msg: email.message.Message) -> str:
-    """Gmail-style forwarded block + original plain body (launched / to_cp path)."""
+def _forward_header_lines(msg: email.message.Message) -> list[str]:
     from_hdr = _decode_mime_header(msg.get("From")) or "Unknown"
     subj = _decode_mime_header(msg.get("Subject")) or ""
-    date_line = _format_forward_date(msg)
-    original = extract_body_from_message(msg)
-    header = [
-        "---------- Forwarded message ---------",
-        f"From: {from_hdr}",
-    ]
+    to_hdr = _decode_mime_header(msg.get("To")) or ""
+    date_line = _format_forward_date_lark(msg)
+    lines = [f"From: {from_hdr}"]
     if date_line:
-        header.append(f"Date: {date_line}")
-    header.append(f"Subject: {subj}")
-    header.append("")
-    if original:
-        return "\n".join(header) + original
-    return "\n".join(header)
+        lines.append(f"Date: {date_line}")
+    lines.append(f"Subject: {subj}")
+    lines.append(f"To: {to_hdr}")
+    return lines
+
+
+def build_forwarded_message_body(msg: email.message.Message) -> str:
+    """Plain-text forwarded block (fallback for clients without HTML)."""
+    original = extract_body_from_message(msg)
+    header = [_FORWARD_SEP, *_forward_header_lines(msg), ""]
+    return "\n".join(header) + (original or "")
+
+
+def build_forwarded_message_html(msg: email.message.Message) -> str:
+    """
+    HTML with ``gmail_quote`` wrappers so Lark/Gmail show **Show/Hide email thread**
+    like a manual forward (empty top + collapsible quoted block).
+    """
+    import html as html_mod
+
+    original = extract_body_from_message(msg)
+    body_html = html_mod.escape(original, quote=False).replace("\n", "<br>\n")
+    attr_html = "<br>\n".join(
+        html_mod.escape(line, quote=False) for line in _forward_header_lines(msg)
+    )
+    return (
+        '<div dir="ltr"><br></div>\n'
+        '<div class="gmail_quote gmail_quote_container">\n'
+        f'<div dir="ltr" class="gmail_attr">{html_mod.escape(_FORWARD_SEP, quote=False)}<br>\n'
+        f"{attr_html}</div>\n"
+        '<blockquote class="gmail_quote" '
+        'style="margin:0 0 0 .8ex;border-left:1px #ccc solid;padding-left:1ex">\n'
+        f'<div dir="ltr">{body_html}</div>\n'
+        "</blockquote>\n"
+        "</div>\n"
+    )
 
 
 def _html_to_text(html: str) -> str:
@@ -443,6 +470,13 @@ def _already_processed_uid(entries: list[dict[str, Any]], uid_key: str) -> bool:
     return False
 
 
+def _forward_subject(subject: str) -> str:
+    s = (subject or "").strip() or "Maintenance"
+    if re.match(r"^(?:Fwd|Fw|FW):\s", s, re.IGNORECASE):
+        return s
+    return f"Fw: {s}"
+
+
 def _reply_subject(subject: str) -> str:
     s = (subject or "").strip() or "Maintenance"
     if re.match(r"^re:\s", s, re.IGNORECASE):
@@ -455,22 +489,29 @@ def forward_maintenance_email(
     subject: str,
     original_msg: email.message.Message | None = None,
 ) -> None:
-    """SMTP forward from om@… — Gmail-style block + original body → evolive + Cc om@."""
+    """
+    SMTP forward from om@… → evolive + Cc om@.
+
+    Uses ``Fw:`` subject + HTML ``gmail_quote`` block so Lark/Gmail clients can
+    **Show/Hide email thread** like clicking the manual Forward button.
+    """
     if not MAIL_PASSWORD:
         raise RuntimeError("MAINTENANCE_MAIL_PASSWORD not set")
-    subj = (subject or "").strip() or "Maintenance"
-    body = (
-        build_forwarded_message_body(original_msg)
-        if original_msg is not None
-        else ""
-    )
-    msg = MIMEText(body, "plain", "utf-8")
+    subj = _forward_subject(subject)
+    if original_msg is not None:
+        plain = build_forwarded_message_body(original_msg)
+        html = build_forwarded_message_html(original_msg)
+        msg = MIMEMultipart("alternative")
+        msg.attach(MIMEText(plain, "plain", "utf-8"))
+        msg.attach(MIMEText(html, "html", "utf-8"))
+    else:
+        msg = MIMEText("", "plain", "utf-8")
     msg["Subject"] = Header(subj, "utf-8")
     msg["From"] = formataddr((FORWARD_FROM_NAME, MAIL_USER))
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid()
     msg["To"] = formataddr((FORWARD_TO_NAME, FORWARD_TO))
-    msg["Cc"] = FORWARD_CC
+    msg["Cc"] = formataddr((NOT_CP_REPLY_CC_NAME, FORWARD_CC))
     recipients = [FORWARD_TO, FORWARD_CC]
     route = f"{FORWARD_TO} cc={FORWARD_CC}"
 

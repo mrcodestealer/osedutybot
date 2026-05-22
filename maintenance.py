@@ -949,8 +949,6 @@ def process_maintenance_pipeline(
             process_email(email_text, **subj_kw),
         )
 
-    has_headers = _find_header_row_and_cols(grid) is not None
-
     launched_list: list[str] = []
     not_launched_list: list[str] = []
 
@@ -974,20 +972,12 @@ def process_maintenance_pipeline(
 
     msg1 = "\n".join(lines1)
 
-    info = extract_info(email_text, **subj_kw)
-    summary_tables = list(info.get("table_names") or [])
-    if not summary_tables and info.get("table") not in (None, "", "Unknown"):
-        summary_tables = [
-            x.strip()
-            for x in str(info["table"]).split(",")
-            if _is_plausible_game_name(x.strip())
-        ]
-    if launched_list:
-        summary_tables = launched_list
+    if not launched_list:
+        return msg1, ""
 
     msg2 = process_email(
         email_text,
-        affected_launched_only=summary_tables or None,
+        affected_launched_only=launched_list,
         **subj_kw,
     )
 
