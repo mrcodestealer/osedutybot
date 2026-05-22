@@ -8,7 +8,8 @@ Processes inbox messages whose subject **literally** starts with ``TINC-`` or
 Runs the same pipeline as ``/m``, and posts to a fixed Lark group.
 
 State file: ``maintenance.json`` (titles + content hashes + IMAP UIDs) to avoid
-re-processing after bot restart.
+re-processing after bot restart. Entries reset at local midnight (``MAINTENANCE_MAIL_TZ``)
+only after ``state_date`` is already set (upgrade keeps existing entries until next day).
 """
 
 from __future__ import annotations
@@ -172,6 +173,11 @@ def _local_tz() -> ZoneInfo | timezone:
         return ZoneInfo(MAIL_TZ)
     except Exception:
         return timezone.utc
+
+
+def _local_today_iso() -> str:
+    """Local calendar date (``MAINTENANCE_MAIL_TZ``) as ``YYYY-MM-DD``."""
+    return datetime.now(_local_tz()).date().isoformat()
 
 
 def _imap_since_today() -> str:
@@ -577,23 +583,70 @@ def build_pipeline_input(subject: str, body: str) -> str:
     return subj
 
 
+def _empty_state(*, state_date: str | None = None) -> dict[str, Any]:
+    return {
+        "version": STATE_VERSION,
+        "entries": [],
+        "state_date": state_date or _local_today_iso(),
+    }
+
+
+def _maybe_reset_state_for_new_day(data: dict[str, Any]) -> dict[str, Any]:
+    """
+    Clear ``entries`` after local midnight once ``state_date`` is established.
+
+    Legacy files without ``state_date``: keep all entries, set ``state_date`` to today
+    (no clear on deploy — avoids re-processing today's mail after a code pull).
+    """
+    today = _local_today_iso()
+    if not isinstance(data.get("entries"), list):
+        data["entries"] = []
+    data["version"] = STATE_VERSION
+
+    prev_date = (data.get("state_date") or "").strip()
+    if not prev_date:
+        data["state_date"] = today
+        n = len(data["entries"])
+        if n:
+            print(
+                f"[maint-mail] maintenance.json: state_date={today}, kept {n} "
+                f"entries (daily clear from next midnight {MAIL_TZ})",
+                flush=True,
+            )
+        return data
+
+    if prev_date == today:
+        return data
+
+    n = len(data["entries"])
+    if n:
+        print(
+            f"[maint-mail] new day {today} ({MAIL_TZ}): cleared maintenance.json "
+            f"({n} entries from {prev_date})",
+            flush=True,
+        )
+    return _empty_state(state_date=today)
+
+
 def _load_state() -> dict[str, Any]:
     if not os.path.isfile(STATE_PATH):
-        return {"version": STATE_VERSION, "entries": []}
+        return _empty_state()
     try:
         with open(STATE_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception:
-        return {"version": STATE_VERSION, "entries": []}
+        return _empty_state()
     if not isinstance(data, dict):
-        return {"version": STATE_VERSION, "entries": []}
+        return _empty_state()
     entries = data.get("entries")
     if not isinstance(entries, list):
-        entries = []
-    return {"version": STATE_VERSION, "entries": entries}
+        data["entries"] = []
+    return _maybe_reset_state_for_new_day(data)
 
 
 def _save_state(data: dict[str, Any]) -> None:
+    data["state_date"] = _local_today_iso()
+    data["version"] = STATE_VERSION
     entries = data.get("entries") or []
     if len(entries) > MAX_ENTRIES:
         data["entries"] = entries[-MAX_ENTRIES:]
