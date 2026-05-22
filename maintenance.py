@@ -16,6 +16,7 @@ from __future__ import annotations
 import sys
 import re
 import os
+import unicodedata
 from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -202,13 +203,34 @@ def _cell_norm(c: Any) -> str:
     return str(c).replace("\r", " ").replace("\n", " ").strip().lower()
 
 
+def _game_name_key(s: Any) -> str:
+    """NFKC + strip accents + remove spaces for stable exact match."""
+    t = unicodedata.normalize("NFKC", str(s or ""))
+    t = t.lower().replace(" ", "")
+    return "".join(
+        c
+        for c in unicodedata.normalize("NFD", t)
+        if unicodedata.category(c) != "Mn"
+    )
+
+
 def _names_match_gamelist(a: Any, b: Any) -> bool:
     """Exact game name match — no substring (avoids «Blackjack» → «Blackjack B»)."""
-    na = _cell_norm(a).replace(" ", "")
-    nb = _cell_norm(b).replace(" ", "")
+    na = _game_name_key(a)
+    nb = _game_name_key(b)
     if not na or not nb:
         return False
     return na == nb
+
+
+def _entrance_header_score(cell_norm: str) -> int:
+    """Prefer true **遊戲入口圖 / Game entrance map** column over other columns."""
+    cn = cell_norm
+    if "遊戲入口圖" in cn or "游戏入口图" in cn:
+        return 10
+    if "entrance" in cn and "map" in cn:
+        return 5
+    return 0
 
 
 def _is_entrance_map_launched(cell: Any) -> bool:
@@ -216,7 +238,13 @@ def _is_entrance_map_launched(cell: Any) -> bool:
     ``遊戲入口圖 / Game entrance map``:
     ``1`` → launched; ``0`` / empty / any other value → not launched.
     """
-    raw = str(cell or "").strip()
+    if cell is None:
+        return False
+    if isinstance(cell, bool):
+        return cell is True
+    if isinstance(cell, (int, float)) and not isinstance(cell, bool):
+        return float(cell) == 1.0
+    raw = str(cell).strip()
     if not raw:
         return False
     try:
@@ -235,19 +263,30 @@ def _is_entrance_map_launched(cell: Any) -> bool:
 
 
 def _fetch_sheet_values(
-    tenant_token: str, spreadsheet_token: str, sheet_id: str, *, max_row: int = 500
+    tenant_token: str, spreadsheet_token: str, sheet_id: str, *, max_row: int = 2500
 ) -> list[list[Any]]:
     rng = f"{sheet_id}!A1:ZZ{max_row}"
     enc = quote(rng, safe="")
     url = f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values/{enc}"
     headers = {"Authorization": f"Bearer {tenant_token}"}
-    params = {"valueRenderOption": "ToString", "dateTimeRenderOption": "FormattedString"}
-    resp = requests.get(url, headers=headers, params=params, timeout=90)
-    data = resp.json()
-    if data.get("code") != 0:
-        raise RuntimeError(str(data.get("msg", data)))
-    vr = data.get("data", {}).get("valueRange") or data.get("data", {}).get("value_range") or {}
-    return vr.get("values") or []
+    # UnformattedValue → raw 0/1 in 遊戲入口圖 (ToString may mis-read coloured cells).
+    last_err: str | None = None
+    for render_opt in ("UnformattedValue", "ToString"):
+        params = {
+            "valueRenderOption": render_opt,
+            "dateTimeRenderOption": "FormattedString",
+        }
+        resp = requests.get(url, headers=headers, params=params, timeout=90)
+        data = resp.json()
+        if data.get("code") == 0:
+            vr = (
+                data.get("data", {}).get("valueRange")
+                or data.get("data", {}).get("value_range")
+                or {}
+            )
+            return vr.get("values") or []
+        last_err = str(data.get("msg", data))
+    raise RuntimeError(last_err or "gamelist fetch failed")
 
 
 def _find_header_row_and_cols(grid: list[list[Any]]) -> tuple[int, int, int] | None:
@@ -258,29 +297,24 @@ def _find_header_row_and_cols(grid: list[list[Any]]) -> tuple[int, int, int] | N
             continue
         name_ci: int | None = None
         entrance_ci: int | None = None
+        entrance_hdr_score = 0
         for ci, cell in enumerate(row):
             cn = _cell_norm(cell)
             if "游戏名称" in cn or ("games" in cn and "name" in cn):
                 name_ci = ci
-            if (
-                "遊戲入口圖" in cn
-                or "游戏入口图" in cn
-                or ("entrance" in cn and "map" in cn)
-            ):
+            esc = _entrance_header_score(cn)
+            if esc > entrance_hdr_score:
+                entrance_hdr_score = esc
                 entrance_ci = ci
-        if name_ci is None or entrance_ci is None:
+        if name_ci is None or entrance_ci is None or entrance_hdr_score == 0:
             continue
         nc = _cell_norm(row[name_ci]) if name_ci < len(row) else ""
-        ec = _cell_norm(row[entrance_ci]) if entrance_ci < len(row) else ""
         score = 0
         if "游戏名称" in nc:
             score += 4
         elif "games" in nc and "name" in nc:
             score += 2
-        if "遊戲入口圖" in ec or "游戏入口图" in ec:
-            score += 4
-        elif "entrance" in ec and "map" in ec:
-            score += 2
+        score += entrance_hdr_score
         scored.append((score, ri, name_ci, entrance_ci))
     if not scored:
         return None
@@ -802,7 +836,7 @@ def process_maintenance_pipeline(
         + (", ".join(launched_list) if launched_list else "（无）")
     )
     lines1.append(
-        "⛔ **非上线 Launched：** "
+        "⛔ **非上线 Not launched：** "
         + (", ".join(not_launched_list) if not_launched_list else "（无）")
     )
     if unknown_list:
