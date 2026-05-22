@@ -773,8 +773,9 @@ def build_maintenance_card(
     summary_section: str = "",
     header_template: str = "orange",
     email_body: str | None = None,
+    show_meta: bool = True,
 ) -> dict[str, Any]:
-    """Lark interactive card: header = ticket id + Status; subject/time in body."""
+    """Lark interactive card: header = ticket id + Status; optional meta / gamelist / QA body."""
     display_subj = normalize_display_subject(email_subject) or "Maintenance email"
     rcv = format_received_at(received_at)
     header_title = build_card_header_title(
@@ -784,17 +785,18 @@ def build_maintenance_card(
     )
 
     elements: list[dict[str, Any]] = []
-    meta_lines: list[str] = []
-    meta_lines.append(f"**Subject:** {display_subj}")
-    if from_addr:
-        meta_lines.append(f"**From:** {from_addr}")
-    if rcv:
-        meta_lines.append(f"**Received:** {rcv}")
-    if meta_lines:
-        elements.append(
-            {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(meta_lines)}}
-        )
-        elements.append({"tag": "hr"})
+    if show_meta:
+        meta_lines: list[str] = []
+        meta_lines.append(f"**Subject:** {display_subj}")
+        if from_addr:
+            meta_lines.append(f"**From:** {from_addr}")
+        if rcv:
+            meta_lines.append(f"**Received:** {rcv}")
+        if meta_lines:
+            elements.append(
+                {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(meta_lines)}}
+            )
+            elements.append({"tag": "hr"})
 
     if (gamelist_section or "").strip():
         elements.append(

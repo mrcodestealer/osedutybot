@@ -1058,22 +1058,6 @@ class MaintenanceMailWatcher:
             return
 
         token = self._get_token()
-        first_reply, second_reply = maintenance.process_maintenance_pipeline(
-            pipeline_in,
-            token,
-            email_subject=display_subj,
-            received_at=when,
-        )
-        main_card = maintenance.build_maintenance_card(
-            email_subject=display_subj,
-            received_at=when,
-            from_addr=from_addr,
-            gamelist_section=first_reply or "",
-            summary_section=second_reply or "",
-            email_body=body,
-        )
-        self._send_lark_card(TARGET_CHAT_ID, main_card)
-
         to_cp, launched_names = maintenance.gamelist_has_launched(
             pipeline_in, token
         )
@@ -1082,6 +1066,25 @@ class MaintenanceMailWatcher:
                 f"[maint-mail] gamelist launched: {launched_names!r} to_cp={to_cp}",
                 flush=True,
             )
+
+        if to_cp:
+            _, second_reply = maintenance.process_maintenance_pipeline(
+                pipeline_in,
+                token,
+                email_subject=display_subj,
+                received_at=when,
+            )
+            if (second_reply or "").strip():
+                main_card = maintenance.build_maintenance_card(
+                    email_subject=display_subj,
+                    received_at=when,
+                    from_addr=from_addr,
+                    gamelist_section="",
+                    summary_section=second_reply,
+                    email_body=body,
+                    show_meta=False,
+                )
+                self._send_lark_card(TARGET_CHAT_ID, main_card)
 
         if FORWARD_ENABLED:
             try:
@@ -1100,11 +1103,6 @@ class MaintenanceMailWatcher:
                     flush=True,
                 )
                 return
-
-        done_card = maintenance.build_forward_done_card(
-            subject, body, to_cp=to_cp
-        )
-        self._send_lark_card(TARGET_CHAT_ID, done_card)
 
         _record_processed(
             entries,
