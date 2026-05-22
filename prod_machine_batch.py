@@ -370,22 +370,76 @@ def _batch_toolbar_button_actionable(btn) -> bool:
         return False
 
 
-def _click_batch_button(page, label: str, *, timeout_ms: int) -> tuple[bool, str]:
+def _wait_batch_toolbar_ready(page, label: str, *, timeout_ms: int, wait_ms: int = 12_000) -> bool:
+    """After row checkbox selection, EGM may enable toolbar buttons after a short delay."""
+    deadline = time.monotonic() + min(wait_ms / 1000.0, timeout_ms / 1000.0)
+    while time.monotonic() < deadline:
+        btn = _locate_batch_toolbar_button(page, label)
+        if btn.count() and _batch_toolbar_button_actionable(btn):
+            return True
+        page.wait_for_timeout(250)
+    btn = _locate_batch_toolbar_button(page, label)
+    return btn.count() > 0 and _batch_toolbar_button_actionable(btn)
+
+
+def _click_batch_button(page, label: str, *, timeout_ms: int, force: bool = False) -> tuple[bool, str]:
     """
-    Click a toolbar batch button. Returns ``(ok, reason)`` where reason is
-    ``""``, ``"not found"``, or ``"disabled"``.
+    Click a toolbar batch button. Tries a real click first (Occupy/Timeout rows are
+    often clickable once selected). Only reports disabled if click fails and button
+    still looks non-actionable; optional force click as last resort.
     """
     btn = _locate_batch_toolbar_button(page, label)
     if btn.count() == 0:
         return False, "not found"
-    if not _batch_toolbar_button_actionable(btn):
-        return False, "disabled"
     try:
         btn.click(timeout=min(30_000, timeout_ms))
         page.wait_for_timeout(400)
         return True, ""
     except Exception:
+        if force:
+            try:
+                btn.click(force=True, timeout=min(30_000, timeout_ms))
+                page.wait_for_timeout(400)
+                return True, ""
+            except Exception:
+                try:
+                    btn.evaluate("el => el.click()")
+                    page.wait_for_timeout(400)
+                    return True, ""
+                except Exception:
+                    pass
+        if not _batch_toolbar_button_actionable(btn):
+            return False, "disabled"
         return False, "click failed"
+
+
+def _submit_batch_action(page, label: str, remark: str, *, timeout_ms: int) -> tuple[bool, str]:
+    """Click batch toolbar button and Save when confirm dialog opens."""
+    _wait_batch_toolbar_ready(page, label, timeout_ms=timeout_ms)
+    clicked, why = _click_batch_button(page, label, timeout_ms=timeout_ms)
+    if not clicked and why in ("disabled", "click failed"):
+        clicked, why = _click_batch_button(page, label, timeout_ms=timeout_ms, force=True)
+    if not clicked:
+        return False, why
+
+    page.wait_for_timeout(500)
+    if _visible_confirm_layer(page) is not None:
+        try:
+            _click_save_confirm(page, remark, timeout_ms=timeout_ms)
+            _wait_batch_done(page, timeout_ms=timeout_ms)
+        except Exception as e:
+            return False, f"confirm/save failed: {e}"
+    else:
+        page.wait_for_timeout(800)
+        if _visible_confirm_layer(page) is not None:
+            try:
+                _click_save_confirm(page, remark, timeout_ms=timeout_ms)
+                _wait_batch_done(page, timeout_ms=timeout_ms)
+            except Exception as e:
+                return False, f"confirm/save failed: {e}"
+        else:
+            _wait_batch_done(page, timeout_ms=timeout_ms)
+    return True, ""
 
 
 def _visible_confirm_layer(page):
@@ -817,6 +871,54 @@ def _process_env(
     )
 
 
+def _batch_disabled_error(
+    page,
+    btn: str,
+    machines: list[dict],
+    belongs: str,
+    *,
+    timeout_ms: int,
+    max_pages: int,
+) -> str:
+    """Human-readable reason when a toolbar batch button stays disabled."""
+    hints: list[str] = []
+    for m in machines:
+        name = _machine_display_name(m)
+        if not name:
+            continue
+        live = _read_live_row_state(page, name, timeout_ms=timeout_ms, max_pages=max_pages)
+        if live is None:
+            hints.append(f"{name}: not on current EGM table (or lost selection)")
+            continue
+        st = (live.get("status") or "").strip()
+        ol = (live.get("online") or "").strip()
+        su = st.upper()
+        ou = ol.upper()
+        is_maint = _status_is_maintenance(st)
+        is_test = bool(live.get("test"))
+        if btn == "BatchMaintenance" and is_maint:
+            hints.append(f"{name}: already in maintenance (status={st!r})")
+        elif btn == "BatchTest" and is_test:
+            hints.append(f"{name}: already in test mode")
+        elif "OCCUPY" in su or "TIMEOUT" in su:
+            hints.append(
+                f"{name}: status {st!r} — BatchMaintenance should be clickable when row is "
+                f"selected; check checkbox selection (online={ol!r})"
+            )
+        elif "OFFLINE" in ou:
+            hints.append(f"{name}: offline ({ol!r}) — batch maintenance usually blocked")
+        elif btn == "BatchMaintenance":
+            hints.append(f"{name}: BatchMaintenance disabled (status={st!r}, online={ol!r})")
+        else:
+            hints.append(f"{name}: {btn} disabled (status={st!r}, online={ol!r})")
+    if hints:
+        return f"button {btn} disabled — " + "; ".join(hints)
+    return (
+        f"button {btn} disabled (row state may already match, game running, offline, "
+        "or no row selected)"
+    )
+
+
 def _process_env_batch(
     page,
     belongs: str,
@@ -887,17 +989,53 @@ def _process_env_batch(
 
     selected = still_need
 
+    # Live verify paginates the table and can clear row checkboxes — re-select before batch click.
+    _clear_table_row_selection(page, timeout_ms=timeout_ms)
+    reselected: list[dict] = []
+    for m in selected:
+        if cancel_check() or manual_stop_check():
+            break
+        name = _machine_display_name(m)
+        if not name:
+            continue
+        try:
+            if _select_machine_on_live_page(
+                page, name, timeout_ms=timeout_ms, max_pages=max_pages
+            ):
+                reselected.append(m)
+            else:
+                fail_list.append(
+                    {
+                        "belongs": m.get("belongs", belongs),
+                        "machine": name,
+                        "error": "machine not found on EGM page before batch click",
+                    }
+                )
+        except Exception as e:
+            fail_list.append(
+                {"belongs": m.get("belongs", belongs), "machine": name, "error": str(e)}
+            )
+    if cancel_check() or manual_stop_check() or not reselected:
+        return ok_list, fail_list
+    selected = reselected
+
+    for btn in buttons:
+        _wait_batch_toolbar_ready(page, btn, timeout_ms=timeout_ms)
+
     for btn in buttons:
         if cancel_check() or manual_stop_check():
             break
-        clicked, why = _click_batch_button(page, btn, timeout_ms=timeout_ms)
+        clicked, why = _submit_batch_action(page, btn, remark, timeout_ms=timeout_ms)
         if not clicked:
             if why == "disabled":
-                err = f"button {btn} disabled (row state may already match or not allow this action)"
+                err = _batch_disabled_error(
+                    page, btn, selected, belongs, timeout_ms=timeout_ms, max_pages=max_pages
+                )
+                err += " (click failed — ensure row checkbox is selected on EGM page)"
             elif why == "not found":
                 err = f"button {btn} not found"
             else:
-                err = f"button {btn} click failed"
+                err = why or f"button {btn} failed"
             for m in selected:
                 fail_list.append(
                     {
@@ -907,11 +1045,6 @@ def _process_env_batch(
                     }
                 )
             return ok_list, fail_list
-        _click_save_confirm(page, remark, timeout_ms=timeout_ms)
-        _wait_batch_done(page, timeout_ms=timeout_ms)
-
-    if cancel_check() or manual_stop_check():
-        return ok_list, fail_list
 
     _refresh_egm_table(page, timeout_ms=timeout_ms, max_pages=max_pages)
 

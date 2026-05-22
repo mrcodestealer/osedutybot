@@ -308,7 +308,7 @@ def _run_prod_set_job_thread(job_id: str, action: str, remark: str, machines: li
         label = PHASE_LABELS.get(step_verify, step_verify)
         lines = [
             f"**{label} — failed ({len(failed)} machine(s))**",
-            "Often caused by **Game is currently running** (player still inside).",
+            "Occupy / Timeout machines can use BatchMaintenance when the row is selected.",
             f"Will retry automatically (attempt {attempt}) unless you tap **Cancel** below.",
             "",
         ]
