@@ -370,18 +370,22 @@ def _batch_toolbar_button_actionable(btn) -> bool:
         return False
 
 
-def _click_batch_button(page, label: str, *, timeout_ms: int) -> bool:
+def _click_batch_button(page, label: str, *, timeout_ms: int) -> tuple[bool, str]:
+    """
+    Click a toolbar batch button. Returns ``(ok, reason)`` where reason is
+    ``""``, ``"not found"``, or ``"disabled"``.
+    """
     btn = _locate_batch_toolbar_button(page, label)
     if btn.count() == 0:
-        return False
+        return False, "not found"
     if not _batch_toolbar_button_actionable(btn):
-        return False
+        return False, "disabled"
     try:
         btn.click(timeout=min(30_000, timeout_ms))
         page.wait_for_timeout(400)
-        return True
+        return True, ""
     except Exception:
-        return False
+        return False, "click failed"
 
 
 def _visible_confirm_layer(page):
@@ -569,7 +573,7 @@ def _probe_one_toolbar_button(
         out["detail"] = "expected enabled after row selected, but button is disabled"
         return out
 
-    if not _click_batch_button(page, label, timeout_ms=timeout_ms):
+    if not _click_batch_button(page, label, timeout_ms=timeout_ms)[0]:
         out["detail"] = "click failed"
         return out
 
@@ -857,16 +861,49 @@ def _process_env_batch(
     if cancel_check() or manual_stop_check() or not selected:
         return ok_list, fail_list
 
+    # Retry path: if live EGM already matches this phase (e.g. maintenance set on prior attempt),
+    # skip batch clicks — BatchMaintenance stays disabled once row is in maintenance.
+    still_need: list[dict] = []
+    for m in selected:
+        if cancel_check() or manual_stop_check():
+            break
+        name = _machine_display_name(m)
+        if not name:
+            continue
+        try:
+            if _verify_machine_live(
+                page, name, verify_action, timeout_ms=timeout_ms, max_pages=max_pages
+            ):
+                ok_list.append({"belongs": m.get("belongs", belongs), "machine": name})
+            else:
+                still_need.append(m)
+        except Exception as e:
+            fail_list.append(
+                {"belongs": m.get("belongs", belongs), "machine": name, "error": str(e)}
+            )
+
+    if cancel_check() or manual_stop_check() or not still_need:
+        return ok_list, fail_list
+
+    selected = still_need
+
     for btn in buttons:
         if cancel_check() or manual_stop_check():
             break
-        if not _click_batch_button(page, btn, timeout_ms=timeout_ms):
+        clicked, why = _click_batch_button(page, btn, timeout_ms=timeout_ms)
+        if not clicked:
+            if why == "disabled":
+                err = f"button {btn} disabled (row state may already match or not allow this action)"
+            elif why == "not found":
+                err = f"button {btn} not found"
+            else:
+                err = f"button {btn} click failed"
             for m in selected:
                 fail_list.append(
                     {
                         "belongs": m.get("belongs", belongs),
                         "machine": _machine_display_name(m),
-                        "error": f"button {btn} not found",
+                        "error": err,
                     }
                 )
             return ok_list, fail_list
