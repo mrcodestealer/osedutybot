@@ -382,6 +382,20 @@ def _body_is_html(s: str) -> bool:
     )
 
 
+def _sanitize_embedded_html(html: str) -> str:
+    """Drop outer document wrappers so nested HTML does not break Lark quote detection."""
+    t = (html or "").strip()
+    if not t:
+        return ""
+    t = re.sub(r"(?is)<!DOCTYPE[^>]*>", "", t)
+    t = re.sub(r"(?is)<head\b[^>]*>.*?</head>", "", t)
+    m = re.search(r"(?is)<body\b[^>]*>(.*)</body>", t)
+    if m:
+        return m.group(1).strip()
+    t = re.sub(r"(?is)</?html\b[^>]*>", "", t)
+    return t.strip()
+
+
 def extract_body_html_raw(msg: email.message.Message) -> str | None:
     """Original HTML part(s) without converting to plain text."""
     html_parts: list[str] = []
@@ -469,7 +483,7 @@ def build_forwarded_message_html(msg: email.message.Message) -> str:
 
     body_raw = extract_body_html_raw(msg)
     if body_raw and _body_is_html(body_raw):
-        body_inner = f"<div><div>{body_raw}</div></div>"
+        body_inner = f"<div><div>{_sanitize_embedded_html(body_raw)}</div></div>"
     else:
         plain = extract_body_from_message(msg)
         body_inner = (
@@ -478,13 +492,14 @@ def build_forwarded_message_html(msg: email.message.Message) -> str:
             else ""
         )
 
+    # Use --collapsed (not --header) so read view can offer Show/Hide email thread.
+    # Lark manual forward drafts use --header (always expanded while composing).
     outer_id = _gen_lark_id("lark-mail-quote-cli")
-    inner_id = _gen_lark_id("lark-mail-quote-cli")
     quote = (
         f'<div id="{outer_id}" class="{_LARK_QUOTE_WRAPPER}">'
         f'<div data-html-block="quote" data-mail-html-ignore="">'
-        f'<div class="adit-html-block adit-html-block--header" style="{_LARK_QUOTE_BORDER}">'
-        f'<div id="{inner_id}">{sep_html}{meta_html}{body_inner}</div>'
+        f'<div class="adit-html-block adit-html-block--collapsed" style="{_LARK_QUOTE_BORDER}">'
+        f"<div><div>{sep_html}{meta_html}{body_inner}</div></div>"
         f"</div></div></div>"
     )
     top = (
@@ -664,6 +679,12 @@ def forward_maintenance_email(
     msg["From"] = formataddr((FORWARD_FROM_NAME, MAIL_USER))
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid()
+    if original_msg is not None:
+        orig_mid = (original_msg.get("Message-ID") or "").strip()
+        if orig_mid:
+            msg["In-Reply-To"] = orig_mid
+            refs = (original_msg.get("References") or "").strip()
+            msg["References"] = f"{refs} {orig_mid}".strip() if refs else orig_mid
     msg["To"] = formataddr((FORWARD_TO_NAME, FORWARD_TO))
     msg["Cc"] = formataddr((NOT_CP_REPLY_CC_NAME, FORWARD_CC))
     recipients = [FORWARD_TO, FORWARD_CC]
