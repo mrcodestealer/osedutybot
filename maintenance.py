@@ -202,12 +202,13 @@ def _cell_norm(c: Any) -> str:
     return str(c).replace("\r", " ").replace("\n", " ").strip().lower()
 
 
-def _names_match(a: Any, b: Any) -> bool:
+def _names_match_gamelist(a: Any, b: Any) -> bool:
+    """Exact game name match — no substring (avoids «Blackjack» → «Blackjack B»)."""
     na = _cell_norm(a).replace(" ", "")
     nb = _cell_norm(b).replace(" ", "")
     if not na or not nb:
         return False
-    return na == nb or na in nb or nb in na
+    return na == nb
 
 
 def _is_entrance_map_launched(cell: Any) -> bool:
@@ -295,29 +296,28 @@ def _row_launched_for_game(
     if not parsed:
         return None
     hi, ci_name, ci_entrance = parsed
-    last: bool | None = None
     for row in grid[hi + 1 :]:
         if not row:
             continue
         name_cell = row[ci_name] if len(row) > ci_name else ""
         entrance_cell = row[ci_entrance] if len(row) > ci_entrance else ""
-        match_name = _names_match(name_cell, game_name)
-        match_tab = bool(sheet_title.strip()) and _names_match(name_cell, sheet_title)
-        if not (match_name or match_tab):
-            continue
-        last = _is_entrance_map_launched(entrance_cell)
+        match_name = _names_match_gamelist(name_cell, game_name)
+        match_tab = bool(sheet_title.strip()) and _names_match_gamelist(
+            name_cell, sheet_title
+        )
+        if match_name or match_tab:
+            return _is_entrance_map_launched(entrance_cell)
 
     data_rows = [r for r in grid[hi + 1 :] if r]
     if (
-        last is None
-        and len(data_rows) == 1
+        len(data_rows) == 1
         and sheet_title.strip()
-        and _names_match(sheet_title, game_name)
+        and _names_match_gamelist(sheet_title, game_name)
     ):
         r = data_rows[0]
         ent = r[ci_entrance] if len(r) > ci_entrance else ""
         return _is_entrance_map_launched(ent)
-    return last
+    return None
 
 
 def _clean_email_line(line: str) -> str:
