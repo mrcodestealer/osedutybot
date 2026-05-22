@@ -72,7 +72,7 @@ PROD_SET_PAGE = """<!DOCTYPE html>
       border: 1px solid var(--accent); background: rgba(59,130,246,.15); color: var(--text); cursor: pointer;
     }
     .btn-action:hover { background: rgba(59,130,246,.3); }
-    .btn-action:disabled { opacity: 0.45; cursor: not-allowed; pointer-events: none; }
+    .btn-action.needs-selection { opacity: 0.72; }
     .ps-action-hint { margin: 0 0 0.65rem; font-size: 0.82rem; color: var(--muted); min-height: 1.1rem; }
     .ps-action-hint.warn { color: var(--warn); }
     .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; }
@@ -371,7 +371,7 @@ PROD_SET_PAGE = """<!DOCTYPE html>
       const n = selectedMachines().length;
       const hasRows = allRows.length > 0;
       document.querySelectorAll(".btn-action").forEach(btn => {
-        btn.disabled = n === 0;
+        btn.classList.toggle("needs-selection", n === 0);
         btn.title = n === 0
           ? (hasRows ? "Tick checkbox(es) in the table first" : "Load machines first (Refresh all PROD), then tick checkbox(es)")
           : "";
@@ -629,11 +629,11 @@ PROD_SET_PAGE = """<!DOCTYPE html>
           const fail = s.failed || [];
           html += `<p style="color:var(--muted);font-size:0.88rem;">Done: ${ok.length}, Not done: ${fail.length}</p>`;
           if (ok.length) {
-            html += "<p><strong>Done:</strong></p><ul class=\"fail-list\">" +
+            html += '<p><strong>Done:</strong></p><ul class="fail-list">' +
               ok.map(m => `<li>✓ ${esc(m.belongs)} — ${esc(m.machine)}</li>`).join("") + "</ul>";
           }
           if (fail.length) {
-            html += "<p><strong>Not done:</strong></p><ul class=\"fail-list\">" +
+            html += '<p><strong>Not done:</strong></p><ul class="fail-list">' +
               fail.map(m => `<li>✗ ${esc(m.belongs)} — ${esc(m.machine)} (${esc(m.error || "")})</li>`).join("") + "</ul>";
           }
         }
@@ -714,7 +714,17 @@ PROD_SET_PAGE = """<!DOCTYPE html>
     });
     document.querySelectorAll(".btn-action").forEach(btn => {
       btn.addEventListener("click", () => {
-        if (btn.disabled || !selectedMachines().length) return;
+        const sel = selectedMachines();
+        if (!sel.length) {
+          const hint = document.getElementById("ps-action-hint");
+          if (hint) {
+            hint.textContent = allRows.length
+              ? "Please tick one or more checkboxes in the table first."
+              : "No machines loaded — click Refresh all PROD above and wait for the count.";
+            hint.classList.add("warn");
+          }
+          return;
+        }
         openRemarkModal(btn.getAttribute("data-action"));
       });
     });
