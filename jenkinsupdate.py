@@ -282,6 +282,31 @@ SMS_UAT_UPDATE_SERVICES = [
 
 _SMS_UAT_SERVICE_IDS_CASEFOLD = frozenset(s.casefold() for s in SMS_UAT_UPDATE_SERVICES)
 
+# Checkbox ``value`` / label text for **PMS-UAT-UPDATE** (Jenkins Services parameter).
+PMS_UAT_UPDATE_SERVICES = [
+    "gmail-to-s3",
+    "pay-callback",
+    "pay-fpmsapi",
+    "pay-fpmsapi-canary",
+    "pay-fpmsapi-ext",
+    "pay-mgntapi",
+    "pay-mgntapi-test",
+    "pay-mgntapi-ts",
+    "pay-mgntweb",
+    "pay-scheduler-common",
+    "pay-scheduler-common-2",
+    "pay-scheduler-datasync",
+    "pay-scheduler-ec2",
+    "pay-scheduler-gcash",
+    "pay-scheduler-maya",
+    "pay-scheduler-others",
+    "pay-scheduler-repair",
+    "pay-scheduler-ts",
+    "pms-script",
+]
+
+_PMS_UAT_SERVICE_IDS_CASEFOLD = frozenset(s.casefold() for s in PMS_UAT_UPDATE_SERVICES)
+
 _DEFAULT_USER = "junchen"
 _DEFAULT_PASSWORD = "junchen"
 
@@ -648,15 +673,29 @@ def _sms_uat_canonical_service_id(tok: str) -> str | None:
 
 
 def _fpms_uat_catalog_exact_service_id(tok: str) -> str | None:
-    """
-    Return canonical Jenkins **checkbox id** when ``tok`` equals a name in ``FPMS_UAT_BRANCH_SERVICES``
-    after :func:`_normalize_service_query_key` (FPMS UAT + PMS-UAT-UPDATE share this list in Lark).
-    """
+    """Return canonical Jenkins **checkbox id** for **FPMS UAT branch** Services."""
     k = _normalize_service_query_key(tok)
     for s in FPMS_UAT_BRANCH_SERVICES:
         if _normalize_service_query_key(s) == k:
             return s
     return None
+
+
+def _pms_uat_catalog_exact_service_id(tok: str) -> str | None:
+    """Return canonical Jenkins **checkbox id** for **PMS-UAT-UPDATE** Services."""
+    k = _normalize_service_query_key(tok)
+    for s in PMS_UAT_UPDATE_SERVICES:
+        if _normalize_service_query_key(s) == k:
+            return s
+    return None
+
+
+def _fpms_lark_is_pms_uat_only_service_token(tok: str) -> bool:
+    """True if ``tok`` is a PMS UAT service id but **not** on the FPMS UAT Services list."""
+    k = _normalize_service_query_key(tok)
+    if k not in _PMS_UAT_SERVICE_IDS_CASEFOLD:
+        return False
+    return k not in _FPMS_SERVICE_IDS_CASEFOLD
 
 
 def _fpms_lark_is_sms_uat_only_service_token(tok: str) -> bool:
@@ -819,6 +858,13 @@ def _rank_sms_uat_services_by_query(
 ) -> list[str]:
     """Like ``_rank_services_by_query`` but against ``SMS_UAT_UPDATE_SERVICES``."""
     return _rank_catalog_services_by_query(SMS_UAT_UPDATE_SERVICES, query, limit, for_menu=for_menu)
+
+
+def _rank_pms_uat_services_by_query(
+    query: str, limit: int = 12, *, for_menu: bool = False
+) -> list[str]:
+    """Like ``_rank_services_by_query`` but against ``PMS_UAT_UPDATE_SERVICES``."""
+    return _rank_catalog_services_by_query(PMS_UAT_UPDATE_SERVICES, query, limit, for_menu=for_menu)
 
 
 # Deploy / listener port → Jenkins Services checkbox ``value`` (same strings as ``FPMS_UAT_BRANCH_SERVICES``).
@@ -6722,25 +6768,28 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
     resolved_ids: list[str] = []
     tokens_to_pick: list[str] = []
     for tok in tokens:
-        try:
-            port_ids = _fpms_lark_resolve_token_by_port_or_none(tok)
-        except ValueError as ex:
-            send(chat_id, f"❌ {ex}")
-            return True
-        if port_ids is not None:
-            for sid in port_ids:
-                if sid not in resolved_ids:
-                    resolved_ids.append(sid)
-        else:
-            tokens_to_pick.append(tok)
-    if jp in ("fpms", "pms_uat"):
-        while tokens_to_pick:
-            hit = _fpms_uat_catalog_exact_service_id(tokens_to_pick[0])
-            if hit is None:
-                break
-            if hit not in resolved_ids:
-                resolved_ids.append(hit)
-            tokens_to_pick = tokens_to_pick[1:]
+        if jp == "fpms":
+            try:
+                port_ids = _fpms_lark_resolve_token_by_port_or_none(tok)
+            except ValueError as ex:
+                send(chat_id, f"❌ {ex}")
+                return True
+            if port_ids is not None:
+                for sid in port_ids:
+                    if sid not in resolved_ids:
+                        resolved_ids.append(sid)
+                continue
+        tokens_to_pick.append(tok)
+    exact_svc_fn = (
+        _pms_uat_catalog_exact_service_id if jp == "pms_uat" else _fpms_uat_catalog_exact_service_id
+    )
+    while tokens_to_pick:
+        hit = exact_svc_fn(tokens_to_pick[0])
+        if hit is None:
+            break
+        if hit not in resolved_ids:
+            resolved_ids.append(hit)
+        tokens_to_pick = tokens_to_pick[1:]
     if not tokens_to_pick:
         if not resolved_ids:
             send(chat_id, "❌ No services parsed after resolving ports.")
@@ -6776,8 +6825,27 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
             "then list services (e.g. `sms-api`). Say **cancel** to clear this session.",
         )
         return True
+    if jp == "fpms" and _fpms_lark_is_pms_uat_only_service_token(first):
+        send(
+            chat_id,
+            f"❌ `{first}` is a **PMS UAT update** service, not on the **FPMS UAT branch** job list. "
+            "Your message matched the **FPMS** job.\n\n"
+            "Include **pms uat update** in the same `/jenkinsupdate` message so the bot selects "
+            "**PMS-UAT-UPDATE**, then list services (e.g. `pay-callback`). Say **cancel** to clear this session.",
+        )
+        return True
+    if jp == "pms_uat" and _fpms_uat_catalog_exact_service_id(first) is not None:
+        send(
+            chat_id,
+            f"❌ `{first}` is an **FPMS UAT branch** service, not on the **PMS UAT** job list. "
+            "Say **cancel**, then start again with **pms uat update** for **PMS-UAT-UPDATE**.",
+        )
+        return True
     q0 = first.replace("_", "-")
-    ranked0 = _rank_services_by_query(q0, limit=12, for_menu=True)
+    if jp == "pms_uat":
+        ranked0 = _rank_pms_uat_services_by_query(q0, limit=12, for_menu=True)
+    else:
+        ranked0 = _rank_services_by_query(q0, limit=12, for_menu=True)
     if not ranked0:
         send(chat_id, f"❌ No Jenkins service matches first text token `{first}`.")
         return True
@@ -7090,6 +7158,26 @@ def handle_lark_jenkins_update_message(
                         "Say **cancel**, then start again with **sms uat update** in your `/jenkinsupdate` message.",
                     )
                     return True
+                if jp_sess == "fpms" and _fpms_lark_is_pms_uat_only_service_token(next_tok):
+                    _fpms_lark_clear_session(chat_id, sender_id)
+                    send(
+                        chat_id,
+                        f"❌ `{next_tok}` is a **PMS UAT update** service, not FPMS. "
+                        "Say **cancel**, then start again with **pms uat update** in your `/jenkinsupdate` message.",
+                    )
+                    return True
+                if (
+                    jp_sess == "pms_uat"
+                    and _fpms_uat_catalog_exact_service_id(next_tok) is not None
+                    and _pms_uat_catalog_exact_service_id(next_tok) is None
+                ):
+                    _fpms_lark_clear_session(chat_id, sender_id)
+                    send(
+                        chat_id,
+                        f"❌ `{next_tok}` is an **FPMS UAT branch** service, not on the **PMS UAT** job list. "
+                        "Say **cancel**, then start again with **pms uat update** for **PMS-UAT-UPDATE**.",
+                    )
+                    return True
                 if (
                     jp_sess == "fnt_rc"
                     and _sms_uat_canonical_service_id(next_tok) is not None
@@ -7116,7 +7204,9 @@ def handle_lark_jenkins_update_message(
                     return True
 
                 exact_id: str | None = None
-                if jp_sess in ("fpms", "pms_uat"):
+                if jp_sess == "pms_uat":
+                    exact_id = _pms_uat_catalog_exact_service_id(next_tok)
+                elif jp_sess == "fpms":
                     exact_id = _fpms_uat_catalog_exact_service_id(next_tok)
                 elif jp_sess == "fnt_rc":
                     exact_id = _fnt_rc_canonical_service_id(next_tok)
@@ -7141,6 +7231,8 @@ def handle_lark_jenkins_update_message(
                     nranked = _rank_fnt_rc_services_by_query(q, limit=12, for_menu=True)
                 elif jp_sess == "sms_uat":
                     nranked = _rank_sms_uat_services_by_query(q, limit=12, for_menu=True)
+                elif jp_sess == "pms_uat":
+                    nranked = _rank_pms_uat_services_by_query(q, limit=12, for_menu=True)
                 else:
                     nranked = _rank_services_by_query(q, limit=12, for_menu=True)
                 if not nranked:
