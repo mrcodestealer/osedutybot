@@ -8,6 +8,14 @@ def get_picture1_path():
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), PICTURE1_FILENAME)
 
 
+MANCHUNG_FILENAME = "manchung.png"
+
+
+def get_manchung_path():
+    """Absolute path to the /manchung image (manchung.png next to this module)."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), MANCHUNG_FILENAME)
+
+
 def get_miao():
     return r"""　　　　　　　　　,-､　　 　　　　　　　 ,.-､ 
 　　　　　　　 ./:::::＼　　　　　　　 ／::::ヽ 

@@ -33,7 +33,7 @@ import random
 # Import command handlers from separate modules
 from duty_list import search_duty
 from holiday import get_today_date, format_holidays, holidays_this_month
-from funny import get_miao, lucifer, dog, get_picture1_path
+from funny import get_miao, lucifer, dog, get_picture1_path, get_manchung_path
 import fe_duty 
 import bi_duty
 import game 
@@ -2843,6 +2843,19 @@ def lark_webhook():
         result = send_image_message(chat_id, key)
         if result.get("code") != 0:
             send_message(chat_id, f"❌ Failed to send picture1: {result}")
+        return _lark_im_done()
+    elif clean_text.lower() == '/manchung':
+        picture_path = get_manchung_path()
+        if not os.path.isfile(picture_path):
+            send_message(chat_id, "❌ manchung picture not found.")
+            return _lark_im_done()
+        key = upload_image_lark(picture_path)
+        if not key:
+            send_message(chat_id, "❌ Failed to upload manchung picture.")
+            return _lark_im_done()
+        result = send_image_message(chat_id, key)
+        if result.get("code") != 0:
+            send_message(chat_id, f"❌ Failed to send manchung picture: {result}")
         return _lark_im_done()
     elif clean_text.lower() == '/picture cat':
         file_token = get_cat_file_token()
