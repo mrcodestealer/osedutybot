@@ -177,6 +177,9 @@ PROD_SET_PAGE = """<!DOCTYPE html>
         <button type="button" class="env-filter-btn" data-ps-toggle="no_maintain">No Maintain</button>
         <button type="button" class="env-filter-btn" data-ps-toggle="test">Test</button>
         <button type="button" class="env-filter-btn" data-ps-toggle="no_test">No Test</button>
+        <button type="button" class="env-filter-btn" data-ps-toggle="occupy">Occupy</button>
+        <button type="button" class="env-filter-btn" data-ps-toggle="no_occupy">No Occupy</button>
+        <button type="button" class="env-filter-btn" data-ps-toggle="normal">Normal</button>
       </div>
       <div class="table-wrap">
         <table id="ps-table">
@@ -226,7 +229,8 @@ PROD_SET_PAGE = """<!DOCTYPE html>
     let searchQ = "";
     let rowFilt = {
       online: false, offline: false, maintain: false,
-      no_maintain: false, test: false, no_test: false
+      no_maintain: false, test: false, no_test: false,
+      occupy: false, no_occupy: false, normal: false
     };
     let pendingAction = null;
     let pollTimer = null;
@@ -279,7 +283,8 @@ PROD_SET_PAGE = """<!DOCTYPE html>
 
     function anyRowFilt() {
       return rowFilt.online || rowFilt.offline || rowFilt.maintain ||
-        rowFilt.no_maintain || rowFilt.test || rowFilt.no_test;
+        rowFilt.no_maintain || rowFilt.test || rowFilt.no_test ||
+        rowFilt.occupy || rowFilt.no_occupy || rowFilt.normal;
     }
 
     function isRowTest(r) {
@@ -303,14 +308,28 @@ PROD_SET_PAGE = """<!DOCTYPE html>
       return String(r.online || "").toLowerCase().includes("offline");
     }
 
+    function isRowOccupy(r) {
+      return String(r.status || "").toLowerCase().includes("occupy");
+    }
+
+    function isRowNormal(r) {
+      const st = String(r.status || "").toLowerCase();
+      return st.includes("normal") && !st.includes("maintain") && !st.includes("test") && !st.includes("occupy");
+    }
+
     function matchesRowFilt(r) {
       if (!anyRowFilt()) return true;
       const t = isRowTest(r);
       const m = isRowMaint(r);
+      const o = isRowOccupy(r);
+      const n = isRowNormal(r);
       if (rowFilt.test && !t) return false;
       if (rowFilt.no_test && t) return false;
       if (rowFilt.maintain && !m) return false;
       if (rowFilt.no_maintain && m) return false;
+      if (rowFilt.occupy && !o) return false;
+      if (rowFilt.no_occupy && o) return false;
+      if (rowFilt.normal && !n) return false;
       if (rowFilt.offline && !isRowOffline(r)) return false;
       if (rowFilt.online && !isRowOnline(r)) return false;
       return true;
@@ -677,6 +696,7 @@ PROD_SET_PAGE = """<!DOCTYPE html>
         if (btn.getAttribute("data-ps-clear") === "1") {
           rowFilt.online = rowFilt.offline = rowFilt.maintain = false;
           rowFilt.no_maintain = rowFilt.test = rowFilt.no_test = false;
+          rowFilt.occupy = rowFilt.no_occupy = rowFilt.normal = false;
           syncRowFiltBar();
           renderTable();
           return;
@@ -691,6 +711,8 @@ PROD_SET_PAGE = """<!DOCTYPE html>
           if (k === "no_maintain") rowFilt.maintain = false;
           if (k === "online") rowFilt.offline = false;
           if (k === "offline") rowFilt.online = false;
+          if (k === "occupy") rowFilt.no_occupy = false;
+          if (k === "no_occupy") rowFilt.occupy = false;
         }
         syncRowFiltBar();
         renderTable();
