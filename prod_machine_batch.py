@@ -17,6 +17,7 @@ from smmachine import (
     _can_pagination_next,
     _click_pagination_next,
     _ensure_row_checkbox_checked,
+    _ensure_row_checkbox_unchecked,
     _find_row_for_target,
     _go_first_page,
     _parse_target_line,
@@ -24,6 +25,7 @@ from smmachine import (
     _row_report_fields,
     _site_synthetic_machine,
     _smachine_resolve_headless,
+    _table_body_rows,
     _wait_table_idle,
 )
 
@@ -78,6 +80,33 @@ LARK_INTRO = {
     "unset_maint": "Will unset maintenance on machines below:",
     "unset_test": "Will unset test on machines below:",
     "unset_both": "Will unset maintenance and test on machines below:",
+}
+
+# SET PROD MACHINE only uses these four toolbar buttons (ignore BatchKick Out, Sync DB Config, …).
+EGM_PROD_BATCH_BUTTONS: tuple[str, ...] = (
+    "BatchMaintenance",
+    "BatchTest",
+    "BatchStart Using",
+    "BatchTestCancel",
+)
+
+# Dry-run probe uses the same set as :data:`ACTION_BUTTONS`.
+EGM_TOOLBAR_BATCH_BUTTONS: tuple[str, ...] = EGM_PROD_BATCH_BUTTONS
+
+_SITE_ALIAS_BELONGS: dict[str, str] = {
+    "nwr": "NP",
+    "np": "NP",
+    "nch": "NCH",
+    "nc": "NCH",
+    "new": "NCH",
+    "tbr": "TBR",
+    "tbp": "TBP",
+    "mdr": "MDR",
+    "dhs": "DHS",
+    "cp": "CP",
+    "osm": "CP",
+    "wf": "WF",
+    "winford": "WF",
 }
 
 _BELONGS_SITE = {
@@ -296,9 +325,16 @@ def _refresh_egm_table(page, *, timeout_ms: int, max_pages: int) -> None:
     _wait_table_idle(page, timeout_ms)
 
 
-def _click_batch_button(page, label: str, *, timeout_ms: int) -> bool:
-    compact = re.sub(r"\s+", "", label or "")
-    pat = re.compile(re.escape(compact), re.I)
+def _batch_button_match_pattern(label: str) -> re.Pattern[str]:
+    """Match toolbar labels with flexible whitespace (``BatchKick Out`` vs ``BatchKickOut``)."""
+    parts = [p for p in re.split(r"\s+", (label or "").strip()) if p]
+    if not parts:
+        return re.compile(r"^$")
+    return re.compile(r"\s+".join(re.escape(p) for p in parts), re.I)
+
+
+def _locate_batch_toolbar_button(page, label: str):
+    pat = _batch_button_match_pattern(label)
     for scope in (
         page.locator(".filter-container"),
         page.locator(".app-container"),
@@ -306,21 +342,388 @@ def _click_batch_button(page, label: str, *, timeout_ms: int) -> bool:
     ):
         btn = scope.locator("button").filter(has_text=pat).first
         if btn.count():
+            return btn
+    role_btn = page.get_by_role("button", name=pat).first
+    if role_btn.count():
+        return role_btn
+    return page.locator("button").filter(has_text=pat).first
+
+
+def _batch_toolbar_button_actionable(btn) -> bool:
+    """True when the batch toolbar button can receive a click (not ``is-disabled``)."""
+    try:
+        if btn.count() == 0:
+            return False
+        cls = btn.get_attribute("class") or ""
+        if "is-disabled" in cls:
+            return False
+        aria_d = (btn.get_attribute("aria-disabled") or "").strip().lower()
+        if aria_d == "true":
+            return False
+        dis = btn.get_attribute("disabled")
+        if dis is not None:
+            dsl = str(dis).strip().lower()
+            if dsl and dsl not in ("false", "0"):
+                return False
+        return bool(btn.is_enabled())
+    except Exception:
+        return False
+
+
+def _click_batch_button(page, label: str, *, timeout_ms: int) -> bool:
+    btn = _locate_batch_toolbar_button(page, label)
+    if btn.count() == 0:
+        return False
+    if not _batch_toolbar_button_actionable(btn):
+        return False
+    try:
+        btn.click(timeout=min(30_000, timeout_ms))
+        page.wait_for_timeout(400)
+        return True
+    except Exception:
+        return False
+
+
+def _visible_confirm_layer(page):
+    for sel in (
+        ".el-dialog__wrapper:not([style*='display: none'])",
+        ".el-message-box__wrapper:not([style*='display: none'])",
+    ):
+        loc = page.locator(sel).filter(has=page.locator(".el-dialog, .el-message-box")).last
+        if loc.count():
             try:
-                btn.click(timeout=min(30_000, timeout_ms))
-                page.wait_for_timeout(400)
+                if loc.is_visible():
+                    return loc
+            except Exception:
+                continue
+    dlg = page.locator(".el-dialog__wrapper").filter(has=page.locator(".el-dialog")).last
+    if dlg.count():
+        try:
+            if dlg.is_visible():
+                return dlg
+        except Exception:
+            pass
+    mbox = page.locator(".el-message-box__wrapper").last
+    if mbox.count():
+        try:
+            if mbox.is_visible():
+                return mbox
+        except Exception:
+            pass
+    return None
+
+
+def _dismiss_batch_confirm_cancel(page, *, timeout_ms: int) -> bool:
+    """Close Warning / confirm UI with **Cancel** — never Save."""
+    page.wait_for_timeout(350)
+    layer = _visible_confirm_layer(page)
+    if layer is None:
+        try:
+            page.wait_for_function(
+                """() => {
+                  const dlg = document.querySelector('.el-dialog__wrapper:not([style*="display: none"]) .el-dialog');
+                  const mb = document.querySelector('.el-message-box__wrapper:not([style*="display: none"]) .el-message-box');
+                  return !!(dlg && dlg.offsetParent) || !!(mb && mb.offsetParent);
+                }""",
+                timeout=min(8_000, timeout_ms),
+            )
+            layer = _visible_confirm_layer(page)
+        except Exception:
+            layer = None
+    if layer is None:
+        return False
+
+    inner = layer.locator(".el-dialog, .el-message-box").first
+    if inner.count() == 0:
+        inner = layer
+
+    for name_pat in (r"^cancel$", r"^close$", r"^no$"):
+        btn = inner.get_by_role("button", name=re.compile(name_pat, re.I))
+        if btn.count():
+            try:
+                btn.first.click(timeout=min(15_000, timeout_ms))
+                _wait_table_idle(page, timeout_ms)
                 return True
             except Exception:
                 continue
-    role_btn = page.get_by_role("button", name=re.compile(re.escape(label), re.I)).first
-    if role_btn.count():
+
+    cancel = inner.locator("button").filter(has_text=re.compile(r"cancel|关闭", re.I)).first
+    if cancel.count():
         try:
-            role_btn.click(timeout=min(30_000, timeout_ms))
-            page.wait_for_timeout(400)
+            cancel.click(timeout=min(15_000, timeout_ms))
+            _wait_table_idle(page, timeout_ms)
             return True
         except Exception:
             pass
+
+    # Never click Save / Confirm / OK / primary.
     return False
+
+
+def _clear_table_row_selection(page, *, timeout_ms: int) -> None:
+    """Uncheck every visible row checkbox on the current page."""
+    rows = _table_body_rows(page)
+    n = rows.count()
+    for i in range(n):
+        try:
+            _ensure_row_checkbox_unchecked(page, rows.nth(i), timeout_ms=timeout_ms)
+        except Exception:
+            continue
+
+
+def _expect_toolbar_enabled_with_selection(label: str, *, is_maint: bool, is_test: bool) -> bool:
+    """
+    After one row is selected, which toolbar buttons should be clickable?
+
+    - BatchStart Using → only when row already in maintenance.
+    - BatchTestCancel → only when row in test mode.
+    - BatchMaintenance / BatchTest → only when not already in that state.
+    """
+    if label == "BatchStart Using":
+        return is_maint
+    if label == "BatchTestCancel":
+        return is_test
+    if label == "BatchMaintenance":
+        return not is_maint
+    if label == "BatchTest":
+        return not is_test
+    return False
+
+
+def _pick_probe_row(page, *, timeout_ms: int) -> tuple[Any, dict[str, Any]]:
+    """Prefer a normal/online row so BatchMaintenance/BatchTest are enabled."""
+    rows = _table_body_rows(page)
+    n = rows.count()
+    fallback = None
+    fallback_ctx: dict[str, Any] = {}
+    for i in range(n):
+        row = rows.nth(i)
+        try:
+            mn, is_test, _gt, status, online = _row_report_fields(row, timeout_ms=timeout_ms)
+        except Exception:
+            continue
+        su = (status or "").upper()
+        ou = (online or "").upper()
+        is_maint = "MAINTAIN" in su or "METERCHECK" in su
+        is_online = "ONLINE" in ou and "OFFLINE" not in ou
+        is_normalish = "NORMAL" in su or "OCCUPY" in su
+        ctx = {
+            "machine": mn,
+            "maintenance": is_maint,
+            "test": bool(is_test),
+            "status": status,
+            "online": online,
+        }
+        if fallback is None:
+            fallback, fallback_ctx = row, ctx
+        if is_online and is_normalish and not is_maint:
+            return row, ctx
+    if fallback is not None:
+        return fallback, fallback_ctx
+    raise RuntimeError("no EGM rows")
+
+
+def _probe_one_toolbar_button(
+    page,
+    label: str,
+    *,
+    timeout_ms: int,
+    expect_disabled: bool,
+    expect_enabled_with_selection: bool | None = None,
+) -> dict[str, Any]:
+    """Check disabled/enabled state; if enabled, click and Cancel (no Save)."""
+    btn = _locate_batch_toolbar_button(page, label)
+    found = btn.count() > 0
+    actionable = _batch_toolbar_button_actionable(btn) if found else False
+    disabled = not actionable if found else None
+
+    out: dict[str, Any] = {
+        "found": found,
+        "disabled": disabled,
+        "ok": False,
+        "detail": "",
+    }
+
+    if not found:
+        out["detail"] = "button not found in toolbar"
+        return out
+
+    if expect_disabled:
+        out["ok"] = not actionable
+        if actionable:
+            out["detail"] = "expected disabled with no row selected, but button is clickable"
+        else:
+            out["detail"] = "disabled without selection (expected)"
+        return out
+
+    should_enable = True if expect_enabled_with_selection is None else expect_enabled_with_selection
+    if not should_enable:
+        out["ok"] = not actionable
+        if actionable:
+            out["detail"] = "enabled but not expected for this row state (UI may differ)"
+        else:
+            out["detail"] = "disabled (expected for this row — e.g. not in maintenance/test)"
+        return out
+
+    if not actionable:
+        out["detail"] = "expected enabled after row selected, but button is disabled"
+        return out
+
+    if not _click_batch_button(page, label, timeout_ms=timeout_ms):
+        out["detail"] = "click failed"
+        return out
+
+    cancelled = _dismiss_batch_confirm_cancel(page, timeout_ms=timeout_ms)
+    if cancelled:
+        out["ok"] = True
+        out["detail"] = "clicked; Warning/confirm dismissed with Cancel (Save not used)"
+        return out
+
+    # Some actions may not open a dialog (harmless no-op UI); still count as click OK.
+    out["ok"] = True
+    out["detail"] = "clicked; no confirm dialog (Save not used)"
+    return out
+
+
+def probe_egm_batch_toolbar_buttons(
+    page,
+    belongs: str,
+    *,
+    timeout_ms: int = 120_000,
+    max_pages: int | None = None,
+) -> dict[str, Any]:
+    """
+    Dry-run every EGM toolbar batch button: no selection → must be disabled;
+    one row selected → click → Cancel only (never Save).
+    """
+    result: dict[str, Any] = {
+        "belongs": belongs,
+        "sample_machine": "",
+        "buttons": {},
+        "error": None,
+    }
+
+    if not _ensure_env_egm_page(page, belongs, timeout_ms=timeout_ms, max_pages=max_pages):
+        result["error"] = "login failed"
+        return result
+
+    rows = _table_body_rows(page)
+    try:
+        rows.first.wait_for(state="visible", timeout=min(20_000, timeout_ms))
+    except Exception:
+        pass
+    if rows.count() == 0:
+        result["error"] = "no EGM rows on first page"
+        return result
+
+    _clear_table_row_selection(page, timeout_ms=timeout_ms)
+
+    for label in EGM_TOOLBAR_BATCH_BUTTONS:
+        result["buttons"][label] = {
+            "without_selection": _probe_one_toolbar_button(
+                page, label, timeout_ms=timeout_ms, expect_disabled=True
+            )
+        }
+
+    row, row_ctx = _pick_probe_row(page, timeout_ms=timeout_ms)
+    result["sample_machine"] = row_ctx.get("machine") or "(probe row)"
+    is_maint = bool(row_ctx.get("maintenance"))
+    is_test = bool(row_ctx.get("test"))
+
+    _ensure_row_checkbox_checked(page, row, timeout_ms=timeout_ms)
+
+    for label in EGM_TOOLBAR_BATCH_BUTTONS:
+        _ensure_row_checkbox_checked(page, row, timeout_ms=timeout_ms)
+        expect_on = _expect_toolbar_enabled_with_selection(
+            label, is_maint=is_maint, is_test=is_test
+        )
+        probe = _probe_one_toolbar_button(
+            page,
+            label,
+            timeout_ms=timeout_ms,
+            expect_disabled=False,
+            expect_enabled_with_selection=expect_on,
+        )
+        result["buttons"][label]["with_selection"] = probe
+        result["buttons"][label]["row_context"] = {**row_ctx, "expects_enabled": expect_on}
+        _dismiss_batch_confirm_cancel(page, timeout_ms=timeout_ms)
+        _wait_table_idle(page, timeout_ms)
+
+    _clear_table_row_selection(page, timeout_ms=timeout_ms)
+    return result
+
+
+def run_egm_batch_button_probe(
+    site_aliases: list[str] | None = None,
+    *,
+    headless: bool | None = None,
+    timeout_ms: int = 120_000,
+    max_pages: int | None = None,
+) -> dict[str, Any]:
+    """Login to each PROD backend and dry-run toolbar batch buttons (Cancel only, never Save)."""
+    from playwright.sync_api import sync_playwright
+
+    from smmachine import DEFAULT_WEBMACHINE_SITES, _dedupe_site_keys_by_resolved_backend
+
+    if site_aliases:
+        use = [s.strip().lower() for s in site_aliases if (s or "").strip()]
+    else:
+        raw_env = (os.environ.get("WEBMACHINE_SITES") or "").strip()
+        if raw_env:
+            use = [s.strip().lower() for s in raw_env.split(",") if s.strip()]
+        else:
+            use = list(DEFAULT_WEBMACHINE_SITES)
+
+    use, skipped = _dedupe_site_keys_by_resolved_backend(use)
+    hl = _smachine_resolve_headless(headless)
+    if headless is None and _truthy_env("SM_MACHINE_HEADED"):
+        hl = False
+
+    report: dict[str, Any] = {"sites": {}, "skipped": skipped, "headless": hl}
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=hl)
+        context = browser.new_context(
+            viewport={"width": 1600, "height": 900},
+            ignore_https_errors=True,
+        )
+        page = context.new_page()
+        page.set_default_timeout(timeout_ms)
+        try:
+            for sk in use:
+                belongs = _SITE_ALIAS_BELONGS.get(sk, sk.upper())
+                try:
+                    synth = _site_synthetic_machine(sk)
+                    from checkcredit import _np_resolve_backend  # noqa: WPS433
+
+                    base, user, pw = _np_resolve_backend(synth)
+                    if not (user and pw):
+                        report["sites"][sk] = {
+                            "belongs": belongs,
+                            "error": f"missing credentials for site {sk!r}",
+                        }
+                        continue
+                    page._prod_set_belongs = None  # type: ignore[attr-defined]
+                    report["sites"][sk] = probe_egm_batch_toolbar_buttons(
+                        page,
+                        belongs,
+                        timeout_ms=timeout_ms,
+                        max_pages=max_pages,
+                    )
+                except Exception as e:
+                    report["sites"][sk] = {"belongs": belongs, "error": str(e)}
+        finally:
+            try:
+                context.close()
+            except Exception:
+                pass
+            browser.close()
+
+    return report
+
+
+def _truthy_env(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _click_save_confirm(page, remark: str, *, timeout_ms: int) -> None:

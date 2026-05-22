@@ -120,7 +120,13 @@ def _send_prod_set_lark_text(text: str) -> None:
         logger.warning("prod-set Lark text failed: %s", e)
 
 
-def _send_prod_set_lark_card(title: str, body_md: str, cancel_url: str | None = None) -> None:
+def _send_prod_set_lark_card(
+    title: str,
+    body_md: str,
+    *,
+    header_template: str | None = None,
+    cancel_url: str | None = None,
+) -> None:
     try:
         from ose_Duty import get_tenant_access_token
 
@@ -144,9 +150,12 @@ def _send_prod_set_lark_card(title: str, body_md: str, cancel_url: str | None = 
                     ],
                 }
             )
+        header: dict = {"title": {"tag": "plain_text", "content": title[:80]}}
+        if header_template:
+            header["template"] = header_template
         card = {
             "config": {"wide_screen_mode": True},
-            "header": {"title": {"tag": "plain_text", "content": title[:80]}},
+            "header": header,
             "elements": elements,
         }
         requests.post(
@@ -207,7 +216,11 @@ def _run_prod_set_job_thread(job_id: str, action: str, remark: str, machines: li
             lines.append(f"• {m.get('belongs', '')} — {nm}{suffix}")
         if len(failed) > 30:
             lines.append(f"... and {len(failed) - 30} more")
-        _send_prod_set_lark_text("\n".join(lines))
+        _send_prod_set_lark_card(
+            f"{label} — failed ({len(failed)} machine(s))",
+            "\n".join(lines),
+            header_template="red",
+        )
 
     try:
         summary = run_prod_batch_job(
@@ -248,9 +261,27 @@ def _run_prod_set_job_thread(job_id: str, action: str, remark: str, machines: li
                 lines.append(f"✗ {m.get('belongs')} — {m.get('machine')}{suffix}")
             if fail_n > 30:
                 lines.append(f"... and {fail_n - 30} more failed")
-            _send_prod_set_lark_text("\n".join(lines))
+            summary_title = ACTION_LABELS.get(action, action)
+            if fail_n:
+                card_title = f"Failed — {summary_title}"
+                card_tpl = "red"
+            else:
+                card_title = f"Success — {summary_title}"
+                card_tpl = "green"
+            _send_prod_set_lark_card(
+                card_title,
+                "\n".join(lines),
+                header_template=card_tpl,
+            )
     except Exception as e:
         logger.exception("prod-set job %s failed", job_id)
+        from prod_machine_batch import ACTION_LABELS
+
+        _send_prod_set_lark_card(
+            f"Failed — {ACTION_LABELS.get(action, action)}",
+            f"**Job error**\n\n{str(e)[:3500]}",
+            header_template="red",
+        )
         with _PROD_SET_JOBS_LOCK:
             if job_id in _PROD_SET_JOBS:
                 _PROD_SET_JOBS[job_id]["status"] = "done"
@@ -5033,6 +5064,7 @@ def api_prod_set_start_job():
     _send_prod_set_lark_card(
         ACTION_LABELS.get(action, action),
         "\n".join(lines),
+        header_template="blue",
         cancel_url=cancel_url,
     )
     t = threading.Thread(
@@ -5076,7 +5108,11 @@ def api_prod_set_cancel(job_id: str):
             return jsonify(error="not found"), 404
         job["cancel_requested"] = True
         action = job.get("action", "")
-    _send_prod_set_lark_text(_prod_set_cancel_message(action))
+    _send_prod_set_lark_card(
+        "Cancelled",
+        _prod_set_cancel_message(action),
+        header_template="grey",
+    )
     return jsonify(ok=True, message="Cancellation requested")
 
 

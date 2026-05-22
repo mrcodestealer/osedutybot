@@ -14,6 +14,21 @@ Or one line (no stdin needed)::
 
     python3 smmachine.py nwr 1932 NCH1933 nch1922
 
+**Batch maintenance + test** (same as webapp ``set_both``; opens a **headed** browser by default)::
+
+    python3 smmachine.py maintenancetest nch1422
+    python3 smmachine.py maintenancetest "Dragons Trio-NCH1462"
+
+Optional remark: ``SM_BATCH_REMARK=your note`` (max 100 chars on the EGM dialog).
+
+**Batch toolbar dry-run** (maintenance/test buttons only; opens dialog then **Cancel** — never Save)::
+
+    python3 smmachine.py batchbuttontest
+    python3 smmachine.py batchbuttontest nch cp wf
+
+Tests: ``BatchMaintenance``, ``BatchTest``, ``BatchStart Using``, ``BatchTestCancel`` only
+(ignores ``BatchKick Out``, ``Sync DB Config``, …).
+
 First argument is a **site alias** (which backend / login to open):
 
 - ``nwr``, ``np`` → NP (``backend-np``), synthetic route ``NWR0001``
@@ -41,6 +56,8 @@ Env:
 - ``SM_MACHINE_COLLECT_MAX_PAGES`` — for **read-only** ``smachine_collect_all_machine_rows`` / web dashboard only:
   max Next steps when ``SM_MACHINE_MAX_PAGES`` is **unset** (default **500** so full machine lists are not cut off early).
 - ``SM_MACHINE_HEADLESS=1`` — headless Chromium (default: headed unless Linux without DISPLAY).
+- ``SM_MACHINE_HEADED=1`` — force headed (used by ``maintenancetest`` mode).
+- ``SM_BATCH_REMARK`` — optional remark for ``maintenancetest`` / batch EGM save dialog.
 - ``SM_MACHINE_STRICT_BACKWARD=1`` — do not re-tick on backward verify if checkboxes were cleared by paging (Element UI tables often drop selection across pages unless ``reserve-selection`` is enabled).
 
 Programmatic read-only export (for dashboards / ``webapp``):
@@ -71,6 +88,126 @@ except ImportError:
 
 def _truthy_env(name: str) -> bool:
     return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# CLI batch modes (first argv): run ``prod_machine_batch`` ``set_both`` (BatchMaintenance + BatchTest).
+_BATCH_CLI_MODES: dict[str, str] = {
+    "maintenancetest": "set_both",
+    "maintaintest": "set_both",
+    "setboth": "set_both",
+}
+
+
+def _infer_belongs_from_machine_line(line: str) -> str:
+    """Guess belongs code from machine token (e.g. ``nch1422`` → ``NCH``)."""
+    alnum = re.sub(r"[^A-Za-z0-9]", "", _normalize_machine_target_line(line)).upper()
+    if not alnum:
+        return ""
+    prefixes = (
+        ("NCH", "NCH"),
+        ("NWR", "NP"),
+        ("NP", "NP"),
+        ("TBR", "TBR"),
+        ("TBP", "TBP"),
+        ("MDR", "MDR"),
+        ("DHS", "DHS"),
+        ("OSM", "CP"),
+        ("CP", "CP"),
+        ("WF", "WF"),
+        ("WINFORD", "WF"),
+    )
+    for needle, belongs in prefixes:
+        if alnum.startswith(needle) or needle in alnum:
+            return belongs
+    return ""
+
+
+def _run_batch_cli_mode(action: str, raw_targets: list[str]) -> None:
+    """Headed Playwright batch maintenance/test (webapp-equivalent ``set_both``)."""
+    from prod_machine_batch import ACTION_LABELS, run_prod_batch_job
+
+    os.environ.setdefault("SM_MACHINE_HEADED", "1")
+    os.environ["SMACHINE_HEADLESS"] = "0"
+
+    remark = (os.environ.get("SM_BATCH_REMARK") or "").strip()[:100]
+    machines: list[dict] = []
+    for line in raw_targets:
+        belongs = _infer_belongs_from_machine_line(line)
+        if not belongs:
+            raise SystemExit(
+                f"Cannot infer belongs for {line!r}. "
+                "Use a name with NCH/NWR/MDR/… in it, or pass belongs explicitly later."
+            )
+        machines.append({"belongs": belongs, "machine": line.strip()})
+
+    label = ACTION_LABELS.get(action, action)
+    print(f"Batch mode: {label!r} (action={action})")
+    print(f"Headed browser (SM_MACHINE_HEADED=1, SMACHINE_HEADLESS=0)")
+    print(f"Targets: {machines}")
+    if remark:
+        print(f"Remark: {remark!r}")
+
+    summary = run_prod_batch_job(action, machines, remark=remark)
+    ok = summary.get("success") or []
+    fail = summary.get("failed") or []
+    print("")
+    print(f"Success: {len(ok)}")
+    for m in ok:
+        print(f"  ✓ {m.get('belongs')} — {m.get('machine')}")
+    print(f"Failed: {len(fail)}")
+    for m in fail:
+        err = (m.get("error") or "").strip()
+        suffix = f" — {err}" if err else ""
+        print(f"  ✗ {m.get('belongs')} — {m.get('machine')}{suffix}")
+    if fail:
+        sys.exit(1)
+
+
+def _run_batch_button_probe_cli(site_filters: list[str] | None) -> None:
+    """Probe EGM batch toolbar buttons on each backend (Cancel only, never Save)."""
+    from prod_machine_batch import EGM_TOOLBAR_BATCH_BUTTONS, run_egm_batch_button_probe
+
+    os.environ.setdefault("SM_MACHINE_HEADED", "1")
+    os.environ["SMACHINE_HEADLESS"] = "0"
+
+    print("Batch toolbar probe — maintenance/test buttons only; Cancel on confirm (never Save)")
+    print(f"Buttons: {', '.join(EGM_TOOLBAR_BATCH_BUTTONS)}")
+    if site_filters:
+        print(f"Sites: {site_filters}")
+    else:
+        print("Sites: all PROD backends (WEBMACHINE_SITES or default list)")
+
+    report = run_egm_batch_button_probe(site_filters, headless=False)
+    failed = 0
+    for sk, site in (report.get("sites") or {}).items():
+        print("")
+        print(f"=== {sk} ({site.get('belongs', '?')}) ===")
+        if site.get("error"):
+            print(f"  ERROR: {site['error']}")
+            failed += 1
+            continue
+        if site.get("sample_machine"):
+            print(f"  sample row: {site['sample_machine']}")
+        for label, probes in (site.get("buttons") or {}).items():
+            wo = probes.get("without_selection") or {}
+            ws = probes.get("with_selection") or {}
+            wo_ok = wo.get("ok")
+            ws_ok = ws.get("ok")
+            mark = "OK" if wo_ok and ws_ok else "FAIL"
+            if not (wo_ok and ws_ok):
+                failed += 1
+            print(f"  [{mark}] {label}")
+            print(f"       no selection: {wo.get('detail') or wo.get('detail', '—')}")
+            print(f"       with selection: {ws.get('detail') or '—'}")
+    skipped = report.get("skipped") or {}
+    if skipped:
+        print("")
+        print("Skipped (duplicate backend):", skipped)
+    print("")
+    if failed:
+        print(f"Probe finished with {failed} issue(s).")
+        sys.exit(1)
+    print("Probe finished — all toolbar buttons behaved as expected.")
 
 
 def _site_routing_key(site: str) -> str:
@@ -110,12 +247,24 @@ def _site_synthetic_machine(site: str) -> str:
     return syn
 
 
+def _normalize_machine_target_line(line: str) -> str:
+    """
+    Strip dashboard-style ``(TEST)`` suffix before row matching.
+
+    Scraped names often append ``(TEST)`` when ``span.test`` is present, but EGM row
+    ``inner_text`` usually omits it — matching would fail on ``…1422(TEST)`` vs ``…1422``.
+    """
+    raw = (line or "").strip()
+    raw = re.sub(r"\(TEST\)\s*$", "", raw, flags=re.I).strip()
+    return raw
+
+
 def _parse_target_line(line: str) -> tuple[str, str]:
     """
     Returns (kind, key) where kind is 'digits' or 'full'.
     digits: standalone numeric id match in row text; full: alphanumeric substring match (case-insensitive).
     """
-    raw = (line or "").strip()
+    raw = _normalize_machine_target_line(line)
     if not raw:
         raise ValueError("empty machine line")
     alnum = re.sub(r"[^A-Za-z0-9]", "", raw)
@@ -1096,7 +1245,12 @@ def main() -> None:
         sys.exit(2)
 
     site = sys.argv[1].strip()
-    synth = _site_synthetic_machine(site)
+    site_key = site.lower()
+
+    if site_key in ("batchbuttontest", "batchbuttonprobe", "probbatch"):
+        optional_sites = [x.strip().lower() for x in sys.argv[2:] if x.strip()]
+        _run_batch_button_probe_cli(optional_sites or None)
+        return
 
     if len(sys.argv) > 2:
         raw_targets = [x.strip() for x in sys.argv[2:] if x.strip()]
@@ -1120,6 +1274,13 @@ def main() -> None:
     if not raw_targets:
         print("No machine lines provided (stdin or argv after site).", file=sys.stderr)
         sys.exit(2)
+
+    batch_action = _BATCH_CLI_MODES.get(site_key)
+    if batch_action:
+        _run_batch_cli_mode(batch_action, raw_targets)
+        return
+
+    synth = _site_synthetic_machine(site)
 
     targets: list[tuple[str, str, str]] = []
     for line in raw_targets:
