@@ -732,6 +732,22 @@ class MaintenanceMailWatcher:
             return
 
         token = self._get_token()
+        first_reply, second_reply = maintenance.process_maintenance_pipeline(
+            pipeline_in,
+            token,
+            email_subject=display_subj,
+            received_at=when,
+        )
+        main_card = maintenance.build_maintenance_card(
+            email_subject=display_subj,
+            received_at=when,
+            from_addr=from_addr,
+            gamelist_section=first_reply or "",
+            summary_section=second_reply or "",
+            email_body=body,
+        )
+        self._send_lark_card(TARGET_CHAT_ID, main_card)
+
         to_cp, launched_names = maintenance.gamelist_has_launched(
             pipeline_in, token
         )
