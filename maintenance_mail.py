@@ -15,11 +15,13 @@ from __future__ import annotations
 
 import email
 import hashlib
+import html as html_mod
 import imaplib
 import json
 import maintenance as _maint_mod
 import os
 import re
+import secrets
 import smtplib
 import ssl
 import threading
@@ -28,9 +30,8 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from email.header import Header
 from email.header import decode_header
-from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from email.utils import formataddr, formatdate, make_msgid, parsedate_to_datetime
+from email.utils import formataddr, formatdate, make_msgid, parseaddr, parsedate_to_datetime
 from typing import Any, Callable
 
 from dotenv import load_dotenv
@@ -275,6 +276,18 @@ def _content_hash(body: str) -> str:
 
 
 _FORWARD_SEP = "---------- Forwarded message ----------"
+_LARK_QUOTE_WRAPPER = "history-quote-wrapper"
+_LARK_QUOTE_BORDER = "border-left: none; padding-left: 0px;"
+_LARK_META_STYLE = (
+    "padding: 12px; background: rgb(245, 246, 247); color: rgb(31, 35, 41); "
+    "border-radius: 4px; margin-bottom: 12px;"
+)
+_LARK_FWD_META_MARGIN = "margin-top: 2px;"
+_LARK_SEP_STYLE = "color: rgb(100, 106, 115); margin-top: 24px; margin-bottom: 8px;"
+_LARK_ADDR_STYLE = (
+    "overflow-wrap: break-word; color: inherit; text-decoration: none; "
+    "white-space: pre-wrap; hyphens: none; word-break: break-word; cursor: pointer;"
+)
 
 
 def _format_forward_date_lark(msg: email.message.Message) -> str:
@@ -305,8 +318,114 @@ def _forward_header_lines(msg: email.message.Message) -> list[str]:
     return lines
 
 
+def _html_escape(s: str) -> str:
+    return html_mod.escape(s or "", quote=False)
+
+
+def _gen_lark_id(prefix: str) -> str:
+    chars = "abcdefghijklmnopqrstuvwxyz0123456789"
+    return prefix + "".join(secrets.choice(chars) for _ in range(6))
+
+
+def _quote_labels(subject: str) -> dict[str, str]:
+    for ch in subject or "":
+        if "\u4e00" <= ch <= "\u9fff":
+            return {
+                "from": "发件人",
+                "date": "时间",
+                "subject": "主题",
+                "to": "收件人",
+                "cc": "抄送",
+                "sep": "--------- 转发消息 ---------",
+            }
+    return {
+        "from": "From",
+        "date": "Date",
+        "subject": "Subject",
+        "to": "To",
+        "cc": "Cc",
+        "sep": _FORWARD_SEP,
+    }
+
+
+def _address_anchor(addr: str) -> str:
+    e = _html_escape(addr)
+    return (
+        f'<a class="quote-head-meta-mailto" data-mailto="mailto:{e}" '
+        f'href="mailto:{e}" style="{_LARK_ADDR_STYLE}">{e}</a>'
+    )
+
+
+def _address_html(from_hdr: str) -> str:
+    name, addr = parseaddr(from_hdr)
+    anchor = _address_anchor(addr) if addr else _html_escape(from_hdr)
+    if name and addr:
+        return f'"{_html_escape(name)}"&lt;{anchor}&gt;'
+    if addr:
+        return f"&lt;{anchor}&gt;"
+    return anchor
+
+
+def _meta_row(label: str, content: str) -> str:
+    return (
+        f'<div class="lme-line-signal"><span style="">{_html_escape(label)}: '
+        f"{content}</span></div>"
+    )
+
+
+def _body_is_html(s: str) -> bool:
+    return bool(
+        re.search(
+            r"(?i)<(?:!doctype\s+html|!--|html|head|body|div|p|br|span|table|blockquote)",
+            s or "",
+        )
+    )
+
+
+def extract_body_html_raw(msg: email.message.Message) -> str | None:
+    """Original HTML part(s) without converting to plain text."""
+    html_parts: list[str] = []
+
+    if msg.is_multipart():
+        for part in msg.walk():
+            ctype = (part.get_content_type() or "").lower()
+            disp = str(part.get("Content-Disposition") or "").lower()
+            if "attachment" in disp:
+                continue
+            if ctype != "text/html":
+                continue
+            try:
+                payload = part.get_payload(decode=True)
+            except Exception:
+                continue
+            if not payload:
+                continue
+            charset = part.get_content_charset() or "utf-8"
+            try:
+                text = payload.decode(charset, errors="replace")
+            except Exception:
+                text = payload.decode("utf-8", errors="replace")
+            html_parts.append(text)
+    else:
+        if (msg.get_content_type() or "").lower() == "text/html":
+            try:
+                payload = msg.get_payload(decode=True)
+            except Exception:
+                payload = None
+            if payload:
+                charset = msg.get_content_charset() or "utf-8"
+                try:
+                    html_parts.append(payload.decode(charset, errors="replace"))
+                except Exception:
+                    html_parts.append(payload.decode("utf-8", errors="replace"))
+
+    if not html_parts:
+        return None
+    return "\n".join(html_parts).strip() or None
+
+
 def build_forwarded_message_body(msg: email.message.Message) -> str:
-    """Plain-text forwarded block (fallback for clients without HTML)."""
+    """Plain-text forwarded block (logging / non-HTML clients)."""
     original = extract_body_from_message(msg)
     header = [_FORWARD_SEP, *_forward_header_lines(msg), ""]
     return "\n".join(header) + (original or "")
@@ -314,27 +433,65 @@ def build_forwarded_message_body(msg: email.message.Message) -> str:
 
 def build_forwarded_message_html(msg: email.message.Message) -> str:
     """
-    HTML with ``gmail_quote`` wrappers so Lark/Gmail show **Show/Hide email thread**
-    like a manual forward (empty top + collapsible quoted block).
-    """
-    import html as html_mod
+    Lark/Feishu mail forward quote (``history-quote-wrapper`` + ``adit-html-block``).
 
-    original = extract_body_from_message(msg)
-    body_html = html_mod.escape(original, quote=False).replace("\n", "<br>\n")
-    attr_html = "<br>\n".join(
-        html_mod.escape(line, quote=False) for line in _forward_header_lines(msg)
+    Matches manual Forward in Lark Mail so the UI can offer **Show/Hide email thread**.
+    """
+    subj = _decode_mime_header(msg.get("Subject")) or ""
+    labels = _quote_labels(subj)
+    from_hdr = _decode_mime_header(msg.get("From")) or "Unknown"
+    to_hdr = _decode_mime_header(msg.get("To")) or ""
+    cc_hdr = _decode_mime_header(msg.get("Cc")) or ""
+    date_line = _format_forward_date_lark(msg)
+
+    meta_rows = [_meta_row(labels["from"], _address_html(from_hdr))]
+    if date_line:
+        meta_rows.append(_meta_row(labels["date"], _html_escape(date_line)))
+    if subj:
+        meta_rows.append(_meta_row(labels["subject"], _html_escape(subj)))
+    meta_rows.append(_meta_row(labels["to"], _html_escape(to_hdr)))
+    if cc_hdr:
+        meta_rows.append(_meta_row(labels["cc"], _html_escape(cc_hdr)))
+    meta_inner = "".join(meta_rows)
+
+    meta_id = _gen_lark_id("lark-mail-meta-cli")
+    meta_html = (
+        f'<div id="{meta_id}" class="adit-html-block__header '
+        f"history-quote-meta-after-forward-title history-quote-meta-wrapper\" "
+        f'style="{_LARK_FWD_META_MARGIN} {_LARK_META_STYLE}">'
+        f'<div style="word-break: break-word;">{meta_inner}</div></div>'
     )
-    return (
-        '<div dir="ltr"><br></div>\n'
-        '<div class="gmail_quote gmail_quote_container">\n'
-        f'<div dir="ltr" class="gmail_attr">{html_mod.escape(_FORWARD_SEP, quote=False)}<br>\n'
-        f"{attr_html}</div>\n"
-        '<blockquote class="gmail_quote" '
-        'style="margin:0 0 0 .8ex;border-left:1px #ccc solid;padding-left:1ex">\n'
-        f'<div dir="ltr">{body_html}</div>\n'
-        "</blockquote>\n"
-        "</div>\n"
+
+    sep_html = (
+        f'<div class="history-quote-forward-title lme-line-signal history-quote-gap-tag" '
+        f'style="{_LARK_SEP_STYLE}">{_html_escape(labels["sep"])}</div>'
     )
+
+    body_raw = extract_body_html_raw(msg)
+    if body_raw and _body_is_html(body_raw):
+        body_inner = f"<div><div>{body_raw}</div></div>"
+    else:
+        plain = extract_body_from_message(msg)
+        body_inner = (
+            f'<pre style="white-space:pre-wrap">{_html_escape(plain)}</pre>'
+            if plain
+            else ""
+        )
+
+    outer_id = _gen_lark_id("lark-mail-quote-cli")
+    inner_id = _gen_lark_id("lark-mail-quote-cli")
+    quote = (
+        f'<div id="{outer_id}" class="{_LARK_QUOTE_WRAPPER}">'
+        f'<div data-html-block="quote" data-mail-html-ignore="">'
+        f'<div class="adit-html-block adit-html-block--header" style="{_LARK_QUOTE_BORDER}">'
+        f'<div id="{inner_id}">{sep_html}{meta_html}{body_inner}</div>'
+        f"</div></div></div>"
+    )
+    top = (
+        '<div style="word-break:break-word;line-height:1.6;'
+        'font-size:14px;color:rgb(0,0,0);"><br></div>'
+    )
+    return f'<div dir="ltr">{top}{quote}</div>'
 
 
 def _html_to_text(html: str) -> str:
@@ -492,20 +649,17 @@ def forward_maintenance_email(
     """
     SMTP forward from om@… → evolive + Cc om@.
 
-    Uses ``Fw:`` subject + HTML ``gmail_quote`` block so Lark/Gmail clients can
-    **Show/Hide email thread** like clicking the manual Forward button.
+    Uses ``Fw:`` subject + Lark ``history-quote-wrapper`` HTML (same as manual
+    Forward) so Feishu/Lark Mail can **Show/Hide email thread**.
     """
     if not MAIL_PASSWORD:
         raise RuntimeError("MAINTENANCE_MAIL_PASSWORD not set")
     subj = _forward_subject(subject)
     if original_msg is not None:
-        plain = build_forwarded_message_body(original_msg)
         html = build_forwarded_message_html(original_msg)
-        msg = MIMEMultipart("alternative")
-        msg.attach(MIMEText(plain, "plain", "utf-8"))
-        msg.attach(MIMEText(html, "html", "utf-8"))
+        msg = MIMEText(html, "html", "utf-8")
     else:
-        msg = MIMEText("", "plain", "utf-8")
+        msg = MIMEText("", "html", "utf-8")
     msg["Subject"] = Header(subj, "utf-8")
     msg["From"] = formataddr((FORWARD_FROM_NAME, MAIL_USER))
     msg["Date"] = formatdate(localtime=True)
