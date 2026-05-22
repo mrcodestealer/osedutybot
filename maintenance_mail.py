@@ -274,6 +274,43 @@ def _content_hash(body: str) -> str:
     return hashlib.sha256(_normalize_body(body).encode("utf-8")).hexdigest()
 
 
+def _format_forward_date(msg: email.message.Message) -> str:
+    """e.g. ``Fri, 22 May 2026 08:07:10 +0000 (UTC)``"""
+    raw = (msg.get("Date") or "").strip()
+    if not raw:
+        return ""
+    try:
+        dt = parsedate_to_datetime(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        tz = dt.strftime("%z") or "+0000"
+        line = dt.strftime(f"%a, %d %b %Y %H:%M:%S {tz}")
+        if tz == "+0000":
+            line += " (UTC)"
+        return line
+    except Exception:
+        return raw
+
+
+def build_forwarded_message_body(msg: email.message.Message) -> str:
+    """Gmail-style forwarded block + original plain body (launched / to_cp path)."""
+    from_hdr = _decode_mime_header(msg.get("From")) or "Unknown"
+    subj = _decode_mime_header(msg.get("Subject")) or ""
+    date_line = _format_forward_date(msg)
+    original = extract_body_from_message(msg)
+    header = [
+        "---------- Forwarded message ---------",
+        f"From: {from_hdr}",
+    ]
+    if date_line:
+        header.append(f"Date: {date_line}")
+    header.append(f"Subject: {subj}")
+    header.append("")
+    if original:
+        return "\n".join(header) + original
+    return "\n".join(header)
+
+
 def _html_to_text(html: str) -> str:
     import html as html_mod
 
@@ -407,17 +444,29 @@ def _already_processed_uid(entries: list[dict[str, Any]], uid_key: str) -> bool:
     return False
 
 
-def forward_maintenance_email(*, subject: str, to_cp: bool = True) -> None:
+def forward_maintenance_email(
+    *,
+    subject: str,
+    to_cp: bool = True,
+    original_msg: email.message.Message | None = None,
+) -> None:
     """
     SMTP forward from om@…
 
-    ``to_cp=True``: blank body → evolive.maintenance@…, Cc om@…
+    ``to_cp=True``: Gmail-style forwarded block + original body → evolive + Cc om@
     ``to_cp=False``: body ``NOT IN CP WEBSITE`` → om@ only (no evolive).
     """
     if not MAIL_PASSWORD:
         raise RuntimeError("MAINTENANCE_MAIL_PASSWORD not set")
     subj = (subject or "").strip() or "Maintenance"
-    body = "" if to_cp else _maint_mod.NOT_IN_CP_WEBSITE_BODY
+    if to_cp:
+        body = (
+            build_forwarded_message_body(original_msg)
+            if original_msg is not None
+            else ""
+        )
+    else:
+        body = _maint_mod.NOT_IN_CP_WEBSITE_BODY
     msg = MIMEText(body, "plain", "utf-8")
     msg["Subject"] = Header(subj, "utf-8")
     msg["From"] = formataddr((FORWARD_FROM_NAME, MAIL_USER))
@@ -759,7 +808,9 @@ class MaintenanceMailWatcher:
 
         if FORWARD_ENABLED:
             try:
-                forward_maintenance_email(subject=subject, to_cp=to_cp)
+                forward_maintenance_email(
+                    subject=subject, to_cp=to_cp, original_msg=msg
+                )
             except Exception as ex:
                 print(
                     f"[maint-mail] forward failed uid={uid_s} ticket={ticket_id!r}: {ex!r}",
