@@ -172,6 +172,109 @@ def _send_prod_set_lark_card(
         logger.warning("prod-set Lark card failed: %s", e)
 
 
+def _prod_set_cancel_url(job_id: str) -> str | None:
+    base = _prod_set_public_base()
+    if not base:
+        return None
+    return f"{base}/api/prod-set/jobs/{job_id}/cancel"
+
+
+def _format_prod_set_live_summary_md(action: str, summary: dict) -> str:
+    from prod_machine_batch import ACTION_LABELS
+
+    ok = summary.get("success") or []
+    fail = summary.get("failed") or []
+    lines = [
+        f"**Live EGM check — {ACTION_LABELS.get(action, action)}**",
+        f"**Done:** {len(ok)}",
+        f"**Not done:** {len(fail)}",
+        "",
+    ]
+    if ok:
+        lines.append("**Done (goal met on EGM):**")
+        for m in ok[:40]:
+            lines.append(f"✓ {m.get('belongs', '')} — {m.get('machine', '')}")
+        if len(ok) > 40:
+            lines.append(f"... and {len(ok) - 40} more")
+    if fail:
+        lines.append("")
+        lines.append("**Not done:**")
+        for m in fail[:40]:
+            err = (m.get("error") or "").strip()
+            suffix = f" ({err})" if err else ""
+            lines.append(f"✗ {m.get('belongs', '')} — {m.get('machine', '')}{suffix}")
+        if len(fail) > 40:
+            lines.append(f"... and {len(fail) - 40} more")
+    return "\n".join(lines)
+
+
+def _send_prod_set_live_summary_card(
+    action: str,
+    summary: dict,
+    *,
+    title_prefix: str,
+    header_template: str,
+    cancel_url: str | None = None,
+) -> None:
+    from prod_machine_batch import ACTION_LABELS
+
+    title = f"{title_prefix} — {ACTION_LABELS.get(action, action)}"
+    _send_prod_set_lark_card(
+        title,
+        _format_prod_set_live_summary_md(action, summary),
+        header_template=header_template,
+        cancel_url=cancel_url,
+    )
+
+
+def _send_prod_set_cancel_live_summary(job_id: str) -> None:
+    """Live EGM re-check after cancel; idempotent per job."""
+    with _PROD_SET_JOBS_LOCK:
+        job = _PROD_SET_JOBS.get(job_id)
+        if not job or job.get("cancel_summary_sent"):
+            return
+        job["cancel_summary_sent"] = True
+        action = job.get("action") or ""
+        machines = list(job.get("machines") or [])
+        job["status"] = "cancelled"
+        job["message"] = "Cancelled — live EGM summary sent."
+
+    if not action or not machines:
+        return
+
+    try:
+        from prod_machine_batch import live_verify_prod_machines
+
+        summary = live_verify_prod_machines(action, machines)
+    except Exception as e:
+        logger.exception("prod-set cancel live verify %s failed", job_id)
+        summary = {
+            "action": action,
+            "success": [],
+            "failed": [
+                {
+                    "belongs": m.get("belongs", ""),
+                    "machine": m.get("name") or m.get("machine") or "",
+                    "error": str(e),
+                }
+                for m in machines
+            ],
+        }
+
+    with _PROD_SET_JOBS_LOCK:
+        if job_id in _PROD_SET_JOBS:
+            _PROD_SET_JOBS[job_id]["summary"] = summary
+
+    fail_n = len(summary.get("failed") or [])
+    tpl = "red" if fail_n else "green"
+    _send_prod_set_live_summary_card(
+        action,
+        summary,
+        title_prefix="Cancelled",
+        header_template=tpl,
+    )
+
+
 def _prod_set_cancel_message(action: str) -> str:
     from prod_machine_batch import ACTION_LABELS
 
@@ -206,7 +309,7 @@ def _run_prod_set_job_thread(job_id: str, action: str, remark: str, machines: li
         lines = [
             f"**{label} — failed ({len(failed)} machine(s))**",
             "Often caused by **Game is currently running** (player still inside).",
-            f"Will retry automatically (attempt {attempt}) unless you tap **Cancel** on the start card.",
+            f"Will retry automatically (attempt {attempt}) unless you tap **Cancel** below.",
             "",
         ]
         for m in failed[:30]:
@@ -220,8 +323,10 @@ def _run_prod_set_job_thread(job_id: str, action: str, remark: str, machines: li
             f"{label} — failed ({len(failed)} machine(s))",
             "\n".join(lines),
             header_template="red",
+            cancel_url=_prod_set_cancel_url(job_id),
         )
 
+    cancelled = False
     try:
         summary = run_prod_batch_job(
             action,
@@ -234,14 +339,17 @@ def _run_prod_set_job_thread(job_id: str, action: str, remark: str, machines: li
         )
         with _PROD_SET_JOBS_LOCK:
             if job_id in _PROD_SET_JOBS:
-                if _PROD_SET_JOBS[job_id].get("cancel_requested"):
+                cancelled = bool(_PROD_SET_JOBS[job_id].get("cancel_requested"))
+                if cancelled:
                     _PROD_SET_JOBS[job_id]["status"] = "cancelled"
-                    _PROD_SET_JOBS[job_id]["message"] = _prod_set_cancel_message(action)
+                    _PROD_SET_JOBS[job_id]["message"] = "Cancelled — checking live EGM…"
                 else:
                     _PROD_SET_JOBS[job_id]["status"] = "done"
                     _PROD_SET_JOBS[job_id]["summary"] = summary
                     _PROD_SET_JOBS[job_id]["message"] = "Batch operation finished."
-        if summary and not cancel_check():
+        if cancelled:
+            _send_prod_set_cancel_live_summary(job_id)
+        elif summary:
             ok_n = len(summary.get("success") or [])
             fail_n = len(summary.get("failed") or [])
             lines = [
@@ -5051,14 +5159,14 @@ def api_prod_set_start_job():
             "created_at": datetime.now().isoformat(),
         }
     intro = LARK_INTRO.get(action, action)
-    lines = [intro, ""]
+    lines = [intro, "", "Tap **Cancel** below to stop and receive a live EGM done / not-done summary.", ""]
     for m in machines[:80]:
         nm = m.get("name") or m.get("machine") or ""
         lines.append(f"• {m.get('belongs', '')} — {nm}")
     if len(machines) > 80:
         lines.append(f"... and {len(machines) - 80} more")
     base = _prod_set_public_base()
-    cancel_url = f"{base}/api/prod-set/jobs/{job_id}/cancel" if base else None
+    cancel_url = _prod_set_cancel_url(job_id)
     from prod_machine_batch import ACTION_LABELS
 
     _send_prod_set_lark_card(
@@ -5098,21 +5206,40 @@ def api_prod_set_job_status(job_id: str):
         )
 
 
-@wm_bp.post("/api/prod-set/jobs/<job_id>/cancel")
+@wm_bp.route("/api/prod-set/jobs/<job_id>/cancel", methods=["GET", "POST"])
 def api_prod_set_cancel(job_id: str):
-    if not _api_auth_ok():
+    if request.method == "POST" and not _api_auth_ok():
         return jsonify(error="unauthorized"), 401
     with _PROD_SET_JOBS_LOCK:
         job = _PROD_SET_JOBS.get(job_id)
         if not job:
+            if request.method == "GET":
+                return (
+                    "<html><body><p>Job not found or already finished.</p></body></html>",
+                    404,
+                    {"Content-Type": "text/html; charset=utf-8"},
+                )
             return jsonify(error="not found"), 404
         job["cancel_requested"] = True
-        action = job.get("action", "")
-    _send_prod_set_lark_card(
-        "Cancelled",
-        _prod_set_cancel_message(action),
-        header_template="grey",
-    )
+        was_running = job.get("status") == "running"
+        job["message"] = "Cancellation requested — stopping and re-checking live EGM…"
+
+    if not was_running:
+        threading.Thread(
+            target=_send_prod_set_cancel_live_summary,
+            args=(job_id,),
+            daemon=True,
+        ).start()
+
+    if request.method == "GET":
+        html = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>Cancel</title></head>
+<body style="font-family:sans-serif;padding:2rem;">
+<h2>Cancellation requested</h2>
+<p>The batch job will stop. A Lark card with a <strong>live EGM summary</strong>
+( done / not done ) will be sent shortly.</p>
+</body></html>"""
+        return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+
     return jsonify(ok=True, message="Cancellation requested")
 
 

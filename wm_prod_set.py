@@ -588,8 +588,24 @@ PROD_SET_PAGE = """<!DOCTYPE html>
         return;
       }
       if (data.status === "cancelled") {
-        showJobBanner(data.message || "Cancelled.", false);
+        let html = `<strong>${esc(data.message || "Cancelled.")}</strong>`;
+        if (data.summary) {
+          const s = data.summary;
+          const ok = s.success || [];
+          const fail = s.failed || [];
+          html += `<p style="color:var(--muted);font-size:0.88rem;">Done: ${ok.length}, Not done: ${fail.length}</p>`;
+          if (ok.length) {
+            html += "<p><strong>Done:</strong></p><ul class=\"fail-list\">" +
+              ok.map(m => `<li>✓ ${esc(m.belongs)} — ${esc(m.machine)}</li>`).join("") + "</ul>";
+          }
+          if (fail.length) {
+            html += "<p><strong>Not done:</strong></p><ul class=\"fail-list\">" +
+              fail.map(m => `<li>✗ ${esc(m.belongs)} — ${esc(m.machine)} (${esc(m.error || "")})</li>`).join("") + "</ul>";
+          }
+        }
+        showJobBanner(html, (data.summary && (data.summary.failed || []).length > 0));
         currentJobId = null;
+        loadMachines();
         return;
       }
       if (data.status === "done") {

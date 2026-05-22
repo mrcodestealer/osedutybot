@@ -1265,4 +1265,110 @@ def run_prod_batch_job(
     }
 
 
+def live_verify_prod_machines(
+    action: str,
+    machines: list[dict],
+    *,
+    headless: bool | None = None,
+    timeout_ms: int | None = None,
+    max_pages: int | None = None,
+) -> dict[str, Any]:
+    """
+    Read-only live EGM check for each requested machine (no batch UI clicks).
+    Returns the same ``success`` / ``failed`` shape as :func:`run_prod_batch_job`.
+    """
+    from playwright.sync_api import sync_playwright
+
+    if max_pages is None:
+        max_pages = int(os.environ.get("SM_MACHINE_MAX_PAGES") or 0) or None
+    timeout_ms = timeout_ms or _default_timeout_ms()
+    hl = _smachine_resolve_headless(headless)
+    if headless is None:
+        hl = _smachine_resolve_headless(
+            os.environ.get("SMACHINE_HEADLESS", "1").strip().lower() not in ("0", "false", "no")
+        )
+
+    by_env: dict[str, list[dict]] = {}
+    for m in machines:
+        b = _belongs_for_machine(m.get("belongs", ""))
+        by_env.setdefault(b, []).append(m)
+
+    success: list[dict] = []
+    failed: list[dict] = []
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=hl)
+        context = browser.new_context(
+            viewport={"width": 1600, "height": 900},
+            ignore_https_errors=True,
+        )
+        page = context.new_page()
+        page.set_default_timeout(timeout_ms)
+        try:
+            for belongs, env_machines in by_env.items():
+                if not _ensure_env_egm_page(
+                    page, belongs, timeout_ms=timeout_ms, max_pages=max_pages
+                ):
+                    for m in env_machines:
+                        failed.append(
+                            {
+                                "belongs": m.get("belongs", belongs),
+                                "machine": _machine_display_name(m),
+                                "error": "login failed",
+                            }
+                        )
+                    continue
+                for m in env_machines:
+                    name = _machine_display_name(m)
+                    if not name:
+                        continue
+                    state = _read_live_row_state(
+                        page, name, timeout_ms=timeout_ms, max_pages=max_pages
+                    )
+                    if state is None:
+                        failed.append(
+                            {
+                                "belongs": m.get("belongs", belongs),
+                                "machine": name,
+                                "error": "machine not found on EGM page",
+                            }
+                        )
+                        continue
+                    if _verify_live_state(state, action):
+                        success.append(
+                            {
+                                "belongs": m.get("belongs", belongs),
+                                "machine": name,
+                                "live": state,
+                            }
+                        )
+                    else:
+                        detail = (
+                            f"live status={state.get('status')!r}, test={state.get('test')}"
+                        )
+                        failed.append(
+                            {
+                                "belongs": m.get("belongs", belongs),
+                                "machine": name,
+                                "error": detail,
+                                "live": state,
+                            }
+                        )
+        finally:
+            try:
+                context.close()
+            except Exception:
+                pass
+            browser.close()
+
+    return {
+        "action": action,
+        "success": success,
+        "failed": failed,
+        "ok": [f"{x['belongs']}::{x['machine']}" for x in success],
+        "failed_keys": [f"{x['belongs']}::{x['machine']}" for x in failed],
+        "live_check": True,
+    }
+
+
 run_prod_set_job = run_prod_batch_job
