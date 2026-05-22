@@ -100,16 +100,23 @@ def normalize_display_subject(subject: str) -> str:
     return s
 
 
+def _clean_status_for_title(raw: str) -> str:
+    """One line only — avoid capturing the next field (e.g. ``Date`` after ``Fixed``)."""
+    v = (raw or "").strip().splitlines()[0].strip().rstrip("/").strip()
+    v = re.split(r"\s+(?:Date|Start|End|Reason)\s*:", v, maxsplit=1, flags=re.I)[0].strip()
+    return v
+
+
 def extract_status_for_card(subject: str, extra_text: str | None = None) -> str | None:
     """Status for card header — from subject/body ``Table availability:`` / ``Status:``."""
     hay = f"{subject or ''}\n{extra_text or ''}"
     for pattern in (
-        r"Table\s+availability\s*:\s*([A-Za-z][A-Za-z\s\-]*)",
-        r"(?<![\w])Status\s*:\s*([A-Za-z][A-Za-z\s\-]*)",
+        r"Table\s+availability\s*:\s*([^\n\r/|]+)",
+        r"(?<![\w])Status\s*:\s*([^\n\r/|]+)",
     ):
         m = re.search(pattern, hay, re.IGNORECASE)
         if m:
-            val = m.group(1).strip().rstrip("/").strip()
+            val = _clean_status_for_title(m.group(1))
             if val and val.lower() != "unknown":
                 return val
     if (extra_text or "").strip():
@@ -118,6 +125,47 @@ def extract_status_for_card(subject: str, extra_text: str | None = None) -> str 
         if st and st.lower() != "unknown":
             return st
     return None
+
+
+FORWARD_DONE_BODY = (
+    "Done forward to evolive.maintenance@om.hotelstotsenberg.com"
+)
+
+
+def build_forward_done_title(
+    subject: str, email_body: str | None = None
+) -> str:
+    """Lark notice title: ``TINC-705939 Fixed`` (ticket + short status)."""
+    ticket = extract_ticket_card_title(subject, email_body) or "Maintenance"
+    status = extract_status_for_card(subject, email_body) or ""
+    if status:
+        return f"{ticket} {status}".strip()
+    return ticket
+
+
+def build_forward_done_card(
+    subject: str, email_body: str | None = None
+) -> dict[str, Any]:
+    """Small card after SMTP forward succeeds."""
+    title = build_forward_done_title(subject, email_body)
+    if len(title) > _CARD_HEADER_TITLE_MAX:
+        title = title[: _CARD_HEADER_TITLE_MAX - 3] + "..."
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "green",
+            "title": {"tag": "plain_text", "content": title},
+        },
+        "elements": [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": FORWARD_DONE_BODY,
+                },
+            }
+        ],
+    }
 
 
 def build_card_header_title(

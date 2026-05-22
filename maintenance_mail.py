@@ -18,13 +18,16 @@ import json
 import maintenance as _maint_mod
 import os
 import re
+import smtplib
 import ssl
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
+from email.header import Header
 from email.header import decode_header
-from email.utils import parsedate_to_datetime
+from email.mime.text import MIMEText
+from email.utils import formataddr, formatdate, make_msgid, parsedate_to_datetime
 from typing import Any, Callable
 
 from dotenv import load_dotenv
@@ -89,6 +92,34 @@ MAIL_VERBOSE = (os.getenv("MAINTENANCE_MAIL_VERBOSE", "").strip() or "0") in (
     "true",
     "yes",
     "on",
+)
+FORWARD_ENABLED = (os.getenv("MAINTENANCE_MAIL_FORWARD_ENABLED", "").strip() or "1") not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
+FORWARD_TO = (
+    os.getenv("MAINTENANCE_MAIL_FORWARD_TO", "").strip()
+    or "evolive.maintenance@om.hotelstotsenberg.com"
+)
+FORWARD_TO_NAME = (
+    os.getenv("MAINTENANCE_MAIL_FORWARD_TO_NAME", "").strip()
+    or "SNSoft - OM - evolive.maintenance"
+)
+FORWARD_CC = (
+    os.getenv("MAINTENANCE_MAIL_FORWARD_CC", "").strip()
+    or "om@hotelstotsenberg.com"
+)
+FORWARD_FROM_NAME = (
+    os.getenv("MAINTENANCE_MAIL_FORWARD_FROM_NAME", "").strip() or "OM-PH"
+)
+SMTP_HOST = (
+    os.getenv("MAINTENANCE_MAIL_SMTP_HOST", "").strip()
+    or "smtp.larksuite.com"
+)
+SMTP_PORT = int(
+    os.getenv("MAINTENANCE_MAIL_SMTP_PORT", "").strip() or "465"
 )
 # Comma-separated IMAP mailboxes (Lark folder names; quote not needed in .env).
 MAIL_IMAP_FOLDERS = [
@@ -350,13 +381,16 @@ def _find_duplicate_title_content(
 
 
 def _find_duplicate_ticket(
-    entries: list[dict[str, Any]], ticket_id: str
+    entries: list[dict[str, Any]], ticket_id: str, content_hash: str
 ) -> dict[str, Any] | None:
+    """Same ticket + same body → duplicate; same ticket + different body → new email."""
     tid = (ticket_id or "").strip().upper()
     if not tid:
         return None
     for ent in reversed(entries):
-        if (ent.get("ticket_id") or "").strip().upper() == tid:
+        if (ent.get("ticket_id") or "").strip().upper() != tid:
+            continue
+        if ent.get("content_hash") == content_hash:
             return ent
     return None
 
@@ -371,6 +405,33 @@ def _already_processed_uid(entries: list[dict[str, Any]], uid_key: str) -> bool:
         if ":" not in stored and key.endswith(":" + stored):
             return True
     return False
+
+
+def forward_maintenance_email(*, subject: str) -> None:
+    """
+    Send blank-body forward via SMTP (same Lark account as IMAP).
+    To: evolive.maintenance@…, Cc: om@…
+    """
+    if not MAIL_PASSWORD:
+        raise RuntimeError("MAINTENANCE_MAIL_PASSWORD not set")
+    subj = (subject or "").strip() or "Maintenance"
+    msg = MIMEText("", "plain", "utf-8")
+    msg["Subject"] = Header(subj, "utf-8")
+    msg["From"] = formataddr((FORWARD_FROM_NAME, MAIL_USER))
+    msg["To"] = formataddr((FORWARD_TO_NAME, FORWARD_TO))
+    msg["Cc"] = FORWARD_CC
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid()
+
+    recipients = [FORWARD_TO, FORWARD_CC]
+    ctx = ssl.create_default_context()
+    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=IMAP_TIMEOUT, context=ctx) as smtp:
+        smtp.login(MAIL_USER, MAIL_PASSWORD)
+        smtp.sendmail(MAIL_USER, recipients, msg.as_string())
+    print(
+        f"[maint-mail] forwarded {subj!r} → {FORWARD_TO} cc={FORWARD_CC}",
+        flush=True,
+    )
 
 
 def _record_processed(
@@ -612,7 +673,7 @@ class MaintenanceMailWatcher:
         chash = _content_hash(pipeline_in)
         ticket_id = maintenance.extract_ticket_card_title(subject, body) or ""
 
-        dup_ticket = _find_duplicate_ticket(entries, ticket_id)
+        dup_ticket = _find_duplicate_ticket(entries, ticket_id, chash)
         if dup_ticket:
             _record_processed(
                 entries,
@@ -663,23 +724,18 @@ class MaintenanceMailWatcher:
                 )
             return
 
-        token = self._get_token()
-        first_reply, second_reply = maintenance.process_maintenance_pipeline(
-            pipeline_in,
-            token,
-            email_subject=display_subj,
-            received_at=when,
-        )
+        if FORWARD_ENABLED:
+            try:
+                forward_maintenance_email(subject=subject)
+            except Exception as ex:
+                print(
+                    f"[maint-mail] forward failed uid={uid_s} ticket={ticket_id!r}: {ex!r}",
+                    flush=True,
+                )
+                return
 
-        card = maintenance.build_maintenance_card(
-            email_subject=display_subj,
-            received_at=when,
-            from_addr=from_addr,
-            gamelist_section=first_reply or "",
-            summary_section=second_reply or "",
-            email_body=body,
-        )
-        self._send_lark_card(TARGET_CHAT_ID, card)
+        done_card = maintenance.build_forward_done_card(subject, body)
+        self._send_lark_card(TARGET_CHAT_ID, done_card)
 
         _record_processed(
             entries,
