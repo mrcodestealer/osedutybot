@@ -530,6 +530,16 @@ def _run_step_with_retries(
     pending = list(targets)
     max_r = _max_phase_retries()
 
+    if not _ensure_env_egm_page(page, belongs, timeout_ms=timeout_ms, max_pages=max_pages):
+        return False, [
+            {
+                "belongs": m.get("belongs", belongs),
+                "machine": _machine_display_name(m),
+                "error": "login failed",
+            }
+            for m in pending
+        ]
+
     for attempt in range(1, max_r + 1):
         if cancel_check() or manual_stop_check():
             return False, pending
