@@ -7,8 +7,8 @@ Env (optional):
   gamelist / GAMELIST — Lark **spreadsheet token** for the game list workbook.
   gamelistsheetid / GAMELISTSHEETID — single worksheet id (only this sheet is read).
   Sheet must include header columns ``游戏名称 / Games Name`` and
-  ``遊戲入口圖 / Game entrance map`` (often on **row 2**): value ``1`` = launched;
-  empty or other = not launched. Each email game is matched against **游戏名称**.
+  ``遊戲入口圖 / Game entrance map`` (often on **row 2**): ``1`` = launched,
+  ``0`` / empty / other = not launched. Each email game is matched against **游戏名称**.
 """
 
 from __future__ import annotations
@@ -211,14 +211,26 @@ def _names_match(a: Any, b: Any) -> bool:
 
 
 def _is_entrance_map_launched(cell: Any) -> bool:
-    """``遊戲入口圖 / Game entrance map`` — only ``1`` counts as launched."""
+    """
+    ``遊戲入口圖 / Game entrance map``:
+    ``1`` → launched; ``0`` / empty / any other value → not launched.
+    """
     raw = str(cell or "").strip()
     if not raw:
         return False
     try:
-        return float(raw.replace(",", "")) == 1.0
+        n = float(raw.replace(",", ""))
+        if n == 1.0:
+            return True
+        if n == 0.0:
+            return False
+        return False
     except ValueError:
-        return raw == "1"
+        if raw == "1":
+            return True
+        if raw == "0":
+            return False
+        return False
 
 
 def _fetch_sheet_values(
@@ -784,7 +796,7 @@ def process_maintenance_pipeline(
         else:
             unknown_list.append(g)
 
-    lines1 = ["📋 **游戏上线状态（gamelist · 遊戲入口圖=1 为上线）**"]
+    lines1 = ["📋 **游戏上线状态（gamelist · 遊戲入口圖: 1=上线, 0=非上线）**"]
     lines1.append(
         "✅ **上线 Launched：** "
         + (", ".join(launched_list) if launched_list else "（无）")
