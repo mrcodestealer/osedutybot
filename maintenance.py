@@ -174,7 +174,7 @@ FORWARD_DONE_BODY = (
 )
 NOT_IN_CP_WEBSITE_BODY = "NOT IN CP WEBSITE"
 FORWARD_DONE_NOT_CP_BODY = (
-    "NOT IN CP WEBSITE — replied to sender, Cc om@hotelstotsenberg.com "
+    "NOT IN CP WEBSITE — emailed Cc om@hotelstotsenberg.com only "
     "(no launched games on gamelist · 遊戲入口圖=1)."
 )
 
