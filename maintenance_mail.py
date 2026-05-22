@@ -29,7 +29,7 @@ from zoneinfo import ZoneInfo
 from email.header import Header
 from email.header import decode_header
 from email.mime.text import MIMEText
-from email.utils import formataddr, formatdate, make_msgid, parsedate_to_datetime
+from email.utils import formataddr, formatdate, make_msgid, parseaddr, parsedate_to_datetime
 from typing import Any, Callable
 
 from dotenv import load_dotenv
@@ -115,6 +115,9 @@ FORWARD_CC = (
 )
 FORWARD_FROM_NAME = (
     os.getenv("MAINTENANCE_MAIL_FORWARD_FROM_NAME", "").strip() or "OM-PH"
+)
+NOT_CP_REPLY_CC_NAME = (
+    os.getenv("MAINTENANCE_MAIL_NOT_CP_CC_NAME", "").strip() or "CP OM Duty"
 )
 SMTP_HOST = (
     os.getenv("MAINTENANCE_MAIL_SMTP_HOST", "").strip()
@@ -440,50 +443,94 @@ def _already_processed_uid(entries: list[dict[str, Any]], uid_key: str) -> bool:
     return False
 
 
+def _reply_subject(subject: str) -> str:
+    s = (subject or "").strip() or "Maintenance"
+    if re.match(r"^re:\s", s, re.IGNORECASE):
+        return s
+    return f"Re: {s}"
+
+
+def _reply_to_recipient(original_msg: email.message.Message) -> tuple[str, str]:
+    """Display name + address for Reply-To / From (ticket sender)."""
+    for header in ("Reply-To", "From"):
+        raw = original_msg.get(header)
+        if not raw:
+            continue
+        name, addr = parseaddr(_decode_mime_header(raw))
+        addr = (addr or "").strip()
+        if addr:
+            return (name or "", addr)
+    return ("", "")
+
+
 def forward_maintenance_email(
     *,
     subject: str,
-    to_cp: bool = True,
     original_msg: email.message.Message | None = None,
 ) -> None:
-    """
-    SMTP forward from om@…
-
-    ``to_cp=True``: Gmail-style forwarded block + original body → evolive + Cc om@
-    ``to_cp=False``: body ``NOT IN CP WEBSITE`` → om@ only (no evolive).
-    """
+    """SMTP forward from om@… — Gmail-style block + original body → evolive + Cc om@."""
     if not MAIL_PASSWORD:
         raise RuntimeError("MAINTENANCE_MAIL_PASSWORD not set")
     subj = (subject or "").strip() or "Maintenance"
-    if to_cp:
-        body = (
-            build_forwarded_message_body(original_msg)
-            if original_msg is not None
-            else ""
-        )
-    else:
-        body = _maint_mod.NOT_IN_CP_WEBSITE_BODY
+    body = (
+        build_forwarded_message_body(original_msg)
+        if original_msg is not None
+        else ""
+    )
     msg = MIMEText(body, "plain", "utf-8")
     msg["Subject"] = Header(subj, "utf-8")
     msg["From"] = formataddr((FORWARD_FROM_NAME, MAIL_USER))
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid()
-
-    if to_cp:
-        msg["To"] = formataddr((FORWARD_TO_NAME, FORWARD_TO))
-        msg["Cc"] = FORWARD_CC
-        recipients = [FORWARD_TO, FORWARD_CC]
-        route = f"{FORWARD_TO} cc={FORWARD_CC}"
-    else:
-        msg["To"] = formataddr((FORWARD_FROM_NAME, FORWARD_CC))
-        recipients = [FORWARD_CC]
-        route = f"{FORWARD_CC} only (NOT IN CP WEBSITE)"
+    msg["To"] = formataddr((FORWARD_TO_NAME, FORWARD_TO))
+    msg["Cc"] = FORWARD_CC
+    recipients = [FORWARD_TO, FORWARD_CC]
+    route = f"{FORWARD_TO} cc={FORWARD_CC}"
 
     ctx = ssl.create_default_context()
     with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=IMAP_TIMEOUT, context=ctx) as smtp:
         smtp.login(MAIL_USER, MAIL_PASSWORD)
         smtp.sendmail(MAIL_USER, recipients, msg.as_string())
     print(f"[maint-mail] forwarded {subj!r} → {route}", flush=True)
+
+
+def reply_not_in_cp_email(
+    *,
+    subject: str,
+    original_msg: email.message.Message | None = None,
+) -> None:
+    """
+    Reply (not forward) when no launched games: body ``NOT IN CP WEBSITE``,
+    ``Re:`` subject, To = original sender, Cc = om@ only (no evolive).
+    """
+    if not MAIL_PASSWORD:
+        raise RuntimeError("MAINTENANCE_MAIL_PASSWORD not set")
+    if original_msg is None:
+        raise ValueError("original_msg required for NOT IN CP reply")
+    to_name, to_addr = _reply_to_recipient(original_msg)
+    if not to_addr:
+        raise ValueError("no Reply-To/From on original message")
+    subj = _reply_subject(subject)
+    msg = MIMEText(_maint_mod.NOT_IN_CP_WEBSITE_BODY, "plain", "utf-8")
+    msg["Subject"] = Header(subj, "utf-8")
+    msg["From"] = formataddr((FORWARD_FROM_NAME, MAIL_USER))
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid()
+    msg["To"] = formataddr((to_name, to_addr)) if to_name else to_addr
+    msg["Cc"] = formataddr((NOT_CP_REPLY_CC_NAME, FORWARD_CC))
+    orig_mid = (original_msg.get("Message-ID") or "").strip()
+    if orig_mid:
+        msg["In-Reply-To"] = orig_mid
+        refs = (original_msg.get("References") or "").strip()
+        msg["References"] = f"{refs} {orig_mid}".strip() if refs else orig_mid
+    recipients = [to_addr, FORWARD_CC]
+    route = f"reply To={to_addr} Cc={FORWARD_CC}"
+
+    ctx = ssl.create_default_context()
+    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=IMAP_TIMEOUT, context=ctx) as smtp:
+        smtp.login(MAIL_USER, MAIL_PASSWORD)
+        smtp.sendmail(MAIL_USER, recipients, msg.as_string())
+    print(f"[maint-mail] NOT IN CP reply {subj!r} → {route}", flush=True)
 
 
 def _record_processed(
@@ -840,12 +887,18 @@ class MaintenanceMailWatcher:
 
         if FORWARD_ENABLED:
             try:
-                forward_maintenance_email(
-                    subject=subject, to_cp=to_cp, original_msg=msg
-                )
+                if to_cp:
+                    forward_maintenance_email(
+                        subject=subject, original_msg=msg
+                    )
+                else:
+                    reply_not_in_cp_email(
+                        subject=subject, original_msg=msg
+                    )
             except Exception as ex:
+                action = "forward" if to_cp else "NOT IN CP reply"
                 print(
-                    f"[maint-mail] forward failed uid={uid_s} ticket={ticket_id!r}: {ex!r}",
+                    f"[maint-mail] {action} failed uid={uid_s} ticket={ticket_id!r}: {ex!r}",
                     flush=True,
                 )
                 return

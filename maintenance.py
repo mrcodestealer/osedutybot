@@ -174,7 +174,7 @@ FORWARD_DONE_BODY = (
 )
 NOT_IN_CP_WEBSITE_BODY = "NOT IN CP WEBSITE"
 FORWARD_DONE_NOT_CP_BODY = (
-    "NOT IN CP WEBSITE — sent to om@hotelstotsenberg.com only "
+    "NOT IN CP WEBSITE — replied to sender, Cc om@hotelstotsenberg.com "
     "(no launched games on gamelist · 遊戲入口圖=1)."
 )
 
@@ -224,7 +224,7 @@ def build_forward_done_card(
     *,
     to_cp: bool = True,
 ) -> dict[str, Any]:
-    """Small card after SMTP forward succeeds."""
+    """Small card after processing: green when email was forwarded to CP; orange when Lark-only."""
     title = build_forward_done_title(subject, email_body)
     if len(title) > _CARD_HEADER_TITLE_MAX:
         title = title[: _CARD_HEADER_TITLE_MAX - 3] + "..."
@@ -921,7 +921,7 @@ def process_maintenance_pipeline(
 ) -> tuple[str, str]:
     """
     Two-part reply for bot:
-    1) Launched vs not launched vs unknown (from gamelist spreadsheet).
+    1) Launched vs not launched (from gamelist spreadsheet; unmatched → not launched).
     2) Full QA/CS summary only if at least one candidate is 「上线 Launched」.
 
     If ``gamelist`` / ``gamelistsheetid`` or tenant token is missing, returns ("", process_email(...)).
@@ -953,16 +953,14 @@ def process_maintenance_pipeline(
 
     launched_list: list[str] = []
     not_launched_list: list[str] = []
-    unknown_list: list[str] = []
 
     for g in candidates:
         verdict = _row_launched_for_game(grid, g, "")
         if verdict is True:
             launched_list.append(g)
-        elif verdict is False:
-            not_launched_list.append(g)
         else:
-            unknown_list.append(g)
+            # False (遊戲入口圖=0) and None (not found on gamelist) → not launched
+            not_launched_list.append(g)
 
     lines1 = ["📋 **游戏上线状态（gamelist · 遊戲入口圖: 1=上线, 0=非上线）**"]
     lines1.append(
@@ -973,8 +971,6 @@ def process_maintenance_pipeline(
         "⛔ **非上线 Not launched：** "
         + (", ".join(not_launched_list) if not_launched_list else "（无）")
     )
-    if unknown_list:
-        lines1.append("❓ **未匹配 / 状态未知：** " + ", ".join(unknown_list))
 
     msg1 = "\n".join(lines1)
 
