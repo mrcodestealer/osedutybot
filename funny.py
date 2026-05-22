@@ -1,3 +1,13 @@
+import os
+
+PICTURE1_FILENAME = "picture1.png"
+
+
+def get_picture1_path():
+    """Absolute path to the /freewifi QR image (picture1.png next to this module)."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), PICTURE1_FILENAME)
+
+
 def get_miao():
     return r"""　　　　　　　　　,-､　　 　　　　　　　 ,.-､ 
 　　　　　　　 ./:::::＼　　　　　　　 ／::::ヽ 
