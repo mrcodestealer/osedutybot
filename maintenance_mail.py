@@ -349,6 +349,18 @@ def _find_duplicate_title_content(
     return None
 
 
+def _find_duplicate_ticket(
+    entries: list[dict[str, Any]], ticket_id: str
+) -> dict[str, Any] | None:
+    tid = (ticket_id or "").strip().upper()
+    if not tid:
+        return None
+    for ent in reversed(entries):
+        if (ent.get("ticket_id") or "").strip().upper() == tid:
+            return ent
+    return None
+
+
 def _already_processed_uid(entries: list[dict[str, Any]], uid_key: str) -> bool:
     key = str(uid_key)
     for e in entries:
@@ -368,6 +380,7 @@ def _record_processed(
     message_id: str,
     title: str,
     content_hash: str,
+    ticket_id: str = "",
 ) -> None:
     entries.append(
         {
@@ -375,6 +388,7 @@ def _record_processed(
             "message_id": (message_id or "").strip(),
             "title": (title or "").strip(),
             "content_hash": content_hash,
+            "ticket_id": (ticket_id or "").strip().upper(),
             "processed_at": datetime.now(timezone.utc).isoformat(),
         }
     )
@@ -466,18 +480,20 @@ class MaintenanceMailWatcher:
 
     def _fetch_header_preview(
         self, mail: imaplib.IMAP4, uid: bytes
-    ) -> tuple[str, str | None]:
-        """Lightweight SUBJECT + DATE peek (before downloading full RFC822)."""
+    ) -> tuple[str, str | None, str]:
+        """Lightweight SUBJECT + DATE + FROM peek (before downloading full RFC822)."""
         uid_s = uid.decode() if isinstance(uid, bytes) else str(uid)
         try:
             typ, data = mail.uid(
-                "fetch", uid, "(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE)])"
+                "fetch",
+                uid,
+                "(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE FROM)])",
             )
         except imaplib.IMAP4.error as ex:
             print(f"[maint-mail] header fetch failed uid={uid_s}: {ex!r}", flush=True)
-            return "", None
+            return "", None, ""
         if typ != "OK" or not data:
-            return "", None
+            return "", None, ""
         for part in data:
             if not isinstance(part, tuple) or len(part) < 2:
                 continue
@@ -485,6 +501,7 @@ class MaintenanceMailWatcher:
             if isinstance(chunk, (bytes, bytearray)) and chunk:
                 msg = email.message_from_bytes(chunk)
                 subj = _decode_mime_header(msg.get("Subject"))
+                from_addr = _decode_mime_header(msg.get("From"))
                 when: str | None = None
                 try:
                     dt = parsedate_to_datetime(msg.get("Date") or "")
@@ -492,8 +509,8 @@ class MaintenanceMailWatcher:
                         when = dt.isoformat()
                 except Exception:
                     when = None
-                return subj, when
-        return "", None
+                return subj, when, from_addr
+        return "", None, ""
 
     def _process_one(
         self,
@@ -512,7 +529,24 @@ class MaintenanceMailWatcher:
         if _already_processed_uid(entries, store_key):
             return
 
-        subject, when = self._fetch_header_preview(mail, uid)
+        subject, when, from_hdr = self._fetch_header_preview(mail, uid)
+
+        if _maint_mod.from_should_ignore(from_hdr):
+            ticket_skip = _maint_mod.extract_ticket_card_title(subject) or ""
+            _record_processed(
+                entries,
+                imap_uid=store_key,
+                message_id="",
+                title=subject or "",
+                content_hash="skip:from_self",
+                ticket_id=ticket_skip,
+            )
+            mail.uid("store", uid, "+FLAGS", "(\\Seen)")
+            print(
+                f"[maint-mail] skip uid={uid_s} (from OM-PH / om@): {subject!r}",
+                flush=True,
+            )
+            return
 
         if not subject_matches(subject):
             if subject and MAIL_VERBOSE:
@@ -555,10 +589,46 @@ class MaintenanceMailWatcher:
             return
 
         display_subj = maintenance.normalize_display_subject(subject)
+        from_addr = _decode_mime_header(msg.get("From"))
+        if maintenance.from_should_ignore(from_addr):
+            ticket_skip = maintenance.extract_ticket_card_title(subject) or ""
+            _record_processed(
+                entries,
+                imap_uid=store_key,
+                message_id=msg.get("Message-ID") or "",
+                title=display_subj,
+                content_hash="skip:from_self",
+                ticket_id=ticket_skip,
+            )
+            mail.uid("store", uid, "+FLAGS", "(\\Seen)")
+            print(
+                f"[maint-mail] skip uid={uid_s} (from OM-PH / om@): {display_subj!r}",
+                flush=True,
+            )
+            return
 
         body = extract_body_from_message(msg)
         pipeline_in = build_pipeline_input(subject, body)
         chash = _content_hash(pipeline_in)
+        ticket_id = maintenance.extract_ticket_card_title(subject, body) or ""
+
+        dup_ticket = _find_duplicate_ticket(entries, ticket_id)
+        if dup_ticket:
+            _record_processed(
+                entries,
+                imap_uid=store_key,
+                message_id=msg.get("Message-ID") or "",
+                title=display_subj,
+                content_hash=chash,
+                ticket_id=ticket_id,
+            )
+            mail.uid("store", uid, "+FLAGS", "(\\Seen)")
+            print(
+                f"[maint-mail] duplicate ticket ignored {folder} uid={uid_s} "
+                f"ticket={ticket_id!r}",
+                flush=True,
+            )
+            return
 
         dup = _find_duplicate_title_content(entries, display_subj, chash)
         if dup:
@@ -568,6 +638,7 @@ class MaintenanceMailWatcher:
                 message_id=msg.get("Message-ID") or "",
                 title=display_subj,
                 content_hash=chash,
+                ticket_id=ticket_id,
             )
             mail.uid("store", uid, "+FLAGS", "(\\Seen)")
             print(
@@ -576,7 +647,6 @@ class MaintenanceMailWatcher:
             )
             return
 
-        from_addr = _decode_mime_header(msg.get("From"))
         if not when:
             try:
                 dt = parsedate_to_datetime(msg.get("Date") or "")
@@ -617,10 +687,12 @@ class MaintenanceMailWatcher:
             message_id=msg.get("Message-ID") or "",
             title=display_subj,
             content_hash=chash,
+            ticket_id=ticket_id,
         )
         mail.uid("store", uid, "+FLAGS", "(\\Seen)")
         print(
-            f"[maint-mail] processed {folder} uid={uid_s} title={display_subj!r}",
+            f"[maint-mail] processed {folder} uid={uid_s} ticket={ticket_id!r} "
+            f"title={display_subj!r}",
             flush=True,
         )
 
@@ -650,7 +722,19 @@ class MaintenanceMailWatcher:
             if _already_processed_uid(entries, _uid_key(folder, uid_s)):
                 stats["already_done"] += 1
                 continue
-            subject, when = self._fetch_header_preview(mail, uid)
+            subject, when, from_hdr = self._fetch_header_preview(mail, uid)
+            if _maint_mod.from_should_ignore(from_hdr):
+                stats["ignored"] += 1
+                ticket_skip = _maint_mod.extract_ticket_card_title(subject) or ""
+                _record_processed(
+                    entries,
+                    imap_uid=_uid_key(folder, uid_s),
+                    message_id="",
+                    title=subject or "",
+                    content_hash="skip:from_self",
+                    ticket_id=ticket_skip,
+                )
+                continue
             if _maint_mod.subject_should_ignore(subject):
                 stats["ignored"] += 1
                 if MAIL_VERBOSE:

@@ -3161,6 +3161,17 @@ def lark_webhook():
                     f"⏭️ Skipped — subject contains ignored marker (e.g. `C88live_ow.ph`).\n\n`{subj}`",
                 )
                 return _lark_im_done()
+            from_line = ""
+            for line in email_text.splitlines()[:40]:
+                if re.match(r"^From:\s*", line, re.I):
+                    from_line = line
+                    break
+            if maintenance.from_should_ignore(from_line):
+                send_message(
+                    chat_id,
+                    "⏭️ Skipped — email is from OM-PH / om@hotelstotsenberg.com (outbound copy).",
+                )
+                return _lark_im_done()
             first_reply, second_reply = maintenance.process_maintenance_pipeline(
                 email_text,
                 token,

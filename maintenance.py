@@ -7,8 +7,8 @@ Env (optional):
   gamelist / GAMELIST — Lark **spreadsheet token** for the game list workbook.
   gamelistsheetid / GAMELISTSHEETID — single worksheet id (only this sheet is read).
   Sheet must include header columns ``游戏名称 / Games Name`` and
-  ``游戏状态 / Game Status`` (often on **row 2**). Each email game is matched
-  against the **游戏名称** column on that sheet only.
+  ``遊戲入口圖 / Game entrance map`` (often on **row 2**): value ``1`` = launched;
+  empty or other = not launched. Each email game is matched against **游戏名称**.
 """
 
 from __future__ import annotations
@@ -38,6 +38,27 @@ _CARD_HEADER_TITLE_MAX = 100
 
 # Substrings in email subject/title → skip (no card, no pipeline).
 _SUBJECT_IGNORE_MARKERS = ("c88live_ow.ph",)
+
+
+def from_should_ignore(from_addr: str | None) -> bool:
+    """Skip outbound copies from our own mailbox (OM-PH / om@…)."""
+    raw = (from_addr or "").strip()
+    if not raw:
+        return False
+    low = raw.lower()
+    if "om@hotelstotsenberg.com" in low:
+        return True
+    if re.search(r"\bom-ph\b", raw, re.IGNORECASE):
+        return True
+    extra = (
+        os.getenv("MAINTENANCE_IGNORE_FROM", "").strip()
+        or os.getenv("maintenance_ignore_from", "").strip()
+    )
+    for token in extra.split(","):
+        t = token.strip().lower()
+        if t and t in low:
+            return True
+    return False
 
 
 def subject_should_ignore(subject: str | None) -> bool:
@@ -189,10 +210,15 @@ def _names_match(a: Any, b: Any) -> bool:
     return na == nb or na in nb or nb in na
 
 
-def _is_launched_status(cell: Any) -> bool:
-    raw = str(cell or "")
-    low = raw.lower()
-    return ("上线" in raw) and ("launched" in low)
+def _is_entrance_map_launched(cell: Any) -> bool:
+    """``遊戲入口圖 / Game entrance map`` — only ``1`` counts as launched."""
+    raw = str(cell or "").strip()
+    if not raw:
+        return False
+    try:
+        return float(raw.replace(",", "")) == 1.0
+    except ValueError:
+        return raw == "1"
 
 
 def _fetch_sheet_values(
@@ -212,38 +238,42 @@ def _fetch_sheet_values(
 
 
 def _find_header_row_and_cols(grid: list[list[Any]]) -> tuple[int, int, int] | None:
-    """Pick the best header row when multiple rows contain name/status-like cells."""
+    """Pick header row with **游戏名称** + **遊戲入口圖 / Game entrance map** columns."""
     scored: list[tuple[int, int, int, int]] = []
     for ri, row in enumerate(grid[:60]):
         if not row:
             continue
         name_ci: int | None = None
-        status_ci: int | None = None
+        entrance_ci: int | None = None
         for ci, cell in enumerate(row):
             cn = _cell_norm(cell)
             if "游戏名称" in cn or ("games" in cn and "name" in cn):
                 name_ci = ci
-            if "游戏状态" in cn or ("game" in cn and "status" in cn):
-                status_ci = ci
-        if name_ci is None or status_ci is None:
+            if (
+                "遊戲入口圖" in cn
+                or "游戏入口图" in cn
+                or ("entrance" in cn and "map" in cn)
+            ):
+                entrance_ci = ci
+        if name_ci is None or entrance_ci is None:
             continue
         nc = _cell_norm(row[name_ci]) if name_ci < len(row) else ""
-        sc = _cell_norm(row[status_ci]) if status_ci < len(row) else ""
+        ec = _cell_norm(row[entrance_ci]) if entrance_ci < len(row) else ""
         score = 0
         if "游戏名称" in nc:
             score += 4
         elif "games" in nc and "name" in nc:
             score += 2
-        if "游戏状态" in sc:
+        if "遊戲入口圖" in ec or "游戏入口图" in ec:
             score += 4
-        elif "game" in sc and "status" in sc:
+        elif "entrance" in ec and "map" in ec:
             score += 2
-        scored.append((score, ri, name_ci, status_ci))
+        scored.append((score, ri, name_ci, entrance_ci))
     if not scored:
         return None
     scored.sort(key=lambda t: (-t[0], -t[1]))
-    _, ri, name_ci, status_ci = scored[0]
-    return ri, name_ci, status_ci
+    _, ri, name_ci, entrance_ci = scored[0]
+    return ri, name_ci, entrance_ci
 
 
 def _row_launched_for_game(
@@ -252,18 +282,18 @@ def _row_launched_for_game(
     parsed = _find_header_row_and_cols(grid)
     if not parsed:
         return None
-    hi, ci_name, ci_status = parsed
+    hi, ci_name, ci_entrance = parsed
     last: bool | None = None
     for row in grid[hi + 1 :]:
         if not row:
             continue
         name_cell = row[ci_name] if len(row) > ci_name else ""
-        status_cell = row[ci_status] if len(row) > ci_status else ""
+        entrance_cell = row[ci_entrance] if len(row) > ci_entrance else ""
         match_name = _names_match(name_cell, game_name)
         match_tab = bool(sheet_title.strip()) and _names_match(name_cell, sheet_title)
         if not (match_name or match_tab):
             continue
-        last = _is_launched_status(status_cell)
+        last = _is_entrance_map_launched(entrance_cell)
 
     data_rows = [r for r in grid[hi + 1 :] if r]
     if (
@@ -273,8 +303,8 @@ def _row_launched_for_game(
         and _names_match(sheet_title, game_name)
     ):
         r = data_rows[0]
-        st = r[ci_status] if len(r) > ci_status else ""
-        return _is_launched_status(st)
+        ent = r[ci_entrance] if len(r) > ci_entrance else ""
+        return _is_entrance_map_launched(ent)
     return last
 
 
@@ -754,7 +784,7 @@ def process_maintenance_pipeline(
         else:
             unknown_list.append(g)
 
-    lines1 = ["📋 **游戏上线状态（对照 gamelist 表格）**"]
+    lines1 = ["📋 **游戏上线状态（gamelist · 遊戲入口圖=1 为上线）**"]
     lines1.append(
         "✅ **上线 Launched：** "
         + (", ".join(launched_list) if launched_list else "（无）")
