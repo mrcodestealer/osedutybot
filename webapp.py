@@ -3860,6 +3860,358 @@ _ADMIN_OFFSET_PAGE = """<!DOCTYPE html>
 """
 
 
+_ADMIN_TIMETABLE_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Admin · OSE timetable</title>
+  <style>
+    :root {
+      --bg: #0b0f14; --card: #151b26; --elev: #1c2533; --text: #e8edf4; --muted: #8b9cb3;
+      --accent: #3b82f6; --line: #2a3544; --morn: #e8c468; --night: #9ec5f7;
+      --ose-purple: #c4b5fd; --ose-purple-bg: rgba(124, 58, 237, 0.12);
+      --ose-glow: 0 0 0 1px rgba(167, 139, 250, 0.45), 0 0 20px rgba(124, 58, 237, 0.35), 0 0 40px rgba(124, 58, 237, 0.12);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: radial-gradient(1200px 600px at 10% -10%, rgba(59,130,246,.12), transparent), var(--bg);
+      color: var(--text); min-height: 100vh;
+    }
+    header.adm-header {
+      padding: 1rem 1.35rem; border-bottom: 1px solid var(--line);
+      display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem;
+    }
+    .adm-header h1 { margin: 0; font-size: 1.15rem; font-weight: 700; }
+    .adm-nav { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; }
+    a.adm-nav-btn, button.adm-nav-btn {
+      font: inherit; font-size: 0.85rem; font-weight: 650; padding: 0.45rem 0.85rem; border-radius: 10px;
+      border: 1px solid var(--line); background: var(--elev); color: var(--text); cursor: pointer;
+      text-decoration: none; display: inline-block;
+    }
+    a.adm-nav-btn:hover, button.adm-nav-btn:hover { border-color: var(--accent); background: rgba(59,130,246,.12); text-decoration: none; }
+    a.adm-nav-btn.active { border-color: var(--accent); background: rgba(59,130,246,.18); }
+    button.adm-nav-btn.ghost { background: transparent; color: var(--muted); }
+    main.adm-timetable-main { padding: 1.1rem 1.35rem 2.5rem; max-width: min(1480px, 98vw); margin: 0 auto; width: 100%; }
+    .ose-year-row {
+      display: flex; align-items: center; justify-content: center; gap: 0.75rem; margin-bottom: 1.1rem;
+    }
+    .ose-year-label { font-size: 1.15rem; font-weight: 700; min-width: 5rem; text-align: center; }
+    .ose-icon-btn {
+      font: inherit; width: 2.25rem; height: 2.25rem; border-radius: 10px; border: 1px solid var(--line);
+      background: var(--elev); color: var(--text); cursor: pointer; font-size: 1.1rem; line-height: 1;
+    }
+    .ose-icon-btn:hover { border-color: rgba(167, 139, 250, 0.55); box-shadow: 0 0 14px rgba(124, 58, 237, 0.22); }
+    .ose-month-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 0.45rem; margin-bottom: 1.25rem;
+    }
+    .ose-month-btn {
+      font: inherit; font-size: 0.74rem; font-weight: 600; padding: 0.48rem 0.3rem; border-radius: 10px;
+      border: 1px solid var(--line); background: var(--card); color: var(--muted); cursor: pointer;
+    }
+    .ose-month-btn:hover { border-color: rgba(167, 139, 250, 0.5); color: var(--text); }
+    .ose-month-btn.active {
+      background: var(--ose-purple-bg); border-color: rgba(196, 181, 253, 0.85); color: var(--ose-purple); box-shadow: var(--ose-glow);
+    }
+    .ose-cal-panel {
+      background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 1.15rem;
+      box-shadow: 0 8px 32px rgba(0,0,0,.22);
+    }
+    .ose-cal-title { margin: 0 0 0.75rem; font-size: 1.22rem; font-weight: 650; padding-bottom: 0.5rem; border-bottom: 2px solid rgba(124, 58, 237, 0.35); }
+    .ose-cal-warn { margin: 0 0 0.75rem; font-size: 0.9rem; color: #f87171; }
+    .ose-cal-dow { display: grid; grid-template-columns: repeat(7, 1fr); gap: 0.5rem; margin-bottom: 0.45rem; }
+    .ose-cal-dow span { text-align: center; font-size: 0.74rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+    .ose-cal-weeks { display: flex; flex-direction: column; gap: 0.5rem; }
+    .ose-cal-row { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 0.55rem; align-items: stretch; }
+    .ose-cal-cell {
+      min-height: 9.5rem; border-radius: 12px; border: 1px solid var(--line);
+      background: linear-gradient(165deg, rgba(28,37,51,.98), rgba(20,26,36,.99));
+      padding: 0.62rem 0.58rem; display: flex; flex-direction: column; gap: 0.38rem;
+    }
+    .ose-cal-cell.empty { background: transparent; border: none; min-height: 0; }
+    .ose-cal-cell.is-today { border-color: rgba(196, 181, 253, 0.75); box-shadow: var(--ose-glow); background: linear-gradient(165deg, rgba(124, 58, 237, 0.14), rgba(20,26,36,.98)); }
+    .ose-day-head { display: flex; align-items: center; justify-content: space-between; gap: 0.4rem; margin-bottom: 0.2rem; }
+    .ose-cal-cell .d { font-weight: 800; font-size: 1.08rem; color: var(--text); line-height: 1; }
+    .ose-today-badge {
+      font-size: 0.58rem; font-weight: 700; text-transform: uppercase; padding: 0.15rem 0.4rem; border-radius: 999px;
+      background: linear-gradient(135deg, rgba(124, 58, 237, 0.55), rgba(167, 139, 250, 0.35));
+      color: #f5f3ff; border: 1px solid rgba(196, 181, 253, 0.5);
+    }
+    .ose-blocks { display: flex; flex-direction: column; gap: 0.36rem; }
+    .ose-block { border-radius: 9px; padding: 0.38rem 0.4rem; border: 1px solid rgba(42, 53, 68, 0.9); }
+    .ose-block-m { background: rgba(232, 196, 104, 0.06); border-color: rgba(232, 196, 104, 0.12); }
+    .ose-block-n { background: rgba(158, 197, 247, 0.06); border-color: rgba(158, 197, 247, 0.12); }
+    .ose-block-label { font-size: 0.68rem; font-weight: 750; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.22rem; }
+    .ose-block-m .ose-block-label { color: var(--morn); }
+    .ose-block-n .ose-block-label { color: var(--night); }
+    .ose-chip-wrap { display: flex; flex-wrap: wrap; gap: 0.2rem 0.25rem; }
+    .ose-chip {
+      font-size: 0.72rem; padding: 0.16rem 0.4rem; border-radius: 7px;
+      background: rgba(15, 20, 28, 0.65); color: #cbd5e1; border: 1px solid rgba(42, 53, 68, 0.85);
+    }
+    .ose-dash { font-size: 0.74rem; color: var(--muted); opacity: 0.7; }
+    .ose-extra-wrap { margin-top: 0.2rem; display: flex; flex-direction: column; gap: 0.4rem; max-height: 8.5rem; overflow-y: auto; }
+    .ose-extra { padding: 0.36rem 0.4rem; border-radius: 8px; font-size: 0.72rem; border: 1px solid rgba(42, 53, 68, 0.75); background: rgba(11, 15, 20, 0.35); }
+    .ose-extra-title { font-weight: 750; text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 0.24rem; font-size: 0.66rem; }
+    .ose-extra-leave { border-color: rgba(232, 196, 104, 0.15); }
+    .ose-extra-leave .ose-extra-title { color: var(--morn); }
+    .ose-extra-offset { border-color: rgba(158, 197, 247, 0.15); }
+    .ose-extra-offset .ose-extra-title { color: var(--night); }
+    .ose-extra-line { color: #9fb0c9; margin-bottom: 0.16rem; word-break: break-word; }
+    .ose-loading { text-align: center; color: var(--muted); padding: 2rem; font-size: 0.95rem; }
+    @media (min-width: 1200px) { .ose-cal-cell { min-height: 10.5rem; padding: 0.7rem 0.65rem; } }
+  </style>
+</head>
+<body>
+  <header class="adm-header">
+    <h1>Admin · OSE timetable</h1>
+    <nav class="adm-nav">
+      <a class="adm-nav-btn active" href="{{ admin_ose_timetable_href }}">OSE timetable</a>
+      <a class="adm-nav-btn" href="{{ admin_leave_href }}">Leave</a>
+      <a class="adm-nav-btn" href="{{ admin_offset_href }}">Offset</a>
+      <form method="post" action="{{ admin_logout_action }}" style="display:inline;margin:0;">
+        <button type="submit" class="adm-nav-btn ghost">Logout</button>
+      </form>
+    </nav>
+  </header>
+  <main class="adm-timetable-main">
+    <div class="ose-year-row">
+      <button type="button" class="ose-icon-btn" id="ose-y-prev" aria-label="Previous year">‹</button>
+      <span class="ose-year-label" id="ose-year-label"></span>
+      <button type="button" class="ose-icon-btn" id="ose-y-next" aria-label="Next year">›</button>
+    </div>
+    <div class="ose-month-grid" id="ose-month-btns" role="tablist" aria-label="Month"></div>
+    <div class="ose-cal-panel" id="ose-cal-panel">
+      <h3 class="ose-cal-title" id="ose-cal-title">Select a month</h3>
+      <p class="ose-cal-warn" id="ose-cal-warn" hidden></p>
+      <div class="ose-cal-dow" aria-hidden="true">
+        <span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span>
+      </div>
+      <div class="ose-cal-weeks" id="ose-cal-root"><div class="ose-loading" id="ose-cal-loading">Loading calendar…</div></div>
+    </div>
+  </main>
+  <script>
+  (function () {
+    var API = {{ api_calendar_href | tojson }};
+    var monthNames = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+    var now = new Date();
+    var year = now.getFullYear();
+    var selectedMonth = now.getMonth() + 1;
+    var monthBar = document.getElementById("ose-month-btns");
+    var yearLabel = document.getElementById("ose-year-label");
+    var calTitle = document.getElementById("ose-cal-title");
+    var calWarn = document.getElementById("ose-cal-warn");
+    var calRoot = document.getElementById("ose-cal-root");
+    var loadingEl = document.getElementById("ose-cal-loading");
+
+    function setYearLabel() { yearLabel.textContent = String(year); }
+
+    function buildMonthButtons() {
+      monthBar.innerHTML = "";
+      for (var m = 1; m <= 12; m++) {
+        var b = document.createElement("button");
+        b.type = "button";
+        b.className = "ose-month-btn" + (m === selectedMonth ? " active" : "");
+        b.textContent = monthNames[m - 1];
+        b.setAttribute("role", "tab");
+        b.setAttribute("aria-selected", m === selectedMonth ? "true" : "false");
+        b.setAttribute("data-month", String(m));
+        b.addEventListener("click", function (ev) {
+          var t = ev.target;
+          selectedMonth = parseInt(t.getAttribute("data-month"), 10);
+          monthBar.querySelectorAll(".ose-month-btn").forEach(function (x) {
+            var on = x === t;
+            x.classList.toggle("active", on);
+            x.setAttribute("aria-selected", on ? "true" : "false");
+          });
+          loadMonth();
+        });
+        monthBar.appendChild(b);
+      }
+    }
+
+    function fillNameChips(wrapEl, arr) {
+      wrapEl.innerHTML = "";
+      if (!arr || !arr.length) {
+        var dash = document.createElement("span");
+        dash.className = "ose-dash";
+        dash.textContent = "—";
+        wrapEl.appendChild(dash);
+        return;
+      }
+      for (var i = 0; i < arr.length; i++) {
+        var ch = document.createElement("span");
+        ch.className = "ose-chip";
+        ch.textContent = arr[i];
+        wrapEl.appendChild(ch);
+      }
+    }
+
+    function appendLeaveAndOffset(box, cell) {
+      var leaves = cell.leave || [];
+      var offs = cell.offset || [];
+      if (!leaves.length && !offs.length) return;
+      var wrap = document.createElement("div");
+      wrap.className = "ose-extra-wrap";
+      if (leaves.length) {
+        var sec = document.createElement("div");
+        sec.className = "ose-extra ose-extra-leave";
+        var h = document.createElement("div");
+        h.className = "ose-extra-title";
+        h.textContent = "Leave";
+        sec.appendChild(h);
+        for (var i = 0; i < leaves.length; i++) {
+          var r = leaves[i];
+          var line = document.createElement("div");
+          line.className = "ose-extra-line";
+          line.textContent = r.start === r.end
+            ? r.name + " (" + r.leave_type + ") — " + r.start
+            : r.name + " (" + r.leave_type + ") — " + r.start + " → " + r.end;
+          sec.appendChild(line);
+        }
+        wrap.appendChild(sec);
+      }
+      if (offs.length) {
+        var sec2 = document.createElement("div");
+        sec2.className = "ose-extra ose-extra-offset";
+        var h2 = document.createElement("div");
+        h2.className = "ose-extra-title";
+        h2.textContent = "Offset";
+        sec2.appendChild(h2);
+        for (var j = 0; j < offs.length; j++) {
+          var line2 = document.createElement("div");
+          line2.className = "ose-extra-line";
+          line2.textContent = offs[j];
+          sec2.appendChild(line2);
+        }
+        wrap.appendChild(sec2);
+      }
+      box.appendChild(wrap);
+    }
+
+    function appendOseShifts(box, cell) {
+      var blocks = document.createElement("div");
+      blocks.className = "ose-blocks";
+      var bm = document.createElement("div");
+      bm.className = "ose-block ose-block-m";
+      var lm = document.createElement("div");
+      lm.className = "ose-block-label";
+      lm.textContent = "Morning";
+      bm.appendChild(lm);
+      var wm = document.createElement("div");
+      wm.className = "ose-chip-wrap";
+      fillNameChips(wm, cell.morning || []);
+      bm.appendChild(wm);
+      blocks.appendChild(bm);
+      var bn = document.createElement("div");
+      bn.className = "ose-block ose-block-n";
+      var ln = document.createElement("div");
+      ln.className = "ose-block-label";
+      ln.textContent = "Night";
+      bn.appendChild(ln);
+      var wn = document.createElement("div");
+      wn.className = "ose-chip-wrap";
+      fillNameChips(wn, cell.night || []);
+      bn.appendChild(wn);
+      blocks.appendChild(bn);
+      box.appendChild(blocks);
+      appendLeaveAndOffset(box, cell);
+    }
+
+    function renderCalendar(data) {
+      if (loadingEl && loadingEl.parentNode) loadingEl.parentNode.removeChild(loadingEl);
+      calRoot.innerHTML = "";
+      calWarn.hidden = true;
+      calWarn.textContent = "";
+      if (!data || !data.ok) {
+        calTitle.textContent = data && data.month_label ? data.month_label : "Calendar";
+        calWarn.textContent = (data && data.error) ? data.error : "Failed to load";
+        calWarn.hidden = false;
+        return;
+      }
+      calTitle.textContent = data.month_label || ("Month " + data.month);
+      if (data.bitable_warning) {
+        calWarn.textContent = data.bitable_warning;
+        calWarn.hidden = false;
+      }
+      var todayRef = new Date();
+      var tY = todayRef.getFullYear();
+      var tM = todayRef.getMonth() + 1;
+      var tD = todayRef.getDate();
+      var cy = data.year;
+      var cm = data.month;
+      var weeks = data.weeks || [];
+      for (var wi = 0; wi < weeks.length; wi++) {
+        var row = document.createElement("div");
+        row.className = "ose-cal-row";
+        var wk = weeks[wi];
+        for (var di = 0; di < wk.length; di++) {
+          var cell = wk[di];
+          var box = document.createElement("div");
+          if (!cell) {
+            box.className = "ose-cal-cell empty";
+          } else {
+            var isToday = (cell.day === tD && cm === tM && cy === tY);
+            box.className = "ose-cal-cell" + (isToday ? " is-today" : "");
+            var head = document.createElement("div");
+            head.className = "ose-day-head";
+            var dayn = document.createElement("span");
+            dayn.className = "d";
+            dayn.textContent = String(cell.day);
+            head.appendChild(dayn);
+            if (isToday) {
+              var badge = document.createElement("span");
+              badge.className = "ose-today-badge";
+              badge.textContent = "Today";
+              head.appendChild(badge);
+            }
+            box.appendChild(head);
+            appendOseShifts(box, cell);
+          }
+          row.appendChild(box);
+        }
+        calRoot.appendChild(row);
+      }
+    }
+
+    function loadMonth() {
+      calRoot.innerHTML = "";
+      var ld = document.createElement("div");
+      ld.className = "ose-loading";
+      ld.id = "ose-cal-loading";
+      ld.textContent = "Loading calendar…";
+      calRoot.appendChild(ld);
+      loadingEl = ld;
+      var url = API + "?kind=ose&year=" + encodeURIComponent(String(year)) + "&month=" + encodeURIComponent(String(selectedMonth));
+      fetch(url).then(function (r) { return r.json(); }).then(renderCalendar).catch(function (e) {
+        renderCalendar({ ok: false, error: String(e) });
+      });
+    }
+
+    document.getElementById("ose-y-prev").addEventListener("click", function () {
+      year--;
+      setYearLabel();
+      buildMonthButtons();
+      loadMonth();
+    });
+    document.getElementById("ose-y-next").addEventListener("click", function () {
+      year++;
+      setYearLabel();
+      buildMonthButtons();
+      loadMonth();
+    });
+
+    setYearLabel();
+    buildMonthButtons();
+    loadMonth();
+  })();
+  </script>
+</body>
+</html>
+"""
+
+
 _ENCODER_PAGE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -4932,12 +5284,27 @@ def admin_leave():
         return redir
     return render_template_string(
         _ADMIN_LEAVE_PAGE,
-        admin_ose_timetable_href=url_for("wm.all_duty", kind="ose"),
+        admin_ose_timetable_href=url_for("wm.admin_timetable"),
         admin_leave_href=url_for("wm.admin_leave"),
         admin_offset_href=url_for("wm.admin_offset"),
         admin_logout_action=url_for("wm.admin_logout"),
         api_admin_leave_list_href=url_for("wm.api_admin_leave_list"),
         api_admin_leave_approve_href=url_for("wm.api_admin_leave_approve"),
+    )
+
+
+@wm_bp.get("/admin/timetable")
+def admin_timetable():
+    redir = _ensure_admin_session_redirect()
+    if redir:
+        return redir
+    return render_template_string(
+        _ADMIN_TIMETABLE_PAGE,
+        admin_ose_timetable_href=url_for("wm.admin_timetable"),
+        admin_leave_href=url_for("wm.admin_leave"),
+        admin_offset_href=url_for("wm.admin_offset"),
+        admin_logout_action=url_for("wm.admin_logout"),
+        api_calendar_href=url_for("wm.api_duty_calendar"),
     )
 
 
@@ -4948,7 +5315,7 @@ def admin_offset():
         return redir
     return render_template_string(
         _ADMIN_OFFSET_PAGE,
-        admin_ose_timetable_href=url_for("wm.all_duty", kind="ose"),
+        admin_ose_timetable_href=url_for("wm.admin_timetable"),
         admin_leave_href=url_for("wm.admin_leave"),
         admin_offset_href=url_for("wm.admin_offset"),
         admin_logout_action=url_for("wm.admin_logout"),
