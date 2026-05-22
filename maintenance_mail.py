@@ -2,8 +2,10 @@
 """
 IMAP watcher for om@hotelstotsenberg.com (or MAINTENANCE_MAIL_USER).
 
-Processes inbox messages whose subject starts with ``TINC-`` or ``[Service Desk]``,
-runs the same pipeline as ``/m``, and posts to a fixed Lark group.
+Processes inbox messages whose subject **literally** starts with ``TINC-`` or
+``[Service Desk]`` (not ``Re:`` / ``Fwd:`` replies), **and** whose From address is
+``no-reply-evolution@evolution.com`` (Jira) or ``servicedesk@evolution.com`` (Service Desk).
+Runs the same pipeline as ``/m``, and posts to a fixed Lark group.
 
 State file: ``maintenance.json`` (titles + content hashes + IMAP UIDs) to avoid
 re-processing after bot restart.
@@ -228,21 +230,15 @@ def _uid_search(mail: imaplib.IMAP4, criteria: str) -> list[bytes]:
 _watcher_started = False
 
 
-def _normalize_subject(subject: str) -> str:
-    """Strip Re:/Fwd:/FW: prefixes so ``Re: TINC-…`` still matches."""
-    s = (subject or "").strip()
-    for _ in range(8):
-        m = re.match(r"^(?:Re|Fwd|FW|Fw|Aw):\s*", s, re.IGNORECASE)
-        if not m:
-            break
-        s = s[m.end() :].strip()
-    return s
-
-
 def subject_matches(subject: str) -> bool:
+    """
+    True only when the subject **starts** with ``TINC-`` or ``[Service Desk]``.
+
+    ``Re: TINC-…`` / ``Fwd: TINC-…`` are **not** matched (QA acks, thread replies).
+    """
     if _maint_mod.subject_should_ignore(subject):
         return False
-    s = _normalize_subject(subject)
+    s = (subject or "").strip()
     if not s:
         return False
     if re.match(r"^TINC-", s, re.IGNORECASE):
@@ -673,6 +669,24 @@ class MaintenanceMailWatcher:
                 )
             return
 
+        if not _maint_mod.from_is_allowed_sender(from_hdr):
+            ticket_skip = _maint_mod.extract_ticket_card_title(subject) or ""
+            _record_processed(
+                entries,
+                imap_uid=store_key,
+                message_id="",
+                title=subject or "",
+                content_hash="skip:from_not_allowed",
+                ticket_id=ticket_skip,
+            )
+            mail.uid("store", uid, "+FLAGS", "(\\Seen)")
+            if MAIL_VERBOSE:
+                print(
+                    f"[maint-mail] skip uid={uid_s} (sender not allowed): {from_hdr!r}",
+                    flush=True,
+                )
+            return
+
         if when and not _received_today(when):
             if MAIL_VERBOSE:
                 print(
@@ -722,6 +736,24 @@ class MaintenanceMailWatcher:
                 f"[maint-mail] skip uid={uid_s} (from OM-PH / om@): {display_subj!r}",
                 flush=True,
             )
+            return
+
+        if not maintenance.from_is_allowed_sender(from_addr):
+            ticket_skip = maintenance.extract_ticket_card_title(subject) or ""
+            _record_processed(
+                entries,
+                imap_uid=store_key,
+                message_id=msg.get("Message-ID") or "",
+                title=display_subj,
+                content_hash="skip:from_not_allowed",
+                ticket_id=ticket_skip,
+            )
+            mail.uid("store", uid, "+FLAGS", "(\\Seen)")
+            if MAIL_VERBOSE:
+                print(
+                    f"[maint-mail] skip uid={uid_s} (sender not allowed): {from_addr!r}",
+                    flush=True,
+                )
             return
 
         body = extract_body_from_message(msg)
@@ -887,6 +919,23 @@ class MaintenanceMailWatcher:
                 continue
             if not subject_matches(subject):
                 stats["not_maintenance"] += 1
+                continue
+            if not _maint_mod.from_is_allowed_sender(from_hdr):
+                stats["ignored"] += 1
+                ticket_skip = _maint_mod.extract_ticket_card_title(subject) or ""
+                _record_processed(
+                    entries,
+                    imap_uid=_uid_key(folder, uid_s),
+                    message_id="",
+                    title=subject or "",
+                    content_hash="skip:from_not_allowed",
+                    ticket_id=ticket_skip,
+                )
+                if MAIL_VERBOSE:
+                    print(
+                        f"[maint-mail] ignore uid={uid_s} (sender not allowed): {from_hdr!r}",
+                        flush=True,
+                    )
                 continue
             if when and not _received_today(when):
                 stats["not_today"] += 1

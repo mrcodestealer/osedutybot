@@ -41,6 +41,48 @@ _CARD_HEADER_TITLE_MAX = 100
 _SUBJECT_IGNORE_MARKERS = ("c88live_ow.ph",)
 
 
+def _parse_from_email_address(from_addr: str | None) -> str:
+    """Email address from ``Name <user@host>`` or bare ``user@host``."""
+    raw = (from_addr or "").strip()
+    if not raw:
+        return ""
+    m = re.search(r"<([^>]+)>", raw)
+    if m:
+        return m.group(1).strip().lower()
+    m2 = re.search(r"[\w.+-]+@[\w.-]+\.\w+", raw)
+    return (m2.group(0) if m2 else raw).strip().lower()
+
+
+_MAINTENANCE_ALLOWED_SENDERS_DEFAULT = (
+    "no-reply-evolution@evolution.com",
+    "servicedesk@evolution.com",
+)
+
+
+def _allowed_sender_emails() -> frozenset[str]:
+    emails = {e.strip().lower() for e in _MAINTENANCE_ALLOWED_SENDERS_DEFAULT if e.strip()}
+    extra = (
+        os.getenv("MAINTENANCE_ALLOWED_FROM", "").strip()
+        or os.getenv("maintenance_allowed_from", "").strip()
+    )
+    for token in extra.split(","):
+        t = token.strip().lower()
+        if t:
+            emails.add(t)
+    return frozenset(emails)
+
+
+def from_is_allowed_sender(from_addr: str | None) -> bool:
+    """
+    Only Evolution Jira (``no-reply-evolution@evolution.com``) and Service Desk
+    (``servicedesk@evolution.com``). Display names may vary; match is by address.
+    """
+    email = _parse_from_email_address(from_addr)
+    if not email:
+        return False
+    return email in _allowed_sender_emails()
+
+
 def from_should_ignore(from_addr: str | None) -> bool:
     """Skip outbound copies from our own mailbox (OM-PH / om@…)."""
     raw = (from_addr or "").strip()

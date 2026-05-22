@@ -3172,6 +3172,14 @@ def lark_webhook():
                     "⏭️ Skipped — email is from OM-PH / om@hotelstotsenberg.com (outbound copy).",
                 )
                 return _lark_im_done()
+            if from_line and not maintenance.from_is_allowed_sender(from_line):
+                send_message(
+                    chat_id,
+                    "⏭️ Skipped — sender must be "
+                    "`no-reply-evolution@evolution.com` (Jira) or "
+                    "`servicedesk@evolution.com` (Service Desk).",
+                )
+                return _lark_im_done()
             first_reply, second_reply = maintenance.process_maintenance_pipeline(
                 email_text,
                 token,
