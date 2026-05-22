@@ -3313,6 +3313,7 @@ _ADMIN_LEAVE_PAGE = """<!DOCTYPE html>
   <header class="adm-header">
     <h1>Admin · Leave approvals</h1>
     <nav class="adm-nav">
+      <a class="adm-nav-btn" href="{{ admin_ose_timetable_href }}">OSE timetable</a>
       <a class="adm-nav-btn active" href="{{ admin_leave_href }}">Leave</a>
       <a class="adm-nav-btn" href="{{ admin_offset_href }}">Offset</a>
       <form method="post" action="{{ admin_logout_action }}" style="display:inline;margin:0;">
@@ -3627,6 +3628,7 @@ _ADMIN_OFFSET_PAGE = """<!DOCTYPE html>
   <header class="adm-header">
     <h1>Admin · Offset approvals</h1>
     <nav class="adm-nav">
+      <a class="adm-nav-btn" href="{{ admin_ose_timetable_href }}">OSE timetable</a>
       <a class="adm-nav-btn" href="{{ admin_leave_href }}">Leave</a>
       <a class="adm-nav-btn active" href="{{ admin_offset_href }}">Offset</a>
       <form method="post" action="{{ admin_logout_action }}" style="display:inline;margin:0;">
@@ -4930,6 +4932,7 @@ def admin_leave():
         return redir
     return render_template_string(
         _ADMIN_LEAVE_PAGE,
+        admin_ose_timetable_href=url_for("wm.all_duty", kind="ose"),
         admin_leave_href=url_for("wm.admin_leave"),
         admin_offset_href=url_for("wm.admin_offset"),
         admin_logout_action=url_for("wm.admin_logout"),
@@ -4945,6 +4948,7 @@ def admin_offset():
         return redir
     return render_template_string(
         _ADMIN_OFFSET_PAGE,
+        admin_ose_timetable_href=url_for("wm.all_duty", kind="ose"),
         admin_leave_href=url_for("wm.admin_leave"),
         admin_offset_href=url_for("wm.admin_offset"),
         admin_logout_action=url_for("wm.admin_logout"),
