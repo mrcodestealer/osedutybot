@@ -1,0 +1,27 @@
+# Feishu / Lark require HTTPS for event + card callback URLs in the developer console.
+# Do NOT point https:// at Flask directly on :5000 — Flask serves HTTP only.
+#
+# Copy/adapt this server block, replace YOUR_DOMAIN and SSL paths, then:
+#   proxy_pass http://127.0.0.1:5000;   # same host where main.py listens (PORT/LARKBOT_PORT)
+#
+# Developer console Request URL example:
+#   https://YOUR_DOMAIN/webhook/event
+
+server {
+    listen 443 ssl http2;
+    server_name YOUR_DOMAIN;
+
+    ssl_certificate     /path/to/fullchain.pem;
+    ssl_certificate_key /path/to/privkey.pem;
+
+    location /webhook/event {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # Feishu POSTs can be >1s to process upstream — keep defaults reasonable
+        proxy_read_timeout 60s;
+    }
+}
