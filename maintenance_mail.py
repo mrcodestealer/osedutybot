@@ -7,6 +7,10 @@ Processes inbox messages whose subject **literally** starts with ``TINC-`` or
 ``no-reply-evolution@evolution.com`` (Jira) or ``servicedesk@evolution.com`` (Service Desk).
 Runs the same pipeline as ``/m``, and posts to a fixed Lark group.
 
+Cancellation notices (same subject as an earlier maintenance mail today) post a
+``TINC-… · Status : Cancelled`` card, forward like other CP mails, and link
+``Table/Game`` from the earlier notice. Duplicate cancel bodies are ignored.
+
 State file: ``maintenance.json`` (titles + content hashes + IMAP UIDs) to avoid
 re-processing after bot restart. Entries reset at local midnight (``MAINTENANCE_MAIL_TZ``)
 only after ``state_date`` is already set (upgrade keeps existing entries until next day).
@@ -792,17 +796,71 @@ def _record_processed(
     title: str,
     content_hash: str,
     ticket_id: str = "",
+    table_names: list[str] | None = None,
+    launched_names: list[str] | None = None,
+    is_cancelled_email: bool = False,
 ) -> None:
-    entries.append(
-        {
-            "imap_uid": str(imap_uid),
-            "message_id": (message_id or "").strip(),
-            "title": (title or "").strip(),
-            "content_hash": content_hash,
-            "ticket_id": (ticket_id or "").strip().upper(),
-            "processed_at": datetime.now(timezone.utc).isoformat(),
-        }
-    )
+    row: dict[str, Any] = {
+        "imap_uid": str(imap_uid),
+        "message_id": (message_id or "").strip(),
+        "title": (title or "").strip(),
+        "content_hash": content_hash,
+        "ticket_id": (ticket_id or "").strip().upper(),
+        "processed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if table_names:
+        row["table_names"] = list(table_names)
+    if launched_names:
+        row["launched_names"] = list(launched_names)
+    if is_cancelled_email:
+        row["is_cancelled_email"] = True
+    entries.append(row)
+
+
+def _find_prior_maintenance_entry(
+    entries: list[dict[str, Any]],
+    display_subj: str,
+    ticket_id: str,
+) -> dict[str, Any] | None:
+    """
+    Latest processed maintenance for the same subject (or ticket) that is not
+    itself a cancellation notice.
+    """
+    nt = (display_subj or "").strip().lower()
+    tid = (ticket_id or "").strip().upper()
+
+    def _usable(ent: dict[str, Any]) -> bool:
+        ch = str(ent.get("content_hash") or "")
+        if ch.startswith("skip:"):
+            return False
+        if ent.get("is_cancelled_email"):
+            return False
+        return True
+
+    for ent in reversed(entries):
+        if not _usable(ent):
+            continue
+        if (ent.get("title") or "").strip().lower() == nt:
+            return ent
+    if tid:
+        for ent in reversed(entries):
+            if not _usable(ent):
+                continue
+            if (ent.get("ticket_id") or "").strip().upper() == tid:
+                return ent
+    return None
+
+
+def _table_game_for_cancel(prior: dict[str, Any] | None) -> str:
+    if not prior:
+        return "Unknown"
+    launched = [str(x).strip() for x in (prior.get("launched_names") or []) if str(x).strip()]
+    if launched:
+        return ", ".join(launched)
+    tables = [str(x).strip() for x in (prior.get("table_names") or []) if str(x).strip()]
+    if tables:
+        return ", ".join(tables)
+    return "Unknown"
 
 
 class MaintenanceMailWatcher:
@@ -1111,33 +1169,70 @@ class MaintenanceMailWatcher:
             return
 
         token = self._get_token()
-        to_cp, launched_names = maintenance.gamelist_has_launched(
-            pipeline_in, token
-        )
-        if MAIL_VERBOSE and launched_names:
-            print(
-                f"[maint-mail] gamelist launched: {launched_names!r} to_cp={to_cp}",
-                flush=True,
-            )
+        is_cancel = maintenance.is_maintenance_cancelled_email(body)
+        launched_names: list[str] = []
 
-        if to_cp:
-            _, second_reply = maintenance.process_maintenance_pipeline(
-                pipeline_in,
-                token,
-                email_subject=display_subj,
-                received_at=when,
-            )
-            if (second_reply or "").strip():
-                main_card = maintenance.build_maintenance_card(
+        if is_cancel:
+            prior = _find_prior_maintenance_entry(entries, display_subj, ticket_id)
+            table_game = _table_game_for_cancel(prior)
+            launched_prior = list(prior.get("launched_names") or []) if prior else []
+            to_cp = len(launched_prior) > 0
+            if not to_cp and prior:
+                to_cp, launched_prior = maintenance.gamelist_has_launched(
+                    "\n".join(prior.get("table_names") or []),
+                    token,
+                )
+            if MAIL_VERBOSE:
+                print(
+                    f"[maint-mail] cancel uid={uid_s} prior={bool(prior)} "
+                    f"table_game={table_game!r} to_cp={to_cp}",
+                    flush=True,
+                )
+            if to_cp:
+                cancel_summary = maintenance.build_cancelled_summary(
+                    table_game=table_game,
+                    ref_email=display_subj,
+                    email_body=body,
+                )
+                cancel_header = maintenance.build_cancelled_card_header_title(
+                    subject, body
+                )
+                cancel_card = maintenance.build_maintenance_card(
                     email_subject=display_subj,
                     received_at=when,
-                    from_addr=from_addr,
-                    gamelist_section="",
-                    summary_section=second_reply,
+                    summary_section=cancel_summary,
                     email_body=body,
                     show_meta=False,
+                    header_title=cancel_header,
+                    header_template="red",
                 )
-                self._send_lark_card(TARGET_CHAT_ID, main_card)
+                self._send_lark_card(TARGET_CHAT_ID, cancel_card)
+        else:
+            to_cp, launched_names = maintenance.gamelist_has_launched(pipeline_in, token)
+            if MAIL_VERBOSE and launched_names:
+                print(
+                    f"[maint-mail] gamelist launched: {launched_names!r} to_cp={to_cp}",
+                    flush=True,
+                )
+
+            if to_cp:
+                _, second_reply = maintenance.process_maintenance_pipeline(
+                    pipeline_in,
+                    token,
+                    email_subject=display_subj,
+                    received_at=when,
+                )
+                if (second_reply or "").strip():
+                    main_card = maintenance.build_maintenance_card(
+                        email_subject=display_subj,
+                        received_at=when,
+                        from_addr=from_addr,
+                        gamelist_section="",
+                        summary_section=second_reply,
+                        email_body=body,
+                        show_meta=False,
+                    )
+                    self._send_lark_card(TARGET_CHAT_ID, main_card)
 
         if FORWARD_ENABLED:
             try:
@@ -1157,17 +1252,25 @@ class MaintenanceMailWatcher:
                 )
                 return
 
-        _record_processed(
-            entries,
-            imap_uid=store_key,
-            message_id=msg.get("Message-ID") or "",
-            title=display_subj,
-            content_hash=chash,
-            ticket_id=ticket_id,
-        )
+        record_kw: dict[str, Any] = {
+            "imap_uid": store_key,
+            "message_id": msg.get("Message-ID") or "",
+            "title": display_subj,
+            "content_hash": chash,
+            "ticket_id": ticket_id,
+        }
+        if is_cancel:
+            record_kw["is_cancelled_email"] = True
+        elif not is_cancel:
+            candidates = maintenance.extract_candidate_game_names(pipeline_in)
+            record_kw["table_names"] = candidates
+            if launched_names:
+                record_kw["launched_names"] = launched_names
+        _record_processed(entries, **record_kw)
         mail.uid("store", uid, "+FLAGS", "(\\Seen)")
+        kind = "cancelled" if is_cancel else "processed"
         print(
-            f"[maint-mail] processed {folder} uid={uid_s} ticket={ticket_id!r} "
+            f"[maint-mail] {kind} {folder} uid={uid_s} ticket={ticket_id!r} "
             f"title={display_subj!r}",
             flush=True,
         )

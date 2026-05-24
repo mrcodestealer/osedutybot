@@ -286,6 +286,97 @@ def extract_ticket_card_title(subject: str, extra_text: str | None = None) -> st
     return None
 
 
+def ticket_id_tinc_style(subject: str, extra_text: str | None = None) -> str | None:
+    """Lark card ticket id — always ``TINC-123456`` (Service Desk ``SD-`` → ``TINC-``)."""
+    raw = extract_ticket_card_title(subject, extra_text)
+    if not raw:
+        return None
+    m = re.match(r"^(?:TINC|SD)[-\s]?(\d{6,8})\b", raw.strip(), re.IGNORECASE)
+    if m:
+        return f"TINC-{m.group(1)}"
+    return raw.upper()
+
+
+_CANCEL_BODY_RE = re.compile(
+    r"(?:this\s+message\s+is\s+to\s+inform\s+that\s+)?(?:the\s+)?"
+    r"(?:technical\s+)?maintenance\s+has\s+been\s+cancell?ed",
+    re.IGNORECASE,
+)
+
+
+def is_maintenance_cancelled_email(body: str | None) -> bool:
+    """True when the email body is a maintenance cancellation notice (not the original schedule)."""
+    text = (body or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not text.strip():
+        return False
+    return bool(_CANCEL_BODY_RE.search(text))
+
+
+def extract_cancel_notice_text(body: str | None) -> str:
+    """Core cancellation lines for the Lark card (notice + apology)."""
+    lines = [
+        _clean_email_line(ln)
+        for ln in (body or "").replace("\r\n", "\n").replace("\r", "\n").splitlines()
+    ]
+    notice: str | None = None
+    apology: str | None = None
+    for ln in lines:
+        if not ln:
+            continue
+        if _CANCEL_BODY_RE.search(ln):
+            notice = ln.strip()
+        elif re.search(r"^we\s+apologize\s+for\s+the\s+inconvenience", ln, re.I):
+            apology = ln.strip()
+    out: list[str] = []
+    if notice:
+        out.append(notice)
+    else:
+        out.append(
+            "This message is to inform that the Technical maintenance has been cancelled."
+        )
+    if apology:
+        out.append(apology)
+    elif not any("apologize" in x.lower() for x in out):
+        out.append("We apologize for the inconvenience.")
+    return "\n".join(out)
+
+
+def build_cancelled_card_header_title(subject: str, extra_text: str | None = None) -> str:
+    """``TINC-7004356 · Status : Cancelled``."""
+    ticket = ticket_id_tinc_style(subject, extra_text) or "Maintenance"
+    title = f"{ticket} · Status : Cancelled"
+    if len(title) > _CARD_HEADER_TITLE_MAX:
+        title = title[: _CARD_HEADER_TITLE_MAX - 3] + "..."
+    return title
+
+
+def build_cancelled_summary(
+    *,
+    table_game: str,
+    ref_email: str,
+    email_body: str | None = None,
+) -> str:
+    """Lark card body for a maintenance cancellation (matches mail-watcher format)."""
+    qa_os_local_id = "ou_0342007237c6c1aa262acae839acb7c6"
+    cs_team_id = "ou_c927a378e9b464741c67b61c1641577b"
+    game = (table_game or "").strip() or "Unknown"
+    ref = (ref_email or "").strip() or "Unknown"
+    notice = extract_cancel_notice_text(email_body)
+    return "\n".join(
+        [
+            "Hi team "
+            f"{lark_card_at_open_id(qa_os_local_id)} "
+            f"{lark_card_at_open_id(cs_team_id)}, kindly help check this email. thank you.",
+            "",
+            notice,
+            "",
+            f"Table/Game: {game}",
+            "",
+            f"REF EMAIL: {ref}",
+        ]
+    )
+
+
 def format_received_at(when: str | None) -> str:
     if not (when or "").strip():
         return ""
@@ -774,15 +865,17 @@ def build_maintenance_card(
     header_template: str = "orange",
     email_body: str | None = None,
     show_meta: bool = True,
+    header_title: str | None = None,
 ) -> dict[str, Any]:
     """Lark interactive card: header = ticket id + Status; optional meta / gamelist / QA body."""
     display_subj = normalize_display_subject(email_subject) or "Maintenance email"
     rcv = format_received_at(received_at)
-    header_title = build_card_header_title(
-        email_subject,
-        email_body=email_body,
-        received_at=received_at,
-    )
+    if not (header_title or "").strip():
+        header_title = build_card_header_title(
+            email_subject,
+            email_body=email_body,
+            received_at=received_at,
+        )
 
     elements: list[dict[str, Any]] = []
     if show_meta:
