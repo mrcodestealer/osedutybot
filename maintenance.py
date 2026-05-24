@@ -400,17 +400,33 @@ def find_tinc_reference_line(text: str) -> str | None:
     return None
 
 
+def find_service_desk_reference_line(text: str) -> str | None:
+    """Last ``[Service Desk] … / (SD-…)`` line in body (``/m`` paste)."""
+    for line in reversed((text or "").replace("\r\n", "\n").splitlines()):
+        ln = _clean_email_line(line)
+        if re.match(r"^\[Service Desk\]", ln, re.IGNORECASE):
+            return ln.strip()
+    return None
+
+
 def resolve_maintenance_subject(
     email_subject: str | None, email_body: str | None = None
 ) -> str:
-    """Prefer ``Subject:`` / TINC subject line; fall back to TINC line in pasted body."""
+    """Prefer ``Subject:`` / TINC / ``[Service Desk]`` line in pasted body."""
     subj = normalize_display_subject(email_subject or "")
     if re.match(r"^(?:TINC-|\[Service Desk\])", subj, re.IGNORECASE):
         return subj
     ref = find_tinc_reference_line(email_body or "")
     if ref:
         return normalize_display_subject(ref)
+    sd = find_service_desk_reference_line(email_body or "")
+    if sd:
+        return normalize_display_subject(sd)
     return subj
+
+
+def _body_has_service_desk(text: str | None) -> bool:
+    return bool(re.search(r"\[Service Desk\]", text or "", re.IGNORECASE))
 
 
 def parse_tinc_subject_metadata(subject: str) -> dict[str, str]:
@@ -459,9 +475,10 @@ def classify_maintenance_card_kind(
     Cancelled emails are handled separately.
     """
     body = email_body or ""
-    subj = (email_subject or "").strip()
+    subj = resolve_maintenance_subject(email_subject, body)
     status = (info.get("status") or "").strip().lower()
     subj_low = subj.lower()
+    is_sd = "[service desk]" in subj_low or _body_has_service_desk(body)
 
     if status == "fixed" or re.search(
         r"successfully\s+accomplished|maintenance\s+(?:is\s+)?fixed",
@@ -473,9 +490,9 @@ def classify_maintenance_card_kind(
         return "in_progress"
     card_status = (extract_status_for_card(subj, body) or "").strip().lower()
     if card_status == "affected" or status == "affected":
-        if "[service desk]" in subj_low:
+        if is_sd:
             return "scheduled"
-    if "[service desk]" in subj_low and re.search(
+    if is_sd and re.search(
         r"going\s+to\s+take\s+place|downtime\s+from|will\s+be\s+unavailable",
         body,
         re.IGNORECASE,
@@ -483,7 +500,7 @@ def classify_maintenance_card_kind(
         return "scheduled"
     if subj_low.startswith("tinc-"):
         return "in_progress"
-    return "scheduled" if "[service desk]" in subj_low else "in_progress"
+    return "scheduled" if is_sd else "in_progress"
 
 
 def _truncate_header(title: str) -> str:
@@ -505,8 +522,9 @@ def build_fixed_card_header(subject: str, email_body: str | None = None) -> str:
 
 
 def build_scheduled_card_header(subject: str, email_body: str | None = None) -> str:
-    meta = parse_service_desk_subject_metadata(subject)
-    sd = meta.get("ticket_sd") or extract_ticket_card_title(subject, email_body) or "SD-?"
+    subj = resolve_maintenance_subject(subject, email_body)
+    meta = parse_service_desk_subject_metadata(subj)
+    sd = meta.get("ticket_sd") or extract_ticket_card_title(subj, email_body) or "SD-?"
     maint = meta.get("maintenance_type") or "Maintenance"
     return _truncate_header(f"⚠️ [{sd}] {maint} - Scheduled")
 
@@ -867,6 +885,127 @@ def build_fixed_card_body(
     )
 
 
+def _scheduled_table_display(
+    info: dict[str, Any],
+    *,
+    launched_tables: list[str] | None,
+    email_subject: str | None,
+    email_body: str | None = None,
+) -> str:
+    """All affected tables from email (scheduled notices often list several)."""
+    names = [str(x).strip() for x in (info.get("table_names") or []) if str(x).strip()]
+    if names:
+        return ", ".join(names)
+    return _table_display(
+        info,
+        launched_tables=launched_tables,
+        email_subject=resolve_maintenance_subject(email_subject, email_body),
+    )
+
+
+def _scheduled_card_values(
+    info: dict[str, Any],
+    *,
+    email_subject: str | None = None,
+    email_body: str | None = None,
+    launched_tables: list[str] | None = None,
+) -> tuple[str, str, str, str, str, str]:
+    subj = resolve_maintenance_subject(email_subject, email_body)
+    sd_meta = parse_service_desk_subject_metadata(subj)
+    maint_type = (
+        sd_meta.get("maintenance_type")
+        or _reason_display(info, email_body)
+        or "Maintenance"
+    )
+    table = _scheduled_table_display(
+        info,
+        launched_tables=launched_tables,
+        email_subject=email_subject,
+        email_body=email_body,
+    )
+    window = format_maintenance_window_utc8(
+        str(info.get("start_time") or ""),
+        str(info.get("end_time") or ""),
+    )
+    avail = extract_status_for_card(subj, email_body) or "Affected"
+    original = sd_meta.get("email_ref") or _email_ref_line(info, email_subject, email_body)
+    return table, maint_type, window, avail, original, subj
+
+
+def build_scheduled_card_elements(
+    info: dict[str, Any],
+    *,
+    email_subject: str | None = None,
+    email_body: str | None = None,
+    launched_tables: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Lark body for Scheduled / Affected (picture 3)."""
+    table, maint_type, window, avail, original, _subj = _scheduled_card_values(
+        info,
+        email_subject=email_subject,
+        email_body=email_body,
+        launched_tables=launched_tables,
+    )
+    return [
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"Hi {_at_cs_team()}"},
+        },
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": "\n".join(
+                    [
+                        f"🎰 Table: {table}",
+                        f"🔧 Type: {maint_type}",
+                    ]
+                ),
+            },
+        },
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": "\n".join(
+                    [
+                        "🧭 Phase: Scheduled maintenance",
+                        "⚠️ Result: Downtime is scheduled and tables will be unavailable.",
+                    ]
+                ),
+            },
+        },
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": "\n".join(
+                    [
+                        f"⏰ Window: {window}",
+                        f"📊 Table Availability: {avail}",
+                    ]
+                ),
+            },
+        },
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": "\n".join(
+                    [
+                        "⚠️ ACTION REQUIRED: Set Maintenance",
+                        "⚠️ 请设置维护",
+                    ]
+                ),
+            },
+        },
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"📧 Original: {original}"},
+        },
+    ]
+
+
 def build_scheduled_card_body(
     info: dict[str, Any],
     *,
@@ -874,15 +1013,13 @@ def build_scheduled_card_body(
     email_body: str | None = None,
     launched_tables: list[str] | None = None,
 ) -> str:
-    sd_meta = parse_service_desk_subject_metadata(email_subject or "")
-    maint_type = sd_meta.get("maintenance_type") or _reason_display(info, None)
-    table = _table_display(info, launched_tables=launched_tables, email_subject=email_subject)
-    window = format_maintenance_window_utc8(
-        str(info.get("start_time") or ""),
-        str(info.get("end_time") or ""),
+    """Plain-text fallback (tests / logging)."""
+    table, maint_type, window, avail, original, _subj = _scheduled_card_values(
+        info,
+        email_subject=email_subject,
+        email_body=email_body,
+        launched_tables=launched_tables,
     )
-    avail = extract_status_for_card(email_subject or "", None) or "Affected"
-    original = sd_meta.get("email_ref") or _email_ref_line(info, email_subject)
     return "\n".join(
         [
             f"Hi {_at_cs_team()}",
@@ -913,8 +1050,7 @@ def build_maintenance_notice(
     Picture-style maintenance card:
     ``(header_title, header_template, body_md, body_elements)``.
 
-    ``body_elements`` is set for **In Progress** and **Fixed** (column field layout);
-    Scheduled still uses ``body_md``.
+    ``body_elements`` is set for **In Progress**, **Fixed**, and **Scheduled**.
     """
     info = extract_info(email_text, email_subject=email_subject)
     kind = classify_maintenance_card_kind(
@@ -936,8 +1072,8 @@ def build_maintenance_notice(
         return (
             build_scheduled_card_header(email_subject or "", email_text),
             "red",
-            build_scheduled_card_body(info, **kw),
-            None,
+            "",
+            build_scheduled_card_elements(info, **kw),
         )
     return (
         build_in_progress_card_header(email_subject or "", email_text),
@@ -1677,13 +1813,13 @@ def process_maintenance_pipeline(
 def parse_subject_from_pasted_email(text: str) -> str | None:
     """
     Subject for ``/m`` pasted email: ``Subject:`` header, else trailing
-    ``TINC-… / Studio / Table / Date`` line in the body.
+    ``TINC-…`` or ``[Service Desk] …`` line in the body.
     """
     for line in text.splitlines()[:8]:
         m = re.match(r"^Subject:\s*(.+)$", line.strip(), re.IGNORECASE)
         if m:
             return m.group(1).strip()
-    return find_tinc_reference_line(text)
+    return find_tinc_reference_line(text) or find_service_desk_reference_line(text)
 
 
 def main():
