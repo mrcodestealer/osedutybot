@@ -1734,8 +1734,10 @@ def process_maintenance_pipeline(
     """
     Reply for bot / mail watcher:
     1) Launched vs not launched (gamelist section; often omitted on cards).
-    2–5) Picture-style Lark card ``header_title``, ``header_template``, ``body_md``,
-    ``body_elements`` (In Progress picture 1 layout) — only if ≥1 game launched.
+    2–5) Picture-style Lark card — always built when gamelist is checked (even if
+    no game is 「上线」; ``/m`` preview still shows Scheduled / In Progress / Fixed).
+
+    Mail watcher only *forwards* when ≥1 launched; card preview is independent.
 
     If gamelist env is missing, returns ("", *build_maintenance_notice(...)).
     """
@@ -1798,13 +1800,10 @@ def process_maintenance_pipeline(
 
     msg1 = "\n".join(lines1)
 
-    if not launched_list:
-        return msg1, "", "", "", None
-
     hdr_title, hdr_tpl, msg2, card_el = build_maintenance_notice(
         email_text,
         email_subject=email_subject,
-        launched_tables=launched_list,
+        launched_tables=launched_list or None,
     )
 
     return msg1, hdr_title, hdr_tpl, msg2, card_el
