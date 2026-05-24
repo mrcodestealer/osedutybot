@@ -387,6 +387,32 @@ def _at_qa_support() -> str:
     return lark_card_at_open_id(_QA_SUPPORT_OPEN_ID)
 
 
+def find_tinc_reference_line(text: str) -> str | None:
+    """Last ``TINC-… Live Dealer … / Studio / Table / Date`` line in body."""
+    for line in reversed((text or "").replace("\r\n", "\n").splitlines()):
+        ln = _clean_email_line(line)
+        if re.match(
+            r"^TINC-\d+\s+.+?/.+?/.+?/",
+            ln,
+            re.IGNORECASE,
+        ):
+            return ln.strip()
+    return None
+
+
+def resolve_maintenance_subject(
+    email_subject: str | None, email_body: str | None = None
+) -> str:
+    """Prefer ``Subject:`` / TINC subject line; fall back to TINC line in pasted body."""
+    subj = normalize_display_subject(email_subject or "")
+    if re.match(r"^(?:TINC-|\[Service Desk\])", subj, re.IGNORECASE):
+        return subj
+    ref = find_tinc_reference_line(email_body or "")
+    if ref:
+        return normalize_display_subject(ref)
+    return subj
+
+
 def parse_tinc_subject_metadata(subject: str) -> dict[str, str]:
     """
     ``TINC-708832 Live Dealer Casino Information / Lithuania Studio /
@@ -467,12 +493,14 @@ def _truncate_header(title: str) -> str:
 
 
 def build_in_progress_card_header(subject: str, email_body: str | None = None) -> str:
-    ticket = ticket_id_tinc_style(subject, email_body) or "Maintenance"
+    subj = resolve_maintenance_subject(subject, email_body)
+    ticket = ticket_id_tinc_style(subj, email_body) or "Maintenance"
     return _truncate_header(f"⚠️ {ticket} - In Progress")
 
 
 def build_fixed_card_header(subject: str, email_body: str | None = None) -> str:
-    ticket = ticket_id_tinc_style(subject, email_body) or "Maintenance"
+    subj = resolve_maintenance_subject(subject, email_body)
+    ticket = ticket_id_tinc_style(subj, email_body) or "Maintenance"
     return _truncate_header(f"✅ {ticket} - Fixed")
 
 
@@ -502,19 +530,49 @@ def _table_display(
 
 
 def _studio_and_date(
-    info: dict[str, Any], email_subject: str | None
+    info: dict[str, Any],
+    email_subject: str | None,
+    email_body: str | None = None,
 ) -> tuple[str, str]:
-    tinc = parse_tinc_subject_metadata(email_subject or "")
-    studio = tinc.get("studio") or "Unknown"
-    date = tinc.get("date") or "Unknown"
+    subj = resolve_maintenance_subject(email_subject, email_body)
+    tinc = parse_tinc_subject_metadata(subj)
+    if not tinc.get("studio"):
+        ref = (info.get("reference") or "").strip()
+        if ref and ref.lower() != "unknown":
+            tinc = parse_tinc_subject_metadata(ref) or tinc
+
+    studio = (tinc.get("studio") or "").strip() or "Unknown"
+    if studio == "Unknown" and email_body:
+        m = re.search(
+            r"\btable\s+.+?\s+in\s+(.+?)\s+is\s+unavailable",
+            email_body,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if m:
+            studio = m.group(1).strip()
+        else:
+            m2 = re.search(r"\bin\s+([\w\s]+Studio)\b", email_body, re.IGNORECASE)
+            if m2:
+                studio = m2.group(1).strip()
+
+    date = (tinc.get("date") or "").strip() or "Unknown"
+    if date == "Unknown":
+        md = (info.get("maint_date") or "").strip()
+        if md:
+            date = md
     return studio, date
 
 
-def _email_ref_line(info: dict[str, Any], email_subject: str | None) -> str:
+def _email_ref_line(
+    info: dict[str, Any],
+    email_subject: str | None,
+    email_body: str | None = None,
+) -> str:
     ref = (info.get("reference") or "").strip()
     if ref and ref.lower() != "unknown":
         return ref
-    return normalize_display_subject(email_subject or "") or "Unknown"
+    resolved = resolve_maintenance_subject(email_subject, email_body)
+    return resolved or "Unknown"
 
 
 def _reason_display(info: dict[str, Any], email_body: str | None) -> str:
@@ -522,7 +580,10 @@ def _reason_display(info: dict[str, Any], email_body: str | None) -> str:
     if reason and reason.lower() != "unknown":
         return reason
     for line in (email_body or "").replace("\r\n", "\n").splitlines():
-        m = re.match(r"^Reason:\s*(.+)$", _clean_email_line(line), re.IGNORECASE)
+        ln = _clean_email_line(line)
+        m = re.match(
+            r"^(?:Technical\s+)?Reason\s*:\s*(.+)$", ln, re.IGNORECASE
+        )
         if m:
             return m.group(1).strip()
     return "Unknown"
@@ -621,10 +682,14 @@ def build_in_progress_card_body(
     email_body: str | None = None,
     launched_tables: list[str] | None = None,
 ) -> str:
-    studio, date = _studio_and_date(info, email_subject)
-    table = _table_display(info, launched_tables=launched_tables, email_subject=email_subject)
+    studio, date = _studio_and_date(info, email_subject, email_body)
+    table = _table_display(
+        info,
+        launched_tables=launched_tables,
+        email_subject=resolve_maintenance_subject(email_subject, email_body),
+    )
     reason = _reason_display(info, email_body)
-    email_ref = _email_ref_line(info, email_subject)
+    email_ref = _email_ref_line(info, email_subject, email_body)
     return "\n".join(
         [
             "Studio:",
@@ -649,11 +714,15 @@ def build_fixed_card_body(
     email_body: str | None = None,
     launched_tables: list[str] | None = None,
 ) -> str:
-    studio, date = _studio_and_date(info, email_subject)
-    table = _table_display(info, launched_tables=launched_tables, email_subject=email_subject)
+    studio, date = _studio_and_date(info, email_subject, email_body)
+    table = _table_display(
+        info,
+        launched_tables=launched_tables,
+        email_subject=resolve_maintenance_subject(email_subject, email_body),
+    )
     reason = _reason_display(info, email_body)
     resolution = format_time_of_resolution(info, email_body)
-    email_ref = _email_ref_line(info, email_subject)
+    email_ref = _email_ref_line(info, email_subject, email_body)
     return "\n".join(
         [
             f"Hi {_at_cs_team()}",
@@ -1091,11 +1160,19 @@ def extract_info(text: str, *, email_subject: str | None = None):
             i = j
             continue
 
-        # ---- Reason ----
-        elif re.search(r'^Reason:', line, re.IGNORECASE):
-            match = re.search(r'^Reason:\s*(.*)$', line, re.IGNORECASE)
+        # ---- Reason / Technical Reason ----
+        elif re.search(r'^(?:Technical\s+)?Reason\s*:', line, re.IGNORECASE):
+            match = re.search(
+                r'^(?:Technical\s+)?Reason\s*:\s*(.*)$', line, re.IGNORECASE
+            )
             if match:
                 info['reason'] = match.group(1).strip()
+
+        # ---- Date (TINC in-progress notices) ----
+        elif re.search(r'^Date\s*:', line, re.IGNORECASE):
+            match = re.search(r'^Date\s*:\s*(.*)$', line, re.IGNORECASE)
+            if match:
+                info['maint_date'] = match.group(1).strip()
 
         # ---- Status (explicit) ----
         elif re.search(r'^Status:', line, re.IGNORECASE):
@@ -1162,8 +1239,10 @@ def extract_info(text: str, *, email_subject: str | None = None):
     ):
         info['status'] = 'Fixed'
 
-    if info["reference"] == "Unknown" and (email_subject or "").strip():
-        info["reference"] = normalize_display_subject(email_subject)
+    if info["reference"] == "Unknown":
+        resolved = resolve_maintenance_subject(email_subject, text)
+        if resolved:
+            info["reference"] = resolved
 
     return info
 
@@ -1460,12 +1539,15 @@ def process_maintenance_pipeline(
 
 
 def parse_subject_from_pasted_email(text: str) -> str | None:
-    """If pasted text starts with ``Subject:``, return that line's value."""
+    """
+    Subject for ``/m`` pasted email: ``Subject:`` header, else trailing
+    ``TINC-… / Studio / Table / Date`` line in the body.
+    """
     for line in text.splitlines()[:8]:
         m = re.match(r"^Subject:\s*(.+)$", line.strip(), re.IGNORECASE)
         if m:
             return m.group(1).strip()
-    return None
+    return find_tinc_reference_line(text)
 
 
 def main():
