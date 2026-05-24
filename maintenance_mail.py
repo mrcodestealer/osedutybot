@@ -1188,7 +1188,9 @@ class MaintenanceMailWatcher:
                     f"table_game={table_game!r} to_cp={to_cp}",
                     flush=True,
                 )
-            if to_cp:
+            # Cancel card when an earlier maintenance with the same subject/ticket
+            # was processed today (Table/Game from that notice's affected tables).
+            if prior is not None:
                 cancel_summary = maintenance.build_cancelled_summary(
                     table_game=table_game,
                     ref_email=display_subj,
@@ -1236,7 +1238,7 @@ class MaintenanceMailWatcher:
 
         if FORWARD_ENABLED:
             try:
-                if to_cp:
+                if is_cancel or to_cp:
                     forward_maintenance_email(
                         subject=subject, original_msg=msg
                     )
@@ -1245,7 +1247,7 @@ class MaintenanceMailWatcher:
                         subject=subject, original_msg=msg
                     )
             except Exception as ex:
-                action = "forward" if to_cp else "NOT IN CP reply"
+                action = "forward" if (is_cancel or to_cp) else "NOT IN CP reply"
                 print(
                     f"[maint-mail] {action} failed uid={uid_s} ticket={ticket_id!r}: {ex!r}",
                     flush=True,
