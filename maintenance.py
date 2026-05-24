@@ -774,6 +774,68 @@ def build_in_progress_card_body(
     )
 
 
+def _fixed_card_values(
+    info: dict[str, Any],
+    *,
+    email_subject: str | None = None,
+    email_body: str | None = None,
+    launched_tables: list[str] | None = None,
+) -> tuple[str, str, str, str, str, str]:
+    subj = resolve_maintenance_subject(email_subject, email_body)
+    studio, date = _studio_and_date(info, email_subject, email_body)
+    table = _table_display(
+        info,
+        launched_tables=launched_tables,
+        email_subject=subj,
+    )
+    reason = _reason_display(info, email_body)
+    resolution = format_time_of_resolution(info, email_body)
+    email_ref = _email_ref_line(info, email_subject, email_body)
+    return studio, date, table, resolution, reason, email_ref
+
+
+def build_fixed_card_elements(
+    info: dict[str, Any],
+    *,
+    email_subject: str | None = None,
+    email_body: str | None = None,
+    launched_tables: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Lark body elements for Fixed (picture 2 — same field layout as In Progress)."""
+    studio, date, table, resolution, reason, email_ref = _fixed_card_values(
+        info,
+        email_subject=email_subject,
+        email_body=email_body,
+        launched_tables=launched_tables,
+    )
+    return [
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"Hi {_at_cs_team()}"},
+        },
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": "**Kindly unset maintenance.**",
+            },
+        },
+        _card_studio_date_columns(studio, date),
+        _card_labeled_field("Table", table),
+        _card_labeled_field("Time of resolution", resolution),
+        _card_labeled_field("Reason", reason),
+        {"tag": "hr"},
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"**CC:** {_at_qa_support()}"},
+        },
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"📧 Email: {email_ref}"},
+        },
+    ]
+
+
 def build_fixed_card_body(
     info: dict[str, Any],
     *,
@@ -781,32 +843,25 @@ def build_fixed_card_body(
     email_body: str | None = None,
     launched_tables: list[str] | None = None,
 ) -> str:
-    studio, date = _studio_and_date(info, email_subject, email_body)
-    table = _table_display(
+    """Plain-text fallback (tests / logging)."""
+    studio, date, table, resolution, reason, email_ref = _fixed_card_values(
         info,
+        email_subject=email_subject,
+        email_body=email_body,
         launched_tables=launched_tables,
-        email_subject=resolve_maintenance_subject(email_subject, email_body),
     )
-    reason = _reason_display(info, email_body)
-    resolution = format_time_of_resolution(info, email_body)
-    email_ref = _email_ref_line(info, email_subject, email_body)
     return "\n".join(
         [
             f"Hi {_at_cs_team()}",
             "",
-            "Kindly unset maintenance.",
-            "Studio:",
-            studio,
-            "Date:",
-            date,
-            "Table:",
-            table,
-            "Time of resolution:",
-            resolution,
-            "Reason:",
-            reason,
+            "**Kindly unset maintenance.**",
+            f"**Studio:**\n{studio}",
+            f"**Date:**\n{date}",
+            f"**Table:**\n{table}",
+            f"**Time of resolution:**\n{resolution}",
+            f"**Reason:**\n{reason}",
             "",
-            f"CC: {_at_qa_support()}",
+            f"**CC:** {_at_qa_support()}",
             f"📧 Email: {email_ref}",
         ]
     )
@@ -858,8 +913,8 @@ def build_maintenance_notice(
     Picture-style maintenance card:
     ``(header_title, header_template, body_md, body_elements)``.
 
-    ``body_elements`` is set for **In Progress** (picture 1 column layout);
-    otherwise use ``body_md`` in :func:`build_maintenance_card`.
+    ``body_elements`` is set for **In Progress** and **Fixed** (column field layout);
+    Scheduled still uses ``body_md``.
     """
     info = extract_info(email_text, email_subject=email_subject)
     kind = classify_maintenance_card_kind(
@@ -874,8 +929,8 @@ def build_maintenance_notice(
         return (
             build_fixed_card_header(email_subject or "", email_text),
             "green",
-            build_fixed_card_body(info, **kw),
-            None,
+            "",
+            build_fixed_card_elements(info, **kw),
         )
     if kind == "scheduled":
         return (
