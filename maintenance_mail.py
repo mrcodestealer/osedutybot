@@ -755,6 +755,119 @@ def forward_maintenance_email(
     print(f"[maint-mail] forwarded {subj!r} → {route}", flush=True)
 
 
+JENKINS_DONE_REPLY_TO = (
+    os.getenv("JENKINS_UPDATE_DONE_REPLY_TO", "").strip() or "junchen@snsoft.my"
+)
+
+
+def _connect_imap_simple() -> imaplib.IMAP4:
+    if not MAIL_PASSWORD:
+        raise RuntimeError("MAINTENANCE_MAIL_PASSWORD not set")
+    ctx = ssl.create_default_context()
+    if IMAP_USE_SSL:
+        mail = imaplib.IMAP4_SSL(
+            MAIL_IMAP_HOST, MAIL_IMAP_PORT, timeout=IMAP_TIMEOUT, ssl_context=ctx
+        )
+    else:
+        mail = imaplib.IMAP4(MAIL_IMAP_HOST, MAIL_IMAP_PORT, timeout=IMAP_TIMEOUT)
+        mail.starttls(ssl_context=ctx)
+    mail.login(MAIL_USER, MAIL_PASSWORD)
+    return mail
+
+
+def _decode_msg_subject(msg: email.message.Message) -> str:
+    raw = msg.get("Subject", "") or ""
+    parts = decode_header(raw)
+    out: list[str] = []
+    for frag, enc in parts:
+        if isinstance(frag, bytes):
+            out.append(frag.decode(enc or "utf-8", errors="replace"))
+        else:
+            out.append(str(frag))
+    return " ".join(out).strip()
+
+
+def find_inbox_message_by_subject_title(title: str) -> email.message.Message | None:
+    """Find newest INBOX message whose subject contains ``title``."""
+    needle = (title or "").strip()
+    if not needle:
+        return None
+    mail = _connect_imap_simple()
+    try:
+        if not _select_mail_folder(mail, "INBOX"):
+            return None
+        safe = needle.replace('"', " ").replace("\\", " ")
+        uids = _uid_search(mail, f'(SUBJECT "{safe}")')
+        if not uids:
+            uids = _uid_search(mail, f'(TEXT "{safe[:120]}")')
+        if not uids:
+            return None
+        uid = uids[-1]
+        typ, data = mail.uid("fetch", uid, "(RFC822)")
+        if typ != "OK" or not data or not data[0]:
+            return None
+        raw_bytes = data[0][1] if isinstance(data[0], tuple) else None
+        if not raw_bytes:
+            return None
+        return email.message_from_bytes(raw_bytes)
+    finally:
+        try:
+            mail.logout()
+        except Exception:
+            pass
+
+
+def reply_jenkins_update_done_email(
+    *,
+    email_title: str,
+    completions: list[tuple[str, str]],
+) -> None:
+    """
+    Auto-reply after Jenkins success (``/SuccessInformMeTime`` flow).
+
+    ``completions`` is a list of ``(environment, time)`` pairs. Multiple pairs are
+    combined into one email when several segments share the same subject.
+
+    Sends only to ``JENKINS_UPDATE_DONE_REPLY_TO`` (default junchen@snsoft.my).
+    """
+    if not MAIL_PASSWORD:
+        raise RuntimeError("MAINTENANCE_MAIL_PASSWORD not set")
+    title = (email_title or "").strip()
+    if not completions:
+        raise ValueError("completions required")
+    blocks = [f"Done {env.strip()}\nRemarks : {when.strip()}" for env, when in completions]
+    body = (
+        "\n\n".join(blocks)
+        + "\nTHIS IS JUST THE BOT AUTO REPLIED EMAIL. IT IS STILL TESTING KINDLY IGNORE...\n\n"
+        "Best Regards,\n"
+        "JC\n"
+    )
+    orig = find_inbox_message_by_subject_title(title)
+    subj = _reply_subject(_decode_msg_subject(orig)) if orig else title
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = Header(subj, "utf-8")
+    msg["From"] = formataddr((FORWARD_FROM_NAME, MAIL_USER))
+    msg["To"] = JENKINS_DONE_REPLY_TO
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid()
+    if orig is not None:
+        orig_mid = (orig.get("Message-ID") or "").strip()
+        if orig_mid:
+            msg["In-Reply-To"] = orig_mid
+            refs = (orig.get("References") or "").strip()
+            msg["References"] = f"{refs} {orig_mid}".strip() if refs else orig_mid
+    recipients = [JENKINS_DONE_REPLY_TO]
+    ctx = ssl.create_default_context()
+    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=IMAP_TIMEOUT, context=ctx) as smtp:
+        smtp.login(MAIL_USER, MAIL_PASSWORD)
+        smtp.sendmail(MAIL_USER, recipients, msg.as_string())
+    envs = ", ".join(c[0] for c in completions)
+    print(
+        f"[maint-mail] jenkins done reply envs={envs!r} title={title!r} → {JENKINS_DONE_REPLY_TO}",
+        flush=True,
+    )
+
+
 def reply_not_in_cp_email(
     *,
     subject: str,

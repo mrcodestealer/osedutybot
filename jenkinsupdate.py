@@ -240,7 +240,9 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
     ),
 }
 
-JENKINS_UPDATE_CMD_RE = re.compile(r"/(?:jenkinsupdate|updatejenkins)\b", re.I)
+JENKINS_UPDATE_CMD_RE = re.compile(
+    r"/(?:update|jenkinsupdate|updatejenkins)(?!more)\b", re.I
+)
 FPMS_PROD_SCRIPT_FLAG_RE = re.compile(r"--fpmsprodscript\b", re.I)
 FPMS_PROD_SCRIPT_BUILD_URL = (
     "https://jenkins.client8.me/job/FPMS/job/FPMS_PROD_SCRIPT_RUN/build?delay=0sec"
@@ -6352,16 +6354,19 @@ def _fpms_lark_begin_jenkins_run(
             defer_fn()
     except Exception:
         pass
-    _fpms_lark_sessions_put_chat_key(
-        session_key,
-        {
-            "state": "jenkins_wait_build",
-            "build_gate_event": ev,
-            "approve_build": None,
-            "lark_cancel": False,
-            "lark_trigger_message_id": trigger_mid,
-        },
+    with _fpms_lark_sessions_lock:
+        prev_sess = _fpms_lark_sessions.get(session_key)
+    wait_sess = {
+        "state": "jenkins_wait_build",
+        "build_gate_event": ev,
+        "approve_build": None,
+        "lark_cancel": False,
+        "lark_trigger_message_id": trigger_mid,
+    }
+    _fpms_lark_preserve_updatemore_queue(
+        prev_sess if isinstance(prev_sess, dict) else None, wait_sess
     )
+    _fpms_lark_sessions_put_chat_key(session_key, wait_sess)
     update_all = bool(data.get("update_all_services"))
     raw_headless = os.environ.get("JENKINSUPDATE_BOT_HEADLESS", "1").strip().lower()
     bot_headless = raw_headless in ("1", "true", "yes", "on")
@@ -6987,6 +6992,288 @@ def _jenkins_message_has_config_block(text: str) -> bool:
     return has_branch and has_version and has_svc
 
 
+def _fpms_lark_preserve_updatemore_queue(prev: dict | None, sess: dict) -> dict:
+    """Keep ``updatemore_queue`` and ``email_reply_subject`` when replacing session state."""
+    if isinstance(prev, dict):
+        q = prev.get("updatemore_queue")
+        if isinstance(q, dict):
+            sess["updatemore_queue"] = q
+        em = (prev.get("email_reply_subject") or "").strip()
+        if em:
+            sess["email_reply_subject"] = em
+    return sess
+
+
+def _fpms_lark_session_email_subject(session_key: str) -> str:
+    with _fpms_lark_sessions_lock:
+        sess = _fpms_lark_sessions.get(session_key)
+    if not isinstance(sess, dict):
+        return ""
+    em = (sess.get("email_reply_subject") or "").strip()
+    if em:
+        return em
+    try:
+        import updatemore as um
+
+        q = um.get_queue(sess)
+        if q:
+            seg = um.current_segment(q)
+            if seg:
+                return (seg.get("email_subject") or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _fpms_lark_jenkins_bot_open_id() -> str:
+    raw = (os.environ.get("JENKINS_BOT_OPEN_ID") or "").strip()
+    if not raw:
+        raw = "ou_45cc096780a23354f0719c9635765985"
+    return raw
+
+
+def _fpms_lark_notify_jenkins_after_build_click(
+    send,
+    chat_id: str,
+    session_key: str,
+    *,
+    folder_url: str,
+    build_number: int | None,
+) -> None:
+    """
+    After **Build** is clicked: notify jenkinsbot for ``/updatemore`` queue gating,
+    else fall back to the legacy build-done ping.
+    """
+    with _fpms_lark_sessions_lock:
+        sess = _fpms_lark_sessions.get(session_key)
+        q = None
+        try:
+            import updatemore as _um
+
+            q = _um.get_queue(sess if isinstance(sess, dict) else None)
+        except Exception:
+            q = None
+
+    if not q or q.get("stopped"):
+        email = _fpms_lark_session_email_subject(session_key)
+        jenkins_oid = _fpms_lark_jenkins_bot_open_id()
+        if jenkins_oid.casefold() in ("0", "false", "no", "off"):
+            jenkins_oid = ""
+        bn = build_number if isinstance(build_number, int) and build_number > 0 else None
+        if email and jenkins_oid:
+            at = f'<at user_id="{jenkins_oid}">jenkinsbot</at>'
+            tail = f" | {email}"
+            if bn:
+                send(chat_id, f"{at} /SuccessInformMeTime {folder_url} {bn}{tail}".strip())
+            else:
+                send(chat_id, f"{at} /SuccessInformMeTime {folder_url}{tail}".strip())
+            return
+        _fpms_lark_send_build_completed_plain_ping(
+            send, chat_id, folder_url=folder_url, build_number=build_number
+        )
+        return
+
+    import updatemore as um
+
+    seg = um.current_segment(q)
+    email = (seg.get("email_subject") or "").strip() if seg else ""
+    next_same = um.next_segment_same_env(q)
+    has_next = um.has_next_segment(q)
+    jenkins_oid = _fpms_lark_jenkins_bot_open_id()
+    if jenkins_oid.casefold() in ("0", "false", "no", "off"):
+        jenkins_oid = ""
+
+    bn = build_number if isinstance(build_number, int) and build_number > 0 else None
+    if jenkins_oid:
+        at = f'<at user_id="{jenkins_oid}">jenkinsbot</at>'
+        if email:
+            cmd = "/SuccessInformMeTime"
+            tail = f" | {email}" if email else ""
+        else:
+            cmd = "/SuccessInformMe"
+            tail = ""
+        if bn:
+            send(chat_id, f"{at} {cmd} {folder_url} {bn}{tail}".strip())
+        else:
+            send(chat_id, f"{at} {cmd} {folder_url}{tail}".strip())
+
+    if next_same:
+        with _fpms_lark_sessions_lock:
+            sess2 = _fpms_lark_sessions.get(session_key)
+            if isinstance(sess2, dict):
+                q2 = sess2.get("updatemore_queue")
+                if isinstance(q2, dict):
+                    q2["waiting_jenkins"] = True
+        send(
+            chat_id,
+            "⏳ Same environment — waiting for Jenkins to finish before the next segment…",
+        )
+        return
+
+    if has_next and not next_same:
+        idx = int(q.get("index") or 0) + 1
+        segs = q.get("segments") or []
+        if idx < len(segs):
+            with _fpms_lark_sessions_lock:
+                sess3 = _fpms_lark_sessions.get(session_key)
+                if isinstance(sess3, dict):
+                    q3 = sess3.get("updatemore_queue")
+                    if isinstance(q3, dict):
+                        q3["index"] = idx
+            send(chat_id, f"▶️ Different environment — starting segment {idx + 1}…")
+            _dispatch_lark_update_command_body(
+                chat_id,
+                session_key,
+                um.segment_to_update_body(segs[idx]),
+                send,
+                from_updatemore=True,
+            )
+        return
+
+    if not email and not jenkins_oid:
+        _fpms_lark_send_build_completed_plain_ping(
+            send, chat_id, folder_url=folder_url, build_number=build_number
+        )
+    elif not email and jenkins_oid and not next_same and not has_next:
+        _fpms_lark_send_build_completed_plain_ping(
+            send, chat_id, folder_url=folder_url, build_number=build_number
+        )
+
+
+def _dispatch_lark_update_command_body(
+    chat_id: str,
+    session_key: str,
+    body: str,
+    send,
+    *,
+    from_updatemore: bool = False,
+    lark_message_id: str | None = None,
+) -> bool:
+    """Core ``/update`` job match + dispatch (shared by ``/update`` and ``/updatemore``)."""
+    key = session_key
+    for pat in (r"@_user_\d+", r"<[^>]+>"):
+        body = re.sub(pat, "", body)
+    body = body.replace("\r\n", "\n").strip()
+
+    try:
+        import updatemore as um
+
+        email_subj = um.parse_email_from_update_body(body)
+    except Exception:
+        email_subj = None
+    if email_subj:
+        with _fpms_lark_sessions_lock:
+            prev = _fpms_lark_sessions.get(key)
+            stub = dict(prev) if isinstance(prev, dict) else {}
+            stub["email_reply_subject"] = email_subj.strip()
+            _fpms_lark_preserve_updatemore_queue(prev if isinstance(prev, dict) else None, stub)
+            _fpms_lark_sessions[key] = stub
+
+    if FPMS_PROD_SCRIPT_FLAG_RE.search(body):
+        return _fpms_lark_dispatch_fpms_prod_script_parameter_flow(
+            chat_id,
+            key,
+            body,
+            FPMS_PROD_SCRIPT_BUILD_URL,
+            send,
+            lark_message_id=lark_message_id,
+        )
+
+    try:
+        _repo_bi, _env_bi, _branch_bi = parse_bi_api_update_message_block(body)
+    except Exception:
+        pass
+    else:
+        return _fpms_lark_dispatch_bi_api_update_parameter_flow(
+            chat_id,
+            key,
+            body,
+            BI_API_UPDATE_BUILD_URL,
+            send,
+            lark_message_id=lark_message_id,
+        )
+
+    head_line = _jenkins_update_first_non_empty_line(body)
+    ties_h: list[tuple[str, float, str, str]] = []
+    if not _jenkins_update_headline_is_config_like(head_line):
+        hint_q = _jenkins_update_job_hint_query_for_ranking(body).strip()
+        q_rank = hint_q or JENKINS_UPDATE_CMD_RE.sub("", head_line, count=1).strip()
+        ranked_h = _rank_jenkins_update_job_matches(q_rank)
+        ties_h = _jenkins_update_disambiguation_ties(ranked_h, band=0.08)
+    if ties_h:
+        ranked, ties = ranked_h, ties_h
+    else:
+        ranked = _rank_jenkins_update_job_matches(body)
+        ties = _jenkins_update_disambiguation_ties(ranked, band=0.05)
+    if not ties:
+        sample = ", ".join(sorted(JENKINS_UPDATE_JOB_REGISTRY.keys())[:14])
+        send(
+            chat_id,
+            "❌ Could not match your text to a Jenkins job. Use a known keyword in the message "
+            f"(e.g. **fpms uat branch**, **frontend uat1 h5**). Aliases include: {sample}, …",
+        )
+        return True
+    prof0 = _jenkins_update_job_automation_profile(ties[0][3])
+    need_menu = (len(ties) > 1) or (len(ties) == 1 and prof0 in ("fnt_rc", "sms_uat"))
+    if need_menu:
+        picker_sid = secrets.token_hex(16)
+        with _fpms_lark_sessions_lock:
+            prev = _fpms_lark_sessions.get(key)
+        sess_menu = {
+            "state": "choose_job",
+            "job_candidates": ties,
+            "pending_body": body,
+            "picker_sid": picker_sid,
+        }
+        _fpms_lark_preserve_updatemore_queue(
+            prev if isinstance(prev, dict) else None, sess_menu
+        )
+        chat_id_part, sender_part = key.split(":", 1)
+        sk_menu = _fpms_lark_session_key(chat_id_part, sender_part)
+        _fpms_lark_register_picker_sid(picker_sid, sk_menu)
+        _fpms_lark_sessions_put(
+            chat_id_part,
+            sender_part,
+            sess_menu,
+        )
+        card_js = _fpms_lark_job_choice_card_json(ties, picker_sid=picker_sid)
+        try:
+            send(chat_id, card_js, msg_type="interactive")
+        except TypeError:
+            send(chat_id, _fpms_format_jenkins_job_menu(ties))
+        return True
+    return _fpms_lark_dispatch_job_row(
+        chat_id, key, body, ties[0], send, lark_message_id=lark_message_id
+    )
+
+
+def handle_lark_jenkins_bot_callback(
+    chat_id: str,
+    sender_id: str,
+    clean_text: str,
+    original_text: str,
+    send,
+) -> bool:
+    """jenkinsbot → duty bot: ``/SuccessProceedNext``, ``/FailedStop``, email-done line."""
+    try:
+        import updatemore as um
+    except Exception:
+        return False
+    return um.handle_jenkinsbot_callback(
+        chat_id,
+        sender_id,
+        clean_text,
+        original_text,
+        send,
+        sessions=_fpms_lark_sessions,
+        sessions_lock=_fpms_lark_sessions_lock,
+        session_key_fn=_fpms_lark_session_key,
+        dispatch_update_body=lambda cid, sk, body, snd, **kw: _dispatch_lark_update_command_body(
+            cid, sk, body, snd, **kw
+        ),
+    )
+
+
 def _fpms_lark_release_build_wait_session(
     session_key: str,
     *,
@@ -7043,6 +7330,11 @@ def handle_lark_jenkins_update_message(
     low = (clean_text or "").strip().casefold()
     body_early = (original_text or clean_text or "").replace("\r\n", "\n").strip()
 
+    if handle_lark_jenkins_bot_callback(
+        chat_id, sender_id, clean_text, original_text, send
+    ):
+        return True
+
     if low == "cancel":
         if _fpms_lark_release_build_wait_session(key):
             return True
@@ -7051,9 +7343,9 @@ def handle_lark_jenkins_update_message(
             if had_other:
                 _fpms_lark_sessions.pop(key, None)
         if had_other:
-            send(chat_id, "⏹️ **All `/jenkinsupdate` steps cancelled.**")
+            send(chat_id, "⏹️ **All `/update` steps cancelled.**")
         else:
-            send(chat_id, "ℹ️ No active `/jenkinsupdate` session to cancel.")
+            send(chat_id, "ℹ️ No active `/update` session to cancel.")
         return True
 
     # New full config while YES/NO is pending → cancel old run and start over (no re-@mention).
@@ -7062,7 +7354,7 @@ def handle_lark_jenkins_update_message(
             key,
             notify=(
                 "⏹️ Previous Jenkins **YES/NO** cancelled. "
-                "Processing your new `/jenkinsupdate`…"
+                "Processing your new `/update`…"
             ),
             send=send,
             chat_id=chat_id,
@@ -7301,89 +7593,53 @@ def handle_lark_jenkins_update_message(
         send(chat_id, "⚠️ Internal session state was reset. Start again with `/jenkinsupdate`.")
         return True
 
+    try:
+        import updatemore as um
+    except Exception:
+        um = None
+
+    if um and um.UPDATEMORE_CMD_RE.search(body_early or ""):
+        if not allow_start:
+            return False
+        for pat in (r"@_user_\d+", r"<[^>]+>"):
+            body_um = re.sub(pat, "", body_early)
+        body_um = body_um.replace("\r\n", "\n").strip()
+        try:
+            segments = um.parse_updatemore_body(body_um)
+        except ValueError as ex:
+            send(chat_id, f"❌ `/updatemore` parse error: {ex}")
+            return True
+        with _fpms_lark_sessions_lock:
+            prev = _fpms_lark_sessions.get(key)
+            if isinstance(prev, dict):
+                _fpms_lark_unregister_picker_sid_from_sess(prev)
+            _fpms_lark_sessions[key] = {
+                "updatemore_queue": um.init_queue(
+                    segments, chat_id=chat_id, sender_id=sender_id
+                )
+            }
+        send(chat_id, um.queue_summary(segments))
+        return _dispatch_lark_update_command_body(
+            chat_id,
+            key,
+            um.segment_to_update_body(segments[0]),
+            send,
+            from_updatemore=True,
+            lark_message_id=lark_message_id,
+        )
+
     if not JENKINS_UPDATE_CMD_RE.search(clean_text or ""):
         return False
     if not allow_start:
         return False
 
     body = original_text or clean_text
-    for pat in (r"@_user_\d+", r"<[^>]+>"):
-        body = re.sub(pat, "", body)
-    body = body.replace("\r\n", "\n").strip()
-
-    # Explicit shortcut: /jenkinsupdate --fpmsprodscript ...
-    if FPMS_PROD_SCRIPT_FLAG_RE.search(body):
-        return _fpms_lark_dispatch_fpms_prod_script_parameter_flow(
-            chat_id,
-            key,
-            body,
-            FPMS_PROD_SCRIPT_BUILD_URL,
-            send,
-            lark_message_id=lark_message_id,
-        )
-
-    # BI API UPDATE shortcut:
-    # if the same /jenkinsupdate message already contains ds-/bi- repository (or services) + env + branch,
-    # skip generic alias matching and dispatch directly to BI-API-UPDATE.
-    try:
-        _repo_bi, _env_bi, _branch_bi = parse_bi_api_update_message_block(body)
-    except Exception:
-        pass
-    else:
-        return _fpms_lark_dispatch_bi_api_update_parameter_flow(
-            chat_id,
-            key,
-            body,
-            BI_API_UPDATE_BUILD_URL,
-            send,
-            lark_message_id=lark_message_id,
-        )
-
-    head_line = _jenkins_update_first_non_empty_line(body)
-    ties_h: list[tuple[str, float, str, str]] = []
-    if not _jenkins_update_headline_is_config_like(head_line):
-        hint_q = _jenkins_update_job_hint_query_for_ranking(body).strip()
-        q_rank = hint_q or JENKINS_UPDATE_CMD_RE.sub("", head_line, count=1).strip()
-        ranked_h = _rank_jenkins_update_job_matches(q_rank)
-        ties_h = _jenkins_update_disambiguation_ties(ranked_h, band=0.08)
-    if ties_h:
-        ranked, ties = ranked_h, ties_h
-    else:
-        ranked = _rank_jenkins_update_job_matches(body)
-        ties = _jenkins_update_disambiguation_ties(ranked, band=0.05)
-    if not ties:
-        sample = ", ".join(sorted(JENKINS_UPDATE_JOB_REGISTRY.keys())[:14])
-        send(
-            chat_id,
-            "❌ Could not match your text to a Jenkins job. Use a known keyword in the message "
-            f"(e.g. **fpms uat branch**, **frontend uat1 h5**). Aliases include: {sample}, …",
-        )
-        return True
-    prof0 = _jenkins_update_job_automation_profile(ties[0][3])
-    need_menu = (len(ties) > 1) or (len(ties) == 1 and prof0 in ("fnt_rc", "sms_uat"))
-    if need_menu:
-        picker_sid = secrets.token_hex(16)
-        sess_menu = {
-            "state": "choose_job",
-            "job_candidates": ties,
-            "pending_body": body,
-            "picker_sid": picker_sid,
-        }
-        sk_menu = _fpms_lark_session_key(chat_id, sender_id)
-        _fpms_lark_register_picker_sid(picker_sid, sk_menu)
-        _fpms_lark_sessions_put(
-            chat_id,
-            sender_id,
-            sess_menu,
-        )
-        card_js = _fpms_lark_job_choice_card_json(ties, picker_sid=picker_sid)
-        try:
-            send(chat_id, card_js, msg_type="interactive")
-        except TypeError:
-            send(chat_id, _fpms_format_jenkins_job_menu(ties))
-        return True
-    return _fpms_lark_dispatch_job_row(
-        chat_id, key, body, ties[0], send, lark_message_id=lark_message_id
+    return _dispatch_lark_update_command_body(
+        chat_id,
+        key,
+        body,
+        send,
+        lark_message_id=lark_message_id,
     )
 
 
@@ -8153,9 +8409,10 @@ def run(
                                 next_build_number,
                                 timeout_ms=max(0, wait_bn_ms),
                             )
-                            _fpms_lark_send_build_completed_plain_ping(
+                            _fpms_lark_notify_jenkins_after_build_click(
                                 send,
                                 cid,
+                                sk,
                                 folder_url=folder_u,
                                 build_number=resolved_bn,
                             )

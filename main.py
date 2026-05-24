@@ -3145,16 +3145,6 @@ def lark_webhook():
         reply = f'the player has been get back his credit. @On-Duty-OSM-Lavie(Podium1) kindly manual cashout the credit and reboot the machine. After that, @Xavier (CS OSM) kindly unset and test the machine thanks'
         send_message(chat_id, reply)
         return _lark_im_done()
-    elif clean_text.lower().startswith('/update'):
-        parts = clean_text.split(maxsplit=1)
-        args = parts[1].strip() if len(parts) > 1 else ""
-        up = _get_update()
-        if up is None:
-            reply = "Update command is unavailable on this server (update module not loaded)."
-        else:
-            reply = up.handle_update(args)
-        send_message(chat_id, reply)
-        return _lark_im_done()
     elif clean_text == '/restartA':
         reply = f'cd /home/pi/osm && ./stopallserver.sh && ./startserver.sh'
         send_message(chat_id, reply)

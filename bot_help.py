@@ -135,8 +135,10 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
                 _SECTION_ICONS["jenkins"],
                 "indigo",
                 [
-                    ("/jenkinsupdate <keyword>", "Match job → confirm → build", "匹配任务→确认→构建"),
-                    ("/updatejenkins …", "Alias of /jenkinsupdate", "同上（别名）"),
+                    ("/update <keyword>", "Match job → confirm → build", "匹配任务→确认→构建"),
+                    ("/updatemore …", "Multiple updates (same / not same env)", "批量更新"),
+                    ("/jenkinsupdate …", "Alias of /update", "同上（别名）"),
+                    ("/updatejenkins …", "Alias of /update", "同上（别名）"),
                 ],
             )
         )
@@ -150,7 +152,6 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
                 "grey",
                 [
                     ("/m <email> | /maintenance …", "Parse maintenance email", "解析维护邮件"),
-                    ("/update <args>", "Server update helper", "服务器更新"),
                     ("/cashout", "Cashout reminder template", "出款提醒模板"),
                     ("/restartA", "Pi restart one-liner", "Pi 重启命令"),
                 ],
@@ -262,8 +263,8 @@ def build_jenkins_help_card() -> dict[str, Any]:
             row = keys[i : i + 4]
             rows_md.append(" · ".join(f"`{k}`" for k in row))
         body = (
-            "**Usage** · `@Bot /jenkinsupdate <keyword>` → confirm on card\n"
-            "**用法** · `@机器人 /jenkinsupdate 关键字` → 卡片确认\n\n"
+            "**Usage** · `@Bot /update <keyword>` → confirm on card\n"
+            "**用法** · `@机器人 /update 关键字` → 卡片确认\n\n"
             + "\n".join(rows_md)
         )
     else:
