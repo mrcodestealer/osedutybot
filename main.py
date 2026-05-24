@@ -3206,6 +3206,17 @@ def lark_webhook():
                     "`servicedesk@evolution.com` (Service Desk).",
                 )
                 return _lark_im_done()
+            if maintenance.is_maintenance_cancelled_email(email_text):
+                cancel_card = maintenance.build_cancelled_maintenance_card(
+                    email_subject=subj,
+                    email_body=email_text,
+                )
+                send_message(
+                    chat_id,
+                    json.dumps(cancel_card, ensure_ascii=False),
+                    msg_type="interactive",
+                )
+                return _lark_im_done()
             first_reply, hdr_title, hdr_tpl, card_body, card_el = (
                 maintenance.process_maintenance_pipeline(
                     email_text,

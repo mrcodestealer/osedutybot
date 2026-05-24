@@ -7,9 +7,10 @@ Processes inbox messages whose subject **literally** starts with ``TINC-`` or
 ``no-reply-evolution@evolution.com`` (Jira) or ``servicedesk@evolution.com`` (Service Desk).
 Runs the same pipeline as ``/m``, and posts to a fixed Lark group.
 
-Cancellation notices (same subject as an earlier maintenance mail today) post a
-``TINC-… · Status : Cancelled`` card, forward like other CP mails, and link
-``Table/Game`` from the earlier notice. Duplicate cancel bodies are ignored.
+Cancellation notices post a red ``❌ [SD-…] … - Cancelled`` (or ``❌ TINC-… - Cancelled``)
+card with Studio/Date/Table + cancellation text; forward like other CP mails.
+``Table`` uses the earlier same-subject notice when available. Duplicate cancel
+bodies are ignored.
 
 State file: ``maintenance.json`` (titles + content hashes + IMAP UIDs) to avoid
 re-processing after bot restart. Entries reset at local midnight (``MAINTENANCE_MAIL_TZ``)
@@ -1188,27 +1189,13 @@ class MaintenanceMailWatcher:
                     f"table_game={table_game!r} to_cp={to_cp}",
                     flush=True,
                 )
-            # Cancel card when an earlier maintenance with the same subject/ticket
-            # was processed today (Table/Game from that notice's affected tables).
-            if prior is not None:
-                cancel_summary = maintenance.build_cancelled_summary(
-                    table_game=table_game,
-                    ref_email=display_subj,
-                    email_body=body,
-                )
-                cancel_header = maintenance.build_cancelled_card_header_title(
-                    subject, body
-                )
-                cancel_card = maintenance.build_maintenance_card(
-                    email_subject=display_subj,
-                    received_at=when,
-                    summary_section=cancel_summary,
-                    email_body=body,
-                    show_meta=False,
-                    header_title=cancel_header,
-                    header_template="red",
-                )
-                self._send_lark_card(TARGET_CHAT_ID, cancel_card)
+            cancel_card = maintenance.build_cancelled_maintenance_card(
+                email_subject=display_subj,
+                email_body=body,
+                table_game=table_game if prior else None,
+                received_at=when,
+            )
+            self._send_lark_card(TARGET_CHAT_ID, cancel_card)
         else:
             to_cp, launched_names = maintenance.gamelist_has_launched(pipeline_in, token)
             if MAIL_VERBOSE and launched_names:
