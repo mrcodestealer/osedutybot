@@ -111,11 +111,11 @@ FORWARD_ENABLED = (os.getenv("MAINTENANCE_MAIL_FORWARD_ENABLED", "").strip() or 
 )
 FORWARD_TO = (
     os.getenv("MAINTENANCE_MAIL_FORWARD_TO", "").strip()
-    or "evolive.maintenance@om.hotelstotsenberg.com"
+    or "junchen@snsoft.my"
 )
 FORWARD_TO_NAME = (
     os.getenv("MAINTENANCE_MAIL_FORWARD_TO_NAME", "").strip()
-    or "SNSoft - OM - evolive.maintenance"
+    or "junchen@snsoft.my"
 )
 FORWARD_CC = (
     os.getenv("MAINTENANCE_MAIL_FORWARD_CC", "").strip()
@@ -720,7 +720,7 @@ def forward_maintenance_email(
     original_msg: email.message.Message | None = None,
 ) -> None:
     """
-    SMTP forward from om@… → evolive + Cc om@.
+    SMTP forward from om@… → junchen@snsoft.my + Cc om@.
 
     Uses ``Fw:`` subject + Lark ``history-quote-wrapper`` HTML (same as manual
     Forward) so Feishu/Lark Mail can **Show/Hide email thread**.
@@ -875,7 +875,7 @@ def reply_not_in_cp_email(
 ) -> None:
     """
     NOT IN CP notice: body ``NOT IN CP WEBSITE``, ``Re:`` subject, blank To,
-    Cc = om@ only (no evolive, no reply to ticket sender).
+    Cc = om@ only (no forward To, no reply to ticket sender).
     """
     if not MAIL_PASSWORD:
         raise RuntimeError("MAINTENANCE_MAIL_PASSWORD not set")
