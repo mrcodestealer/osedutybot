@@ -13,6 +13,7 @@ Env (optional):
 
 from __future__ import annotations
 
+import json
 import sys
 import re
 import os
@@ -36,6 +37,9 @@ GAMELIST_SHEET_ID = (
 )
 
 _CARD_HEADER_TITLE_MAX = 100
+
+_CHBOX_DIR = os.path.dirname(os.path.abspath(__file__))
+MAINTENANCE_STATE_PATH = os.path.join(_CHBOX_DIR, "maintenance.json")
 
 # Lark @mentions for maintenance cards (display names come from open_id).
 _CS_TEAM_OPEN_ID = "ou_c927a378e9b464741c67b61c1641577b"
@@ -352,6 +356,89 @@ def parse_service_desk_date_from_subject(subject: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+def _normalize_title_key(title: str) -> str:
+    """Collapse whitespace for matching ``[Service Desk] …`` subject lines."""
+    return re.sub(r"\s+", " ", (title or "").strip().lower())
+
+
+def _ticket_match_keys(ticket_id: str) -> set[str]:
+    """``SD-7004356`` and ``TINC-7004356`` match the same Service Desk ticket."""
+    tid = (ticket_id or "").strip().upper()
+    keys: set[str] = set()
+    if tid:
+        keys.add(tid)
+    m = re.match(r"^(?:TINC|SD)[-\s]?(\d{6,8})\b", tid)
+    if m:
+        num = m.group(1)
+        keys.add(f"SD-{num}")
+        keys.add(f"TINC-{num}")
+    return keys
+
+
+def load_maintenance_state_entries() -> list[dict[str, Any]]:
+    """Today's processed maintenance rows from ``maintenance.json`` (mail watcher)."""
+    if not os.path.isfile(MAINTENANCE_STATE_PATH):
+        return []
+    try:
+        with open(MAINTENANCE_STATE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return []
+    if not isinstance(data, dict):
+        return []
+    entries = data.get("entries")
+    return list(entries) if isinstance(entries, list) else []
+
+
+def find_prior_maintenance_entry(
+    entries: list[dict[str, Any]],
+    display_subj: str,
+    ticket_id: str,
+) -> dict[str, Any] | None:
+    """
+    Latest non-cancel maintenance with the same subject title or SD/TINC ticket.
+    Used by cancel cards and the mail watcher.
+    """
+    nt = _normalize_title_key(display_subj)
+    tkeys = _ticket_match_keys(ticket_id)
+
+    def _usable(ent: dict[str, Any]) -> bool:
+        ch = str(ent.get("content_hash") or "")
+        if ch.startswith("skip:"):
+            return False
+        if ent.get("is_cancelled_email"):
+            return False
+        return True
+
+    for ent in reversed(entries):
+        if not _usable(ent):
+            continue
+        if _normalize_title_key(str(ent.get("title") or "")) == nt:
+            return ent
+    if tkeys:
+        for ent in reversed(entries):
+            if not _usable(ent):
+                continue
+            et = (ent.get("ticket_id") or "").strip().upper()
+            if et in tkeys or bool(_ticket_match_keys(et) & tkeys):
+                return ent
+    return None
+
+
+def lookup_prior_maintenance_for_cancel(
+    email_subject: str | None,
+    email_body: str | None = None,
+) -> dict[str, Any] | None:
+    """Find earlier maintenance in ``maintenance.json`` for this cancel subject/ticket."""
+    subj = resolve_maintenance_subject(email_subject, email_body)
+    if not subj:
+        return None
+    tid = extract_ticket_card_title(subj, email_body) or ""
+    return find_prior_maintenance_entry(
+        load_maintenance_state_entries(), subj, tid
+    )
+
+
 def build_cancelled_card_header_title(subject: str, extra_text: str | None = None) -> str:
     """
     ``❌ [SD-7050222] Equipment maintenance - Cancelled`` or
@@ -399,12 +486,85 @@ def _table_for_cancel(
     )
 
 
+def _cancel_fields_for_card(
+    info: dict[str, Any],
+    *,
+    email_subject: str | None,
+    email_body: str | None,
+    table_game: str | None = None,
+    prior: dict[str, Any] | None = None,
+) -> tuple[str, str, str]:
+    """
+    Studio / Date / Table for cancel cards — fill from ``maintenance.json`` prior
+    entry with the same ``[Service Desk] …`` title or SD/TINC ticket.
+    """
+    if prior is None:
+        prior = lookup_prior_maintenance_for_cancel(email_subject, email_body)
+
+    studio, date = _studio_date_for_cancel(
+        info, email_subject=email_subject, email_body=email_body
+    )
+    table = _table_for_cancel(
+        info,
+        email_subject=email_subject,
+        email_body=email_body,
+        table_game=table_game,
+    )
+
+    if prior:
+        pst = str(prior.get("studio") or "").strip()
+        if pst and studio in ("", "Unknown"):
+            studio = pst
+        pdt = str(prior.get("maint_date") or "").strip()
+        if pdt and date in ("", "Unknown"):
+            date = pdt
+        prior_title = str(prior.get("title") or "").strip()
+        if prior_title:
+            if date in ("", "Unknown"):
+                sd_d = parse_service_desk_date_from_subject(prior_title)
+                if sd_d:
+                    date = sd_d
+            tinc = parse_tinc_subject_metadata(prior_title)
+            if studio in ("", "Unknown") and tinc.get("studio"):
+                studio = tinc["studio"]
+            if date in ("", "Unknown") and tinc.get("date"):
+                date = tinc["date"]
+        if table in ("", "Unknown"):
+            launched = [
+                str(x).strip()
+                for x in (prior.get("launched_names") or [])
+                if str(x).strip()
+            ]
+            tables = [
+                str(x).strip()
+                for x in (prior.get("table_names") or [])
+                if str(x).strip()
+            ]
+            if launched:
+                table = ", ".join(launched)
+            elif tables:
+                table = ", ".join(tables)
+
+    if date in ("", "Unknown"):
+        subj = resolve_maintenance_subject(email_subject, email_body)
+        sd_d = parse_service_desk_date_from_subject(subj)
+        if sd_d:
+            date = sd_d
+
+    return (
+        (studio or "").strip() or "Unknown",
+        (date or "").strip() or "Unknown",
+        (table or "").strip() or "Unknown",
+    )
+
+
 def build_cancelled_card_elements(
     *,
     info: dict[str, Any] | None = None,
     email_subject: str | None = None,
     email_body: str | None = None,
     table_game: str | None = None,
+    prior: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Cancelled card body — same field layout as In Progress, then cancellation notice.
@@ -412,14 +572,12 @@ def build_cancelled_card_elements(
     inf = info if info is not None else extract_info(
         email_body or "", email_subject=email_subject
     )
-    studio, date = _studio_date_for_cancel(
-        inf, email_subject=email_subject, email_body=email_body
-    )
-    table = _table_for_cancel(
+    studio, date, table = _cancel_fields_for_card(
         inf,
         email_subject=email_subject,
         email_body=email_body,
         table_game=table_game,
+        prior=prior,
     )
     notice = extract_cancel_notice_text(email_body)
     return [
@@ -437,10 +595,13 @@ def build_cancelled_maintenance_card(
     email_subject: str,
     email_body: str | None = None,
     table_game: str | None = None,
+    prior: dict[str, Any] | None = None,
     received_at: str | None = None,
 ) -> dict[str, Any]:
     """Full red interactive card for a cancellation notice."""
     info = extract_info(email_body or "", email_subject=email_subject)
+    if prior is None:
+        prior = lookup_prior_maintenance_for_cancel(email_subject, email_body)
     return build_maintenance_card(
         email_subject=email_subject,
         received_at=received_at,
@@ -450,6 +611,7 @@ def build_cancelled_maintenance_card(
             email_subject=email_subject,
             email_body=email_body,
             table_game=table_game,
+            prior=prior,
         ),
         email_body=email_body,
         show_meta=False,
@@ -466,11 +628,11 @@ def build_cancelled_summary(
 ) -> str:
     """Plain-text fallback for cancellation cards."""
     info = extract_info(email_body or "", email_subject=ref_email)
-    studio, date = _studio_date_for_cancel(
-        info, email_subject=ref_email, email_body=email_body
-    )
-    table = _table_for_cancel(
-        info, email_subject=ref_email, email_body=email_body, table_game=table_game
+    studio, date, table = _cancel_fields_for_card(
+        info,
+        email_subject=ref_email,
+        email_body=email_body,
+        table_game=table_game,
     )
     notice = extract_cancel_notice_text(email_body)
     return "\n".join(

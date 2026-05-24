@@ -799,6 +799,8 @@ def _record_processed(
     ticket_id: str = "",
     table_names: list[str] | None = None,
     launched_names: list[str] | None = None,
+    studio: str = "",
+    maint_date: str = "",
     is_cancelled_email: bool = False,
 ) -> None:
     row: dict[str, Any] = {
@@ -813,6 +815,10 @@ def _record_processed(
         row["table_names"] = list(table_names)
     if launched_names:
         row["launched_names"] = list(launched_names)
+    if (studio or "").strip():
+        row["studio"] = studio.strip()
+    if (maint_date or "").strip():
+        row["maint_date"] = maint_date.strip()
     if is_cancelled_email:
         row["is_cancelled_email"] = True
     entries.append(row)
@@ -823,33 +829,8 @@ def _find_prior_maintenance_entry(
     display_subj: str,
     ticket_id: str,
 ) -> dict[str, Any] | None:
-    """
-    Latest processed maintenance for the same subject (or ticket) that is not
-    itself a cancellation notice.
-    """
-    nt = (display_subj or "").strip().lower()
-    tid = (ticket_id or "").strip().upper()
-
-    def _usable(ent: dict[str, Any]) -> bool:
-        ch = str(ent.get("content_hash") or "")
-        if ch.startswith("skip:"):
-            return False
-        if ent.get("is_cancelled_email"):
-            return False
-        return True
-
-    for ent in reversed(entries):
-        if not _usable(ent):
-            continue
-        if (ent.get("title") or "").strip().lower() == nt:
-            return ent
-    if tid:
-        for ent in reversed(entries):
-            if not _usable(ent):
-                continue
-            if (ent.get("ticket_id") or "").strip().upper() == tid:
-                return ent
-    return None
+    """Delegate to :func:`maintenance.find_prior_maintenance_entry` (normalized title)."""
+    return maintenance.find_prior_maintenance_entry(entries, display_subj, ticket_id)
 
 
 def _table_game_for_cancel(prior: dict[str, Any] | None) -> str:
@@ -1192,7 +1173,8 @@ class MaintenanceMailWatcher:
             cancel_card = maintenance.build_cancelled_maintenance_card(
                 email_subject=display_subj,
                 email_body=body,
-                table_game=table_game if prior else None,
+                table_game=table_game,
+                prior=prior,
                 received_at=when,
             )
             self._send_lark_card(TARGET_CHAT_ID, cancel_card)
@@ -1260,6 +1242,18 @@ class MaintenanceMailWatcher:
             record_kw["table_names"] = candidates
             if launched_names:
                 record_kw["launched_names"] = launched_names
+            info_rec = maintenance.extract_info(pipeline_in, email_subject=display_subj)
+            studio_val, date_val = maintenance._studio_and_date(
+                info_rec, display_subj, pipeline_in
+            )
+            if studio_val and studio_val != "Unknown":
+                record_kw["studio"] = studio_val
+            if not date_val or date_val == "Unknown":
+                date_val = maintenance.parse_service_desk_date_from_subject(
+                    display_subj
+                ) or date_val
+            if date_val and date_val != "Unknown":
+                record_kw["maint_date"] = date_val
         _record_processed(entries, **record_kw)
         mail.uid("store", uid, "+FLAGS", "(\\Seen)")
         kind = "cancelled" if is_cancel else "processed"
