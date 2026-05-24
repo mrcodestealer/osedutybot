@@ -932,6 +932,32 @@ def _scheduled_card_values(
     return table, maint_type, window, avail, original, subj
 
 
+def _scheduled_card_main_md(
+    table: str,
+    maint_type: str,
+    window: str,
+    avail: str,
+) -> str:
+    """Single ``lark_md`` block — section gaps match reference card (picture 3)."""
+    return "\n".join(
+        [
+            f"Hi {_at_cs_team()}",
+            "",
+            f"🎰 Table: {table}",
+            f"🔧 Type: {maint_type}",
+            "",
+            "🧭 Phase: Scheduled maintenance",
+            "⚠️ Result: Downtime is scheduled and tables will be unavailable.",
+            "",
+            f"⏰ Window: {window}",
+            f"📊 Table Availability: {avail}",
+            "",
+            "⚠️ ACTION REQUIRED: Set Maintenance",
+            "⚠️ 请设置维护",
+        ]
+    )
+
+
 def build_scheduled_card_elements(
     info: dict[str, Any],
     *,
@@ -939,69 +965,24 @@ def build_scheduled_card_elements(
     email_body: str | None = None,
     launched_tables: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Lark body for Scheduled / Affected (picture 3)."""
+    """Lark body for Scheduled / Affected (picture 3): one body block, hr, grey Original."""
     table, maint_type, window, avail, original, _subj = _scheduled_card_values(
         info,
         email_subject=email_subject,
         email_body=email_body,
         launched_tables=launched_tables,
     )
+    main_md = _scheduled_card_main_md(table, maint_type, window, avail)
+    footer_md = f"<font color='grey'>📧 Original: {original}</font>"
     return [
         {
             "tag": "div",
-            "text": {"tag": "lark_md", "content": f"Hi {_at_cs_team()}"},
+            "text": {"tag": "lark_md", "content": main_md},
         },
+        {"tag": "hr"},
         {
             "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": "\n".join(
-                    [
-                        f"🎰 Table: {table}",
-                        f"🔧 Type: {maint_type}",
-                    ]
-                ),
-            },
-        },
-        {
-            "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": "\n".join(
-                    [
-                        "🧭 Phase: Scheduled maintenance",
-                        "⚠️ Result: Downtime is scheduled and tables will be unavailable.",
-                    ]
-                ),
-            },
-        },
-        {
-            "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": "\n".join(
-                    [
-                        f"⏰ Window: {window}",
-                        f"📊 Table Availability: {avail}",
-                    ]
-                ),
-            },
-        },
-        {
-            "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": "\n".join(
-                    [
-                        "⚠️ ACTION REQUIRED: Set Maintenance",
-                        "⚠️ 请设置维护",
-                    ]
-                ),
-            },
-        },
-        {
-            "tag": "div",
-            "text": {"tag": "lark_md", "content": f"📧 Original: {original}"},
+            "text": {"tag": "lark_md", "content": footer_md},
         },
     ]
 
@@ -1020,24 +1001,11 @@ def build_scheduled_card_body(
         email_body=email_body,
         launched_tables=launched_tables,
     )
-    return "\n".join(
-        [
-            f"Hi {_at_cs_team()}",
-            "",
-            f"🎰 Table: {table}",
-            f"🔧 Type: {maint_type}",
-            "",
-            "🧭 Phase: Scheduled maintenance",
-            "⚠️ Result: Downtime is scheduled and tables will be unavailable.",
-            "",
-            f"⏰ Window: {window}",
-            f"📊 Table Availability: {avail}",
-            "",
-            "⚠️ ACTION REQUIRED: Set Maintenance",
-            "⚠️ 请设置维护",
-            f"📧 Original: {original}",
-        ]
-    )
+    parts = [
+        _scheduled_card_main_md(table, maint_type, window, avail),
+        f"📧 Original: {original}",
+    ]
+    return "\n\n---\n\n".join(parts)
 
 
 def build_maintenance_notice(

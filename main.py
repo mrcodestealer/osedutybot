@@ -3215,7 +3215,9 @@ def lark_webhook():
             )
             card = maintenance.build_maintenance_card(
                 email_subject=subj,
-                gamelist_section="" if (card_body or card_el) else (first_reply or ""),
+                gamelist_section=""
+                if (card_body or card_el)
+                else (first_reply or ""),
                 summary_section=card_body or "",
                 body_elements=card_el,
                 email_body=email_text,
