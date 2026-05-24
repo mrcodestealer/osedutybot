@@ -1218,21 +1218,23 @@ class MaintenanceMailWatcher:
                 )
 
             if to_cp:
-                _, second_reply = maintenance.process_maintenance_pipeline(
+                _, hdr_title, hdr_tpl, card_body = maintenance.process_maintenance_pipeline(
                     pipeline_in,
                     token,
                     email_subject=display_subj,
                     received_at=when,
                 )
-                if (second_reply or "").strip():
+                if (card_body or "").strip():
                     main_card = maintenance.build_maintenance_card(
                         email_subject=display_subj,
                         received_at=when,
                         from_addr=from_addr,
                         gamelist_section="",
-                        summary_section=second_reply,
+                        summary_section=card_body,
                         email_body=body,
                         show_meta=False,
+                        header_title=hdr_title,
+                        header_template=hdr_tpl,
                     )
                     self._send_lark_card(TARGET_CHAT_ID, main_card)
 

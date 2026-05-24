@@ -3206,7 +3206,7 @@ def lark_webhook():
                     "`servicedesk@evolution.com` (Service Desk).",
                 )
                 return _lark_im_done()
-            first_reply, second_reply = maintenance.process_maintenance_pipeline(
+            first_reply, hdr_title, hdr_tpl, card_body = maintenance.process_maintenance_pipeline(
                 email_text,
                 token,
                 email_subject=subj,
@@ -3214,8 +3214,11 @@ def lark_webhook():
             card = maintenance.build_maintenance_card(
                 email_subject=subj,
                 gamelist_section=first_reply or "",
-                summary_section=second_reply or "",
+                summary_section=card_body or "",
                 email_body=email_text,
+                show_meta=False,
+                header_title=hdr_title or None,
+                header_template=hdr_tpl or "orange",
             )
             send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
         else:

@@ -37,6 +37,10 @@ GAMELIST_SHEET_ID = (
 
 _CARD_HEADER_TITLE_MAX = 100
 
+# Lark @mentions for maintenance cards (display names come from open_id).
+_CS_TEAM_OPEN_ID = "ou_c927a378e9b464741c67b61c1641577b"
+_QA_SUPPORT_OPEN_ID = "ou_0342007237c6c1aa262acae839acb7c6"
+
 # Substrings in email subject/title → skip (no card, no pipeline).
 _SUBJECT_IGNORE_MARKERS = ("c88live_ow.ph",)
 
@@ -357,16 +361,14 @@ def build_cancelled_summary(
     email_body: str | None = None,
 ) -> str:
     """Lark card body for a maintenance cancellation (matches mail-watcher format)."""
-    qa_os_local_id = "ou_0342007237c6c1aa262acae839acb7c6"
-    cs_team_id = "ou_c927a378e9b464741c67b61c1641577b"
     game = (table_game or "").strip() or "Unknown"
     ref = (ref_email or "").strip() or "Unknown"
     notice = extract_cancel_notice_text(email_body)
     return "\n".join(
         [
             "Hi team "
-            f"{lark_card_at_open_id(qa_os_local_id)} "
-            f"{lark_card_at_open_id(cs_team_id)}, kindly help check this email. thank you.",
+            f"{lark_card_at_open_id(_QA_SUPPORT_OPEN_ID)} "
+            f"{lark_card_at_open_id(_CS_TEAM_OPEN_ID)}, kindly help check this email. thank you.",
             "",
             notice,
             "",
@@ -374,6 +376,374 @@ def build_cancelled_summary(
             "",
             f"REF EMAIL: {ref}",
         ]
+    )
+
+
+def _at_cs_team() -> str:
+    return lark_card_at_open_id(_CS_TEAM_OPEN_ID)
+
+
+def _at_qa_support() -> str:
+    return lark_card_at_open_id(_QA_SUPPORT_OPEN_ID)
+
+
+def parse_tinc_subject_metadata(subject: str) -> dict[str, str]:
+    """
+    ``TINC-708832 Live Dealer Casino Information / Lithuania Studio /
+    Double Ball Roulette / 24/May/26`` → studio, table, date, email_ref.
+    """
+    s = normalize_display_subject(subject)
+    m = re.match(
+        r"^(TINC-\d+)\s+.+?\s*/\s*(.+?)\s*/\s*(.+?)\s*/\s*(.+?)\s*$",
+        s,
+        re.IGNORECASE,
+    )
+    if not m:
+        return {}
+    return {
+        "ticket": m.group(1).upper(),
+        "studio": m.group(2).strip(),
+        "table": m.group(3).strip(),
+        "date": m.group(4).strip(),
+        "email_ref": s,
+    }
+
+
+def parse_service_desk_subject_metadata(subject: str) -> dict[str, str]:
+    """``[Service Desk] Studio cleaning maintenance / … / (SD-7044009)``."""
+    s = normalize_display_subject(subject)
+    out: dict[str, str] = {"email_ref": s}
+    m = re.match(r"^\[Service Desk\]\s*(.+?)\s*/", s, re.IGNORECASE)
+    if m:
+        out["maintenance_type"] = m.group(1).strip()
+    sd = extract_ticket_card_title(s)
+    if sd:
+        out["ticket_sd"] = sd
+    return out
+
+
+def classify_maintenance_card_kind(
+    info: dict[str, Any],
+    *,
+    email_subject: str | None = None,
+    email_body: str | None = None,
+) -> str:
+    """
+    ``in_progress`` | ``fixed`` | ``scheduled`` for picture-style Lark cards.
+    Cancelled emails are handled separately.
+    """
+    body = email_body or ""
+    subj = (email_subject or "").strip()
+    status = (info.get("status") or "").strip().lower()
+    subj_low = subj.lower()
+
+    if status == "fixed" or re.search(
+        r"successfully\s+accomplished|maintenance\s+(?:is\s+)?fixed",
+        body,
+        re.IGNORECASE,
+    ):
+        return "fixed"
+    if status in ("in progress", "in-progress", "inprogress"):
+        return "in_progress"
+    card_status = (extract_status_for_card(subj, body) or "").strip().lower()
+    if card_status == "affected" or status == "affected":
+        if "[service desk]" in subj_low:
+            return "scheduled"
+    if "[service desk]" in subj_low and re.search(
+        r"going\s+to\s+take\s+place|downtime\s+from|will\s+be\s+unavailable",
+        body,
+        re.IGNORECASE,
+    ):
+        return "scheduled"
+    if subj_low.startswith("tinc-"):
+        return "in_progress"
+    return "scheduled" if "[service desk]" in subj_low else "in_progress"
+
+
+def _truncate_header(title: str) -> str:
+    if len(title) <= _CARD_HEADER_TITLE_MAX:
+        return title
+    return title[: _CARD_HEADER_TITLE_MAX - 3] + "..."
+
+
+def build_in_progress_card_header(subject: str, email_body: str | None = None) -> str:
+    ticket = ticket_id_tinc_style(subject, email_body) or "Maintenance"
+    return _truncate_header(f"⚠️ {ticket} - In Progress")
+
+
+def build_fixed_card_header(subject: str, email_body: str | None = None) -> str:
+    ticket = ticket_id_tinc_style(subject, email_body) or "Maintenance"
+    return _truncate_header(f"✅ {ticket} - Fixed")
+
+
+def build_scheduled_card_header(subject: str, email_body: str | None = None) -> str:
+    meta = parse_service_desk_subject_metadata(subject)
+    sd = meta.get("ticket_sd") or extract_ticket_card_title(subject, email_body) or "SD-?"
+    maint = meta.get("maintenance_type") or "Maintenance"
+    return _truncate_header(f"⚠️ [{sd}] {maint} - Scheduled")
+
+
+def _table_display(
+    info: dict[str, Any],
+    *,
+    launched_tables: list[str] | None,
+    email_subject: str | None,
+) -> str:
+    if launched_tables:
+        return ", ".join(launched_tables)
+    names = [str(x).strip() for x in (info.get("table_names") or []) if str(x).strip()]
+    if names:
+        return ", ".join(names)
+    tinc = parse_tinc_subject_metadata(email_subject or "")
+    if tinc.get("table"):
+        return tinc["table"]
+    tbl = (info.get("table") or "").strip()
+    return tbl if tbl and tbl.lower() != "unknown" else "Unknown"
+
+
+def _studio_and_date(
+    info: dict[str, Any], email_subject: str | None
+) -> tuple[str, str]:
+    tinc = parse_tinc_subject_metadata(email_subject or "")
+    studio = tinc.get("studio") or "Unknown"
+    date = tinc.get("date") or "Unknown"
+    return studio, date
+
+
+def _email_ref_line(info: dict[str, Any], email_subject: str | None) -> str:
+    ref = (info.get("reference") or "").strip()
+    if ref and ref.lower() != "unknown":
+        return ref
+    return normalize_display_subject(email_subject or "") or "Unknown"
+
+
+def _reason_display(info: dict[str, Any], email_body: str | None) -> str:
+    reason = (info.get("reason") or "").strip()
+    if reason and reason.lower() != "unknown":
+        return reason
+    for line in (email_body or "").replace("\r\n", "\n").splitlines():
+        m = re.match(r"^Reason:\s*(.+)$", _clean_email_line(line), re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+    return "Unknown"
+
+
+_MONTH_MAP = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
+
+
+def _parse_maint_utc_datetime(raw: str) -> datetime | None:
+    s = (raw or "").strip()
+    if not s or s.upper() == "TBA":
+        return None
+    m = re.search(
+        r"(\d{1,2})/(\w{3})/(\d{2,4})\s+(\d{1,2}):(\d{2})\s*(AM|PM)?\s*UTC",
+        s,
+        re.IGNORECASE,
+    )
+    if not m:
+        return None
+    day = int(m.group(1))
+    mon = _MONTH_MAP.get(m.group(2).lower()[:3])
+    if not mon:
+        return None
+    yr = int(m.group(3))
+    if yr < 100:
+        yr += 2000
+    hour = int(m.group(4))
+    minute = int(m.group(5))
+    ampm = (m.group(6) or "").upper()
+    if ampm == "PM" and hour < 12:
+        hour += 12
+    if ampm == "AM" and hour == 12:
+        hour = 0
+    try:
+        return datetime(yr, mon, day, hour, minute, tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _format_utc8_from_utc_str(utc_str: str) -> str:
+    dt = _parse_maint_utc_datetime(utc_str)
+    if not dt:
+        return (utc_str or "").strip() or "Unknown"
+    local = dt.astimezone(ZoneInfo("Asia/Shanghai"))
+    return local.strftime("%d/%b/%y %H:%M UTC+8")
+
+
+def format_maintenance_window_utc8(start: str, end: str) -> str:
+    a = _format_utc8_from_utc_str(start)
+    b = _format_utc8_from_utc_str(end)
+    return f"{a} -> {b}"
+
+
+def format_time_of_resolution(
+    info: dict[str, Any], email_body: str | None = None
+) -> str:
+    body = email_body or ""
+    m = re.search(
+        r"Time of resolution:\s*(.+)$",
+        body.replace("\r\n", "\n"),
+        re.IGNORECASE | re.MULTILINE,
+    )
+    if m:
+        return m.group(1).strip()
+    start = (info.get("start_time") or "").strip()
+    end = (info.get("end_time") or "").strip()
+    if not start or start.lower() == "unknown":
+        return "Unknown"
+    if not end or end.lower() in ("unknown", "tba"):
+        return f"From {start} till TBA"
+    dt1 = _parse_maint_utc_datetime(start)
+    dt2 = _parse_maint_utc_datetime(end)
+    if dt1 and dt2 and dt2 > dt1:
+        mins = int((dt2 - dt1).total_seconds() // 60)
+        return f"From {start} till {end} ({mins} min in total)"
+    return f"From {start} till {end}"
+
+
+def build_in_progress_card_body(
+    info: dict[str, Any],
+    *,
+    email_subject: str | None = None,
+    email_body: str | None = None,
+    launched_tables: list[str] | None = None,
+) -> str:
+    studio, date = _studio_and_date(info, email_subject)
+    table = _table_display(info, launched_tables=launched_tables, email_subject=email_subject)
+    reason = _reason_display(info, email_body)
+    email_ref = _email_ref_line(info, email_subject)
+    return "\n".join(
+        [
+            "Studio:",
+            studio,
+            "Date:",
+            date,
+            "Table:",
+            table,
+            "Reason:",
+            reason,
+            "",
+            "⚠️ Maintenance in progress. Will notify when fixed.",
+            f"📧 Email: {email_ref}",
+        ]
+    )
+
+
+def build_fixed_card_body(
+    info: dict[str, Any],
+    *,
+    email_subject: str | None = None,
+    email_body: str | None = None,
+    launched_tables: list[str] | None = None,
+) -> str:
+    studio, date = _studio_and_date(info, email_subject)
+    table = _table_display(info, launched_tables=launched_tables, email_subject=email_subject)
+    reason = _reason_display(info, email_body)
+    resolution = format_time_of_resolution(info, email_body)
+    email_ref = _email_ref_line(info, email_subject)
+    return "\n".join(
+        [
+            f"Hi {_at_cs_team()}",
+            "",
+            "Kindly unset maintenance.",
+            "Studio:",
+            studio,
+            "Date:",
+            date,
+            "Table:",
+            table,
+            "Time of resolution:",
+            resolution,
+            "Reason:",
+            reason,
+            "",
+            f"CC: {_at_qa_support()}",
+            f"📧 Email: {email_ref}",
+        ]
+    )
+
+
+def build_scheduled_card_body(
+    info: dict[str, Any],
+    *,
+    email_subject: str | None = None,
+    email_body: str | None = None,
+    launched_tables: list[str] | None = None,
+) -> str:
+    sd_meta = parse_service_desk_subject_metadata(email_subject or "")
+    maint_type = sd_meta.get("maintenance_type") or _reason_display(info, None)
+    table = _table_display(info, launched_tables=launched_tables, email_subject=email_subject)
+    window = format_maintenance_window_utc8(
+        str(info.get("start_time") or ""),
+        str(info.get("end_time") or ""),
+    )
+    avail = extract_status_for_card(email_subject or "", None) or "Affected"
+    original = sd_meta.get("email_ref") or _email_ref_line(info, email_subject)
+    return "\n".join(
+        [
+            f"Hi {_at_cs_team()}",
+            "",
+            f"🎰 Table: {table}",
+            f"🔧 Type: {maint_type}",
+            "",
+            "🧭 Phase: Scheduled maintenance",
+            "⚠️ Result: Downtime is scheduled and tables will be unavailable.",
+            "",
+            f"⏰ Window: {window}",
+            f"📊 Table Availability: {avail}",
+            "",
+            "⚠️ ACTION REQUIRED: Set Maintenance",
+            "⚠️ 请设置维护",
+            f"📧 Original: {original}",
+        ]
+    )
+
+
+def build_maintenance_notice(
+    email_text: str,
+    *,
+    email_subject: str | None = None,
+    launched_tables: list[str] | None = None,
+) -> tuple[str, str, str]:
+    """Picture-style maintenance card: ``(header_title, header_template, body_md)``."""
+    info = extract_info(email_text, email_subject=email_subject)
+    kind = classify_maintenance_card_kind(
+        info, email_subject=email_subject, email_body=email_text
+    )
+    kw = {
+        "email_subject": email_subject,
+        "email_body": email_text,
+        "launched_tables": launched_tables,
+    }
+    if kind == "fixed":
+        return (
+            build_fixed_card_header(email_subject or "", email_text),
+            "green",
+            build_fixed_card_body(info, **kw),
+        )
+    if kind == "scheduled":
+        return (
+            build_scheduled_card_header(email_subject or "", email_text),
+            "red",
+            build_scheduled_card_body(info, **kw),
+        )
+    return (
+        build_in_progress_card_header(email_subject or "", email_text),
+        "orange",
+        build_in_progress_card_body(info, **kw),
     )
 
 
@@ -706,7 +1076,7 @@ def extract_info(text: str, *, email_subject: str | None = None):
                 if match:
                     info['table'] = match.group(1).strip()
                     info['table_names'] = [info['table']]
-        elif re.search(r'^Affected table/-s:', line, re.IGNORECASE):
+        elif re.search(r'^Affected tables?\s*:', line, re.IGNORECASE):
             block_names, j = _parse_table_block_after_heading(lines, i)
             if block_names:
                 info["table"] = ", ".join(block_names)
@@ -725,9 +1095,7 @@ def extract_info(text: str, *, email_subject: str | None = None):
         elif re.search(r'^Reason:', line, re.IGNORECASE):
             match = re.search(r'^Reason:\s*(.*)$', line, re.IGNORECASE)
             if match:
-                reason = match.group(1).strip()
-                reason = re.sub(r'\s*\([^)]*\)', '', reason)
-                info['reason'] = reason
+                info['reason'] = match.group(1).strip()
 
         # ---- Status (explicit) ----
         elif re.search(r'^Status:', line, re.IGNORECASE):
@@ -736,14 +1104,14 @@ def extract_info(text: str, *, email_subject: str | None = None):
                 info['status'] = match.group(1).strip()
 
         # ---- Start time ----
-        elif re.search(r'^Start time:', line, re.IGNORECASE):
-            match = re.search(r'^Start time:\s*(.*)$', line, re.IGNORECASE)
+        elif re.search(r'^Start\s*time\s*:', line, re.IGNORECASE):
+            match = re.search(r'^Start\s*time\s*:\s*(.*)$', line, re.IGNORECASE)
             if match:
                 info['start_time'] = match.group(1).strip()
 
         # ---- End time ----
-        elif re.search(r'^End time:', line, re.IGNORECASE):
-            match = re.search(r'^End time:\s*(.*)$', line, re.IGNORECASE)
+        elif re.search(r'^End\s*time\s*:', line, re.IGNORECASE):
+            match = re.search(r'^End\s*time\s*:\s*(.*)$', line, re.IGNORECASE)
             if match:
                 info['end_time'] = match.group(1).strip()
 
@@ -946,7 +1314,7 @@ def get_table_name(text):
             match = re.search(r'table\s+(.*?)\s+was', line, re.IGNORECASE)
             if match:
                 return match.group(1).strip()
-        elif re.search(r'^Affected table/-s:', line, re.IGNORECASE):
+        elif re.search(r'^Affected tables?\s*:', line, re.IGNORECASE):
             block_names, _ = _parse_table_block_after_heading(lines, i)
             if block_names:
                 return block_names[0]
@@ -1013,13 +1381,14 @@ def process_maintenance_pipeline(
     *,
     email_subject: str | None = None,
     received_at: str | None = None,
-) -> tuple[str, str]:
+) -> tuple[str, str, str, str]:
     """
-    Two-part reply for bot:
-    1) Launched vs not launched (from gamelist spreadsheet; unmatched → not launched).
-    2) Full QA/CS summary only if at least one candidate is 「上线 Launched」.
+    Reply for bot / mail watcher:
+    1) Launched vs not launched (gamelist section; often omitted on cards).
+    2–4) Picture-style Lark card ``header_title``, ``header_template``, ``body_md``
+    only if at least one candidate is 「上线 Launched」.
 
-    If ``gamelist`` / ``gamelistsheetid`` or tenant token is missing, returns ("", process_email(...)).
+    If gamelist env is missing, returns ("", *build_maintenance_notice(...)).
     """
     tok = (tenant_access_token or "").strip()
     ss = GAMELIST_SPREADSHEET_TOKEN
@@ -1027,21 +1396,32 @@ def process_maintenance_pipeline(
     subj_kw = {"email_subject": email_subject}
 
     if not ss or not sid or not tok:
-        return "", process_email(email_text, **subj_kw)
+        h, t, b = build_maintenance_notice(email_text, email_subject=email_subject)
+        return "", h, t, b
 
     try:
         grid = _fetch_sheet_values(tok, ss, sid)
     except Exception as e:
+        h, t, b = build_maintenance_notice(
+            email_text, email_subject=email_subject
+        )
         return (
             f"⚠️ **Gamelist 表格**读取失败（仍发送下方原始摘要）: `{e}`",
-            process_email(email_text, **subj_kw),
+            h,
+            t,
+            b,
         )
 
     candidates = extract_candidate_game_names(email_text)
     if not candidates:
+        h, t, b = build_maintenance_notice(
+            email_text, email_subject=email_subject
+        )
         return (
             "⚠️ 未能从邮件中识别游戏/表名（仍发送下方原始摘要）。",
-            process_email(email_text, **subj_kw),
+            h,
+            t,
+            b,
         )
 
     launched_list: list[str] = []
@@ -1068,15 +1448,15 @@ def process_maintenance_pipeline(
     msg1 = "\n".join(lines1)
 
     if not launched_list:
-        return msg1, ""
+        return msg1, "", "", ""
 
-    msg2 = process_email(
+    hdr_title, hdr_tpl, msg2 = build_maintenance_notice(
         email_text,
-        affected_launched_only=launched_list,
-        **subj_kw,
+        email_subject=email_subject,
+        launched_tables=launched_list,
     )
 
-    return msg1, msg2
+    return msg1, hdr_title, hdr_tpl, msg2
 
 
 def parse_subject_from_pasted_email(text: str) -> str | None:
