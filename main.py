@@ -3206,15 +3206,18 @@ def lark_webhook():
                     "`servicedesk@evolution.com` (Service Desk).",
                 )
                 return _lark_im_done()
-            first_reply, hdr_title, hdr_tpl, card_body = maintenance.process_maintenance_pipeline(
-                email_text,
-                token,
-                email_subject=subj,
+            first_reply, hdr_title, hdr_tpl, card_body, card_el = (
+                maintenance.process_maintenance_pipeline(
+                    email_text,
+                    token,
+                    email_subject=subj,
+                )
             )
             card = maintenance.build_maintenance_card(
                 email_subject=subj,
-                gamelist_section="" if (card_body or "").strip() else (first_reply or ""),
+                gamelist_section="" if (card_body or card_el) else (first_reply or ""),
                 summary_section=card_body or "",
+                body_elements=card_el,
                 email_body=email_text,
                 show_meta=False,
                 header_title=hdr_title or None,

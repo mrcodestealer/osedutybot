@@ -675,6 +675,76 @@ def format_time_of_resolution(
     return f"From {start} till {end}"
 
 
+def _card_labeled_field(label: str, value: str) -> dict[str, Any]:
+    """Bold label + value on next line (picture 1 field blocks)."""
+    val = (value or "").strip() or "Unknown"
+    return {
+        "tag": "div",
+        "text": {"tag": "lark_md", "content": f"**{label}:**\n{val}"},
+    }
+
+
+def _card_studio_date_columns(studio: str, date: str) -> dict[str, Any]:
+    """Two-column Studio | Date row (picture 1)."""
+    return {
+        "tag": "column_set",
+        "flex_mode": "bisect",
+        "background_style": "default",
+        "horizontal_spacing": "8px",
+        "columns": [
+            {
+                "tag": "column",
+                "width": "weighted",
+                "weight": 1,
+                "vertical_align": "top",
+                "elements": [_card_labeled_field("Studio", studio)],
+            },
+            {
+                "tag": "column",
+                "width": "weighted",
+                "weight": 1,
+                "vertical_align": "top",
+                "elements": [_card_labeled_field("Date", date)],
+            },
+        ],
+    }
+
+
+def build_in_progress_card_elements(
+    info: dict[str, Any],
+    *,
+    email_subject: str | None = None,
+    email_body: str | None = None,
+    launched_tables: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Lark body elements matching picture 1 (bisect Studio/Date, hr, footer)."""
+    studio, date = _studio_and_date(info, email_subject, email_body)
+    table = _table_display(
+        info,
+        launched_tables=launched_tables,
+        email_subject=resolve_maintenance_subject(email_subject, email_body),
+    )
+    reason = _reason_display(info, email_body)
+    email_ref = _email_ref_line(info, email_subject, email_body)
+    return [
+        _card_studio_date_columns(studio, date),
+        _card_labeled_field("Table", table),
+        _card_labeled_field("Reason", reason),
+        {"tag": "hr"},
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": "⚠️ Maintenance in progress. Will notify when fixed.",
+            },
+        },
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"📧 Email: {email_ref}"},
+        },
+    ]
+
+
 def build_in_progress_card_body(
     info: dict[str, Any],
     *,
@@ -682,6 +752,7 @@ def build_in_progress_card_body(
     email_body: str | None = None,
     launched_tables: list[str] | None = None,
 ) -> str:
+    """Plain-text fallback (tests / logging)."""
     studio, date = _studio_and_date(info, email_subject, email_body)
     table = _table_display(
         info,
@@ -692,14 +763,10 @@ def build_in_progress_card_body(
     email_ref = _email_ref_line(info, email_subject, email_body)
     return "\n".join(
         [
-            "Studio:",
-            studio,
-            "Date:",
-            date,
-            "Table:",
-            table,
-            "Reason:",
-            reason,
+            f"**Studio:**\n{studio}",
+            f"**Date:**\n{date}",
+            f"**Table:**\n{table}",
+            f"**Reason:**\n{reason}",
             "",
             "⚠️ Maintenance in progress. Will notify when fixed.",
             f"📧 Email: {email_ref}",
@@ -786,8 +853,14 @@ def build_maintenance_notice(
     *,
     email_subject: str | None = None,
     launched_tables: list[str] | None = None,
-) -> tuple[str, str, str]:
-    """Picture-style maintenance card: ``(header_title, header_template, body_md)``."""
+) -> tuple[str, str, str, list[dict[str, Any]] | None]:
+    """
+    Picture-style maintenance card:
+    ``(header_title, header_template, body_md, body_elements)``.
+
+    ``body_elements`` is set for **In Progress** (picture 1 column layout);
+    otherwise use ``body_md`` in :func:`build_maintenance_card`.
+    """
     info = extract_info(email_text, email_subject=email_subject)
     kind = classify_maintenance_card_kind(
         info, email_subject=email_subject, email_body=email_text
@@ -802,17 +875,20 @@ def build_maintenance_notice(
             build_fixed_card_header(email_subject or "", email_text),
             "green",
             build_fixed_card_body(info, **kw),
+            None,
         )
     if kind == "scheduled":
         return (
             build_scheduled_card_header(email_subject or "", email_text),
             "red",
             build_scheduled_card_body(info, **kw),
+            None,
         )
     return (
         build_in_progress_card_header(email_subject or "", email_text),
         "orange",
-        build_in_progress_card_body(info, **kw),
+        "",
+        build_in_progress_card_elements(info, **kw),
     )
 
 
@@ -1309,12 +1385,13 @@ def build_maintenance_card(
     from_addr: str | None = None,
     gamelist_section: str = "",
     summary_section: str = "",
+    body_elements: list[dict[str, Any]] | None = None,
     header_template: str = "orange",
     email_body: str | None = None,
     show_meta: bool = True,
     header_title: str | None = None,
 ) -> dict[str, Any]:
-    """Lark interactive card: header = ticket id + Status; optional meta / gamelist / QA body."""
+    """Lark interactive card: header = ticket id + Status; optional meta / gamelist / body."""
     display_subj = normalize_display_subject(email_subject) or "Maintenance email"
     rcv = format_received_at(received_at)
     if not (header_title or "").strip():
@@ -1350,7 +1427,9 @@ def build_maintenance_card(
         )
         elements.append({"tag": "hr"})
 
-    if (summary_section or "").strip():
+    if body_elements:
+        elements.extend(body_elements)
+    elif (summary_section or "").strip():
         elements.append(
             {
                 "tag": "div",
@@ -1460,12 +1539,12 @@ def process_maintenance_pipeline(
     *,
     email_subject: str | None = None,
     received_at: str | None = None,
-) -> tuple[str, str, str, str]:
+) -> tuple[str, str, str, str, list[dict[str, Any]] | None]:
     """
     Reply for bot / mail watcher:
     1) Launched vs not launched (gamelist section; often omitted on cards).
-    2–4) Picture-style Lark card ``header_title``, ``header_template``, ``body_md``
-    only if at least one candidate is 「上线 Launched」.
+    2–5) Picture-style Lark card ``header_title``, ``header_template``, ``body_md``,
+    ``body_elements`` (In Progress picture 1 layout) — only if ≥1 game launched.
 
     If gamelist env is missing, returns ("", *build_maintenance_notice(...)).
     """
@@ -1475,13 +1554,13 @@ def process_maintenance_pipeline(
     subj_kw = {"email_subject": email_subject}
 
     if not ss or not sid or not tok:
-        h, t, b = build_maintenance_notice(email_text, email_subject=email_subject)
-        return "", h, t, b
+        h, t, b, el = build_maintenance_notice(email_text, email_subject=email_subject)
+        return "", h, t, b, el
 
     try:
         grid = _fetch_sheet_values(tok, ss, sid)
     except Exception as e:
-        h, t, b = build_maintenance_notice(
+        h, t, b, el = build_maintenance_notice(
             email_text, email_subject=email_subject
         )
         return (
@@ -1489,11 +1568,12 @@ def process_maintenance_pipeline(
             h,
             t,
             b,
+            el,
         )
 
     candidates = extract_candidate_game_names(email_text)
     if not candidates:
-        h, t, b = build_maintenance_notice(
+        h, t, b, el = build_maintenance_notice(
             email_text, email_subject=email_subject
         )
         return (
@@ -1501,6 +1581,7 @@ def process_maintenance_pipeline(
             h,
             t,
             b,
+            el,
         )
 
     launched_list: list[str] = []
@@ -1527,15 +1608,15 @@ def process_maintenance_pipeline(
     msg1 = "\n".join(lines1)
 
     if not launched_list:
-        return msg1, "", "", ""
+        return msg1, "", "", "", None
 
-    hdr_title, hdr_tpl, msg2 = build_maintenance_notice(
+    hdr_title, hdr_tpl, msg2, card_el = build_maintenance_notice(
         email_text,
         email_subject=email_subject,
         launched_tables=launched_list,
     )
 
-    return msg1, hdr_title, hdr_tpl, msg2
+    return msg1, hdr_title, hdr_tpl, msg2, card_el
 
 
 def parse_subject_from_pasted_email(text: str) -> str | None:

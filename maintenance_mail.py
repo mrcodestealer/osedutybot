@@ -1218,19 +1218,22 @@ class MaintenanceMailWatcher:
                 )
 
             if to_cp:
-                _, hdr_title, hdr_tpl, card_body = maintenance.process_maintenance_pipeline(
-                    pipeline_in,
-                    token,
-                    email_subject=display_subj,
-                    received_at=when,
+                _, hdr_title, hdr_tpl, card_body, card_el = (
+                    maintenance.process_maintenance_pipeline(
+                        pipeline_in,
+                        token,
+                        email_subject=display_subj,
+                        received_at=when,
+                    )
                 )
-                if (card_body or "").strip():
+                if (card_body or "").strip() or card_el:
                     main_card = maintenance.build_maintenance_card(
                         email_subject=display_subj,
                         received_at=when,
                         from_addr=from_addr,
                         gamelist_section="",
                         summary_section=card_body,
+                        body_elements=card_el,
                         email_body=body,
                         show_meta=False,
                         header_title=hdr_title,
