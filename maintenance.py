@@ -580,12 +580,26 @@ def build_cancelled_card_elements(
         prior=prior,
     )
     notice = extract_cancel_notice_text(email_body)
+    if prior and (prior.get("title") or "").strip():
+        original = str(prior["title"]).strip()
+    else:
+        original = resolve_maintenance_subject(email_subject, email_body) or _email_ref_line(
+            inf, email_subject, email_body
+        )
     return [
         _card_studio_date_columns(studio, date),
         _card_labeled_field("Table", table),
         {
             "tag": "div",
             "text": {"tag": "lark_md", "content": notice},
+        },
+        {"tag": "hr"},
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"<font color='grey'>📧 Original: {original}</font>",
+            },
         },
     ]
 
@@ -628,13 +642,19 @@ def build_cancelled_summary(
 ) -> str:
     """Plain-text fallback for cancellation cards."""
     info = extract_info(email_body or "", email_subject=ref_email)
+    prior = lookup_prior_maintenance_for_cancel(ref_email, email_body)
     studio, date, table = _cancel_fields_for_card(
         info,
         email_subject=ref_email,
         email_body=email_body,
         table_game=table_game,
+        prior=prior,
     )
     notice = extract_cancel_notice_text(email_body)
+    if prior and (prior.get("title") or "").strip():
+        original = str(prior["title"]).strip()
+    else:
+        original = resolve_maintenance_subject(ref_email, email_body) or ref_email
     return "\n".join(
         [
             f"**Studio:**\n{studio}",
@@ -642,6 +662,8 @@ def build_cancelled_summary(
             f"**Table:**\n{table}",
             "",
             notice,
+            "",
+            f"📧 Original: {original}",
         ]
     )
 
