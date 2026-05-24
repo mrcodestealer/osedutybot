@@ -36,6 +36,63 @@ def parse_email_from_update_body(body: str) -> str | None:
     return None
 
 
+def normalize_email_key(title: str) -> str:
+    return re.sub(r"\s+", " ", (title or "").strip().casefold())
+
+
+def assign_email_batches(segments: list[dict[str, Any]]) -> None:
+    """
+    Consecutive ``same`` segments that **each** have the same explicit ``Email:`` title
+    share one batch → one combined reply after all complete.
+
+    No inheritance: ``same`` without ``Email:`` breaks the batch chain.
+    """
+    batch_counter = 0
+    i = 0
+    while i < len(segments):
+        email = (segments[i].get("email_subject") or "").strip()
+        if not email:
+            i += 1
+            continue
+        indices = [i]
+        j = i + 1
+        while j < len(segments) and segments[j].get("same_as_prev"):
+            nxt_email = (segments[j].get("email_subject") or "").strip()
+            if not nxt_email:
+                break
+            if normalize_email_key(nxt_email) != normalize_email_key(email):
+                break
+            indices.append(j)
+            j += 1
+        bid = batch_counter
+        batch_counter += 1
+        for idx in indices:
+            segments[idx]["email_batch_id"] = bid
+            segments[idx]["email_batch_indices"] = list(indices)
+            segments[idx]["email_batch_title"] = email
+        i = j if len(indices) > 1 else i + 1
+
+
+def build_email_batch_state(segments: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    """Runtime batch tracker (only batches with 2+ segments)."""
+    batches: dict[int, dict[str, Any]] = {}
+    seen: set[int] = set()
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+        bid = seg.get("email_batch_id")
+        indices = seg.get("email_batch_indices")
+        if bid is None or bid in seen or not isinstance(indices, list) or len(indices) < 2:
+            continue
+        seen.add(int(bid))
+        batches[int(bid)] = {
+            "title": (seg.get("email_batch_title") or seg.get("email_subject") or "").strip(),
+            "indices": list(indices),
+            "done_by_idx": {},
+        }
+    return batches
+
+
 def _normalize_lines(body: str) -> list[str]:
     return [ln.rstrip() for ln in (body or "").replace("\r\n", "\n").split("\n")]
 
@@ -132,6 +189,7 @@ def parse_updatemore_body(body: str) -> list[dict[str, Any]]:
         else:
             raise ValueError(f"Expected `same` or `not same`, got: {lines[i - 1]!r}")
 
+    assign_email_batches(segments)
     return segments
 
 
@@ -153,7 +211,10 @@ def queue_summary(segments: list[dict[str, Any]]) -> str:
     lines = [f"📋 **/updatemore** — {len(segments)} segment(s):"]
     for n, seg in enumerate(segments, 1):
         same = " (same env)" if seg.get("same_as_prev") else ""
-        em = " 📧" if seg.get("email_subject") else ""
+        em = ""
+        if seg.get("email_subject"):
+            batch_ix = seg.get("email_batch_indices") or []
+            em = " 📧 (batched reply)" if len(batch_ix) > 1 else " 📧"
         lines.append(f"  {n}. `{seg['env_line']}`{same}{em}")
     return "\n".join(lines)
 
@@ -178,6 +239,8 @@ def init_queue(
         "chat_id": chat_id,
         "sender_id": sender_id,
         "stopped": False,
+        "email_batches": build_email_batch_state(segments),
+        "email_watches": [],
     }
 
 
@@ -211,6 +274,81 @@ def segment_has_email(q: dict[str, Any]) -> bool:
 
 def clear_queue_from_session(sess: dict[str, Any]) -> None:
     sess.pop("updatemore_queue", None)
+
+
+def register_email_build_watch(
+    q: dict[str, Any],
+    *,
+    seg_idx: int,
+    email_title: str,
+) -> None:
+    watches = list(q.get("email_watches") or [])
+    watches.append({"seg_idx": int(seg_idx), "title": (email_title or "").strip()})
+    q["email_watches"] = watches
+
+
+def record_email_build_success(
+    q: dict[str, Any],
+    *,
+    email_title: str,
+    environment: str,
+    when: str,
+) -> tuple[str, list[tuple[str, str]] | None, str]:
+    """
+    Returns ``(status, rows, canonical_title)`` — ``status`` is ``sent`` or ``pending``.
+    """
+    title = (email_title or "").strip()
+    key = normalize_email_key(title)
+    seg_idx: int | None = None
+    watches = list(q.get("email_watches") or [])
+    for i, watch in enumerate(watches):
+        if normalize_email_key(str(watch.get("title") or "")) == key:
+            seg_idx = int(watch.get("seg_idx", -1))
+            watches.pop(i)
+            break
+    q["email_watches"] = watches
+
+    segs = q.get("segments") or []
+    seg = segs[seg_idx] if seg_idx is not None and 0 <= seg_idx < len(segs) else None
+    indices = list((seg or {}).get("email_batch_indices") or [])
+    canonical = str((seg or {}).get("email_batch_title") or title)
+
+    if len(indices) < 2:
+        return "sent", [(environment.strip(), when.strip())], canonical
+
+    bid = int((seg or {}).get("email_batch_id", -1))
+    batches = q.get("email_batches") or {}
+    batch = batches.get(bid)
+    if not isinstance(batch, dict):
+        batch = {"title": canonical, "indices": indices, "done_by_idx": {}}
+        batches[bid] = batch
+        q["email_batches"] = batches
+
+    done_by_idx: dict[int, dict[str, str]] = dict(batch.get("done_by_idx") or {})
+    if seg_idx is not None and seg_idx >= 0:
+        done_by_idx[seg_idx] = {
+            "environment": environment.strip(),
+            "time": when.strip(),
+        }
+    else:
+        spare = [ix for ix in indices if ix not in done_by_idx]
+        if spare:
+            done_by_idx[spare[0]] = {
+                "environment": environment.strip(),
+                "time": when.strip(),
+            }
+    batch["done_by_idx"] = done_by_idx
+
+    if len(done_by_idx) < len(indices):
+        return "pending", None, canonical
+
+    rows = [
+        (done_by_idx[ix]["environment"], done_by_idx[ix]["time"])
+        for ix in sorted(indices)
+        if ix in done_by_idx
+    ]
+    batch["done_by_idx"] = {}
+    return "sent", rows, canonical
 
 
 # ----- jenkinsbot → duty bot callbacks -----
@@ -319,16 +457,29 @@ def handle_jenkins_email_done(
     key, q, sess = find_active_queue_for_chat(chat_id, sessions, sessions_lock)
 
     if q and not q.get("stopped"):
-        try:
-            _send_jenkins_email_reply(
-                send,
+        status, rows, canonical = record_email_build_success(
+            q,
+            email_title=email_title,
+            environment=environment,
+            when=when,
+        )
+        if status == "pending":
+            send(
                 chat_id,
-                email_title=email_title,
-                completions=[(environment, when)],
+                f"📧 Jenkins **{environment}** done at **{when}** — waiting for other `same` "
+                f"segment(s) with the same `Email:` subject before replying…",
             )
-        except Exception as ex:
-            send(chat_id, f"❌ Jenkins email auto-reply failed: {ex}")
-            return True
+        elif status == "sent" and rows:
+            try:
+                _send_jenkins_email_reply(
+                    send,
+                    chat_id,
+                    email_title=canonical or email_title,
+                    completions=rows,
+                )
+            except Exception as ex:
+                send(chat_id, f"❌ Jenkins email auto-reply failed: {ex}")
+                return True
 
         if q.get("waiting_jenkins") and not q.get("stopped"):
             with sessions_lock:

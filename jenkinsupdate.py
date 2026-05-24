@@ -7077,6 +7077,7 @@ def _fpms_lark_notify_jenkins_after_build_click(
 
     seg = um.current_segment(q)
     email = (seg.get("email_subject") or "").strip() if seg else ""
+    seg_idx = int(q.get("index") or 0)
     next_same = um.next_segment_same_env(q)
     has_next = um.has_next_segment(q)
     jenkins_oid = _fpms_lark_jenkins_bot_open_id()
@@ -7089,6 +7090,11 @@ def _fpms_lark_notify_jenkins_after_build_click(
         if email:
             cmd = "/SuccessInformMeTime"
             tail = f" | {email}" if email else ""
+            um.register_email_build_watch(q, seg_idx=seg_idx, email_title=email)
+            with _fpms_lark_sessions_lock:
+                sess_w = _fpms_lark_sessions.get(session_key)
+                if isinstance(sess_w, dict):
+                    sess_w["updatemore_queue"] = q
         else:
             cmd = "/SuccessInformMe"
             tail = ""
