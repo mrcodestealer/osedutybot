@@ -155,6 +155,15 @@ MAIL_IMAP_FOLDERS = [
     ).split(",")
     if f.strip()
 ]
+# Jenkins ``/replyupdateemail`` — search these Lark mail folders (see sidebar: Priority, OSE Pending).
+JENKINS_REPLY_IMAP_FOLDERS = [
+    f.strip()
+    for f in (
+        os.getenv("JENKINS_REPLY_IMAP_FOLDERS", "").strip()
+        or "Priority,OSE Pending"
+    ).split(",")
+    if f.strip()
+]
 
 _state_lock = threading.Lock()
 
@@ -898,34 +907,92 @@ def _decode_msg_subject(msg: email.message.Message) -> str:
     return " ".join(out).strip()
 
 
+def _fetch_newest_uid_message_in_folder(
+    mail: imaplib.IMAP4, folder: str, needle: str
+) -> email.message.Message | None:
+    """Newest message in ``folder`` whose subject (or body) contains ``needle``."""
+    if not _select_mail_folder(mail, folder):
+        return None
+    safe = needle.replace('"', " ").replace("\\", " ")
+    uids = _uid_search(mail, f'(SUBJECT "{safe}")')
+    if not uids:
+        uids = _uid_search(mail, f'(TEXT "{safe[:120]}")')
+    if not uids:
+        return None
+    uid = uids[-1]
+    typ, data = mail.uid("fetch", uid, "(RFC822)")
+    if typ != "OK" or not data or not data[0]:
+        return None
+    raw_bytes = data[0][1] if isinstance(data[0], tuple) else None
+    if not raw_bytes:
+        return None
+    return email.message_from_bytes(raw_bytes)
+
+
+def _message_sort_timestamp(msg: email.message.Message) -> datetime:
+    raw = (msg.get("Date") or "").strip()
+    if not raw:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        dt = parsedate_to_datetime(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
 def find_inbox_message_by_subject_title(title: str) -> email.message.Message | None:
     """Find newest INBOX message whose subject contains ``title``."""
+    found = find_message_by_subject_title(title, folders=["INBOX"])
+    return found[0] if found else None
+
+
+def find_message_by_subject_title(
+    title: str,
+    *,
+    folders: list[str] | None = None,
+) -> tuple[email.message.Message, str] | None:
+    """
+    Search ``folders`` (in order) for the newest message matching ``title``.
+
+    Returns ``(message, folder_name)`` or ``None``.
+    """
     needle = (title or "").strip()
     if not needle:
         return None
+    scan = [f.strip() for f in (folders or JENKINS_REPLY_IMAP_FOLDERS) if f.strip()]
+    if not scan:
+        scan = list(JENKINS_REPLY_IMAP_FOLDERS)
     mail = _connect_imap_simple()
+    best_msg: email.message.Message | None = None
+    best_folder = ""
+    best_ts = datetime.min.replace(tzinfo=timezone.utc)
     try:
-        if not _select_mail_folder(mail, "INBOX"):
+        for folder in scan:
+            msg = _fetch_newest_uid_message_in_folder(mail, folder, needle)
+            if msg is None:
+                continue
+            ts = _message_sort_timestamp(msg)
+            if best_msg is None or ts >= best_ts:
+                best_msg = msg
+                best_folder = folder
+                best_ts = ts
+        if best_msg is None:
             return None
-        safe = needle.replace('"', " ").replace("\\", " ")
-        uids = _uid_search(mail, f'(SUBJECT "{safe}")')
-        if not uids:
-            uids = _uid_search(mail, f'(TEXT "{safe[:120]}")')
-        if not uids:
-            return None
-        uid = uids[-1]
-        typ, data = mail.uid("fetch", uid, "(RFC822)")
-        if typ != "OK" or not data or not data[0]:
-            return None
-        raw_bytes = data[0][1] if isinstance(data[0], tuple) else None
-        if not raw_bytes:
-            return None
-        return email.message_from_bytes(raw_bytes)
+        return best_msg, best_folder
     finally:
         try:
             mail.logout()
         except Exception:
             pass
+
+
+def find_jenkins_reply_message_by_subject_title(
+    title: str,
+) -> tuple[email.message.Message, str] | None:
+    """Newest match in **Priority** + **OSE Pending** (``JENKINS_REPLY_IMAP_FOLDERS``)."""
+    return find_message_by_subject_title(title, folders=JENKINS_REPLY_IMAP_FOLDERS)
 
 
 def reply_jenkins_update_done_email(
@@ -953,11 +1020,13 @@ def reply_jenkins_update_done_email(
         "Best Regards,\n"
         "JC\n"
     )
-    orig = find_inbox_message_by_subject_title(title)
-    if orig is None:
+    orig_found = find_jenkins_reply_message_by_subject_title(title)
+    if orig_found is None:
+        folders = ", ".join(JENKINS_REPLY_IMAP_FOLDERS)
         raise EmailThreadNotFoundError(
-            f"No INBOX email found with subject matching {title!r} — reply not sent."
+            f"No email found with subject matching {title!r} in folder(s): {folders}."
         )
+    orig, orig_folder = orig_found
     subj = _reply_subject(_decode_msg_subject(orig))
     msg = MIMEText(body, "plain", "utf-8")
     msg["Subject"] = Header(subj, "utf-8")
@@ -977,7 +1046,8 @@ def reply_jenkins_update_done_email(
         smtp.sendmail(MAIL_USER, recipients, msg.as_string())
     envs = ", ".join(c[0] for c in completions)
     print(
-        f"[maint-mail] jenkins done reply envs={envs!r} title={title!r} → {JENKINS_DONE_REPLY_TO}",
+        f"[maint-mail] jenkins done reply envs={envs!r} title={title!r} folder={orig_folder!r} "
+        f"→ {JENKINS_DONE_REPLY_TO}",
         flush=True,
     )
 

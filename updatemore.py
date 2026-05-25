@@ -466,10 +466,11 @@ def _send_jenkins_email_reply(
             completions=completions,
         )
     except mm.EmailThreadNotFoundError:
+        folders = ", ".join(mm.JENKINS_REPLY_IMAP_FOLDERS)
         send(
             chat_id,
             "❌ **Can't find email** — no reply sent.\n"
-            f"Searched INBOX for subject containing: `{email_title}`\n"
+            f"Searched **{folders}** for subject containing: `{email_title}`\n"
             "Check the **Email:** line in your `/update` matches the original mail subject.",
         )
         return
