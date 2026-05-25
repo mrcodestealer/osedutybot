@@ -3631,6 +3631,61 @@ def lark_webhook():
 
     return _lark_im_done()
 
+def _handle_reply_update_email_internal(payload: dict) -> tuple[bool, str, int]:
+    """
+    Shared handler for ``POST /internal/reply-update-email`` (jenkinsbot → duty bot).
+    Returns ``(ok, message, http_status)``.
+    """
+    chat_id = (payload.get("chat_id") or DUTY_CHAT_ID or "").strip()
+    email_title = (payload.get("email_title") or "").strip()
+    environment = (payload.get("environment") or "").strip()
+    when = (payload.get("when") or "").strip()
+    if not chat_id:
+        return False, "missing chat_id", 400
+    if not email_title or not environment or not when:
+        return False, "missing email_title, environment, or when", 400
+    ju = _get_jenkinsupdate()
+    if ju is None:
+        return False, "jenkinsupdate module unavailable", 503
+    try:
+        import updatemore as um
+    except Exception as ex:
+        return False, f"updatemore import failed: {ex}", 503
+    um.process_reply_update_email(
+        chat_id,
+        email_title,
+        environment,
+        when,
+        send_message,
+        sessions=ju._fpms_lark_sessions,
+        sessions_lock=ju._fpms_lark_sessions_lock,
+        session_key_fn=ju._fpms_lark_session_key,
+        dispatch_update_body=lambda cid, sk, body, snd, **kw: ju._dispatch_lark_update_command_body(
+            cid, sk, body, snd, **kw
+        ),
+    )
+    return True, "processed", 200
+
+
+@app.route("/internal/reply-update-email", methods=["POST"])
+def internal_reply_update_email():
+    """
+    jenkinsbot calls this when Lark bot→bot @mention does not reach duty bot.
+    Optional header ``X-Duty-Internal-Token`` must match ``DUTY_INTERNAL_TOKEN``.
+    """
+    token_need = (os.getenv("DUTY_INTERNAL_TOKEN") or "").strip()
+    if token_need:
+        got = (
+            (request.headers.get("X-Duty-Internal-Token") or "").strip()
+            or (request.headers.get("Authorization") or "").replace("Bearer", "").strip()
+        )
+        if got != token_need:
+            return jsonify({"ok": False, "error": "unauthorized"}), 403
+    payload = request.get_json(silent=True) or {}
+    ok, msg, code = _handle_reply_update_email_internal(payload)
+    return jsonify({"ok": ok, "message": msg}), code
+
+
 def _register_lark_webhook_duplicate_paths():
     """
     If the developer console still points at a legacy path (e.g. old 「消息卡片请求网址」),

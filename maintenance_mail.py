@@ -155,15 +155,11 @@ MAIL_IMAP_FOLDERS = [
     ).split(",")
     if f.strip()
 ]
-# Jenkins ``/replyupdateemail`` — search these Lark mail folders (see sidebar: Priority, OSE Pending).
-JENKINS_REPLY_IMAP_FOLDERS = [
-    f.strip()
-    for f in (
-        os.getenv("JENKINS_REPLY_IMAP_FOLDERS", "").strip()
-        or "Priority,OSE Pending"
-    ).split(",")
-    if f.strip()
-]
+# Jenkins ``/replyupdateemail`` — Lark mail folders (Priority, OSE Pending; Sent for outbound copies).
+JENKINS_REPLY_IMAP_FOLDERS = ["Priority", "OSE Pending", "Sent"]
+JENKINS_REPLY_IMAP_SCAN_LIMIT = int(
+    os.getenv("JENKINS_REPLY_IMAP_SCAN_LIMIT", "").strip() or "1200"
+)
 
 _state_lock = threading.Lock()
 
@@ -907,19 +903,144 @@ def _decode_msg_subject(msg: email.message.Message) -> str:
     return " ".join(out).strip()
 
 
+def _subject_contains_needle(subject: str, needle: str) -> bool:
+    n = (needle or "").strip().casefold()
+    if not n:
+        return False
+    return n in (subject or "").casefold()
+
+
+def _imap_list_folder_names(mail: imaplib.IMAP4) -> list[str]:
+    names: list[str] = []
+    try:
+        typ, data = mail.list()
+    except Exception as ex:
+        print(f"[maint-mail] LIST failed: {ex!r}", flush=True)
+        return names
+    if typ != "OK" or not data:
+        return names
+    for item in data:
+        if not item:
+            continue
+        if isinstance(item, bytes):
+            line = item.decode("utf-8", errors="replace")
+        else:
+            line = str(item)
+        m = re.search(r'"([^"]+)"\s*$', line)
+        if m:
+            names.append(m.group(1))
+        else:
+            parts = line.rsplit(" ", 1)
+            if len(parts) == 2:
+                names.append(parts[1].strip().strip('"'))
+    return names
+
+
+def _resolve_imap_folder_name(mail: imaplib.IMAP4, folder: str) -> str:
+    """Map UI folder label to actual IMAP mailbox name when possible."""
+    want = (folder or "").strip()
+    if not want:
+        return "INBOX"
+    if _select_mail_folder(mail, want):
+        return want
+    names = _imap_list_folder_names(mail)
+    want_cf = want.casefold()
+    want_flat = want_cf.replace(" ", "")
+    for name in names:
+        if name.casefold() == want_cf:
+            return name
+    for name in names:
+        if name.casefold().replace(" ", "") == want_flat:
+            return name
+    for name in names:
+        if want_cf in name.casefold() or name.casefold() in want_cf:
+            return name
+    return want
+
+
+def _uid_search_subject_variants(mail: imaplib.IMAP4, needle: str) -> list[bytes]:
+    """Try several IMAP SEARCH shapes (Lark server support varies)."""
+    safe = (needle or "").strip().replace('"', " ").replace("\\", " ")
+    if not safe:
+        return []
+    criteria_list = [
+        f'(SUBJECT "{safe}")',
+        f'(TEXT "{safe[:120]}")',
+        f'(HEADER Subject "{safe}")',
+    ]
+    for crit in criteria_list:
+        uids = _uid_search(mail, crit)
+        if uids:
+            return uids
+    try:
+        typ, data = mail.uid("search", None, "CHARSET", "UTF-8", "SUBJECT", safe)
+        if typ == "OK" and data and data[0]:
+            return data[0].split()
+    except Exception:
+        pass
+    return []
+
+
+def _fetch_subject_header_for_uid(mail: imaplib.IMAP4, uid: bytes) -> str:
+    typ, data = mail.uid("fetch", uid, "(BODY.PEEK[HEADER.FIELDS (SUBJECT)])")
+    if typ != "OK" or not data:
+        return ""
+    raw_hdr = b""
+    for part in data:
+        if isinstance(part, tuple) and len(part) >= 2 and part[1]:
+            raw_hdr += part[1]
+    if not raw_hdr:
+        return ""
+    subj = ""
+    for line in raw_hdr.decode("utf-8", errors="replace").splitlines():
+        if line.lower().startswith("subject:"):
+            subj = line.split(":", 1)[1].strip()
+            break
+    if not subj:
+        return ""
+    return _decode_msg_subject(email.message_from_string(f"Subject: {subj}\n\n"))
+
+
+def _find_matching_uid_in_folder(
+    mail: imaplib.IMAP4, folder: str, needle: str
+) -> bytes | None:
+    resolved = _resolve_imap_folder_name(mail, folder)
+    if not _select_mail_folder(mail, resolved):
+        print(f"[maint-mail] jenkins reply: SELECT {folder!r} failed", flush=True)
+        return None
+    uids = _uid_search_subject_variants(mail, needle)
+    if uids:
+        return uids[-1]
+    all_uids = _uid_search(mail, "ALL")
+    if not all_uids:
+        print(f"[maint-mail] jenkins reply: {resolved!r} is empty", flush=True)
+        return None
+    limit = max(50, JENKINS_REPLY_IMAP_SCAN_LIMIT)
+    tail = all_uids[-limit:]
+    for uid in reversed(tail):
+        subj = _fetch_subject_header_for_uid(mail, uid)
+        if _subject_contains_needle(subj, needle):
+            print(
+                f"[maint-mail] jenkins reply: subject scan hit uid={uid!r} "
+                f"folder={resolved!r} subj={subj!r}",
+                flush=True,
+            )
+            return uid
+    print(
+        f"[maint-mail] jenkins reply: no subject match in {resolved!r} "
+        f"(scanned {len(tail)} of {len(all_uids)} msgs) needle={needle!r}",
+        flush=True,
+    )
+    return None
+
+
 def _fetch_newest_uid_message_in_folder(
     mail: imaplib.IMAP4, folder: str, needle: str
 ) -> email.message.Message | None:
-    """Newest message in ``folder`` whose subject (or body) contains ``needle``."""
-    if not _select_mail_folder(mail, folder):
+    """Newest message in ``folder`` whose subject contains ``needle``."""
+    uid = _find_matching_uid_in_folder(mail, folder, needle)
+    if uid is None:
         return None
-    safe = needle.replace('"', " ").replace("\\", " ")
-    uids = _uid_search(mail, f'(SUBJECT "{safe}")')
-    if not uids:
-        uids = _uid_search(mail, f'(TEXT "{safe[:120]}")')
-    if not uids:
-        return None
-    uid = uids[-1]
     typ, data = mail.uid("fetch", uid, "(RFC822)")
     if typ != "OK" or not data or not data[0]:
         return None
@@ -1023,8 +1144,27 @@ def reply_jenkins_update_done_email(
     orig_found = find_jenkins_reply_message_by_subject_title(title)
     if orig_found is None:
         folders = ", ".join(JENKINS_REPLY_IMAP_FOLDERS)
+        hint = ""
+        try:
+            mail_dbg = _connect_imap_simple()
+            try:
+                listed = _imap_list_folder_names(mail_dbg)
+                near = [
+                    f
+                    for f in listed
+                    if any(
+                        k in f.casefold()
+                        for k in ("priority", "ose", "pending", "inbox", "sent")
+                    )
+                ][:12]
+                if near:
+                    hint = f" IMAP folders seen: {', '.join(near)}."
+            finally:
+                mail_dbg.logout()
+        except Exception:
+            pass
         raise EmailThreadNotFoundError(
-            f"No email found with subject matching {title!r} in folder(s): {folders}."
+            f"No email found with subject matching {title!r} in folder(s): {folders}.{hint}"
         )
     orig, orig_folder = orig_found
     subj = _reply_subject(_decode_msg_subject(orig))

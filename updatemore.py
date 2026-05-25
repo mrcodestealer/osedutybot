@@ -563,6 +563,33 @@ def handle_jenkins_email_done(
     return True
 
 
+def process_reply_update_email(
+    chat_id: str,
+    email_title: str,
+    environment: str,
+    when: str,
+    send: Callable[..., Any],
+    *,
+    sessions: dict,
+    sessions_lock: threading.Lock,
+    session_key_fn: Callable[[str, str], str],
+    dispatch_update_body: Callable[..., bool],
+) -> bool:
+    """Direct entry (HTTP from jenkinsbot) — same outcome as Lark ``/replyupdateemail``."""
+    return handle_jenkins_email_done(
+        chat_id,
+        "jenkinsbot",
+        (email_title or "").strip(),
+        (environment or "").strip(),
+        (when or "").strip(),
+        send,
+        sessions=sessions,
+        sessions_lock=sessions_lock,
+        session_key_fn=session_key_fn,
+        dispatch_update_body=dispatch_update_body,
+    )
+
+
 def handle_jenkinsbot_callback(
     chat_id: str,
     sender_id: str,
