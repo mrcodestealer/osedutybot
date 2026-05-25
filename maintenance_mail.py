@@ -1573,7 +1573,7 @@ class MaintenanceMailWatcher:
             since_lb = _imap_since_lookback()
             print(
                 f"[maint-mail] maintenance search SINCE {since_today} → 0; "
-                f"retry SINCE {since_lb} ({MAIL_TZ} today still enforced in code)",
+                f"retry SINCE {since_lb} ({PROCESS_DAYS}-day window in code)",
                 flush=True,
             )
             uids = self._uids_maintenance_subject_search(mail, since_lb)
@@ -1585,12 +1585,13 @@ class MaintenanceMailWatcher:
         if not uids:
             return []
         if len(uids) > SUBJECT_SEARCH_MAX:
+            dropped = len(uids) - SUBJECT_SEARCH_MAX
             print(
-                f"[maint-mail] IMAP subject hits: {len(uids)} → cap {SUBJECT_SEARCH_MAX} "
-                "(oldest first; raise MAINTENANCE_MAIL_SUBJECT_MAX if needed)",
+                f"[maint-mail] IMAP subject hits: {len(uids)} → keep newest {SUBJECT_SEARCH_MAX} "
+                f"(dropped {dropped} older UID(s); raise MAINTENANCE_MAIL_SUBJECT_MAX if needed)",
                 flush=True,
             )
-            uids = uids[:SUBJECT_SEARCH_MAX]
+            uids = uids[-SUBJECT_SEARCH_MAX:]
         else:
             print(
                 f"[maint-mail] IMAP subject hits: {len(uids)} (TINC- / [Service Desk])",
