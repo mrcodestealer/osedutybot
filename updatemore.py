@@ -355,7 +355,8 @@ def record_email_build_success(
 
 _SUCCESS_PROCEED_RE = re.compile(r"/SuccessProceedNext\b", re.I)
 _FAILED_STOP_RE = re.compile(r"/FailedStop\b", re.I)
-_EMAIL_DONE_RE = re.compile(
+_REPLY_UPDATE_EMAIL_RE = re.compile(r"/replyupdateemail\b", re.I)
+_EMAIL_DONE_LEGACY_RE = re.compile(
     r"^(?P<title>.+?)\s+(?P<env>\S+)\s+(?P<time>\d{1,2}:\d{2}\s*[AP]M)\s*$",
     re.I,
 )
@@ -370,12 +371,28 @@ def is_failed_stop_message(text: str) -> bool:
 
 
 def parse_email_done_message(text: str) -> tuple[str, str, str] | None:
-    """Parse ``{email title} {ENVIRONMENT} {time}`` from jenkinsbot."""
+    """
+    Parse jenkinsbot Jenkins-done notify for duty bot email auto-reply.
+
+    Preferred: ``/replyupdateemail | {email title} | {env or pipeline} | {time}``
+    Legacy: ``{email title} {ENVIRONMENT} {time}`` (space-separated).
+    """
     raw = (text or "").strip()
     for pat in (r"@_user_\d+", r"<[^>]+>"):
         raw = re.sub(pat, "", raw)
     raw = re.sub(r"\s+", " ", raw).strip()
-    m = _EMAIL_DONE_RE.match(raw)
+
+    m_cmd = _REPLY_UPDATE_EMAIL_RE.search(raw)
+    if m_cmd:
+        rest = raw[m_cmd.end() :].strip()
+        if rest.startswith("|"):
+            rest = rest[1:].strip()
+        parts = [p.strip() for p in rest.split("|") if p.strip()]
+        if len(parts) >= 3:
+            return parts[0], parts[1], parts[2]
+        return None
+
+    m = _EMAIL_DONE_LEGACY_RE.match(raw)
     if not m:
         return None
     return m.group("title").strip(), m.group("env").strip(), m.group("time").strip()
@@ -433,10 +450,14 @@ def _send_jenkins_email_reply(
         completions=completions,
     )
     envs = ", ".join(c[0] for c in completions)
+    reply_to = mm.JENKINS_DONE_REPLY_TO
     send(
         chat_id,
-        f"📧 Auto-replied email ({len(completions)} done block(s)) → junchen@snsoft.my\n"
-        f"**Subject:** `{email_title}`\n**Environments:** {envs}",
+        f"📧 Auto-replied email ({len(completions)} done block(s))\n"
+        f"- **From:** `{mm.MAIL_USER}`\n"
+        f"- **To:** `{reply_to}`\n"
+        f"- **Subject (search / Re:):** `{email_title}`\n"
+        f"- **Environments:** {envs}",
     )
 
 
