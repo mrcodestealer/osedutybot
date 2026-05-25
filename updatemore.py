@@ -102,9 +102,49 @@ def _is_segment_marker(line: str) -> bool:
     return (line or "").strip().casefold() in _SEGMENT_MARKERS
 
 
+def _normalize_updatemore_body(body: str) -> str:
+    """Fix ``@Duty Bot/updatemore`` (no space) without destroying multiline layout."""
+    raw = (body or "").replace("\r\n", "\n").strip()
+    for pat in (r"@_user_\d+", r"<[^>]+>"):
+        raw = re.sub(pat, "", raw)
+    lines_out: list[str] = []
+    for ln in raw.split("\n"):
+        s = re.sub(r"[ \t]+", " ", ln).strip()
+        if not s:
+            continue
+        s = re.sub(
+            r"(?:^|\s)(?:duty\s*)?bot\s*/updatemore\b",
+            "/updatemore",
+            s,
+            count=1,
+            flags=re.I,
+        )
+        s = re.sub(r"^duty\s*bot\s+", "", s, flags=re.I)
+        m = re.search(r"/updatemore\b", s, re.I)
+        if m and m.start() > 0:
+            s = s[m.start() :].strip()
+        s = re.sub(
+            r"(/updatemore\b(?:\s+skip[\s-]?build)?)\s+(?=update\b)",
+            r"\1\n",
+            s,
+            count=1,
+            flags=re.I,
+        )
+        if re.search(r"\ssame\b", s, re.I) and not re.match(r"^same\b", s, re.I):
+            s = re.sub(r"\s+(same)\s*$", r"\n\1", s, count=1, flags=re.I)
+            s = re.sub(r"\s+(same)\s+(?=Email:\s)", r"\n\1\n", s, count=1, flags=re.I)
+        if re.search(r"\sEmail:\s", s, re.I):
+            s = re.sub(r"\s+(Email:\s*)", r"\n\1", s, flags=re.I)
+        for part in s.split("\n"):
+            part = part.strip()
+            if part:
+                lines_out.append(part)
+    return "\n".join(lines_out)
+
+
 def updatemore_skip_build_requested(body: str) -> bool:
     """True when message includes ``/updatemore … skip build`` (same line or next line)."""
-    raw = (body or "").replace("\r\n", "\n")
+    raw = _normalize_updatemore_body(body)
     if re.search(r"/updatemore\b[^\n]*\bskip[\s-]?build\b", raw, re.I):
         return True
     lines = _normalize_lines(raw)
@@ -131,7 +171,9 @@ def _strip_skip_build_lines(lines: list[str]) -> list[str]:
                 out.append("/updatemore")
                 continue
             if remainder:
-                out.append(remainder)
+                out.append(f"/updatemore {remainder}".strip())
+            else:
+                out.append("/updatemore")
             continue
         if s.casefold() in _SKIP_BUILD_LINES:
             continue
@@ -149,7 +191,7 @@ def parse_updatemore_body(body: str) -> list[dict[str, Any]]:
       - ``email_subject`` — only when this segment has an explicit ``Email:`` line
       - ``same_as_prev`` — True when preceded by a ``same`` marker
     """
-    lines = _normalize_lines(body)
+    lines = _normalize_lines(_normalize_updatemore_body(body))
     lines = _strip_skip_build_lines(lines)
     while lines and not lines[0].strip():
         lines.pop(0)
