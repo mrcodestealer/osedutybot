@@ -32,7 +32,7 @@ import smtplib
 import ssl
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from email.header import Header
 from email.header import decode_header
@@ -246,6 +246,77 @@ def _received_in_process_window(when: str | None) -> bool:
 def _received_today(when: str | None) -> bool:
     """Backward-compatible alias — same as :func:`_received_in_process_window`."""
     return _received_in_process_window(when)
+
+
+def _message_local_date(when: str | None) -> date | None:
+    if not (when or "").strip():
+        return None
+    try:
+        dt = datetime.fromisoformat(when.strip().replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        try:
+            tz = ZoneInfo(MAIL_TZ)
+        except Exception:
+            tz = timezone.utc
+        return dt.astimezone(tz).date()
+    except ValueError:
+        return None
+
+
+def _is_carryover_local_date(when: str | None) -> bool:
+    """Local calendar yesterday — midnight handoff before state recorded the UID."""
+    local_d = _message_local_date(when)
+    if not local_d:
+        return False
+    today = datetime.now(_local_tz()).date()
+    return local_d == today - timedelta(days=1)
+
+
+def _uid_is_unseen(mail: imaplib.IMAP4, uid: bytes) -> bool:
+    try:
+        typ, data = mail.uid("fetch", uid, "(FLAGS)")
+    except Exception:
+        return False
+    if typ != "OK" or not data:
+        return False
+    for item in data:
+        chunks: list[str] = []
+        if isinstance(item, tuple):
+            for part in item:
+                if isinstance(part, (bytes, bytearray)):
+                    chunks.append(part.decode("utf-8", errors="replace"))
+                elif part is not None:
+                    chunks.append(str(part))
+        elif isinstance(item, (bytes, bytearray)):
+            chunks.append(item.decode("utf-8", errors="replace"))
+        combined = " ".join(chunks)
+        if "\\Seen" in combined:
+            return False
+    return True
+
+
+def _should_accept_carryover(
+    mail: imaplib.IMAP4, uid: bytes, when: str | None
+) -> bool:
+    """
+    After midnight state reset: yesterday's Date + still UNSEEN ⇒ never finished.
+    """
+    if not when or _received_in_process_window(when):
+        return False
+    if not _is_carryover_local_date(when):
+        return False
+    return _uid_is_unseen(mail, uid)
+
+
+def _accept_message_date(
+    mail: imaplib.IMAP4, uid: bytes, when: str | None
+) -> bool:
+    if not (when or "").strip():
+        return True
+    if _received_in_process_window(when):
+        return True
+    return _should_accept_carryover(mail, uid, when)
 
 
 def _merge_uid_lists(*groups: list[bytes]) -> list[bytes]:
@@ -1200,13 +1271,19 @@ class MaintenanceMailWatcher:
                 )
             return
 
-        if when and not _received_in_process_window(when):
+        if when and not _accept_message_date(mail, uid, when):
             print(
                 f"[maint-mail] skip uid={uid_s} (not {_process_window_label()}, "
                 f"date={when!r}): {subject!r}",
                 flush=True,
             )
             return
+        if when and _should_accept_carryover(mail, uid, when):
+            print(
+                f"[maint-mail] carryover uid={uid_s} (unread, local yesterday {MAIL_TZ}): "
+                f"{subject!r}",
+                flush=True,
+            )
 
         try:
             typ, data = mail.uid("fetch", uid, "(RFC822)")
@@ -1317,13 +1394,19 @@ class MaintenanceMailWatcher:
             except Exception:
                 when = None
 
-        if when and not _received_in_process_window(when):
+        if when and not _accept_message_date(mail, uid, when):
             print(
                 f"[maint-mail] skip uid={uid_s} (not {_process_window_label()}, "
                 f"date={when!r}): {display_subj!r}",
                 flush=True,
             )
             return
+        if when and _should_accept_carryover(mail, uid, when):
+            print(
+                f"[maint-mail] carryover uid={uid_s} (unread, local yesterday {MAIL_TZ}): "
+                f"{display_subj!r}",
+                flush=True,
+            )
 
         token = self._get_token()
         is_cancel = maintenance.is_maintenance_cancelled_email(body)
@@ -1385,24 +1468,6 @@ class MaintenanceMailWatcher:
                     )
                     self._send_lark_card(TARGET_CHAT_ID, main_card)
 
-        if FORWARD_ENABLED:
-            try:
-                if is_cancel or to_cp:
-                    forward_maintenance_email(
-                        subject=subject, original_msg=msg
-                    )
-                else:
-                    reply_not_in_cp_email(
-                        subject=subject, original_msg=msg
-                    )
-            except Exception as ex:
-                action = "forward" if (is_cancel or to_cp) else "NOT IN CP reply"
-                print(
-                    f"[maint-mail] {action} failed uid={uid_s} ticket={ticket_id!r}: {ex!r}",
-                    flush=True,
-                )
-                return
-
         record_kw: dict[str, Any] = {
             "imap_uid": store_key,
             "message_id": msg.get("Message-ID") or "",
@@ -1431,6 +1496,25 @@ class MaintenanceMailWatcher:
                 record_kw["maint_date"] = date_val
         _record_processed(entries, **record_kw)
         mail.uid("store", uid, "+FLAGS", "(\\Seen)")
+
+        if FORWARD_ENABLED:
+            try:
+                if is_cancel or to_cp:
+                    forward_maintenance_email(
+                        subject=subject, original_msg=msg
+                    )
+                else:
+                    reply_not_in_cp_email(
+                        subject=subject, original_msg=msg
+                    )
+            except Exception as ex:
+                action = "forward" if (is_cancel or to_cp) else "NOT IN CP reply"
+                print(
+                    f"[maint-mail] {action} failed uid={uid_s} ticket={ticket_id!r}: {ex!r} "
+                    "(Lark already sent; UID recorded — no duplicate card)",
+                    flush=True,
+                )
+
         kind = "cancelled" if is_cancel else "processed"
         print(
             f"[maint-mail] {kind} {folder} uid={uid_s} ticket={ticket_id!r} "
@@ -1454,6 +1538,7 @@ class MaintenanceMailWatcher:
             "imap_hits": len(uids),
             "already_done": 0,
             "not_today": 0,
+            "carryover": 0,
             "ignored": 0,
             "not_maintenance": 0,
             "todo": 0,
@@ -1505,9 +1590,11 @@ class MaintenanceMailWatcher:
                         flush=True,
                     )
                 continue
-            if when and not _received_in_process_window(when):
+            if when and not _accept_message_date(mail, uid, when):
                 stats["not_today"] += 1
                 continue
+            if when and _should_accept_carryover(mail, uid, when):
+                stats["carryover"] += 1
             todo.append(uid)
         stats["todo"] = len(todo)
         return todo, stats
@@ -1536,6 +1623,7 @@ class MaintenanceMailWatcher:
                     f"done={stats['already_done']} "
                     f"ignored={stats['ignored']} "
                     f"not_today={stats['not_today']} "
+                    f"carryover={stats['carryover']} "
                     f"not_maint={stats['not_maintenance']} "
                     f"→ 0 to process",
                     flush=True,
@@ -1581,13 +1669,16 @@ class MaintenanceMailWatcher:
         )
         keep_today: list[bytes] = []
         keep_unknown: list[bytes] = []
+        keep_carryover: list[bytes] = []
         for uid in reversed(uids):
             _, when, _ = self._fetch_header_preview(mail, uid)
             if not when:
                 keep_unknown.append(uid)
             elif _received_in_process_window(when):
                 keep_today.append(uid)
-        out = _merge_uid_lists(keep_today, keep_unknown)
+            elif _should_accept_carryover(mail, uid, when):
+                keep_carryover.append(uid)
+        out = _merge_uid_lists(keep_today, keep_unknown, keep_carryover)
         if out:
             dropped = len(uids) - len(out)
             print(
@@ -1609,11 +1700,11 @@ class MaintenanceMailWatcher:
         if not uids:
             return []
         print(
-            f"[maint-mail] broad SINCE {since}: {len(uids)} mail(s) (cap {POLL_LIMIT}), "
+            f"[maint-mail] broad SINCE {since}: {len(uids)} mail(s), "
             "filter TINC- / [Service Desk] in code",
             flush=True,
         )
-        return uids[-POLL_LIMIT:]
+        return uids
 
     def _uids_today_matching(self, mail: imaplib.IMAP4) -> list[bytes]:
         """
