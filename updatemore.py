@@ -11,6 +11,7 @@ UPDATEMORE_CMD_RE = re.compile(r"/updatemore\b", re.I)
 _SAME_MARKER = "same"
 _NOT_SAME_MARKERS = frozenset({"not same", "notsame"})
 _SEGMENT_MARKERS = frozenset({_SAME_MARKER, *_NOT_SAME_MARKERS})
+_SKIP_BUILD_LINES = frozenset({"skip build", "skip-build", "skipbuild"})
 
 
 def parse_email_subject_from_line(line: str) -> str | None:
@@ -101,6 +102,43 @@ def _is_segment_marker(line: str) -> bool:
     return (line or "").strip().casefold() in _SEGMENT_MARKERS
 
 
+def updatemore_skip_build_requested(body: str) -> bool:
+    """True when message includes ``/updatemore … skip build`` (same line or next line)."""
+    raw = (body or "").replace("\r\n", "\n")
+    if re.search(r"/updatemore\b[^\n]*\bskip[\s-]?build\b", raw, re.I):
+        return True
+    lines = _normalize_lines(raw)
+    if not lines:
+        return False
+    if not UPDATEMORE_CMD_RE.search(lines[0]):
+        return False
+    rest = UPDATEMORE_CMD_RE.sub("", lines[0], count=1).strip().casefold()
+    if rest in _SKIP_BUILD_LINES:
+        return True
+    for ln in lines[1:3]:
+        if (ln or "").strip().casefold() in _SKIP_BUILD_LINES:
+            return True
+    return False
+
+
+def _strip_skip_build_lines(lines: list[str]) -> list[str]:
+    out: list[str] = []
+    for i, ln in enumerate(lines):
+        s = (ln or "").strip()
+        if i == 0 and UPDATEMORE_CMD_RE.search(s):
+            remainder = UPDATEMORE_CMD_RE.sub("", s, count=1).strip()
+            if remainder.casefold() in _SKIP_BUILD_LINES:
+                out.append("/updatemore")
+                continue
+            if remainder:
+                out.append(remainder)
+            continue
+        if s.casefold() in _SKIP_BUILD_LINES:
+            continue
+        out.append(ln)
+    return out
+
+
 def parse_updatemore_body(body: str) -> list[dict[str, Any]]:
     """
     Parse ``/updatemore`` message into ordered segments.
@@ -112,6 +150,7 @@ def parse_updatemore_body(body: str) -> list[dict[str, Any]]:
       - ``same_as_prev`` — True when preceded by a ``same`` marker
     """
     lines = _normalize_lines(body)
+    lines = _strip_skip_build_lines(lines)
     while lines and not lines[0].strip():
         lines.pop(0)
     if not lines or not UPDATEMORE_CMD_RE.search(lines[0]):
@@ -231,8 +270,9 @@ def init_queue(
     *,
     chat_id: str,
     sender_id: str,
+    skip_build: bool = False,
 ) -> dict[str, Any]:
-    return {
+    q: dict[str, Any] = {
         "segments": segments,
         "index": 0,
         "waiting_jenkins": False,
@@ -241,7 +281,72 @@ def init_queue(
         "stopped": False,
         "email_batches": build_email_batch_state(segments),
         "email_watches": [],
+        "skip_build": bool(skip_build),
     }
+    if skip_build:
+        register_email_batch_watches(q, segments)
+    return q
+
+
+def register_email_batch_watches(
+    q: dict[str, Any],
+    segments: list[dict[str, Any]],
+) -> int:
+    """Pre-register one watch per batched segment (for ``skip build`` email testing)."""
+    registered: set[int] = set()
+    count = 0
+    for seg in segments:
+        indices = list(seg.get("email_batch_indices") or [])
+        if len(indices) < 2:
+            continue
+        for batch_idx in indices:
+            if batch_idx in registered:
+                continue
+            if not (0 <= batch_idx < len(segments)):
+                continue
+            email = (segments[batch_idx].get("email_subject") or "").strip()
+            if not email:
+                continue
+            register_email_build_watch(q, seg_idx=batch_idx, email_title=email)
+            registered.add(batch_idx)
+            count += 1
+    return count
+
+
+def skip_build_manual_instructions(segments: list[dict[str, Any]], q: dict[str, Any]) -> str:
+    """Lark help after ``/updatemore skip build`` — no Jenkins Build click."""
+    batches = q.get("email_batches") or {}
+    n_batch = sum(1 for b in batches.values() if isinstance(b, dict))
+    lines = [
+        "🧪 **`/updatemore skip build`** — Jenkins **Build** skipped (email batch test only).",
+        "",
+        queue_summary(segments),
+        "",
+    ]
+    if n_batch:
+        sample_em = ""
+        for seg in segments:
+            em = (seg.get("email_subject") or "").strip()
+            if em and len(seg.get("email_batch_indices") or []) >= 2:
+                sample_em = em
+                break
+        lines.extend(
+            [
+                "Simulate Jenkins done **once per batched segment** (same `Email:` title):",
+                "```",
+                f"@Duty Bot /replyupdateemail | {sample_em or '{email title}'} | BI-API-UPDATE | 6:10AM",
+                f"@Duty Bot /replyupdateemail | {sample_em or '{email title}'} | BI-API-UPDATE | 6:25AM",
+                "```",
+                "- **1st** → waiting (no email yet)",
+                "- **2nd** → **one** combined email reply",
+            ]
+        )
+    else:
+        lines.append(
+            "No batched segments (need 2+ `same` + same `Email:`). "
+            "Each `/replyupdateemail` replies immediately."
+        )
+    return "\n".join(lines)
 
 
 def current_segment(q: dict[str, Any]) -> dict[str, Any] | None:
@@ -583,6 +688,12 @@ def handle_jenkins_email_done(
                 )
             except Exception as ex:
                 send(chat_id, f"❌ Jenkins email auto-reply failed: {ex}")
+                return True
+            if q.get("skip_build"):
+                with sessions_lock:
+                    if sess:
+                        clear_queue_from_session(sess)
+                send(chat_id, "✅ **`/updatemore skip build`** test finished.")
                 return True
 
         if q.get("waiting_jenkins") and not q.get("stopped"):
