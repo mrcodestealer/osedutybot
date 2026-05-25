@@ -122,6 +122,44 @@ BI_API_UPDATE_BUILD_URL = (
     "https://jenkins.client8.me/job/BI-GO/job/BI-API-UPDATE/build?delay=0sec"
 )
 
+# Jenkins REPOSITORY dropdown (BI-API-UPDATE) — keep in sync with the job parameter list.
+BI_API_UPDATE_DEFAULT_ENVIRONMENT = "prod"
+BI_API_UPDATE_DEFAULT_SOURCE_BRANCH = "main"
+BI_API_UPDATE_REPOSITORY_OPTIONS: list[tuple[str, str]] = [
+    ("bi-clickhouse", "bi-clickhouse"),
+    ("bi-superjackpot", "bi-superjackpot"),
+    ("bi-appsflyer", "bi-appsflyer"),
+    ("bi-go-player-tag", "bi-go-player-tag"),
+    ("bi-hologres", "bi-hologres"),
+    ("bi-lark-alert", "bi-lark-alert"),
+    ("bi-payout", "bi-payout"),
+    ("bi-lark-chatbot", "bi-lark-chatbot"),
+    ("bi-backendsystem", "bi-backendsystem"),
+    ("bi-social-app", "bi-social-app"),
+    ("bi-social-algo", "bi-social-algo"),
+    ("bi-faiss-search", "bi-faiss-search"),
+    ("bi-chat-frontend", "bi-chat-frontend"),
+    ("bi-ads-attribution", "bi-ads-attribution"),
+    ("bi-event-manager", "bi-event-manager"),
+    ("bi-chatboard", "bi-chatboard"),
+    ("bi-librechat", "bi-librechat"),
+    ("bi-pms-player-tag", "bi-pms-player-tag"),
+    ("bi-tag-management", "bi-tag-management"),
+]
+
+_BI_UPDATE_NOISE_TOKENS = frozenset(
+    {
+        "update",
+        "jenkinsupdate",
+        "updatejenkins",
+        "ds",
+        "bi",
+        "api",
+        "go",
+        "build",
+    }
+)
+
 # Lark ``/jenkinsupdate``: keyword → (short title, build URL(s); multiple lines = several links).
 JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
     "fpms uat branch": ("FPMS UAT BRANCH UPDATE", BUILD_URL),
@@ -238,6 +276,10 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
         "FPMS PROD SCRIPT RUN",
         "https://jenkins.client8.me/job/FPMS/job/FPMS_PROD_SCRIPT_RUN/build?delay=0sec",
     ),
+    "ds": ("BI API UPDATE", BI_API_UPDATE_BUILD_URL),
+    "ds update": ("BI API UPDATE", BI_API_UPDATE_BUILD_URL),
+    "bi api update": ("BI API UPDATE", BI_API_UPDATE_BUILD_URL),
+    "bi-api-update": ("BI API UPDATE", BI_API_UPDATE_BUILD_URL),
 }
 
 JENKINS_UPDATE_CMD_RE = re.compile(
@@ -1426,7 +1468,120 @@ def _find_ds_or_bi_repo_token(text: str) -> str | None:
     return tok or None
 
 
-def parse_bi_api_update_message_block(text: str) -> tuple[str, str, str]:
+def _body_requests_bi_api_update(body: str) -> bool:
+    """True when the message should use BI-API-UPDATE (``/update ds``, ``ds-…``, etc.)."""
+    raw = (body or "").strip()
+    if not raw:
+        return False
+    if _find_ds_or_bi_repo_token(raw):
+        return True
+    if re.search(r"\b(?:repository|repo|services?)\s*:", raw, re.I):
+        return True
+    head = JENKINS_UPDATE_CMD_RE.sub("", _jenkins_update_first_non_empty_line(raw), count=1).strip()
+    head_cf = head.casefold()
+    if head_cf in ("ds", "ds update", "bi", "bi api", "bi api update", "bi-api-update"):
+        return True
+    if head_cf.startswith("ds ") or head_cf.startswith("bi "):
+        return True
+    ranked = _rank_jenkins_update_job_matches(raw)
+    if ranked:
+        prof = _jenkins_update_job_automation_profile(ranked[0][3])
+        if prof == "bi_api_update" and ranked[0][1] >= 0.55:
+            return True
+    return False
+
+
+def _normalize_bi_repository_hint(token: str) -> str:
+    """Turn free text (``superjackpot``, ``ds-superjackpot-api``) into a repo hint string."""
+    t = normalize_parameter_text(token)
+    if not t:
+        return ""
+    tl = t.casefold()
+    if tl.startswith("ds-") or tl.startswith("bi-"):
+        return t
+    slug = re.sub(r"[^a-z0-9]+", "-", tl).strip("-")
+    if not slug:
+        return ""
+    if not slug.endswith("-api"):
+        slug = f"{slug}-api"
+    return f"ds-{slug}"
+
+
+def _extract_bi_repo_hint_from_body(body: str) -> str:
+    """Repo hint from ``/update ds superjackpot`` / ``ds-superjackpot-api`` / inline keys."""
+    tok = _find_ds_or_bi_repo_token(body)
+    if tok:
+        return tok
+    repo = _extract_keyed_value(
+        body,
+        ("repository", "repo", "service", "services"),
+        stop_keys=(
+            "repository",
+            "repo",
+            "service",
+            "services",
+            "environment",
+            "env",
+            "source_branch",
+            "source branch",
+            "branch",
+        ),
+    )
+    if repo:
+        return _normalize_bi_repository_hint(repo)
+    rest = JENKINS_UPDATE_CMD_RE.sub("", body, count=1)
+    rest = _jenkins_update_strip_job_aliases(rest)
+    parts: list[str] = []
+    for w in re.split(r"[\s:：,，;+]+", rest):
+        w = (w or "").strip()
+        if not w:
+            continue
+        wl = w.casefold()
+        if wl in _BI_UPDATE_NOISE_TOKENS:
+            continue
+        if re.match(
+            r"^(?:env|environment|branch|source_branch|source|repository|repo|services?)\b",
+            wl,
+        ):
+            continue
+        parts.append(w)
+    if not parts:
+        return ""
+    return _normalize_bi_repository_hint(max(parts, key=len))
+
+
+def _resolve_bi_repository_jenkins_value(
+    want_value: str,
+    options: list[tuple[str, str]] | None = None,
+) -> tuple[str, list[tuple[str, str, float]], bool]:
+    """
+    Map user repo text to a Jenkins REPOSITORY option value.
+
+    Returns ``(picked_value, ranked_top, need_user_pick)``.
+    """
+    opts = options or BI_API_UPDATE_REPOSITORY_OPTIONS
+    want = normalize_parameter_text(want_value)
+    if not want:
+        ranked = [(ov, ot, 0.0) for ov, ot in opts]
+        return "", ranked[:8], True
+    ranked = _rank_bi_repository_options(want, opts)
+    if not ranked:
+        return "", [], True
+    top_v, _top_t, top_sc = ranked[0]
+    if top_sc >= 10.0:
+        return top_v, ranked[:8], False
+    if top_sc >= 8.0:
+        return top_v, ranked[:8], False
+    if len(ranked) > 1 and ranked[1][2] >= top_sc - 0.04:
+        return top_v, ranked[:8], True
+    if top_sc < 0.42:
+        return top_v, ranked[:8], True
+    return top_v, ranked[:8], False
+
+
+def parse_bi_api_update_message_block(
+    text: str, *, allow_missing_repository: bool = False
+) -> tuple[str, str, str]:
     """
     Parse free text (chat paste / one-line command) for BI-API-UPDATE fields:
     ``repository``, ``env``/``environment``, ``branch``/``source_branch``.
@@ -1452,6 +1607,8 @@ def parse_bi_api_update_message_block(text: str) -> tuple[str, str, str]:
     )
     if not repo:
         repo = _find_ds_or_bi_repo_token(body)
+    if not repo:
+        repo = _extract_bi_repo_hint_from_body(body)
     env = _extract_keyed_value(
         body,
         ("environment", "env"),
@@ -1462,17 +1619,18 @@ def parse_bi_api_update_message_block(text: str) -> tuple[str, str, str]:
         ("source_branch", "source branch", "branch"),
         stop_keys=keys_all,
     )
-    if not repo:
+    if not repo and not allow_missing_repository:
         raise ConfigBlockError(
-            "Missing repository/services for BI-API-UPDATE (use ds-... or bi-... token)."
+            "Missing repository for BI-API-UPDATE (e.g. `ds-superjackpot-api`, "
+            "`/update ds superjackpot`, or `repository: …`)."
         )
     if not env:
-        raise ConfigBlockError("Missing env: / environment: for BI-API-UPDATE.")
+        env = BI_API_UPDATE_DEFAULT_ENVIRONMENT
     if not branch:
-        raise ConfigBlockError("Missing branch: / source_branch: for BI-API-UPDATE.")
-    repo_norm = normalize_parameter_text(repo)
+        branch = BI_API_UPDATE_DEFAULT_SOURCE_BRANCH
+    repo_norm = normalize_parameter_text(repo) if repo else ""
     repo_low = repo_norm.casefold()
-    if not (repo_low.startswith("ds-") or repo_low.startswith("bi-")):
+    if repo_norm and not (repo_low.startswith("ds-") or repo_low.startswith("bi-")):
         raise ConfigBlockError(
             f"Repository/service {repo_norm!r} must start with ds- or bi- for BI-API-UPDATE shortcut."
         )
@@ -5287,8 +5445,10 @@ def parse_bi_api_update_bot_block(text: str) -> dict:
         raise ValueError("Empty message.")
     lines = [L.strip() for L in raw.splitlines() if L.strip()]
     if not lines or not JENKINS_UPDATE_CMD_RE.search(lines[0]):
-        raise ValueError("First line must include `/jenkinsupdate`.")
-    repo, env, branch = parse_bi_api_update_message_block(raw)
+        raise ValueError("First line must include `/update` or `/jenkinsupdate`.")
+    repo, env, branch = parse_bi_api_update_message_block(
+        raw, allow_missing_repository=True
+    )
     return {
         "_job_kind": "bi_api_update",
         "repository": repo,
@@ -5692,6 +5852,120 @@ def _fpms_lark_service_pick_card_json(
         "body": {"elements": body_elements},
     }
     return json.dumps(card, ensure_ascii=False)
+
+
+def _fpms_lark_bi_repository_pick_card_json(
+    repo_hint: str,
+    ranked: list[tuple[str, str, float]],
+    picker_sid: str,
+    *,
+    environment: str,
+    source_branch: str,
+) -> str:
+    """Interactive card: pick Jenkins **REPOSITORY** (``repo`` / ``repo_can`` callbacks)."""
+    ps = (picker_sid or "").strip()
+    hint = _fpms_lark_short_line(repo_hint or "(none)", 100)
+    env_s = normalize_parameter_text(environment).casefold() or BI_API_UPDATE_DEFAULT_ENVIRONMENT
+    br_s = normalize_parameter_text(source_branch) or BI_API_UPDATE_DEFAULT_SOURCE_BRANCH
+    lines_md: list[str] = [
+        "**BI API UPDATE** — choose **REPOSITORY**",
+        f"Hint: `{hint}` · Env: **{env_s}** · Branch: **{br_s}**",
+        "",
+        "Tap **1–N** (or type a number). **Cancel** stops the flow.",
+        "",
+    ]
+    for i, (ov, _ot, _sc) in enumerate(ranked, start=1):
+        lines_md.append(f"**{i}.** `{ov}`")
+    buttons: list[dict[str, object]] = []
+    for i in range(1, len(ranked) + 1):
+        pl: dict[str, object] = {"k": "repo", "i": i}
+        if ps:
+            pl["sid"] = ps
+        buttons.append(
+            _fpms_lark_v2_callback_button(
+                str(i),
+                "primary" if i == 1 else "default",
+                pl,
+                element_id=f"rp_{i}"[:20],
+            )
+        )
+    body_elements: list[dict[str, object]] = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines_md)}},
+    ]
+    for off in range(0, len(buttons), 5):
+        body_elements.append(_fpms_lark_v2_column_set_button_row(buttons[off : off + 5]))
+    body_elements.append({"tag": "hr"})
+    p2: dict[str, object] = {"k": "repo_can"}
+    if ps:
+        p2["sid"] = ps
+    body_elements.append(
+        _fpms_lark_v2_column_set_button_row(
+            [_fpms_lark_v2_callback_button("Cancel", "default", p2, element_id="repo_can")]
+        )
+    )
+    card: dict[str, object] = {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "wathet",
+            "title": {
+                "tag": "plain_text",
+                "content": f"BI REPOSITORY: {_fpms_lark_short_line(repo_hint or 'pick one', 48)}",
+            },
+        },
+        "body": {"elements": body_elements},
+    }
+    return json.dumps(card, ensure_ascii=False)
+
+
+def _fpms_lark_send_bi_repository_pick_card(
+    chat_id: str,
+    session_key: str,
+    send,
+    *,
+    repo_hint: str,
+    ranked: list[tuple[str, str, float]],
+    environment: str,
+    source_branch: str,
+    raw_prompt_body: str,
+) -> None:
+    ps = secrets.token_hex(16)
+    opts = [(r[0], r[1]) for r in ranked]
+    with _fpms_lark_sessions_lock:
+        prev = _fpms_lark_sessions.get(session_key)
+        sess = {
+            "state": "choose_bi_repo",
+            "repo_ranked": opts,
+            "repo_hint": repo_hint,
+            "environment": environment,
+            "source_branch": source_branch,
+            "jenkins_job_url": BI_API_UPDATE_BUILD_URL,
+            "raw_prompt_body": raw_prompt_body,
+            "job_profile": "bi_api_update",
+            "picker_sid": ps,
+        }
+        _fpms_lark_preserve_updatemore_queue(
+            prev if isinstance(prev, dict) else None, sess
+        )
+        _fpms_lark_register_picker_sid(ps, session_key)
+        _fpms_lark_sessions[session_key] = sess
+    card_js = _fpms_lark_bi_repository_pick_card_json(
+        repo_hint,
+        ranked,
+        ps,
+        environment=environment,
+        source_branch=source_branch,
+    )
+    try:
+        send(chat_id, card_js, msg_type="interactive")
+    except TypeError:
+        lines = [
+            f"BI API UPDATE — pick REPOSITORY (env={environment}, branch={source_branch}):",
+            f"Hint: {repo_hint or '(none)'}",
+        ]
+        for i, (ov, _ot, _sc) in enumerate(ranked, start=1):
+            lines.append(f"  {i}. {ov}")
+        send(chat_id, "\n".join(lines))
 
 
 def _fpms_lark_send_service_pick_card(
@@ -6931,14 +7205,16 @@ def _fpms_lark_dispatch_bi_api_update_parameter_flow(
     *,
     lark_message_id: str | None = None,
 ) -> bool:
-    """Parse BI API UPDATE block from `/jenkinsupdate`, then run headless Jenkins fill."""
+    """Parse BI API UPDATE block from `/update` or `/jenkinsupdate`, then run headless Jenkins fill."""
     try:
         data = parse_bi_api_update_bot_block(body)
     except Exception as ex:
         send(
             chat_id,
-            "❌ Could not parse BI API UPDATE block. Need `/jenkinsupdate` plus "
-            "`repository:` (or `services:`) with `ds-`/`bi-`, `env:`, and `branch:`.\n"
+            "❌ Could not parse BI API UPDATE block. Examples:\n"
+            "• `/update ds superjackpot` (defaults: **prod** / **main**)\n"
+            "• `/update ds` then pick REPOSITORY from the card\n"
+            "• `/update repository: ds-superjackpot-api env: prod branch: main`\n"
             f"```\n{ex}\n```",
         )
         return True
@@ -6951,6 +7227,30 @@ def _fpms_lark_dispatch_bi_api_update_parameter_flow(
                 "**Tap YES/NO** on that card (or type **yes** / **no**), or say **cancel** before starting a new run.",
             )
             return True
+    repo_hint = str(data.get("repository") or "").strip()
+    picked, ranked, need_pick = _resolve_bi_repository_jenkins_value(repo_hint)
+    if need_pick:
+        if not ranked:
+            send(
+                chat_id,
+                "❌ No Jenkins REPOSITORY option matches your text. "
+                "Try `superjackpot`, `ds-superjackpot-api`, or `/update ds` and pick from the list.",
+            )
+            return True
+        _fpms_lark_send_bi_repository_pick_card(
+            chat_id,
+            session_key,
+            send,
+            repo_hint=repo_hint,
+            ranked=ranked,
+            environment=str(data.get("environment") or BI_API_UPDATE_DEFAULT_ENVIRONMENT),
+            source_branch=str(
+                data.get("source_branch") or BI_API_UPDATE_DEFAULT_SOURCE_BRANCH
+            ),
+            raw_prompt_body=body,
+        )
+        return True
+    data["repository"] = picked
     _fpms_lark_begin_jenkins_run(
         chat_id,
         session_key,
@@ -7185,11 +7485,7 @@ def _dispatch_lark_update_command_body(
             lark_message_id=lark_message_id,
         )
 
-    try:
-        _repo_bi, _env_bi, _branch_bi = parse_bi_api_update_message_block(body)
-    except Exception:
-        pass
-    else:
+    if _body_requests_bi_api_update(body):
         return _fpms_lark_dispatch_bi_api_update_parameter_flow(
             chat_id,
             key,
@@ -7417,6 +7713,96 @@ def handle_lark_jenkins_update_message(
             return _fpms_lark_dispatch_job_row(
                 chat_id, key, pending, row, send, lark_message_id=lark_message_id
             )
+        if st == "choose_bi_repo":
+            ranked_opts = list(sess.get("repo_ranked") or [])
+            if not ranked_opts:
+                _fpms_lark_clear_session(chat_id, sender_id)
+                send(chat_id, "Session error — start again with `/update ds`.")
+                return True
+            idx = _parse_single_menu_index(clean_text.strip(), len(ranked_opts))
+            if idx is None:
+                new_hint = _normalize_bi_repository_hint(clean_text.strip())
+                if new_hint:
+                    picked, ranked, need_pick = _resolve_bi_repository_jenkins_value(
+                        new_hint
+                    )
+                    if not need_pick:
+                        data = {
+                            "_job_kind": "bi_api_update",
+                            "repository": picked,
+                            "environment": str(
+                                sess.get("environment") or BI_API_UPDATE_DEFAULT_ENVIRONMENT
+                            ),
+                            "source_branch": str(
+                                sess.get("source_branch")
+                                or BI_API_UPDATE_DEFAULT_SOURCE_BRANCH
+                            ),
+                        }
+                        raw_pb = str(sess.get("raw_prompt_body") or "")
+                        ju = str(sess.get("jenkins_job_url") or BI_API_UPDATE_BUILD_URL)
+                        _fpms_lark_clear_session(chat_id, sender_id)
+                        _fpms_lark_begin_jenkins_run(
+                            chat_id,
+                            key,
+                            data,
+                            [],
+                            send,
+                            raw_prompt_body=raw_pb,
+                            jenkins_build_url=ju,
+                            job_profile="bi_api_update",
+                            lark_message_id=lark_message_id,
+                        )
+                        return True
+                    ranked_opts = [(r[0], r[1]) for r in ranked]
+                    sess["repo_ranked"] = ranked_opts
+                    sess["repo_hint"] = new_hint
+                    with _fpms_lark_sessions_lock:
+                        _fpms_lark_sessions[key] = sess
+                ps = str(sess.get("picker_sid") or "").strip()
+                ranked_scored = [(ov, ot, 0.0) for ov, ot in ranked_opts]
+                card_js = _fpms_lark_bi_repository_pick_card_json(
+                    str(sess.get("repo_hint") or ""),
+                    ranked_scored,
+                    ps,
+                    environment=str(sess.get("environment") or BI_API_UPDATE_DEFAULT_ENVIRONMENT),
+                    source_branch=str(
+                        sess.get("source_branch") or BI_API_UPDATE_DEFAULT_SOURCE_BRANCH
+                    ),
+                )
+                try:
+                    send(chat_id, card_js, msg_type="interactive")
+                except TypeError:
+                    send(
+                        chat_id,
+                        f"Pick REPOSITORY **1–{len(ranked_opts)}** or type a service name (e.g. superjackpot).",
+                    )
+                return True
+            ov, _ot = ranked_opts[idx - 1]
+            data = {
+                "_job_kind": "bi_api_update",
+                "repository": ov,
+                "environment": str(
+                    sess.get("environment") or BI_API_UPDATE_DEFAULT_ENVIRONMENT
+                ),
+                "source_branch": str(
+                    sess.get("source_branch") or BI_API_UPDATE_DEFAULT_SOURCE_BRANCH
+                ),
+            }
+            raw_pb = str(sess.get("raw_prompt_body") or "")
+            ju = str(sess.get("jenkins_job_url") or BI_API_UPDATE_BUILD_URL)
+            _fpms_lark_clear_session(chat_id, sender_id)
+            _fpms_lark_begin_jenkins_run(
+                chat_id,
+                key,
+                data,
+                [],
+                send,
+                raw_prompt_body=raw_pb,
+                jenkins_build_url=ju,
+                job_profile="bi_api_update",
+                lark_message_id=lark_message_id,
+            )
+            return True
         if st == "jenkins_wait_build":
             if not isinstance(sess.get("build_gate_event"), threading.Event):
                 _fpms_lark_clear_session(chat_id, sender_id)
@@ -7649,6 +8035,68 @@ def handle_lark_jenkins_update_message(
     )
 
 
+def _fpms_lark_handle_bi_repo_pick_callbacks(
+    chat_id: str,
+    sender_id: str,
+    parsed: dict[str, object],
+    send,
+    *,
+    lark_message_id: str | None = None,
+) -> bool:
+    """Interactive **REPOSITORY** card: ``repo`` / ``repo_can``."""
+    k = str(parsed.get("k") or "").strip().lower()
+    sk = _fpms_lark_session_key(chat_id, sender_id)
+    if k == "repo_can":
+        return handle_lark_jenkins_update_message(
+            chat_id,
+            sender_id,
+            "cancel",
+            "cancel",
+            send,
+            allow_start=True,
+            lark_message_id=lark_message_id,
+        )
+    if k != "repo":
+        return False
+    try:
+        idx = int(str(parsed.get("i")).strip())
+    except (TypeError, ValueError):
+        return False
+    with _fpms_lark_sessions_lock:
+        sess = _fpms_lark_sessions.get(sk)
+        if not isinstance(sess, dict) or sess.get("state") != "choose_bi_repo":
+            return False
+        ranked_opts = list(sess.get("repo_ranked") or [])
+        if idx < 1 or idx > len(ranked_opts):
+            return False
+        ov, _ot = ranked_opts[idx - 1]
+        data = {
+            "_job_kind": "bi_api_update",
+            "repository": ov,
+            "environment": str(
+                sess.get("environment") or BI_API_UPDATE_DEFAULT_ENVIRONMENT
+            ),
+            "source_branch": str(
+                sess.get("source_branch") or BI_API_UPDATE_DEFAULT_SOURCE_BRANCH
+            ),
+        }
+        raw_pb = str(sess.get("raw_prompt_body") or "")
+        ju = str(sess.get("jenkins_job_url") or BI_API_UPDATE_BUILD_URL)
+        _fpms_lark_sessions.pop(sk, None)
+    _fpms_lark_begin_jenkins_run(
+        chat_id,
+        sk,
+        data,
+        [],
+        send,
+        raw_prompt_body=raw_pb,
+        jenkins_build_url=ju,
+        job_profile="bi_api_update",
+        lark_message_id=lark_message_id,
+    )
+    return True
+
+
 def _fpms_lark_handle_service_pick_callbacks(
     chat_id: str,
     sender_id: str,
@@ -7767,6 +8215,9 @@ def handle_lark_jenkins_card_action(
     k = str(parsed.get("k") or "").strip().lower()
     if k in ("svc", "svc_go", "svc_clr", "svc_can"):
         if _fpms_lark_handle_service_pick_callbacks(chat_id, sender_id, parsed, send):
+            return True
+    if k in ("repo", "repo_can"):
+        if _fpms_lark_handle_bi_repo_pick_callbacks(chat_id, sender_id, parsed, send):
             return True
     if k == "ju_cancel":
         return handle_lark_jenkins_update_message(
