@@ -97,10 +97,16 @@ SUBJECT_SEARCH_MAX = int(
     os.getenv("MAINTENANCE_MAIL_SUBJECT_MAX", "").strip() or "300"
 )
 MAIL_TZ = (os.getenv("MAINTENANCE_MAIL_TZ", "").strip() or "Asia/Shanghai")
-# Calendar days to process (local MAIL_TZ): 2 = today + yesterday (matches IMAP lookback).
+# Calendar days to process (local MAIL_TZ): 1 = today only.
 PROCESS_DAYS = max(
     1,
-    int(os.getenv("MAINTENANCE_MAIL_PROCESS_DAYS", "").strip() or "2"),
+    int(os.getenv("MAINTENANCE_MAIL_PROCESS_DAYS", "").strip() or "1"),
+)
+# IMAP SINCE lookback (local MAIL_TZ) — wider than PROCESS_DAYS so UTC/internal
+# dates still find mail that belongs to «today» locally; code filters to PROCESS_DAYS.
+IMAP_SEARCH_EXTRA_DAYS = max(
+    0,
+    int(os.getenv("MAINTENANCE_MAIL_IMAP_EXTRA_DAYS", "").strip() or "1"),
 )
 MAIL_VERBOSE = (os.getenv("MAINTENANCE_MAIL_VERBOSE", "").strip() or "0") in (
     "1",
@@ -195,19 +201,28 @@ def _imap_since_today() -> str:
     return datetime.now(_local_tz()).strftime("%d-%b-%Y")
 
 
-def _imap_since_lookback() -> str:
+def _imap_since_for_search() -> str:
     """
-    IMAP internal dates are often UTC — mail at 01:32 CST may still be «yesterday» in UTC.
-    Search from (local today − PROCESS_DAYS + 1); filter with ``_received_in_process_window``.
+    IMAP SINCE for subject search (may be wider than PROCESS_DAYS).
+
+    Server internal dates are often UTC — mail at 01:32 CST can still be «yesterday»
+    on the server. Search from (local today − IMAP_SEARCH_EXTRA_DAYS); only mail whose
+    Date header falls in ``PROCESS_DAYS`` is processed.
     """
-    d = datetime.now(_local_tz()).date() - timedelta(days=PROCESS_DAYS - 1)
+    d = datetime.now(_local_tz()).date() - timedelta(days=IMAP_SEARCH_EXTRA_DAYS)
     return d.strftime("%d-%b-%Y")
+
+
+def _process_window_label() -> str:
+    if PROCESS_DAYS <= 1:
+        return f"today ({MAIL_TZ})"
+    return f"{PROCESS_DAYS}-day window ({MAIL_TZ})"
 
 
 def _received_in_process_window(when: str | None) -> bool:
     """
     True when the message Date falls within the last ``PROCESS_DAYS`` local
-    calendar days (default **2** = today + yesterday). Missing Date → allow
+    calendar days (default **1** = today only). Missing Date → allow
     (re-checked after full RFC822 fetch).
     """
     if not (when or "").strip():
@@ -1187,8 +1202,8 @@ class MaintenanceMailWatcher:
 
         if when and not _received_in_process_window(when):
             print(
-                f"[maint-mail] skip uid={uid_s} (outside {PROCESS_DAYS}-day window "
-                f"{MAIL_TZ}, date={when!r}): {subject!r}",
+                f"[maint-mail] skip uid={uid_s} (not {_process_window_label()}, "
+                f"date={when!r}): {subject!r}",
                 flush=True,
             )
             return
@@ -1304,8 +1319,8 @@ class MaintenanceMailWatcher:
 
         if when and not _received_in_process_window(when):
             print(
-                f"[maint-mail] skip uid={uid_s} (outside {PROCESS_DAYS}-day window "
-                f"{MAIL_TZ}, date={when!r}): {display_subj!r}",
+                f"[maint-mail] skip uid={uid_s} (not {_process_window_label()}, "
+                f"date={when!r}): {display_subj!r}",
                 flush=True,
             )
             return
@@ -1550,6 +1565,44 @@ class MaintenanceMailWatcher:
             _uid_search(mail, f'(SINCE {since} SUBJECT "[Service Desk]")'),
         )
 
+    def _cap_uids_keep_process_window(
+        self, mail: imaplib.IMAP4, uids: list[bytes]
+    ) -> list[bytes]:
+        """
+        When IMAP returns more than SUBJECT_SEARCH_MAX hits, keep **all** mail in the
+        process window (today by default) instead of blindly dropping older UIDs.
+        """
+        if len(uids) <= SUBJECT_SEARCH_MAX:
+            return uids
+        print(
+            f"[maint-mail] IMAP subject hits: {len(uids)} (> {SUBJECT_SEARCH_MAX}); "
+            f"scanning headers to keep all {_process_window_label()}",
+            flush=True,
+        )
+        keep_today: list[bytes] = []
+        keep_unknown: list[bytes] = []
+        for uid in reversed(uids):
+            _, when, _ = self._fetch_header_preview(mail, uid)
+            if not when:
+                keep_unknown.append(uid)
+            elif _received_in_process_window(when):
+                keep_today.append(uid)
+        out = _merge_uid_lists(keep_today, keep_unknown)
+        if out:
+            dropped = len(uids) - len(out)
+            print(
+                f"[maint-mail] kept {len(out)} UID(s) in {_process_window_label()} "
+                f"(dropped {dropped} older/non-matching)",
+                flush=True,
+            )
+            return out
+        print(
+            f"[maint-mail] no {_process_window_label()} in scan; "
+            f"fallback newest {SUBJECT_SEARCH_MAX}",
+            flush=True,
+        )
+        return uids[-SUBJECT_SEARCH_MAX:]
+
     def _uids_broad_since(self, mail: imaplib.IMAP4, since: str) -> list[bytes]:
         """Fallback when SUBJECT search returns nothing (some Lark setups)."""
         uids = _uid_search(mail, f"(SINCE {since})")
@@ -1565,34 +1618,29 @@ class MaintenanceMailWatcher:
     def _uids_today_matching(self, mail: imaplib.IMAP4) -> list[bytes]:
         """
         Prefer IMAP SUBJECT search (fast, only maintenance mail).
-        Fall back to broad SINCE + in-code filter if the server ignores bracket subjects.
+        Search SINCE today and a short lookback (UTC/IMAP date safety); only
+        ``PROCESS_DAYS`` (default today) is processed after header/full Date check.
         """
         since_today = _imap_since_today()
-        uids = self._uids_maintenance_subject_search(mail, since_today)
+        since_search = _imap_since_for_search()
+        uids = _merge_uid_lists(
+            self._uids_maintenance_subject_search(mail, since_today),
+            self._uids_maintenance_subject_search(mail, since_search),
+        )
         if not uids:
-            since_lb = _imap_since_lookback()
             print(
-                f"[maint-mail] maintenance search SINCE {since_today} → 0; "
-                f"retry SINCE {since_lb} ({PROCESS_DAYS}-day window in code)",
+                f"[maint-mail] maintenance search SINCE {since_today} / {since_search} → 0; "
+                f"broad fallback (process {_process_window_label()} only)",
                 flush=True,
             )
-            uids = self._uids_maintenance_subject_search(mail, since_lb)
-        if not uids:
-            for since in (_imap_since_today(), _imap_since_lookback()):
+            for since in (since_today, since_search):
                 uids = self._uids_broad_since(mail, since)
                 if uids:
                     break
         if not uids:
             return []
-        if len(uids) > SUBJECT_SEARCH_MAX:
-            dropped = len(uids) - SUBJECT_SEARCH_MAX
-            print(
-                f"[maint-mail] IMAP subject hits: {len(uids)} → keep newest {SUBJECT_SEARCH_MAX} "
-                f"(dropped {dropped} older UID(s); raise MAINTENANCE_MAIL_SUBJECT_MAX if needed)",
-                flush=True,
-            )
-            uids = uids[-SUBJECT_SEARCH_MAX:]
-        else:
+        uids = self._cap_uids_keep_process_window(mail, uids)
+        if len(uids) <= SUBJECT_SEARCH_MAX:
             print(
                 f"[maint-mail] IMAP subject hits: {len(uids)} (TINC- / [Service Desk])",
                 flush=True,
