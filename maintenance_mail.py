@@ -97,6 +97,11 @@ SUBJECT_SEARCH_MAX = int(
     os.getenv("MAINTENANCE_MAIL_SUBJECT_MAX", "").strip() or "300"
 )
 MAIL_TZ = (os.getenv("MAINTENANCE_MAIL_TZ", "").strip() or "Asia/Shanghai")
+# Calendar days to process (local MAIL_TZ): 2 = today + yesterday (matches IMAP lookback).
+PROCESS_DAYS = max(
+    1,
+    int(os.getenv("MAINTENANCE_MAIL_PROCESS_DAYS", "").strip() or "2"),
+)
 MAIL_VERBOSE = (os.getenv("MAINTENANCE_MAIL_VERBOSE", "").strip() or "0") in (
     "1",
     "true",
@@ -193,15 +198,20 @@ def _imap_since_today() -> str:
 def _imap_since_lookback() -> str:
     """
     IMAP internal dates are often UTC — mail at 01:32 CST may still be «yesterday» in UTC.
-    Search from (local today − 1 day); keep only local-today in ``_received_today``.
+    Search from (local today − PROCESS_DAYS + 1); filter with ``_received_in_process_window``.
     """
-    d = datetime.now(_local_tz()).date() - timedelta(days=1)
+    d = datetime.now(_local_tz()).date() - timedelta(days=PROCESS_DAYS - 1)
     return d.strftime("%d-%b-%Y")
 
 
-def _received_today(when: str | None) -> bool:
+def _received_in_process_window(when: str | None) -> bool:
+    """
+    True when the message Date falls within the last ``PROCESS_DAYS`` local
+    calendar days (default **2** = today + yesterday). Missing Date → allow
+    (re-checked after full RFC822 fetch).
+    """
     if not (when or "").strip():
-        return False
+        return True
     try:
         dt = datetime.fromisoformat(when.strip().replace("Z", "+00:00"))
         if dt.tzinfo is None:
@@ -210,9 +220,17 @@ def _received_today(when: str | None) -> bool:
             tz = ZoneInfo(MAIL_TZ)
         except Exception:
             tz = timezone.utc
-        return dt.astimezone(tz).date() == datetime.now(tz).date()
+        local_date = dt.astimezone(tz).date()
+        today = datetime.now(tz).date()
+        earliest = today - timedelta(days=PROCESS_DAYS - 1)
+        return earliest <= local_date <= today
     except ValueError:
         return False
+
+
+def _received_today(when: str | None) -> bool:
+    """Backward-compatible alias — same as :func:`_received_in_process_window`."""
+    return _received_in_process_window(when)
 
 
 def _merge_uid_lists(*groups: list[bytes]) -> list[bytes]:
@@ -1167,12 +1185,12 @@ class MaintenanceMailWatcher:
                 )
             return
 
-        if when and not _received_today(when):
-            if MAIL_VERBOSE:
-                print(
-                    f"[maint-mail] skip uid={uid_s} (not local today {MAIL_TZ}): {subject!r}",
-                    flush=True,
-                )
+        if when and not _received_in_process_window(when):
+            print(
+                f"[maint-mail] skip uid={uid_s} (outside {PROCESS_DAYS}-day window "
+                f"{MAIL_TZ}, date={when!r}): {subject!r}",
+                flush=True,
+            )
             return
 
         try:
@@ -1284,12 +1302,12 @@ class MaintenanceMailWatcher:
             except Exception:
                 when = None
 
-        if when and not _received_today(when):
-            if MAIL_VERBOSE:
-                print(
-                    f"[maint-mail] skip uid={uid_s} (not local today {MAIL_TZ}): {display_subj!r}",
-                    flush=True,
-                )
+        if when and not _received_in_process_window(when):
+            print(
+                f"[maint-mail] skip uid={uid_s} (outside {PROCESS_DAYS}-day window "
+                f"{MAIL_TZ}, date={when!r}): {display_subj!r}",
+                flush=True,
+            )
             return
 
         token = self._get_token()
@@ -1472,7 +1490,7 @@ class MaintenanceMailWatcher:
                         flush=True,
                     )
                 continue
-            if when and not _received_today(when):
+            if when and not _received_in_process_window(when):
                 stats["not_today"] += 1
                 continue
             todo.append(uid)
