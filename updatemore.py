@@ -436,6 +436,21 @@ def find_active_queue_for_chat(
     return None, None, None
 
 
+def is_jenkinsbot_duty_command(text: str) -> bool:
+    """True when text is jenkinsbot → duty bot control (``/replyupdateemail``, etc.)."""
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    if _REPLY_UPDATE_EMAIL_RE.search(raw):
+        return True
+    if _SUCCESS_PROCEED_RE.search(raw) or _FAILED_STOP_RE.search(raw):
+        return True
+    for pat in (r"@_user_\d+", r"<[^>]+>"):
+        raw = re.sub(pat, "", raw)
+    raw = re.sub(r"\s+", " ", raw).strip()
+    return bool(_EMAIL_DONE_LEGACY_RE.match(raw))
+
+
 def _send_jenkins_email_reply(
     send: Callable[..., Any],
     chat_id: str,
@@ -445,10 +460,19 @@ def _send_jenkins_email_reply(
 ) -> None:
     import maintenance_mail as mm
 
-    mm.reply_jenkins_update_done_email(
-        email_title=email_title,
-        completions=completions,
-    )
+    try:
+        mm.reply_jenkins_update_done_email(
+            email_title=email_title,
+            completions=completions,
+        )
+    except mm.EmailThreadNotFoundError:
+        send(
+            chat_id,
+            "❌ **Can't find email** — no reply sent.\n"
+            f"Searched INBOX for subject containing: `{email_title}`\n"
+            "Check the **Email:** line in your `/update` matches the original mail subject.",
+        )
+        return
     envs = ", ".join(c[0] for c in completions)
     reply_to = mm.JENKINS_DONE_REPLY_TO
     send(

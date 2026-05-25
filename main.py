@@ -93,6 +93,12 @@ import bot_help
 _jenkins_mod = None  # None = not loaded yet; False = import failed
 
 
+def _jenkins_bot_open_id() -> str:
+    return (
+        os.environ.get("JENKINS_BOT_OPEN_ID") or "ou_45cc096780a23354f0719c9635765985"
+    ).strip()
+
+
 def _get_jenkinsupdate():
     """Return jenkinsupdate module or None if import failed (logged once)."""
     global _jenkins_mod
@@ -2662,6 +2668,11 @@ def lark_webhook():
             bot_mentioned = True
             print("✅ Bot mentioned (old schema via is_mention flag)")
 
+    # jenkinsbot → duty bot: `<at user_id=…>` may not appear in mentions[] — still process.
+    if chat_type == "group" and sender_id and sender_id == _jenkins_bot_open_id():
+        bot_mentioned = True
+        print(f"✅ Jenkins bot sender {sender_id!r} — treat as mentioned")
+
     lark_reactions_enabled = bool(message_id) and (
         chat_type != "group" or bot_mentioned
     )
@@ -2697,6 +2708,28 @@ def lark_webhook():
                 args=(run_np_third_http_by_choice, chat_id, idx_np),
                 daemon=True,
             ).start()
+            return _lark_im_done()
+
+    # jenkinsbot → duty bot callbacks (`/replyupdateemail`, …) — no @duty required in group.
+    try:
+        import updatemore as _updatemore
+
+        _jb_duty_cmd = _updatemore.is_jenkinsbot_duty_command(clean_text) or (
+            sender_id == _jenkins_bot_open_id()
+            and "/replyupdateemail" in (original_text or clean_text or "").casefold()
+        )
+    except Exception:
+        _jb_duty_cmd = "/replyupdateemail" in (clean_text or "").casefold()
+
+    ju = _get_jenkinsupdate()
+    if ju and _jb_duty_cmd:
+        if ju.handle_lark_jenkins_bot_callback(
+            chat_id,
+            sender_id or "",
+            clean_text,
+            original_text,
+            send_message,
+        ):
             return _lark_im_done()
 
     ju = _get_jenkinsupdate()

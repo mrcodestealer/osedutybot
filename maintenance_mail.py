@@ -867,6 +867,10 @@ JENKINS_DONE_REPLY_TO = (
 )
 
 
+class EmailThreadNotFoundError(LookupError):
+    """INBOX has no message whose subject matches the requested email title."""
+
+
 def _connect_imap_simple() -> imaplib.IMAP4:
     if not MAIL_PASSWORD:
         raise RuntimeError("MAINTENANCE_MAIL_PASSWORD not set")
@@ -950,19 +954,22 @@ def reply_jenkins_update_done_email(
         "JC\n"
     )
     orig = find_inbox_message_by_subject_title(title)
-    subj = _reply_subject(_decode_msg_subject(orig)) if orig else title
+    if orig is None:
+        raise EmailThreadNotFoundError(
+            f"No INBOX email found with subject matching {title!r} — reply not sent."
+        )
+    subj = _reply_subject(_decode_msg_subject(orig))
     msg = MIMEText(body, "plain", "utf-8")
     msg["Subject"] = Header(subj, "utf-8")
     msg["From"] = formataddr((FORWARD_FROM_NAME, MAIL_USER))
     msg["To"] = JENKINS_DONE_REPLY_TO
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid()
-    if orig is not None:
-        orig_mid = (orig.get("Message-ID") or "").strip()
-        if orig_mid:
-            msg["In-Reply-To"] = orig_mid
-            refs = (orig.get("References") or "").strip()
-            msg["References"] = f"{refs} {orig_mid}".strip() if refs else orig_mid
+    orig_mid = (orig.get("Message-ID") or "").strip()
+    if orig_mid:
+        msg["In-Reply-To"] = orig_mid
+        refs = (orig.get("References") or "").strip()
+        msg["References"] = f"{refs} {orig_mid}".strip() if refs else orig_mid
     recipients = [JENKINS_DONE_REPLY_TO]
     ctx = ssl.create_default_context()
     with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=IMAP_TIMEOUT, context=ctx) as smtp:
