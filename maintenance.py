@@ -178,7 +178,7 @@ def extract_status_for_card(subject: str, extra_text: str | None = None) -> str 
 
 
 FORWARD_DONE_BODY = "Done forward to junchen@snsoft.my"
-NOT_IN_CP_WEBSITE_BODY = "NOT IN CP WEBSITE"
+NOT_IN_CP_WEBSITE_BODY = "NOT IN CP WEBSITE\nFrom Duty Bot Auto Reply"
 FORWARD_DONE_NOT_CP_BODY = (
     "NOT IN CP WEBSITE — emailed Cc om@hotelstotsenberg.com only "
     "(no launched games on gamelist · 遊戲入口圖=1)."
