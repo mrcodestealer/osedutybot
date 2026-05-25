@@ -436,19 +436,77 @@ def find_active_queue_for_chat(
     return None, None, None
 
 
+def _strip_lark_mentions(text: str) -> str:
+    raw = (text or "").strip()
+    for pat in (r"@_user_\d+", r"<[^>]+>"):
+        raw = re.sub(pat, "", raw)
+    return re.sub(r"\s+", " ", raw).strip()
+
+
 def is_jenkinsbot_duty_command(text: str) -> bool:
     """True when text is jenkinsbot → duty bot control (``/replyupdateemail``, etc.)."""
     raw = (text or "").strip()
     if not raw:
         return False
+    low = raw.casefold()
+    if "/replyupdateemail" in low or "/successproceednext" in low or "/failedstop" in low:
+        return True
     if _REPLY_UPDATE_EMAIL_RE.search(raw):
         return True
     if _SUCCESS_PROCEED_RE.search(raw) or _FAILED_STOP_RE.search(raw):
         return True
-    for pat in (r"@_user_\d+", r"<[^>]+>"):
-        raw = re.sub(pat, "", raw)
-    raw = re.sub(r"\s+", " ", raw).strip()
-    return bool(_EMAIL_DONE_LEGACY_RE.match(raw))
+    cleaned = _strip_lark_mentions(raw)
+    return bool(_EMAIL_DONE_LEGACY_RE.match(cleaned))
+
+
+def _lark_json_text_field(part: str) -> str:
+    """If ``part`` is Lark ``content`` JSON, return the ``text`` field."""
+    s = (part or "").strip()
+    if not s.startswith("{"):
+        return s
+    try:
+        import json
+
+        obj = json.loads(s)
+    except Exception:
+        return s
+    if isinstance(obj, dict):
+        t = obj.get("text")
+        if isinstance(t, str) and t.strip():
+            return t.strip()
+    return s
+
+
+def resolve_duty_command_body(*parts: str | None) -> str:
+    """Best-effort command body for jenkinsbot → duty bot (handles empty ``text`` + JSON content)."""
+    candidates: list[str] = []
+    for part in parts:
+        if not part:
+            continue
+        raw = part.strip()
+        extracted = _lark_json_text_field(raw)
+        for variant in (extracted, _strip_lark_mentions(extracted), raw, _strip_lark_mentions(raw)):
+            if variant and variant not in candidates:
+                candidates.append(variant)
+    for cand in candidates:
+        if cand.startswith("{") and "replyupdateemail" in cand.casefold():
+            continue
+        if _REPLY_UPDATE_EMAIL_RE.search(cand) or _SUCCESS_PROCEED_RE.search(cand) or _FAILED_STOP_RE.search(cand):
+            return cand
+        if _EMAIL_DONE_LEGACY_RE.match(cand):
+            return cand
+    blob = " ".join(candidates)
+    m = re.search(
+        r"/replyupdateemail\s*\|\s*[^|\"\\]+?\|\s*[^|\"\\]+?\|\s*[^|\"\\]+",
+        blob,
+        re.I,
+    )
+    if m:
+        return _strip_lark_mentions(m.group(0))
+    for cmd in ("/SuccessProceedNext", "/FailedStop"):
+        if cmd.casefold() in blob.casefold():
+            return cmd
+    return candidates[0] if candidates else ""
 
 
 def _send_jenkins_email_reply(
@@ -601,12 +659,15 @@ def handle_jenkinsbot_callback(
     sessions_lock: threading.Lock,
     session_key_fn: Callable[[str, str], str],
     dispatch_update_body: Callable[..., bool],
+    message_content_raw: str = "",
 ) -> bool:
     """
     Handle ``/SuccessProceedNext``, ``/FailedStop``, or email-done lines from jenkinsbot.
     Returns True if consumed.
     """
-    body = (original_text or clean_text or "").replace("\r\n", "\n")
+    body = resolve_duty_command_body(
+        original_text, clean_text, message_content_raw
+    )
 
     if is_failed_stop_message(body):
         key, q, sess = find_waiting_queue_for_chat(chat_id, sessions, sessions_lock)
@@ -640,6 +701,14 @@ def handle_jenkinsbot_callback(
             session_key_fn=session_key_fn,
             dispatch_update_body=dispatch_update_body,
         )
+
+    if _REPLY_UPDATE_EMAIL_RE.search(body) or "/replyupdateemail" in (body or "").casefold():
+        send(
+            chat_id,
+            "❌ **Malformed `/replyupdateemail`** — expected:\n"
+            "`/replyupdateemail | {email title} | {pipeline} | {time}`",
+        )
+        return True
 
     if is_success_proceed_message(body):
         key, q, sess = find_waiting_queue_for_chat(chat_id, sessions, sessions_lock)

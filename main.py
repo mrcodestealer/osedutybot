@@ -1513,6 +1513,125 @@ def get_bot_open_id():
 
 BOT_OPEN_ID = "ou_1f6596a9923a2a835918e7e2513595d5"
 
+
+def _jenkins_bot_open_id() -> str:
+    return (os.getenv("JENKINS_BOT_OPEN_ID") or "ou_45cc096780a23354f0719c9635765985").strip()
+
+
+def _mention_includes_duty_bot(mentions: list) -> bool:
+    for mention in mentions or []:
+        mention_id_obj = mention.get("id")
+        if isinstance(mention_id_obj, dict):
+            mention_id = mention_id_obj.get("open_id", "")
+        else:
+            mention_id = mention_id_obj
+        if mention_id == BOT_OPEN_ID:
+            return True
+    return False
+
+
+def _dispatch_jenkins_duty_command(
+    chat_id: str,
+    sender_id: str,
+    duty_clean: str,
+    duty_orig: str,
+    send,
+    *,
+    message_content_raw: str = "",
+) -> bool:
+    """Handle jenkinsbot → duty bot (``/replyupdateemail``, etc.) with or without jenkinsupdate."""
+    ju = _get_jenkinsupdate()
+    if ju:
+        try:
+            import updatemore as um
+
+            return um.handle_jenkinsbot_callback(
+                chat_id,
+                sender_id,
+                duty_clean,
+                duty_orig,
+                send,
+                sessions=ju._fpms_lark_sessions,
+                sessions_lock=ju._fpms_lark_sessions_lock,
+                session_key_fn=ju._fpms_lark_session_key,
+                dispatch_update_body=lambda cid, sk, body, snd, **kw: ju._dispatch_lark_update_command_body(
+                    cid, sk, body, snd, **kw
+                ),
+                message_content_raw=message_content_raw,
+            )
+        except Exception as ex:
+            print(f"[lark] jenkins duty via jenkinsupdate failed: {ex!r}", flush=True)
+    try:
+        import updatemore as um
+
+        empty_lock = threading.Lock()
+        return um.handle_jenkinsbot_callback(
+            chat_id,
+            sender_id,
+            duty_clean,
+            duty_orig,
+            send,
+            sessions={},
+            sessions_lock=empty_lock,
+            session_key_fn=lambda cid, sid: f"{(cid or '').strip()}:{(sid or '').strip()}",
+            dispatch_update_body=lambda *a, **kw: False,
+            message_content_raw=message_content_raw,
+        )
+    except Exception as ex:
+        print(f"[lark] jenkins duty fallback failed: {ex!r}", flush=True)
+        return False
+
+
+def _lark_flatten_rich_content(obj) -> str:
+    """Collect plain text from Lark post / rich ``content`` JSON."""
+    parts: list[str] = []
+    if isinstance(obj, str):
+        s = obj.strip()
+        if s:
+            parts.append(s)
+    elif isinstance(obj, dict):
+        if str(obj.get("tag") or "").lower() == "text":
+            t = obj.get("text")
+            if isinstance(t, str) and t.strip():
+                parts.append(t.strip())
+        else:
+            for key in ("text", "title", "content"):
+                if key in obj:
+                    sub = _lark_flatten_rich_content(obj[key])
+                    if sub:
+                        parts.append(sub)
+    elif isinstance(obj, list):
+        for item in obj:
+            sub = _lark_flatten_rich_content(item)
+            if sub:
+                parts.append(sub)
+    return " ".join(parts)
+
+
+def _lark_extract_message_text(content_str: str) -> str:
+    """Parse ``im.message`` ``content`` JSON — text, post, and rich variants."""
+    raw = (content_str or "").strip()
+    if not raw:
+        return ""
+    try:
+        content = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+    if not isinstance(content, dict):
+        return str(content)
+    plain = content.get("text")
+    if isinstance(plain, str) and plain.strip():
+        return plain.strip()
+    for locale in ("zh_cn", "en_us", "ja_jp", "zh_hk", "en", "zh"):
+        block = content.get(locale)
+        if isinstance(block, dict):
+            flat = _lark_flatten_rich_content(block.get("content"))
+            if flat.strip():
+                return flat.strip()
+    flat_all = _lark_flatten_rich_content(content)
+    return flat_all.strip()
+
+
 processed_messages = set()
 processed_lock = threading.Lock()
 
@@ -2550,6 +2669,7 @@ def lark_webhook():
 
     chat_id = None
     text = None
+    message_content_raw = ""
     chat_type = None
     mentions = []
     message_id = None
@@ -2562,11 +2682,11 @@ def lark_webhook():
         message_id = message.get("message_id")
         chat_type = message.get("chat_type")
         mentions = message.get("mentions", [])
-        content_str = message.get("content", "{}")
+        message_content_raw = message.get("content") or "{}"
         try:
-            content = json.loads(content_str)
-            text = content.get("text", "")
-        except json.JSONDecodeError:
+            text = _lark_extract_message_text(message_content_raw)
+        except Exception as ex:
+            print(f"[lark] content parse failed: {ex!r}", flush=True)
             text = ""
     elif data.get("type") == "event_callback":
         event = data.get("event", {})
@@ -2575,15 +2695,15 @@ def lark_webhook():
         chat_type = event.get("chat_type")
         mentions = event.get("mentions", [])
         is_mention_old = event.get("is_mention", False)
+        message_content_raw = event.get("content") or "{}"
         text = event.get("text_without_at_bot") or event.get("text", "")
         if not text:
-            content_str = event.get("content")
-            if content_str:
-                try:
-                    content = json.loads(content_str)
-                    text = content.get("text", "")
-                except:
-                    pass
+            try:
+                text = _lark_extract_message_text(message_content_raw)
+            except Exception:
+                text = ""
+        elif not message_content_raw or message_content_raw == "{}":
+            message_content_raw = json.dumps({"text": text})
     else:
         het = _lark_header_event_type(data)
         if _lark_ack_only_event_type(het):
@@ -2631,7 +2751,11 @@ def lark_webhook():
         return _lark_im_done()
 
     original_text = text
-    print(f"📝 Original text: {repr(original_text)}")
+    print(
+        f"📝 Original text: {repr(original_text)} sender={sender_id!r} "
+        f"content_len={len(message_content_raw or '')}",
+        flush=True,
+    )
 
         # 清理提及占位符（先做清理，便于后续命令处理）
     mention_keys = [m.get("key", "") for m in mentions if m.get("key")]
@@ -2642,6 +2766,19 @@ def lark_webhook():
     text = re.sub(r'\s+', ' ', text).strip()
     clean_text = text
     print(f"🧹 Cleaned text (repr): {repr(clean_text)}")
+
+    jenkins_bot_oid = _jenkins_bot_open_id()
+    is_jenkins_bot_sender = bool(
+        sender_id and jenkins_bot_oid and sender_id == jenkins_bot_oid
+    )
+    try:
+        import updatemore as _updatemore
+
+        duty_blob = _updatemore.resolve_duty_command_body(
+            original_text, clean_text, message_content_raw
+        )
+    except Exception:
+        duty_blob = (clean_text or original_text or message_content_raw or "").strip()
 
     # Group: Got It / DONE only when the bot is @mentioned; p2p always.
     bot_mentioned = chat_type != "group"
@@ -2667,11 +2804,16 @@ def lark_webhook():
         try:
             import updatemore as _updatemore
 
-            if _updatemore.is_jenkinsbot_duty_command(clean_text or original_text):
+            if _updatemore.is_jenkinsbot_duty_command(duty_blob):
                 bot_mentioned = True
                 print("✅ Jenkins/duty email command — treat as mentioned (any sender)")
+            elif is_jenkins_bot_sender and _updatemore.is_jenkinsbot_duty_command(
+                message_content_raw or ""
+            ):
+                bot_mentioned = True
+                print("✅ Jenkinsbot sender duty command — treat as mentioned")
         except Exception:
-            if "/replyupdateemail" in (clean_text or "").casefold():
+            if "/replyupdateemail" in (duty_blob or "").casefold():
                 bot_mentioned = True
 
     lark_reactions_enabled = bool(message_id) and (
@@ -2715,21 +2857,39 @@ def lark_webhook():
     try:
         import updatemore as _updatemore
 
-        _jb_duty_cmd = _updatemore.is_jenkinsbot_duty_command(
-            clean_text or original_text
-        )
+        _jb_duty_cmd = _updatemore.is_jenkinsbot_duty_command(duty_blob)
+        if not _jb_duty_cmd and is_jenkins_bot_sender:
+            _jb_duty_cmd = _updatemore.is_jenkinsbot_duty_command(
+                message_content_raw or ""
+            )
+        if not _jb_duty_cmd and is_jenkins_bot_sender and _mention_includes_duty_bot(mentions):
+            _jb_duty_cmd = "/replyupdateemail" in (message_content_raw or "").casefold()
     except Exception:
-        _jb_duty_cmd = "/replyupdateemail" in (clean_text or "").casefold()
+        _jb_duty_cmd = "/replyupdateemail" in (duty_blob or "").casefold()
 
-    ju = _get_jenkinsupdate()
-    if ju and _jb_duty_cmd:
-        if ju.handle_lark_jenkins_bot_callback(
+    if _jb_duty_cmd:
+        _duty_orig = duty_blob or original_text
+        _duty_clean = duty_blob or clean_text
+        print(
+            f"[lark] jenkins duty cmd sender={sender_id!r} jenkinsbot={is_jenkins_bot_sender} "
+            f"body={_duty_orig!r}",
+            flush=True,
+        )
+        if _dispatch_jenkins_duty_command(
             chat_id,
             sender_id or "",
-            clean_text,
-            original_text,
+            _duty_clean,
+            _duty_orig,
             send_message,
+            message_content_raw=message_content_raw,
         ):
+            return _lark_im_done()
+        if is_jenkins_bot_sender or _jb_duty_cmd:
+            send_message(
+                chat_id,
+                "❌ **Duty bot** saw a jenkinsbot command but could not handle it.\n"
+                f"Body: `{(_duty_orig or '')[:200]}`",
+            )
             return _lark_im_done()
 
     ju = _get_jenkinsupdate()
@@ -2749,7 +2909,14 @@ def lark_webhook():
         return _lark_im_done()
 
     if chat_type == "group" and not bot_mentioned and not jenkins_sess_active:
-        print("⏭️ Bot not mentioned in group chat – ignoring further commands")
+        if is_jenkins_bot_sender:
+            print(
+                f"⏭️ Jenkinsbot message ignored (no duty command) text={original_text!r} "
+                f"content={message_content_raw[:240]!r}",
+                flush=True,
+            )
+        else:
+            print("⏭️ Bot not mentioned in group chat – ignoring further commands")
         return _lark_im_done()
 
     if bot_help.handle_help_command(
