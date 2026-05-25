@@ -354,6 +354,55 @@ def parse_service_desk_date_from_subject(subject: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+_SD_SUBJECT_UTC_RE = re.compile(
+    r"(\d{1,2}/[A-Za-z]{3}/\d{2,4})\s+(\d{1,2}:\d{2})\s*UTC",
+    re.IGNORECASE,
+)
+
+
+def parse_service_desk_times_from_subject(subject: str) -> tuple[str, str]:
+    """
+    Start/end from Service Desk subject slashes, e.g.
+    ``… / 27/May/26 07:35 UTC / … / (SD-7055392)``.
+    """
+    s = normalize_display_subject(subject)
+    hits = _SD_SUBJECT_UTC_RE.findall(s)
+    if not hits:
+        return "Unknown", "Unknown"
+
+    def _fmt(pair: tuple[str, str]) -> str:
+        return f"{pair[0]} {pair[1]} UTC"
+
+    start = _fmt(hits[0])
+    end = _fmt(hits[1]) if len(hits) > 1 else "TBA"
+    return start, end
+
+
+def _apply_service_desk_utc_times(
+    info: dict[str, Any], text: str, *, email_subject: str | None
+) -> None:
+    """Fill ``start_time`` / ``end_time`` from SD subject or slash-style UTC in text."""
+    subj = (email_subject or "").strip()
+    combined = f"{subj}\n{text}" if subj else text
+
+    if info["start_time"] == "Unknown" or info["end_time"] == "Unknown":
+        subj_start, subj_end = parse_service_desk_times_from_subject(subj)
+        if info["start_time"] == "Unknown" and subj_start != "Unknown":
+            info["start_time"] = subj_start
+        if info["end_time"] == "Unknown" and subj_end != "Unknown":
+            info["end_time"] = subj_end
+
+    hits = _SD_SUBJECT_UTC_RE.findall(combined)
+    if hits:
+        def _fmt(pair: tuple[str, str]) -> str:
+            return f"{pair[0]} {pair[1]} UTC"
+
+        if info["start_time"] == "Unknown":
+            info["start_time"] = _fmt(hits[0])
+        if info["end_time"] == "Unknown":
+            info["end_time"] = _fmt(hits[1]) if len(hits) > 1 else "TBA"
+
+
 def _normalize_title_key(title: str) -> str:
     """Collapse whitespace for matching ``[Service Desk] …`` subject lines."""
     return re.sub(r"\s+", " ", (title or "").strip().lower())
@@ -1738,9 +1787,16 @@ def extract_info(text: str, *, email_subject: str | None = None):
         from_match = re.search(r'from\s+(.*?)\s+UTC', text, re.IGNORECASE)
         if from_match:
             info['start_time'] = from_match.group(1).strip() + " UTC"
+    if info['end_time'] == 'Unknown':
+        till_match = re.search(
+            r'(?:till|to|until)\s+(.*?)\s+UTC', text, re.IGNORECASE
+        )
+        if till_match:
+            info['end_time'] = till_match.group(1).strip() + " UTC"
     # If end time still unknown and "We will inform you" appears, set TBA
     if info['end_time'] == 'Unknown' and re.search(r'We will inform you as soon', text, re.IGNORECASE):
         info['end_time'] = "TBA"
+    _apply_service_desk_utc_times(info, text, email_subject=email_subject)
     # If table name still unknown, try to extract from "table X in Y" in the first paragraph
     if info['table'] == 'Unknown':
         table_match = re.search(r'table\s+([^\.]+?)\s+in', text, re.IGNORECASE)

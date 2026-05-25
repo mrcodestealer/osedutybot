@@ -685,8 +685,11 @@ def extract_body_from_message(msg: email.message.Message) -> str:
 
 
 def build_pipeline_input(subject: str, body: str) -> str:
+    """Match ``/m`` pasted email: subject line + body (SD times often live in subject)."""
     subj = (subject or "").strip()
     body = _normalize_body(body)
+    if subj and body:
+        return f"{subj}\n\n{body}"
     if body:
         return body
     return subj
