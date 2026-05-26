@@ -846,19 +846,20 @@ def handle_jenkins_email_done(
     key, q, sess = find_active_queue_for_chat(chat_id, sessions, sessions_lock)
 
     if q and not q.get("stopped"):
-        status, rows, canonical = record_email_build_success(
-            q,
-            email_title=email_title,
-            environment=environment,
-            when=when,
-        )
+        with sessions_lock:
+            status, rows, canonical = record_email_build_success(
+                q,
+                email_title=email_title,
+                environment=environment,
+                when=when,
+            )
         if status == "pending":
             progress = ""
-            key = normalize_email_key(email_title)
+            email_key = normalize_email_key(email_title)
             for batch in (q.get("email_batches") or {}).values():
                 if not isinstance(batch, dict):
                     continue
-                if normalize_email_key(str(batch.get("title") or "")) != key:
+                if normalize_email_key(str(batch.get("title") or "")) != email_key:
                     continue
                 done_n = len(batch.get("done_by_idx") or {})
                 total_n = len(batch.get("indices") or [])
@@ -872,11 +873,18 @@ def handle_jenkins_email_done(
                 "`/SuccessInformMeTime` on the other build)._",
             )
         elif status == "sent" and rows:
+            subj = canonical or email_title
+            envs = ", ".join(c[0] for c in rows)
+            send(
+                chat_id,
+                f"📧 All batched Jenkins segments done ({len(rows)}) — searching mailbox and "
+                f"sending **Reply-All** for subject `{subj}` ({envs})…",
+            )
             try:
                 _send_jenkins_email_reply(
                     send,
                     chat_id,
-                    email_title=canonical or email_title,
+                    email_title=subj,
                     completions=rows,
                 )
             except Exception as ex:

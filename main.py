@@ -3954,6 +3954,24 @@ def _handle_reply_update_email_internal(payload: dict) -> tuple[bool, str, int]:
     return True, "processed", 200
 
 
+def _run_reply_update_email_background(payload: dict) -> None:
+    """Run IMAP reply off the HTTP thread so jenkinsbot does not hit its POST timeout."""
+    try:
+        ok, msg, code = _handle_reply_update_email_internal(payload)
+        if not ok:
+            chat_id = (payload.get("chat_id") or DUTY_CHAT_ID or "").strip()
+            if chat_id:
+                send_message(
+                    chat_id,
+                    f"❌ Jenkins email callback failed ({code}): {msg}",
+                )
+    except Exception as ex:
+        chat_id = (payload.get("chat_id") or DUTY_CHAT_ID or "").strip()
+        print(f"❌ reply-update-email background error: {ex}")
+        if chat_id:
+            send_message(chat_id, f"❌ Jenkins email callback error: {ex}")
+
+
 @app.route("/internal/reply-update-email", methods=["POST"])
 def internal_reply_update_email():
     """
@@ -3969,8 +3987,27 @@ def internal_reply_update_email():
         if got != token_need:
             return jsonify({"ok": False, "error": "unauthorized"}), 403
     payload = request.get_json(silent=True) or {}
-    ok, msg, code = _handle_reply_update_email_internal(payload)
-    return jsonify({"ok": ok, "message": msg}), code
+    chat_id = (payload.get("chat_id") or DUTY_CHAT_ID or "").strip()
+    email_title = (payload.get("email_title") or "").strip()
+    environment = (payload.get("environment") or "").strip()
+    when = (payload.get("when") or "").strip()
+    if not chat_id:
+        return jsonify({"ok": False, "error": "missing chat_id"}), 400
+    if not email_title or not environment or not when:
+        return jsonify({"ok": False, "error": "missing email_title, environment, or when"}), 400
+    ju = _get_jenkinsupdate()
+    if ju is None:
+        return jsonify({"ok": False, "error": "jenkinsupdate module unavailable"}), 503
+    try:
+        import updatemore  # noqa: F401
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"updatemore import failed: {ex}"}), 503
+    threading.Thread(
+        target=_run_reply_update_email_background,
+        args=(payload,),
+        daemon=True,
+    ).start()
+    return jsonify({"ok": True, "message": "accepted", "accepted": True}), 202
 
 
 def _register_lark_webhook_duplicate_paths():
