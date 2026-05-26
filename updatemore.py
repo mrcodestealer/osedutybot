@@ -808,6 +808,13 @@ def _send_jenkins_email_reply(
             "Check the **Email:** line in your `/update` matches the original mail subject.",
         )
         return
+    except Exception as ex:
+        send(
+            chat_id,
+            f"❌ **Jenkins email reply failed:** {ex}\n"
+            f"Subject searched: `{email_title}`",
+        )
+        return
     envs = ", ".join(c[0] for c in completions)
     to_line = ", ".join(sent.get("to") or []) or "(none)"
     cc_line = ", ".join(sent.get("cc") or []) or "(none)"
@@ -846,10 +853,23 @@ def handle_jenkins_email_done(
             when=when,
         )
         if status == "pending":
+            progress = ""
+            key = normalize_email_key(email_title)
+            for batch in (q.get("email_batches") or {}).values():
+                if not isinstance(batch, dict):
+                    continue
+                if normalize_email_key(str(batch.get("title") or "")) != key:
+                    continue
+                done_n = len(batch.get("done_by_idx") or {})
+                total_n = len(batch.get("indices") or [])
+                progress = f" (**{done_n}/{total_n}** batched `same` segments — **no email yet**)"
+                break
             send(
                 chat_id,
                 f"📧 Jenkins **{environment}** done at **{when}** — waiting for other `same` "
-                f"segment(s) with the same `Email:` subject before replying…",
+                f"segment(s) with the same `Email:` subject before replying…{progress}\n"
+                "_Need one more Jenkins **SUCCESS** → `replyupdateemail` (or second "
+                "`/SuccessInformMeTime` on the other build)._",
             )
         elif status == "sent" and rows:
             try:

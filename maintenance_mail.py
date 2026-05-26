@@ -1115,6 +1115,46 @@ def _fetch_subject_header_for_uid(mail: imaplib.IMAP4, uid: bytes) -> str:
     return _decode_msg_subject(email.message_from_string(f"Subject: {subj}\n\n"))
 
 
+_JENKINS_REPLY_UID_SCAN_CAP = min(
+    1200, max(25, int(os.getenv("JENKINS_REPLY_UID_SCAN_CAP", "").strip() or "40"))
+)
+
+
+def _fetch_header_date_subject_for_uid(
+    mail: imaplib.IMAP4, uid: bytes
+) -> tuple[datetime, str]:
+    """Lightweight header peek — avoid full RFC822 when picking newest UID."""
+    typ, data = mail.uid("fetch", uid, "(BODY.PEEK[HEADER.FIELDS (DATE SUBJECT)])")
+    if typ != "OK" or not data:
+        return datetime.min.replace(tzinfo=timezone.utc), ""
+    raw_hdr = b""
+    for part in data:
+        if isinstance(part, tuple) and len(part) >= 2 and part[1]:
+            raw_hdr += part[1]
+    if not raw_hdr:
+        return datetime.min.replace(tzinfo=timezone.utc), ""
+    text = raw_hdr.decode("utf-8", errors="replace")
+    subj = ""
+    date_raw = ""
+    for line in text.splitlines():
+        if line.lower().startswith("subject:"):
+            subj = line.split(":", 1)[1].strip()
+        elif line.lower().startswith("date:"):
+            date_raw = line.split(":", 1)[1].strip()
+    if subj:
+        subj = _decode_msg_subject(email.message_from_string(f"Subject: {subj}\n\n"))
+    ts = datetime.min.replace(tzinfo=timezone.utc)
+    if date_raw:
+        try:
+            dt = parsedate_to_datetime(date_raw)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            ts = dt
+        except Exception:
+            pass
+    return ts, subj
+
+
 def _pick_newest_uid_among_candidates(
     mail: imaplib.IMAP4,
     uids: list[bytes],
@@ -1122,27 +1162,23 @@ def _pick_newest_uid_among_candidates(
     folder_label: str,
     needle: str,
 ) -> bytes | None:
-    """Among IMAP UIDs, return the one with the latest ``Date`` (full RFC822 fetch)."""
+    """Among IMAP UIDs, return the one with the latest ``Date`` (header peek only)."""
+    if not uids:
+        return None
+    capped = uids[:_JENKINS_REPLY_UID_SCAN_CAP]
     best_uid: bytes | None = None
     best_ts = datetime.min.replace(tzinfo=timezone.utc)
-    for uid in uids:
-        typ, data = mail.uid("fetch", uid, "(RFC822)")
-        if typ != "OK" or not data or not data[0]:
+    for uid in capped:
+        ts, subj = _fetch_header_date_subject_for_uid(mail, uid)
+        if not _subject_contains_needle(subj, needle):
             continue
-        raw_bytes = data[0][1] if isinstance(data[0], tuple) else None
-        if not raw_bytes:
-            continue
-        msg = email.message_from_bytes(raw_bytes)
-        if not _subject_contains_needle(_decode_msg_subject(msg), needle):
-            continue
-        ts = _message_sort_timestamp(msg)
         if best_uid is None or ts >= best_ts:
             best_uid = uid
             best_ts = ts
     if best_uid is not None:
         print(
             f"[maint-mail] jenkins reply: newest match uid={best_uid!r} "
-            f"folder={folder_label!r} needle={needle!r}",
+            f"folder={folder_label!r} needle={needle!r} (scanned {len(capped)} uid(s))",
             flush=True,
         )
     return best_uid
