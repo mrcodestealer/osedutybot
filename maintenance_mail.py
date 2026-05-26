@@ -36,7 +36,6 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from email.header import Header
 from email.header import decode_header
-from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr, formatdate, make_msgid, parseaddr, parsedate_to_datetime
 from typing import Any, Callable
@@ -139,6 +138,10 @@ FORWARD_FROM_NAME = (
 NOT_CP_REPLY_CC_NAME = (
     os.getenv("MAINTENANCE_MAIL_NOT_CP_CC_NAME", "").strip() or "CP OM Duty"
 )
+# Link Fw: to the incoming maintenance mail in om@ (In-Reply-To). Set 0 if Show/Hide breaks.
+FORWARD_THREAD_HEADERS = (
+    os.getenv("MAINTENANCE_MAIL_FORWARD_THREAD", "").strip() or "1"
+) not in ("0", "false", "no", "off")
 SMTP_HOST = (
     os.getenv("MAINTENANCE_MAIL_SMTP_HOST", "").strip()
     or "smtp.larksuite.com"
@@ -398,6 +401,8 @@ def _content_hash(body: str) -> str:
 
 _FORWARD_SEP = "---------- Forwarded message ----------"
 _LARK_QUOTE_WRAPPER = "history-quote-wrapper"
+# Lark forward uses ``--header`` (not ``--collapsed``, which is for Re: quotes).
+_LARK_FORWARD_BLOCK = "adit-html-block--header"
 _LARK_QUOTE_BORDER = "border-left: none; padding-left: 0px;"
 _LARK_META_STYLE = (
     "padding: 12px; background: rgb(245, 246, 247); color: rgb(31, 35, 41); "
@@ -566,11 +571,10 @@ def build_forwarded_message_body(msg: email.message.Message) -> str:
     return "\n".join(header) + (original or "")
 
 
-def _build_lark_collapsed_quote_html(msg: email.message.Message) -> str:
+def _build_lark_forward_quote_html(msg: email.message.Message) -> str:
     """
-    Collapsible quoted original (``history-quote-wrapper`` + ``--collapsed``).
-
-    Lark Mail uses this for **Show/Hide email thread** on forward and reply.
+    Forward quote block per Lark composer (``history-quote-wrapper`` +
+    ``adit-html-block--header``). See larksuite/cli ``mail_quote.go``.
     """
     subj = _decode_mime_header(msg.get("Subject")) or ""
     labels = _quote_labels(subj)
@@ -604,23 +608,25 @@ def _build_lark_collapsed_quote_html(msg: email.message.Message) -> str:
 
     body_raw = extract_body_html_raw(msg)
     if body_raw and _body_is_html(body_raw):
-        body_inner = f"<div><div>{_sanitize_embedded_html(body_raw)}</div></div>"
+        body_html = _sanitize_embedded_html(body_raw)
     else:
         plain = extract_body_from_message(msg)
-        body_inner = (
+        body_html = (
             f'<pre style="white-space:pre-wrap">{_html_escape(plain)}</pre>'
             if plain
             else ""
         )
+    body_part = f"<div>{body_html}</div>" if body_html else ""
 
     outer_id = _gen_lark_id("lark-mail-quote-cli")
+    inner_id = _gen_lark_id("lark-mail-quote-cli")
     return (
-        f'<div id="{outer_id}" class="{_LARK_QUOTE_WRAPPER}" data-html-block="quote" '
-        f'data-mail-html-ignore="">'
-        f'<div class="adit-html-block adit-html-block--collapsed" '
-        f'contenteditable="false" style="{_LARK_QUOTE_BORDER}">'
-        f"<div><div>{sep_html}{meta_html}{body_inner}</div></div>"
-        f"</div></div>"
+        f'<div id="{outer_id}" class="{_LARK_QUOTE_WRAPPER}">'
+        f'<div data-html-block="quote" data-mail-html-ignore="">'
+        f'<div class="adit-html-block {_LARK_FORWARD_BLOCK}" '
+        f'style="{_LARK_QUOTE_BORDER}">'
+        f'<div id="{inner_id}">{sep_html}{meta_html}{body_part}</div>'
+        f"</div></div></div>"
     )
 
 
@@ -628,14 +634,14 @@ def build_forwarded_message_html(msg: email.message.Message) -> str:
     """
     ``Fw:`` forward HTML for Lark Mail **Show/Hide email thread**.
 
-    Full document + ``multipart/alternative`` (plain stub + this HTML) so clients
-    do not fall back to the expanded ``---------- Forwarded message ----------`` text.
+    Structure matches Lark ``buildForwardQuoteHTML`` (``--header`` block).
+    Sent as a single ``text/html`` part so SMTP clients do not prefer plain text.
     """
     top = (
         '<div style="word-break:break-word;line-height:1.6;'
         'font-size:14px;color:rgb(0,0,0);"><br></div>'
     )
-    inner = f'<div dir="ltr">{top}{_build_lark_collapsed_quote_html(msg)}</div>'
+    inner = f'<div dir="ltr">{top}{_build_lark_forward_quote_html(msg)}</div>'
     return (
         "<!DOCTYPE html><html><head>"
         '<meta http-equiv="Content-Type" content="text/html; charset=utf-8">'
@@ -830,6 +836,21 @@ def _reply_subject(subject: str) -> str:
     return f"Re: {s}"
 
 
+def _apply_in_reply_to_headers(
+    msg: email.message.Message,
+    original_msg: email.message.Message | None,
+) -> None:
+    """Thread on the incoming maintenance Message-ID (om@ inbox conversation)."""
+    if original_msg is None:
+        return
+    orig_mid = (original_msg.get("Message-ID") or "").strip()
+    if not orig_mid:
+        return
+    msg["In-Reply-To"] = orig_mid
+    refs = (original_msg.get("References") or "").strip()
+    msg["References"] = f"{refs} {orig_mid}".strip() if refs else orig_mid
+
+
 def forward_maintenance_email(
     *,
     subject: str,
@@ -838,34 +859,33 @@ def forward_maintenance_email(
     """
     SMTP forward from om@… → junchen@snsoft.my + Cc om@.
 
-    Uses ``Fw:`` + Lark ``history-quote-wrapper`` HTML (not plain
-    ``---------- Forwarded message ----------``) for **Show/Hide email thread**.
+    Uses ``Fw:`` + Lark ``history-quote-wrapper`` HTML (``--header`` block) for
+    **Show/Hide email thread**. When ``MAINTENANCE_MAIL_FORWARD_THREAD=1`` (default),
+    sets ``In-Reply-To`` so the ``Fw:`` appears in the **same conversation** as the
+    incoming maintenance mail in om@ (cannot merge into junchen@'s inbox — no original).
     """
     if not MAIL_PASSWORD:
         raise RuntimeError("MAINTENANCE_MAIL_PASSWORD not set")
     subj = _forward_subject(subject)
     if original_msg is not None:
         html = build_forwarded_message_html(original_msg)
-        msg = MIMEMultipart("alternative")
-        # Plain stub only — do not embed full forward text or Lark shows it expanded.
-        msg.attach(
-            MIMEText(
-                "Maintenance forward — view in Lark Mail (HTML).\n",
-                "plain",
-                "utf-8",
-            )
-        )
-        msg.attach(MIMEText(html, "html", "utf-8"))
+        # HTML-only: multipart/alternative with any plain part makes Lark Mail
+        # fall back to expanded ``---------- Forwarded message ----------`` text.
+        msg = MIMEText(html, "html", "utf-8")
+        msg.replace_header("Content-Type", 'text/html; charset="utf-8"')
     else:
         msg = MIMEText("", "html", "utf-8")
     msg["Subject"] = Header(subj, "utf-8")
     msg["From"] = formataddr((FORWARD_FROM_NAME, MAIL_USER))
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid()
+    if FORWARD_THREAD_HEADERS:
+        _apply_in_reply_to_headers(msg, original_msg)
     msg["To"] = formataddr((FORWARD_TO_NAME, FORWARD_TO))
     msg["Cc"] = formataddr((NOT_CP_REPLY_CC_NAME, FORWARD_CC))
     recipients = [FORWARD_TO, FORWARD_CC]
-    route = f"{FORWARD_TO} cc={FORWARD_CC}"
+    thread_note = " threaded" if FORWARD_THREAD_HEADERS and original_msg else ""
+    route = f"{FORWARD_TO} cc={FORWARD_CC}{thread_note}"
 
     ctx = ssl.create_default_context()
     with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=IMAP_TIMEOUT, context=ctx) as smtp:
