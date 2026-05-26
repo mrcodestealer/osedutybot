@@ -160,7 +160,14 @@ MAIL_IMAP_FOLDERS = [
     if f.strip()
 ]
 # Jenkins ``/replyupdateemail`` — Lark mail folders (Priority, OSE Pending; Sent for outbound copies).
-JENKINS_REPLY_IMAP_FOLDERS = ["Priority", "OSE Pending", "Sent"]
+JENKINS_REPLY_IMAP_FOLDERS = [
+    f.strip()
+    for f in (
+        os.getenv("JENKINS_REPLY_IMAP_FOLDERS", "").strip()
+        or "Priority,OSE Pending,Sent"
+    ).split(",")
+    if f.strip()
+]
 JENKINS_REPLY_IMAP_SCAN_LIMIT = int(
     os.getenv("JENKINS_REPLY_IMAP_SCAN_LIMIT", "").strip() or "1200"
 )
@@ -1836,35 +1843,35 @@ class MaintenanceMailWatcher:
         with _state_lock:
             state = _load_state()
             entries: list[dict[str, Any]] = state["entries"]
-            todo, stats = self._prefilter_uids(
-                mail, uids, entries, folder=folder
-            )
-            if not todo:
-                print(
-                    f"[maint-mail] {label}: "
-                    f"imap={stats['imap_hits']} "
-                    f"done={stats['already_done']} "
-                    f"ignored={stats['ignored']} "
-                    f"not_today={stats['not_today']} "
-                    f"carryover={stats['carryover']} "
-                    f"not_maint={stats['not_maintenance']} "
-                    f"→ 0 to process",
-                    flush=True,
-                )
-                _save_state(state)
-                return
+        todo, stats = self._prefilter_uids(mail, uids, entries, folder=folder)
+        if not todo:
             print(
                 f"[maint-mail] {label}: "
-                f"imap={stats['imap_hits']} → process {len(todo)}",
+                f"imap={stats['imap_hits']} "
+                f"done={stats['already_done']} "
+                f"ignored={stats['ignored']} "
+                f"not_today={stats['not_today']} "
+                f"carryover={stats['carryover']} "
+                f"not_maint={stats['not_maintenance']} "
+                f"→ 0 to process",
                 flush=True,
             )
-            for uid in todo:
-                if self._stop.is_set():
-                    break
-                try:
-                    self._process_one(mail, uid, state, folder=folder)
-                except Exception as ex:
-                    print(f"[maint-mail] process error uid={uid!r}: {ex!r}", flush=True)
+            with _state_lock:
+                _save_state(state)
+            return
+        print(
+            f"[maint-mail] {label}: "
+            f"imap={stats['imap_hits']} → process {len(todo)}",
+            flush=True,
+        )
+        for uid in todo:
+            if self._stop.is_set():
+                break
+            try:
+                self._process_one(mail, uid, state, folder=folder)
+            except Exception as ex:
+                print(f"[maint-mail] process error uid={uid!r}: {ex!r}", flush=True)
+        with _state_lock:
             _save_state(state)
 
     def _uids_maintenance_subject_search(

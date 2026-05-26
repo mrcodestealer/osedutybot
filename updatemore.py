@@ -8,6 +8,10 @@ import threading
 from typing import Any, Callable
 
 UPDATEMORE_CMD_RE = re.compile(r"/updatemore\b", re.I)
+
+# Per-chat ``/updatemore`` queue — survives when jenkinsupdate is unavailable (fallback path).
+_chat_updatemore_queues: dict[str, dict[str, Any]] = {}
+_chat_updatemore_lock = threading.Lock()
 _SAME_MARKER = "same"
 _NOT_SAME_MARKERS = frozenset({"not same", "notsame"})
 _SEGMENT_MARKERS = frozenset({_SAME_MARKER, *_NOT_SAME_MARKERS})
@@ -307,6 +311,18 @@ def get_queue(sess: dict[str, Any] | None) -> dict[str, Any] | None:
     return q if isinstance(q, dict) else None
 
 
+def sync_chat_updatemore_queue(chat_id: str, q: dict[str, Any] | None) -> None:
+    """Mirror active queue by chat (used when jenkinsupdate sessions are empty)."""
+    cid = (chat_id or "").strip()
+    if not cid:
+        return
+    with _chat_updatemore_lock:
+        if q is None:
+            _chat_updatemore_queues.pop(cid, None)
+        else:
+            _chat_updatemore_queues[cid] = q
+
+
 def init_queue(
     segments: list[dict[str, Any]],
     *,
@@ -327,6 +343,7 @@ def init_queue(
     }
     if skip_build:
         register_email_batch_watches(q, segments)
+    sync_chat_updatemore_queue(chat_id, q)
     return q
 
 
@@ -422,6 +439,9 @@ def segment_has_email(q: dict[str, Any]) -> bool:
 
 
 def clear_queue_from_session(sess: dict[str, Any]) -> None:
+    q = sess.get("updatemore_queue") if isinstance(sess, dict) else None
+    if isinstance(q, dict):
+        sync_chat_updatemore_queue(str(q.get("chat_id") or ""), None)
     sess.pop("updatemore_queue", None)
 
 
@@ -442,7 +462,24 @@ def cancel_active_updatemore_in_chat(
             if get_queue(sess):
                 clear_queue_from_session(sess)
                 cleared = True
+    cid = (chat_id or "").strip()
+    with _chat_updatemore_lock:
+        if cid and cid in _chat_updatemore_queues:
+            _chat_updatemore_queues.pop(cid, None)
+            cleared = True
     return cleared
+
+
+def _find_chat_fallback_queue(chat_id: str) -> tuple[str | None, dict[str, Any] | None, dict[str, Any] | None]:
+    """Queue stored via :func:`sync_chat_updatemore_queue` when jenkins sessions are gone."""
+    cid = (chat_id or "").strip()
+    if not cid:
+        return None, None, None
+    with _chat_updatemore_lock:
+        q = _chat_updatemore_queues.get(cid)
+    if isinstance(q, dict) and not q.get("stopped"):
+        return None, q, {"updatemore_queue": q}
+    return None, None, None
 
 
 def register_email_build_watch(
@@ -601,6 +638,9 @@ def find_waiting_queue_for_chat(
             q = get_queue(sess)
             if q and q.get("waiting_jenkins") and not q.get("stopped"):
                 return str(sk), q, sess
+    _k, q, sess = _find_chat_fallback_queue(chat_id)
+    if q and q.get("waiting_jenkins"):
+        return _k, q, sess
     return None, None, None
 
 
@@ -620,7 +660,7 @@ def find_active_queue_for_chat(
             q = get_queue(sess)
             if q and not q.get("stopped"):
                 return str(sk), q, sess
-    return None, None, None
+    return _find_chat_fallback_queue(chat_id)
 
 
 def _strip_lark_mentions(text: str) -> str:
@@ -666,6 +706,53 @@ def _lark_json_text_field(part: str) -> str:
     return s
 
 
+def _lark_flatten_rich_json(obj: object) -> str:
+    """Collect plain text from Lark post / rich ``content`` JSON."""
+    parts: list[str] = []
+    if isinstance(obj, str):
+        s = obj.strip()
+        if s:
+            parts.append(s)
+    elif isinstance(obj, dict):
+        if str(obj.get("tag") or "").lower() == "text":
+            t = obj.get("text")
+            if isinstance(t, str) and t.strip():
+                parts.append(t.strip())
+        else:
+            for key in ("text", "title", "content"):
+                if key in obj:
+                    sub = _lark_flatten_rich_json(obj[key])
+                    if sub:
+                        parts.append(sub)
+    elif isinstance(obj, list):
+        for item in obj:
+            sub = _lark_flatten_rich_json(item)
+            if sub:
+                parts.append(sub)
+    return "\n".join(parts).strip()
+
+
+def _lark_extract_text_from_part(part: str) -> str:
+    """Plain text, ``{\"text\":…}``, or post-style rich JSON."""
+    raw = (part or "").strip()
+    if not raw:
+        return ""
+    extracted = _lark_json_text_field(raw)
+    if extracted and _REPLY_UPDATE_EMAIL_RE.search(extracted):
+        return extracted
+    if raw.startswith("{"):
+        try:
+            import json
+
+            obj = json.loads(raw)
+        except Exception:
+            return extracted or raw
+        flat = _lark_flatten_rich_json(obj)
+        if flat:
+            return flat
+    return extracted or raw
+
+
 def resolve_duty_command_body(*parts: str | None) -> str:
     """Best-effort command body for jenkinsbot → duty bot (handles empty ``text`` + JSON content)."""
     candidates: list[str] = []
@@ -673,7 +760,7 @@ def resolve_duty_command_body(*parts: str | None) -> str:
         if not part:
             continue
         raw = part.strip()
-        extracted = _lark_json_text_field(raw)
+        extracted = _lark_extract_text_from_part(raw)
         for variant in (extracted, _strip_lark_mentions(extracted), raw, _strip_lark_mentions(raw)):
             if variant and variant not in candidates:
                 candidates.append(variant)
@@ -896,6 +983,16 @@ def handle_jenkinsbot_callback(
             session_key_fn=session_key_fn,
             dispatch_update_body=dispatch_update_body,
         )
+
+    raw_blob = " ".join(p for p in (original_text, clean_text, message_content_raw) if p)
+    if is_reply_update_email_text(raw_blob) and not email_done:
+        send(
+            chat_id,
+            "❌ **Could not parse Jenkins email command** — expected:\n"
+            "`/replyupdateemail | {email title} | {pipeline} | {time}`\n"
+            f"Parsed body preview: `{(body or '')[:120]}`",
+        )
+        return True
 
     if _REPLY_UPDATE_EMAIL_RE.search(body) or re.search(r"\breplyupdateemail\b", body or "", re.I):
         send(

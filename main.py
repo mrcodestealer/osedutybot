@@ -118,8 +118,6 @@ VERIFICATION_TOKEN = (os.getenv("VERIFICATION_TOKEN") or "").strip()
 DUTY_CHAT_ID = os.getenv("DUTY_CHAT_ID")
 LABORATORY_GROUP = os.getenv("LABORATORY_GROUP")
 OSE_BOT_GROUP = os.getenv("OSE_BOT_GROUP")
-LARK_LEGACY_CARD_V1_ALLOW_MISSING_VERIFICATION_TOKEN=1
-
 app = Flask(__name__)
 app.config.setdefault(
     "SECRET_KEY",
@@ -929,37 +927,42 @@ def scheduled_amountloss_check():
 
 # ================= P0 交互确认相关 =================
 pending_p0_confirmation = {}  # key: sender_id -> {"timestamp": datetime, "original_text": str}
+_pending_p0_lock = threading.Lock()
 P0_CONFIRMATION_TIMEOUT = 60  # 秒
 
 def handle_p0_confirmation(chat_id, sender_id, clean_text, original_text, send_func):
-    global pending_p0_confirmation
     now = datetime.now()
 
     # 情况1：用户在 OSE_BOT_GROUP 回复确认
-    if chat_id == OSE_BOT_GROUP and sender_id in pending_p0_confirmation:
-        entry = pending_p0_confirmation[sender_id]
-        if (now - entry["timestamp"]).total_seconds() > P0_CONFIRMATION_TIMEOUT:
-            del pending_p0_confirmation[sender_id]
-            return False, None
+    if chat_id == OSE_BOT_GROUP:
+        with _pending_p0_lock:
+            entry = pending_p0_confirmation.get(sender_id)
+        if entry is not None:
+            if (now - entry["timestamp"]).total_seconds() > P0_CONFIRMATION_TIMEOUT:
+                with _pending_p0_lock:
+                    pending_p0_confirmation.pop(sender_id, None)
+                return False, None
 
-        reply_lower = clean_text.strip().lower()
-        if reply_lower in ('yes', 'y'):
-            del pending_p0_confirmation[sender_id]
-            alert_msg = p0.format_p0_alert(chat_id, sender_id, entry["original_text"])
-            send_func(OSE_BOT_GROUP, alert_msg)
-            return True, None
-        elif reply_lower in ('no', 'n'):
-            del pending_p0_confirmation[sender_id]
-            return True, "👌 Understood, not a P0."
-        else:
+            reply_lower = clean_text.strip().lower()
+            if reply_lower in ('yes', 'y'):
+                with _pending_p0_lock:
+                    pending_p0_confirmation.pop(sender_id, None)
+                alert_msg = p0.format_p0_alert(chat_id, sender_id, entry["original_text"])
+                send_func(OSE_BOT_GROUP, alert_msg)
+                return True, None
+            if reply_lower in ('no', 'n'):
+                with _pending_p0_lock:
+                    pending_p0_confirmation.pop(sender_id, None)
+                return True, "👌 Understood, not a P0."
             return True, "❓ Please confirm: is this a P0? Reply 'yes' or 'no'."
 
     # 情况2：在 LABORATORY_GROUP 中检测到 P0 关键字（此分支之前缺失）
     if chat_id == LABORATORY_GROUP and p0.should_broadcast(original_text):
-        pending_p0_confirmation[sender_id] = {
-            "timestamp": now,
-            "original_text": original_text
-        }
+        with _pending_p0_lock:
+            pending_p0_confirmation[sender_id] = {
+                "timestamp": now,
+                "original_text": original_text
+            }
         send_func(OSE_BOT_GROUP, f'⚠️ <at user_id="{sender_id}">User</at> This is P0? (Reply "yes" or "no" without mentioning me)')
         return True, None
 
@@ -967,56 +970,64 @@ def handle_p0_confirmation(chat_id, sender_id, clean_text, original_text, send_f
 
 def clean_pending_p0_confirmations():
     now = datetime.now()
-    expired = [k for k, v in pending_p0_confirmation.items()
-               if (now - v["timestamp"]).total_seconds() > P0_CONFIRMATION_TIMEOUT]
-    for k in expired:
-        del pending_p0_confirmation[k]
+    with _pending_p0_lock:
+        expired = [
+            k
+            for k, v in pending_p0_confirmation.items()
+            if (now - v["timestamp"]).total_seconds() > P0_CONFIRMATION_TIMEOUT
+        ]
+        for k in expired:
+            pending_p0_confirmation.pop(k, None)
     if expired:
         print(f"🧹 Cleaned {len(expired)} expired P0 confirmations")
 
 # ================= P1 交互确认相关 =================
 pending_p1_confirmation = {}  # key: sender_id -> {"timestamp": datetime, "original_text": str}
+_pending_p1_lock = threading.Lock()
 P1_CONFIRMATION_TIMEOUT = 60  # 秒
 active_p1_reminders = {}      # key: sender_id -> job_id (用于取消提醒)
+_active_p1_reminders_lock = threading.Lock()
 
 def handle_p1_confirmation(chat_id, sender_id, clean_text, original_text, send_func):
-    global pending_p1_confirmation
     now = datetime.now()
 
+    with _pending_p1_lock:
+        pending_keys = list(pending_p1_confirmation.keys())
     print(f"[P1] ENV OSE_BOT_GROUP={OSE_BOT_GROUP}, chat_id={chat_id}, sender_id={sender_id}, clean_text='{clean_text}'")
-    print(f"[P1] pending keys: {list(pending_p1_confirmation.keys())}")
+    print(f"[P1] pending keys: {pending_keys}")
 
     # 情况1：用户在 OSE_BOT_GROUP 回复确认
     if chat_id == OSE_BOT_GROUP:
-        if sender_id in pending_p1_confirmation:
-            entry = pending_p1_confirmation[sender_id]
+        with _pending_p1_lock:
+            entry = pending_p1_confirmation.get(sender_id)
+        if entry is not None:
             if (now - entry["timestamp"]).total_seconds() > P1_CONFIRMATION_TIMEOUT:
-                del pending_p1_confirmation[sender_id]
+                with _pending_p1_lock:
+                    pending_p1_confirmation.pop(sender_id, None)
                 return False, None
 
             reply_lower = clean_text.strip().lower()
             if reply_lower in ('yes', 'y'):
-                del pending_p1_confirmation[sender_id]
+                with _pending_p1_lock:
+                    pending_p1_confirmation.pop(sender_id, None)
                 _, confirm_reply = send_p1_alert_and_reminder(OSE_BOT_GROUP, sender_id, entry["original_text"], send_func)
                 return True, confirm_reply
-            elif reply_lower in ('no', 'n'):
-                del pending_p1_confirmation[sender_id]
+            if reply_lower in ('no', 'n'):
+                with _pending_p1_lock:
+                    pending_p1_confirmation.pop(sender_id, None)
                 return True, "👌 Understood, not a P1."
-            else:
-                # 回复了其他内容，提示确认
-                return True, "❓ Please confirm: is this a P1? Reply 'yes' or 'no'."
-        else:
-            # 在 OSE_BOT_GROUP 发言，但 sender_id 不在待确认列表中（可能是其他人或超时）
-            # 不做任何处理，让消息继续走其他命令（但会被提及检查拦截，除非@机器人）
-            print(f"[P1] sender_id {sender_id} not in pending list, ignoring.")
-            return False, None
+            return True, "❓ Please confirm: is this a P1? Reply 'yes' or 'no'."
+
+        print(f"[P1] sender_id {sender_id} not in pending list, ignoring.")
+        return False, None
 
     # 情况2：在 LABORATORY_GROUP 中检测到 P1 关键字
     if chat_id == LABORATORY_GROUP and p1.should_broadcast(original_text):
-        pending_p1_confirmation[sender_id] = {
-            "timestamp": now,
-            "original_text": original_text
-        }
+        with _pending_p1_lock:
+            pending_p1_confirmation[sender_id] = {
+                "timestamp": now,
+                "original_text": original_text
+            }
         send_func(OSE_BOT_GROUP, f'⚠️ <at user_id="{sender_id}">User</at> This is P1? (Reply "yes" or "no" without mentioning me)')
         return True, None
 
@@ -1038,7 +1049,8 @@ def send_p1_alert_and_reminder(source_chat_id, sender_id, original_text, send_fu
             send_func=send_func
         )
         if job:
-            active_p1_reminders[sender_id] = job.id
+            with _active_p1_reminders_lock:
+                active_p1_reminders[sender_id] = job.id
             print(f"[P1] Reminder job {job.id} saved for sender {sender_id}")
         return True, "✅ Will remind after 15minutes escalate to P0. If problem solved kindly tag me and use command /cancelp1"
     except Exception as e:
@@ -1194,6 +1206,9 @@ def recall_message(message_id):
         
 def send_message(chat_id, text, msg_type="text", mentions=None, receive_id_type="chat_id"):
     token = get_tenant_access_token()
+    if not token:
+        print("[lark] send_message skipped: no tenant_access_token", flush=True)
+        return {"code": -1, "msg": "no tenant_access_token"}
     url = "https://open.larksuite.com/open-apis/im/v1/messages"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     if msg_type == "interactive":
@@ -1306,12 +1321,53 @@ def get_cat_file_token():
         _CAT_FILE_TOKEN = upload_file_to_drive(cat_path)
     return _CAT_FILE_TOKEN
 
+_tenant_token_cache: dict[str, object] = {"token": None, "expires_at": 0.0}
+_tenant_token_lock = threading.Lock()
+_TENANT_TOKEN_REFRESH_SEC = 120  # refresh before Lark expiry (typically 7200s)
+
+
 def get_tenant_access_token():
+    """Return tenant_access_token; cached ~2h with early refresh."""
+    now = time.time()
+    with _tenant_token_lock:
+        tok = _tenant_token_cache.get("token")
+        exp = float(_tenant_token_cache.get("expires_at") or 0.0)
+        if tok and now < exp:
+            return tok  # type: ignore[return-value]
+
     url = "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal"
     headers = {"Content-Type": "application/json"}
     data = {"app_id": APP_ID, "app_secret": APP_SECRET}
-    response = requests.post(url, headers=headers, json=data)
-    return response.json().get("tenant_access_token")
+    try:
+        response = requests.post(url, headers=headers, json=data, timeout=15)
+        response.raise_for_status()
+        body = response.json()
+    except Exception as ex:
+        print(f"[lark] tenant_access_token request failed: {ex!r}", flush=True)
+        with _tenant_token_lock:
+            stale = _tenant_token_cache.get("token")
+            if stale:
+                return stale  # type: ignore[return-value]
+        return None
+
+    if body.get("code") not in (0, None):
+        print(f"[lark] tenant_access_token API error: {body}", flush=True)
+        return None
+
+    token = body.get("tenant_access_token")
+    if not token:
+        print(f"[lark] tenant_access_token missing in response: {body}", flush=True)
+        return None
+
+    try:
+        expire_sec = int(body.get("expire") or 7200)
+    except (TypeError, ValueError):
+        expire_sec = 7200
+    ttl = max(60, expire_sec - _TENANT_TOKEN_REFRESH_SEC)
+    with _tenant_token_lock:
+        _tenant_token_cache["token"] = token
+        _tenant_token_cache["expires_at"] = time.time() + ttl
+    return token
 
 # ================= SCHEDULED REMINDERS =================
 # Lark open_id for @mentions (same as reminder.py ``omduty`` / ``OMDUTY``).
@@ -1418,10 +1474,14 @@ def myoseweeklymeeting():
 
 def clean_pending_p1_confirmations():
     now = datetime.now()
-    expired = [k for k, v in pending_p1_confirmation.items()
-               if (now - v["timestamp"]).total_seconds() > P1_CONFIRMATION_TIMEOUT]
-    for k in expired:
-        del pending_p1_confirmation[k]
+    with _pending_p1_lock:
+        expired = [
+            k
+            for k, v in pending_p1_confirmation.items()
+            if (now - v["timestamp"]).total_seconds() > P1_CONFIRMATION_TIMEOUT
+        ]
+        for k in expired:
+            pending_p1_confirmation.pop(k, None)
     if expired:
         print(f"🧹 Cleaned {len(expired)} expired P1 confirmations")
 
@@ -1502,20 +1562,49 @@ def send_restart_ready():
             pass
 
 def get_bot_open_id():
+    """Duty/Lark **bot** open_id via ``GET /open-apis/bot/v3/info`` (not ``users/me``)."""
     token = get_tenant_access_token()
-    url = "https://open.larksuite.com/open-apis/contact/v3/users/me?user_id_type=open_id"
+    if not token:
+        print("❌ Failed to get bot open_id: no tenant_access_token", flush=True)
+        return None
+    host = (os.getenv("LARK_HOST") or "https://open.larksuite.com").rstrip("/")
+    url = f"{host}/open-apis/bot/v3/info"
     headers = {"Authorization": f"Bearer {token}"}
-    resp = requests.get(url, headers=headers).json()
+    try:
+        resp = requests.get(url, headers=headers, timeout=15).json()
+    except Exception as ex:
+        print(f"❌ Failed to get bot open_id: {ex!r}", flush=True)
+        return None
     if resp.get("code") == 0:
-        return resp["data"]["user"]["open_id"]
-    print("❌ Failed to get bot open_id:", resp)
+        oid = ((resp.get("bot") or {}).get("open_id") or "").strip()
+        if oid:
+            return oid
+    print("❌ Failed to get bot open_id:", resp, flush=True)
     return None
 
-BOT_OPEN_ID = "ou_1f6596a9923a2a835918e7e2513595d5"
+BOT_OPEN_ID = (
+    os.getenv("BOT_OPEN_ID") or os.getenv("DUTY_BOT_OPEN_ID") or "ou_1f6596a9923a2a835918e7e2513595d5"
+).strip()
+
+_JENKINS_BOT_OPEN_ID_DEFAULT = "ou_45cc096780a23354f0719c9635765985"
 
 
 def _jenkins_bot_open_id() -> str:
-    return (os.getenv("JENKINS_BOT_OPEN_ID") or "ou_45cc096780a23354f0719c9635765985").strip()
+    return (os.getenv("JENKINS_BOT_OPEN_ID") or _JENKINS_BOT_OPEN_ID_DEFAULT).strip()
+
+
+if not (os.getenv("BOT_OPEN_ID") or os.getenv("DUTY_BOT_OPEN_ID")):
+    print(
+        f"[lark] WARNING: BOT_OPEN_ID / DUTY_BOT_OPEN_ID unset — using built-in default {BOT_OPEN_ID!r} "
+        "for self-message skip and @mention detection.",
+        flush=True,
+    )
+if not (os.getenv("JENKINS_BOT_OPEN_ID") or "").strip():
+    print(
+        f"[lark] WARNING: JENKINS_BOT_OPEN_ID unset — using default {_JENKINS_BOT_OPEN_ID_DEFAULT!r}. "
+        "Jenkinsbot → duty `/replyupdateemail` will fail if this open_id is wrong.",
+        flush=True,
+    )
 
 
 def _mention_includes_duty_bot(mentions: list) -> bool:
@@ -1541,6 +1630,20 @@ def _dispatch_jenkins_duty_command(
 ) -> bool:
     """Handle jenkinsbot → duty bot (``/replyupdateemail``, etc.) with or without jenkinsupdate."""
     ju = _get_jenkinsupdate()
+    if ju is None:
+        try:
+            import updatemore as um
+
+            if um.is_jenkinsbot_duty_command(duty_orig or duty_clean or message_content_raw):
+                send(
+                    chat_id,
+                    "⚠️ **jenkinsupdate** is not loaded (e.g. Playwright missing). "
+                    "`/replyupdateemail` can still send a **single** email if parsed, but "
+                    "**`/updatemore` batching** needs jenkinsupdate. Fix the server import error "
+                    "and set `JENKINS_BOT_OPEN_ID` in `.env`.",
+                )
+        except Exception:
+            pass
     if ju:
         try:
             import updatemore as um
@@ -1634,6 +1737,25 @@ def _lark_extract_message_text(content_str: str) -> str:
 
 processed_messages = set()
 processed_lock = threading.Lock()
+_MAX_PROCESSED_MESSAGE_IDS = 50_000
+_PROCESSED_PRUNE_CHUNK = 10_000
+
+
+def _remember_processed_message_id(message_id: str) -> bool:
+    """Record ``message_id``; return True if it was already seen (duplicate)."""
+    if not message_id:
+        return False
+    with processed_lock:
+        if message_id in processed_messages:
+            return True
+        if len(processed_messages) >= _MAX_PROCESSED_MESSAGE_IDS:
+            for _ in range(_PROCESSED_PRUNE_CHUNK):
+                try:
+                    processed_messages.pop()
+                except KeyError:
+                    break
+        processed_messages.add(message_id)
+        return False
 
 
 def _feishu_decrypt_encrypt_field(ciphertext_b64: str, encrypt_key: str) -> str:
@@ -2363,12 +2485,9 @@ def lark_webhook():
             return _lark_http_card_callback_ok()
         # Never wait on ``processed_lock`` in this thread — Lark times out ~3s; lock contention → ``code: undefined``.
         def _run_card_callback_worker() -> None:
-            with processed_lock:
-                if eid_ca and eid_ca in processed_messages:
-                    print(f"⏭️ Duplicate card callback {eid_ca} ignored ({hdr_et!r})", flush=True)
-                    return
-                if eid_ca:
-                    processed_messages.add(eid_ca)
+            if eid_ca and _remember_processed_message_id(eid_ca):
+                print(f"⏭️ Duplicate card callback {eid_ca} ignored ({hdr_et!r})", flush=True)
+                return
             if not chat_id_ca:
                 parsed_pref = _lark_parse_card_action_value(val_ca)
                 try:
@@ -2717,12 +2836,9 @@ def lark_webhook():
             return _lark_http_card_callback_ok()
         return _lark_im_done()
 
-    with processed_lock:
-        if message_id and message_id in processed_messages:
-            print(f"⏭️ Duplicate message {message_id} ignored")
-            return _lark_im_done()
-        if message_id:
-            processed_messages.add(message_id)
+    if message_id and _remember_processed_message_id(message_id):
+        print(f"⏭️ Duplicate message {message_id} ignored")
+        return _lark_im_done()
 
     if not chat_id or text is None:
         # Card callbacks can be mis-parsed as ``im.message`` shape but lack chat/text — **400 breaks the client**.
@@ -3005,11 +3121,13 @@ def lark_webhook():
         return _lark_im_done()
 
     if clean_text.lower() == '/cancelp1':
-        if sender_id in active_p1_reminders:
-            job_id = active_p1_reminders[sender_id]
+        with _active_p1_reminders_lock:
+            job_id = active_p1_reminders.get(sender_id)
+        if job_id:
             try:
                 scheduler.remove_job(job_id)
-                del active_p1_reminders[sender_id]
+                with _active_p1_reminders_lock:
+                    active_p1_reminders.pop(sender_id, None)
                 reply = "✅ P1 reminder has been cancelled."
             except Exception as e:
                 reply = f"❌ Failed to cancel reminder: {e}"
