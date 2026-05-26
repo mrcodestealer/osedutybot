@@ -892,7 +892,15 @@ def _jenkins_reply_all_recipients(
     to_out: list[str] = []
     to_norm: set[str] = set()
 
+    def _bad_recipient(addr: str) -> bool:
+        key = _normalize_email_address(addr)
+        if "mailer-daemon" in key or key.startswith("postmaster@"):
+            return True
+        return False
+
     def _add_to(addr: str) -> None:
+        if _bad_recipient(addr):
+            return
         key = _normalize_email_address(addr)
         if key in own or key in to_norm:
             return
@@ -906,9 +914,10 @@ def _jenkins_reply_all_recipients(
 
     cc_out: list[str] = []
     cc_norm: set[str] = set()
+
     for a in orig_cc:
         key = _normalize_email_address(a)
-        if key in own or key in to_norm or key in cc_norm:
+        if key in own or key in to_norm or key in cc_norm or _bad_recipient(a):
             continue
         cc_norm.add(key)
         cc_out.append(a)
@@ -1024,6 +1033,90 @@ def _subject_contains_needle(subject: str, needle: str) -> bool:
     return n in (subject or "").casefold()
 
 
+_BOUNCE_FROM_MARKERS = (
+    "mailer-daemon",
+    "mail delivery subsystem",
+    "postmaster@",
+    "mdaemon@",
+)
+_BOUNCE_SUBJECT_MARKERS = (
+    "undelivered",
+    "undeliverable",
+    "delivery status",
+    "delivery failure",
+    "mail delivery failed",
+    "failure notice",
+    "returned mail",
+    "verify address failed",
+    "无法递送",
+    "投递失败",
+    "未送达",
+    "退信",
+    "邮件发送失败",
+)
+
+
+def _should_skip_jenkins_reply_thread(*, from_hdr: str, subject: str) -> bool:
+    """
+    Skip DSN / bounce / mailer-daemon and our own prior ``Re:`` bot sends.
+
+    When picking a thread for Reply-All, walk **newest → older** until a normal mail.
+    """
+    from_cf = (from_hdr or "").casefold()
+    subj_cf = (subject or "").casefold()
+    for marker in _BOUNCE_FROM_MARKERS:
+        if marker in from_cf:
+            return True
+    for _name, addr in getaddresses([from_hdr or ""]):
+        local = (addr.split("@", 1)[0] if "@" in addr else "").casefold()
+        if local in ("mailer-daemon", "postmaster", "noreply-bounces"):
+            return True
+    for marker in _BOUNCE_SUBJECT_MARKERS:
+        if marker in subj_cf:
+            return True
+    # Prior bot ``Re:`` from our mailbox — keep original ``{title}`` (non-Re) thread.
+    if re.match(r"^re:\s", (subject or "").strip(), re.I):
+        own = _own_smtp_identities()
+        for _name, addr in getaddresses([from_hdr or ""]):
+            if _normalize_email_address(addr) in own:
+                return True
+    return False
+
+
+def _should_skip_jenkins_reply_message(msg: email.message.Message) -> bool:
+    from_hdr = _decode_mime_header(msg.get("From")) or ""
+    subj = _decode_msg_subject(msg)
+    if _should_skip_jenkins_reply_thread(from_hdr=from_hdr, subject=subj):
+        return True
+    auto = (_decode_mime_header(msg.get("Auto-Submitted")) or "").casefold()
+    if auto and auto != "no":
+        return True
+    # Bot test body marker (full fetch only)
+    try:
+        body = _message_plain_text_snippet(msg, limit=400).casefold()
+    except Exception:
+        body = ""
+    if "this is just the bot auto replied email" in body:
+        return True
+    return False
+
+
+def _message_plain_text_snippet(msg: email.message.Message, *, limit: int = 400) -> str:
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == "text/plain":
+                payload = part.get_payload(decode=True)
+                if isinstance(payload, bytes):
+                    return payload.decode(part.get_content_charset() or "utf-8", errors="replace")[
+                        :limit
+                    ]
+        return ""
+    payload = msg.get_payload(decode=True)
+    if isinstance(payload, bytes):
+        return payload.decode(msg.get_content_charset() or "utf-8", errors="replace")[:limit]
+    return str(payload or "")[:limit]
+
+
 def _imap_list_folder_names(mail: imaplib.IMAP4) -> list[str]:
     names: list[str] = []
     try:
@@ -1120,29 +1213,40 @@ _JENKINS_REPLY_UID_SCAN_CAP = min(
 )
 
 
-def _fetch_header_date_subject_for_uid(
+def _fetch_header_peek_for_uid(
     mail: imaplib.IMAP4, uid: bytes
-) -> tuple[datetime, str]:
-    """Lightweight header peek — avoid full RFC822 when picking newest UID."""
-    typ, data = mail.uid("fetch", uid, "(BODY.PEEK[HEADER.FIELDS (DATE SUBJECT)])")
+) -> tuple[datetime, str, str]:
+    """Lightweight header peek — ``Date``, ``Subject``, ``From``."""
+    typ, data = mail.uid(
+        "fetch", uid, "(BODY.PEEK[HEADER.FIELDS (DATE SUBJECT FROM AUTO-SUBMITTED)])"
+    )
     if typ != "OK" or not data:
-        return datetime.min.replace(tzinfo=timezone.utc), ""
+        return datetime.min.replace(tzinfo=timezone.utc), "", ""
     raw_hdr = b""
     for part in data:
         if isinstance(part, tuple) and len(part) >= 2 and part[1]:
             raw_hdr += part[1]
     if not raw_hdr:
-        return datetime.min.replace(tzinfo=timezone.utc), ""
+        return datetime.min.replace(tzinfo=timezone.utc), "", ""
     text = raw_hdr.decode("utf-8", errors="replace")
     subj = ""
     date_raw = ""
+    from_raw = ""
+    auto_submitted = ""
     for line in text.splitlines():
-        if line.lower().startswith("subject:"):
+        low = line.lower()
+        if low.startswith("subject:"):
             subj = line.split(":", 1)[1].strip()
-        elif line.lower().startswith("date:"):
+        elif low.startswith("date:"):
             date_raw = line.split(":", 1)[1].strip()
+        elif low.startswith("from:"):
+            from_raw = line.split(":", 1)[1].strip()
+        elif low.startswith("auto-submitted:"):
+            auto_submitted = line.split(":", 1)[1].strip()
     if subj:
         subj = _decode_msg_subject(email.message_from_string(f"Subject: {subj}\n\n"))
+    if from_raw:
+        from_raw = _decode_mime_header(from_raw) or from_raw
     ts = datetime.min.replace(tzinfo=timezone.utc)
     if date_raw:
         try:
@@ -1152,36 +1256,59 @@ def _fetch_header_date_subject_for_uid(
             ts = dt
         except Exception:
             pass
-    return ts, subj
+    if auto_submitted and auto_submitted.strip().casefold() not in ("", "no"):
+        from_raw = from_raw or ""
+        # Treat as bounce/auto — force skip via synthetic from marker
+        if "mailer-daemon" not in from_raw.casefold():
+            from_raw = (from_raw + " mailer-daemon").strip()
+    return ts, subj, from_raw
 
 
-def _pick_newest_uid_among_candidates(
+def _pick_reply_uid_among_candidates(
     mail: imaplib.IMAP4,
     uids: list[bytes],
     *,
     folder_label: str,
     needle: str,
 ) -> bytes | None:
-    """Among IMAP UIDs, return the one with the latest ``Date`` (header peek only)."""
+    """
+    Newest UID whose subject matches ``needle``, skipping bounces and prior bot ``Re:`` mail.
+    """
     if not uids:
         return None
     capped = uids[:_JENKINS_REPLY_UID_SCAN_CAP]
-    best_uid: bytes | None = None
-    best_ts = datetime.min.replace(tzinfo=timezone.utc)
+    ranked: list[tuple[datetime, bytes, str, str]] = []
     for uid in capped:
-        ts, subj = _fetch_header_date_subject_for_uid(mail, uid)
+        ts, subj, from_hdr = _fetch_header_peek_for_uid(mail, uid)
         if not _subject_contains_needle(subj, needle):
             continue
-        if best_uid is None or ts >= best_ts:
-            best_uid = uid
-            best_ts = ts
-    if best_uid is not None:
+        ranked.append((ts, uid, subj, from_hdr))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda row: row[0], reverse=True)
+    skipped = 0
+    for ts, uid, subj, from_hdr in ranked:
+        if _should_skip_jenkins_reply_thread(from_hdr=from_hdr, subject=subj):
+            skipped += 1
+            print(
+                f"[maint-mail] jenkins reply: skip uid={uid!r} folder={folder_label!r} "
+                f"from={from_hdr!r} subj={subj!r}",
+                flush=True,
+            )
+            continue
         print(
-            f"[maint-mail] jenkins reply: newest match uid={best_uid!r} "
-            f"folder={folder_label!r} needle={needle!r} (scanned {len(capped)} uid(s))",
+            f"[maint-mail] jenkins reply: use uid={uid!r} folder={folder_label!r} "
+            f"needle={needle!r} (skipped {skipped} bounce/bot msg(s), "
+            f"scanned {len(capped)} uid(s))",
             flush=True,
         )
-    return best_uid
+        return uid
+    print(
+        f"[maint-mail] jenkins reply: all {len(ranked)} subject match(es) skipped "
+        f"(bounces/bot) folder={folder_label!r} needle={needle!r}",
+        flush=True,
+    )
+    return None
 
 
 def _find_matching_uid_in_folder(
@@ -1194,7 +1321,7 @@ def _find_matching_uid_in_folder(
     uids = _uid_search_subject_variants(mail, needle)
     if uids:
         pick_from = uids[-max(50, min(len(uids), JENKINS_REPLY_IMAP_SCAN_LIMIT)) :]
-        found = _pick_newest_uid_among_candidates(
+        found = _pick_reply_uid_among_candidates(
             mail, list(reversed(pick_from)), folder_label=resolved, needle=needle
         )
         if found:
@@ -1211,7 +1338,7 @@ def _find_matching_uid_in_folder(
         if _subject_contains_needle(subj, needle):
             scan_hits.append(uid)
     if scan_hits:
-        return _pick_newest_uid_among_candidates(
+        return _pick_reply_uid_among_candidates(
             mail, scan_hits, folder_label=resolved, needle=needle
         )
     print(
@@ -1315,9 +1442,10 @@ def reply_jenkins_update_done_email(
     ``completions`` is a list of ``(environment, time)`` pairs. Multiple pairs are
     combined into one email when several segments share the same subject.
 
-    Finds the **newest** matching message in ``JENKINS_REPLY_IMAP_FOLDERS``, then
-    **Reply-All** to its ``To`` / ``Cc`` (plus ``From`` in ``To``). Does **not**
-    send if no matching mail exists.
+    Finds the **newest normal** matching message in ``JENKINS_REPLY_IMAP_FOLDERS``
+    (skips mailer-daemon bounces and prior bot ``Re:`` replies), then **Reply-All**
+    to its ``To`` / ``Cc`` (plus ``From`` in ``To``). Does **not** send if no
+    matching mail exists.
 
     Returns ``{"to": [...], "cc": [...], "folder": str, "subject": str}``.
     """
@@ -1360,6 +1488,11 @@ def reply_jenkins_update_done_email(
             f"in folder(s): {folders}.{hint}"
         )
     orig, orig_folder = orig_found
+    if _should_skip_jenkins_reply_message(orig):
+        raise EmailThreadNotFoundError(
+            f"Email not found — newest match for {title!r} was a bounce or bot reply; "
+            f"no normal thread in folder(s): {', '.join(JENKINS_REPLY_IMAP_FOLDERS)}."
+        )
     to_addrs, cc_addrs, recipients = _jenkins_reply_all_recipients(orig)
     subj = _reply_subject(_decode_msg_subject(orig))
     msg = MIMEText(body, "plain", "utf-8")
