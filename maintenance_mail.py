@@ -1199,32 +1199,15 @@ def reply_jenkins_update_done_email(
     )
 
 
-def _reply_to_address(original_msg: email.message.Message | None) -> tuple[str, str]:
-    """
-    Address to reply in-thread: ``Reply-To`` if set, else ``From`` on the
-    maintenance notice (e.g. servicedesk@evolution.com).
-    """
-    if original_msg is None:
-        return "", ""
-    for hdr in ("Reply-To", "From"):
-        raw = _decode_mime_header(original_msg.get(hdr)) or ""
-        if not raw:
-            continue
-        name, addr = parseaddr(raw)
-        addr = (addr or _maint_mod._parse_from_email_address(raw)).strip()
-        if addr:
-            return (name.strip() or addr), addr
-    return "", ""
-
-
 def reply_not_in_cp_email(
     *,
     subject: str,
     original_msg: email.message.Message | None = None,
 ) -> None:
     """
-    NOT IN CP notice: ``Re:`` same subject, **To** = original sender (in-thread),
-    **Cc** = om@. Plain text only (no HTML quote).
+    NOT IN CP: internal note on om@ only — **To** = om@ (not Evolution/Jira).
+    ``Re:`` + ``In-Reply-To`` so Lark Mail threads on the incoming maintenance mail.
+    Plain text only (no HTML quote).
     """
     if not MAIL_PASSWORD:
         raise RuntimeError("MAINTENANCE_MAIL_PASSWORD not set")
@@ -1234,26 +1217,15 @@ def reply_not_in_cp_email(
     msg["From"] = formataddr((FORWARD_FROM_NAME, MAIL_USER))
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid()
-    msg["Cc"] = formataddr((NOT_CP_REPLY_CC_NAME, FORWARD_CC))
+    msg["To"] = formataddr((NOT_CP_REPLY_CC_NAME, FORWARD_CC))
     recipients: list[str] = [FORWARD_CC]
-    to_name, to_addr = _reply_to_address(original_msg)
-    if to_addr and _maint_mod.from_should_ignore(f"<{to_addr}>"):
-        to_addr = ""
-        to_name = ""
-    if to_addr:
-        msg["To"] = formataddr((to_name, to_addr)) if to_name else to_addr
-        recipients.insert(0, to_addr)
     if original_msg is not None:
         orig_mid = (original_msg.get("Message-ID") or "").strip()
         if orig_mid:
             msg["In-Reply-To"] = orig_mid
             refs = (original_msg.get("References") or "").strip()
             msg["References"] = f"{refs} {orig_mid}".strip() if refs else orig_mid
-    route = (
-        f"To={to_addr} Cc={FORWARD_CC}"
-        if to_addr
-        else f"Cc={FORWARD_CC} only (no reply-To on original)"
-    )
+    route = f"To={FORWARD_CC} (internal, not to Evolution)"
 
     ctx = ssl.create_default_context()
     with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=IMAP_TIMEOUT, context=ctx) as smtp:
