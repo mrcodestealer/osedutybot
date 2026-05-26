@@ -1055,12 +1055,39 @@ def _parse_maint_utc_datetime(raw: str) -> datetime | None:
         return None
 
 
+def _ensure_utc_suffix(ts: str) -> str:
+    """Service Desk ``Time of resolution`` often omits ``UTC``; times are still UTC."""
+    s = (ts or "").strip()
+    if not s or s.lower() in ("unknown", "tba"):
+        return s
+    if re.search(r"\bUTC\b", s, re.IGNORECASE):
+        return s
+    return f"{s} UTC"
+
+
 def _format_utc8_from_utc_str(utc_str: str) -> str:
-    dt = _parse_maint_utc_datetime(utc_str)
+    normalized = _ensure_utc_suffix(utc_str)
+    dt = _parse_maint_utc_datetime(normalized)
     if not dt:
         return (utc_str or "").strip() or "Unknown"
     local = dt.astimezone(_display_tz())
     return local.strftime("%d/%b/%y %H:%M UTC+8")
+
+
+def _format_resolution_range(start_raw: str, end_raw: str) -> str:
+    start8 = _format_utc8_from_utc_str(start_raw)
+    end_part = (end_raw or "").strip()
+    if not end_part or end_part.lower() in ("unknown", "tba"):
+        return f"From {start8} till TBA"
+    if re.search(r"we will inform you as soon", end_part, re.IGNORECASE):
+        return f"From {start8} till TBA"
+    end8 = _format_utc8_from_utc_str(end_part)
+    dt1 = _parse_maint_utc_datetime(_ensure_utc_suffix(start_raw))
+    dt2 = _parse_maint_utc_datetime(_ensure_utc_suffix(end_part))
+    if dt1 and dt2 and dt2 > dt1:
+        mins = int((dt2 - dt1).total_seconds() // 60)
+        return f"From {start8} till {end8} ({mins} min in total)"
+    return f"From {start8} till {end8}"
 
 
 def _convert_inline_utc_to_utc8(text: str) -> str:
@@ -1096,21 +1123,22 @@ def format_time_of_resolution(
         re.IGNORECASE | re.MULTILINE,
     )
     if m:
-        return _convert_inline_utc_to_utc8(m.group(1).strip())
+        line = m.group(1).strip()
+        fm = re.search(
+            r"from\s+(.*?)\s+till\s+(.*?)(?:\s*\(|$)", line, re.IGNORECASE
+        )
+        if fm:
+            return _format_resolution_range(
+                fm.group(1).strip(), fm.group(2).strip()
+            )
+        converted = _convert_inline_utc_to_utc8(line)
+        if "UTC+8" in converted:
+            return converted
     start = (info.get("start_time") or "").strip()
     end = (info.get("end_time") or "").strip()
     if not start or start.lower() == "unknown":
         return "Unknown"
-    start8 = _format_utc8_from_utc_str(start)
-    if not end or end.lower() in ("unknown", "tba"):
-        return f"From {start8} till TBA"
-    end8 = _format_utc8_from_utc_str(end)
-    dt1 = _parse_maint_utc_datetime(start)
-    dt2 = _parse_maint_utc_datetime(end)
-    if dt1 and dt2 and dt2 > dt1:
-        mins = int((dt2 - dt1).total_seconds() // 60)
-        return f"From {start8} till {end8} ({mins} min in total)"
-    return f"From {start8} till {end8}"
+    return _format_resolution_range(start, end)
 
 
 def _card_labeled_field(label: str, value: str) -> dict[str, Any]:
