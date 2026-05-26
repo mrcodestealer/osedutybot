@@ -776,24 +776,12 @@ def _save_state(data: dict[str, Any]) -> None:
 def _find_duplicate_title_content(
     entries: list[dict[str, Any]], title: str, content_hash: str
 ) -> dict[str, Any] | None:
-    nt = (title or "").strip().lower()
-    for ent in reversed(entries):
-        if (ent.get("title") or "").strip().lower() != nt:
-            continue
-        if ent.get("content_hash") == content_hash:
-            return ent
-    return None
-
-
-def _find_duplicate_ticket(
-    entries: list[dict[str, Any]], ticket_id: str, content_hash: str
-) -> dict[str, Any] | None:
-    """Same ticket + same body → duplicate; same ticket + different body → new email."""
-    tid = (ticket_id or "").strip().upper()
-    if not tid:
+    """Ignore only when **same title** (normalized) **and** same body hash."""
+    nt = _maint_mod._normalize_title_key(title)
+    if not nt:
         return None
     for ent in reversed(entries):
-        if (ent.get("ticket_id") or "").strip().upper() != tid:
+        if _maint_mod._normalize_title_key(str(ent.get("title") or "")) != nt:
             continue
         if ent.get("content_hash") == content_hash:
             return ent
@@ -1567,45 +1555,9 @@ class MaintenanceMailWatcher:
             return
 
         body = extract_body_from_message(msg)
-        if maintenance.is_not_affected_notice(display_subj, body):
-            ticket_skip = maintenance.extract_ticket_card_title(subject, body) or ""
-            _record_processed(
-                entries,
-                imap_uid=store_key,
-                message_id=msg.get("Message-ID") or "",
-                title=display_subj,
-                content_hash="skip:not_affected",
-                ticket_id=ticket_skip,
-            )
-            mail.uid("store", uid, "+FLAGS", "(\\Seen)")
-            print(
-                f"[maint-mail] skip uid={uid_s} (Table Availability: Not Affected): "
-                f"{display_subj!r}",
-                flush=True,
-            )
-            return
-
         pipeline_in = build_pipeline_input(subject, body)
         chash = _content_hash(pipeline_in)
         ticket_id = maintenance.extract_ticket_card_title(subject, body) or ""
-
-        dup_ticket = _find_duplicate_ticket(entries, ticket_id, chash)
-        if dup_ticket:
-            _record_processed(
-                entries,
-                imap_uid=store_key,
-                message_id=msg.get("Message-ID") or "",
-                title=display_subj,
-                content_hash=chash,
-                ticket_id=ticket_id,
-            )
-            mail.uid("store", uid, "+FLAGS", "(\\Seen)")
-            print(
-                f"[maint-mail] duplicate ticket ignored {folder} uid={uid_s} "
-                f"ticket={ticket_id!r}",
-                flush=True,
-            )
-            return
 
         dup = _find_duplicate_title_content(entries, display_subj, chash)
         if dup:
@@ -1619,7 +1571,8 @@ class MaintenanceMailWatcher:
             )
             mail.uid("store", uid, "+FLAGS", "(\\Seen)")
             print(
-                f"[maint-mail] duplicate ignored {folder} uid={uid_s} title={display_subj!r}",
+                f"[maint-mail] duplicate ignored (same title+content) {folder} "
+                f"uid={uid_s} title={display_subj!r}",
                 flush=True,
             )
             return

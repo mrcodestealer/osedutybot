@@ -3375,10 +3375,11 @@ def lark_webhook():
         if email_text:
             token = get_tenant_access_token()
             subj = maintenance.parse_subject_from_pasted_email(email_text) or "Maintenance (/m)"
-            if maintenance.subject_should_ignore(subj):
+            resolved_subj = maintenance.resolve_maintenance_subject(subj, email_text)
+            if maintenance.subject_should_ignore(resolved_subj):
                 send_message(
                     chat_id,
-                    f"⏭️ Skipped — subject contains ignored marker (e.g. `C88live_ow.ph`).\n\n`{subj}`",
+                    f"⏭️ Skipped — subject contains ignored marker (e.g. `C88live_ow.ph`).\n\n`{resolved_subj}`",
                 )
                 return _lark_im_done()
             from_line = ""
@@ -3402,7 +3403,7 @@ def lark_webhook():
                 return _lark_im_done()
             if maintenance.is_maintenance_cancelled_email(email_text):
                 cancel_card = maintenance.build_cancelled_maintenance_card(
-                    email_subject=subj,
+                    email_subject=resolved_subj,
                     email_body=email_text,
                 )
                 send_message(
@@ -3411,15 +3412,35 @@ def lark_webhook():
                     msg_type="interactive",
                 )
                 return _lark_im_done()
+            if maintenance.gamelist_configured() and token:
+                to_cp, _launched = maintenance.gamelist_has_launched(
+                    email_text, token
+                )
+                if not to_cp:
+                    send_message(
+                        chat_id,
+                        "⛔ **没有 CP 上线游戏**（NOT IN CP WEBSITE）。",
+                    )
+                    return _lark_im_done()
+            if (
+                "[service desk]" not in resolved_subj.lower()
+                and "tinc-" not in resolved_subj.lower()
+            ):
+                send_message(
+                    chat_id,
+                    "⚠️ 未能识别邮件主题。请在粘贴内容末尾保留一行 "
+                    "``[Service Desk] … / … / (SD-xxxxx)``，或开头加 ``Subject: …``。",
+                )
+                return _lark_im_done()
             first_reply, hdr_title, hdr_tpl, card_body, card_el = (
                 maintenance.process_maintenance_pipeline(
                     email_text,
                     token,
-                    email_subject=subj,
+                    email_subject=resolved_subj,
                 )
             )
             card = maintenance.build_maintenance_card(
-                email_subject=subj,
+                email_subject=resolved_subj,
                 gamelist_section=(first_reply or "").strip(),
                 summary_section=card_body or "",
                 body_elements=card_el,

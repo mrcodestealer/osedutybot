@@ -193,6 +193,11 @@ FORWARD_DONE_NOT_CP_BODY = (
 )
 
 
+def gamelist_configured() -> bool:
+    """True when Lark gamelist spreadsheet env is set (sheet still needs token to read)."""
+    return bool(GAMELIST_SPREADSHEET_TOKEN and GAMELIST_SHEET_ID)
+
+
 def gamelist_has_launched(
     email_text: str, tenant_access_token: str | None
 ) -> tuple[bool, list[str]]:
@@ -844,8 +849,6 @@ def classify_maintenance_card_kind(
     if status in ("in progress", "in-progress", "inprogress"):
         return "in_progress"
     card_status = (extract_status_for_card(subj, body) or "").strip().lower()
-    if "not affected" in card_status or "not affected" in status:
-        return "scheduled" if is_sd else "in_progress"
     if card_status == "affected" or status == "affected":
         if is_sd:
             return "scheduled"
@@ -874,6 +877,11 @@ def build_in_progress_card_header(subject: str, email_body: str | None = None) -
 
 def build_fixed_card_header(subject: str, email_body: str | None = None) -> str:
     subj = resolve_maintenance_subject(subject, email_body)
+    if "[service desk]" in subj.lower():
+        meta = parse_service_desk_subject_metadata(subj)
+        sd = meta.get("ticket_sd") or extract_ticket_card_title(subj, email_body) or "SD-?"
+        maint = meta.get("maintenance_type") or "Maintenance"
+        return _truncate_header(f"✅ [{sd}] {maint} - Fixed")
     ticket = ticket_id_tinc_style(subj, email_body) or "Maintenance"
     return _truncate_header(f"✅ {ticket} - Fixed")
 
@@ -906,7 +914,11 @@ def _table_display(
     if tinc.get("table"):
         return tinc["table"]
     tbl = (info.get("table") or "").strip()
-    return tbl if tbl and tbl.lower() != "unknown" else "Unknown"
+    if tbl and tbl.lower() != "unknown":
+        low = tbl.lower()
+        if "availability" in low or low in ("affected", "not affected"):
+            tbl = ""
+    return tbl if tbl else "Unknown"
 
 
 def _studio_and_date(
@@ -940,6 +952,11 @@ def _studio_and_date(
         md = (info.get("maint_date") or "").strip()
         if md:
             date = md
+    st = (info.get("start_time") or "").strip()
+    if st and st.lower() not in ("unknown", "tba"):
+        dt = _parse_maint_utc_datetime(st)
+        if dt:
+            date = dt.astimezone(_display_tz()).strftime("%d/%b/%y")
     if "[service desk]" in subj.lower():
         if studio == "Unknown":
             sd_studio = parse_service_desk_studio_from_subject(subj)
@@ -994,6 +1011,19 @@ _MONTH_MAP = {
 }
 
 
+def _display_tz() -> ZoneInfo:
+    """Local TZ for maintenance cards (default Asia/Shanghai = UTC+8)."""
+    tz_name = (
+        os.getenv("MAINTENANCE_MAIL_TZ", "").strip()
+        or os.getenv("maintenance_mail_tz", "").strip()
+        or "Asia/Shanghai"
+    )
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:
+        return ZoneInfo("Asia/Shanghai")
+
+
 def _parse_maint_utc_datetime(raw: str) -> datetime | None:
     s = (raw or "").strip()
     if not s or s.upper() == "TBA":
@@ -1029,8 +1059,25 @@ def _format_utc8_from_utc_str(utc_str: str) -> str:
     dt = _parse_maint_utc_datetime(utc_str)
     if not dt:
         return (utc_str or "").strip() or "Unknown"
-    local = dt.astimezone(ZoneInfo("Asia/Shanghai"))
+    local = dt.astimezone(_display_tz())
     return local.strftime("%d/%b/%y %H:%M UTC+8")
+
+
+def _convert_inline_utc_to_utc8(text: str) -> str:
+    """Replace each ``dd/Mon/yy HH:MM UTC`` fragment in a line with UTC+8."""
+    s = text or ""
+
+    def _repl(m: re.Match[str]) -> str:
+        frag = m.group(0)
+        converted = _format_utc8_from_utc_str(frag)
+        return converted if converted != frag else frag
+
+    return re.sub(
+        r"\d{1,2}/[A-Za-z]{3}/\d{2,4}\s+\d{1,2}:\d{2}\s*(?:AM|PM)?\s*UTC",
+        _repl,
+        s,
+        flags=re.IGNORECASE,
+    )
 
 
 def format_maintenance_window_utc8(start: str, end: str) -> str:
@@ -1049,19 +1096,21 @@ def format_time_of_resolution(
         re.IGNORECASE | re.MULTILINE,
     )
     if m:
-        return m.group(1).strip()
+        return _convert_inline_utc_to_utc8(m.group(1).strip())
     start = (info.get("start_time") or "").strip()
     end = (info.get("end_time") or "").strip()
     if not start or start.lower() == "unknown":
         return "Unknown"
+    start8 = _format_utc8_from_utc_str(start)
     if not end or end.lower() in ("unknown", "tba"):
-        return f"From {start} till TBA"
+        return f"From {start8} till TBA"
+    end8 = _format_utc8_from_utc_str(end)
     dt1 = _parse_maint_utc_datetime(start)
     dt2 = _parse_maint_utc_datetime(end)
     if dt1 and dt2 and dt2 > dt1:
         mins = int((dt2 - dt1).total_seconds() // 60)
-        return f"From {start} till {end} ({mins} min in total)"
-    return f"From {start} till {end}"
+        return f"From {start8} till {end8} ({mins} min in total)"
+    return f"From {start8} till {end8}"
 
 
 def _card_labeled_field(label: str, value: str) -> dict[str, Any]:
@@ -1432,20 +1481,12 @@ def format_received_at(when: str | None) -> str:
     if not (when or "").strip():
         return ""
     raw = when.strip()
-    tz_name = (
-        os.getenv("MAINTENANCE_MAIL_TZ", "").strip()
-        or os.getenv("maintenance_mail_tz", "").strip()
-        or "Asia/Shanghai"
-    )
     try:
         dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        try:
-            dt = dt.astimezone(ZoneInfo(tz_name))
-        except Exception:
-            pass
-        return dt.strftime("%d/%b/%y %H:%M")
+        dt = dt.astimezone(_display_tz())
+        return dt.strftime("%d/%b/%y %H:%M UTC+8")
     except ValueError:
         return raw
 
@@ -1914,8 +1955,8 @@ def generate_output(
     output.extend(
         [
             f"Status: {format_status_display(info['status'])}",
-            f"Start time: {info['start_time']}",
-            f"End time : {info['end_time']}",
+            f"Start time: {_format_utc8_from_utc_str(str(info['start_time']))}",
+            f"End time : {_format_utc8_from_utc_str(str(info['end_time']))}",
             "",
             f"REF EMAIL:{info['reference']}",
         ]
@@ -2100,10 +2141,12 @@ def process_maintenance_pipeline(
     tok = (tenant_access_token or "").strip()
     ss = GAMELIST_SPREADSHEET_TOKEN
     sid = GAMELIST_SHEET_ID
-    subj_kw = {"email_subject": email_subject}
+    resolved_subj = resolve_maintenance_subject(email_subject, email_text)
 
     if not ss or not sid or not tok:
-        h, t, b, el = build_maintenance_notice(email_text, email_subject=email_subject)
+        h, t, b, el = build_maintenance_notice(
+            email_text, email_subject=resolved_subj
+        )
         return (
             "⚠️ **Gamelist 未配置**（`gamelist` / `GAMELISTSHEETID` / token）— "
             "下方 Table 为邮件全文桌台，**未与 CP 表核对**。",
@@ -2117,7 +2160,7 @@ def process_maintenance_pipeline(
         grid = _fetch_sheet_values(tok, ss, sid)
     except Exception as e:
         h, t, b, el = build_maintenance_notice(
-            email_text, email_subject=email_subject
+            email_text, email_subject=resolved_subj
         )
         return (
             f"⚠️ **Gamelist 表格读取失败** — 下方 Table 为邮件全文，**未与 CP 核对**: `{e}`",
@@ -2130,7 +2173,8 @@ def process_maintenance_pipeline(
     candidates = extract_candidate_game_names(email_text)
     if not candidates:
         h, t, b, el = build_maintenance_notice(
-            email_text, email_subject=email_subject,
+            email_text,
+            email_subject=resolved_subj,
             launched_tables=[],
         )
         return (
@@ -2142,37 +2186,31 @@ def process_maintenance_pipeline(
         )
 
     launched_list: list[str] = []
-    not_launched_list: list[str] = []
-    not_on_sheet_list: list[str] = []
+    not_cp_list: list[str] = []
 
     for g in candidates:
         verdict = _row_launched_for_game(grid, g, "")
         if verdict is True:
             launched_list.append(g)
-        elif verdict is False:
-            not_launched_list.append(g)
         else:
-            not_on_sheet_list.append(g)
+            # 遊戲入口圖=0 / 空 / 表内未找到 → 均视为 NOT IN CP WEBSITE
+            not_cp_list.append(g)
 
-    lines1 = ["📋 **游戏上线状态（gamelist · 遊戲入口圖: 1=上线, 0=非上线）**"]
+    lines1 = ["📋 **游戏上线状态（gamelist · 遊戲入口圖: 1=上线）**"]
     lines1.append(
-        "✅ **上线 Launched：** "
+        "✅ **CP 上线：** "
         + (", ".join(launched_list) if launched_list else "（无）")
     )
     lines1.append(
-        "⛔ **在表但非上线 (0/空)：** "
-        + (", ".join(not_launched_list) if not_launched_list else "（无）")
-    )
-    lines1.append(
-        "❓ **表内未找到（名称不一致？）：** "
-        + (", ".join(not_on_sheet_list) if not_on_sheet_list else "（无）")
+        "⛔ **NOT IN CP WEBSITE：** "
+        + (", ".join(not_cp_list) if not_cp_list else "（无）")
     )
 
     msg1 = "\n".join(lines1)
 
     hdr_title, hdr_tpl, msg2, card_el = build_maintenance_notice(
         email_text,
-        email_subject=email_subject,
+        email_subject=resolved_subj,
         launched_tables=launched_list,
     )
 
