@@ -354,6 +354,22 @@ def parse_service_desk_date_from_subject(subject: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+def parse_service_desk_studio_from_subject(subject: str) -> str:
+    """``EU CA`` from ``… / 26/May/26 03:50 UTC / EU CA / …``."""
+    s = normalize_display_subject(subject)
+    m = re.search(
+        r"UTC\s*/\s*([^/]+?)\s*/\s*(?:/\s*)?(?:Table\s+Availability|\(SD-)",
+        s,
+        re.IGNORECASE,
+    )
+    if not m:
+        return ""
+    seg = m.group(1).strip()
+    if not seg or seg.lower() in ("affected", "not affected"):
+        return ""
+    return seg
+
+
 _SD_SUBJECT_UTC_RE = re.compile(
     r"(\d{1,2}/[A-Za-z]{3}/\d{2,4})\s+(\d{1,2}:\d{2})\s*UTC",
     re.IGNORECASE,
@@ -871,8 +887,13 @@ def _table_display(
     launched_tables: list[str] | None,
     email_subject: str | None,
 ) -> str:
-    if launched_tables:
-        return ", ".join(launched_tables)
+    # ``launched_tables is not None`` ⇒ gamelist was checked — never list non-CP games.
+    if launched_tables is not None:
+        return (
+            ", ".join(launched_tables)
+            if launched_tables
+            else "（无 CP 上线 · 遊戲入口圖≠1）"
+        )
     names = [str(x).strip() for x in (info.get("table_names") or []) if str(x).strip()]
     if names:
         return ", ".join(names)
@@ -914,6 +935,15 @@ def _studio_and_date(
         md = (info.get("maint_date") or "").strip()
         if md:
             date = md
+    if "[service desk]" in subj.lower():
+        if studio == "Unknown":
+            sd_studio = parse_service_desk_studio_from_subject(subj)
+            if sd_studio:
+                studio = sd_studio
+        if date == "Unknown":
+            sd_date = parse_service_desk_date_from_subject(subj)
+            if sd_date:
+                date = sd_date
     return studio, date
 
 
@@ -1228,7 +1258,13 @@ def _scheduled_table_display(
     email_subject: str | None,
     email_body: str | None = None,
 ) -> str:
-    """All affected tables from email (scheduled notices often list several)."""
+    """CP-launched tables when gamelist was checked; else all from email."""
+    if launched_tables is not None:
+        return _table_display(
+            info,
+            launched_tables=launched_tables,
+            email_subject=email_subject,
+        )
     names = [str(x).strip() for x in (info.get("table_names") or []) if str(x).strip()]
     if names:
         return ", ".join(names)
@@ -1716,7 +1752,9 @@ def extract_info(text: str, *, email_subject: str | None = None):
                 if match:
                     info['table'] = match.group(1).strip()
                     info['table_names'] = [info['table']]
-        elif re.search(r'^Affected tables?\s*:', line, re.IGNORECASE):
+        elif re.search(
+            r'^Affected tables?(?:/-s)?\s*:', line, re.IGNORECASE
+        ):
             block_names, j = _parse_table_block_after_heading(lines, i)
             if block_names:
                 info["table"] = ", ".join(block_names)
@@ -1974,7 +2012,9 @@ def get_table_name(text):
             match = re.search(r'table\s+(.*?)\s+was', line, re.IGNORECASE)
             if match:
                 return match.group(1).strip()
-        elif re.search(r'^Affected tables?\s*:', line, re.IGNORECASE):
+        elif re.search(
+            r'^Affected tables?(?:/-s)?\s*:', line, re.IGNORECASE
+        ):
             block_names, _ = _parse_table_block_after_heading(lines, i)
             if block_names:
                 return block_names[0]
@@ -2114,7 +2154,7 @@ def process_maintenance_pipeline(
     hdr_title, hdr_tpl, msg2, card_el = build_maintenance_notice(
         email_text,
         email_subject=email_subject,
-        launched_tables=launched_list or None,
+        launched_tables=launched_list,
     )
 
     return msg1, hdr_title, hdr_tpl, msg2, card_el
