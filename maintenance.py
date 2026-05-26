@@ -157,6 +157,14 @@ def _clean_status_for_title(raw: str) -> str:
     return v
 
 
+def is_not_affected_notice(
+    subject: str | None = None, email_body: str | None = None
+) -> bool:
+    """Service Desk «Table Availability: Not Affected» — no CP maintenance action."""
+    st = extract_status_for_card(subject or "", email_body)
+    return bool(st and "not affected" in st.lower())
+
+
 def extract_status_for_card(subject: str, extra_text: str | None = None) -> str | None:
     """Status for card header — from subject/body ``Table availability:`` / ``Status:``."""
     hay = f"{subject or ''}\n{extra_text or ''}"
@@ -598,15 +606,10 @@ def _cancel_fields_for_card(
                 for x in (prior.get("launched_names") or [])
                 if str(x).strip()
             ]
-            tables = [
-                str(x).strip()
-                for x in (prior.get("table_names") or [])
-                if str(x).strip()
-            ]
             if launched:
                 table = ", ".join(launched)
-            elif tables:
-                table = ", ".join(tables)
+            elif prior.get("table_names"):
+                table = "（无 CP 上线 · 遊戲入口圖≠1）"
 
     if date in ("", "Unknown"):
         subj = resolve_maintenance_subject(email_subject, email_body)
@@ -841,6 +844,8 @@ def classify_maintenance_card_kind(
     if status in ("in progress", "in-progress", "inprogress"):
         return "in_progress"
     card_status = (extract_status_for_card(subj, body) or "").strip().lower()
+    if "not affected" in card_status or "not affected" in status:
+        return "scheduled" if is_sd else "in_progress"
     if card_status == "affected" or status == "affected":
         if is_sd:
             return "scheduled"
@@ -2099,7 +2104,14 @@ def process_maintenance_pipeline(
 
     if not ss or not sid or not tok:
         h, t, b, el = build_maintenance_notice(email_text, email_subject=email_subject)
-        return "", h, t, b, el
+        return (
+            "⚠️ **Gamelist 未配置**（`gamelist` / `GAMELISTSHEETID` / token）— "
+            "下方 Table 为邮件全文桌台，**未与 CP 表核对**。",
+            h,
+            t,
+            b,
+            el,
+        )
 
     try:
         grid = _fetch_sheet_values(tok, ss, sid)
@@ -2108,7 +2120,7 @@ def process_maintenance_pipeline(
             email_text, email_subject=email_subject
         )
         return (
-            f"⚠️ **Gamelist 表格**读取失败（仍发送下方原始摘要）: `{e}`",
+            f"⚠️ **Gamelist 表格读取失败** — 下方 Table 为邮件全文，**未与 CP 核对**: `{e}`",
             h,
             t,
             b,
@@ -2118,10 +2130,11 @@ def process_maintenance_pipeline(
     candidates = extract_candidate_game_names(email_text)
     if not candidates:
         h, t, b, el = build_maintenance_notice(
-            email_text, email_subject=email_subject
+            email_text, email_subject=email_subject,
+            launched_tables=[],
         )
         return (
-            "⚠️ 未能从邮件中识别游戏/表名（仍发送下方原始摘要）。",
+            "⚠️ 未能从邮件中识别游戏/表名。",
             h,
             t,
             b,
@@ -2130,14 +2143,16 @@ def process_maintenance_pipeline(
 
     launched_list: list[str] = []
     not_launched_list: list[str] = []
+    not_on_sheet_list: list[str] = []
 
     for g in candidates:
         verdict = _row_launched_for_game(grid, g, "")
         if verdict is True:
             launched_list.append(g)
-        else:
-            # False (遊戲入口圖=0) and None (not found on gamelist) → not launched
+        elif verdict is False:
             not_launched_list.append(g)
+        else:
+            not_on_sheet_list.append(g)
 
     lines1 = ["📋 **游戏上线状态（gamelist · 遊戲入口圖: 1=上线, 0=非上线）**"]
     lines1.append(
@@ -2145,8 +2160,12 @@ def process_maintenance_pipeline(
         + (", ".join(launched_list) if launched_list else "（无）")
     )
     lines1.append(
-        "⛔ **非上线 Not launched：** "
+        "⛔ **在表但非上线 (0/空)：** "
         + (", ".join(not_launched_list) if not_launched_list else "（无）")
+    )
+    lines1.append(
+        "❓ **表内未找到（名称不一致？）：** "
+        + (", ".join(not_on_sheet_list) if not_on_sheet_list else "（无）")
     )
 
     msg1 = "\n".join(lines1)

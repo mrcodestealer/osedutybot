@@ -1567,6 +1567,24 @@ class MaintenanceMailWatcher:
             return
 
         body = extract_body_from_message(msg)
+        if maintenance.is_not_affected_notice(display_subj, body):
+            ticket_skip = maintenance.extract_ticket_card_title(subject, body) or ""
+            _record_processed(
+                entries,
+                imap_uid=store_key,
+                message_id=msg.get("Message-ID") or "",
+                title=display_subj,
+                content_hash="skip:not_affected",
+                ticket_id=ticket_skip,
+            )
+            mail.uid("store", uid, "+FLAGS", "(\\Seen)")
+            print(
+                f"[maint-mail] skip uid={uid_s} (Table Availability: Not Affected): "
+                f"{display_subj!r}",
+                flush=True,
+            )
+            return
+
         pipeline_in = build_pipeline_input(subject, body)
         chash = _content_hash(pipeline_in)
         ticket_id = maintenance.extract_ticket_card_title(subject, body) or ""
@@ -1648,14 +1666,21 @@ class MaintenanceMailWatcher:
                     f"table_game={table_game!r} to_cp={to_cp}",
                     flush=True,
                 )
-            cancel_card = maintenance.build_cancelled_maintenance_card(
-                email_subject=display_subj,
-                email_body=body,
-                table_game=table_game,
-                prior=prior,
-                received_at=when,
-            )
-            self._send_lark_card(TARGET_CHAT_ID, cancel_card)
+            cancel_to_group = to_cp or bool(prior)
+            if cancel_to_group:
+                cancel_card = maintenance.build_cancelled_maintenance_card(
+                    email_subject=display_subj,
+                    email_body=body,
+                    table_game=table_game,
+                    prior=prior,
+                    received_at=when,
+                )
+                self._send_lark_card(TARGET_CHAT_ID, cancel_card)
+            elif MAIL_VERBOSE:
+                print(
+                    f"[maint-mail] cancel uid={uid_s} skip Lark (not on CP, no prior)",
+                    flush=True,
+                )
         else:
             to_cp, launched_names = maintenance.gamelist_has_launched(pipeline_in, token)
             if MAIL_VERBOSE and launched_names:
@@ -1719,7 +1744,16 @@ class MaintenanceMailWatcher:
 
         if FORWARD_ENABLED:
             try:
-                if is_cancel or to_cp:
+                if is_cancel:
+                    if to_cp or prior:
+                        forward_maintenance_email(
+                            subject=subject, original_msg=msg
+                        )
+                    else:
+                        reply_not_in_cp_email(
+                            subject=subject, original_msg=msg
+                        )
+                elif to_cp:
                     forward_maintenance_email(
                         subject=subject, original_msg=msg
                     )
