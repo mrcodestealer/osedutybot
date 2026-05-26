@@ -795,7 +795,7 @@ def _send_jenkins_email_reply(
     import maintenance_mail as mm
 
     try:
-        mm.reply_jenkins_update_done_email(
+        sent = mm.reply_jenkins_update_done_email(
             email_title=email_title,
             completions=completions,
         )
@@ -803,18 +803,20 @@ def _send_jenkins_email_reply(
         folders = ", ".join(mm.JENKINS_REPLY_IMAP_FOLDERS)
         send(
             chat_id,
-            "❌ **Can't find email** — no reply sent.\n"
-            f"Searched **{folders}** for subject containing: `{email_title}`\n"
+            "❌ **Email not found** — no reply sent.\n"
+            f"Searched **{folders}** for the latest mail whose subject contains: `{email_title}`\n"
             "Check the **Email:** line in your `/update` matches the original mail subject.",
         )
         return
     envs = ", ".join(c[0] for c in completions)
-    reply_to = mm.JENKINS_DONE_REPLY_TO
+    to_line = ", ".join(sent.get("to") or []) or "(none)"
+    cc_line = ", ".join(sent.get("cc") or []) or "(none)"
     send(
         chat_id,
         f"📧 Auto-replied email ({len(completions)} done block(s))\n"
         f"- **From:** `{mm.MAIL_USER}`\n"
-        f"- **To:** `{reply_to}`\n"
+        f"- **To:** `{to_line}`\n"
+        f"- **Cc:** `{cc_line}`\n"
         f"- **Subject (search / Re:):** `{email_title}`\n"
         f"- **Environments:** {envs}",
     )

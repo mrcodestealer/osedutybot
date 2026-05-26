@@ -37,7 +37,7 @@ from zoneinfo import ZoneInfo
 from email.header import Header
 from email.header import decode_header
 from email.mime.text import MIMEText
-from email.utils import formataddr, formatdate, make_msgid, parseaddr, parsedate_to_datetime
+from email.utils import formataddr, formatdate, getaddresses, make_msgid, parseaddr, parsedate_to_datetime
 from typing import Any, Callable
 
 from dotenv import load_dotenv
@@ -843,6 +843,86 @@ def _reply_subject(subject: str) -> str:
     return f"Re: {s}"
 
 
+def _normalize_email_address(addr: str) -> str:
+    return (addr or "").strip().casefold()
+
+
+def _own_smtp_identities() -> set[str]:
+    """Addresses we must not include as recipients (our sending mailbox)."""
+    ids: set[str] = set()
+    for raw in (MAIL_USER, JENKINS_DONE_REPLY_TO):
+        a = (raw or "").strip()
+        if a:
+            ids.add(_normalize_email_address(a))
+    return ids
+
+
+def _parse_header_address_list(msg: email.message.Message, header: str) -> list[str]:
+    """Decode ``To`` / ``Cc`` / ``From`` and return unique addr-specs in order."""
+    raw = _decode_mime_header(msg.get(header)) or ""
+    if not raw.strip():
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for _name, addr in getaddresses([raw]):
+        a = (addr or "").strip()
+        if not a or "@" not in a:
+            continue
+        key = _normalize_email_address(a)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(a)
+    return out
+
+
+def _jenkins_reply_all_recipients(
+    orig: email.message.Message,
+) -> tuple[list[str], list[str], list[str]]:
+    """
+    Reply-all using **latest matched message** ``To`` / ``Cc`` (and ``From`` in ``To``).
+
+    Returns ``(to_header_addrs, cc_header_addrs, smtp_recipients)``.
+    """
+    own = _own_smtp_identities()
+    orig_to = _parse_header_address_list(orig, "To")
+    orig_cc = _parse_header_address_list(orig, "Cc")
+    orig_from = _parse_header_address_list(orig, "From")
+
+    to_out: list[str] = []
+    to_norm: set[str] = set()
+
+    def _add_to(addr: str) -> None:
+        key = _normalize_email_address(addr)
+        if key in own or key in to_norm:
+            return
+        to_norm.add(key)
+        to_out.append(addr)
+
+    for a in orig_to:
+        _add_to(a)
+    for a in orig_from:
+        _add_to(a)
+
+    cc_out: list[str] = []
+    cc_norm: set[str] = set()
+    for a in orig_cc:
+        key = _normalize_email_address(a)
+        if key in own or key in to_norm or key in cc_norm:
+            continue
+        cc_norm.add(key)
+        cc_out.append(a)
+
+    if not to_out and cc_out:
+        to_out = [cc_out.pop(0)]
+        cc_norm.discard(_normalize_email_address(to_out[0]))
+
+    smtp_recipients = list(to_out) + [a for a in cc_out if a not in to_out]
+    if not smtp_recipients:
+        raise ValueError("Original email has no To/Cc recipients to reply to")
+    return to_out, cc_out, smtp_recipients
+
+
 def _apply_in_reply_to_headers(
     msg: email.message.Message,
     original_msg: email.message.Message | None,
@@ -1035,6 +1115,39 @@ def _fetch_subject_header_for_uid(mail: imaplib.IMAP4, uid: bytes) -> str:
     return _decode_msg_subject(email.message_from_string(f"Subject: {subj}\n\n"))
 
 
+def _pick_newest_uid_among_candidates(
+    mail: imaplib.IMAP4,
+    uids: list[bytes],
+    *,
+    folder_label: str,
+    needle: str,
+) -> bytes | None:
+    """Among IMAP UIDs, return the one with the latest ``Date`` (full RFC822 fetch)."""
+    best_uid: bytes | None = None
+    best_ts = datetime.min.replace(tzinfo=timezone.utc)
+    for uid in uids:
+        typ, data = mail.uid("fetch", uid, "(RFC822)")
+        if typ != "OK" or not data or not data[0]:
+            continue
+        raw_bytes = data[0][1] if isinstance(data[0], tuple) else None
+        if not raw_bytes:
+            continue
+        msg = email.message_from_bytes(raw_bytes)
+        if not _subject_contains_needle(_decode_msg_subject(msg), needle):
+            continue
+        ts = _message_sort_timestamp(msg)
+        if best_uid is None or ts >= best_ts:
+            best_uid = uid
+            best_ts = ts
+    if best_uid is not None:
+        print(
+            f"[maint-mail] jenkins reply: newest match uid={best_uid!r} "
+            f"folder={folder_label!r} needle={needle!r}",
+            flush=True,
+        )
+    return best_uid
+
+
 def _find_matching_uid_in_folder(
     mail: imaplib.IMAP4, folder: str, needle: str
 ) -> bytes | None:
@@ -1044,22 +1157,27 @@ def _find_matching_uid_in_folder(
         return None
     uids = _uid_search_subject_variants(mail, needle)
     if uids:
-        return uids[-1]
+        pick_from = uids[-max(50, min(len(uids), JENKINS_REPLY_IMAP_SCAN_LIMIT)) :]
+        found = _pick_newest_uid_among_candidates(
+            mail, list(reversed(pick_from)), folder_label=resolved, needle=needle
+        )
+        if found:
+            return found
     all_uids = _uid_search(mail, "ALL")
     if not all_uids:
         print(f"[maint-mail] jenkins reply: {resolved!r} is empty", flush=True)
         return None
     limit = max(50, JENKINS_REPLY_IMAP_SCAN_LIMIT)
     tail = all_uids[-limit:]
+    scan_hits: list[bytes] = []
     for uid in reversed(tail):
         subj = _fetch_subject_header_for_uid(mail, uid)
         if _subject_contains_needle(subj, needle):
-            print(
-                f"[maint-mail] jenkins reply: subject scan hit uid={uid!r} "
-                f"folder={resolved!r} subj={subj!r}",
-                flush=True,
-            )
-            return uid
+            scan_hits.append(uid)
+    if scan_hits:
+        return _pick_newest_uid_among_candidates(
+            mail, scan_hits, folder_label=resolved, needle=needle
+        )
     print(
         f"[maint-mail] jenkins reply: no subject match in {resolved!r} "
         f"(scanned {len(tail)} of {len(all_uids)} msgs) needle={needle!r}",
@@ -1154,14 +1272,18 @@ def reply_jenkins_update_done_email(
     *,
     email_title: str,
     completions: list[tuple[str, str]],
-) -> None:
+) -> dict[str, Any]:
     """
     Auto-reply after Jenkins success (``/SuccessInformMeTime`` flow).
 
     ``completions`` is a list of ``(environment, time)`` pairs. Multiple pairs are
     combined into one email when several segments share the same subject.
 
-    Sends only to ``JENKINS_UPDATE_DONE_REPLY_TO`` (default junchen@snsoft.my).
+    Finds the **newest** matching message in ``JENKINS_REPLY_IMAP_FOLDERS``, then
+    **Reply-All** to its ``To`` / ``Cc`` (plus ``From`` in ``To``). Does **not**
+    send if no matching mail exists.
+
+    Returns ``{"to": [...], "cc": [...], "folder": str, "subject": str}``.
     """
     if not MAIL_PASSWORD:
         raise RuntimeError("MAINTENANCE_MAIL_PASSWORD not set")
@@ -1198,14 +1320,18 @@ def reply_jenkins_update_done_email(
         except Exception:
             pass
         raise EmailThreadNotFoundError(
-            f"No email found with subject matching {title!r} in folder(s): {folders}.{hint}"
+            f"Email not found — no message with subject matching {title!r} "
+            f"in folder(s): {folders}.{hint}"
         )
     orig, orig_folder = orig_found
+    to_addrs, cc_addrs, recipients = _jenkins_reply_all_recipients(orig)
     subj = _reply_subject(_decode_msg_subject(orig))
     msg = MIMEText(body, "plain", "utf-8")
     msg["Subject"] = Header(subj, "utf-8")
     msg["From"] = formataddr((FORWARD_FROM_NAME, MAIL_USER))
-    msg["To"] = JENKINS_DONE_REPLY_TO
+    msg["To"] = ", ".join(to_addrs)
+    if cc_addrs:
+        msg["Cc"] = ", ".join(cc_addrs)
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid()
     orig_mid = (orig.get("Message-ID") or "").strip()
@@ -1213,17 +1339,23 @@ def reply_jenkins_update_done_email(
         msg["In-Reply-To"] = orig_mid
         refs = (orig.get("References") or "").strip()
         msg["References"] = f"{refs} {orig_mid}".strip() if refs else orig_mid
-    recipients = [JENKINS_DONE_REPLY_TO]
     ctx = ssl.create_default_context()
     with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=IMAP_TIMEOUT, context=ctx) as smtp:
         smtp.login(MAIL_USER, MAIL_PASSWORD)
         smtp.sendmail(MAIL_USER, recipients, msg.as_string())
     envs = ", ".join(c[0] for c in completions)
+    route = ", ".join(recipients)
     print(
         f"[maint-mail] jenkins done reply envs={envs!r} title={title!r} folder={orig_folder!r} "
-        f"→ {JENKINS_DONE_REPLY_TO}",
+        f"To={to_addrs!r} Cc={cc_addrs!r} → {route}",
         flush=True,
     )
+    return {
+        "to": to_addrs,
+        "cc": cc_addrs,
+        "folder": orig_folder,
+        "subject": subj,
+    }
 
 
 def reply_not_in_cp_email(
