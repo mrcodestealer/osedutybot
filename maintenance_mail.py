@@ -1732,11 +1732,11 @@ class MaintenanceMailWatcher:
                 lark_note = (
                     "Lark already sent; "
                     if (is_cancel or to_cp)
-                    else "no Lark (NOT IN CP); "
+                    else "no Lark (not on CP gamelist); "
                 )
                 print(
                     f"[maint-mail] {action} failed uid={uid_s} ticket={ticket_id!r}: {ex!r} "
-                    f"({lark_note}UID recorded — will not retry)",
+                    f"({lark_note}UID recorded — no duplicate)",
                     flush=True,
                 )
 
