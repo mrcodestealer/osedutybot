@@ -64,27 +64,6 @@ import maintenance
 import emergency
 import ecsre
 
-_update_mod = None  # None = not loaded yet; False = import failed
-
-
-def _get_update():
-    """Return update module or None if import failed (logged once)."""
-    global _update_mod
-    if _update_mod is False:
-        return None
-    if _update_mod is not None:
-        return _update_mod
-    try:
-        import update as up
-
-        _update_mod = up
-        return up
-    except Exception as e:
-        print("[update] optional import skipped: %r" % (e,), flush=True)
-        _update_mod = False
-        return None
-
-
 import otpp1
 import bot_help
 
