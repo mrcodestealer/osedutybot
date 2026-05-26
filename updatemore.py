@@ -376,8 +376,8 @@ def skip_build_manual_instructions(segments: list[dict[str, Any]], q: dict[str, 
             [
                 "Simulate Jenkins done **once per batched segment** (same `Email:` title):",
                 "```",
-                f"@Duty Bot /replyupdateemail | {sample_em or '{email title}'} | BI-API-UPDATE | 6:10AM",
-                f"@Duty Bot /replyupdateemail | {sample_em or '{email title}'} | BI-API-UPDATE | 6:25AM",
+                f"@Duty Bot replyupdateemail | {sample_em or '{email title}'} | BI-API-UPDATE | 6:10AM",
+                f"@Duty Bot replyupdateemail | {sample_em or '{email title}'} | BI-API-UPDATE | 6:25AM",
                 "```",
                 "- **1st** → waiting (no email yet)",
                 "- **2nd** → **one** combined email reply",
@@ -386,8 +386,10 @@ def skip_build_manual_instructions(segments: list[dict[str, Any]], q: dict[str, 
     else:
         lines.append(
             "No batched segments (need 2+ `same` + same `Email:`). "
-            "Each `/replyupdateemail` replies immediately."
+            "Each `replyupdateemail` replies immediately."
         )
+    lines.append("")
+    lines.append("Cancel: `@Duty Bot cancel updatemore`")
     return "\n".join(lines)
 
 
@@ -423,6 +425,26 @@ def clear_queue_from_session(sess: dict[str, Any]) -> None:
     sess.pop("updatemore_queue", None)
 
 
+def cancel_active_updatemore_in_chat(
+    chat_id: str,
+    sessions: dict,
+    sessions_lock: threading.Lock,
+) -> bool:
+    """Remove any ``updatemore_queue`` in this chat. Returns True if one was cleared."""
+    prefix = f"{(chat_id or '').strip()}:"
+    cleared = False
+    with sessions_lock:
+        for sk, sess in list(sessions.items()):
+            if not str(sk).startswith(prefix):
+                continue
+            if not isinstance(sess, dict):
+                continue
+            if get_queue(sess):
+                clear_queue_from_session(sess)
+                cleared = True
+    return cleared
+
+
 def register_email_build_watch(
     q: dict[str, Any],
     *,
@@ -454,6 +476,20 @@ def record_email_build_success(
             watches.pop(i)
             break
     q["email_watches"] = watches
+
+    if seg_idx is None:
+        batches_lookup = q.get("email_batches") or {}
+        for batch in batches_lookup.values():
+            if not isinstance(batch, dict):
+                continue
+            if normalize_email_key(str(batch.get("title") or "")) != key:
+                continue
+            indices_lookup = list(batch.get("indices") or [])
+            done_lookup = dict(batch.get("done_by_idx") or {})
+            spare = [ix for ix in indices_lookup if ix not in done_lookup]
+            if spare:
+                seg_idx = spare[0]
+            break
 
     segs = q.get("segments") or []
     seg = segs[seg_idx] if seg_idx is not None and 0 <= seg_idx < len(segs) else None
@@ -502,11 +538,15 @@ def record_email_build_success(
 
 _SUCCESS_PROCEED_RE = re.compile(r"/SuccessProceedNext\b", re.I)
 _FAILED_STOP_RE = re.compile(r"/FailedStop\b", re.I)
-_REPLY_UPDATE_EMAIL_RE = re.compile(r"/replyupdateemail\b", re.I)
+_REPLY_UPDATE_EMAIL_RE = re.compile(r"/?replyupdateemail\b", re.I)
 _EMAIL_DONE_LEGACY_RE = re.compile(
     r"^(?P<title>.+?)\s+(?P<env>\S+)\s+(?P<time>\d{1,2}:\d{2}\s*[AP]M)\s*$",
     re.I,
 )
+
+
+def is_reply_update_email_text(text: str) -> bool:
+    return bool(re.search(r"/?replyupdateemail\b", text or "", re.I))
 
 
 def is_success_proceed_message(text: str) -> bool:
@@ -596,7 +636,9 @@ def is_jenkinsbot_duty_command(text: str) -> bool:
     if not raw:
         return False
     low = raw.casefold()
-    if "/replyupdateemail" in low or "/successproceednext" in low or "/failedstop" in low:
+    if re.search(r"/?replyupdateemail\b", raw, re.I):
+        return True
+    if "/successproceednext" in low or "/failedstop" in low:
         return True
     if _REPLY_UPDATE_EMAIL_RE.search(raw):
         return True
@@ -636,7 +678,7 @@ def resolve_duty_command_body(*parts: str | None) -> str:
             if variant and variant not in candidates:
                 candidates.append(variant)
     for cand in candidates:
-        if cand.startswith("{") and "replyupdateemail" in cand.casefold():
+        if cand.startswith("{") and re.search(r"replyupdateemail", cand, re.I):
             continue
         if _REPLY_UPDATE_EMAIL_RE.search(cand) or _SUCCESS_PROCEED_RE.search(cand) or _FAILED_STOP_RE.search(cand):
             return cand
@@ -644,7 +686,7 @@ def resolve_duty_command_body(*parts: str | None) -> str:
             return cand
     blob = " ".join(candidates)
     m = re.search(
-        r"/replyupdateemail\s*\|\s*[^|\"\\]+?\|\s*[^|\"\\]+?\|\s*[^|\"\\]+",
+        r"/?replyupdateemail\s*\|\s*[^|\"\\]+?\|\s*[^|\"\\]+?\|\s*[^|\"\\]+",
         blob,
         re.I,
     )
@@ -855,10 +897,10 @@ def handle_jenkinsbot_callback(
             dispatch_update_body=dispatch_update_body,
         )
 
-    if _REPLY_UPDATE_EMAIL_RE.search(body) or "/replyupdateemail" in (body or "").casefold():
+    if _REPLY_UPDATE_EMAIL_RE.search(body) or re.search(r"\breplyupdateemail\b", body or "", re.I):
         send(
             chat_id,
-            "❌ **Malformed `/replyupdateemail`** — expected:\n"
+            "❌ **Malformed `replyupdateemail`** — expected:\n"
             "`/replyupdateemail | {email title} | {pipeline} | {time}`",
         )
         return True

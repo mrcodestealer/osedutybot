@@ -2807,13 +2807,14 @@ def lark_webhook():
             if _updatemore.is_jenkinsbot_duty_command(duty_blob):
                 bot_mentioned = True
                 print("✅ Jenkins/duty email command — treat as mentioned (any sender)")
-            elif is_jenkins_bot_sender and _updatemore.is_jenkinsbot_duty_command(
-                message_content_raw or ""
+            elif is_jenkins_bot_sender and (
+                _updatemore.is_reply_update_email_text(message_content_raw or "")
+                or _updatemore.is_jenkinsbot_duty_command(message_content_raw or "")
             ):
                 bot_mentioned = True
                 print("✅ Jenkinsbot sender duty command — treat as mentioned")
         except Exception:
-            if "/replyupdateemail" in (duty_blob or "").casefold():
+            if re.search(r"/?replyupdateemail\b", duty_blob or "", re.I):
                 bot_mentioned = True
 
     lark_reactions_enabled = bool(message_id) and (
@@ -2858,14 +2859,17 @@ def lark_webhook():
         import updatemore as _updatemore
 
         _jb_duty_cmd = _updatemore.is_jenkinsbot_duty_command(duty_blob)
+        if not _jb_duty_cmd:
+            _jb_duty_cmd = _updatemore.is_reply_update_email_text(duty_blob or "")
         if not _jb_duty_cmd and is_jenkins_bot_sender:
-            _jb_duty_cmd = _updatemore.is_jenkinsbot_duty_command(
-                message_content_raw or ""
+            _jb_duty_cmd = (
+                _updatemore.is_jenkinsbot_duty_command(message_content_raw or "")
+                or _updatemore.is_reply_update_email_text(message_content_raw or "")
             )
         if not _jb_duty_cmd and is_jenkins_bot_sender and _mention_includes_duty_bot(mentions):
-            _jb_duty_cmd = "/replyupdateemail" in (message_content_raw or "").casefold()
+            _jb_duty_cmd = _updatemore.is_reply_update_email_text(message_content_raw or "")
     except Exception:
-        _jb_duty_cmd = "/replyupdateemail" in (duty_blob or "").casefold()
+        _jb_duty_cmd = bool(re.search(r"/?replyupdateemail\b", duty_blob or "", re.I))
 
     if _jb_duty_cmd:
         _duty_orig = duty_blob or original_text

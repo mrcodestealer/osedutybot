@@ -1204,7 +1204,7 @@ def _reply_to_address(original_msg: email.message.Message | None) -> tuple[str, 
         if not raw:
             continue
         name, addr = parseaddr(raw)
-        addr = (addr or maintenance._parse_from_email_address(raw)).strip()
+        addr = (addr or _maint_mod._parse_from_email_address(raw)).strip()
         if addr:
             return (name.strip() or addr), addr
     return "", ""
@@ -1230,7 +1230,7 @@ def reply_not_in_cp_email(
     msg["Cc"] = formataddr((NOT_CP_REPLY_CC_NAME, FORWARD_CC))
     recipients: list[str] = [FORWARD_CC]
     to_name, to_addr = _reply_to_address(original_msg)
-    if to_addr and maintenance.from_should_ignore(f"<{to_addr}>"):
+    if to_addr and _maint_mod.from_should_ignore(f"<{to_addr}>"):
         to_addr = ""
         to_name = ""
     if to_addr:
@@ -1296,7 +1296,7 @@ def _find_prior_maintenance_entry(
     ticket_id: str,
 ) -> dict[str, Any] | None:
     """Delegate to :func:`maintenance.find_prior_maintenance_entry` (normalized title)."""
-    return maintenance.find_prior_maintenance_entry(entries, display_subj, ticket_id)
+    return _maint_mod.find_prior_maintenance_entry(entries, display_subj, ticket_id)
 
 
 def _table_game_for_cancel(prior: dict[str, Any] | None) -> str:
@@ -1729,9 +1729,14 @@ class MaintenanceMailWatcher:
                     )
             except Exception as ex:
                 action = "forward" if (is_cancel or to_cp) else "NOT IN CP reply"
+                lark_note = (
+                    "Lark already sent; "
+                    if (is_cancel or to_cp)
+                    else "no Lark (NOT IN CP); "
+                )
                 print(
                     f"[maint-mail] {action} failed uid={uid_s} ticket={ticket_id!r}: {ex!r} "
-                    "(Lark already sent; UID recorded — no duplicate card)",
+                    f"({lark_note}UID recorded — will not retry)",
                     flush=True,
                 )
 
