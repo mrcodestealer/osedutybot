@@ -1147,6 +1147,10 @@ def _should_skip_jenkins_reply_thread(*, from_hdr: str, subject: str) -> bool:
     return False
 
 
+def _body_has_bot_auto_reply_marker(body: str) -> bool:
+    return "this is just the bot auto replied email" in (body or "").casefold()
+
+
 def _body_is_failed_send_notification(body: str) -> bool:
     """
     Lark / mailer-daemon body: ``Failed to send "Re: …" to the following recipients:``.
@@ -1177,7 +1181,7 @@ def _should_skip_jenkins_reply_message(msg: email.message.Message) -> bool:
         body = ""
     if _body_is_failed_send_notification(body):
         return True
-    if "this is just the bot auto replied email" in body:
+    if _body_has_bot_auto_reply_marker(body):
         return True
     own = _own_smtp_identities()
     for _name, addr in getaddresses([from_hdr or ""]):
@@ -1684,6 +1688,7 @@ def _pick_reply_uid_among_candidates(
     )
     skipped = 0
     own = _own_smtp_identities()
+    bot_with_rcpt: bytes | None = None
     for ts, uid, h in ranked:
         subj = h.get("subj") or ""
         from_hdr = h.get("from_hdr") or ""
@@ -1707,10 +1712,12 @@ def _pick_reply_uid_among_candidates(
                         break
             if need_bot_check:
                 body_peek = _fetch_body_peek_for_uid(mail, uid, limit=500)
-                if "this is just the bot auto replied email" in (
-                    body_peek or ""
-                ).casefold():
+                if _body_has_bot_auto_reply_marker(body_peek):
                     reason = "bot auto-reply (body)"
+                    if bot_with_rcpt is None and _headers_have_reply_recipients(
+                        to_raw, cc_raw, from_hdr
+                    ):
+                        bot_with_rcpt = uid
                 else:
                     reason = ""
             if not reason:
@@ -1728,19 +1735,13 @@ def _pick_reply_uid_among_candidates(
             f"reason={reason!r} from={from_hdr!r} subj={subj!r}",
             flush=True,
         )
-    if ranked:
+    if bot_with_rcpt is not None:
         for ts, uid, h in ranked:
-            subj = h.get("subj") or ""
-            from_hdr = h.get("from_hdr") or ""
-            if _should_skip_jenkins_reply_thread(from_hdr=from_hdr, subject=subj):
-                continue
-            if not _headers_have_reply_recipients(
-                h.get("to_raw") or "", h.get("cc_raw") or "", from_hdr
-            ):
+            if uid != bot_with_rcpt:
                 continue
             print(
-                f"[maint-mail] jenkins reply: fallback uid={uid!r} folder={folder_label!r} "
-                f"(prior thread mail with recipients; skipped bounces only) subj={subj!r}",
+                f"[maint-mail] jenkins reply: use uid={uid!r} folder={folder_label!r} "
+                f"(prior bot Re: with Reply-All To/Cc) subj={h.get('subj')!r}",
                 flush=True,
             )
             return uid
@@ -2018,11 +2019,23 @@ def reply_jenkins_update_done_email(
             f"in folder(s): {folders}.{hint}"
         )
     orig, orig_folder = orig_found
-    if _should_skip_jenkins_reply_message(orig):
+    from_hdr = _decode_mime_header(orig.get("From")) or ""
+    subj = _decode_msg_subject(orig)
+    body_snip = ""
+    try:
+        body_snip = _message_plain_text_snippet(orig, limit=_JENKINS_REPLY_BODY_PEEK)
+    except Exception:
+        pass
+    if _should_skip_jenkins_reply_thread(from_hdr=from_hdr, subject=subj):
         raise EmailThreadNotFoundError(
-            f"Email not found — newest match for {title!r} was a bounce, "
-            f"``Failed to send`` notice, or bot test reply; "
-            f"no normal thread in folder(s): {', '.join(JENKINS_REPLY_IMAP_FOLDERS)}."
+            f"Email not found — newest match for {title!r} was a bounce / "
+            f"mailer-daemon notice in folder(s): {', '.join(JENKINS_REPLY_IMAP_FOLDERS)}."
+        )
+    if _body_is_failed_send_notification(body_snip):
+        raise EmailThreadNotFoundError(
+            f"Email not found — newest match for {title!r} was a "
+            f"``Failed to send`` delivery notice in folder(s): "
+            f"{', '.join(JENKINS_REPLY_IMAP_FOLDERS)}."
         )
     if not _jenkins_message_has_reply_recipients(orig):
         raise EmailThreadNotFoundError(
