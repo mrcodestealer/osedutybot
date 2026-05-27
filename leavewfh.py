@@ -1909,7 +1909,6 @@ def _dept_block_markdown(
         return ""
     lines = [f"**{dept_label}**"]
     if leave_in:
-        lines.append("")
         lines.append("**LEAVE**")
         lines.extend(_attendance_person_line(r, on_date) for r in leave_in)
     if wfh_in:
