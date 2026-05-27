@@ -1229,19 +1229,29 @@ def collect_leave_source_rows(
     *,
     include_bitable: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Company leave calendar + other sources (merged, de-duplicated)."""
+    """Company HRMS leave calendar + Leave2026 sheet (no per-user Lark calendars)."""
     warnings: list[str] = []
     company_rows, w_co = fetch_leave_from_company_leave_calendar(token, year, month)
     warnings.extend(w_co)
-    open_map = resolve_roster_open_ids(token)
-    profile_rows, w0 = fetch_leave_from_lark_contact_profile(
-        token, year, month, open_map=open_map
-    )
-    warnings.extend(w0)
-    lark_rows, w1 = fetch_leave_from_lark_calendar(token, year, month, open_map=open_map)
-    warnings.extend(w1)
-    att_rows, w2 = fetch_leave_from_lark_attendance(token, year, month, open_map=open_map)
-    warnings.extend(w2)
+    profile_rows: list[dict[str, Any]] = []
+    lark_rows: list[dict[str, Any]] = []
+    att_rows: list[dict[str, Any]] = []
+    open_map: dict[str, str] = {}
+    if os.getenv("LEAVE_WFH_USE_PER_USER_SOURCES", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        open_map = resolve_roster_open_ids(token)
+        profile_rows, w0 = fetch_leave_from_lark_contact_profile(
+            token, year, month, open_map=open_map
+        )
+        warnings.extend(w0)
+        lark_rows, w1 = fetch_leave_from_lark_calendar(token, year, month, open_map=open_map)
+        warnings.extend(w1)
+        att_rows, w2 = fetch_leave_from_lark_attendance(token, year, month, open_map=open_map)
+        warnings.extend(w2)
     bitable_rows = (
         fetch_approved_leaves_for_month(token, year, month, require_approved=False)
         if include_bitable
@@ -1255,7 +1265,7 @@ def collect_leave_source_rows(
     )
     if not merged and not company_rows:
         warnings.append(
-            f"No leave found for {year}-{month:02d} from company leave calendar or other sources."
+            f"No leave found for {year}-{month:02d} from company leave calendar or sheet."
         )
     meta = {
         "company_leave_calendar_rows": len(company_rows),
