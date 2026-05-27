@@ -759,8 +759,8 @@ def build_ose_message_card(
     offset_lines: list[str],
     leave_entries: list[dict[str, Any]],
     include_tag: bool = False,
-    first_section_title: str = "😴 (～￣▽￣)～ Rest Well",
-    second_section_title: str = "🍀 Good Luckヾ(≧▽≦*)o",
+    first_section_title: str = "🌅 Morning shift",
+    second_section_title: str = "🌙 Night Shift",
     dutylist_attendance: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     lines: list[str] = []
@@ -835,9 +835,9 @@ def get_ose_payload_for_date(target_date: date, mode: str = "date", *, include_t
 
     if mode == "date":
         first_title_plain = "Morning shift"
-        second_title_plain = "Night shift"
+        second_title_plain = "Night Shift"
         first_title_card = "🌅 Morning shift"
-        second_title_card = "🌙 Night shift"
+        second_title_card = "🌙 Night Shift"
     else:
         first_title_plain = "(～￣▽￣)～ Rest Well"
         second_title_plain = "Good Luckヾ(≧▽≦*)o"
@@ -899,8 +899,7 @@ def get_ose_payload_for_date(target_date: date, mode: str = "date", *, include_t
 
 def get_ose_payload_for_now(now_dt: Optional[datetime] = None, *, include_tag: bool = False) -> dict[str, Any]:
     now_dt = now_dt or datetime.now()
-    mode = "evening" if now_dt.hour >= 19 else "morning"
-    return get_ose_payload_for_date(now_dt.date(), mode=mode, include_tag=include_tag)
+    return get_ose_payload_for_date(now_dt.date(), mode="date", include_tag=include_tag)
 
 
 def get_ose_duty_for_date(target_date: date) -> str:
