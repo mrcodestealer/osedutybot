@@ -1584,6 +1584,33 @@ def _headers_have_reply_recipients(
     return _jenkins_message_has_reply_recipients(stub)
 
 
+def _header_reply_recipient_count(to_raw: str, cc_raw: str, from_raw: str) -> int:
+    """Unique SMTP recipients from header peek (To + Cc + From, minus our mailbox)."""
+    stub = email.message_from_string(
+        f"To: {to_raw or ''}\nCc: {cc_raw or ''}\nFrom: {from_raw or ''}\n\n"
+    )
+    try:
+        _to, _cc, smtp = _jenkins_reply_all_recipients(stub)
+        return len(smtp)
+    except ValueError:
+        return 0
+
+
+def _header_is_prior_bot_reply(
+    h: dict[str, Any], *, own: set[str], body_peek: str | None = None
+) -> bool:
+    subj = (h.get("subj") or "").strip()
+    from_hdr = h.get("from_hdr") or ""
+    if not re.match(r"^re:\s", subj, re.I):
+        return False
+    for _n, addr in getaddresses([from_hdr]):
+        if _normalize_email_address(addr) in own:
+            if body_peek is None:
+                return True
+            return _body_has_bot_auto_reply_marker(body_peek)
+    return False
+
+
 def _fetch_header_peek_for_uid(
     mail: imaplib.IMAP4, uid: bytes
 ) -> tuple[datetime, str, str]:
@@ -1683,13 +1710,30 @@ def _pick_reply_uid_among_candidates(
     if not ranked:
         return None
     ranked.sort(
-        key=lambda row: (_jenkins_reply_subject_score(row[2].get("subj") or "", needle), row[0]),
+        key=lambda row: (
+            _jenkins_reply_subject_score(row[2].get("subj") or "", needle),
+            _header_reply_recipient_count(
+                row[2].get("to_raw") or "",
+                row[2].get("cc_raw") or "",
+                row[2].get("from_hdr") or "",
+            ),
+            row[0],
+        ),
         reverse=True,
     )
     skipped = 0
     own = _own_smtp_identities()
     bot_with_rcpt: bytes | None = None
-    for ts, uid, h in ranked:
+    bot_with_rcpt_n = 0
+
+    def _try_pick_uid(
+        uid: bytes,
+        h: dict[str, Any],
+        *,
+        pass_label: str,
+        allow_bot: bool,
+    ) -> bytes | None:
+        nonlocal skipped
         subj = h.get("subj") or ""
         from_hdr = h.get("from_hdr") or ""
         to_raw = h.get("to_raw") or ""
@@ -1704,27 +1748,22 @@ def _pick_reply_uid_among_candidates(
             else:
                 reason = "no To/Cc recipients (headers)"
         else:
-            need_bot_check = False
-            if re.match(r"^re:\s", (subj or "").strip(), re.I):
-                for _n, addr in getaddresses([from_hdr or ""]):
-                    if _normalize_email_address(addr) in own:
-                        need_bot_check = True
-                        break
-            if need_bot_check:
+            body_peek = None
+            if _header_is_prior_bot_reply(h, own=own):
                 body_peek = _fetch_body_peek_for_uid(mail, uid, limit=500)
-                if _body_has_bot_auto_reply_marker(body_peek):
-                    reason = "bot auto-reply (body)"
-                    if bot_with_rcpt is None and _headers_have_reply_recipients(
-                        to_raw, cc_raw, from_hdr
-                    ):
+                if _header_is_prior_bot_reply(h, own=own, body_peek=body_peek):
+                    rcpt_n = _header_reply_recipient_count(to_raw, cc_raw, from_hdr)
+                    nonlocal bot_with_rcpt, bot_with_rcpt_n
+                    if rcpt_n > bot_with_rcpt_n:
                         bot_with_rcpt = uid
-                else:
-                    reason = ""
+                        bot_with_rcpt_n = rcpt_n
+                    if not allow_bot:
+                        reason = "bot auto-reply (body)"
             if not reason:
                 elapsed = time.monotonic() - t0
                 print(
                     f"[maint-mail] jenkins reply: use uid={uid!r} folder={folder_label!r} "
-                    f"needle={needle!r} subj={subj!r} in {elapsed:.1f}s "
+                    f"needle={needle!r} subj={subj!r} pass={pass_label} in {elapsed:.1f}s "
                     f"(skipped {skipped}, walked {len(walk)} uid(s))",
                     flush=True,
                 )
@@ -1735,6 +1774,14 @@ def _pick_reply_uid_among_candidates(
             f"reason={reason!r} from={from_hdr!r} subj={subj!r}",
             flush=True,
         )
+        return None
+
+    for ts, uid, h in ranked:
+        if _try_pick_uid(uid, h, pass_label="non-bot", allow_bot=False) is not None:
+            return uid
+    for ts, uid, h in ranked:
+        if _try_pick_uid(uid, h, pass_label="any", allow_bot=True) is not None:
+            return uid
     if bot_with_rcpt is not None:
         for ts, uid, h in ranked:
             if uid != bot_with_rcpt:
@@ -2072,6 +2119,7 @@ def reply_jenkins_update_done_email(
     return {
         "to": to_addrs,
         "cc": cc_addrs,
+        "recipients": recipients,
         "folder": orig_folder,
         "subject": subj,
     }
