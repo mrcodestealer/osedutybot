@@ -47,35 +47,32 @@ def normalize_email_key(title: str) -> str:
 
 def assign_email_batches(segments: list[dict[str, Any]]) -> None:
     """
-    Consecutive ``same`` segments that **each** have the same explicit ``Email:`` title
-    share one batch → one combined reply after all complete.
+    Batch email replies by **exact same** ``Email:`` subject (any segment order).
 
-    No inheritance: ``same`` without ``Email:`` breaks the batch chain.
+    ``same`` / ``not same`` only controls whether the **environment** line is reused
+    (same Jenkins env keyword) — not whether emails are combined.
     """
-    batch_counter = 0
-    i = 0
-    while i < len(segments):
-        email = (segments[i].get("email_subject") or "").strip()
+    by_key: dict[str, list[int]] = {}
+    title_by_key: dict[str, str] = {}
+    for i, seg in enumerate(segments):
+        email = (seg.get("email_subject") or "").strip()
         if not email:
-            i += 1
             continue
-        indices = [i]
-        j = i + 1
-        while j < len(segments) and segments[j].get("same_as_prev"):
-            nxt_email = (segments[j].get("email_subject") or "").strip()
-            if not nxt_email:
-                break
-            if normalize_email_key(nxt_email) != normalize_email_key(email):
-                break
-            indices.append(j)
-            j += 1
+        k = normalize_email_key(email)
+        by_key.setdefault(k, []).append(i)
+        title_by_key.setdefault(k, email)
+
+    batch_counter = 0
+    for k, indices in by_key.items():
+        if len(indices) < 2:
+            continue
         bid = batch_counter
         batch_counter += 1
+        canonical = title_by_key[k]
         for idx in indices:
             segments[idx]["email_batch_id"] = bid
             segments[idx]["email_batch_indices"] = list(indices)
-            segments[idx]["email_batch_title"] = email
-        i = j if len(indices) > 1 else i + 1
+            segments[idx]["email_batch_title"] = canonical
 
 
 def build_email_batch_state(segments: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
@@ -134,7 +131,12 @@ def _normalize_updatemore_body(body: str) -> str:
             count=1,
             flags=re.I,
         )
-        if re.search(r"\ssame\b", s, re.I) and not re.match(r"^same\b", s, re.I):
+        if (
+            re.search(r"\ssame\b", s, re.I)
+            and not re.match(r"^same\b", s, re.I)
+            and not re.match(r"^not\s*same\b", s, re.I)
+            and not re.search(r"\bnot\s+same\b", s, re.I)
+        ):
             s = re.sub(r"\s+(same)\s*$", r"\n\1", s, count=1, flags=re.I)
             s = re.sub(r"\s+(same)\s+(?=Email:\s)", r"\n\1\n", s, count=1, flags=re.I)
         if re.search(r"\sEmail:\s", s, re.I):
@@ -193,7 +195,7 @@ def parse_updatemore_body(body: str) -> list[dict[str, Any]]:
       - ``env_line`` — keyword line (e.g. ``update fpms uat``)
       - ``lines`` — branch/version/services config lines
       - ``email_subject`` — only when this segment has an explicit ``Email:`` line
-      - ``same_as_prev`` — True when preceded by a ``same`` marker
+      - ``same_as_prev`` — True when preceded by ``same`` (reuse previous **environment** only)
     """
     lines = _normalize_lines(_normalize_updatemore_body(body))
     lines = _strip_skip_build_lines(lines)
@@ -299,7 +301,7 @@ def queue_summary(segments: list[dict[str, Any]]) -> str:
         em = ""
         if seg.get("email_subject"):
             batch_ix = seg.get("email_batch_indices") or []
-            em = " 📧 (batched reply)" if len(batch_ix) > 1 else " 📧"
+            em = " 📧 (shared reply)" if len(batch_ix) > 1 else " 📧"
         lines.append(f"  {n}. `{seg['env_line']}`{same}{em}")
     return "\n".join(lines)
 
@@ -391,7 +393,7 @@ def skip_build_manual_instructions(segments: list[dict[str, Any]], q: dict[str, 
                 break
         lines.extend(
             [
-                "Simulate Jenkins done **once per batched segment** (same `Email:` title):",
+                "Simulate Jenkins done **once per segment** (identical `Email:` title):",
                 "```",
                 f"@Duty Bot replyupdateemail | {sample_em or '{email title}'} | BI-API-UPDATE | 6:10AM",
                 f"@Duty Bot replyupdateemail | {sample_em or '{email title}'} | BI-API-UPDATE | 6:25AM",
@@ -402,7 +404,7 @@ def skip_build_manual_instructions(segments: list[dict[str, Any]], q: dict[str, 
         )
     else:
         lines.append(
-            "No batched segments (need 2+ `same` + same `Email:`). "
+            "No shared-email batch (need 2+ segments with the **same** `Email:` line). "
             "Each `replyupdateemail` replies immediately."
         )
     lines.append("")
@@ -863,14 +865,14 @@ def handle_jenkins_email_done(
                     continue
                 done_n = len(batch.get("done_by_idx") or {})
                 total_n = len(batch.get("indices") or [])
-                progress = f" (**{done_n}/{total_n}** batched `same` segments — **no email yet**)"
+                progress = f" (**{done_n}/{total_n}** segments share this `Email:` — **no email yet**)"
                 break
             send(
                 chat_id,
-                f"📧 Jenkins **{environment}** done at **{when}** — waiting for other `same` "
-                f"segment(s) with the same `Email:` subject before replying…{progress}\n"
-                "_Need one more Jenkins **SUCCESS** → `replyupdateemail` (or second "
-                "`/SuccessInformMeTime` on the other build)._",
+                f"📧 Jenkins **{environment}** done at **{when}** — waiting for other segment(s) "
+                f"with the **same** `Email:` subject before replying…{progress}\n"
+                "_Need more Jenkins **SUCCESS** → `replyupdateemail` (or "
+                "`/SuccessInformMeTime` on the other build(s))._",
             )
         elif status == "sent" and rows:
             subj = canonical or email_title
