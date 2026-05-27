@@ -295,14 +295,17 @@ def normalize_env_key(env_line: str) -> str:
 
 
 def queue_summary(segments: list[dict[str, Any]]) -> str:
-    lines = [f"📋 **/updatemore** — {len(segments)} segment(s):"]
+    has_shared_email = any(
+        len(seg.get("email_batch_indices") or []) > 1 for seg in segments
+    )
+    lines: list[str] = []
+    if has_shared_email:
+        lines.append("Same emails detected will send together.")
+    else:
+        lines.append(f"📋 **/updatemore** — {len(segments)} segment(s):")
     for n, seg in enumerate(segments, 1):
-        same = " (same env)" if seg.get("same_as_prev") else ""
-        em = ""
-        if seg.get("email_subject"):
-            batch_ix = seg.get("email_batch_indices") or []
-            em = " 📧 (shared reply)" if len(batch_ix) > 1 else " 📧"
-        lines.append(f"  {n}. `{seg['env_line']}`{same}{em}")
+        env = (seg.get("env_line") or "").strip()
+        lines.append(f"{n}. {env}")
     return "\n".join(lines)
 
 

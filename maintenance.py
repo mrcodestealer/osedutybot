@@ -749,14 +749,26 @@ def _at_qa_support() -> str:
 
 def find_tinc_reference_line(text: str) -> str | None:
     """Last ``TINC-… Live Dealer … / Studio / Table / Date`` line in body."""
-    for line in reversed((text or "").replace("\r\n", "\n").splitlines()):
-        ln = _clean_email_line(line)
-        if re.match(
-            r"^TINC-\d+\s+.+?/.+?/.+?/",
-            ln,
-            re.IGNORECASE,
-        ):
-            return ln.strip()
+    cleaned = [
+        _clean_email_line(line) for line in (text or "").replace("\r\n", "\n").splitlines()
+    ]
+    for idx in range(len(cleaned) - 1, -1, -1):
+        ln = cleaned[idx].strip()
+        if not re.match(r"^TINC-\d+", ln, re.IGNORECASE):
+            continue
+        candidate = ln
+        if not parse_tinc_subject_metadata(candidate) and idx + 1 < len(cleaned):
+            nxt = cleaned[idx + 1].strip()
+            if nxt and not re.match(
+                r"^(?:TINC-|SD-|\[Service Desk\]|Status|Studio|Date|Table|Reason)\b",
+                nxt,
+                re.IGNORECASE,
+            ):
+                candidate = f"{ln} {nxt}"
+        if parse_tinc_subject_metadata(candidate):
+            return candidate.strip()
+        if re.match(r"^TINC-\d+\s+.+?/.+?/.+?/", candidate, re.IGNORECASE):
+            return candidate.strip()
     return None
 
 
@@ -969,6 +981,48 @@ def _studio_and_date(
     return studio, date
 
 
+def _complete_tinc_email_ref(
+    ref: str,
+    *,
+    email_subject: str | None = None,
+    email_body: str | None = None,
+    info: dict[str, Any] | None = None,
+) -> str:
+    """
+    TINC reference lines are often wrapped in the body (studio/table/date on next line).
+  Prefer a full ``TINC-… / studio / table / date`` line or the email Subject.
+    """
+    body = email_body or ""
+    full = find_tinc_reference_line(body)
+    if full:
+        return full
+    for candidate in (ref, normalize_display_subject(email_subject or "")):
+        if not candidate:
+            continue
+        meta = parse_tinc_subject_metadata(candidate)
+        if meta.get("email_ref"):
+            return meta["email_ref"]
+    info = info or {}
+    ticket = extract_ticket_card_title(ref) or extract_ticket_card_title(
+        email_subject or ""
+    )
+    studio = (info.get("studio") or "").strip()
+    table = (info.get("table") or "").strip()
+    date = (info.get("date") or "").strip()
+    if (
+        ticket
+        and studio not in ("", "Unknown")
+        and table not in ("", "Unknown")
+        and date not in ("", "Unknown")
+    ):
+        title_part = "Live Dealer Casino Information"
+        m = re.match(r"^TINC-\d+\s+(.+?)\s*/", ref, re.IGNORECASE)
+        if m:
+            title_part = m.group(1).strip()
+        return f"{ticket} {title_part} / {studio} / {table} / {date}"
+    return ref
+
+
 def _email_ref_line(
     info: dict[str, Any],
     email_subject: str | None,
@@ -976,8 +1030,22 @@ def _email_ref_line(
 ) -> str:
     ref = (info.get("reference") or "").strip()
     if ref and ref.lower() != "unknown":
+        if re.match(r"^TINC-", ref, re.IGNORECASE):
+            return _complete_tinc_email_ref(
+                ref,
+                email_subject=email_subject,
+                email_body=email_body,
+                info=info,
+            )
         return ref
     resolved = resolve_maintenance_subject(email_subject, email_body)
+    if resolved and re.match(r"^TINC-", resolved, re.IGNORECASE):
+        return _complete_tinc_email_ref(
+            resolved,
+            email_subject=email_subject,
+            email_body=email_body,
+            info=info,
+        )
     return resolved or "Unknown"
 
 
@@ -1888,7 +1956,12 @@ def extract_info(text: str, *, email_subject: str | None = None):
 
         # ---- Reference lines (only if they match expected patterns) ----
         elif re.search(r'^(TINC-\d+|SD-\d+|\[Service Desk\])', line, re.IGNORECASE):
-            info['reference'] = line.strip()
+            ln = _clean_email_line(line)
+            if re.match(r"^TINC-", ln, re.IGNORECASE):
+                if parse_tinc_subject_metadata(ln):
+                    info["reference"] = ln.strip()
+            else:
+                info["reference"] = ln.strip()
 
         i += 1
 
@@ -1929,10 +2002,26 @@ def extract_info(text: str, *, email_subject: str | None = None):
     ):
         info['status'] = 'Fixed'
 
-    if info["reference"] == "Unknown":
+    full_tinc = find_tinc_reference_line(text)
+    subj_norm = normalize_display_subject(email_subject or "")
+    subj_meta = parse_tinc_subject_metadata(subj_norm)
+    if full_tinc:
+        info["reference"] = full_tinc
+    elif subj_meta.get("email_ref"):
+        info["reference"] = subj_meta["email_ref"]
+    elif info["reference"] == "Unknown":
         resolved = resolve_maintenance_subject(email_subject, text)
         if resolved:
             info["reference"] = resolved
+    elif re.match(r"^TINC-", info["reference"], re.IGNORECASE) and not parse_tinc_subject_metadata(
+        info["reference"]
+    ):
+        info["reference"] = _complete_tinc_email_ref(
+            info["reference"],
+            email_subject=email_subject,
+            email_body=text,
+            info=info,
+        )
 
     return info
 
