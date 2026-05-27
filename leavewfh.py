@@ -26,6 +26,7 @@ Usage:
     ./leave.py --calendar-wfh 2026-05    # Who is WFH this month (console)
     ./leave.py --sync-wfh-month         # Sync WFH → tblWBI5BxrtFiJul
     ./leave.py --resync-wfh-month 2026-05
+    ./leave.py --leave-today       # Print today's leave (console)
     ./leave.py --debug             # Show raw API responses
 """
 
@@ -1644,6 +1645,159 @@ def sync_leave_calendar_to_bitable(
     }
 
 
+def _leave_type_emoji(leave_type: str) -> str:
+    lt = (leave_type or "").strip().lower()
+    if "annual" in lt or lt == "al":
+        return "🏖️"
+    if "sick" in lt or lt == "sl":
+        return "🤒"
+    if "medical" in lt or "hospital" in lt or lt == "mc":
+        return "🏥"
+    if "maternity" in lt:
+        return "👶"
+    if "emergency" in lt:
+        return "🚨"
+    if "work from home" in lt or lt == "wfh":
+        return "🏠"
+    return "📋"
+
+
+def _format_leave_day(d: date) -> str:
+    return d.strftime("%d %b %Y")
+
+
+def rows_on_leave_date(rows: list[dict[str, Any]], on_date: date) -> list[dict[str, Any]]:
+    by_name: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        if not (r["start"] <= on_date <= r["end"]):
+            continue
+        if (r.get("leave_type") or "").strip().lower() == WFH_TYPE.lower():
+            continue
+        key = r["name"].strip().lower()
+        prev = by_name.get(key)
+        if not prev:
+            by_name[key] = r
+            continue
+        if "annual" in (r.get("leave_type") or "").lower():
+            by_name[key] = r
+    out = list(by_name.values())
+    out.sort(key=lambda r: (r["leave_type"].lower(), r["name"].lower()))
+    return out
+
+
+def format_leave_today_text(
+    on_date: date,
+    today_rows: list[dict[str, Any]],
+) -> str:
+    header = f"🏖️ On leave — {on_date.strftime('%A, %d %b %Y')}"
+    if not today_rows:
+        return f"{header}\n\n✅ No one on leave today (HRMS Leave Calendar)."
+    lines = [header, ""]
+    cur_type = ""
+    for row in today_rows:
+        lt = row["leave_type"]
+        if lt != cur_type:
+            cur_type = lt
+            lines.append(f"\n{_leave_type_emoji(lt)} **{lt}**")
+        st, ed = row["start"], row["end"]
+        if st == ed:
+            span = _format_leave_day(st)
+        else:
+            span = f"{_format_leave_day(st)} → {_format_leave_day(ed)}"
+        lines.append(f"• **{row['name']}** — {span}")
+    lines.append(f"\n👥 **{len(today_rows)}** person(s) on leave today")
+    return "\n".join(lines).strip()
+
+
+def build_leave_today_lark_card(
+    on_date: date,
+    today_rows: list[dict[str, Any]],
+    warnings: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    """Interactive card for ``/leave`` — who is on leave today."""
+    date_label = on_date.strftime("%A · %d %b %Y")
+    if not today_rows:
+        body_md = (
+            f"📅 **{date_label}**\n\n"
+            "✅ **All hands on deck!**\n\n"
+            "No one is on leave today according to the **HRMS Leave Calendar**."
+        )
+        header_title = "✅ No Leave Today"
+        template = "green"
+    else:
+        parts = [f"📅 **{date_label}**\n"]
+        by_type: dict[str, list[dict[str, Any]]] = {}
+        for row in today_rows:
+            by_type.setdefault(row["leave_type"], []).append(row)
+        for lt in sorted(by_type.keys(), key=str.lower):
+            emoji = _leave_type_emoji(lt)
+            parts.append(f"\n{emoji} **{lt}** ({len(by_type[lt])})")
+            for row in by_type[lt]:
+                st, ed = row["start"], row["end"]
+                if st == ed:
+                    span = _format_leave_day(st)
+                elif st <= on_date <= ed and st != ed:
+                    if st == on_date:
+                        span = f"starts today · until {_format_leave_day(ed)}"
+                    elif ed == on_date:
+                        span = f"since {_format_leave_day(st)} · **last day**"
+                    else:
+                        span = f"{_format_leave_day(st)} → {_format_leave_day(ed)}"
+                else:
+                    span = f"{_format_leave_day(st)} → {_format_leave_day(ed)}"
+                parts.append(f"• **{row['name']}** — {span}")
+        parts.append(f"\n---\n👥 **{len(today_rows)}** colleague(s) on leave")
+        body_md = "\n".join(parts)
+        header_title = f"🏖️ On Leave Today ({len(today_rows)})"
+        template = "orange"
+
+    elements: list[dict[str, Any]] = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": body_md}},
+    ]
+    for w in (warnings or [])[:2]:
+        elements.append(
+            {
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": f"⚠️ {w}"},
+            }
+        )
+
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": template,
+            "title": {"tag": "plain_text", "content": header_title},
+        },
+        "body": {"elements": elements},
+    }
+
+
+def get_leave_today_payload(ref_date: Optional[date] = None) -> dict[str, Any]:
+    """Text + Lark card for who is on leave on ``ref_date`` (default: today)."""
+    on_date = ref_date or date.today()
+    try:
+        token = get_tenant_access_token()
+        rows, meta = collect_leave_source_rows(
+            token, on_date.year, on_date.month, include_bitable=False
+        )
+        warnings = list(meta.get("warnings") or [])
+        today_rows = rows_on_leave_date(rows, on_date)
+        return {
+            "text": format_leave_today_text(on_date, today_rows),
+            "lark_card": build_leave_today_lark_card(on_date, today_rows, warnings),
+            "count": len(today_rows),
+            "date": on_date.isoformat(),
+        }
+    except Exception as exc:
+        return {
+            "text": f"❌ Could not load leave data: {exc}",
+            "lark_card": None,
+            "count": 0,
+            "date": on_date.isoformat(),
+        }
+
+
 def _print_leave_calendar(cal: dict[str, Any]) -> None:
     y, m = cal["year"], cal["month"]
     print(f"Leave calendar — {y}-{m:02d}")
@@ -1718,6 +1872,10 @@ def main():
             DEBUG = True
         elif arg == "--csv":
             output_csv = True
+        elif arg == "--leave-today":
+            payload = get_leave_today_payload()
+            print(payload.get("text") or "")
+            return
         elif arg == "--calendar":
             show_calendar = True
             if i + 1 < len(args) and re.match(r"^\d{4}-\d{1,2}$", args[i + 1]):

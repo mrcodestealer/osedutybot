@@ -41,6 +41,7 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
                 ("/date", "Today's date", "今天日期"),
                 ("/holiday", "Upcoming public holidays", "即将到来的公共假期"),
                 ("/holidaythismonth", "Holidays this month", "本月假期"),
+                ("/leave", "@bot — who is on leave today (card)", "@机器人 — 今日谁请假（卡片）"),
                 ("/restart", "Restart bot process", "重启机器人"),
             ],
         ),
