@@ -1952,24 +1952,27 @@ def build_dutylist_leave_wfh_elements(
     for dept in all_depts:
         by_tier[_department_display_tier(dept)].append(dept)
 
-    tier_mds: list[str] = []
+    tier_blocks: list[list[str]] = []
     t1 = _tier_department_markdowns(1, by_tier[1], all_leave, all_wfh, on_date)
     if t1:
-        tier_mds.append("\n\n".join(t1))
+        tier_blocks.append(t1)
     t2 = _tier_department_markdowns(2, by_tier[2], all_leave, all_wfh, on_date)
     if t2:
-        tier_mds.append("\n\n".join(t2))
+        tier_blocks.append(t2)
     t3_leave = _tier3_rows(all_leave)
     t3_wfh = _tier3_rows(all_wfh)
     other_md = _dept_block_markdown("Other", t3_leave, t3_wfh, on_date)
     if other_md:
-        tier_mds.append(other_md)
+        tier_blocks.append([other_md])
 
     elements: list[dict[str, Any]] = []
-    for i, md in enumerate(tier_mds):
-        if i:
+    for tier_idx, blocks in enumerate(tier_blocks):
+        if not blocks:
+            continue
+        if elements:
             elements.append(_lark_hr_element())
-        elements.append(_lark_md_element(md))
+        for md in blocks:
+            elements.append(_lark_md_element(md))
     return elements
 
 
