@@ -1795,22 +1795,55 @@ def get_dutylist_leave_wfh_for_date(ref_date: Optional[date] = None) -> dict[str
         }
 
 
+def _dept_sort_key(department: str) -> tuple[int, str]:
+    d = (department or "Other").strip().upper()
+    if d == "OSE" or d.startswith("OSE "):
+        return (0, d)
+    return (1, d)
+
+
+def _group_rows_by_department(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        dept = (row.get("department") or "Other").strip() or "Other"
+        groups.setdefault(dept, []).append(row)
+    for dept in groups:
+        groups[dept].sort(key=lambda r: str(r.get("name") or "").lower())
+    return groups
+
+
+def _format_attendance_by_department(
+    rows: list[dict[str, Any]],
+    on_date: date,
+    *,
+    bullet: str = "-",
+) -> list[str]:
+    """``FPMS`` / ``OSE`` headers with ``- name`` lines underneath."""
+    if not rows:
+        return []
+    lines: list[str] = []
+    groups = _group_rows_by_department(rows)
+    for dept in sorted(groups.keys(), key=_dept_sort_key):
+        if lines:
+            lines.append("")
+        lines.append(f"**{dept}**")
+        for row in groups[dept]:
+            span = _attendance_span_for_row(row, on_date)
+            lt = str(row.get("leave_type") or "Leave").strip()
+            emoji = _leave_type_emoji(lt)
+            lines.append(f"{bullet} **{row['name']}** · {emoji} {lt} · {span}")
+    return lines
+
+
 def _attendance_section_md(
     title: str,
     rows: list[dict[str, Any]],
     on_date: date,
-    *,
-    show_department: bool = False,
 ) -> list[str]:
     if not rows:
         return []
-    lines = [f"\n{title} ({len(rows)})"]
-    for row in rows:
-        span = _attendance_span_for_row(row, on_date)
-        dept = f" ({row.get('department') or ''})" if show_department else ""
-        lines.append(
-            f"• **{row['name']}**{dept} — {_leave_type_emoji(row['leave_type'])} {row['leave_type']} — {span}"
-        )
+    lines = [f"\n**{title}** ({len(rows)})"]
+    lines.extend(_format_attendance_by_department(rows, on_date))
     return lines
 
 
@@ -1818,33 +1851,18 @@ def dutylist_attendance_plain_sections(
     data: dict[str, Any],
     on_date: date,
 ) -> list[tuple[str, list[str]]]:
-    """Section title + bullet lines for OSE morning/evening cards."""
+    """Section title + department-grouped lines for OSE cards."""
     sections: list[tuple[str, list[str]]] = []
-
-    def _bullets(rows: list[dict[str, Any]], *, show_dept: bool) -> list[str]:
-        out: list[str] = []
-        for row in rows:
-            span = _attendance_span_for_row(row, on_date)
-            dept = f" ({row.get('department') or ''})" if show_dept else ""
-            out.append(
-                f"• {row['name']}{dept} ({row['leave_type']}) — {span}"
-            )
-        return out
-
     ose_leave = data.get("ose_leave") or []
     other_leave = data.get("other_leave") or []
     ose_wfh = data.get("ose_wfh") or []
     other_wfh = data.get("other_wfh") or []
-    if ose_leave:
-        sections.append(("🏖️ Leave (OSE)", _bullets(ose_leave, show_dept=False)))
-    if other_leave:
-        sections.append(
-            ("🏖️ Leave (other dept)", _bullets(other_leave, show_dept=True))
-        )
-    if ose_wfh:
-        sections.append(("🏠 WFH (OSE)", _bullets(ose_wfh, show_dept=False)))
-    if other_wfh:
-        sections.append(("🏠 WFH (other dept)", _bullets(other_wfh, show_dept=True)))
+    all_leave = ose_leave + other_leave
+    all_wfh = ose_wfh + other_wfh
+    if all_leave:
+        sections.append(("🏖️ Leave", _format_attendance_by_department(all_leave, on_date)))
+    if all_wfh:
+        sections.append(("🏠 WFH", _format_attendance_by_department(all_wfh, on_date)))
     return sections
 
 
@@ -1861,18 +1879,11 @@ def build_dutylist_attendance_card(
     total = len(ose_leave) + len(other_leave) + len(ose_wfh) + len(other_wfh)
     date_label = on_date.strftime("%A · %d %b %Y")
 
-    parts = [
-        f"📅 **{date_label}**",
-        "_Names must appear in dutyList.csv (fuzzy match, e.g. Shie Ni / Jiun Hou (Jeno) → Jeno)._",
-    ]
-    parts.extend(_attendance_section_md("🏖️ Leave — OSE", ose_leave, on_date))
-    parts.extend(
-        _attendance_section_md("🏖️ Leave — other departments", other_leave, on_date, show_department=True)
-    )
-    parts.extend(_attendance_section_md("🏠 WFH — OSE", ose_wfh, on_date))
-    parts.extend(
-        _attendance_section_md("🏠 WFH — other departments", other_wfh, on_date, show_department=True)
-    )
+    all_leave = ose_leave + other_leave
+    all_wfh = ose_wfh + other_wfh
+    parts = [f"📅 **{date_label}**"]
+    parts.extend(_attendance_section_md("Leave", all_leave, on_date))
+    parts.extend(_attendance_section_md("WFH", all_wfh, on_date))
 
     if total == 0:
         parts.append("\n✅ No leave or WFH today for anyone in **dutyList.csv**.")
