@@ -407,6 +407,10 @@ def _content_hash(body: str) -> str:
 
 
 _FORWARD_SEP = "---------- Forwarded message ----------"
+_FORWARD_SIGNOFF_HTML = (
+    '<div style="word-break:break-word;line-height:1.6;'
+    'font-size:14px;color:rgb(0,0,0);">Best Regards,<br>JC<br><br></div>'
+)
 _LARK_QUOTE_WRAPPER = "history-quote-wrapper"
 # Lark forward uses ``--header`` (not ``--collapsed``, which is for Re: quotes).
 _LARK_FORWARD_BLOCK = "adit-html-block--header"
@@ -648,7 +652,10 @@ def build_forwarded_message_html(msg: email.message.Message) -> str:
         '<div style="word-break:break-word;line-height:1.6;'
         'font-size:14px;color:rgb(0,0,0);"><br></div>'
     )
-    inner = f'<div dir="ltr">{top}{_build_lark_forward_quote_html(msg)}</div>'
+    inner = (
+        f'<div dir="ltr">{_FORWARD_SIGNOFF_HTML}{top}'
+        f"{_build_lark_forward_quote_html(msg)}</div>"
+    )
     return (
         "<!DOCTYPE html><html><head>"
         '<meta http-equiv="Content-Type" content="text/html; charset=utf-8">'
