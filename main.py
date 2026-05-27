@@ -1402,6 +1402,7 @@ def evening_reminder():
 
 
 _ose_bitable_sync_lock = threading.Lock()
+_leave_wfh_sync_lock = threading.Lock()
 
 
 def poll_offset_approver_notifications_from_bitable():
@@ -1439,6 +1440,45 @@ def ose_leave_offset_daily_sync():
             print(f"[OSE Bitable] stale offset purge failed: {exc!r}", flush=True)
     finally:
         _ose_bitable_sync_lock.release()
+
+
+def ose_leave_wfh_calendar_sync():
+    """
+    Sync HRMS company Leave + WFH calendars into OSE tracking Bitables (leavewfh.py).
+
+    Same month: add new rows when someone is approved on Lark calendars.
+    New calendar month: each table is cleared and refilled for that month only.
+    """
+    if not _leave_wfh_sync_lock.acquire(blocking=False):
+        print("[Leave/WFH sync] skipped (already running)", flush=True)
+        return
+    try:
+        try:
+            import leavewfh as lw
+        except ImportError:
+            import leave as lw  # type: ignore[no-redef]
+
+        today = datetime.now().date()
+        y, m = today.year, today.month
+        leave_res = lw.sync_leave_calendar_to_bitable(year=y, month=m)
+        wfh_res = lw.sync_wfh_calendar_to_bitable(year=y, month=m)
+        print(
+            f"[Leave/WFH sync] {y}-{m:02d} leave: "
+            f"deleted={leave_res.get('deleted', 0)} added={leave_res.get('added', leave_res.get('created', 0))} "
+            f"skipped={leave_res.get('skipped', False)} | "
+            f"WFH: deleted={wfh_res.get('deleted', 0)} added={wfh_res.get('added', 0)} "
+            f"skipped={wfh_res.get('skipped', False)}",
+            flush=True,
+        )
+        for label, res in ("leave", leave_res), ("wfh", wfh_res):
+            for w in res.get("warnings") or []:
+                print(f"[Leave/WFH sync] {label} warning: {w}", flush=True)
+            for err in res.get("create_errors") or []:
+                print(f"[Leave/WFH sync] {label} create error: {err}", flush=True)
+    except Exception as exc:
+        print(f"[Leave/WFH sync] failed: {exc!r}", flush=True)
+    finally:
+        _leave_wfh_sync_lock.release()
 
 
 # def amountloss():
@@ -1481,6 +1521,31 @@ def _add_scheduler_job(job_id: str, func, trigger: str, **trigger_kwargs) -> Non
 
 # Lark leave/offset: clear in-process cache + prefetch before morning OSE card (same TZ as hour=7 job).
 _add_scheduler_job("ose_leave_offset_daily_sync", ose_leave_offset_daily_sync, "cron", hour=6, minute=50)
+if os.getenv("LEAVE_WFH_SYNC_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on"):
+    _lwfh_hour = int(os.getenv("LEAVE_WFH_SYNC_CRON_HOUR", "7"))
+    _lwfh_min = int(os.getenv("LEAVE_WFH_SYNC_CRON_MINUTE", "20"))
+    _add_scheduler_job(
+        "ose_leave_wfh_calendar_sync",
+        ose_leave_wfh_calendar_sync,
+        "cron",
+        hour=_lwfh_hour,
+        minute=_lwfh_min,
+    )
+    _lwfh_interval = int(os.getenv("LEAVE_WFH_SYNC_INTERVAL_MIN", "120"))
+    if _lwfh_interval > 0:
+        _add_scheduler_job(
+            "ose_leave_wfh_calendar_sync_interval",
+            ose_leave_wfh_calendar_sync,
+            "interval",
+            minutes=max(30, _lwfh_interval),
+        )
+    print(
+        f"[Leave/WFH sync] scheduled daily {_lwfh_hour:02d}:{_lwfh_min:02d}"
+        + (f" + every {_lwfh_interval} min" if _lwfh_interval > 0 else ""),
+        flush=True,
+    )
+else:
+    print("[Leave/WFH sync] disabled (LEAVE_WFH_SYNC_ENABLED=0)", flush=True)
 _add_scheduler_job("morning_reminder", morning_reminder, "cron", hour=7, minute=0)
 _add_scheduler_job("evening_reminder", evening_reminder, "cron", hour=19, minute=0)
 _offset_approver_poll_min = int(os.getenv("OSE_OFFSET_APPROVER_POLL_MIN", "3"))
