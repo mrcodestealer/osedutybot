@@ -1475,10 +1475,21 @@ def _body_requests_bi_api_update(body: str) -> bool:
     raw = (body or "").strip()
     if not raw:
         return False
+    # FPMS / NT / PMS UAT blocks: ``Branch:`` + ``Version:`` + ``Service:`` (not BI ``repository:``).
+    if (
+        re.search(r"\bbranch\s*:", raw, re.I)
+        and re.search(r"\bversion\s*:", raw, re.I)
+        and re.search(r"\bservice\s*:", raw, re.I)
+    ):
+        return False
     if _find_ds_or_bi_repo_token(raw):
         return True
-    if re.search(r"\b(?:repository|repo|services?)\s*:", raw, re.I):
+    if re.search(r"\b(?:repository|repo)\s*:", raw, re.I):
         return True
+    for m in re.finditer(r"\b(?:service|services)\s*:\s*([^\n]+)", raw, re.I):
+        val = (m.group(1) or "").strip().casefold()
+        if val.startswith("ds-") or val.startswith("bi-"):
+            return True
     head = JENKINS_UPDATE_CMD_RE.sub("", _jenkins_update_first_non_empty_line(raw), count=1).strip()
     head_cf = head.casefold()
     if head_cf in ("ds", "ds update", "bi", "bi api", "bi api update", "bi-api-update"):
