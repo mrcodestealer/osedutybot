@@ -35,7 +35,9 @@ Credentials: ``JENKINS_USERNAME`` / ``JENKINS_PASSWORD`` (recommended), else def
 
 **Lark bot screenshots** (all automated ``/jenkinsupdate`` jobs): YES/NO card first; **one** whole-form PNG
 uploads in the background. ``JENKINSUPDATE_FORM_SCREENSHOT=0`` disables. ``JENKINSUPDATE_FORM_SCREENSHOT_ROWS=1``
-adds per-parameter row images. ``JENKINSUPDATE_BOT_SINGLE_VERIFY=0`` restores two on-page re-checks.
+adds per-parameter row images. By default, when you list services (e.g. ``auth-rollout, player-rollout``), the bot
+also sends a **Services row** PNG plus **one close-up per service** (``JENKINSUPDATE_SERVICES_DETAIL_SCREENSHOT=0``
+to disable). ``JENKINSUPDATE_BOT_SINGLE_VERIFY=0`` restores two on-page re-checks.
 
 Usage::
 
@@ -6103,7 +6105,7 @@ def _fpms_lark_verification_card_json(
     md_checks = "\n".join(verify_lines)
     footer_ok = (
         "✅ All checks **OK** — tap **YES** or **NO** below (or type **yes** / **no**). "
-        "One form screenshot may arrive in chat right after this card."
+        "Form + Services close-up screenshot(s) may arrive in chat right after this card."
     )
     footer_bad = (
         "⚠️ At least one line shows **❌**. **Build** stays disabled until every line is ✅. "
@@ -6230,6 +6232,12 @@ def _jenkins_form_screenshot_include_rows() -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+def _jenkins_services_detail_screenshot_enabled() -> bool:
+    """Per-service checkbox close-ups (default on for Lark bot)."""
+    raw = os.environ.get("JENKINSUPDATE_SERVICES_DETAIL_SCREENSHOT", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
 def _jenkins_bot_single_verify_enabled() -> bool:
     raw = os.environ.get("JENKINSUPDATE_BOT_SINGLE_VERIFY", "1").strip().lower()
     return raw not in ("0", "false", "no", "off")
@@ -6259,14 +6267,87 @@ def _jenkins_job_profile_display(job_profile: str) -> str:
     }.get(jp, jp.upper().replace("_", " "))
 
 
+def capture_jenkins_services_detail_screenshots(
+    page,
+    service_names: list[str],
+    *,
+    out_dir: str,
+    ts: str,
+    prof: str,
+) -> list[str]:
+    """
+    Close-ups for the Services list: full Services row + one PNG per requested service
+    (scrolls each checkbox into view so virtual lists are visible in chat).
+    """
+    paths: list[str] = []
+    names = [n.strip() for n in (service_names or []) if (n or "").strip()][:8]
+    if not names:
+        return paths
+    try:
+        row = _form_row(page, "Services")
+        row.wait_for(state="visible", timeout=15_000)
+        row.scroll_into_view_if_needed(timeout=15_000)
+        _safe_page_wait(page, 200)
+        pth = os.path.join(out_dir, f"{prof}_{ts}_Services_row.png")
+        row.screenshot(path=pth, animations="disabled")
+        paths.append(pth)
+        print(f"→ Jenkins Services row screenshot: {pth}", flush=True)
+    except Exception as ex:
+        print(f"→ Services row screenshot skipped: {ex!r}", flush=True)
+
+    for n in names:
+        safe = re.sub(r"[^\w.-]+", "_", n)[:48]
+        pth = os.path.join(out_dir, f"{prof}_{ts}_svc_{safe}.png")
+        try:
+            _scroll_services_pane_to_reveal_service(page, n)
+            _safe_page_wait(page, 150)
+            svc_row = _form_row(page, "Services")
+            opt = svc_row.locator(
+                f'div.active-choice div.tr:has(input[type="checkbox"][value="{n}"]), '
+                f'div.active-choice div.tr:has(input[type="checkbox"][json="{n}"])'
+            ).first
+            if opt.count() == 0:
+                opt = svc_row.locator(
+                    f'div.tr:has(input[type="checkbox"][value="{n}"])'
+                ).first
+            opt.wait_for(state="visible", timeout=12_000)
+            opt.scroll_into_view_if_needed(timeout=12_000)
+            _safe_page_wait(page, 120)
+            opt.screenshot(path=pth, animations="disabled")
+            paths.append(pth)
+            checked = bool(
+                page.evaluate(
+                    """(v) => {"""
+                    + _SERVICES_UNOCHOICE_JS_FN
+                    + r"""
+                        const root = __fpmsServicesCheckboxRoot();
+                        const el = root && __fpmsFindServiceInput(root, v);
+                        return !!(el && el.checked);
+                    }""",
+                    n,
+                )
+            )
+            print(
+                f"→ Jenkins service screenshot {n!r} (checked={checked}): {pth}",
+                flush=True,
+            )
+        except Exception as ex:
+            print(f"→ Service screenshot skipped ({n!r}): {ex!r}", flush=True)
+    return paths
+
+
 def capture_jenkins_build_parameters_screenshots(
     page,
     job_profile: str,
+    *,
+    services_expected: list[str] | None = None,
 ) -> tuple[list[str], str]:
     """
     One PNG of the filled Jenkins build-parameters form (whole form in frame).
 
     Set ``JENKINSUPDATE_FORM_SCREENSHOT_ROWS=1`` to also capture per-parameter row close-ups.
+    When ``services_expected`` is set, also captures Services row + per-service close-ups
+    (unless ``JENKINSUPDATE_SERVICES_DETAIL_SCREENSHOT=0``).
 
     Returns ``(file_paths, temp_dir)`` — caller should delete ``temp_dir`` after upload.
     """
@@ -6325,6 +6406,21 @@ def capture_jenkins_build_parameters_screenshots(
                     flush=True,
                 )
 
+    if (
+        services_expected
+        and _jenkins_services_detail_screenshot_enabled()
+        and (job_profile or "fpms").strip() not in ("bi_api_update", "fpms_prod_script")
+    ):
+        paths.extend(
+            capture_jenkins_services_detail_screenshots(
+                page,
+                services_expected,
+                out_dir=out_dir,
+                ts=ts,
+                prof=prof,
+            )
+        )
+
     return paths, out_dir
 
 
@@ -6380,10 +6476,23 @@ def _fpms_lark_send_parameter_screenshots(
             continue
         if i < len(paths):
             time.sleep(0.12)
+    svc_snaps = sum(1 for p in paths if "_svc_" in os.path.basename(p))
+    has_svc_row = any(
+        os.path.basename(p).endswith("_Services_row.png") for p in paths
+    )
     if sent == 1:
         send(chat_id, f"📸 **{prof_label}** — Jenkins filled form (1 screenshot).")
     elif sent:
-        send(chat_id, f"📸 **{prof_label}** — {sent} Jenkins form screenshot(s).")
+        extra = ""
+        if svc_snaps or has_svc_row:
+            extra = (
+                f" Includes **Services row**"
+                + (f" + **{svc_snaps}** per-service close-up(s)." if svc_snaps else ".")
+            )
+        send(
+            chat_id,
+            f"📸 **{prof_label}** — {sent} Jenkins screenshot(s).{extra}",
+        )
     else:
         send(chat_id, f"⚠️ Could not send Jenkins screenshots for **{prof_label}**.")
 
@@ -8874,7 +8983,13 @@ def run(
                 if _jenkins_form_screenshot_enabled(bot_lark_gate):
                     try:
                         shot_paths, shot_dir = capture_jenkins_build_parameters_screenshots(
-                            page, jp
+                            page,
+                            jp,
+                            services_expected=(
+                                None
+                                if update_all_services
+                                else list(services or [])
+                            ),
                         )
                     except Exception as shot_ex:
                         try:
