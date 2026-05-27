@@ -761,6 +761,7 @@ def build_ose_message_card(
     include_tag: bool = False,
     first_section_title: str = "😴 (～￣▽￣)～ Rest Well",
     second_section_title: str = "🍀 Good Luckヾ(≧▽≦*)o",
+    dutylist_attendance: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     lines: list[str] = []
     if include_tag and TARGET_USER_OPEN_ID:
@@ -784,7 +785,17 @@ def build_ose_message_card(
                 leave_lines.append(
                     f"• {name} ({lt}) - From {_format_ddmmyyyy(st)} until {_format_ddmmyyyy(ed)}"
                 )
-        lines.extend(_section_lines("🏖️ Leave", leave_lines))
+        lines.extend(_section_lines("🏖️ Leave (OSE Bitable)", leave_lines))
+    if dutylist_attendance:
+        try:
+            import leavewfh as lw
+
+            for title, bullets in lw.dutylist_attendance_plain_sections(
+                dutylist_attendance, target_date
+            ):
+                lines.extend(_section_lines(title, bullets))
+        except Exception:
+            pass
     content = "\n".join(lines).strip()
 
     return {
@@ -816,6 +827,14 @@ def get_ose_payload_for_date(target_date: date, mode: str = "date", *, include_t
     if err:
         return {"text": err, "lark_card": None}
 
+    dutylist_attendance: dict[str, Any] = {}
+    try:
+        import leavewfh as lw
+
+        dutylist_attendance = lw.get_dutylist_leave_wfh_for_date(target_date)
+    except Exception:
+        dutylist_attendance = {}
+
     if mode == "date":
         first_title_plain = "Morning shift"
         second_title_plain = "Night shift"
@@ -841,7 +860,7 @@ def get_ose_payload_for_date(target_date: date, mode: str = "date", *, include_t
         lines.extend(offset_lines)
     if leave_entries:
         lines.append("")
-        lines.append("Leave")
+        lines.append("Leave (OSE Bitable)")
         for row in leave_entries:
             name = row["name"]
             lt = row["leave_type"]
@@ -853,6 +872,18 @@ def get_ose_payload_for_date(target_date: date, mode: str = "date", *, include_t
                 lines.append(
                     f"• {name} ({lt}) - From {_format_ddmmyyyy(st)} until {_format_ddmmyyyy(ed)}"
                 )
+    if dutylist_attendance:
+        try:
+            import leavewfh as lw
+
+            for title, bullets in lw.dutylist_attendance_plain_sections(
+                dutylist_attendance, target_date
+            ):
+                lines.append("")
+                lines.append(title.replace("🏖️ ", "").replace("🏠 ", ""))
+                lines.extend(bullets)
+        except Exception:
+            pass
 
     text = "\n".join(lines).strip()
     return {
@@ -866,6 +897,7 @@ def get_ose_payload_for_date(target_date: date, mode: str = "date", *, include_t
             include_tag=include_tag,
             first_section_title=first_title_card,
             second_section_title=second_title_card,
+            dutylist_attendance=dutylist_attendance,
         ),
     }
 

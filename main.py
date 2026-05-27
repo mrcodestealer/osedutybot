@@ -3187,7 +3187,7 @@ def lark_webhook():
     elif clean_text.lower() == '/date':
         today = get_today_date()
         reply = f"Today's date is {today}."
-    elif re.match(r"^/leave\b", clean_text, re.I):
+    elif re.match(r"^/leave\b", clean_text, re.I) or re.match(r"^/wfh\b", clean_text, re.I):
         try:
             import leavewfh as _leavewfh
         except ImportError:
@@ -3198,9 +3198,9 @@ def lark_webhook():
         if isinstance(card, dict):
             resp = send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
             if resp.get("code") != 0:
-                send_message(chat_id, payload.get("text") or "❌ Leave card failed.")
+                send_message(chat_id, payload.get("text") or "❌ Leave/WFH card failed.")
         else:
-            send_message(chat_id, payload.get("text") or "❌ Could not load leave data.")
+            send_message(chat_id, payload.get("text") or "❌ Could not load leave/WFH data.")
         return _lark_im_done()
     elif re.match(r"^/wholeave\b", clean_text, re.I):
         try:

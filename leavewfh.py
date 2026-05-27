@@ -1695,6 +1695,211 @@ def rows_on_leave_date(rows: list[dict[str, Any]], on_date: date) -> list[dict[s
     return out
 
 
+def rows_on_wfh_date(rows: list[dict[str, Any]], on_date: date) -> list[dict[str, Any]]:
+    by_name: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        if not (r["start"] <= on_date <= r["end"]):
+            continue
+        lt = (r.get("leave_type") or "").strip().lower()
+        if lt != WFH_TYPE.lower() and "wfh" not in lt and "work from home" not in lt:
+            continue
+        key = r["name"].strip().lower()
+        if key not in by_name:
+            by_name[key] = r
+    out = list(by_name.values())
+    out.sort(key=lambda r: r["name"].lower())
+    return out
+
+
+def _attendance_span_for_row(row: dict[str, Any], on_date: date) -> str:
+    st, ed = row["start"], row["end"]
+    if st == ed:
+        return _format_leave_day(st)
+    if st == on_date:
+        return f"starts today · until {_format_leave_day(ed)}"
+    if ed == on_date:
+        return f"since {_format_leave_day(st)} · **last day**"
+    return f"{_format_leave_day(st)} → {_format_leave_day(ed)}"
+
+
+def _dutylist_bucket_rows(
+    hrms_rows: list[dict[str, Any]],
+    on_date: date,
+    *,
+    wfh: bool,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Map HRMS rows → dutyList names; split OSE vs other departments."""
+    import duty_list_match as dlm
+
+    duty = dlm.load_duty_list()
+    today = rows_on_wfh_date(hrms_rows, on_date) if wfh else rows_on_leave_date(hrms_rows, on_date)
+    ose_out: list[dict[str, Any]] = []
+    other_out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for r in today:
+        entry = dlm.match_duty_entry(r.get("name") or "", duty)
+        if not entry:
+            continue
+        key = entry["name"].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        item = {
+            **r,
+            "name": entry["name"],
+            "department": entry["department"],
+        }
+        if dlm.is_ose_department(entry["department"]):
+            ose_out.append(item)
+        else:
+            other_out.append(item)
+    ose_out.sort(key=lambda x: (x["leave_type"].lower(), x["name"].lower()))
+    other_out.sort(key=lambda x: (x["department"].lower(), x["name"].lower()))
+    return ose_out, other_out
+
+
+def get_dutylist_leave_wfh_for_date(ref_date: Optional[date] = None) -> dict[str, Any]:
+    """
+    HRMS leave + WFH for ``ref_date``, only people in dutyList.csv.
+    Split into OSE (incl. manager / team lead / senior) vs other departments.
+    """
+    on_date = ref_date or date.today()
+    warnings: list[str] = []
+    try:
+        token = get_tenant_access_token()
+        leave_rows, w0 = fetch_leave_from_company_leave_calendar(
+            token, on_date.year, on_date.month
+        )
+        wfh_rows, w1 = fetch_wfh_from_company_calendar(token, on_date.year, on_date.month)
+        warnings.extend(w0)
+        warnings.extend(w1)
+        ose_leave, other_leave = _dutylist_bucket_rows(leave_rows, on_date, wfh=False)
+        ose_wfh, other_wfh = _dutylist_bucket_rows(wfh_rows, on_date, wfh=True)
+        return {
+            "date": on_date.isoformat(),
+            "ose_leave": ose_leave,
+            "other_leave": other_leave,
+            "ose_wfh": ose_wfh,
+            "other_wfh": other_wfh,
+            "warnings": warnings,
+        }
+    except Exception as exc:
+        return {
+            "date": on_date.isoformat(),
+            "ose_leave": [],
+            "other_leave": [],
+            "ose_wfh": [],
+            "other_wfh": [],
+            "warnings": [str(exc)],
+            "error": str(exc),
+        }
+
+
+def _attendance_section_md(
+    title: str,
+    rows: list[dict[str, Any]],
+    on_date: date,
+    *,
+    show_department: bool = False,
+) -> list[str]:
+    if not rows:
+        return []
+    lines = [f"\n{title} ({len(rows)})"]
+    for row in rows:
+        span = _attendance_span_for_row(row, on_date)
+        dept = f" ({row.get('department') or ''})" if show_department else ""
+        lines.append(
+            f"• **{row['name']}**{dept} — {_leave_type_emoji(row['leave_type'])} {row['leave_type']} — {span}"
+        )
+    return lines
+
+
+def dutylist_attendance_plain_sections(
+    data: dict[str, Any],
+    on_date: date,
+) -> list[tuple[str, list[str]]]:
+    """Section title + bullet lines for OSE morning/evening cards."""
+    sections: list[tuple[str, list[str]]] = []
+
+    def _bullets(rows: list[dict[str, Any]], *, show_dept: bool) -> list[str]:
+        out: list[str] = []
+        for row in rows:
+            span = _attendance_span_for_row(row, on_date)
+            dept = f" ({row.get('department') or ''})" if show_dept else ""
+            out.append(
+                f"• {row['name']}{dept} ({row['leave_type']}) — {span}"
+            )
+        return out
+
+    ose_leave = data.get("ose_leave") or []
+    other_leave = data.get("other_leave") or []
+    ose_wfh = data.get("ose_wfh") or []
+    other_wfh = data.get("other_wfh") or []
+    if ose_leave:
+        sections.append(("🏖️ Leave (OSE)", _bullets(ose_leave, show_dept=False)))
+    if other_leave:
+        sections.append(
+            ("🏖️ Leave (other dept)", _bullets(other_leave, show_dept=True))
+        )
+    if ose_wfh:
+        sections.append(("🏠 WFH (OSE)", _bullets(ose_wfh, show_dept=False)))
+    if other_wfh:
+        sections.append(("🏠 WFH (other dept)", _bullets(other_wfh, show_dept=True)))
+    return sections
+
+
+def build_dutylist_attendance_card(
+    on_date: date,
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    """Lark card: leave/WFH today for dutyList.csv people (OSE vs other dept)."""
+    ose_leave = data.get("ose_leave") or []
+    other_leave = data.get("other_leave") or []
+    ose_wfh = data.get("ose_wfh") or []
+    other_wfh = data.get("other_wfh") or []
+    warnings = list(data.get("warnings") or [])
+    total = len(ose_leave) + len(other_leave) + len(ose_wfh) + len(other_wfh)
+    date_label = on_date.strftime("%A · %d %b %Y")
+
+    parts = [
+        f"📅 **{date_label}**",
+        "_Names must appear in dutyList.csv (fuzzy match, e.g. Shie Ni / Jiun Hou (Jeno) → Jeno)._",
+    ]
+    parts.extend(_attendance_section_md("🏖️ Leave — OSE", ose_leave, on_date))
+    parts.extend(
+        _attendance_section_md("🏖️ Leave — other departments", other_leave, on_date, show_department=True)
+    )
+    parts.extend(_attendance_section_md("🏠 WFH — OSE", ose_wfh, on_date))
+    parts.extend(
+        _attendance_section_md("🏠 WFH — other departments", other_wfh, on_date, show_department=True)
+    )
+
+    if total == 0:
+        parts.append("\n✅ No leave or WFH today for anyone in **dutyList.csv**.")
+        template = "green"
+        header_title = "✅ No Leave / WFH (dutyList)"
+    else:
+        parts.append(f"\n---\n👥 **{total}** colleague(s) (dutyList.csv)")
+        template = "orange"
+        header_title = f"Leave & WFH ({total})"
+
+    elements: list[dict[str, Any]] = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(parts).strip()}},
+    ]
+    for w in warnings[:2]:
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"⚠️ {w}"}})
+
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": template,
+            "title": {"tag": "plain_text", "content": header_title},
+        },
+        "body": {"elements": elements},
+    }
+
+
 def format_leave_today_text(
     on_date: date,
     today_rows: list[dict[str, Any]],
@@ -1837,30 +2042,32 @@ def get_wholeave_today_payload(ref_date: Optional[date] = None) -> dict[str, Any
 
 
 def get_leave_today_payload(ref_date: Optional[date] = None) -> dict[str, Any]:
-    """Text + Lark card for who is on leave on ``ref_date`` (default: today)."""
+    """Leave + WFH today for dutyList.csv people (OSE vs other departments)."""
     on_date = ref_date or date.today()
-    try:
-        token = get_tenant_access_token()
-        rows, meta = collect_leave_source_rows(
-            token, on_date.year, on_date.month, include_bitable=False
-        )
-        warnings = list(meta.get("warnings") or [])
-        today_rows = rows_on_leave_date(rows, on_date)
+    data = get_dutylist_leave_wfh_for_date(on_date)
+    if data.get("error"):
         return {
-            "text": format_leave_today_text(on_date, today_rows),
-            "lark_card": build_leave_today_lark_card(on_date, today_rows, warnings),
-            "count": len(today_rows),
-            "date": on_date.isoformat(),
-            "source": "hrms",
-        }
-    except Exception as exc:
-        return {
-            "text": f"❌ Could not load leave data: {exc}",
+            "text": f"❌ Could not load leave/WFH: {data['error']}",
             "lark_card": None,
             "count": 0,
             "date": on_date.isoformat(),
-            "source": "hrms",
+            "source": "dutylist_hrms",
         }
+    total = (
+        len(data.get("ose_leave") or [])
+        + len(data.get("other_leave") or [])
+        + len(data.get("ose_wfh") or [])
+        + len(data.get("other_wfh") or [])
+    )
+    card = build_dutylist_attendance_card(on_date, data)
+    return {
+        "text": f"Leave & WFH — {on_date.strftime('%d %b %Y')} ({total} in dutyList.csv)",
+        "lark_card": card,
+        "count": total,
+        "date": on_date.isoformat(),
+        "source": "dutylist_hrms",
+        "data": data,
+    }
 
 
 def _print_leave_calendar(cal: dict[str, Any]) -> None:

@@ -41,7 +41,16 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
                 ("/date", "Today's date", "今天日期"),
                 ("/holiday", "Upcoming public holidays", "即将到来的公共假期"),
                 ("/holidaythismonth", "Holidays this month", "本月假期"),
-                ("/leave", "@bot — who is on leave today (HRMS calendar)", "@机器人 — 今日谁请假（HRMS 日历）"),
+                (
+                    "/leave",
+                    "@bot — leave & WFH today (dutyList.csv; OSE + other dept)",
+                    "@机器人 — 今日请假与 WFH（dutyList；OSE 及其他部门）",
+                ),
+                (
+                    "/wfh",
+                    "Same card as /leave (leave + WFH sections)",
+                    "与 /leave 相同卡片（含请假与 WFH）",
+                ),
                 (
                     "/wholeave",
                     "@bot — who is on leave today (OSE leave Bitable)",
