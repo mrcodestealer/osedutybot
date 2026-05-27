@@ -1795,11 +1795,61 @@ def get_dutylist_leave_wfh_for_date(ref_date: Optional[date] = None) -> dict[str
         }
 
 
-def _dept_sort_key(department: str) -> tuple[int, str]:
+def _department_display_tier(department: str) -> int:
+    """
+    Display order for leave/WFH cards:
+      1 — OSE / OTE (incl. OSE Manager, Team Lead, Senior)
+      2 — FPMS, CPMS, DB, FE, BI, SRE, F&T
+      3 — all other departments
+    """
     d = (department or "Other").strip().upper()
-    if d == "OSE" or d.startswith("OSE "):
-        return (0, d)
-    return (1, d)
+    if d == "OTE" or d == "OSE" or d.startswith("OSE "):
+        return 1
+    if d == "FPMS":
+        return 2
+    if d.startswith("CPMS"):
+        return 2
+    if d in ("DB", "DBA"):
+        return 2
+    if d.startswith("FE"):
+        return 2
+    if d == "BI":
+        return 2
+    if "SRE" in d:
+        return 2
+    if d in ("F&T", "FT"):
+        return 2
+    return 3
+
+
+def _department_order_in_tier(department: str, tier: int) -> tuple[int, str]:
+    d = (department or "Other").strip().upper()
+    if tier == 1:
+        tier1 = {
+            "OSE": 0,
+            "OSE MANAGER": 1,
+            "OSE TEAM LEAD": 2,
+            "OSE SENIOR": 3,
+            "OTE": 4,
+        }
+        return (tier1.get(d, 50), d)
+    if tier == 2:
+        if d == "FPMS":
+            return (0, d)
+        if d.startswith("CPMS"):
+            return (1, d)
+        if d in ("DB", "DBA"):
+            return (2, d)
+        if d.startswith("FE"):
+            return (3, d)
+        if d == "BI":
+            return (4, d)
+        if "SRE" in d:
+            return (5, d)
+        if d in ("F&T", "FT"):
+            return (6, d)
+        return (99, d)
+    return (0, d)
 
 
 def _group_rows_by_department(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -1818,20 +1868,32 @@ def _format_attendance_by_department(
     *,
     bullet: str = "-",
 ) -> list[str]:
-    """``FPMS`` / ``OSE`` headers with ``- name`` lines underneath."""
+    """Department blocks in tier order (OSE/OTE → core depts → other)."""
     if not rows:
         return []
-    lines: list[str] = []
     groups = _group_rows_by_department(rows)
-    for dept in sorted(groups.keys(), key=_dept_sort_key):
+    by_tier: dict[int, list[tuple[str, list[dict[str, Any]]]]] = {1: [], 2: [], 3: []}
+    for dept, dept_rows in groups.items():
+        tier = _department_display_tier(dept)
+        by_tier[tier].append((dept, dept_rows))
+
+    lines: list[str] = []
+    for tier in (1, 2, 3):
+        block = sorted(
+            by_tier[tier],
+            key=lambda item: _department_order_in_tier(item[0], tier),
+        )
+        if not block:
+            continue
         if lines:
             lines.append("")
-        lines.append(f"**{dept}**")
-        for row in groups[dept]:
-            span = _attendance_span_for_row(row, on_date)
-            lt = str(row.get("leave_type") or "Leave").strip()
-            emoji = _leave_type_emoji(lt)
-            lines.append(f"{bullet} **{row['name']}** · {emoji} {lt} · {span}")
+        for dept, dept_rows in block:
+            lines.append(f"**{dept}**")
+            for row in dept_rows:
+                span = _attendance_span_for_row(row, on_date)
+                lt = str(row.get("leave_type") or "Leave").strip()
+                emoji = _leave_type_emoji(lt)
+                lines.append(f"{bullet} **{row['name']}** · {emoji} {lt} · {span}")
     return lines
 
 
