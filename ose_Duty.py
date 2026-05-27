@@ -786,17 +786,25 @@ def build_ose_message_card(
                     f"• {name} ({lt}) - From {_format_ddmmyyyy(st)} until {_format_ddmmyyyy(ed)}"
                 )
         lines.extend(_section_lines("🏖️ Leave (OSE Bitable)", leave_lines))
+    body_elements: list[dict[str, Any]] = [
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": "\n".join(lines).strip()},
+        }
+    ]
     if dutylist_attendance:
         try:
             import leavewfh as lw
 
-            for title, bullets in lw.dutylist_attendance_plain_sections(
+            lw_sections = lw.dutylist_attendance_plain_sections(
                 dutylist_attendance, target_date
-            ):
-                lines.extend(_section_lines(title, bullets))
+            )
+            if lw_sections:
+                body_elements.append({"tag": "hr"})
+                for _title, section_els in lw_sections:
+                    body_elements.extend(section_els)
         except Exception:
             pass
-    content = "\n".join(lines).strip()
 
     return {
         "schema": "2.0",
@@ -808,17 +816,7 @@ def build_ose_message_card(
                 "content": f"OSE DUTY FOR {target_date.strftime('%d/%m/%Y')}",
             },
         },
-        "body": {
-            "elements": [
-                {
-                    "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": content,
-                    },
-                }
-            ]
-        },
+        "body": {"elements": body_elements},
     }
 
 
@@ -876,12 +874,9 @@ def get_ose_payload_for_date(target_date: date, mode: str = "date", *, include_t
         try:
             import leavewfh as lw
 
-            for title, bullets in lw.dutylist_attendance_plain_sections(
-                dutylist_attendance, target_date
-            ):
-                lines.append("")
-                lines.append(title.replace("🏖️ ", "").replace("🏠 ", ""))
-                lines.extend(bullets)
+            lines.append("")
+            lines.append("Leave & WFH")
+            lines.extend(lw.format_dutylist_leave_wfh_display(dutylist_attendance, target_date))
         except Exception:
             pass
 
