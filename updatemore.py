@@ -804,13 +804,26 @@ def _send_jenkins_email_reply(
             email_title=email_title,
             completions=completions,
         )
+    except mm.JenkinsReplyOnlyBouncesError as ex:
+        folders = ", ".join(mm.JENKINS_REPLY_IMAP_FOLDERS)
+        send(
+            chat_id,
+            "❌ **Email not found** — no reply sent.\n"
+            f"Searched **{folders}** for `{email_title}` — only **Failed to send** / "
+            "mailer-daemon notices found (no normal thread with To/Cc).\n"
+            "Keep the original notification in **Priority** or **INBOX**, or fix "
+            "invalid addresses on past bounces.\n"
+            f"_{ex}_",
+        )
+        return
     except mm.EmailThreadNotFoundError:
         folders = ", ".join(mm.JENKINS_REPLY_IMAP_FOLDERS)
         send(
             chat_id,
             "❌ **Email not found** — no reply sent.\n"
             f"Searched **{folders}** for the latest mail whose subject contains: `{email_title}`\n"
-            "Check the **Email:** line in your `/update` matches the original mail subject.",
+            "Check the **Email:** line in your `/update` matches the original mail subject.\n"
+            "Tip: put the original mail in **Priority** / **INBOX** (not only bounce notices).",
         )
         return
     except Exception as ex:
