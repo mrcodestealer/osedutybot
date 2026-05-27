@@ -159,12 +159,12 @@ MAIL_IMAP_FOLDERS = [
     ).split(",")
     if f.strip()
 ]
-# Jenkins ``/replyupdateemail`` — Lark mail folders (Priority, OSE Pending; Sent for outbound copies).
+# Jenkins ``/replyupdateemail`` — Lark IMAP folders (no ``Priority`` on this mailbox).
 JENKINS_REPLY_IMAP_FOLDERS = [
     f.strip()
     for f in (
         os.getenv("JENKINS_REPLY_IMAP_FOLDERS", "").strip()
-        or "Priority,OSE Pending,Sent,INBOX"
+        or "OSE Pending,INBOX,Sent,CLOSED EMAILS"
     ).split(",")
     if f.strip()
 ]
@@ -1235,7 +1235,6 @@ def _uid_search_subject_variants(mail: imaplib.IMAP4, needle: str) -> list[bytes
         f'(TEXT "{safe[:120]}")',
         f'(HEADER Subject "{safe}")',
     ]
-    # Shorter token helps when the server does not substring-match multi-word SUBJECT.
     parts = [p for p in re.split(r"\s+", safe) if len(p) >= 4]
     if len(parts) > 1:
         criteria_list.append(f'(TEXT "{parts[0]}")')
@@ -1258,6 +1257,61 @@ def _uid_search_subject_variants(mail: imaplib.IMAP4, needle: str) -> list[bytes
     return []
 
 
+_JENKINS_REPLY_SINCE_DAYS = min(
+    365, max(7, int(os.getenv("JENKINS_REPLY_SINCE_DAYS", "").strip() or "90"))
+)
+_JENKINS_REPLY_SINCE_UID_CAP = min(
+    800, max(50, int(os.getenv("JENKINS_REPLY_SINCE_UID_CAP", "").strip() or "500"))
+)
+
+
+def _uid_search_jenkins_needle(mail: imaplib.IMAP4, needle: str) -> list[bytes]:
+    """
+  Lark IMAP often returns 0 for ``(SUBJECT "TESTING BOT")`` but matches
+  ``(SINCE … SUBJECT "TESTING")``. Client-side subject filter still requires the full needle.
+    """
+    uids = _uid_search_subject_variants(mail, needle)
+    if uids:
+        return uids
+    safe = (needle or "").strip().replace('"', " ").replace("\\", " ")
+    if not safe:
+        return []
+    since_s = (
+        datetime.now(timezone.utc) - timedelta(days=_JENKINS_REPLY_SINCE_DAYS)
+    ).strftime("%d-%b-%Y")
+    tokens = sorted(
+        {p for p in re.split(r"\s+", safe) if len(p) >= 3},
+        key=len,
+        reverse=True,
+    )
+    if not tokens:
+        tokens = [safe[:40]]
+    seen: set[bytes] = set()
+    ordered: list[bytes] = []
+    for tok in tokens[:4]:
+        for crit in (
+            f'(SINCE {since_s} SUBJECT "{tok}")',
+            f'(SINCE {since_s} TEXT "{tok}")',
+        ):
+            found = _uid_search(mail, crit)
+            if not found:
+                continue
+            if len(found) > _JENKINS_REPLY_SINCE_UID_CAP:
+                found = found[-_JENKINS_REPLY_SINCE_UID_CAP :]
+            for u in found:
+                if u not in seen:
+                    seen.add(u)
+                    ordered.append(u)
+            if ordered:
+                print(
+                    f"[maint-mail] jenkins reply: SINCE search {crit!r} → "
+                    f"{len(ordered)} uid(s) (needle={safe!r})",
+                    flush=True,
+                )
+                return ordered
+    return []
+
+
 def _jenkins_reply_search_folders(
     mail: imaplib.IMAP4, configured: list[str]
 ) -> list[str]:
@@ -1274,9 +1328,22 @@ def _jenkins_reply_search_folders(
 
     for f in configured:
         _add(f)
+    expand = os.getenv("JENKINS_REPLY_IMAP_EXPAND_FOLDERS", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if not expand:
+        return out or list(configured)
     try:
+        configured_cf = {f.casefold() for f in configured}
         for name in _imap_list_folder_names(mail):
             cf = name.casefold()
+            if "draft" in cf:
+                continue
+            if any(name.casefold() == p or name.startswith(p + "/") for p in configured_cf):
+                _add(name)
+                continue
             if any(
                 k in cf
                 for k in (
@@ -1286,7 +1353,6 @@ def _jenkins_reply_search_folders(
                     "inbox",
                     "sent",
                     "closed",
-                    "draft",
                 )
             ):
                 _add(name)
@@ -1316,10 +1382,10 @@ def _fetch_subject_header_for_uid(mail: imaplib.IMAP4, uid: bytes) -> str:
 
 
 _JENKINS_REPLY_UID_WALK_MAX = min(
-    120, max(8, int(os.getenv("JENKINS_REPLY_UID_WALK_MAX", "").strip() or "50"))
+    120, max(8, int(os.getenv("JENKINS_REPLY_UID_WALK_MAX", "").strip() or "40"))
 )
 _JENKINS_REPLY_SUBJECT_UID_WINDOW = min(
-    200, max(10, int(os.getenv("JENKINS_REPLY_SUBJECT_UID_WINDOW", "").strip() or "50"))
+    600, max(20, int(os.getenv("JENKINS_REPLY_SUBJECT_UID_WINDOW", "").strip() or "400"))
 )
 _JENKINS_REPLY_HEADER_BATCH = min(
     50, max(5, int(os.getenv("JENKINS_REPLY_HEADER_BATCH", "").strip() or "20"))
@@ -1531,8 +1597,25 @@ def _pick_reply_uid_among_candidates(
     if not uids:
         return None
     t0 = time.monotonic()
-    walk = [_uid_as_bytes(u) for u in uids[:_JENKINS_REPLY_UID_WALK_MAX]]
-    headers_map = _imap_uid_fetch_headers_batch(mail, walk)
+    uid_list = [_uid_as_bytes(u) for u in uids]
+    walk_max = _JENKINS_REPLY_UID_WALK_MAX
+    if len(uid_list) > walk_max:
+        scan_cap = min(len(uid_list), _JENKINS_REPLY_SINCE_UID_CAP)
+        scan_pool = uid_list[:scan_cap]
+        headers_map: dict[bytes, dict[str, Any]] = {}
+        chunk = max(5, _JENKINS_REPLY_HEADER_BATCH)
+        for i in range(0, len(scan_pool), chunk):
+            headers_map.update(_imap_uid_fetch_headers_batch(mail, scan_pool[i : i + chunk]))
+        subject_hits = [
+            uid
+            for uid in scan_pool
+            if _subject_contains_needle((headers_map.get(uid) or {}).get("subj") or "", needle)
+        ]
+        walk = subject_hits[:walk_max] if subject_hits else uid_list[:walk_max]
+        headers_map = {u: headers_map[u] for u in walk if u in headers_map}
+    else:
+        walk = uid_list[:walk_max]
+        headers_map = _imap_uid_fetch_headers_batch(mail, walk)
     ranked: list[tuple[datetime, bytes, dict[str, Any]]] = []
     for uid in walk:
         h = headers_map.get(uid) or _fetch_reply_headers_single(mail, uid)
@@ -1629,10 +1712,10 @@ def _find_matching_uid_in_folder(
         print(f"[maint-mail] jenkins reply: SELECT {folder!r} failed", flush=True)
         return None, False
     had_match = False
-    uids = _uid_search_subject_variants(mail, needle)
+    uids = _uid_search_jenkins_needle(mail, needle)
     if uids:
         had_match = True
-        win = min(len(uids), _JENKINS_REPLY_SUBJECT_UID_WINDOW, _JENKINS_REPLY_UID_WALK_MAX)
+        win = min(len(uids), _JENKINS_REPLY_SUBJECT_UID_WINDOW)
         pick_from = uids[-win:]
         found = _pick_reply_uid_among_candidates(
             mail, list(reversed(pick_from)), folder_label=resolved, needle=needle
@@ -1640,15 +1723,31 @@ def _find_matching_uid_in_folder(
         if found:
             return found, True
         print(
-            f"[maint-mail] jenkins reply: {resolved!r} had {len(uids)} SUBJECT hit(s) for "
+            f"[maint-mail] jenkins reply: {resolved!r} had {len(uids)} search hit(s) for "
             f"{needle!r} but none usable (bounces / no To/Cc)",
             flush=True,
         )
+        return None, True
+    msg_count = 0
+    try:
+        typ, data = mail.status(_imap_mailbox_name(resolved), "(MESSAGES)")
+        if typ == "OK" and data:
+            m = re.search(rb"MESSAGES\s+(\d+)", data[0])
+            if m:
+                msg_count = int(m.group(1))
+    except Exception:
+        pass
+    if msg_count > 500:
+        print(
+            f"[maint-mail] jenkins reply: {resolved!r} has {msg_count} msgs, "
+            f"no SINCE/subject hits for {needle!r} (skipped UID SEARCH ALL)",
+            flush=True,
+        )
+        return None, had_match
     all_uids = _uid_search(mail, "ALL")
     if not all_uids:
         print(f"[maint-mail] jenkins reply: {resolved!r} is empty", flush=True)
         return None, had_match
-    # Small folders: scan every message (Lark UI search often finds thread mail IMAP SUBJECT misses).
     if len(all_uids) <= 300:
         tail_newest = [_uid_as_bytes(u) for u in reversed(all_uids)]
         tail_n = len(all_uids)
@@ -1761,6 +1860,8 @@ def find_message_by_subject_title(
                 best_uid = _uid_as_bytes(uid)
                 best_folder = folder
                 best_ts = ts
+            if folder in configured:
+                break
         if best_uid is None:
             if saw_subject_hits_only_bounces:
                 where = ", ".join(folders_checked) or ", ".join(scan)
@@ -1793,7 +1894,7 @@ def find_message_by_subject_title(
 def find_jenkins_reply_message_by_subject_title(
     title: str,
 ) -> tuple[email.message.Message, str] | None:
-    """Newest match in **Priority** + **OSE Pending** (``JENKINS_REPLY_IMAP_FOLDERS``)."""
+    """Newest match in ``JENKINS_REPLY_IMAP_FOLDERS`` (INBOX, OSE Pending, Sent, …)."""
     return find_message_by_subject_title(title, folders=JENKINS_REPLY_IMAP_FOLDERS)
 
 
@@ -2777,3 +2878,67 @@ def start_maintenance_mail_watcher(
     threading.Thread(target=_target, name="maintenance-mail-imap", daemon=True).start()
     _watcher_started = True
     return True
+
+
+def debug_jenkins_reply_search(needle: str = "TESTING BOT") -> int:
+    """
+    Debug Jenkins Reply-All IMAP search (subject needle → folders).
+
+    Run: ``python3 maintenance_mail.py jenkins-reply-search [subject]``
+
+    Exit codes: 0 = found, 1 = not found, 2 = only bounces / skipped matches.
+    """
+    needle = (needle or "TESTING BOT").strip()
+    if not MAIL_PASSWORD:
+        print("MAINTENANCE_MAIL_PASSWORD not set in .env", flush=True)
+        return 1
+    print(f"Mailbox: {MAIL_USER}", flush=True)
+    print(f"Needle: {needle!r}", flush=True)
+    print(f"Configured folders: {', '.join(JENKINS_REPLY_IMAP_FOLDERS)}", flush=True)
+    mail = _connect_imap_simple()
+    try:
+        scan = _jenkins_reply_search_folders(mail, list(JENKINS_REPLY_IMAP_FOLDERS))
+        print(f"Search folders ({len(scan)}): {', '.join(scan)}", flush=True)
+        any_hit = False
+        for folder in scan:
+            uid, had = _find_matching_uid_in_folder(mail, folder, needle)
+            status = "USABLE" if uid else ("MATCH_BUT_SKIP" if had else "NO_MATCH")
+            print(f"  [{status}] {folder!r} uid={uid!r}", flush=True)
+            if had:
+                any_hit = True
+        print(flush=True)
+        try:
+            found = find_jenkins_reply_message_by_subject_title(needle)
+        except JenkinsReplyOnlyBouncesError as ex:
+            print(f"find_jenkins_reply: ONLY_BOUNCES — {ex}", flush=True)
+            return 2
+        if found:
+            msg, folder = found
+            subj = _decode_msg_subject(msg)
+            print(f"find_jenkins_reply: OK folder={folder!r} subj={subj!r}", flush=True)
+            try:
+                to, cc, _rcpt = _jenkins_reply_all_recipients(msg)
+                print(f"  Reply-All To={to} Cc={cc}", flush=True)
+            except Exception as ex:
+                print(f"  Reply-All failed: {ex}", flush=True)
+            return 0
+        print("find_jenkins_reply: not found", flush=True)
+        return 1 if not any_hit else 2
+    finally:
+        try:
+            mail.logout()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) >= 2 and sys.argv[1] == "jenkins-reply-search":
+        _needle = sys.argv[2] if len(sys.argv) > 2 else "TESTING BOT"
+        raise SystemExit(debug_jenkins_reply_search(_needle))
+    print(
+        "Usage: python3 maintenance_mail.py jenkins-reply-search [subject]",
+        flush=True,
+    )
+    raise SystemExit(2)
