@@ -163,6 +163,7 @@ _BI_UPDATE_NOISE_TOKENS = frozenset(
 # Lark ``/jenkinsupdate``: keyword → (short title, build URL(s); multiple lines = several links).
 JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
     "fpms uat branch": ("FPMS UAT BRANCH UPDATE", BUILD_URL),
+    "fpms uat": ("FPMS UAT BRANCH UPDATE", BUILD_URL),
     "fpms prod script": (
         "FPMS PROD SCRIPT",
         "https://jenkins.client8.me/job/FPMS/job/FPMS_PROD_SCRIPT_RUN/",
@@ -209,6 +210,7 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
     ),
     "cpms uat update": (
         "CPMS-UAT-UPDATE",
+        "https://jenkins.client8.me/job/IGO/job/UAT/job/IGO-UAT-UPDATE/build?delay=0sec\n"
         "https://jenkins.client8.me/job/CPMS/job/UAT/job/CPMS-UAT-UPDATE/build?delay=0sec",
     ),
     "pms uat update": (
@@ -7457,6 +7459,26 @@ def _dispatch_lark_update_command_body(
 ) -> bool:
     """Core ``/update`` job match + dispatch (shared by ``/update`` and ``/updatemore``)."""
     key = session_key
+    try:
+        import updatemore as _um_guard
+
+        with _fpms_lark_sessions_lock:
+            _sess_g = _fpms_lark_sessions.get(key)
+            _q_g = _um_guard.get_queue(_sess_g if isinstance(_sess_g, dict) else None)
+        if (
+            _q_g
+            and _q_g.get("skip_build")
+            and not from_updatemore
+        ):
+            send(
+                chat_id,
+                "⏸️ **`/updatemore skip build`** test is active — Jenkins **Build** blocked.\n"
+                "Send two `replyupdateemail | …` lines (see instructions above), or `@Duty Bot cancel updatemore`.",
+            )
+            return True
+    except Exception:
+        pass
+
     for pat in (r"@_user_\d+", r"<[^>]+>"):
         body = re.sub(pat, "", body)
     body = body.replace("\r\n", "\n").strip()
@@ -7637,6 +7659,22 @@ def handle_lark_jenkins_update_message(
     ):
         return True
 
+    if low in ("cancel updatemore", "cancel updatemore queue") or re.match(
+        r"^cancel\s+updatemore\b", low
+    ):
+        try:
+            import updatemore as _um_cancel
+
+            if _um_cancel.cancel_active_updatemore_in_chat(
+                chat_id, _fpms_lark_sessions, _fpms_lark_sessions_lock
+            ):
+                send(chat_id, "✅ **`/updatemore`** queue cleared (skip-build test cancelled).")
+            else:
+                send(chat_id, "No active **`/updatemore`** queue in this chat.")
+        except Exception as ex:
+            send(chat_id, f"❌ cancel updatemore failed: {ex}")
+        return True
+
     if low == "cancel":
         if _fpms_lark_release_build_wait_session(key):
             return True
@@ -7662,6 +7700,50 @@ def handle_lark_jenkins_update_message(
             chat_id=chat_id,
         ):
             allow_start = True
+
+    try:
+        import updatemore as um
+    except Exception:
+        um = None
+
+    if um and um.UPDATEMORE_CMD_RE.search(body_early or ""):
+        if not allow_start:
+            return False
+        for pat in (r"@_user_\d+", r"<[^>]+>"):
+            body_um = re.sub(pat, "", body_early)
+        body_um = body_um.replace("\r\n", "\n").strip()
+        body_um = um._normalize_updatemore_body(body_um)
+        skip_build = um.updatemore_skip_build_requested(
+            body_early
+        ) or um.updatemore_skip_build_requested(body_um)
+        try:
+            segments = um.parse_updatemore_body(body_um)
+        except ValueError as ex:
+            send(chat_id, f"❌ `/updatemore` parse error: {ex}")
+            return True
+        with _fpms_lark_sessions_lock:
+            prev = _fpms_lark_sessions.get(key)
+            if isinstance(prev, dict):
+                _fpms_lark_unregister_picker_sid_from_sess(prev)
+            q = um.init_queue(
+                segments,
+                chat_id=chat_id,
+                sender_id=sender_id,
+                skip_build=skip_build,
+            )
+            _fpms_lark_sessions[key] = {"updatemore_queue": q}
+        if skip_build:
+            send(chat_id, um.skip_build_manual_instructions(segments, q))
+            return True
+        send(chat_id, um.queue_summary(segments))
+        return _dispatch_lark_update_command_body(
+            chat_id,
+            key,
+            um.segment_to_update_body(segments[0]),
+            send,
+            from_updatemore=True,
+            lark_message_id=lark_message_id,
+        )
 
     with _fpms_lark_sessions_lock:
         sess = _fpms_lark_sessions.get(key)
@@ -7982,43 +8064,19 @@ def handle_lark_jenkins_update_message(
                 return True
 
         _fpms_lark_clear_session(chat_id, sender_id)
-        send(chat_id, "⚠️ Internal session state was reset. Start again with `/jenkinsupdate`.")
+        had_um = bool(sess.get("updatemore_queue"))
+        if had_um:
+            send(
+                chat_id,
+                "⚠️ Stale **`/updatemore`** session was cleared (no active Jenkins step). "
+                "Send your **`/updatemore`** message again.",
+            )
+        else:
+            send(
+                chat_id,
+                "⚠️ Internal session state was reset. Start again with `/update` or `/jenkinsupdate`.",
+            )
         return True
-
-    try:
-        import updatemore as um
-    except Exception:
-        um = None
-
-    if um and um.UPDATEMORE_CMD_RE.search(body_early or ""):
-        if not allow_start:
-            return False
-        for pat in (r"@_user_\d+", r"<[^>]+>"):
-            body_um = re.sub(pat, "", body_early)
-        body_um = body_um.replace("\r\n", "\n").strip()
-        try:
-            segments = um.parse_updatemore_body(body_um)
-        except ValueError as ex:
-            send(chat_id, f"❌ `/updatemore` parse error: {ex}")
-            return True
-        with _fpms_lark_sessions_lock:
-            prev = _fpms_lark_sessions.get(key)
-            if isinstance(prev, dict):
-                _fpms_lark_unregister_picker_sid_from_sess(prev)
-            _fpms_lark_sessions[key] = {
-                "updatemore_queue": um.init_queue(
-                    segments, chat_id=chat_id, sender_id=sender_id
-                )
-            }
-        send(chat_id, um.queue_summary(segments))
-        return _dispatch_lark_update_command_body(
-            chat_id,
-            key,
-            um.segment_to_update_body(segments[0]),
-            send,
-            from_updatemore=True,
-            lark_message_id=lark_message_id,
-        )
 
     if not JENKINS_UPDATE_CMD_RE.search(clean_text or ""):
         return False
