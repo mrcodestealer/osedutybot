@@ -921,17 +921,15 @@ def _jenkins_reply_all_recipients(
     orig: email.message.Message,
 ) -> tuple[list[str], list[str], list[str]]:
     """
-    Reply-all using **latest matched message** ``To`` / ``Cc`` (and ``From`` in ``To``).
+    Reply-all: every address on original **To** + **Cc** (+ **From** on To).
 
-    Returns ``(to_header_addrs, cc_header_addrs, smtp_recipients)``.
+    ``Cc`` keeps all original Cc lines (even when the same person is also on To).
+    SMTP delivery dedupes so each mailbox gets one message.
     """
     own = _own_smtp_identities()
     orig_to = _parse_header_address_list(orig, "To")
     orig_cc = _parse_header_address_list(orig, "Cc")
     orig_from = _parse_header_address_list(orig, "From")
-
-    to_out: list[str] = []
-    to_norm: set[str] = set()
 
     def _bad_recipient(addr: str) -> bool:
         key = _normalize_email_address(addr)
@@ -939,35 +937,41 @@ def _jenkins_reply_all_recipients(
             return True
         return False
 
-    def _add_to(addr: str) -> None:
-        if _bad_recipient(addr):
-            return
-        key = _normalize_email_address(addr)
+    to_out: list[str] = []
+    to_norm: set[str] = set()
+    for a in list(orig_to) + list(orig_from):
+        if _bad_recipient(a):
+            continue
+        key = _normalize_email_address(a)
         if key in own or key in to_norm:
-            return
+            continue
         to_norm.add(key)
-        to_out.append(addr)
-
-    for a in orig_to:
-        _add_to(a)
-    for a in orig_from:
-        _add_to(a)
+        to_out.append(a)
 
     cc_out: list[str] = []
     cc_norm: set[str] = set()
-
     for a in orig_cc:
+        if _bad_recipient(a):
+            continue
         key = _normalize_email_address(a)
-        if key in own or key in to_norm or key in cc_norm or _bad_recipient(a):
+        if key in own or key in cc_norm:
             continue
         cc_norm.add(key)
         cc_out.append(a)
 
     if not to_out and cc_out:
-        to_out = [cc_out.pop(0)]
-        cc_norm.discard(_normalize_email_address(to_out[0]))
+        to_out = [cc_out[0]]
+        to_norm.add(_normalize_email_address(to_out[0]))
 
-    smtp_recipients = list(to_out) + [a for a in cc_out if a not in to_out]
+    smtp_seen: set[str] = set()
+    smtp_recipients: list[str] = []
+    for a in to_out + cc_out:
+        key = _normalize_email_address(a)
+        if key in smtp_seen:
+            continue
+        smtp_seen.add(key)
+        smtp_recipients.append(a)
+
     if not smtp_recipients:
         raise ValueError("Original email has no To/Cc recipients to reply to")
     return to_out, cc_out, smtp_recipients

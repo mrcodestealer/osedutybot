@@ -839,20 +839,13 @@ def _send_jenkins_email_reply(
     to_line = ", ".join(sent.get("to") or []) or "(none)"
     cc_line = ", ".join(sent.get("cc") or []) or "(none)"
     rcpt_line = ", ".join(sent.get("recipients") or []) or to_line
-    cc_note = ""
-    if cc_line == "(none)" and rcpt_line != to_line:
-        cc_note = "\n- _Cc header empty — duplicate To/Cc addresses are merged into **To**._"
-    elif cc_line == "(none)":
-        cc_note = (
-            "\n- _Original **Cc** matched **To** (same people); only **To** is set on the reply._"
-        )
     send(
         chat_id,
         f"📧 Auto-replied email ({len(completions)} done block(s))\n"
         f"- **From:** `{mm.MAIL_USER}`\n"
-        f"- **Reply-All delivered to:** `{rcpt_line}`\n"
-        f"- **To header:** `{to_line}`\n"
-        f"- **Cc header:** `{cc_line}`{cc_note}\n"
+        f"- **Reply-All (all To + Cc):** `{rcpt_line}`\n"
+        f"- **To:** `{to_line}`\n"
+        f"- **Cc:** `{cc_line}`\n"
         f"- **Subject (search / Re:):** `{email_title}`\n"
         f"- **Environments:** {envs}",
     )
