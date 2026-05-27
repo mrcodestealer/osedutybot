@@ -811,7 +811,7 @@ def _send_jenkins_email_reply(
             "❌ **Email not found** — no reply sent.\n"
             f"Searched **{folders}** for `{email_title}` — only **Failed to send** / "
             "mailer-daemon notices found (no normal thread with To/Cc).\n"
-            "Keep the original notification in **Priority** or **INBOX**, or fix "
+            "Keep the original notification in **OSE Pending** or **INBOX**, or fix "
             "invalid addresses on past bounces.\n"
             f"_{ex}_",
         )
@@ -823,7 +823,9 @@ def _send_jenkins_email_reply(
             "❌ **Email not found** — no reply sent.\n"
             f"Searched **{folders}** for the latest mail whose subject contains: `{email_title}`\n"
             "Check the **Email:** line in your `/update` matches the original mail subject.\n"
-            "Tip: put the original mail in **Priority** / **INBOX** (not only bounce notices).",
+            "Tip: keep the original thread in **OSE Pending** / **INBOX** (not only "
+            "**Failed to send** bounce notices). Restart the duty bot after pulling "
+            "mail-search fixes if folders still list **Priority** first.",
         )
         return
     except Exception as ex:
