@@ -1862,50 +1862,117 @@ def _group_rows_by_department(rows: list[dict[str, Any]]) -> dict[str, list[dict
     return groups
 
 
-def _format_attendance_by_department(
-    rows: list[dict[str, Any]],
+_TIER_SEPARATOR = "---"
+
+
+def _attendance_person_line(row: dict[str, Any], on_date: date) -> str:
+    span = _attendance_span_for_row(row, on_date)
+    lt = str(row.get("leave_type") or "Leave").strip()
+    emoji = _leave_type_emoji(lt)
+    return f"- **{row['name']}** · {emoji} {lt} · {span}"
+
+
+def _rows_for_department(rows: list[dict[str, Any]], department: str) -> list[dict[str, Any]]:
+    dept = (department or "").strip()
+    out = [r for r in rows if (r.get("department") or "").strip() == dept]
+    out.sort(key=lambda r: str(r.get("name") or "").lower())
+    return out
+
+
+def _tier3_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out = [r for r in rows if _department_display_tier(str(r.get("department") or "")) == 3]
+    out.sort(key=lambda r: (str(r.get("department") or "").lower(), str(r.get("name") or "").lower()))
+    return out
+
+
+def _dept_block_lines(
+    dept_label: str,
+    leave_rows: list[dict[str, Any]],
+    wfh_rows: list[dict[str, Any]],
     on_date: date,
     *,
-    bullet: str = "-",
+    department: Optional[str] = None,
 ) -> list[str]:
-    """Department blocks in tier order (OSE/OTE → core depts → other)."""
-    if not rows:
+    """``**Dept**`` → ``leave`` → names → ``wfh`` → names."""
+    if department is not None:
+        leave_in = _rows_for_department(leave_rows, department)
+        wfh_in = _rows_for_department(wfh_rows, department)
+    else:
+        leave_in = leave_rows
+        wfh_in = wfh_rows
+    if not leave_in and not wfh_in:
         return []
-    groups = _group_rows_by_department(rows)
-    by_tier: dict[int, list[tuple[str, list[dict[str, Any]]]]] = {1: [], 2: [], 3: []}
-    for dept, dept_rows in groups.items():
-        tier = _department_display_tier(dept)
-        by_tier[tier].append((dept, dept_rows))
-
-    lines: list[str] = []
-    for tier in (1, 2, 3):
-        block = sorted(
-            by_tier[tier],
-            key=lambda item: _department_order_in_tier(item[0], tier),
-        )
-        if not block:
-            continue
-        if lines:
-            lines.append("")
-        for dept, dept_rows in block:
-            lines.append(f"**{dept}**")
-            for row in dept_rows:
-                span = _attendance_span_for_row(row, on_date)
-                lt = str(row.get("leave_type") or "Leave").strip()
-                emoji = _leave_type_emoji(lt)
-                lines.append(f"{bullet} **{row['name']}** · {emoji} {lt} · {span}")
+    lines = [f"**{dept_label}**", "leave"]
+    if leave_in:
+        lines.extend(_attendance_person_line(r, on_date) for r in leave_in)
+    else:
+        lines.append("- —")
+    lines.append("wfh")
+    if wfh_in:
+        lines.extend(_attendance_person_line(r, on_date) for r in wfh_in)
+    else:
+        lines.append("- —")
     return lines
 
 
-def _attendance_section_md(
-    title: str,
-    rows: list[dict[str, Any]],
+def format_dutylist_leave_wfh_display(
+    data: dict[str, Any],
     on_date: date,
 ) -> list[str]:
-    if not rows:
+    """
+    Tier 1: each OSE / OTE dept — leave + wfh under each.
+    ``---``
+    Tier 2: FPMS, CPMS, DB, FE, BI, SRE, F&T — leave + wfh each.
+    ``---``
+    Tier 3: **Other** — all remaining depts combined.
+    """
+    all_leave = list(data.get("ose_leave") or []) + list(data.get("other_leave") or [])
+    all_wfh = list(data.get("ose_wfh") or []) + list(data.get("other_wfh") or [])
+    if not all_leave and not all_wfh:
         return []
-    lines = [f"\n**{title}** ({len(rows)})"]
-    lines.extend(_format_attendance_by_department(rows, on_date))
+
+    leave_depts = set((r.get("department") or "").strip() for r in all_leave if r.get("department"))
+    wfh_depts = set((r.get("department") or "").strip() for r in all_wfh if r.get("department"))
+    all_depts = {d for d in leave_depts | wfh_depts if d}
+
+    by_tier: dict[int, list[str]] = {1: [], 2: [], 3: []}
+    for dept in all_depts:
+        by_tier[_department_display_tier(dept)].append(dept)
+
+    lines: list[str] = []
+
+    def _append_tier(block_lines: list[str]) -> None:
+        nonlocal lines
+        if not block_lines:
+            return
+        if lines:
+            lines.append(_TIER_SEPARATOR)
+        lines.extend(block_lines)
+
+    tier1_block: list[str] = []
+    for dept in sorted(set(by_tier[1]), key=lambda d: _department_order_in_tier(d, 1)):
+        part = _dept_block_lines(dept, all_leave, all_wfh, on_date, department=dept)
+        if part:
+            if tier1_block:
+                tier1_block.append("")
+            tier1_block.extend(part)
+    _append_tier(tier1_block)
+
+    tier2_block: list[str] = []
+    for dept in sorted(set(by_tier[2]), key=lambda d: _department_order_in_tier(d, 2)):
+        part = _dept_block_lines(dept, all_leave, all_wfh, on_date, department=dept)
+        if part:
+            if tier2_block:
+                tier2_block.append("")
+            tier2_block.extend(part)
+    _append_tier(tier2_block)
+
+    t3_leave = _tier3_rows(all_leave)
+    t3_wfh = _tier3_rows(all_wfh)
+    if t3_leave or t3_wfh:
+        other_block = _dept_block_lines("Other", t3_leave, t3_wfh, on_date)
+        _append_tier(other_block)
+
     return lines
 
 
@@ -1913,19 +1980,11 @@ def dutylist_attendance_plain_sections(
     data: dict[str, Any],
     on_date: date,
 ) -> list[tuple[str, list[str]]]:
-    """Section title + department-grouped lines for OSE cards."""
-    sections: list[tuple[str, list[str]]] = []
-    ose_leave = data.get("ose_leave") or []
-    other_leave = data.get("other_leave") or []
-    ose_wfh = data.get("ose_wfh") or []
-    other_wfh = data.get("other_wfh") or []
-    all_leave = ose_leave + other_leave
-    all_wfh = ose_wfh + other_wfh
-    if all_leave:
-        sections.append(("🏖️ Leave", _format_attendance_by_department(all_leave, on_date)))
-    if all_wfh:
-        sections.append(("🏠 WFH", _format_attendance_by_department(all_wfh, on_date)))
-    return sections
+    """One section: departments with separate leave / wfh blocks."""
+    lines = format_dutylist_leave_wfh_display(data, on_date)
+    if lines:
+        return [("📋 Leave & WFH", lines)]
+    return []
 
 
 def build_dutylist_attendance_card(
@@ -1941,11 +2000,11 @@ def build_dutylist_attendance_card(
     total = len(ose_leave) + len(other_leave) + len(ose_wfh) + len(other_wfh)
     date_label = on_date.strftime("%A · %d %b %Y")
 
-    all_leave = ose_leave + other_leave
-    all_wfh = ose_wfh + other_wfh
     parts = [f"📅 **{date_label}**"]
-    parts.extend(_attendance_section_md("Leave", all_leave, on_date))
-    parts.extend(_attendance_section_md("WFH", all_wfh, on_date))
+    body = format_dutylist_leave_wfh_display(data, on_date)
+    if body:
+        parts.append("")
+        parts.extend(body)
 
     if total == 0:
         parts.append("\n✅ No leave or WFH today for anyone in **dutyList.csv**.")
