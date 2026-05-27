@@ -95,15 +95,34 @@ def _match_roster_name(display: str) -> Optional[str]:
     return None
 
 
+def _is_roster_name(name: str) -> bool:
+    nm = od._title_name(name)
+    if not nm:
+        return False
+    return any(nm == od._title_name(r) for r in od.OSE_LEAVE_FORM_NAMES)
+
+
 def resolve_request_person(open_id: str, token: str) -> str:
+    """Resolve OSE roster name; prefer Bitable/sheet person index over Lark display name."""
+    from_index = od.lookup_roster_name_for_open_id(open_id, token)
+    if from_index:
+        return from_index
     display = _fetch_user_display_name(open_id, token)
     roster = _match_roster_name(display)
-    if not roster:
-        raise ValueError(
-            f"Could not match your Lark name {display!r} to an OSE roster name. "
-            "Ask admin to align your Lark profile with the duty roster."
-        )
-    return roster
+    if roster:
+        return roster
+    raise ValueError(
+        f"Could not match your Lark account to an OSE roster name"
+        + (f" (Lark name: {display!r})." if display else ".")
+        + " Use @bot leave or offset and pick your name from the roster list."
+    )
+
+
+def try_resolve_request_person(open_id: str, token: str) -> Optional[str]:
+    try:
+        return resolve_request_person(open_id, token)
+    except ValueError:
+        return None
 
 
 def wants_editoffset(text: str) -> bool:
@@ -285,16 +304,135 @@ def _select_options(values: tuple[str, ...] | list[str]) -> list[dict[str, Any]]
     ]
 
 
-def _callback_payload(kind: str, *, owner_open_id: str, request_person: str) -> dict[str, str]:
-    return {
+def _callback_payload(
+    kind: str,
+    *,
+    owner_open_id: str,
+    request_person: str,
+    pick_roster_name: bool = False,
+) -> dict[str, str]:
+    d = {
         "k": kind,
         "owner": (owner_open_id or "").strip(),
         "request_person": (request_person or "").strip(),
     }
+    if pick_roster_name:
+        d["pick_roster"] = "1"
+    return d
 
 
-def build_offset_form_card(*, owner_open_id: str, request_person: str) -> dict[str, Any]:
-    exchange_names = list(od.ose_offset_form_exchange_names(exclude_person=request_person))
+def _roster_name_picker_elements() -> list[dict[str, Any]]:
+    return [
+        {
+            "tag": "div",
+            "text": {"tag": "plain_text", "content": "Your name (OSE roster)"},
+        },
+        {
+            "tag": "select_static",
+            "name": "request_person",
+            "placeholder": {"tag": "plain_text", "content": "Select your roster name"},
+            "options": _select_options(od.OSE_LEAVE_FORM_NAMES),
+            "required": True,
+        },
+    ]
+
+
+def build_offset_form_card(
+    *, owner_open_id: str, request_person: str, pick_roster_name: bool = False
+) -> dict[str, Any]:
+    exchange_names = list(
+        od.ose_offset_form_exchange_names(
+            exclude_person="" if pick_roster_name else request_person
+        )
+    )
+    intro = (
+        "Select your roster name, then fill the fields below and tap **Submit**."
+        if pick_roster_name
+        else (
+            f"**Request person:** {request_person}\n"
+            "Fill the fields below, then tap **Submit**."
+        )
+    )
+    form_elements: list[dict[str, Any]] = []
+    if pick_roster_name:
+        form_elements.extend(_roster_name_picker_elements())
+    form_elements.extend(
+        [
+            {
+                "tag": "div",
+                "text": {"tag": "plain_text", "content": "Exchange person"},
+            },
+            {
+                "tag": "select_static",
+                "name": "exchange_person",
+                "placeholder": {"tag": "plain_text", "content": "Select exchange person"},
+                "options": _select_options(exchange_names),
+                "required": True,
+            },
+            {
+                "tag": "div",
+                "text": {"tag": "plain_text", "content": "Shift"},
+            },
+            {
+                "tag": "select_static",
+                "name": "shift_type",
+                "placeholder": {"tag": "plain_text", "content": "N or D"},
+                "options": _select_options(od.OSE_SHIFT_TYPES),
+                "required": True,
+            },
+            {
+                "tag": "div",
+                "text": {"tag": "plain_text", "content": "Original date"},
+            },
+            {
+                "tag": "date_picker",
+                "name": "original_date",
+                "placeholder": {"tag": "plain_text", "content": "Pick original date"},
+                "required": True,
+            },
+            {
+                "tag": "div",
+                "text": {"tag": "plain_text", "content": "Exchange date"},
+            },
+            {
+                "tag": "date_picker",
+                "name": "exchange_date",
+                "placeholder": {"tag": "plain_text", "content": "Pick exchange date"},
+                "required": True,
+            },
+            {
+                "tag": "input",
+                "name": "reason",
+                "input_type": "multiline_text",
+                "rows": 4,
+                "auto_resize": True,
+                "width": "fill",
+                "label": {"tag": "plain_text", "content": "Reason"},
+                "label_position": "top",
+                "placeholder": {"tag": "plain_text", "content": "Reason for offset"},
+                "required": True,
+                "max_length": 1000,
+            },
+            {
+                "tag": "button",
+                "name": "submit_ose_offset",
+                "text": {"tag": "plain_text", "content": "Submit"},
+                "type": "primary",
+                "form_action_type": "submit",
+                "behaviors": [
+                    {
+                        "type": "callback",
+                        "value": _callback_payload(
+                            _OFFSET_SUBMIT_KEY,
+                            owner_open_id=owner_open_id,
+                            request_person=request_person,
+                            pick_roster_name=pick_roster_name,
+                        ),
+                    }
+                ],
+            },
+        ]
+    )
     return {
         "schema": "2.0",
         "config": {"update_multi": True, "width_mode": "fill"},
@@ -306,91 +444,12 @@ def build_offset_form_card(*, owner_open_id: str, request_person: str) -> dict[s
             "elements": [
                 {
                     "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": (
-                            f"**Request person:** {request_person}\n"
-                            "Fill the fields below, then tap **Submit**."
-                        ),
-                    },
+                    "text": {"tag": "lark_md", "content": intro},
                 },
                 {
                     "tag": "form",
                     "name": "ose_offset_form",
-                    "elements": [
-                        {
-                            "tag": "div",
-                            "text": {"tag": "plain_text", "content": "Exchange person"},
-                        },
-                        {
-                            "tag": "select_static",
-                            "name": "exchange_person",
-                            "placeholder": {"tag": "plain_text", "content": "Select exchange person"},
-                            "options": _select_options(exchange_names),
-                            "required": True,
-                        },
-                        {
-                            "tag": "div",
-                            "text": {"tag": "plain_text", "content": "Shift"},
-                        },
-                        {
-                            "tag": "select_static",
-                            "name": "shift_type",
-                            "placeholder": {"tag": "plain_text", "content": "N or D"},
-                            "options": _select_options(od.OSE_SHIFT_TYPES),
-                            "required": True,
-                        },
-                        {
-                            "tag": "div",
-                            "text": {"tag": "plain_text", "content": "Original date"},
-                        },
-                        {
-                            "tag": "date_picker",
-                            "name": "original_date",
-                            "placeholder": {"tag": "plain_text", "content": "Pick original date"},
-                            "required": True,
-                        },
-                        {
-                            "tag": "div",
-                            "text": {"tag": "plain_text", "content": "Exchange date"},
-                        },
-                        {
-                            "tag": "date_picker",
-                            "name": "exchange_date",
-                            "placeholder": {"tag": "plain_text", "content": "Pick exchange date"},
-                            "required": True,
-                        },
-                        {
-                            "tag": "input",
-                            "name": "reason",
-                            "input_type": "multiline_text",
-                            "rows": 4,
-                            "auto_resize": True,
-                            "width": "fill",
-                            "label": {"tag": "plain_text", "content": "Reason"},
-                            "label_position": "top",
-                            "placeholder": {"tag": "plain_text", "content": "Reason for offset"},
-                            "required": True,
-                            "max_length": 1000,
-                        },
-                        {
-                            "tag": "button",
-                            "name": "submit_ose_offset",
-                            "text": {"tag": "plain_text", "content": "Submit"},
-                            "type": "primary",
-                            "form_action_type": "submit",
-                            "behaviors": [
-                                {
-                                    "type": "callback",
-                                    "value": _callback_payload(
-                                        _OFFSET_SUBMIT_KEY,
-                                        owner_open_id=owner_open_id,
-                                        request_person=request_person,
-                                    ),
-                                }
-                            ],
-                        },
-                    ],
+                    "elements": form_elements,
                 },
             ]
         },
@@ -554,30 +613,19 @@ def build_offset_submit_done_card(
     }
 
 
-def build_leave_form_card(*, owner_open_id: str, request_person: str) -> dict[str, Any]:
-    return {
-        "schema": "2.0",
-        "config": {"update_multi": True, "width_mode": "fill"},
-        "header": {
-            "template": "blue",
-            "title": {"tag": "plain_text", "content": "OSE leave request"},
-        },
-        "body": {
-            "elements": [
-                {
-                    "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": (
-                            f"**Name:** {request_person}\n"
-                            "Fill the fields below, then tap **Submit**."
-                        ),
-                    },
-                },
-                {
-                    "tag": "form",
-                    "name": "ose_leave_form",
-                    "elements": [
+def build_leave_form_card(
+    *, owner_open_id: str, request_person: str, pick_roster_name: bool = False
+) -> dict[str, Any]:
+    intro = (
+        "Select your roster name, then fill the fields below and tap **Submit**."
+        if pick_roster_name
+        else (f"**Name:** {request_person}\n" "Fill the fields below, then tap **Submit**.")
+    )
+    form_elements: list[dict[str, Any]] = []
+    if pick_roster_name:
+        form_elements.extend(_roster_name_picker_elements())
+    form_elements.extend(
+        [
                         {
                             "tag": "div",
                             "text": {"tag": "plain_text", "content": "Leave type"},
@@ -635,11 +683,30 @@ def build_leave_form_card(*, owner_open_id: str, request_person: str) -> dict[st
                                         _LEAVE_SUBMIT_KEY,
                                         owner_open_id=owner_open_id,
                                         request_person=request_person,
+                                        pick_roster_name=pick_roster_name,
                                     ),
                                 }
                             ],
                         },
-                    ],
+        ]
+    )
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": "OSE leave request"},
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": intro},
+                },
+                {
+                    "tag": "form",
+                    "name": "ose_leave_form",
+                    "elements": form_elements,
                 },
             ]
         },
@@ -1237,7 +1304,10 @@ def handle_mention(
         return True
     try:
         token = get_token_func()
-        request_person = resolve_request_person(oid, token)
+        request_person = try_resolve_request_person(oid, token)
+        pick_roster = request_person is None
+        if pick_roster:
+            request_person = ""
     except Exception as e:
         send_message(chat_id, f"❌ {e}")
         return True
@@ -1247,7 +1317,11 @@ def handle_mention(
                 owner_open_id=oid,
                 group_chat_id=chat_id,
                 chat_type=chat_type,
-                card=build_offset_form_card(owner_open_id=oid, request_person=request_person),
+                card=build_offset_form_card(
+                    owner_open_id=oid,
+                    request_person=request_person,
+                    pick_roster_name=pick_roster,
+                ),
                 send_message=send_message,
                 token=token,
             )
@@ -1256,7 +1330,11 @@ def handle_mention(
                 owner_open_id=oid,
                 group_chat_id=chat_id,
                 chat_type=chat_type,
-                card=build_leave_form_card(owner_open_id=oid, request_person=request_person),
+                card=build_leave_form_card(
+                    owner_open_id=oid,
+                    request_person=request_person,
+                    pick_roster_name=pick_roster,
+                ),
                 send_message=send_message,
                 token=token,
             )
@@ -1348,14 +1426,38 @@ def _parse_date_iso(raw: Optional[str]) -> date:
         raise ValueError(f"invalid date {raw!r} (use YYYY-MM-DD)") from e
 
 
-def _assert_owner(parsed: dict[str, Any], sender_open_id: str) -> tuple[str, str]:
-    owner = str(parsed.get("owner") or "").strip()
+def _resolve_submit_request_person(
+    parsed: dict[str, Any],
+    *,
+    action: dict[str, Any],
+    event_obj: Any,
+) -> str:
     request_person = str(parsed.get("request_person") or "").strip()
+    if str(parsed.get("pick_roster") or "") == "1":
+        picked = _get_form_field(action, parsed, event_obj, "request_person")
+        if not picked:
+            raise ValueError("Please select your roster name from the OSE list.")
+        request_person = od._title_name(picked)
+        if not _is_roster_name(request_person):
+            raise ValueError(f"{picked!r} is not on the OSE roster.")
+    if not request_person:
+        raise ValueError("Request person is missing from the form session.")
+    return request_person
+
+
+def _assert_owner(
+    parsed: dict[str, Any],
+    sender_open_id: str,
+    *,
+    action: Optional[dict[str, Any]] = None,
+    event_obj: Any = None,
+) -> tuple[str, str]:
+    owner = str(parsed.get("owner") or "").strip()
     sender = (sender_open_id or "").strip()
     if not owner or owner != sender:
         raise ValueError("This form can only be submitted by the user who opened it.")
-    if not request_person:
-        raise ValueError("Request person is missing from the form session.")
+    act = action if isinstance(action, dict) else {}
+    request_person = _resolve_submit_request_person(parsed, action=act, event_obj=event_obj)
     return owner, request_person
 
 
@@ -2690,8 +2792,10 @@ def handle_card_callback(
         return False
     cid = (chat_id or "").strip()
     try:
-        owner, request_person = _assert_owner(parsed, sender_open_id)
         action = event_obj.get("action") if isinstance(event_obj.get("action"), dict) else {}
+        owner, request_person = _assert_owner(
+            parsed, sender_open_id, action=action, event_obj=event_obj
+        )
         reason = _get_form_field(action, parsed, event_obj, "reason")
         if not reason:
             if cid:

@@ -1107,6 +1107,28 @@ def _lookup_person_open_id(name: str, idx: dict[str, str]) -> str:
     return ""
 
 
+def lookup_roster_name_for_open_id(open_id: str, token: str) -> str:
+    """
+  Map Lark ``open_id`` → OSE roster name using leave/offset Bitable person fields
+  (built from duty roster records), not the user's Lark display name.
+  """
+    oid = (open_id or "").strip()
+    if not oid:
+        return ""
+    idx = _get_ose_person_open_id_index(token)
+    for roster in OSE_LEAVE_FORM_NAMES:
+        rnm = _title_name(roster)
+        if idx.get(rnm) == oid or idx.get(_name_key(rnm)) == oid:
+            return rnm
+    for key, pid in idx.items():
+        if pid != oid or key.startswith("ou_"):
+            continue
+        for roster in OSE_LEAVE_FORM_NAMES:
+            if _names_same_person(roster, key):
+                return _title_name(roster)
+    return ""
+
+
 def _person_field_value(name: str, *, token: str) -> list[dict[str, str]]:
     nm = _title_name(name)
     open_id = _lookup_person_open_id(nm, _get_ose_person_open_id_index(token))
