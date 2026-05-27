@@ -1055,11 +1055,16 @@ _BOUNCE_SUBJECT_MARKERS = (
     "failure notice",
     "returned mail",
     "verify address failed",
+    "failed to send",
     "无法递送",
     "投递失败",
     "未送达",
     "退信",
     "邮件发送失败",
+)
+
+_JENKINS_REPLY_BODY_PEEK = min(
+    8000, max(800, int(os.getenv("JENKINS_REPLY_BODY_PEEK", "").strip() or "3500"))
 )
 
 
@@ -1081,12 +1086,22 @@ def _should_skip_jenkins_reply_thread(*, from_hdr: str, subject: str) -> bool:
     for marker in _BOUNCE_SUBJECT_MARKERS:
         if marker in subj_cf:
             return True
-    # Prior bot ``Re:`` from our mailbox — keep original ``{title}`` (non-Re) thread.
-    if re.match(r"^re:\s", (subject or "").strip(), re.I):
-        own = _own_smtp_identities()
-        for _name, addr in getaddresses([from_hdr or ""]):
-            if _normalize_email_address(addr) in own:
-                return True
+    return False
+
+
+def _body_is_failed_send_notification(body: str) -> bool:
+    """
+    Lark / mailer-daemon body: ``Failed to send "Re: …" to the following recipients:``.
+    """
+    b = (body or "").casefold()
+    if not b:
+        return False
+    if "failed to send" in b and "following recipients" in b:
+        return True
+    if "failed to send" in b and "invalid recipient address" in b:
+        return True
+    if "verify address failed" in b and "user not found" in b:
+        return True
     return False
 
 
@@ -1098,14 +1113,29 @@ def _should_skip_jenkins_reply_message(msg: email.message.Message) -> bool:
     auto = (_decode_mime_header(msg.get("Auto-Submitted")) or "").casefold()
     if auto and auto != "no":
         return True
-    # Bot test body marker (full fetch only)
     try:
-        body = _message_plain_text_snippet(msg, limit=400).casefold()
+        body = _message_plain_text_snippet(msg, limit=_JENKINS_REPLY_BODY_PEEK).casefold()
     except Exception:
         body = ""
+    if _body_is_failed_send_notification(body):
+        return True
     if "this is just the bot auto replied email" in body:
         return True
+    own = _own_smtp_identities()
+    for _name, addr in getaddresses([from_hdr or ""]):
+        if _normalize_email_address(addr) in own and re.match(
+            r"^re:\s", (subj or "").strip(), re.I
+        ):
+            return True
     return False
+
+
+def _jenkins_message_has_reply_recipients(msg: email.message.Message) -> bool:
+    try:
+        _jenkins_reply_all_recipients(msg)
+        return True
+    except ValueError:
+        return False
 
 
 def _message_plain_text_snippet(msg: email.message.Message, *, limit: int = 400) -> str:
@@ -1271,6 +1301,34 @@ def _fetch_header_peek_for_uid(
     return ts, subj, from_raw
 
 
+def _fetch_body_peek_for_uid(mail: imaplib.IMAP4, uid: bytes) -> str:
+    """First N bytes of plain text (for Lark ``Failed to send …`` detection)."""
+    lim = _JENKINS_REPLY_BODY_PEEK
+    try:
+        typ, data = mail.uid("fetch", uid, f"(BODY.PEEK[TEXT]<0.{lim}>)")
+    except Exception:
+        return ""
+    if typ != "OK" or not data:
+        return ""
+    raw = b""
+    for part in data:
+        if isinstance(part, tuple) and len(part) >= 2 and part[1]:
+            raw += part[1]
+    if not raw:
+        return ""
+    return raw.decode("utf-8", errors="replace")
+
+
+def _fetch_uid_message(mail: imaplib.IMAP4, uid: bytes) -> email.message.Message | None:
+    typ, data = mail.uid("fetch", uid, "(RFC822)")
+    if typ != "OK" or not data or not data[0]:
+        return None
+    raw_bytes = data[0][1] if isinstance(data[0], tuple) else None
+    if not raw_bytes:
+        return None
+    return email.message_from_bytes(raw_bytes)
+
+
 def _pick_reply_uid_among_candidates(
     mail: imaplib.IMAP4,
     uids: list[bytes],
@@ -1279,7 +1337,8 @@ def _pick_reply_uid_among_candidates(
     needle: str,
 ) -> bytes | None:
     """
-    Newest UID whose subject matches ``needle``, skipping bounces and prior bot ``Re:`` mail.
+    Newest→older: first subject match that is not a bounce / ``Failed to send …`` notice
+    and has usable ``To``/``Cc`` for Reply-All.
     """
     if not uids:
         return None
@@ -1295,24 +1354,38 @@ def _pick_reply_uid_among_candidates(
     ranked.sort(key=lambda row: row[0], reverse=True)
     skipped = 0
     for ts, uid, subj, from_hdr in ranked:
+        reason = ""
         if _should_skip_jenkins_reply_thread(from_hdr=from_hdr, subject=subj):
-            skipped += 1
-            print(
-                f"[maint-mail] jenkins reply: skip uid={uid!r} folder={folder_label!r} "
-                f"from={from_hdr!r} subj={subj!r}",
-                flush=True,
-            )
-            continue
+            reason = "bounce/daemon (headers)"
+        else:
+            body_peek = _fetch_body_peek_for_uid(mail, uid)
+            if _body_is_failed_send_notification(body_peek):
+                reason = 'Failed to send "Re: …" delivery notice (body)'
+            else:
+                msg = _fetch_uid_message(mail, uid)
+                if msg is None:
+                    reason = "RFC822 fetch failed"
+                elif _should_skip_jenkins_reply_message(msg):
+                    reason = "bounce/bot auto-reply (full message)"
+                elif not _jenkins_message_has_reply_recipients(msg):
+                    reason = "no To/Cc recipients on message"
+                else:
+                    print(
+                        f"[maint-mail] jenkins reply: use uid={uid!r} folder={folder_label!r} "
+                        f"needle={needle!r} subj={subj!r} (skipped {skipped} unusable msg(s), "
+                        f"scanned {len(capped)} uid(s))",
+                        flush=True,
+                    )
+                    return uid
+        skipped += 1
         print(
-            f"[maint-mail] jenkins reply: use uid={uid!r} folder={folder_label!r} "
-            f"needle={needle!r} (skipped {skipped} bounce/bot msg(s), "
-            f"scanned {len(capped)} uid(s))",
+            f"[maint-mail] jenkins reply: skip uid={uid!r} folder={folder_label!r} "
+            f"reason={reason!r} from={from_hdr!r} subj={subj!r}",
             flush=True,
         )
-        return uid
     print(
-        f"[maint-mail] jenkins reply: all {len(ranked)} subject match(es) skipped "
-        f"(bounces/bot) folder={folder_label!r} needle={needle!r}",
+        f"[maint-mail] jenkins reply: all {len(ranked)} subject match(es) unusable "
+        f"(bounces / failed-send / no recipients) folder={folder_label!r} needle={needle!r}",
         flush=True,
     )
     return None
@@ -1449,8 +1522,9 @@ def reply_jenkins_update_done_email(
     ``completions`` is a list of ``(environment, time)`` pairs. Multiple pairs are
     combined into one email when several segments share the same subject.
 
-    Finds the **newest normal** matching message in ``JENKINS_REPLY_IMAP_FOLDERS``
-    (skips mailer-daemon bounces and prior bot ``Re:`` replies), then **Reply-All**
+    Finds the **newest usable** matching message in ``JENKINS_REPLY_IMAP_FOLDERS``
+    (walks backward skipping mailer-daemon / ``Failed to send …`` notices and bot test
+    replies until a message has ``To``/``Cc``), then **Reply-All**
     to its ``To`` / ``Cc`` (plus ``From`` in ``To``). Does **not** send if no
     matching mail exists.
 
@@ -1497,8 +1571,15 @@ def reply_jenkins_update_done_email(
     orig, orig_folder = orig_found
     if _should_skip_jenkins_reply_message(orig):
         raise EmailThreadNotFoundError(
-            f"Email not found — newest match for {title!r} was a bounce or bot reply; "
+            f"Email not found — newest match for {title!r} was a bounce, "
+            f"``Failed to send`` notice, or bot test reply; "
             f"no normal thread in folder(s): {', '.join(JENKINS_REPLY_IMAP_FOLDERS)}."
+        )
+    if not _jenkins_message_has_reply_recipients(orig):
+        raise EmailThreadNotFoundError(
+            f"Email not found — messages matching {title!r} have no Reply-All recipients "
+            f"(only bounces or invalid To/Cc). Check folder(s): "
+            f"{', '.join(JENKINS_REPLY_IMAP_FOLDERS)}."
         )
     to_addrs, cc_addrs, recipients = _jenkins_reply_all_recipients(orig)
     subj = _reply_subject(_decode_msg_subject(orig))
