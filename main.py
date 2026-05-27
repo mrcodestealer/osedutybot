@@ -3215,7 +3215,7 @@ def lark_webhook():
             if resp.get("code") != 0:
                 send_message(chat_id, payload.get("text") or "❌ Wholeave card failed.")
         else:
-            send_message(chat_id, payload.get("text") or "❌ Could not load leave sheet.")
+                send_message(chat_id, payload.get("text") or "❌ Could not load OSE leave Bitable.")
         return _lark_im_done()
     elif clean_text.lower() == '/holiday':
         reply = format_holidays()

@@ -1787,44 +1787,52 @@ def build_leave_today_lark_card(
     }
 
 
-_WHOLEAVE_SHEET_SOURCE = "Leave sheet (Leave2026 / OSE duty sheet)"
+_WHOLEAVE_BITABLE_SOURCE = "OSE leave Bitable (approved records)"
 
 
 def get_wholeave_today_payload(ref_date: Optional[date] = None) -> dict[str, Any]:
-    """Text + Lark card for who is on leave today — from leave spreadsheet only."""
+    """
+    Text + Lark card for who is on leave today — from the OSE leave Bitable
+    (``OSE_BASE_TOKEN`` / ``OSE_LEAVE_TABLE_ID``, same as /ose duty leave list).
+    """
     on_date = ref_date or date.today()
     try:
         token = get_tenant_access_token()
-        sheet_days, warnings = fetch_leave_rows_from_spreadsheets(
-            token, on_date.year, on_date.month
+        rows = fetch_approved_leaves_for_month(
+            token,
+            on_date.year,
+            on_date.month,
+            app_token=_OSE_BITABLE_BASE,
+            table_id=_OSE_BITABLE_LEAVE_TABLE,
+            require_approved=True,
         )
-        rows = _consolidate_leave_rows(sheet_days)
         today_rows = rows_on_leave_date(rows, on_date)
-        if not rows and not warnings:
+        warnings: list[str] = []
+        if not rows:
             warnings.append(
-                f"No leave markers found on the sheet for {on_date.year}-{on_date.month:02d}."
+                f"No approved leave rows in OSE Bitable for {on_date.year}-{on_date.month:02d}."
             )
         return {
             "text": format_leave_today_text(
-                on_date, today_rows, source=_WHOLEAVE_SHEET_SOURCE
+                on_date, today_rows, source=_WHOLEAVE_BITABLE_SOURCE
             ),
             "lark_card": build_leave_today_lark_card(
                 on_date,
                 today_rows,
                 warnings,
-                source=_WHOLEAVE_SHEET_SOURCE,
+                source=_WHOLEAVE_BITABLE_SOURCE,
             ),
             "count": len(today_rows),
             "date": on_date.isoformat(),
-            "source": "sheet",
+            "source": "bitable",
         }
     except Exception as exc:
         return {
-            "text": f"❌ Could not load leave sheet: {exc}",
+            "text": f"❌ Could not load OSE leave Bitable: {exc}",
             "lark_card": None,
             "count": 0,
             "date": on_date.isoformat(),
-            "source": "sheet",
+            "source": "bitable",
         }
 
 

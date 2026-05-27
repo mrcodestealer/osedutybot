@@ -44,8 +44,8 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
                 ("/leave", "@bot — who is on leave today (HRMS calendar)", "@机器人 — 今日谁请假（HRMS 日历）"),
                 (
                     "/wholeave",
-                    "@bot — who is on leave today (leave sheet)",
-                    "@机器人 — 今日谁请假（请假表）",
+                    "@bot — who is on leave today (OSE leave Bitable)",
+                    "@机器人 — 今日谁请假（OSE 请假多维表）",
                 ),
                 ("/restart", "Restart bot process", "重启机器人"),
             ],
