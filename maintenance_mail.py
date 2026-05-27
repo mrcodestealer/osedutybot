@@ -2038,7 +2038,8 @@ def reply_jenkins_update_done_email(
         raise ValueError("completions required")
     blocks = [f"Done {env.strip()}\nRemarks : {when.strip()}" for env, when in completions]
     body = (
-        "\n\n".join(blocks)
+        "Hi team,\n\n"
+        + "\n\n".join(blocks)
         + "\nTHIS IS JUST THE BOT AUTO REPLIED EMAIL. IT IS STILL TESTING KINDLY IGNORE...\n\n"
         "Best Regards,\n"
         "JC\n"
