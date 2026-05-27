@@ -26,7 +26,8 @@ Usage:
     ./leave.py --calendar-wfh 2026-05    # Who is WFH this month (console)
     ./leave.py --sync-wfh-month         # Sync WFH → tblWBI5BxrtFiJul
     ./leave.py --resync-wfh-month 2026-05
-    ./leave.py --leave-today       # Print today's leave (console)
+    ./leave.py --leave-today       # Print today's leave (console, HRMS calendar)
+    ./leave.py --wholeave-today    # Print today's leave from Leave2026 sheet only
     ./leave.py --debug             # Show raw API responses
 """
 
@@ -1698,10 +1699,12 @@ def rows_on_leave_date(rows: list[dict[str, Any]], on_date: date) -> list[dict[s
 def format_leave_today_text(
     on_date: date,
     today_rows: list[dict[str, Any]],
+    *,
+    source_label: str = "HRMS Leave Calendar",
 ) -> str:
     header = f"🏖️ On leave — {on_date.strftime('%A, %d %b %Y')}"
     if not today_rows:
-        return f"{header}\n\n✅ No one on leave today (HRMS Leave Calendar)."
+        return f"{header}\n\n✅ No one on leave today ({source_label})."
     lines = [header, ""]
     cur_type = ""
     for row in today_rows:
@@ -1723,14 +1726,16 @@ def build_leave_today_lark_card(
     on_date: date,
     today_rows: list[dict[str, Any]],
     warnings: Optional[list[str]] = None,
+    *,
+    source_label: str = "HRMS Leave Calendar",
 ) -> dict[str, Any]:
-    """Interactive card for ``/leave`` — who is on leave today."""
+    """Interactive card for ``/leave`` or ``/wholeave`` — who is on leave today."""
     date_label = on_date.strftime("%A · %d %b %Y")
     if not today_rows:
         body_md = (
             f"📅 **{date_label}**\n\n"
             "✅ **All hands on deck!**\n\n"
-            "No one is on leave today according to the **HRMS Leave Calendar**."
+            f"No one is on leave today according to the **{source_label}**."
         )
         header_title = "✅ No Leave Today"
         template = "green"
@@ -1757,6 +1762,7 @@ def build_leave_today_lark_card(
                     span = f"{_format_leave_day(st)} → {_format_leave_day(ed)}"
                 parts.append(f"• **{row['name']}** — {span}")
         parts.append(f"\n---\n👥 **{len(today_rows)}** colleague(s) on leave")
+        parts.append(f"\n📎 Source: **{source_label}**")
         body_md = "\n".join(parts)
         header_title = f"🏖️ On Leave Today ({len(today_rows)})"
         template = "orange"
@@ -1784,7 +1790,7 @@ def build_leave_today_lark_card(
 
 
 def get_leave_today_payload(ref_date: Optional[date] = None) -> dict[str, Any]:
-    """Text + Lark card for who is on leave on ``ref_date`` (default: today)."""
+    """Text + Lark card for who is on leave on ``ref_date`` (default: today, HRMS calendar)."""
     on_date = ref_date or date.today()
     try:
         token = get_tenant_access_token()
@@ -1802,6 +1808,39 @@ def get_leave_today_payload(ref_date: Optional[date] = None) -> dict[str, Any]:
     except Exception as exc:
         return {
             "text": f"❌ Could not load leave data: {exc}",
+            "lark_card": None,
+            "count": 0,
+            "date": on_date.isoformat(),
+        }
+
+
+def get_wholeave_today_payload(ref_date: Optional[date] = None) -> dict[str, Any]:
+    """Text + Lark card for who is on leave today — from Leave2026 sheet only (``/wholeave``)."""
+    on_date = ref_date or date.today()
+    source_label = "Leave sheet (Leave2026)"
+    try:
+        token = get_tenant_access_token()
+        sheet_rows_raw, warnings = fetch_leave_rows_from_spreadsheets(
+            token, on_date.year, on_date.month
+        )
+        rows = _consolidate_leave_rows(sheet_rows_raw)
+        today_rows = rows_on_leave_date(rows, on_date)
+        return {
+            "text": format_leave_today_text(
+                on_date, today_rows, source_label=source_label
+            ),
+            "lark_card": build_leave_today_lark_card(
+                on_date,
+                today_rows,
+                warnings,
+                source_label=source_label,
+            ),
+            "count": len(today_rows),
+            "date": on_date.isoformat(),
+        }
+    except Exception as exc:
+        return {
+            "text": f"❌ Could not load leave sheet: {exc}",
             "lark_card": None,
             "count": 0,
             "date": on_date.isoformat(),
@@ -1884,6 +1923,10 @@ def main():
             output_csv = True
         elif arg == "--leave-today":
             payload = get_leave_today_payload()
+            print(payload.get("text") or "")
+            return
+        elif arg == "--wholeave-today":
+            payload = get_wholeave_today_payload()
             print(payload.get("text") or "")
             return
         elif arg == "--calendar":

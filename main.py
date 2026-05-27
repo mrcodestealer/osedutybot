@@ -3187,6 +3187,21 @@ def lark_webhook():
     elif clean_text.lower() == '/date':
         today = get_today_date()
         reply = f"Today's date is {today}."
+    elif re.match(r"^/wholeave\b", clean_text, re.I):
+        try:
+            import leavewfh as _leavewfh
+        except ImportError:
+            import leave as _leavewfh  # type: ignore[no-redef]
+
+        payload = _leavewfh.get_wholeave_today_payload()
+        card = payload.get("lark_card")
+        if isinstance(card, dict):
+            resp = send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
+            if resp.get("code") != 0:
+                send_message(chat_id, payload.get("text") or "❌ Leave sheet card failed.")
+        else:
+            send_message(chat_id, payload.get("text") or "❌ Could not load leave sheet.")
+        return _lark_im_done()
     elif re.match(r"^/leave\b", clean_text, re.I):
         try:
             import leavewfh as _leavewfh
