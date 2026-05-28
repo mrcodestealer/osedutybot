@@ -1412,11 +1412,9 @@ def _leave_row_key(row: dict[str, Any]) -> tuple[str, str, str, str]:
 def _existing_synced_rows_by_key(
     records: list[dict[str, Any]],
 ) -> dict[tuple[str, str, str, str], str]:
-    """Map leave row key → record_id for auto-synced Bitable rows."""
+    """Map leave row key → record_id for rows already in the tracking Bitable."""
     out: dict[tuple[str, str, str, str], str] = {}
     for rec in records:
-        if not _record_reason_tagged(rec):
-            continue
         parsed = _parse_leave_row(rec, require_approved=False)
         rid = str(rec.get("record_id") or "").strip()
         if not parsed or not rid:
@@ -1491,19 +1489,54 @@ def _build_tracking_fields(
     *,
     open_map: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
-    del token, open_map  # Name column is plain text; no open_id required.
+    del open_map  # Name column is plain text; no open_id required.
     name = str(row.get("name") or "").strip()
-    detail = (row.get("reason") or "").strip()
-    tagged_reason = f"{SYNC_REASON_TAG} {name} | {detail}".strip()
     st: date = row["start"]
     ed: date = row["end"]
-    return {
+    fields: dict[str, Any] = {
         "Name": name,
         "Leave Type": row["leave_type"],
         "Start Date": _bitable_date_ms(st),
         "End Date": _bitable_date_ms(ed),
-        "Reason": tagged_reason,
     }
+    # Tracking table may not have Reason (sync tag lives in state file only).
+    allowed = _leave_tracking_field_names(token)
+    if allowed is not None:
+        fields = {k: v for k, v in fields.items() if k in allowed}
+    return fields
+
+
+_LEAVE_TRACKING_FIELD_NAMES: Optional[set[str]] = None
+
+
+def _leave_tracking_field_names(token: str) -> Optional[set[str]]:
+    global _LEAVE_TRACKING_FIELD_NAMES
+    if _LEAVE_TRACKING_FIELD_NAMES is not None:
+        return _LEAVE_TRACKING_FIELD_NAMES
+    if not TRACK_BASE_ID or not TRACK_TABLE_ID:
+        return None
+    try:
+        url = (
+            "https://open.larksuite.com/open-apis/bitable/v1/apps/"
+            f"{TRACK_BASE_ID}/tables/{TRACK_TABLE_ID}/fields"
+        )
+        res = requests.get(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            params={"page_size": 200},
+            timeout=30,
+        ).json()
+        if res.get("code") != 0:
+            return None
+        items = (res.get("data") or {}).get("items") or []
+        _LEAVE_TRACKING_FIELD_NAMES = {
+            str(it.get("field_name") or "").strip()
+            for it in items
+            if str(it.get("field_name") or "").strip()
+        }
+        return _LEAVE_TRACKING_FIELD_NAMES
+    except Exception:
+        return None
 
 
 def sync_leave_calendar_to_bitable(
@@ -1517,10 +1550,9 @@ def sync_leave_calendar_to_bitable(
     Sync leave for ``year``/``month`` into the OSE tracking Bitable (tblmHJHe12BCJRD8).
 
     - **New month** (vs last sync): delete every row in the table, insert this month only.
-    - **Same month**: keep existing rows; **add** new leave not already present; remove auto-synced
-      rows that disappeared from Lark (cancelled leave). Manual rows (no sync tag) are kept.
-    - **force_resync** (``--resync-month``): delete all auto-synced rows for this month and rewrite
-      (use after changing the Name column to Text).
+    - **Same month**: keep existing rows; **add** new leave not already present; remove rows
+      whose key no longer appears in HRMS (cancelled leave).
+    - **force_resync** (``--resync-month``): delete all existing rows and rewrite from HRMS.
     """
     ref = ref_date or date.today()
     year = int(year if year is not None else ref.year)
@@ -1577,8 +1609,6 @@ def sync_leave_calendar_to_bitable(
         rows_to_add = list(source_rows)
     elif force_resync:
         for rec in existing:
-            if not _record_reason_tagged(rec):
-                continue
             rid = str(rec.get("record_id") or "").strip()
             if not rid:
                 continue
@@ -1617,12 +1647,20 @@ def sync_leave_calendar_to_bitable(
         except Exception as exc:
             create_errors.append(f"{row.get('name')}: {exc}")
 
+    existing_after = get_all_records(token, TRACK_BASE_ID, TRACK_TABLE_ID)
+    synced_ids: list[str] = []
+    for rec in existing_after:
+        parsed = _parse_leave_row(rec, require_approved=False)
+        rid = str(rec.get("record_id") or "").strip()
+        if parsed and rid and _leave_row_key(parsed) in source_by_key:
+            synced_ids.append(rid)
+
     _save_sync_state(
         {
             "year": year,
             "month": month,
             "synced_at": datetime.now().isoformat(timespec="seconds"),
-            "synced_record_ids": created_ids,
+            "synced_record_ids": synced_ids,
             "month_changed": month_changed,
         }
     )
