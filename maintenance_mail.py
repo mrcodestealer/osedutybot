@@ -1962,7 +1962,7 @@ CHECKEMAIL_SCAN_DAYS = max(
     7,
     int(
         os.getenv("MAINTENANCE_MAIL_CHECKEMAIL_SCAN_DAYS", "").strip()
-        or str(CHECKEEMAIL_IMAP_DAYS)
+        or str(CHECKEMAIL_IMAP_DAYS)
     ),
 )
 CHECKEMAIL_SCAN_CAP = max(
