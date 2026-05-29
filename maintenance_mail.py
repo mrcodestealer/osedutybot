@@ -2012,7 +2012,7 @@ def _checkemail_pool_cap(folder: str) -> int:
     if cf == "sent":
         return max(CHECKEEMAIL_SUBJECT_POOL, 360)
     if cf in ("inbox",):
-        return min(CHECKEEMAIL_SUBJECT_POOL, 140)
+        return CHECKEEMAIL_SUBJECT_POOL
     return CHECKEEMAIL_SUBJECT_POOL
 
 
@@ -2513,8 +2513,8 @@ def _checkemail_search_folders() -> list[str]:
 
 
 def _checkemail_primary_folders() -> list[str]:
-    """Fast pass — Sent + OSE Pending only."""
-    return ["Sent", "OSE Pending"]
+    """Fast pass — INBOX first (Evolution originals), then om@ forwards."""
+    return ["INBOX", "OSE Pending", "Sent"]
 
 
 def _schedule_message_by_ticket_scan(
@@ -2538,7 +2538,7 @@ def _schedule_message_by_ticket_scan(
         resolved = _resolve_imap_folder_name(mail, folder)
         if not _select_mail_folder(mail, resolved, readonly=True):
             continue
-        uids = _uids_for_ticket_schedule_lookup(mail, tid, user_title=needle)
+        uids = _uids_for_ticket_schedule_lookup(mail, tid, user_title=tid)
         if not uids:
             continue
         ordered = sorted({_uid_as_bytes(u) for u in uids}, key=lambda x: int(x))
@@ -2803,6 +2803,30 @@ def find_all_maintenance_messages_by_title(
                             cap=max(CHECKEMAIL_SCAN_CAP, 250),
                             max_hits=40,
                         )
+                    if not uids:
+                        raw = _uids_by_ticket_imap_search(mail, ticket_id)
+                        if raw and len(raw) <= 64:
+                            uids = raw
+                        elif raw:
+                            filtered: list[bytes] = []
+                            chunk = max(5, _JENKINS_REPLY_HEADER_BATCH)
+                            for off in range(0, min(len(raw), 240), chunk):
+                                part = raw[off : off + chunk]
+                                headers_map = _imap_uid_fetch_headers_batch(
+                                    mail, part
+                                )
+                                for uid in part:
+                                    ub = _uid_as_bytes(uid)
+                                    h = headers_map.get(ub) or {}
+                                    subj = str(h.get("subj") or "")
+                                    if _maint_mod.tickets_match(
+                                        _maint_mod.extract_ticket_card_title(subj),
+                                        ticket_id,
+                                    ):
+                                        filtered.append(ub)
+                                if len(filtered) >= 40:
+                                    break
+                            uids = filtered
                 else:
                     uids = _uids_by_checkemail_subject_filter(
                         mail, user_title, folder=folder, max_hits=40
