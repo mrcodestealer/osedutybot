@@ -456,15 +456,19 @@ def subjects_match_for_search(subject: str, needle: str) -> bool:
     True when ``needle`` matches ``subject`` (full title, ticket id, or key tokens).
 
     Handles ``/ /`` vs ``/`` and extra spaces in Service Desk subjects.
+    When ``needle`` is ticket-only (e.g. ``SD-7066787``), the ticket must appear
+    in the **subject** (not body TEXT hits).
     """
     subj_n = normalize_subject_for_search(subject)
     needle_n = normalize_subject_for_search(needle)
     if not needle_n:
         return False
-    if needle_n in subj_n:
-        return True
     n_tid = extract_ticket_card_title(needle) or ""
     s_tid = extract_ticket_card_title(subject) or ""
+    if n_tid and needle_n == normalize_subject_for_search(n_tid):
+        return bool(s_tid and (_ticket_match_keys(n_tid) & _ticket_match_keys(s_tid)))
+    if needle_n in subj_n:
+        return True
     if n_tid and s_tid and (_ticket_match_keys(n_tid) & _ticket_match_keys(s_tid)):
         return True
     tokens = [
@@ -475,6 +479,13 @@ def subjects_match_for_search(subject: str, needle: str) -> bool:
     if len(tokens) >= 2 and all(tok in subj_n for tok in tokens[:8]):
         return True
     return False
+
+
+def tickets_match(a: str | None, b: str | None) -> bool:
+    """``SD-7066787`` matches ``TINC-7066787`` and vice versa."""
+    if not (a or "").strip() or not (b or "").strip():
+        return False
+    return bool(_ticket_match_keys(a) & _ticket_match_keys(b))
 
 
 def _ticket_match_keys(ticket_id: str) -> set[str]:

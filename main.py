@@ -3658,7 +3658,8 @@ def lark_webhook():
                 "Example:\n"
                 "`/checkemail SD-7066787`\n"
                 "`/checkemail [Service Desk] Equipment maintenance / 01/Jun/26 … (SD-7066787)`\n\n"
-                "Finds the newest matching mail in om@ IMAP and shows parsed fields only — **no email sent**.",
+                "Finds mail in om@ IMAP (prefers **Evolution original**, not `Re:`/`Fw:`). "
+                "Parsed fields only — **no email sent**.",
             )
             return _lark_im_done()
         try:
