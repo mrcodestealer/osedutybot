@@ -1958,10 +1958,23 @@ CHECKEMAIL_IMAP_DAYS = max(
     7,
     int(os.getenv("MAINTENANCE_MAIL_CHECKEMAIL_DAYS", "").strip() or "45"),
 )
+CHECKEMAIL_SCAN_DAYS = max(
+    3,
+    int(os.getenv("MAINTENANCE_MAIL_CHECKEMAIL_SCAN_DAYS", "").strip() or "14"),
+)
+CHECKEMAIL_SCAN_CAP = max(
+    40,
+    int(os.getenv("MAINTENANCE_MAIL_CHECKEMAIL_SCAN_CAP", "").strip() or "120"),
+)
 
 
 def _checkemail_imap_since() -> str:
     d = datetime.now(_local_tz()).date() - timedelta(days=CHECKEMAIL_IMAP_DAYS)
+    return d.strftime("%d-%b-%Y")
+
+
+def _checkemail_scan_since() -> str:
+    d = datetime.now(_local_tz()).date() - timedelta(days=CHECKEMAIL_SCAN_DAYS)
     return d.strftime("%d-%b-%Y")
 
 
@@ -2000,22 +2013,34 @@ def _score_maintenance_check_candidate(
 
 
 def _uids_by_ticket_subject_scan(
-    mail: imaplib.IMAP4, ticket_id: str, *, cap: int = 900
+    mail: imaplib.IMAP4, ticket_id: str, *, cap: int | None = None
 ) -> list[bytes]:
-    """Client-side scan — reliable when IMAP SUBJECT breaks on ``[Service Desk]``."""
-    since = _checkemail_imap_since()
+    """
+    Slow fallback — scan recent mail when SUBJECT search returns nothing.
+    Uses batched header fetch (not one UID per round-trip).
+    """
+    lim = cap if cap is not None else CHECKEMAIL_SCAN_CAP
+    since = _checkemail_scan_since()
     recent = _uid_search(mail, f"(SINCE {since})")
     if not recent:
         return []
-    take = recent[-cap:] if len(recent) > cap else recent
+    take = recent[-lim:] if len(recent) > lim else recent
+    pool = list(reversed(take))
     out: list[bytes] = []
-    for uid in reversed(take):
-        h = _fetch_reply_headers_single(mail, uid)
-        subj = str(h.get("subj") or "")
-        if _maint_mod.tickets_match(
-            _maint_mod.extract_ticket_card_title(subj), ticket_id
-        ):
-            out.append(_uid_as_bytes(uid))
+    chunk = max(5, _JENKINS_REPLY_HEADER_BATCH)
+    for off in range(0, len(pool), chunk):
+        part = pool[off : off + chunk]
+        headers_map = _imap_uid_fetch_headers_batch(mail, part)
+        for uid in part:
+            ub = _uid_as_bytes(uid)
+            h = headers_map.get(ub) or {}
+            subj = str(h.get("subj") or "")
+            if _maint_mod.tickets_match(
+                _maint_mod.extract_ticket_card_title(subj), ticket_id
+            ):
+                out.append(ub)
+        if len(out) >= 12:
+            break
     return out
 
 
@@ -2023,7 +2048,7 @@ def _uids_for_maintenance_check(
     mail: imaplib.IMAP4, needles: list[str], ticket_id: str
 ) -> list[bytes]:
     """
-    Collect UID candidates for ``/checkemail``.
+    Collect UID candidates for ``/checkemail`` (fast path first).
 
     Do **not** pass ``[Service Desk]…`` to IMAP SUBJECT — ``[`` starts CHARSET
     in SEARCH and returns nothing on Lark.
@@ -2040,17 +2065,20 @@ def _uids_for_maintenance_check(
 
     since = _checkemail_imap_since()
     if ticket_id:
-        _add_many(_uid_search(mail, f'(SINCE {since} SUBJECT "{ticket_id}")'))
-        _add_many(_uid_search(mail, f'(SINCE {since} TEXT "{ticket_id}")'))
-        _add_many(_uids_by_ticket_subject_scan(mail, ticket_id))
+        fast = _uid_search(mail, f'(SINCE {since} SUBJECT "{ticket_id}")')
+        _add_many(fast)
+        if ordered:
+            return ordered[-40:]
+        slow_text = _uid_search(mail, f'(SINCE {since} TEXT "{ticket_id}")')
+        _add_many(slow_text[-30:] if slow_text else None)
+        if ordered:
+            return ordered
+        return _uids_by_ticket_subject_scan(mail, ticket_id)
     for needle in needles:
-        if ticket_id and needle.upper() == ticket_id.upper():
-            continue
         if "[" in needle or "]" in needle:
             continue
         _add_many(_uid_search_subject_variants(mail, needle))
-        _add_many(_uid_search_jenkins_needle(mail, needle))
-    return ordered
+    return ordered[-40:]
 
 
 def _maintenance_search_needles(title: str) -> list[str]:
@@ -2098,6 +2126,7 @@ def find_maintenance_message_by_subject_title(
     best_folder = ""
     best_score = -10_000
     best_ts = datetime.min.replace(tzinfo=timezone.utc)
+    t0 = time.monotonic()
     try:
         for folder in folders:
             resolved = _resolve_imap_folder_name(mail, folder)
@@ -2106,20 +2135,37 @@ def find_maintenance_message_by_subject_title(
             folder_uids = _uids_for_maintenance_check(mail, needles, ticket_id)
             if not folder_uids:
                 continue
-            for uid in folder_uids[-400:]:
-                h = _fetch_reply_headers_single(mail, uid)
+            candidates = folder_uids[-40:]
+            headers_map = _imap_uid_fetch_headers_batch(mail, candidates)
+            for uid in candidates:
+                ub = _uid_as_bytes(uid)
+                h = headers_map.get(ub) or _fetch_reply_headers_single(mail, ub)
                 subj = str(h.get("subj") or "")
                 if not _maint_mod.matches_checkemail_query(subj, user_title):
                     continue
                 score = _score_maintenance_check_candidate(h, user_title)
-                ts = h["ts"]
+                ts = h.get("ts") or datetime.min.replace(tzinfo=timezone.utc)
                 if score > best_score or (score == best_score and ts >= best_ts):
                     best_score = score
-                    best_uid = _uid_as_bytes(uid)
+                    best_uid = ub
                     best_folder = folder
                     best_ts = ts
+            if best_score >= 200:
+                break
         if best_uid is None:
+            if MAIL_VERBOSE:
+                print(
+                    f"[maint-mail] checkemail: no match for {user_title!r} "
+                    f"({time.monotonic() - t0:.1f}s)",
+                    flush=True,
+                )
             return None
+        if MAIL_VERBOSE:
+            print(
+                f"[maint-mail] checkemail: found in {best_folder!r} "
+                f"score={best_score} ({time.monotonic() - t0:.1f}s)",
+                flush=True,
+            )
         msg = _fetch_uid_message(mail, best_uid)
         if msg is None:
             return None
