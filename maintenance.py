@@ -204,6 +204,34 @@ def gamelist_configured() -> bool:
     return bool(GAMELIST_SPREADSHEET_TOKEN and GAMELIST_SHEET_ID)
 
 
+def gamelist_launched_for_candidates(
+    candidates: list[str],
+    tenant_access_token: str | None,
+) -> tuple[bool, list[str]]:
+    """
+    Gamelist check for already-parsed table names.
+
+    Use when names come from ``extract_candidate_game_names`` (e.g. ``/checkemail``).
+    Passing ``"\\n".join(names)`` into :func:`gamelist_has_launched` fails because
+    bare names are not re-parseable without a schedule body block.
+    """
+    tok = (tenant_access_token or "").strip()
+    names = [str(x).strip() for x in (candidates or []) if str(x).strip()]
+    if not names or not gamelist_configured() or not tok:
+        return False, []
+    try:
+        grid = _fetch_sheet_values(tok, GAMELIST_SPREADSHEET_TOKEN, GAMELIST_SHEET_ID)
+    except Exception:
+        return False, []
+    if _find_header_row_and_cols(grid) is None:
+        return False, []
+    launched: list[str] = []
+    for g in names:
+        if _row_launched_for_game(grid, g, "") is True:
+            launched.append(g)
+    return (len(launched) > 0, launched)
+
+
 def gamelist_has_launched(
     email_text: str, tenant_access_token: str | None
 ) -> tuple[bool, list[str]]:
@@ -216,20 +244,10 @@ def gamelist_has_launched(
     sid = GAMELIST_SHEET_ID
     if not ss or not sid or not tok:
         return False, []
-    try:
-        grid = _fetch_sheet_values(tok, ss, sid)
-    except Exception:
-        return False, []
-    if _find_header_row_and_cols(grid) is None:
-        return False, []
     candidates = extract_candidate_game_names(email_text)
     if not candidates:
         return False, []
-    launched: list[str] = []
-    for g in candidates:
-        if _row_launched_for_game(grid, g, "") is True:
-            launched.append(g)
-    return (len(launched) > 0, launched)
+    return gamelist_launched_for_candidates(candidates, tok)
 
 
 def build_forward_done_title(
@@ -2611,7 +2629,7 @@ def _gather_checkemail_context(
     launched_tables: list[str] | None = None
     tok = (tenant_access_token or "").strip()
     if gamelist_configured() and tok and candidates:
-        _to_cp, launched_tables = gamelist_has_launched("\n".join(candidates), tok)
+        _to_cp, launched_tables = gamelist_launched_for_candidates(candidates, tok)
 
     card_hdr = ""
     card_tpl = "blue"
