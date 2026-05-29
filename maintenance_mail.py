@@ -2043,13 +2043,43 @@ def _uids_by_ticket_imap_search(mail: imaplib.IMAP4, ticket_id: str) -> list[byt
         _add_many(_uid_search_jenkins_needle(mail, tid))
     if not ordered and digits:
         _add_many(_uid_search_jenkins_needle(mail, digits))
-    if re.match(r"^SD-", tid, re.I):
-        for crit in (
-            f'(SINCE {since} SUBJECT "Equipment maintenance")',
-            f'(SUBJECT "Equipment maintenance")',
-        ):
-            _add_many(_uid_search(mail, crit))
     return ordered
+
+
+def _uids_for_ticket_schedule_lookup(
+    mail: imaplib.IMAP4, ticket_id: str
+) -> list[bytes]:
+    """
+    Ticket UIDs for schedule lookup.
+
+    Prefer client-side subject scan (accurate, small set). Broad IMAP SUBJECT/TEXT
+    tokens can return thousands of unrelated rows — never use those alone.
+    """
+    tid = (ticket_id or "").strip()
+    if not tid:
+        return []
+    subj_uids = _uids_by_ticket_subject_scan(
+        mail, tid, cap=max(CHECKEMAIL_SCAN_CAP, 200)
+    )
+    if subj_uids:
+        return subj_uids
+    raw = _uids_by_ticket_imap_search(mail, tid)
+    if not raw or len(raw) > 64:
+        return []
+    out: list[bytes] = []
+    chunk = max(5, _JENKINS_REPLY_HEADER_BATCH)
+    for off in range(0, len(raw), chunk):
+        part = raw[off : off + chunk]
+        headers_map = _imap_uid_fetch_headers_batch(mail, part)
+        for uid in part:
+            ub = _uid_as_bytes(uid)
+            h = headers_map.get(ub) or {}
+            subj = str(h.get("subj") or "")
+            if _maint_mod.tickets_match(
+                _maint_mod.extract_ticket_card_title(subj), tid
+            ):
+                out.append(ub)
+    return out
 
 
 def _fetch_message_by_state_imap_uid(
@@ -2157,10 +2187,15 @@ def _uids_for_maintenance_check(
                 ordered.append(ub)
 
     if ticket_id:
-        _add_many(_uids_by_ticket_imap_search(mail, ticket_id))
-        if ordered:
-            return _uids_spread_pool(ordered, 80)
-        return _uids_by_ticket_subject_scan(mail, ticket_id)
+        subj_uids = _uids_by_ticket_subject_scan(
+            mail, ticket_id, cap=max(CHECKEMAIL_SCAN_CAP, 200)
+        )
+        if subj_uids:
+            return subj_uids
+        imap_uids = _uids_by_ticket_imap_search(mail, ticket_id)
+        if imap_uids and len(imap_uids) <= 64:
+            return imap_uids
+        return []
     for needle in needles:
         if "[" in needle or "]" in needle:
             continue
@@ -2349,14 +2384,11 @@ def _schedule_message_by_ticket_scan(
         resolved = _resolve_imap_folder_name(mail, folder)
         if not _select_mail_folder(mail, resolved, readonly=True):
             continue
-        uids = _uids_by_ticket_imap_search(mail, tid)
-        if not uids:
-            uids = _uids_by_ticket_subject_scan(mail, tid)
+        uids = _uids_for_ticket_schedule_lookup(mail, tid)
         if not uids:
             continue
         ordered = sorted({_uid_as_bytes(u) for u in uids}, key=lambda x: int(x))
-        take = ordered[:cap_per_folder]
-        hit = _pick_best_schedule_message(mail, folder, take, tid)
+        hit = _pick_best_schedule_message(mail, folder, ordered, tid)
         if hit is None:
             continue
         names = _names_from_schedule_message(hit[0], tid)
@@ -2471,10 +2503,7 @@ def find_schedule_message_by_subject_title(
     if not needles:
         return None
     ticket_id = _maint_mod.extract_ticket_card_title(user_title) or ""
-    folders = [f.strip() for f in MAIL_IMAP_FOLDERS if f.strip()] or [
-        "INBOX",
-        "OSE Pending",
-    ]
+    folders = _checkemail_search_folders()
     mail = _connect_imap_simple()
     best_uid: bytes | None = None
     best_folder = ""
@@ -2544,6 +2573,9 @@ def find_schedule_message_by_subject_title(
             if best_score >= 120:
                 break
         if best_uid is None:
+            return None
+        resolved = _resolve_imap_folder_name(mail, best_folder)
+        if not _select_mail_folder(mail, resolved, readonly=True):
             return None
         msg = _fetch_uid_message(mail, best_uid)
         if msg is None:
@@ -2644,6 +2676,9 @@ def find_maintenance_message_by_subject_title(
                     f"({time.monotonic() - t0:.1f}s)",
                     flush=True,
                 )
+            return None
+        resolved = _resolve_imap_folder_name(mail, best_folder)
+        if not _select_mail_folder(mail, resolved, readonly=True):
             return None
         if MAIL_VERBOSE:
             print(
