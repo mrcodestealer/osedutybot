@@ -2480,7 +2480,8 @@ def _body_looks_like_schedule(body: str) -> bool:
     low = (body or "").lower()
     return bool(
         re.search(
-            r"following tables will be unavailable|tables will be unavailable|"
+            r"following tables will be unavailable|following table was unavailable|"
+            r"tables will be unavailable|took place with a downtime|"
             r"going to take place|equipment maintenance is going to|"
             r"this is to inform you that equipment maintenance",
             low,

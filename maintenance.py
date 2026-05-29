@@ -328,6 +328,12 @@ _CANCEL_BODY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ``following tables will be unavailable`` / ``following table was unavailable``
+_FOLLOWING_TABLES_UNAVAILABLE_RE = re.compile(
+    r"following tables? (?:will be|was|were) unavailable",
+    re.IGNORECASE,
+)
+
 
 def is_maintenance_cancelled_email(body: str | None) -> bool:
     """True when the email body is a maintenance cancellation notice (not the original schedule)."""
@@ -750,11 +756,12 @@ def _cancel_fields_for_card(
         if names:
             table = ", ".join(names)
 
-    if date in ("", "Unknown"):
-        subj = resolve_maintenance_subject(email_subject, email_body)
-        sd_d = parse_service_desk_date_from_subject(subj)
-        if sd_d:
-            date = sd_d
+    subj = resolve_maintenance_subject(email_subject, email_body)
+    sd_d = parse_service_desk_date_from_subject(subj)
+    if not sd_d and (schedule_subject or "").strip():
+        sd_d = parse_service_desk_date_from_subject(schedule_subject)
+    if sd_d:
+        date = sd_d
 
     return (
         (studio or "").strip() or "Unknown",
@@ -2100,8 +2107,10 @@ def extract_info(text: str, *, email_subject: str | None = None):
             else:
                 match = re.search(r'table\s+(.*?)\s+was', line, re.IGNORECASE)
                 if match:
-                    info['table'] = match.group(1).strip()
-                    info['table_names'] = [info['table']]
+                    name = match.group(1).strip()
+                    if _is_plausible_game_name(name):
+                        info['table'] = name
+                        info['table_names'] = [name]
         elif re.search(
             r'^Affected tables?(?:/-s)?\s*:', line, re.IGNORECASE
         ):
@@ -2111,7 +2120,7 @@ def extract_info(text: str, *, email_subject: str | None = None):
                 info["table_names"] = list(block_names)
             i = j
             continue
-        elif re.search(r'following tables will be unavailable:', line, re.IGNORECASE):
+        elif _FOLLOWING_TABLES_UNAVAILABLE_RE.search(line):
             block_names, j = _parse_table_block_after_heading(lines, i)
             if block_names:
                 info["table"] = ", ".join(block_names)
@@ -2192,10 +2201,16 @@ def extract_info(text: str, *, email_subject: str | None = None):
     _apply_service_desk_utc_times(info, text, email_subject=email_subject)
     # If table name still unknown, try to extract from "table X in Y" in the first paragraph
     if info['table'] == 'Unknown':
-        table_match = re.search(r'table\s+([^\.]+?)\s+in', text, re.IGNORECASE)
+        table_match = re.search(
+            r'(?m)^table\s+(?!availability\b)([^\n\.]+?)\s+in\b',
+            text,
+            re.IGNORECASE,
+        )
         if table_match:
-            info['table'] = table_match.group(1).strip()
-            info['table_names'] = [info['table']]
+            name = table_match.group(1).strip()
+            if _is_plausible_game_name(name):
+                info['table'] = name
+                info['table_names'] = [name]
     elif info['table'] != 'Unknown' and not info['table_names']:
         info['table_names'] = [
             x.strip() for x in info['table'].split(',') if x.strip()
@@ -2389,7 +2404,7 @@ def get_table_name(text):
             block_names, _ = _parse_table_block_after_heading(lines, i)
             if block_names:
                 return block_names[0]
-        elif re.search(r'following tables will be unavailable:', line, re.IGNORECASE):
+        elif _FOLLOWING_TABLES_UNAVAILABLE_RE.search(line):
             block_names, _ = _parse_table_block_after_heading(lines, i)
             if block_names:
                 return block_names[0]
