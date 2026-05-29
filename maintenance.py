@@ -2513,7 +2513,7 @@ def process_maintenance_pipeline(
     return msg1, hdr_title, hdr_tpl, msg2, card_el
 
 
-def format_maintenance_email_check(
+def _gather_checkemail_context(
     *,
     email_subject: str,
     email_body: str,
@@ -2524,13 +2524,8 @@ def format_maintenance_email_check(
     schedule_body: str | None = None,
     schedule_from: str = "",
     schedule_folder: str = "",
-) -> str:
-    """
-    Human-readable extraction report for ``/checkemail`` (IMAP lookup, no send).
-
-    When ``schedule_*`` is set, parsed fields come from the **original schedule**
-  mail (not a cancel / om@ forward copy).
-    """
+) -> dict[str, Any]:
+    """Shared parse + card preview data for ``/checkemail``."""
     matched_cancel = is_maintenance_cancelled_email(email_body)
     use_schedule = bool((schedule_body or "").strip())
     ex_subj = (schedule_subject or email_subject) or ""
@@ -2568,96 +2563,26 @@ def format_maintenance_email_check(
         email_subject=resolved,
     )
 
-    lines = [
-        "**🔍 Check only — no email sent**",
-        "",
-        f"**Folder:** {(folder or '').strip() or '—'}",
-        f"**Subject:** {resolve_maintenance_subject(email_subject, email_body) or email_subject or '—'}",
-        f"**From:** {(from_addr or '').strip() or '—'}",
-    ]
-    if use_schedule:
-        lines.extend(
-            [
-                "",
-                "**ℹ️ Matched mail is a cancel / forward copy.**",
-                "Parsed fields below are from the **original schedule** mail:",
-                f"• Schedule folder: {(schedule_folder or '').strip() or '—'}",
-                f"• Schedule from: {(schedule_from or '').strip() or '—'}",
-                f"• Schedule subject: {resolve_maintenance_subject(schedule_subject, schedule_body) or schedule_subject or '—'}",
-            ]
-        )
-    lines.extend(
-        [
-            "",
-            "**Parsed fields**",
-            f"• Ticket: `{ticket}`",
-            f"• Studio: {studio}",
-            f"• Date: {date}",
-            f"• Table: {table}",
-            "• table_names: "
-            + (", ".join(candidates) if candidates else "（无）"),
-            f"• Status: {info.get('status', 'Unknown')}",
-            f"• Start: {info.get('start_time', 'Unknown')}",
-            f"• End: {info.get('end_time', 'Unknown')}",
-            f"• Reason: {info.get('reason', 'Unknown')}",
-            f"• Reference: {info.get('reference', 'Unknown')}",
-            f"• Cancel email: {'yes' if matched_cancel else 'no'}",
-        ]
-    )
-
-    if matched_cancel:
-        prior = lookup_prior_maintenance_for_cancel(email_subject, email_body)
-        lines.extend(["", "**Cancel → prior maintenance**"])
-        if prior:
-            lines.append("• Prior found: **yes**")
-            if prior.get("ticket_id"):
-                lines.append(f"• Prior ticket: `{prior.get('ticket_id')}`")
-            pt = table_display_from_prior(prior)
-            lines.append(f"• Prior tables: {pt or '（无）'}")
-        else:
-            lines.append("• Prior found: **no**")
-            if not use_schedule:
-                lines.append(
-                    "  — process the scheduled mail first "
-                    "(same subject / ticket in maintenance.json today)"
-                )
-        if prior or use_schedule:
-            _st, date2, table2 = _cancel_fields_for_card(
-                info,
-                email_subject=email_subject,
-                email_body=email_body,
-                prior=prior,
-                schedule_subject=schedule_subject,
-                schedule_body=schedule_body,
-            )
-            lines.append(f"• Cancel card Date: {date2}")
-            lines.append(f"• Cancel card Table: {table2}")
-        if not use_schedule:
-            lines.append(
-                "• ⚠️ Original schedule mail not found in IMAP — "
-                "Table / Studio may be wrong until the first notice is located."
-            )
-
     launched_tables: list[str] | None = None
     tok = (tenant_access_token or "").strip()
     if gamelist_configured() and tok and candidates:
         _to_cp, launched_tables = gamelist_has_launched("\n".join(candidates), tok)
 
     card_hdr = ""
-    card_body_preview = ""
+    card_tpl = "blue"
+    card_els: list[dict[str, Any]] | None = None
     if use_schedule or not matched_cancel:
-        hdr, _tpl, _md, card_els = build_maintenance_notice(
+        card_hdr, card_tpl, _md, card_els = build_maintenance_notice(
             ex_body,
             email_subject=ex_subj,
             launched_tables=launched_tables,
         )
-        card_hdr = hdr
-        card_body_preview = _elements_to_check_preview(card_els or [])
     elif matched_cancel:
         prior_for_card = lookup_prior_maintenance_for_cancel(
             email_subject, email_body
         )
         card_hdr = build_cancelled_card_header_title(email_subject, email_body)
+        card_tpl = "red"
         card_els = build_cancelled_card_elements(
             info=info,
             email_subject=email_subject,
@@ -2666,39 +2591,241 @@ def format_maintenance_email_check(
             schedule_subject=schedule_subject,
             schedule_body=schedule_body,
         )
-        card_body_preview = _elements_to_check_preview(card_els)
 
-    if card_hdr or card_body_preview:
-        lines.extend(
-            [
-                "",
-                "**Lark card preview** (same as bot sends to group)",
-                f"• Header: {card_hdr}",
-                "",
-                card_body_preview or "（空）",
-            ]
-        )
-
-    tok = (tenant_access_token or "").strip()
+    prior = (
+        lookup_prior_maintenance_for_cancel(email_subject, email_body)
+        if matched_cancel
+        else None
+    )
+    gamelist_md = ""
     if gamelist_configured() and tok and candidates:
         launched = launched_tables or []
         not_cp = [g for g in candidates if g not in launched]
-        lines.extend(
+        gamelist_md = "\n".join(
             [
-                "",
                 "**Gamelist**",
                 "• On CP: " + (", ".join(launched) if launched else "（无）"),
                 "• NOT IN CP: " + (", ".join(not_cp) if not_cp else "（无）"),
             ]
         )
 
-    preview_src = (schedule_body or email_body or "").strip().replace("\r\n", "\n")
-    preview_label = (
-        "**Schedule body preview**" if use_schedule else "**Body preview**"
+    return {
+        "matched_cancel": matched_cancel,
+        "use_schedule": use_schedule,
+        "email_subject": email_subject,
+        "email_body": email_body,
+        "from_addr": from_addr,
+        "folder": folder,
+        "schedule_subject": schedule_subject,
+        "schedule_body": schedule_body,
+        "schedule_from": schedule_from,
+        "schedule_folder": schedule_folder,
+        "info": info,
+        "candidates": candidates,
+        "ticket": ticket,
+        "studio": studio,
+        "date": date,
+        "table": table,
+        "prior": prior,
+        "card_hdr": card_hdr,
+        "card_tpl": card_tpl,
+        "card_els": card_els,
+        "gamelist_md": gamelist_md,
+    }
+
+
+def build_checkemail_error_card(
+    message_md: str,
+    *,
+    title: str = "Check email",
+) -> dict[str, Any]:
+    """Red Lark card for ``/checkemail`` errors."""
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "red",
+            "title": {"tag": "plain_text", "content": title[:200]},
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": lark_md_for_card(message_md.strip()),
+                    },
+                }
+            ]
+        },
+    }
+
+
+def build_maintenance_email_check_card(
+    *,
+    email_subject: str,
+    email_body: str,
+    from_addr: str = "",
+    folder: str = "",
+    tenant_access_token: str | None = None,
+    schedule_subject: str | None = None,
+    schedule_body: str | None = None,
+    schedule_from: str = "",
+    schedule_folder: str = "",
+) -> dict[str, Any]:
+    """
+    Lark interactive card for ``/checkemail`` — same body as the group maintenance card.
+    """
+    ctx = _gather_checkemail_context(
+        email_subject=email_subject,
+        email_body=email_body,
+        from_addr=from_addr,
+        folder=folder,
+        tenant_access_token=tenant_access_token,
+        schedule_subject=schedule_subject,
+        schedule_body=schedule_body,
+        schedule_from=schedule_from,
+        schedule_folder=schedule_folder,
     )
-    if len(preview_src) > 900:
-        preview_src = preview_src[:900] + "…"
-    lines.extend(["", preview_label, preview_src or "（空）"])
+    meta_lines = [
+        "🔍 **Check only — no email sent**",
+        f"**Folder:** {(ctx['folder'] or '').strip() or '—'}",
+        f"**From:** {(ctx['from_addr'] or '').strip() or '—'}",
+    ]
+    disp_subj = resolve_maintenance_subject(
+        ctx["email_subject"], ctx["email_body"]
+    )
+    if disp_subj:
+        meta_lines.append(f"**Matched subject:** {disp_subj}")
+    if ctx["use_schedule"]:
+        meta_lines.extend(
+            [
+                "",
+                "ℹ️ Matched cancel/forward — card below uses **original schedule** mail.",
+                f"**Schedule folder:** {(ctx['schedule_folder'] or '').strip() or '—'}",
+                f"**Schedule from:** {(ctx['schedule_from'] or '').strip() or '—'}",
+            ]
+        )
+    elif ctx["matched_cancel"]:
+        meta_lines.append(
+            "⚠️ Original schedule mail not found — table may be incomplete."
+        )
+
+    elements: list[dict[str, Any]] = [
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": "\n".join(meta_lines)},
+        },
+        {"tag": "hr"},
+    ]
+    if ctx["card_els"]:
+        elements.extend(ctx["card_els"])
+    else:
+        info = ctx["info"]
+        elements.append(
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": "\n".join(
+                        [
+                            f"🎰 **Table:** {ctx['table']}",
+                            f"📅 **Date:** {ctx['date']}",
+                            f"⏰ **Start:** {info.get('start_time', 'Unknown')}",
+                            f"⏰ **End:** {info.get('end_time', 'Unknown')}",
+                        ]
+                    ),
+                },
+            }
+        )
+    if (ctx.get("gamelist_md") or "").strip():
+        elements.extend(
+            [
+                {"tag": "hr"},
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": lark_md_for_card(ctx["gamelist_md"].strip()),
+                    },
+                },
+            ]
+        )
+    while elements and elements[-1].get("tag") == "hr":
+        elements.pop()
+
+    hdr = (ctx.get("card_hdr") or "").strip() or f"🔍 Check: {ctx['ticket']}"
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": ctx.get("card_tpl") or "blue",
+            "title": {"tag": "plain_text", "content": hdr},
+        },
+        "body": {"elements": elements},
+    }
+
+
+def format_maintenance_email_check(
+    *,
+    email_subject: str,
+    email_body: str,
+    from_addr: str = "",
+    folder: str = "",
+    tenant_access_token: str | None = None,
+    schedule_subject: str | None = None,
+    schedule_body: str | None = None,
+    schedule_from: str = "",
+    schedule_folder: str = "",
+) -> str:
+    """
+    Plain-text fallback for ``/checkemail`` (tests / logging).
+    """
+    ctx = _gather_checkemail_context(
+        email_subject=email_subject,
+        email_body=email_body,
+        from_addr=from_addr,
+        folder=folder,
+        tenant_access_token=tenant_access_token,
+        schedule_subject=schedule_subject,
+        schedule_body=schedule_body,
+        schedule_from=schedule_from,
+        schedule_folder=schedule_folder,
+    )
+    info = ctx["info"]
+    lines = [
+        "**🔍 Check only — no email sent**",
+        "",
+        f"**Folder:** {(ctx['folder'] or '').strip() or '—'}",
+        f"**Subject:** {resolve_maintenance_subject(ctx['email_subject'], ctx['email_body']) or '—'}",
+        f"**From:** {(ctx['from_addr'] or '').strip() or '—'}",
+        "",
+        "**Parsed fields**",
+        f"• Ticket: `{ctx['ticket']}`",
+        f"• Studio: {ctx['studio']}",
+        f"• Date: {ctx['date']}",
+        f"• Table: {ctx['table']}",
+        "• table_names: "
+        + (", ".join(ctx["candidates"]) if ctx["candidates"] else "（无）"),
+        f"• Status: {info.get('status', 'Unknown')}",
+        f"• Start: {info.get('start_time', 'Unknown')}",
+        f"• End: {info.get('end_time', 'Unknown')}",
+        f"• Reason: {info.get('reason', 'Unknown')}",
+        f"• Cancel email: {'yes' if ctx['matched_cancel'] else 'no'}",
+    ]
+    if ctx["card_hdr"]:
+        preview = _elements_to_check_preview(ctx["card_els"] or [])
+        lines.extend(
+            [
+                "",
+                "**Lark card preview**",
+                f"• Header: {ctx['card_hdr']}",
+                "",
+                preview or "（空）",
+            ]
+        )
+    if ctx.get("gamelist_md"):
+        lines.extend(["", ctx["gamelist_md"]])
     return "\n".join(lines)
 
 

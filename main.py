@@ -3664,14 +3664,22 @@ def lark_webhook():
             return _lark_im_done()
         try:
             import maintenance_mail as _maint_mail
+            import maintenance as _maint_mod
 
             token = get_tenant_access_token()
-            reply = _maint_mail.check_maintenance_email_by_title(
+            card = _maint_mail.check_maintenance_email_by_title(
                 title, tenant_access_token=token
             )
         except Exception as ex:
-            reply = f"❌ `/checkemail` failed: `{ex}`"
-        send_message(chat_id, reply)
+            card = _maint_mod.build_checkemail_error_card(
+                f"❌ `/checkemail` failed: `{ex}`",
+                title="Check email — error",
+            )
+        send_message(
+            chat_id,
+            json.dumps(card, ensure_ascii=False),
+            msg_type="interactive",
+        )
         return _lark_im_done()
     elif clean_text.lower().startswith('/nch'):
         parts = clean_text.split(maxsplit=1)

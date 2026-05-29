@@ -2473,29 +2473,31 @@ def check_maintenance_email_by_title(
     title: str,
     *,
     tenant_access_token: str | None = None,
-) -> str:
-    """``/checkemail`` — find om@ mail by subject fragment and show parsed fields."""
+) -> dict[str, Any]:
+    """``/checkemail`` — find om@ mail and return a Lark interactive card."""
     if not MAIL_PASSWORD:
-        return (
+        return _maint_mod.build_checkemail_error_card(
             "❌ `MAINTENANCE_MAIL_PASSWORD` not set — cannot read om@ IMAP."
         )
     needle = (title or "").strip()
     if not needle:
-        return (
+        return _maint_mod.build_checkemail_error_card(
             "❌ Usage: `/checkemail [Service Desk] … / (SD-xxxxx)`\n"
-            "Example: `/checkemail SD-7066787`"
+            "Example: `/checkemail SD-7066787`",
+            title="Check email — usage",
         )
     found = find_maintenance_message_by_subject_title(needle)
     if not found:
         folders = ", ".join(MAIL_IMAP_FOLDERS) or "INBOX, OSE Pending"
-        return (
+        return _maint_mod.build_checkemail_error_card(
             f"❌ No email found matching:\n`{needle}`\n\n"
             f"Searched **{MAIL_USER}** folders: {folders} "
             f"(last {CHECKEMAIL_IMAP_DAYS} days)\n\n"
             "Tips:\n"
             "• `/checkemail SD-7066787` — picks Evolution **original**, not `Re:`/`Fw:`\n"
             "• Full `[Service Desk]…` title also works (spacing/`/ /` normalized)\n"
-            "• Mail must be in **om@** inbox (not only junchen@ forward copy)"
+            "• Mail must be in **om@** inbox (not only junchen@ forward copy)",
+            title="Email not found",
         )
     msg, folder = found
     subj = _decode_mime_header(msg.get("Subject")) or ""
@@ -2519,7 +2521,7 @@ def check_maintenance_email_by_title(
         if not schedule_kw:
             schedule_kw = _schedule_kwargs_from_prior(needle, subj, body)
 
-    return _maint_mod.format_maintenance_email_check(
+    return _maint_mod.build_maintenance_email_check_card(
         email_subject=subj,
         email_body=body,
         from_addr=from_hdr,
