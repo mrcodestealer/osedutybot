@@ -217,12 +217,37 @@ def _imap_mailbox_name(folder: str) -> str:
     return name
 
 
+class ImapStaleConnectionError(OSError):
+    """IMAP socket/SSL dead — reconnect and retry."""
+
+
+def _imap_connection_broken(ex: BaseException) -> bool:
+    msg = repr(ex).lower()
+    needles = (
+        "ssl",
+        "tls",
+        "eof",
+        "bad_length",
+        "connection reset",
+        "broken pipe",
+        "timed out",
+        "socket error",
+        "connection closed",
+        "unexpected eof",
+    )
+    return any(n in msg for n in needles)
+
+
 def _select_mail_folder(mail: imaplib.IMAP4, folder: str, *, readonly: bool = False) -> bool:
     mailbox = _imap_mailbox_name(folder)
     try:
         typ, data = mail.select(mailbox, readonly=readonly)
     except Exception as ex:
         print(f"[maint-mail] SELECT {folder!r} failed: {ex!r}", flush=True)
+        if _imap_connection_broken(ex):
+            raise ImapStaleConnectionError(
+                f"IMAP connection lost during SELECT {folder!r}"
+            ) from ex
         return False
     if typ != "OK":
         print(f"[maint-mail] SELECT {folder!r} not OK: {data!r}", flush=True)
@@ -2876,9 +2901,11 @@ class MaintenanceMailWatcher:
         """Poll today in each configured folder (seen + unread)."""
         since = _imap_since_today()
         any_mail = False
+        any_folder_opened = False
         for folder in MAIL_IMAP_FOLDERS:
             if not _select_mail_folder(mail, folder):
                 continue
+            any_folder_opened = True
             uids = self._uids_today_matching(mail)
             if not uids:
                 print(
@@ -2893,7 +2920,13 @@ class MaintenanceMailWatcher:
                 label=f"{folder} today ({len(uids)})",
                 folder=folder,
             )
-        if not any_mail:
+        if not any_folder_opened:
+            print(
+                f"[maint-mail] could not SELECT any folder (not empty — check names / IMAP): "
+                f"{MAIL_IMAP_FOLDERS!r}",
+                flush=True,
+            )
+        elif not any_mail:
             print(
                 f"[maint-mail] all folders empty for today ({MAIL_TZ}): {MAIL_IMAP_FOLDERS!r}",
                 flush=True,
@@ -2926,14 +2959,29 @@ class MaintenanceMailWatcher:
                     except Exception:
                         pass
                     self._poll_today_folders(mail)
+                except ImapStaleConnectionError:
+                    raise
                 except Exception as ex:
                     print(f"[maint-mail] IDLE loop error: {ex!r}", flush=True)
+                    if _imap_connection_broken(ex):
+                        raise ImapStaleConnectionError(
+                            "IMAP connection lost in IDLE loop"
+                        ) from ex
                     if self._stop.wait(timeout=POLL_SECONDS):
                         break
             return
 
         while not self._stop.is_set():
-            self._poll_today_folders(mail)
+            try:
+                self._poll_today_folders(mail)
+            except ImapStaleConnectionError:
+                raise
+            except Exception as ex:
+                print(f"[maint-mail] poll error: {ex!r}", flush=True)
+                if _imap_connection_broken(ex):
+                    raise ImapStaleConnectionError(
+                        "IMAP connection lost during poll"
+                    ) from ex
             if self._stop.wait(timeout=POLL_SECONDS):
                 break
 
@@ -2951,6 +2999,15 @@ class MaintenanceMailWatcher:
                 self._poll_today_folders(mail)
                 backoff = POLL_SECONDS
                 self._run_idle_or_poll(mail)
+            except ImapStaleConnectionError as ex:
+                print(
+                    f"[maint-mail] IMAP stale ({MAIL_IMAP_HOST}:{MAIL_IMAP_PORT}) — "
+                    f"reconnecting: {ex!r}",
+                    flush=True,
+                )
+                if self._stop.wait(timeout=min(backoff, 30)):
+                    break
+                backoff = min(backoff * 2, 120)
             except Exception as ex:
                 print(
                     f"[maint-mail] connection error ({MAIL_IMAP_HOST}:{MAIL_IMAP_PORT}): {ex!r}",
