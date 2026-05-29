@@ -2574,19 +2574,13 @@ def _gather_checkemail_context(
     card_hdr = ""
     card_tpl = "blue"
     card_els: list[dict[str, Any]] | None = None
-    if use_schedule or not matched_cancel:
-        card_hdr, card_tpl, _md, card_els = build_maintenance_notice(
-            ex_body,
-            email_subject=ex_subj,
-            launched_tables=launched_tables,
-        )
-    elif matched_cancel:
+    tg = (table_game or "").strip()
+    if matched_cancel:
         prior_for_card = lookup_prior_maintenance_for_cancel(
             email_subject, email_body
         )
         card_hdr = build_cancelled_card_header_title(email_subject, email_body)
         card_tpl = "red"
-        tg = (table_game or "").strip()
         if not tg or tg.lower() == "unknown":
             if (schedule_body or "").strip():
                 sch_names = extract_candidate_game_names(
@@ -2607,6 +2601,12 @@ def _gather_checkemail_context(
             schedule_subject=schedule_subject,
             schedule_body=schedule_body,
         )
+    else:
+        card_hdr, card_tpl, _md, card_els = build_maintenance_notice(
+            ex_body,
+            email_subject=ex_subj,
+            launched_tables=launched_tables,
+        )
 
     prior = (
         lookup_prior_maintenance_for_cancel(email_subject, email_body)
@@ -2625,9 +2625,14 @@ def _gather_checkemail_context(
             ]
         )
 
+    schedule_resolved = bool(
+        (tg or "").strip() and (tg or "").strip().lower() != "unknown"
+    )
+
     return {
         "matched_cancel": matched_cancel,
         "use_schedule": use_schedule,
+        "schedule_resolved": schedule_resolved,
         "email_subject": email_subject,
         "email_body": email_body,
         "from_addr": from_addr,
@@ -2710,7 +2715,7 @@ def build_maintenance_email_check_card(
             "<font color='grey'>🔍 Check only — preview uses **original schedule** mail "
             "(matched item was cancel/forward).</font>",
         ]
-    elif ctx["matched_cancel"]:
+    elif ctx["matched_cancel"] and not ctx.get("schedule_resolved"):
         meta_lines = [
             "<font color='grey'>🔍 Check only — no email sent</font>",
             "<font color='grey'>⚠️ Schedule mail not found in IMAP — Table may show Unknown.</font>",
