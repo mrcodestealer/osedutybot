@@ -2033,20 +2033,22 @@ def _uids_by_ticket_imap_search(mail: imaplib.IMAP4, ticket_id: str) -> list[byt
             f'(SINCE {since} HEADER Subject "{safe}")',
         ):
             _add_many(_uid_search(mail, crit))
-        if ordered:
-            break
     if not ordered and digits:
         for crit in (
             f'(SINCE {since} TEXT "{digits}")',
             f'(TEXT "{digits}")',
         ):
             _add_many(_uid_search(mail, crit))
-            if ordered:
-                break
     if not ordered:
         _add_many(_uid_search_jenkins_needle(mail, tid))
     if not ordered and digits:
         _add_many(_uid_search_jenkins_needle(mail, digits))
+    if re.match(r"^SD-", tid, re.I):
+        for crit in (
+            f'(SINCE {since} SUBJECT "Equipment maintenance")',
+            f'(SUBJECT "Equipment maintenance")',
+        ):
+            _add_many(_uid_search(mail, crit))
     return ordered
 
 
@@ -2234,6 +2236,17 @@ def _prior_schedule_rows(
     return rows
 
 
+def _names_from_known_schedule_message(
+    msg: email.message.Message,
+) -> list[str]:
+    """Table names from a trusted schedule row (e.g. ``maintenance.json`` ``imap_uid``)."""
+    subj = _decode_mime_header(msg.get("Subject")) or ""
+    body = extract_body_from_message(msg)
+    if _maint_mod.is_maintenance_cancelled_email(body):
+        return []
+    return _maint_mod.extract_candidate_game_names(f"{subj}\n{body}")
+
+
 def _names_from_schedule_message(
     msg: email.message.Message,
     ticket_id: str = "",
@@ -2245,8 +2258,6 @@ def _names_from_schedule_message(
     body = extract_body_from_message(msg)
     if _maint_mod.is_maintenance_cancelled_email(body):
         return []
-    if tid and not _body_looks_like_schedule(body):
-        return []
     return _maint_mod.extract_candidate_game_names(f"{subj}\n{body}")
 
 
@@ -2255,6 +2266,48 @@ def _message_is_schedule_notice(
     ticket_id: str = "",
 ) -> bool:
     return bool(_names_from_schedule_message(msg, ticket_id))
+
+
+def _schedule_pick_score(
+    msg: email.message.Message,
+    names: list[str],
+) -> tuple[int, int, float]:
+    """Higher is better — more tables, Evolution original, older mail."""
+    from_hdr = _decode_mime_header(msg.get("From")) or ""
+    from_bonus = 1 if _maint_mod.from_is_allowed_sender(from_hdr) else 0
+    raw_date = msg.get("Date") or ""
+    try:
+        ts = parsedate_to_datetime(raw_date)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        ts_val = ts.timestamp()
+    except Exception:
+        ts_val = 0.0
+    return (len(names), from_bonus, -ts_val)
+
+
+def _pick_best_schedule_message(
+    mail: imaplib.IMAP4,
+    folder: str,
+    uids: list[bytes],
+    ticket_id: str,
+) -> tuple[email.message.Message, str] | None:
+    """Best schedule row among ticket UIDs (skip cancel / wrong subject)."""
+    tid = (ticket_id or "").strip()
+    best: tuple[email.message.Message, str] | None = None
+    best_score = (-1, -1, float("-inf"))
+    for uid in uids:
+        msg = _fetch_uid_message(mail, _uid_as_bytes(uid))
+        if msg is None:
+            continue
+        names = _names_from_schedule_message(msg, tid)
+        if not names:
+            continue
+        score = _schedule_pick_score(msg, names)
+        if score > best_score:
+            best_score = score
+            best = (msg, folder)
+    return best
 
 
 def _checkemail_search_folders() -> list[str]:
@@ -2279,17 +2332,19 @@ def _schedule_message_by_ticket_scan(
     mail: imaplib.IMAP4,
     ticket_id: str,
     *,
-    cap_per_folder: int = 100,
+    cap_per_folder: int = 150,
 ) -> tuple[email.message.Message, str] | None:
     """
-    First **schedule** mail for ``ticket_id`` — walk UIDs oldest-first.
+    Best **schedule** mail for ``ticket_id`` across folders.
 
-    Schedule and cancel share the same subject; the plan notice is usually the
-    earliest mail with table names, not the latest cancel forward.
+    Schedule and cancel share the same subject — scan all ticket UIDs and pick
+    the row with real table names (prefer Evolution original, then oldest).
     """
     tid = (ticket_id or "").strip()
     if not tid:
         return None
+    global_best: tuple[email.message.Message, str] | None = None
+    global_score = (-1, -1, float("-inf"))
     for folder in _checkemail_search_folders():
         resolved = _resolve_imap_folder_name(mail, folder)
         if not _select_mail_folder(mail, resolved, readonly=True):
@@ -2299,21 +2354,23 @@ def _schedule_message_by_ticket_scan(
             uids = _uids_by_ticket_subject_scan(mail, tid)
         if not uids:
             continue
-        ordered = sorted((_uid_as_bytes(u) for u in uids), key=lambda x: int(x))
+        ordered = sorted({_uid_as_bytes(u) for u in uids}, key=lambda x: int(x))
         take = ordered[:cap_per_folder]
-        for uid in take:
-            msg = _fetch_uid_message(mail, _uid_as_bytes(uid))
-            if msg is None:
-                continue
-            if _names_from_schedule_message(msg, tid):
-                if MAIL_VERBOSE:
-                    print(
-                        f"[maint-mail] schedule found by ticket scan {tid!r} "
-                        f"in {folder!r} uid={uid!r}",
-                        flush=True,
-                    )
-                return msg, folder
-    return None
+        hit = _pick_best_schedule_message(mail, folder, take, tid)
+        if hit is None:
+            continue
+        names = _names_from_schedule_message(hit[0], tid)
+        score = _schedule_pick_score(hit[0], names)
+        if score > global_score:
+            global_score = score
+            global_best = hit
+            if MAIL_VERBOSE:
+                print(
+                    f"[maint-mail] schedule candidate {tid!r} in {folder!r}: "
+                    f"{names!r} score={score}",
+                    flush=True,
+                )
+    return global_best
 
 
 def _fetch_schedule_message_from_prior(
@@ -2346,7 +2403,14 @@ def _fetch_schedule_message_from_prior(
                 if hit is None:
                     continue
                 msg, folder = hit
-                if _names_from_schedule_message(msg, ticket):
+                body = extract_body_from_message(msg)
+                if _maint_mod.is_maintenance_cancelled_email(body):
+                    continue
+                if (
+                    _names_from_known_schedule_message(msg)
+                    or _names_from_schedule_message(msg, ticket)
+                    or _body_looks_like_schedule(body)
+                ):
                     return msg, folder
             except Exception as ex:
                 if MAIL_VERBOSE:
@@ -2384,8 +2448,9 @@ def _body_looks_like_schedule(body: str) -> bool:
     low = (body or "").lower()
     return bool(
         re.search(
-            r"following tables will be unavailable|going to take place|"
-            r"equipment maintenance is going to",
+            r"following tables will be unavailable|tables will be unavailable|"
+            r"going to take place|equipment maintenance is going to|"
+            r"this is to inform you that equipment maintenance",
             low,
         )
     )
@@ -2999,6 +3064,14 @@ def _table_game_for_cancel(
     mail: imaplib.IMAP4 | None = None,
     ticket_id: str = "",
 ) -> str:
+    tid = (ticket_id or "").strip()
+    if not tid and prior:
+        tid = str(prior.get("ticket_id") or "").strip()
+        if not tid:
+            tid = _maint_mod.extract_ticket_card_title(
+                str(prior.get("title") or "")
+            ) or ""
+
     names = _maint_mod.table_names_from_prior_entry(prior)
     if names:
         return ", ".join(names)
@@ -3009,7 +3082,9 @@ def _table_game_for_cancel(
             try:
                 hit = _fetch_message_by_state_imap_uid(mail, store_key)
                 if hit is not None:
-                    names = _names_from_schedule_message(hit[0], tid)
+                    names = _names_from_known_schedule_message(hit[0])
+                    if not names:
+                        names = _names_from_schedule_message(hit[0], tid)
                     if names:
                         return ", ".join(names)
             except Exception as ex:
@@ -3019,13 +3094,6 @@ def _table_game_for_cancel(
                         flush=True,
                     )
 
-    tid = (ticket_id or "").strip()
-    if not tid and prior:
-        tid = str(prior.get("ticket_id") or "").strip()
-        if not tid:
-            tid = _maint_mod.extract_ticket_card_title(
-                str(prior.get("title") or "")
-            ) or ""
     if mail is not None and tid:
         try:
             scan_hit = _schedule_message_by_ticket_scan(mail, tid)
