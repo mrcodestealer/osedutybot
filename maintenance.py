@@ -443,6 +443,40 @@ def _normalize_title_key(title: str) -> str:
     return re.sub(r"\s+", " ", (title or "").strip().lower())
 
 
+def normalize_subject_for_search(title: str) -> str:
+    """Lowercase, collapse spaces and ``/`` segments for fuzzy subject match."""
+    t = _normalize_title_key(title)
+    t = re.sub(r"\s*/\s*", " / ", t)
+    t = re.sub(r"(?: / )+", " / ", t)
+    return t.strip(" /")
+
+
+def subjects_match_for_search(subject: str, needle: str) -> bool:
+    """
+    True when ``needle`` matches ``subject`` (full title, ticket id, or key tokens).
+
+    Handles ``/ /`` vs ``/`` and extra spaces in Service Desk subjects.
+    """
+    subj_n = normalize_subject_for_search(subject)
+    needle_n = normalize_subject_for_search(needle)
+    if not needle_n:
+        return False
+    if needle_n in subj_n:
+        return True
+    n_tid = extract_ticket_card_title(needle) or ""
+    s_tid = extract_ticket_card_title(subject) or ""
+    if n_tid and s_tid and (_ticket_match_keys(n_tid) & _ticket_match_keys(s_tid)):
+        return True
+    tokens = [
+        p
+        for p in re.split(r"[^\w\-\[\]:]+", needle_n)
+        if len(p) >= 4 and p not in ("service", "desk", "table", "availability")
+    ]
+    if len(tokens) >= 2 and all(tok in subj_n for tok in tokens[:8]):
+        return True
+    return False
+
+
 def _ticket_match_keys(ticket_id: str) -> set[str]:
     """``SD-7004356`` and ``TINC-7004356`` match the same Service Desk ticket."""
     tid = (ticket_id or "").strip().upper()

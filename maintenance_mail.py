@@ -1954,16 +1954,38 @@ def _message_sort_timestamp(msg: email.message.Message) -> datetime:
         return datetime.min.replace(tzinfo=timezone.utc)
 
 
+def _maintenance_search_needles(title: str) -> list[str]:
+    """IMAP search tokens — full title, ticket id, ``(SD-…)`` fragment."""
+    out: list[str] = []
+    t = (title or "").strip()
+    if t:
+        out.append(t)
+    ticket = _maint_mod.extract_ticket_card_title(t)
+    if ticket:
+        out.append(ticket)
+    m_sd = re.search(r"\(SD-\d{6,8}\)", t, re.IGNORECASE)
+    if m_sd:
+        out.append(m_sd.group(0).strip("()"))
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for n in out:
+        key = n.lower()
+        if key not in seen:
+            seen.add(key)
+            ordered.append(n)
+    return ordered
+
+
 def find_maintenance_message_by_subject_title(
     title: str,
 ) -> tuple[email.message.Message, str] | None:
     """
-    Newest message in ``MAIL_IMAP_FOLDERS`` whose subject contains ``title``.
+    Newest message in ``MAIL_IMAP_FOLDERS`` whose subject matches ``title``.
 
     For ``/checkemail`` preview — no SMTP, no Lark maintenance card.
     """
-    needle = (title or "").strip()
-    if not needle:
+    needles = _maintenance_search_needles(title)
+    if not needles:
         return None
     folders = [f.strip() for f in MAIL_IMAP_FOLDERS if f.strip()] or [
         "INBOX",
@@ -1973,18 +1995,25 @@ def find_maintenance_message_by_subject_title(
     best_uid: bytes | None = None
     best_folder = ""
     best_ts = datetime.min.replace(tzinfo=timezone.utc)
+    seen_uids: set[bytes] = set()
     try:
         for folder in folders:
             resolved = _resolve_imap_folder_name(mail, folder)
             if not _select_mail_folder(mail, resolved, readonly=True):
                 continue
-            uids = _uid_search_jenkins_needle(mail, needle)
-            if not uids:
+            folder_uids: list[bytes] = []
+            for needle in needles:
+                for uid in _uid_search_jenkins_needle(mail, needle) or []:
+                    ub = _uid_as_bytes(uid)
+                    if ub not in seen_uids:
+                        seen_uids.add(ub)
+                        folder_uids.append(ub)
+            if not folder_uids:
                 continue
-            for uid in reversed(uids[-120:]):
+            for uid in reversed(folder_uids[-200:]):
                 h = _fetch_reply_headers_single(mail, uid)
                 subj = str(h.get("subj") or "")
-                if needle.lower() not in subj.lower():
+                if not _maint_mod.subjects_match_for_search(subj, title):
                     continue
                 ts = h["ts"]
                 if best_uid is None or ts >= best_ts:
@@ -2025,7 +2054,9 @@ def check_maintenance_email_by_title(
         folders = ", ".join(MAIL_IMAP_FOLDERS) or "INBOX, OSE Pending"
         return (
             f"❌ No email found matching:\n`{needle}`\n\n"
-            f"Searched folders: {folders}"
+            f"Searched folders: {folders}\n\n"
+            "Tip: try ticket only, e.g. `/checkemail SD-7066787` "
+            "(spacing in Service Desk subjects varies)."
         )
     msg, folder = found
     subj = _decode_mime_header(msg.get("Subject")) or ""
