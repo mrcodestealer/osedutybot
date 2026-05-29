@@ -526,6 +526,50 @@ def load_maintenance_state_entries() -> list[dict[str, Any]]:
     return list(entries) if isinstance(entries, list) else []
 
 
+def find_maintenance_state_entry_for_checkemail(
+    user_title: str,
+    ticket_id: str = "",
+) -> dict[str, Any] | None:
+    """
+    Best ``maintenance.json`` row for ``/checkemail`` — prefer non-cancel, same ticket.
+    """
+    entries = load_maintenance_state_entries()
+    if not entries:
+        return None
+    ut = (user_title or "").strip()
+    tid = (ticket_id or extract_ticket_card_title(ut) or "").strip()
+    tkeys = _ticket_match_keys(tid) if tid else set()
+
+    def _ticket_ok(ent: dict[str, Any]) -> bool:
+        if not tkeys:
+            return False
+        et = (ent.get("ticket_id") or "").strip().upper()
+        if et in tkeys or bool(_ticket_match_keys(et) & tkeys):
+            return True
+        title_tid = extract_ticket_card_title(str(ent.get("title") or "")) or ""
+        return bool(title_tid and (_ticket_match_keys(title_tid) & tkeys))
+
+    if ut:
+        nt = _normalize_title_key(ut)
+        for ent in reversed(entries):
+            if ent.get("is_cancelled_email"):
+                continue
+            if _normalize_title_key(str(ent.get("title") or "")) == nt:
+                return ent
+            if subjects_match_for_search(str(ent.get("title") or ""), ut):
+                return ent
+    if tkeys:
+        for ent in reversed(entries):
+            if ent.get("is_cancelled_email"):
+                continue
+            if _ticket_ok(ent):
+                return ent
+        for ent in reversed(entries):
+            if _ticket_ok(ent):
+                return ent
+    return None
+
+
 def find_prior_maintenance_entry(
     entries: list[dict[str, Any]],
     display_subj: str,

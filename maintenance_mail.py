@@ -1959,8 +1959,11 @@ CHECKEMAIL_IMAP_DAYS = max(
     int(os.getenv("MAINTENANCE_MAIL_CHECKEMAIL_DAYS", "").strip() or "45"),
 )
 CHECKEMAIL_SCAN_DAYS = max(
-    3,
-    int(os.getenv("MAINTENANCE_MAIL_CHECKEMAIL_SCAN_DAYS", "").strip() or "14"),
+    7,
+    int(
+        os.getenv("MAINTENANCE_MAIL_CHECKEMAIL_SCAN_DAYS", "").strip()
+        or str(CHECKEEMAIL_IMAP_DAYS)
+    ),
 )
 CHECKEMAIL_SCAN_CAP = max(
     40,
@@ -1976,6 +1979,94 @@ def _checkemail_imap_since() -> str:
 def _checkemail_scan_since() -> str:
     d = datetime.now(_local_tz()).date() - timedelta(days=CHECKEMAIL_SCAN_DAYS)
     return d.strftime("%d-%b-%Y")
+
+
+def _ticket_digits(ticket_id: str) -> str:
+    m = re.match(r"^(?:TINC|SD)[-\s]?(\d{6,8})\b", (ticket_id or "").strip(), re.I)
+    return m.group(1) if m else ""
+
+
+def _uids_spread_pool(uids: list[bytes], cap: int = 80) -> list[bytes]:
+    """Keep oldest + newest UIDs — Evolution original is often not in the newest 40."""
+    if len(uids) <= cap:
+        return uids
+    half = cap // 2
+    merged: list[bytes] = []
+    seen: set[bytes] = set()
+    for uid in uids[:half] + uids[-half:]:
+        ub = _uid_as_bytes(uid)
+        if ub not in seen:
+            seen.add(ub)
+            merged.append(ub)
+    return merged
+
+
+def _uids_by_ticket_imap_search(mail: imaplib.IMAP4, ticket_id: str) -> list[bytes]:
+    """
+    Lark IMAP often misses ``SUBJECT "SD-7066787"`` but matches digits or SINCE+token.
+    """
+    tid = (ticket_id or "").strip()
+    if not tid:
+        return []
+    digits = _ticket_digits(tid)
+    tokens: list[str] = []
+    for tok in (tid, digits, f"SD-{digits}" if digits else "", f"(SD-{digits})" if digits else ""):
+        t = (tok or "").strip()
+        if t and t not in tokens:
+            tokens.append(t)
+    since = _checkemail_imap_since()
+    seen: set[bytes] = set()
+    ordered: list[bytes] = []
+
+    def _add_many(uids: list[bytes] | None) -> None:
+        for uid in uids or []:
+            ub = _uid_as_bytes(uid)
+            if ub not in seen:
+                seen.add(ub)
+                ordered.append(ub)
+
+    for tok in tokens:
+        safe = tok.replace('"', " ").replace("\\", " ")
+        for crit in (
+            f'(SINCE {since} SUBJECT "{safe}")',
+            f'(SUBJECT "{safe}")',
+            f'(SINCE {since} HEADER Subject "{safe}")',
+        ):
+            _add_many(_uid_search(mail, crit))
+        if ordered:
+            break
+    if not ordered and digits:
+        for crit in (
+            f'(SINCE {since} TEXT "{digits}")',
+            f'(TEXT "{digits}")',
+        ):
+            _add_many(_uid_search(mail, crit))
+            if ordered:
+                break
+    if not ordered:
+        _add_many(_uid_search_jenkins_needle(mail, tid))
+    if not ordered and digits:
+        _add_many(_uid_search_jenkins_needle(mail, digits))
+    return ordered
+
+
+def _fetch_message_by_state_imap_uid(
+    mail: imaplib.IMAP4, imap_uid: str
+) -> tuple[email.message.Message, str] | None:
+    store_key = (imap_uid or "").strip()
+    if not store_key:
+        return None
+    if ":" in store_key:
+        folder, uid_s = store_key.split(":", 1)
+    else:
+        folder, uid_s = "INBOX", store_key
+    resolved = _resolve_imap_folder_name(mail, folder)
+    if not _select_mail_folder(mail, resolved, readonly=True):
+        return None
+    msg = _fetch_uid_message(mail, uid_s.encode())
+    if msg is None:
+        return None
+    return msg, folder
 
 
 def _score_maintenance_check_candidate(
@@ -2020,7 +2111,7 @@ def _uids_by_ticket_subject_scan(
     Uses batched header fetch (not one UID per round-trip).
     """
     lim = cap if cap is not None else CHECKEMAIL_SCAN_CAP
-    since = _checkemail_scan_since()
+    since = _checkemail_imap_since()
     recent = _uid_search(mail, f"(SINCE {since})")
     if not recent:
         return []
@@ -2063,22 +2154,17 @@ def _uids_for_maintenance_check(
                 seen.add(ub)
                 ordered.append(ub)
 
-    since = _checkemail_imap_since()
     if ticket_id:
-        fast = _uid_search(mail, f'(SINCE {since} SUBJECT "{ticket_id}")')
-        _add_many(fast)
+        _add_many(_uids_by_ticket_imap_search(mail, ticket_id))
         if ordered:
-            return ordered[-40:]
-        slow_text = _uid_search(mail, f'(SINCE {since} TEXT "{ticket_id}")')
-        _add_many(slow_text[-30:] if slow_text else None)
-        if ordered:
-            return ordered
+            return _uids_spread_pool(ordered, 80)
         return _uids_by_ticket_subject_scan(mail, ticket_id)
     for needle in needles:
         if "[" in needle or "]" in needle:
             continue
         _add_many(_uid_search_subject_variants(mail, needle))
-    return ordered[-40:]
+        _add_many(_uid_search_jenkins_needle(mail, needle))
+    return _uids_spread_pool(ordered, 80)
 
 
 def _maintenance_search_needles(title: str) -> list[str]:
@@ -2128,14 +2214,30 @@ def find_maintenance_message_by_subject_title(
     best_ts = datetime.min.replace(tzinfo=timezone.utc)
     t0 = time.monotonic()
     try:
-        for folder in folders:
-            resolved = _resolve_imap_folder_name(mail, folder)
-            if not _select_mail_folder(mail, resolved, readonly=True):
-                continue
-            folder_uids = _uids_for_maintenance_check(mail, needles, ticket_id)
+        state_ent = _maint_mod.find_maintenance_state_entry_for_checkemail(
+            user_title, ticket_id
+        )
+        if state_ent:
+            hit = _fetch_message_by_state_imap_uid(
+                mail, str(state_ent.get("imap_uid") or "")
+            )
+            if hit is not None:
+                msg, folder = hit
+                subj = _decode_mime_header(msg.get("Subject")) or ""
+                if _maint_mod.matches_checkemail_query(subj, user_title):
+                    if MAIL_VERBOSE:
+                        print(
+                            f"[maint-mail] checkemail: maintenance.json hit "
+                            f"{state_ent.get('imap_uid')!r} ({time.monotonic() - t0:.1f}s)",
+                            flush=True,
+                        )
+                    return msg, folder
+
+        def _consider_folder_uids(folder: str, folder_uids: list[bytes]) -> None:
+            nonlocal best_uid, best_folder, best_score, best_ts
             if not folder_uids:
-                continue
-            candidates = folder_uids[-40:]
+                return
+            candidates = _uids_spread_pool(folder_uids, 80)
             headers_map = _imap_uid_fetch_headers_batch(mail, candidates)
             for uid in candidates:
                 ub = _uid_as_bytes(uid)
@@ -2150,8 +2252,24 @@ def find_maintenance_message_by_subject_title(
                     best_uid = ub
                     best_folder = folder
                     best_ts = ts
+
+        for folder in folders:
+            resolved = _resolve_imap_folder_name(mail, folder)
+            if not _select_mail_folder(mail, resolved, readonly=True):
+                continue
+            _consider_folder_uids(folder, _uids_for_maintenance_check(mail, needles, ticket_id))
             if best_score >= 200:
                 break
+        if best_uid is None and ticket_id:
+            for folder in folders:
+                resolved = _resolve_imap_folder_name(mail, folder)
+                if not _select_mail_folder(mail, resolved, readonly=True):
+                    continue
+                _consider_folder_uids(
+                    folder, _uids_by_ticket_subject_scan(mail, ticket_id)
+                )
+                if best_uid is not None:
+                    break
         if best_uid is None:
             if MAIL_VERBOSE:
                 print(
