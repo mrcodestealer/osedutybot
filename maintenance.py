@@ -681,6 +681,8 @@ def _table_for_cancel(
     tg = (table_game or "").strip()
     if tg and tg.lower() != "unknown":
         return tg
+    if is_maintenance_cancelled_email(email_body or ""):
+        return "Unknown"
     return _table_display(
         info,
         launched_tables=None,
@@ -2524,6 +2526,7 @@ def _gather_checkemail_context(
     schedule_body: str | None = None,
     schedule_from: str = "",
     schedule_folder: str = "",
+    table_game: str | None = None,
 ) -> dict[str, Any]:
     """Shared parse + card preview data for ``/checkemail``."""
     matched_cancel = is_maintenance_cancelled_email(email_body)
@@ -2583,11 +2586,24 @@ def _gather_checkemail_context(
         )
         card_hdr = build_cancelled_card_header_title(email_subject, email_body)
         card_tpl = "red"
+        tg = (table_game or "").strip()
+        if not tg or tg.lower() == "unknown":
+            if (schedule_body or "").strip():
+                sch_names = extract_candidate_game_names(
+                    f"{(schedule_subject or email_subject or '').strip()}\n{schedule_body}"
+                )
+                if sch_names:
+                    tg = ", ".join(sch_names)
+            if (not tg or tg.lower() == "unknown") and prior_for_card:
+                pt = table_display_from_prior(prior_for_card)
+                if pt:
+                    tg = pt
         card_els = build_cancelled_card_elements(
             info=info,
             email_subject=email_subject,
             email_body=email_body,
             prior=prior_for_card,
+            table_game=tg or None,
             schedule_subject=schedule_subject,
             schedule_body=schedule_body,
         )
@@ -2672,6 +2688,7 @@ def build_maintenance_email_check_card(
     schedule_body: str | None = None,
     schedule_from: str = "",
     schedule_folder: str = "",
+    table_game: str | None = None,
 ) -> dict[str, Any]:
     """
     Lark interactive card for ``/checkemail`` — same body as the group maintenance card.
@@ -2686,6 +2703,7 @@ def build_maintenance_email_check_card(
         schedule_body=schedule_body,
         schedule_from=schedule_from,
         schedule_folder=schedule_folder,
+        table_game=table_game,
     )
     meta_lines = [
         "🔍 **Check only — no email sent**",
@@ -2791,6 +2809,7 @@ def format_maintenance_email_check(
         schedule_body=schedule_body,
         schedule_from=schedule_from,
         schedule_folder=schedule_folder,
+        table_game=table_game,
     )
     info = ctx["info"]
     lines = [

@@ -2521,12 +2521,39 @@ def check_maintenance_email_by_title(
         if not schedule_kw:
             schedule_kw = _schedule_kwargs_from_prior(needle, subj, body)
 
+    table_game = ""
+    if schedule_kw.get("schedule_body"):
+        names = _maint_mod.extract_candidate_game_names(
+            f"{schedule_kw.get('schedule_subject', '')}\n{schedule_kw['schedule_body']}"
+        )
+        if names:
+            table_game = ", ".join(names)
+    if (not table_game or table_game.lower() == "unknown") and _maint_mod.is_maintenance_cancelled_email(
+        body
+    ):
+        try:
+            mail = _connect_imap_simple()
+            try:
+                prior = _maint_mod.lookup_prior_maintenance_for_cancel(subj, body)
+                tid = _maint_mod.extract_ticket_card_title(needle) or ""
+                table_game = _table_game_for_cancel(
+                    prior, mail=mail, ticket_id=tid
+                )
+            finally:
+                try:
+                    mail.logout()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     return _maint_mod.build_maintenance_email_check_card(
         email_subject=subj,
         email_body=body,
         from_addr=from_hdr,
         folder=folder,
         tenant_access_token=tenant_access_token,
+        table_game=table_game or None,
         **schedule_kw,
     )
 
@@ -2815,31 +2842,66 @@ def _table_game_for_cancel(
     prior: dict[str, Any] | None,
     *,
     mail: imaplib.IMAP4 | None = None,
+    ticket_id: str = "",
 ) -> str:
     names = _maint_mod.table_names_from_prior_entry(prior)
     if names:
         return ", ".join(names)
+
+    def _names_from_msg(msg: email.message.Message) -> list[str]:
+        body = extract_body_from_message(msg)
+        if _maint_mod.is_maintenance_cancelled_email(body):
+            return []
+        subj = _decode_mime_header(msg.get("Subject")) or ""
+        return _maint_mod.extract_candidate_game_names(f"{subj}\n{body}")
+
     if prior and mail is not None:
-        store_key = str(prior.get("imap_uid") or "")
-        if ":" in store_key:
-            folder, uid_s = store_key.split(":", 1)
+        store_key = str(prior.get("imap_uid") or "").strip()
+        if store_key:
             try:
-                if _select_mail_folder(mail, folder):
-                    orig = _fetch_uid_message(mail, uid_s.encode())
-                    if orig is not None:
-                        body = extract_body_from_message(orig)
-                        subj = _decode_mime_header(orig.get("Subject")) or ""
-                        names = _maint_mod.extract_candidate_game_names(
-                            f"{subj}\n{body}"
-                        )
-                        if names:
-                            return ", ".join(names)
+                hit = _fetch_message_by_state_imap_uid(mail, store_key)
+                if hit is not None:
+                    names = _names_from_msg(hit[0])
+                    if names:
+                        return ", ".join(names)
             except Exception as ex:
                 if MAIL_VERBOSE:
                     print(
                         f"[maint-mail] cancel prior IMAP re-fetch failed: {ex!r}",
                         flush=True,
                     )
+
+    tid = (ticket_id or "").strip()
+    if not tid and prior:
+        tid = str(prior.get("ticket_id") or "").strip()
+        if not tid:
+            tid = _maint_mod.extract_ticket_card_title(
+                str(prior.get("title") or "")
+            ) or ""
+    if mail is not None and tid:
+        try:
+            uids = _uids_by_ticket_imap_search(mail, tid)
+            if not uids:
+                uids = _uids_by_ticket_subject_scan(mail, tid)
+            for uid in _uids_spread_pool(uids, 40)[:16]:
+                msg = _fetch_uid_message(mail, _uid_as_bytes(uid))
+                if msg is None:
+                    continue
+                names = _names_from_msg(msg)
+                if names:
+                    if MAIL_VERBOSE:
+                        print(
+                            f"[maint-mail] cancel table from ticket scan "
+                            f"{tid!r}: {names!r}",
+                            flush=True,
+                        )
+                    return ", ".join(names)
+        except Exception as ex:
+            if MAIL_VERBOSE:
+                print(
+                    f"[maint-mail] cancel ticket IMAP scan failed: {ex!r}",
+                    flush=True,
+                )
     return "Unknown"
 
 
@@ -3149,7 +3211,9 @@ class MaintenanceMailWatcher:
 
         if is_cancel:
             prior = _find_prior_maintenance_entry(entries, display_subj, ticket_id)
-            table_game = _table_game_for_cancel(prior, mail=mail)
+            table_game = _table_game_for_cancel(
+                prior, mail=mail, ticket_id=ticket_id
+            )
             launched_prior = list(prior.get("launched_names") or []) if prior else []
             to_cp = len(launched_prior) > 0
             if not to_cp and prior:
