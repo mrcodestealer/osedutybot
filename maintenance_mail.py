@@ -2189,6 +2189,98 @@ def _maintenance_search_needles(title: str) -> list[str]:
     return ordered
 
 
+def find_schedule_message_by_subject_title(
+    title: str,
+) -> tuple[email.message.Message, str] | None:
+    """
+    Original **schedule** notice for ``/checkemail`` — skips cancel bodies and
+    prefers ``servicedesk@`` / ``no-reply-evolution@`` over om@ forwards.
+    """
+    user_title = (title or "").strip()
+    needles = _maintenance_search_needles(user_title)
+    if not needles:
+        return None
+    ticket_id = _maint_mod.extract_ticket_card_title(user_title) or ""
+    folders = [f.strip() for f in MAIL_IMAP_FOLDERS if f.strip()] or [
+        "INBOX",
+        "OSE Pending",
+    ]
+    mail = _connect_imap_simple()
+    best_uid: bytes | None = None
+    best_folder = ""
+    best_score = -10_000
+    best_ts = datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        state_ent = _maint_mod.find_maintenance_state_entry_for_checkemail(
+            user_title, ticket_id
+        )
+        if state_ent and not state_ent.get("is_cancelled_email"):
+            hit = _fetch_message_by_state_imap_uid(
+                mail, str(state_ent.get("imap_uid") or "")
+            )
+            if hit is not None:
+                msg, folder = hit
+                body = extract_body_from_message(msg)
+                subj = _decode_mime_header(msg.get("Subject")) or ""
+                if (
+                    not _maint_mod.is_maintenance_cancelled_email(body)
+                    and _maint_mod.matches_checkemail_query(subj, user_title)
+                ):
+                    return msg, folder
+
+        for folder in folders:
+            resolved = _resolve_imap_folder_name(mail, folder)
+            if not _select_mail_folder(mail, resolved, readonly=True):
+                continue
+            folder_uids = _uids_for_maintenance_check(mail, needles, ticket_id)
+            if not folder_uids:
+                folder_uids = _uids_by_ticket_subject_scan(mail, ticket_id)
+            if not folder_uids:
+                continue
+            candidates = _uids_spread_pool(folder_uids, 80)
+            headers_map = _imap_uid_fetch_headers_batch(mail, candidates)
+            ranked: list[tuple[int, datetime, bytes]] = []
+            for uid in candidates:
+                ub = _uid_as_bytes(uid)
+                h = headers_map.get(ub) or _fetch_reply_headers_single(mail, ub)
+                subj = str(h.get("subj") or "")
+                if not _maint_mod.matches_checkemail_query(subj, user_title):
+                    continue
+                sc = _score_maintenance_check_candidate(h, user_title)
+                ts = h.get("ts") or datetime.min.replace(tzinfo=timezone.utc)
+                ranked.append((sc, ts, ub))
+            ranked.sort(key=lambda x: (x[0], x[1]), reverse=True)
+            for sc, ts, ub in ranked[:24]:
+                msg = _fetch_uid_message(mail, ub)
+                if msg is None:
+                    continue
+                body = extract_body_from_message(msg)
+                if _maint_mod.is_maintenance_cancelled_email(body):
+                    continue
+                from_hdr = _decode_mime_header(msg.get("From")) or ""
+                adj = sc
+                if _maint_mod.from_should_ignore(from_hdr):
+                    adj -= 80
+                if adj > best_score or (adj == best_score and ts >= best_ts):
+                    best_score = adj
+                    best_uid = ub
+                    best_folder = folder
+                    best_ts = ts
+            if best_score >= 180:
+                break
+        if best_uid is None:
+            return None
+        msg = _fetch_uid_message(mail, best_uid)
+        if msg is None:
+            return None
+        return msg, best_folder
+    finally:
+        try:
+            mail.logout()
+        except Exception:
+            pass
+
+
 def find_maintenance_message_by_subject_title(
     title: str,
 ) -> tuple[email.message.Message, str] | None:
@@ -2327,12 +2419,29 @@ def check_maintenance_email_by_title(
     subj = _decode_mime_header(msg.get("Subject")) or ""
     body = extract_body_from_message(msg)
     from_hdr = _decode_mime_header(msg.get("From")) or ""
+
+    schedule_kw: dict[str, str] = {}
+    need_schedule = _maint_mod.is_maintenance_cancelled_email(
+        body
+    ) or _maint_mod.from_should_ignore(from_hdr)
+    if need_schedule:
+        sched = find_schedule_message_by_subject_title(needle)
+        if sched:
+            smsg, sfolder = sched
+            schedule_kw = {
+                "schedule_subject": _decode_mime_header(smsg.get("Subject")) or "",
+                "schedule_body": extract_body_from_message(smsg),
+                "schedule_from": _decode_mime_header(smsg.get("From")) or "",
+                "schedule_folder": sfolder,
+            }
+
     return _maint_mod.format_maintenance_email_check(
         email_subject=subj,
         email_body=body,
         from_addr=from_hdr,
         folder=folder,
         tenant_access_token=tenant_access_token,
+        **schedule_kw,
     )
 
 

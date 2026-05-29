@@ -386,6 +386,8 @@ def parse_service_desk_studio_from_subject(subject: str) -> str:
     seg = m.group(1).strip()
     if not seg or seg.lower() in ("affected", "not affected"):
         return ""
+    if re.search(r"table\s+availability", seg, re.IGNORECASE):
+        return ""
     return seg
 
 
@@ -564,9 +566,6 @@ def find_maintenance_state_entry_for_checkemail(
                 continue
             if _ticket_ok(ent):
                 return ent
-        for ent in reversed(entries):
-            if _ticket_ok(ent):
-                return ent
     return None
 
 
@@ -696,6 +695,8 @@ def _cancel_fields_for_card(
     email_body: str | None,
     table_game: str | None = None,
     prior: dict[str, Any] | None = None,
+    schedule_subject: str | None = None,
+    schedule_body: str | None = None,
 ) -> tuple[str, str, str]:
     """
     Studio / Date / Table for cancel cards — fill from ``maintenance.json`` prior
@@ -736,6 +737,12 @@ def _cancel_fields_for_card(
             prior_table = table_display_from_prior(prior)
             if prior_table:
                 table = prior_table
+
+    if table in ("", "Unknown") and (schedule_body or "").strip():
+        sch_subj = (schedule_subject or email_subject or "").strip()
+        names = extract_candidate_game_names(f"{sch_subj}\n{schedule_body}")
+        if names:
+            table = ", ".join(names)
 
     if date in ("", "Unknown"):
         subj = resolve_maintenance_subject(email_subject, email_body)
@@ -1926,8 +1933,12 @@ def _is_plausible_game_name(name: str) -> bool:
         "best regards",
         "dear casino",
         "once maintenance",
+        "message is to",
+        "this message",
     )
     if any(j in low for j in junk):
+        return False
+    if re.match(r"^to\s*:?\s*$", low):
         return False
     if len(t.split()) > 8:
         return False
@@ -2473,46 +2484,71 @@ def format_maintenance_email_check(
     from_addr: str = "",
     folder: str = "",
     tenant_access_token: str | None = None,
+    schedule_subject: str | None = None,
+    schedule_body: str | None = None,
+    schedule_from: str = "",
+    schedule_folder: str = "",
 ) -> str:
     """
     Human-readable extraction report for ``/checkemail`` (IMAP lookup, no send).
+
+    When ``schedule_*`` is set, parsed fields come from the **original schedule**
+  mail (not a cancel / om@ forward copy).
     """
-    resolved = resolve_maintenance_subject(email_subject, email_body)
-    info = extract_info(email_body, email_subject=email_subject)
-    pipeline_text = f"{resolved}\n{email_body or ''}"
+    matched_cancel = is_maintenance_cancelled_email(email_body)
+    use_schedule = bool((schedule_body or "").strip())
+    ex_subj = (schedule_subject or email_subject) or ""
+    ex_body = (schedule_body or email_body) or ""
+    resolved = resolve_maintenance_subject(ex_subj, ex_body)
+    info = extract_info(ex_body, email_subject=ex_subj)
+    pipeline_text = f"{resolved}\n{ex_body}"
     candidates = extract_candidate_game_names(pipeline_text)
-    ticket = extract_ticket_card_title(resolved, email_body) or "Unknown"
-    studio, date = _studio_and_date(info, email_subject, email_body)
+    ticket = extract_ticket_card_title(resolved, ex_body) or "Unknown"
+    studio, date = _studio_and_date(info, ex_subj, ex_body)
     table = _table_display(
         info,
         launched_tables=None,
         email_subject=resolved,
     )
-    is_cancel = is_maintenance_cancelled_email(email_body)
 
     lines = [
         "**🔍 Check only — no email sent**",
         "",
         f"**Folder:** {(folder or '').strip() or '—'}",
-        f"**Subject:** {resolved or email_subject or '—'}",
+        f"**Subject:** {resolve_maintenance_subject(email_subject, email_body) or email_subject or '—'}",
         f"**From:** {(from_addr or '').strip() or '—'}",
-        "",
-        "**Parsed fields**",
-        f"• Ticket: `{ticket}`",
-        f"• Studio: {studio}",
-        f"• Date: {date}",
-        f"• Table: {table}",
-        "• table_names: "
-        + (", ".join(candidates) if candidates else "（无）"),
-        f"• Status: {info.get('status', 'Unknown')}",
-        f"• Start: {info.get('start_time', 'Unknown')}",
-        f"• End: {info.get('end_time', 'Unknown')}",
-        f"• Reason: {info.get('reason', 'Unknown')}",
-        f"• Reference: {info.get('reference', 'Unknown')}",
-        f"• Cancel email: {'yes' if is_cancel else 'no'}",
     ]
+    if use_schedule:
+        lines.extend(
+            [
+                "",
+                "**ℹ️ Matched mail is a cancel / forward copy.**",
+                "Parsed fields below are from the **original schedule** mail:",
+                f"• Schedule folder: {(schedule_folder or '').strip() or '—'}",
+                f"• Schedule from: {(schedule_from or '').strip() or '—'}",
+                f"• Schedule subject: {resolve_maintenance_subject(schedule_subject, schedule_body) or schedule_subject or '—'}",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "**Parsed fields**",
+            f"• Ticket: `{ticket}`",
+            f"• Studio: {studio}",
+            f"• Date: {date}",
+            f"• Table: {table}",
+            "• table_names: "
+            + (", ".join(candidates) if candidates else "（无）"),
+            f"• Status: {info.get('status', 'Unknown')}",
+            f"• Start: {info.get('start_time', 'Unknown')}",
+            f"• End: {info.get('end_time', 'Unknown')}",
+            f"• Reason: {info.get('reason', 'Unknown')}",
+            f"• Reference: {info.get('reference', 'Unknown')}",
+            f"• Cancel email: {'yes' if matched_cancel else 'no'}",
+        ]
+    )
 
-    if is_cancel:
+    if matched_cancel:
         prior = lookup_prior_maintenance_for_cancel(email_subject, email_body)
         lines.extend(["", "**Cancel → prior maintenance**"])
         if prior:
@@ -2521,18 +2557,28 @@ def format_maintenance_email_check(
                 lines.append(f"• Prior ticket: `{prior.get('ticket_id')}`")
             pt = table_display_from_prior(prior)
             lines.append(f"• Prior tables: {pt or '（无）'}")
+        else:
+            lines.append("• Prior found: **no**")
+            if not use_schedule:
+                lines.append(
+                    "  — process the scheduled mail first "
+                    "(same subject / ticket in maintenance.json today)"
+                )
+        if prior or use_schedule:
             _st, date2, table2 = _cancel_fields_for_card(
                 info,
                 email_subject=email_subject,
                 email_body=email_body,
                 prior=prior,
+                schedule_subject=schedule_subject,
+                schedule_body=schedule_body,
             )
             lines.append(f"• Cancel card Date: {date2}")
             lines.append(f"• Cancel card Table: {table2}")
-        else:
+        if not use_schedule:
             lines.append(
-                "• Prior found: **no** — process the scheduled mail first "
-                "(same subject / ticket in maintenance.json today)"
+                "• ⚠️ Original schedule mail not found in IMAP — "
+                "Table / Studio may be wrong until the first notice is located."
             )
 
     tok = (tenant_access_token or "").strip()
@@ -2548,10 +2594,13 @@ def format_maintenance_email_check(
             ]
         )
 
-    preview = (email_body or "").strip().replace("\r\n", "\n")
-    if len(preview) > 900:
-        preview = preview[:900] + "…"
-    lines.extend(["", "**Body preview**", preview or "（空）"])
+    preview_src = (schedule_body or email_body or "").strip().replace("\r\n", "\n")
+    preview_label = (
+        "**Schedule body preview**" if use_schedule else "**Body preview**"
+    )
+    if len(preview_src) > 900:
+        preview_src = preview_src[:900] + "…"
+    lines.extend(["", preview_label, preview_src or "（空）"])
     return "\n".join(lines)
 
 
