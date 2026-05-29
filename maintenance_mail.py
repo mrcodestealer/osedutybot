@@ -1954,6 +1954,92 @@ def _message_sort_timestamp(msg: email.message.Message) -> datetime:
         return datetime.min.replace(tzinfo=timezone.utc)
 
 
+def find_maintenance_message_by_subject_title(
+    title: str,
+) -> tuple[email.message.Message, str] | None:
+    """
+    Newest message in ``MAIL_IMAP_FOLDERS`` whose subject contains ``title``.
+
+    For ``/checkemail`` preview — no SMTP, no Lark maintenance card.
+    """
+    needle = (title or "").strip()
+    if not needle:
+        return None
+    folders = [f.strip() for f in MAIL_IMAP_FOLDERS if f.strip()] or [
+        "INBOX",
+        "OSE Pending",
+    ]
+    mail = _connect_imap_simple()
+    best_uid: bytes | None = None
+    best_folder = ""
+    best_ts = datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        for folder in folders:
+            resolved = _resolve_imap_folder_name(mail, folder)
+            if not _select_mail_folder(mail, resolved, readonly=True):
+                continue
+            uids = _uid_search_jenkins_needle(mail, needle)
+            if not uids:
+                continue
+            for uid in reversed(uids[-120:]):
+                h = _fetch_reply_headers_single(mail, uid)
+                subj = str(h.get("subj") or "")
+                if needle.lower() not in subj.lower():
+                    continue
+                ts = h["ts"]
+                if best_uid is None or ts >= best_ts:
+                    best_uid = _uid_as_bytes(uid)
+                    best_folder = folder
+                    best_ts = ts
+        if best_uid is None:
+            return None
+        msg = _fetch_uid_message(mail, best_uid)
+        if msg is None:
+            return None
+        return msg, best_folder
+    finally:
+        try:
+            mail.logout()
+        except Exception:
+            pass
+
+
+def check_maintenance_email_by_title(
+    title: str,
+    *,
+    tenant_access_token: str | None = None,
+) -> str:
+    """``/checkemail`` — find om@ mail by subject fragment and show parsed fields."""
+    if not MAIL_PASSWORD:
+        return (
+            "❌ `MAINTENANCE_MAIL_PASSWORD` not set — cannot read om@ IMAP."
+        )
+    needle = (title or "").strip()
+    if not needle:
+        return (
+            "❌ Usage: `/checkemail [Service Desk] … / (SD-xxxxx)`\n"
+            "Example: `/checkemail SD-7066787`"
+        )
+    found = find_maintenance_message_by_subject_title(needle)
+    if not found:
+        folders = ", ".join(MAIL_IMAP_FOLDERS) or "INBOX, OSE Pending"
+        return (
+            f"❌ No email found matching:\n`{needle}`\n\n"
+            f"Searched folders: {folders}"
+        )
+    msg, folder = found
+    subj = _decode_mime_header(msg.get("Subject")) or ""
+    body = extract_body_from_message(msg)
+    from_hdr = _decode_mime_header(msg.get("From")) or ""
+    return _maint_mod.format_maintenance_email_check(
+        email_subject=subj,
+        email_body=body,
+        from_addr=from_hdr,
+        folder=folder,
+        tenant_access_token=tenant_access_token,
+    )
+
+
 def find_inbox_message_by_subject_title(title: str) -> email.message.Message | None:
     """Find newest INBOX message whose subject contains ``title``."""
     found = find_message_by_subject_title(title, folders=["INBOX"])
@@ -2234,15 +2320,35 @@ def _find_prior_maintenance_entry(
     return _maint_mod.find_prior_maintenance_entry(entries, display_subj, ticket_id)
 
 
-def _table_game_for_cancel(prior: dict[str, Any] | None) -> str:
-    if not prior:
-        return "Unknown"
-    launched = [str(x).strip() for x in (prior.get("launched_names") or []) if str(x).strip()]
-    if launched:
-        return ", ".join(launched)
-    tables = [str(x).strip() for x in (prior.get("table_names") or []) if str(x).strip()]
-    if tables:
-        return ", ".join(tables)
+def _table_game_for_cancel(
+    prior: dict[str, Any] | None,
+    *,
+    mail: imaplib.IMAP4 | None = None,
+) -> str:
+    names = _maint_mod.table_names_from_prior_entry(prior)
+    if names:
+        return ", ".join(names)
+    if prior and mail is not None:
+        store_key = str(prior.get("imap_uid") or "")
+        if ":" in store_key:
+            folder, uid_s = store_key.split(":", 1)
+            try:
+                if _select_mail_folder(mail, folder):
+                    orig = _fetch_uid_message(mail, uid_s.encode())
+                    if orig is not None:
+                        body = extract_body_from_message(orig)
+                        subj = _decode_mime_header(orig.get("Subject")) or ""
+                        names = _maint_mod.extract_candidate_game_names(
+                            f"{subj}\n{body}"
+                        )
+                        if names:
+                            return ", ".join(names)
+            except Exception as ex:
+                if MAIL_VERBOSE:
+                    print(
+                        f"[maint-mail] cancel prior IMAP re-fetch failed: {ex!r}",
+                        flush=True,
+                    )
     return "Unknown"
 
 
@@ -2552,7 +2658,7 @@ class MaintenanceMailWatcher:
 
         if is_cancel:
             prior = _find_prior_maintenance_entry(entries, display_subj, ticket_id)
-            table_game = _table_game_for_cancel(prior)
+            table_game = _table_game_for_cancel(prior, mail=mail)
             launched_prior = list(prior.get("launched_names") or []) if prior else []
             to_cp = len(launched_prior) > 0
             if not to_cp and prior:

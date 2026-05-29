@@ -3649,6 +3649,29 @@ def lark_webhook():
                 "Examples: `/m …`, `/maintenance …`, `/maintenanceshort …`",
             )
         return _lark_im_done()
+    elif cmd == "/checkemail":
+        title = " ".join(cmd_parts[1:]).strip()
+        if not title:
+            send_message(
+                chat_id,
+                "❌ Usage: `/checkemail <email title or SD-xxxxx>`\n"
+                "Example:\n"
+                "`/checkemail SD-7066787`\n"
+                "`/checkemail [Service Desk] Equipment maintenance / 01/Jun/26 … (SD-7066787)`\n\n"
+                "Finds the newest matching mail in om@ IMAP and shows parsed fields only — **no email sent**.",
+            )
+            return _lark_im_done()
+        try:
+            import maintenance_mail as _maint_mail
+
+            token = get_tenant_access_token()
+            reply = _maint_mail.check_maintenance_email_by_title(
+                title, tenant_access_token=token
+            )
+        except Exception as ex:
+            reply = f"❌ `/checkemail` failed: `{ex}`"
+        send_message(chat_id, reply)
+        return _lark_im_done()
     elif clean_text.lower().startswith('/nch'):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:

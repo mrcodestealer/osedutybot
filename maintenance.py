@@ -551,6 +551,29 @@ def _studio_date_for_cancel(
     return studio, date
 
 
+def table_names_from_prior_entry(prior: dict[str, Any] | None) -> list[str]:
+    """Launched CP tables first, else all table names from the earlier notice."""
+    if not prior:
+        return []
+    launched = [
+        str(x).strip()
+        for x in (prior.get("launched_names") or [])
+        if str(x).strip()
+    ]
+    if launched:
+        return launched
+    return [
+        str(x).strip()
+        for x in (prior.get("table_names") or [])
+        if str(x).strip()
+    ]
+
+
+def table_display_from_prior(prior: dict[str, Any] | None) -> str:
+    names = table_names_from_prior_entry(prior)
+    return ", ".join(names) if names else ""
+
+
 def _table_for_cancel(
     info: dict[str, Any],
     *,
@@ -612,15 +635,9 @@ def _cancel_fields_for_card(
             if date in ("", "Unknown") and tinc.get("date"):
                 date = tinc["date"]
         if table in ("", "Unknown"):
-            launched = [
-                str(x).strip()
-                for x in (prior.get("launched_names") or [])
-                if str(x).strip()
-            ]
-            if launched:
-                table = ", ".join(launched)
-            elif prior.get("table_names"):
-                table = "（无 CP 上线 · 遊戲入口圖≠1）"
+            prior_table = table_display_from_prior(prior)
+            if prior_table:
+                table = prior_table
 
     if date in ("", "Unknown"):
         subj = resolve_maintenance_subject(email_subject, email_body)
@@ -664,7 +681,7 @@ def build_cancelled_card_elements(
             inf, email_subject, email_body
         )
     return [
-        _card_studio_date_columns(studio, date),
+        _card_labeled_field("Date", date),
         _card_labeled_field("Table", table),
         {
             "tag": "div",
@@ -734,7 +751,6 @@ def build_cancelled_summary(
         original = resolve_maintenance_subject(ref_email, email_body) or ref_email
     return "\n".join(
         [
-            f"**Studio:**\n{studio}",
             f"**Date:**\n{date}",
             f"**Table:**\n{table}",
             "",
@@ -1778,8 +1794,20 @@ def _is_plausible_game_name(name: str) -> bool:
     low = t.lower()
     if re.search(r"https?://|@|\.com\b|evolution\b", low):
         return False
-    if ":" in t and not re.search(r"privé|priv", t, re.I):
-        return False
+    if ":" in t:
+        if re.search(r"privé|priv", t, re.I):
+            pass
+        elif t.count(":") == 1:
+            left, right = t.split(":", 1)
+            if not (
+                left.strip()
+                and right.strip()
+                and len(left) <= 48
+                and len(right) <= 32
+            ):
+                return False
+        else:
+            return False
     junk = (
         "maintenance",
         "availability",
@@ -2338,6 +2366,95 @@ def process_maintenance_pipeline(
     )
 
     return msg1, hdr_title, hdr_tpl, msg2, card_el
+
+
+def format_maintenance_email_check(
+    *,
+    email_subject: str,
+    email_body: str,
+    from_addr: str = "",
+    folder: str = "",
+    tenant_access_token: str | None = None,
+) -> str:
+    """
+    Human-readable extraction report for ``/checkemail`` (IMAP lookup, no send).
+    """
+    resolved = resolve_maintenance_subject(email_subject, email_body)
+    info = extract_info(email_body, email_subject=email_subject)
+    pipeline_text = f"{resolved}\n{email_body or ''}"
+    candidates = extract_candidate_game_names(pipeline_text)
+    ticket = extract_ticket_card_title(resolved, email_body) or "Unknown"
+    studio, date = _studio_and_date(info, email_subject, email_body)
+    table = _table_display(
+        info,
+        launched_tables=None,
+        email_subject=resolved,
+    )
+    is_cancel = is_maintenance_cancelled_email(email_body)
+
+    lines = [
+        "**🔍 Check only — no email sent**",
+        "",
+        f"**Folder:** {(folder or '').strip() or '—'}",
+        f"**Subject:** {resolved or email_subject or '—'}",
+        f"**From:** {(from_addr or '').strip() or '—'}",
+        "",
+        "**Parsed fields**",
+        f"• Ticket: `{ticket}`",
+        f"• Studio: {studio}",
+        f"• Date: {date}",
+        f"• Table: {table}",
+        "• table_names: "
+        + (", ".join(candidates) if candidates else "（无）"),
+        f"• Status: {info.get('status', 'Unknown')}",
+        f"• Start: {info.get('start_time', 'Unknown')}",
+        f"• End: {info.get('end_time', 'Unknown')}",
+        f"• Reason: {info.get('reason', 'Unknown')}",
+        f"• Reference: {info.get('reference', 'Unknown')}",
+        f"• Cancel email: {'yes' if is_cancel else 'no'}",
+    ]
+
+    if is_cancel:
+        prior = lookup_prior_maintenance_for_cancel(email_subject, email_body)
+        lines.extend(["", "**Cancel → prior maintenance**"])
+        if prior:
+            lines.append("• Prior found: **yes**")
+            if prior.get("ticket_id"):
+                lines.append(f"• Prior ticket: `{prior.get('ticket_id')}`")
+            pt = table_display_from_prior(prior)
+            lines.append(f"• Prior tables: {pt or '（无）'}")
+            _st, date2, table2 = _cancel_fields_for_card(
+                info,
+                email_subject=email_subject,
+                email_body=email_body,
+                prior=prior,
+            )
+            lines.append(f"• Cancel card Date: {date2}")
+            lines.append(f"• Cancel card Table: {table2}")
+        else:
+            lines.append(
+                "• Prior found: **no** — process the scheduled mail first "
+                "(same subject / ticket in maintenance.json today)"
+            )
+
+    tok = (tenant_access_token or "").strip()
+    if gamelist_configured() and tok and candidates:
+        _to_cp, launched = gamelist_has_launched("\n".join(candidates), tok)
+        not_cp = [g for g in candidates if g not in launched]
+        lines.extend(
+            [
+                "",
+                "**Gamelist**",
+                "• On CP: " + (", ".join(launched) if launched else "（无）"),
+                "• NOT IN CP: " + (", ".join(not_cp) if not_cp else "（无）"),
+            ]
+        )
+
+    preview = (email_body or "").strip().replace("\r\n", "\n")
+    if len(preview) > 900:
+        preview = preview[:900] + "…"
+    lines.extend(["", "**Body preview**", preview or "（空）"])
+    return "\n".join(lines)
 
 
 def parse_subject_from_pasted_email(text: str) -> str | None:
