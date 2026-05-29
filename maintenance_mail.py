@@ -1966,13 +1966,13 @@ CHECKEMAIL_SCAN_DAYS = max(
     ),
 )
 CHECKEMAIL_SCAN_CAP = max(
-    40,
-    int(os.getenv("MAINTENANCE_MAIL_CHECKEMAIL_SCAN_CAP", "").strip() or "120"),
+    1,
+    int(os.getenv("MAINTENANCE_MAIL_CHECKEEMAIL_SCAN_CAP", "").strip() or "500"),
 )
 # Recent UID pool per folder for mail-UI-style subject filtering (Lark SUBJECT often broken).
 CHECKEEMAIL_SUBJECT_POOL = max(
     80,
-    int(os.getenv("MAINTENANCE_MAIL_CHECKEEMAIL_SUBJECT_POOL", "").strip() or "320"),
+    int(os.getenv("MAINTENANCE_MAIL_CHECKEEMAIL_SUBJECT_POOL", "").strip() or "800"),
 )
 
 
@@ -2047,7 +2047,7 @@ def _checkemail_subject_search_needles(user_title: str) -> list[str]:
             _add(f"(SD-{digits})")
     if "[service desk]" in t.lower():
         stripped = re.sub(r"^\[Service Desk\]\s*", "", t, flags=re.IGNORECASE).strip()
-        m = re.match(r"^(.+?)\s*/\s*\d{1,2}/", stripped)
+        m = re.match(r"^(.+?)\s*(?:/+\s*)+\d{1,2}/", stripped)
         if m:
             _add(m.group(1).strip())
     return out
@@ -2763,6 +2763,98 @@ def _checkemail_message_dedupe_key(
     return f"{kind}|{_maint_mod.normalize_subject_for_search(subj)}|{sig}"
 
 
+def _try_add_checkemail_hit(
+    hits: list[tuple[email.message.Message, str, datetime]],
+    seen: set[str],
+    msg: email.message.Message,
+    folder: str,
+    *,
+    want_kinds: set[str] | None = None,
+) -> bool:
+    """Append one useful ``/checkemail`` row when not already deduped."""
+    subj = _decode_mime_header(msg.get("Subject")) or ""
+    body = extract_body_from_message(msg)
+    if not _checkemail_body_is_useful(body, subj):
+        return False
+    if want_kinds is not None:
+        kind = _maint_mod.classify_checkemail_step_kind(body, email_subject=subj)
+        if kind not in want_kinds:
+            return False
+    key = _checkemail_message_dedupe_key(msg, body)
+    if key in seen:
+        return False
+    seen.add(key)
+    hits.append((msg, folder, _message_received_ts(msg)))
+    return True
+
+
+def _checkemail_timeline_kinds(
+    hits: list[tuple[email.message.Message, str, datetime]],
+) -> set[str]:
+    kinds: set[str] = set()
+    for msg, _folder, _ts in hits:
+        subj = _decode_mime_header(msg.get("Subject")) or ""
+        body = extract_body_from_message(msg)
+        kinds.add(
+            _maint_mod.classify_checkemail_step_kind(body, email_subject=subj)
+        )
+    return kinds
+
+
+def _supplement_checkemail_timeline_messages(
+    mail: imaplib.IMAP4,
+    hits: list[tuple[email.message.Message, str, datetime]],
+    seen: set[str],
+    *,
+    ticket_id: str,
+    user_title: str,
+    want_kinds: set[str],
+) -> None:
+    """Second pass for cancel/uncancel rows missed by the primary folder scan."""
+    if not ticket_id or not want_kinds:
+        return
+    for folder in _checkemail_search_folders():
+        resolved = _resolve_imap_folder_name(mail, folder)
+        if not _select_mail_folder(mail, resolved, readonly=True):
+            continue
+        uids = _uids_by_checkemail_subject_filter(
+            mail,
+            user_title,
+            ticket_id=ticket_id,
+            folder=folder,
+            max_hits=40,
+        )
+        if not uids:
+            uids = _uids_by_ticket_subject_scan(
+                mail,
+                ticket_id,
+                cap=max(CHECKEMAIL_SCAN_CAP, 250),
+                max_hits=40,
+            )
+        if not uids:
+            continue
+        sorted_uids = sorted({_uid_as_bytes(u) for u in uids}, key=lambda x: int(x))
+        pre_headers = _imap_uid_fetch_headers_batch(mail, sorted_uids)
+        for uid in sorted_uids:
+            h = pre_headers.get(uid) or {}
+            subj_pre = str(h.get("subj") or "")
+            if subj_pre and not _subject_matches_checkemail_title(
+                subj_pre, user_title, ticket_id=ticket_id
+            ):
+                continue
+            msg = _fetch_uid_message(mail, uid)
+            if msg is None:
+                continue
+            subj = _decode_mime_header(msg.get("Subject")) or ""
+            if not _subject_matches_checkemail_title(
+                subj, user_title, ticket_id=ticket_id
+            ):
+                continue
+            _try_add_checkemail_hit(
+                hits, seen, msg, folder, want_kinds=want_kinds
+            )
+
+
 def find_all_maintenance_messages_by_title(
     title: str,
 ) -> list[tuple[email.message.Message, str, datetime]]:
@@ -2778,84 +2870,94 @@ def find_all_maintenance_messages_by_title(
     mail = _connect_imap_simple()
     hits: list[tuple[email.message.Message, str, datetime]] = []
     seen: set[str] = set()
-    folder_passes = [
-        _checkemail_primary_folders(),
-        [f for f in _checkemail_search_folders() if f not in _checkemail_primary_folders()],
-    ]
     try:
-        for pass_folders in folder_passes:
-            for folder in pass_folders:
-                resolved = _resolve_imap_folder_name(mail, folder)
-                if not _select_mail_folder(mail, resolved, readonly=True):
-                    continue
-                if ticket_id:
-                    uids = _uids_by_checkemail_subject_filter(
+        for folder in _checkemail_search_folders():
+            resolved = _resolve_imap_folder_name(mail, folder)
+            if not _select_mail_folder(mail, resolved, readonly=True):
+                continue
+            if ticket_id:
+                uids = _uids_by_checkemail_subject_filter(
+                    mail,
+                    user_title,
+                    ticket_id=ticket_id,
+                    folder=folder,
+                    max_hits=40,
+                )
+                if not uids:
+                    uids = _uids_by_ticket_subject_scan(
                         mail,
-                        user_title,
-                        ticket_id=ticket_id,
-                        folder=folder,
+                        ticket_id,
+                        cap=max(CHECKEMAIL_SCAN_CAP, 250),
                         max_hits=40,
                     )
-                    if not uids:
-                        uids = _uids_by_ticket_subject_scan(
-                            mail,
-                            ticket_id,
-                            cap=max(CHECKEMAIL_SCAN_CAP, 250),
-                            max_hits=40,
-                        )
-                    if not uids:
-                        raw = _uids_by_ticket_imap_search(mail, ticket_id)
-                        if raw and len(raw) <= 64:
-                            uids = raw
-                        elif raw:
-                            filtered: list[bytes] = []
-                            chunk = max(5, _JENKINS_REPLY_HEADER_BATCH)
-                            for off in range(0, min(len(raw), 240), chunk):
-                                part = raw[off : off + chunk]
-                                headers_map = _imap_uid_fetch_headers_batch(
-                                    mail, part
-                                )
-                                for uid in part:
-                                    ub = _uid_as_bytes(uid)
-                                    h = headers_map.get(ub) or {}
-                                    subj = str(h.get("subj") or "")
-                                    if _maint_mod.tickets_match(
-                                        _maint_mod.extract_ticket_card_title(subj),
-                                        ticket_id,
-                                    ):
-                                        filtered.append(ub)
-                                if len(filtered) >= 40:
-                                    break
-                            uids = filtered
-                else:
-                    uids = _uids_by_checkemail_subject_filter(
-                        mail, user_title, folder=folder, max_hits=40
-                    )
-                    if not uids:
-                        uids = _uids_for_maintenance_check(
-                            mail, _maintenance_search_needles(user_title), ticket_id
-                        )
                 if not uids:
+                    raw = _uids_by_ticket_imap_search(mail, ticket_id)
+                    if raw and len(raw) <= 64:
+                        uids = raw
+                    elif raw:
+                        filtered: list[bytes] = []
+                        chunk = max(5, _JENKINS_REPLY_HEADER_BATCH)
+                        for off in range(0, min(len(raw), 240), chunk):
+                            part = raw[off : off + chunk]
+                            headers_map = _imap_uid_fetch_headers_batch(
+                                mail, part
+                            )
+                            for uid in part:
+                                ub = _uid_as_bytes(uid)
+                                h = headers_map.get(ub) or {}
+                                subj = str(h.get("subj") or "")
+                                if _maint_mod.tickets_match(
+                                    _maint_mod.extract_ticket_card_title(subj),
+                                    ticket_id,
+                                ):
+                                    filtered.append(ub)
+                            if len(filtered) >= 40:
+                                break
+                        uids = filtered
+            else:
+                uids = _uids_by_checkemail_subject_filter(
+                    mail, user_title, folder=folder, max_hits=40
+                )
+                if not uids:
+                    uids = _uids_for_maintenance_check(
+                        mail, _maintenance_search_needles(user_title), ticket_id
+                    )
+            if not uids:
+                continue
+            sorted_uids = sorted({_uid_as_bytes(u) for u in uids}, key=lambda x: int(x))
+            pre_headers = _imap_uid_fetch_headers_batch(mail, sorted_uids)
+            for uid in sorted_uids:
+                h = pre_headers.get(uid) or {}
+                subj_pre = str(h.get("subj") or "")
+                if subj_pre and not _subject_matches_checkemail_title(
+                    subj_pre, user_title, ticket_id=ticket_id
+                ):
                     continue
-                for uid in sorted({_uid_as_bytes(u) for u in uids}, key=lambda x: int(x)):
-                    msg = _fetch_uid_message(mail, uid)
-                    if msg is None:
-                        continue
-                    subj = _decode_mime_header(msg.get("Subject")) or ""
-                    if not _subject_matches_checkemail_title(
-                        subj, user_title, ticket_id=ticket_id
-                    ):
-                        continue
-                    body = extract_body_from_message(msg)
-                    if not _checkemail_body_is_useful(body, subj):
-                        continue
-                    key = _checkemail_message_dedupe_key(msg, body)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    hits.append((msg, folder, _message_received_ts(msg)))
-            if hits:
-                break
+                msg = _fetch_uid_message(mail, uid)
+                if msg is None:
+                    continue
+                subj = _decode_mime_header(msg.get("Subject")) or ""
+                if not _subject_matches_checkemail_title(
+                    subj, user_title, ticket_id=ticket_id
+                ):
+                    continue
+                _try_add_checkemail_hit(hits, seen, msg, folder)
+        if ticket_id and hits:
+            found_kinds = _checkemail_timeline_kinds(hits)
+            want: set[str] = set()
+            if "schedule" in found_kinds and "cancel" not in found_kinds:
+                want.add("cancel")
+            if found_kinds & {"schedule", "cancel"} and "uncancel" not in found_kinds:
+                want.add("uncancel")
+            if want:
+                _supplement_checkemail_timeline_messages(
+                    mail,
+                    hits,
+                    seen,
+                    ticket_id=ticket_id,
+                    user_title=user_title,
+                    want_kinds=want,
+                )
         hits.sort(key=lambda x: x[2])
         return hits
     finally:

@@ -138,16 +138,17 @@ def normalize_display_subject(subject: str) -> str:
     s = (subject or "").strip()
     for _ in range(12):
         if re.match(r"^(?:TINC-|\[Service Desk\])", s, re.IGNORECASE):
-            return s
+            break
         m = re.match(r"^(?:Re|Fwd|FW|Fw|Aw):\s*", s, re.IGNORECASE)
         if m:
             s = s[m.end() :].strip()
             continue
         hit = re.search(r"(\[Service Desk\]|TINC-)", s, re.IGNORECASE)
         if hit:
-            return s[hit.start() :].strip()
+            s = s[hit.start() :].strip()
+            break
         break
-    return s
+    return _normalize_sd_subject_slashes(s)
 
 
 def _clean_status_for_title(raw: str) -> str:
@@ -363,7 +364,9 @@ def is_maintenance_cancelled_email(body: str | None) -> bool:
 
 _UNCANCEL_BODY_RE = re.compile(
     r"(?:mentioned\s+)?maintenance\s+has\s+not\s+been\s+cancell?ed|"
-    r"not\s+been\s+cancell?ed\s+and\s+has\s+been\s+carried\s+out",
+    r"not\s+been\s+cancell?ed\s+and\s+has\s+been\s+carried\s+out|"
+    r"maintenance\s+(?:was|is)\s+not\s+cancell?ed|"
+    r"cancellation.*retracted|retract.*cancellation",
     re.IGNORECASE,
 )
 
@@ -515,12 +518,33 @@ def _normalize_title_key(title: str) -> str:
     return re.sub(r"\s+", " ", (title or "").strip().lower())
 
 
+_SD_DATE_TOKEN_RE = re.compile(r"\d{1,2}/[A-Za-z]{3}/\d{2,4}")
+
+
+def _normalize_sd_subject_slashes(text: str) -> str:
+    """
+    Collapse ``//`` field separators to `` / `` without splitting ``28/May/26`` dates.
+    """
+    s = text or ""
+    dates: list[str] = []
+
+    def _stash_date(m: re.Match[str]) -> str:
+        dates.append(m.group(0))
+        return f"__SDDATE{len(dates) - 1}__"
+
+    s = _SD_DATE_TOKEN_RE.sub(_stash_date, s)
+    s = re.sub(r"\s*/+\s*", " / ", s)
+    s = re.sub(r"(?: / )+", " / ", s)
+    for idx, token in enumerate(dates):
+        s = s.replace(f"__SDDATE{idx}__", token)
+    return s.strip(" /")
+
+
 def normalize_subject_for_search(title: str) -> str:
     """Lowercase, collapse spaces and ``/`` segments for fuzzy subject match."""
     t = _normalize_title_key(title)
-    t = re.sub(r"\s*/\s*", " / ", t)
-    t = re.sub(r"(?: / )+", " / ", t)
-    return t.strip(" /")
+    t = _normalize_sd_subject_slashes(t)
+    return t
 
 
 def subjects_match_for_search(subject: str, needle: str) -> bool:
@@ -1049,7 +1073,7 @@ def parse_service_desk_subject_metadata(subject: str) -> dict[str, str]:
     """``[Service Desk] Studio cleaning maintenance / … / (SD-7044009)``."""
     s = normalize_display_subject(subject)
     out: dict[str, str] = {"email_ref": s}
-    m = re.match(r"^\[Service Desk\]\s*(.+?)\s*/", s, re.IGNORECASE)
+    m = re.match(r"^\[Service Desk\]\s*(.+?)\s*(?:/+\s*)+", s, re.IGNORECASE)
     if m:
         out["maintenance_type"] = m.group(1).strip()
     sd = extract_ticket_card_title(s)
