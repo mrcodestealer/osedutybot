@@ -2705,29 +2705,20 @@ def build_maintenance_email_check_card(
         schedule_folder=schedule_folder,
         table_game=table_game,
     )
-    meta_lines = [
-        "🔍 **Check only — no email sent**",
-        f"**Folder:** {(ctx['folder'] or '').strip() or '—'}",
-        f"**From:** {(ctx['from_addr'] or '').strip() or '—'}",
-    ]
-    disp_subj = resolve_maintenance_subject(
-        ctx["email_subject"], ctx["email_body"]
-    )
-    if disp_subj:
-        meta_lines.append(f"**Matched subject:** {disp_subj}")
     if ctx["use_schedule"]:
-        meta_lines.extend(
-            [
-                "",
-                "ℹ️ Matched cancel/forward — card below uses **original schedule** mail.",
-                f"**Schedule folder:** {(ctx['schedule_folder'] or '').strip() or '—'}",
-                f"**Schedule from:** {(ctx['schedule_from'] or '').strip() or '—'}",
-            ]
-        )
+        meta_lines = [
+            "<font color='grey'>🔍 Check only — preview uses **original schedule** mail "
+            "(matched item was cancel/forward).</font>",
+        ]
     elif ctx["matched_cancel"]:
-        meta_lines.append(
-            "⚠️ Original schedule mail not found — table may be incomplete."
-        )
+        meta_lines = [
+            "<font color='grey'>🔍 Check only — no email sent</font>",
+            "<font color='grey'>⚠️ Schedule mail not found in IMAP — Table may show Unknown.</font>",
+        ]
+    else:
+        meta_lines = [
+            "<font color='grey'>🔍 Check only — no email sent</font>",
+        ]
 
     elements: list[dict[str, Any]] = [
         {
