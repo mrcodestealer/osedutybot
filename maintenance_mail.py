@@ -2234,18 +2234,27 @@ def _prior_schedule_rows(
     return rows
 
 
-def _names_from_schedule_message(msg: email.message.Message) -> list[str]:
+def _names_from_schedule_message(
+    msg: email.message.Message,
+    ticket_id: str = "",
+) -> list[str]:
+    subj = _decode_mime_header(msg.get("Subject")) or ""
+    tid = (ticket_id or "").strip()
+    if tid and not _maint_mod.subject_matches_service_desk_ticket(subj, tid):
+        return []
     body = extract_body_from_message(msg)
     if _maint_mod.is_maintenance_cancelled_email(body):
         return []
-    subj = _decode_mime_header(msg.get("Subject")) or ""
+    if tid and not _body_looks_like_schedule(body):
+        return []
     return _maint_mod.extract_candidate_game_names(f"{subj}\n{body}")
 
 
-def _message_is_schedule_notice(msg: email.message.Message) -> bool:
-    return bool(_names_from_schedule_message(msg)) or _body_looks_like_schedule(
-        extract_body_from_message(msg)
-    )
+def _message_is_schedule_notice(
+    msg: email.message.Message,
+    ticket_id: str = "",
+) -> bool:
+    return bool(_names_from_schedule_message(msg, ticket_id))
 
 
 def _checkemail_search_folders() -> list[str]:
@@ -2296,7 +2305,7 @@ def _schedule_message_by_ticket_scan(
             msg = _fetch_uid_message(mail, _uid_as_bytes(uid))
             if msg is None:
                 continue
-            if _names_from_schedule_message(msg):
+            if _names_from_schedule_message(msg, tid):
                 if MAIL_VERBOSE:
                     print(
                         f"[maint-mail] schedule found by ticket scan {tid!r} "
@@ -2323,6 +2332,11 @@ def _fetch_schedule_message_from_prior(
     if im is None:
         im = _connect_imap_simple()
     try:
+        ticket = (
+            _maint_mod.extract_ticket_card_title(needle)
+            or _maint_mod.extract_ticket_card_title(cancel_subj)
+            or ""
+        )
         for prior in priors:
             store_key = str(prior.get("imap_uid") or "").strip()
             if not store_key:
@@ -2332,9 +2346,7 @@ def _fetch_schedule_message_from_prior(
                 if hit is None:
                     continue
                 msg, folder = hit
-                if _names_from_schedule_message(msg):
-                    return msg, folder
-                if _message_is_schedule_notice(msg):
+                if _names_from_schedule_message(msg, ticket):
                     return msg, folder
             except Exception as ex:
                 if MAIL_VERBOSE:
@@ -2422,7 +2434,7 @@ def find_schedule_message_by_subject_title(
             hit = _fetch_message_by_state_imap_uid(
                 mail, str(state_ent.get("imap_uid") or "")
             )
-            if hit is not None and _names_from_schedule_message(hit[0]):
+            if hit is not None and _names_from_schedule_message(hit[0], ticket_id):
                 return hit
 
         for folder in folders:
@@ -2449,7 +2461,7 @@ def find_schedule_message_by_subject_title(
             ranked.sort(key=lambda x: (x[0], x[1]), reverse=True)
             for sc, ts, ub in ranked[:48]:
                 msg = _fetch_uid_message(mail, ub)
-                if msg is None or not _message_is_schedule_notice(msg):
+                if msg is None or not _message_is_schedule_notice(msg, ticket_id):
                     continue
                 from_hdr = _decode_mime_header(msg.get("From")) or ""
                 adj = sc
@@ -2997,7 +3009,7 @@ def _table_game_for_cancel(
             try:
                 hit = _fetch_message_by_state_imap_uid(mail, store_key)
                 if hit is not None:
-                    names = _names_from_schedule_message(hit[0])
+                    names = _names_from_schedule_message(hit[0], tid)
                     if names:
                         return ", ".join(names)
             except Exception as ex:
@@ -3018,7 +3030,7 @@ def _table_game_for_cancel(
         try:
             scan_hit = _schedule_message_by_ticket_scan(mail, tid)
             if scan_hit is not None:
-                names = _names_from_schedule_message(scan_hit[0])
+                names = _names_from_schedule_message(scan_hit[0], tid)
                 if names:
                     return ", ".join(names)
         except Exception as ex:

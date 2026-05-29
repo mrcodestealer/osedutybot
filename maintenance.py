@@ -339,6 +339,10 @@ def is_maintenance_cancelled_email(body: str | None) -> bool:
 
 def extract_cancel_notice_text(body: str | None) -> str:
     """Core cancellation lines for the Lark card (notice + apology)."""
+
+    def _norm_line(text: str) -> str:
+        return re.sub(r"\s+", " ", (text or "").strip())
+
     lines = [
         _clean_email_line(ln)
         for ln in (body or "").replace("\r\n", "\n").replace("\r", "\n").splitlines()
@@ -349,21 +353,21 @@ def extract_cancel_notice_text(body: str | None) -> str:
         if not ln:
             continue
         if _CANCEL_BODY_RE.search(ln):
-            notice = ln.strip()
+            notice = _norm_line(ln)
         elif re.search(r"^we\s+apologize\s+for\s+the\s+inconvenience", ln, re.I):
-            apology = ln.strip()
-    out: list[str] = []
+            apology = _norm_line(ln)
+    parts: list[str] = []
     if notice:
-        out.append(notice)
+        parts.append(notice)
     else:
-        out.append(
+        parts.append(
             "This message is to inform that the Technical maintenance has been cancelled."
         )
     if apology:
-        out.append(apology)
-    elif not any("apologize" in x.lower() for x in out):
-        out.append("We apologize for the inconvenience.")
-    return "\n".join(out)
+        parts.append(apology)
+    elif not any("apologize" in x.lower() for x in parts):
+        parts.append("We apologize for the inconvenience.")
+    return " ".join(parts)
 
 
 def parse_service_desk_date_from_subject(subject: str) -> str:
@@ -1914,6 +1918,19 @@ def _clean_email_line(line: str) -> str:
     return re.sub(r"^>\s*", "", (line or "").strip())
 
 
+def subject_matches_service_desk_ticket(
+    subject: str | None, ticket_id: str
+) -> bool:
+    """True when ``subject`` is a Service Desk maintenance row for ``ticket_id``."""
+    subj = (subject or "").strip()
+    if not subj or "[service desk]" not in subj.lower():
+        return False
+    tid = extract_ticket_card_title(subj) or ""
+    if not tid or not (ticket_id or "").strip():
+        return False
+    return bool(tickets_match(tid, ticket_id))
+
+
 def _is_garbage_table_cell(name: str) -> bool:
     """Reject subject tails / quote lines mistaken as table names."""
     t = (name or "").strip()
@@ -1936,6 +1953,16 @@ def _is_plausible_game_name(name: str) -> bool:
         return False
     low = t.lower()
     if re.search(r"https?://|@|\.com\b|evolution\b", low):
+        return False
+    if re.search(r"\b\d{4}/\d{2}/\d{2}\b", t):
+        return False
+    if re.search(r"\b\d{1,2}/[A-Za-z]{3}/\d{2,4}\b", t):
+        return False
+    if re.match(r"^hi\s+team\b", low):
+        return False
+    if "not working" in low or "invited link" in low:
+        return False
+    if re.search(r"\bissue\b", low) and len(t.split()) >= 3:
         return False
     if ":" in t:
         if re.search(r"privé|priv", t, re.I):
