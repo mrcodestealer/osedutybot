@@ -1974,6 +1974,15 @@ CHECKEEMAIL_SUBJECT_POOL = max(
     80,
     int(os.getenv("MAINTENANCE_MAIL_CHECKEEMAIL_SUBJECT_POOL", "").strip() or "800"),
 )
+# ``/checkemail`` folders — om@ maintenance threads live in Priority + OSE Pending only.
+CHECKEMAIL_IMAP_FOLDERS = [
+    f.strip()
+    for f in (
+        os.getenv("MAINTENANCE_MAIL_CHECKEEMAIL_FOLDERS", "").strip()
+        or "Priority,OSE Pending"
+    ).split(",")
+    if f.strip()
+]
 
 
 def _checkemail_imap_since() -> str:
@@ -2494,27 +2503,21 @@ def _pick_best_schedule_message(
 
 
 def _checkemail_search_folders() -> list[str]:
-    """Folders for schedule lookup — Sent first (om@ forwards), then inbox."""
+    """Folders for ``/checkemail`` — Priority + OSE Pending (override via env)."""
     out: list[str] = []
     seen: set[str] = set()
-    for name in [
-        "Sent",
-        "OSE Pending",
-        *list(MAIL_IMAP_FOLDERS),
-        "INBOX",
-        "CLOSED EMAILS",
-    ]:
+    for name in CHECKEMAIL_IMAP_FOLDERS:
         n = (name or "").strip()
         if not n or n in seen:
             continue
         seen.add(n)
         out.append(n)
-    return out
+    return out or ["Priority", "OSE Pending"]
 
 
 def _checkemail_primary_folders() -> list[str]:
-    """Fast pass — INBOX first (Evolution originals), then om@ forwards."""
-    return ["INBOX", "OSE Pending", "Sent"]
+    """Same as ``_checkemail_search_folders`` (legacy alias)."""
+    return _checkemail_search_folders()
 
 
 def _schedule_message_by_ticket_scan(
@@ -3096,7 +3099,7 @@ def check_maintenance_email_by_title(
 
     all_msgs = find_all_maintenance_messages_by_title(needle)
     if not all_msgs:
-        folders = ", ".join(_checkemail_search_folders()) or "INBOX, OSE Pending, Sent"
+        folders = ", ".join(_checkemail_search_folders()) or "Priority, OSE Pending"
         return _maint_mod.build_checkemail_error_card(
             f"❌ No email found matching:\n`{needle}`\n\n"
             f"Searched **{MAIL_USER}** folders: {folders} "
@@ -3104,7 +3107,7 @@ def check_maintenance_email_by_title(
             "Tips:\n"
             "• `/checkemail SD-7044010` — timeline of schedule → cancel → clarification\n"
             "• Subject: `[Service Desk] Studio cleaning maintenance / … (SD-xxxxx)`\n"
-            "• Evolution originals may be in **Sent** (om@ forward copies)",
+            "• Mail must be in **Priority** or **OSE Pending**",
             title="Email not found",
         )
 
