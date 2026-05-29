@@ -757,6 +757,24 @@ def _cancel_fields_for_card(
     )
 
 
+def _elements_to_check_preview(elements: list[dict[str, Any]]) -> str:
+    """Plain-text Lark card body for ``/checkemail``."""
+    out: list[str] = []
+    for el in elements or []:
+        tag = el.get("tag")
+        if tag == "hr":
+            out.append("---")
+            continue
+        text = el.get("text") or {}
+        if text.get("tag") == "lark_md":
+            c = str(text.get("content") or "")
+            c = re.sub(r"</?font[^>]*>", "", c)
+            c = re.sub(r"<at id=([^>]+)></at>", "@mention", c)
+            if c.strip():
+                out.append(c)
+    return "\n".join(out)
+
+
 def build_cancelled_card_elements(
     *,
     info: dict[str, Any] | None = None,
@@ -764,6 +782,8 @@ def build_cancelled_card_elements(
     email_body: str | None = None,
     table_game: str | None = None,
     prior: dict[str, Any] | None = None,
+    schedule_subject: str | None = None,
+    schedule_body: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     Cancelled card body — same field layout as In Progress, then cancellation notice.
@@ -777,6 +797,8 @@ def build_cancelled_card_elements(
         email_body=email_body,
         table_game=table_game,
         prior=prior,
+        schedule_subject=schedule_subject,
+        schedule_body=schedule_body,
     )
     notice = extract_cancel_notice_text(email_body)
     if prior and (prior.get("title") or "").strip():
@@ -1047,17 +1069,16 @@ def _table_display(
             else "（无 CP 上线 · 遊戲入口圖≠1）"
         )
     names = [str(x).strip() for x in (info.get("table_names") or []) if str(x).strip()]
+    names = [n for n in names if not _is_garbage_table_cell(n)]
     if names:
         return ", ".join(names)
     tinc = parse_tinc_subject_metadata(email_subject or "")
-    if tinc.get("table"):
+    if tinc.get("table") and not _is_garbage_table_cell(tinc["table"]):
         return tinc["table"]
     tbl = (info.get("table") or "").strip()
-    if tbl and tbl.lower() != "unknown":
-        low = tbl.lower()
-        if "availability" in low or low in ("affected", "not affected"):
-            tbl = ""
-    return tbl if tbl else "Unknown"
+    if tbl and tbl.lower() != "unknown" and not _is_garbage_table_cell(tbl):
+        return tbl
+    return "Unknown"
 
 
 def _studio_and_date(
@@ -1891,6 +1912,21 @@ def _clean_email_line(line: str) -> str:
     return re.sub(r"^>\s*", "", (line or "").strip())
 
 
+def _is_garbage_table_cell(name: str) -> bool:
+    """Reject subject tails / quote lines mistaken as table names."""
+    t = (name or "").strip()
+    if not t:
+        return True
+    low = t.lower()
+    if re.search(r"\(sd-\d|sd-\d{6,8}\)", low):
+        return True
+    if "availability" in low or low in ("affected", "not affected"):
+        return True
+    if t.startswith(">") or "dear casino" in low:
+        return True
+    return not _is_plausible_game_name(t)
+
+
 def _is_plausible_game_name(name: str) -> bool:
     """Reject summary lines / URLs mistaken as table names."""
     t = (name or "").strip()
@@ -2499,8 +2535,29 @@ def format_maintenance_email_check(
     use_schedule = bool((schedule_body or "").strip())
     ex_subj = (schedule_subject or email_subject) or ""
     ex_body = (schedule_body or email_body) or ""
+    if matched_cancel and not use_schedule:
+        ex_body = ""
     resolved = resolve_maintenance_subject(ex_subj, ex_body)
-    info = extract_info(ex_body, email_subject=ex_subj)
+    info = extract_info(ex_body, email_subject=ex_subj) if ex_body.strip() else {
+        "table": "Unknown",
+        "table_names": [],
+        "reason": "Unknown",
+        "status": "Unknown",
+        "start_time": "Unknown",
+        "end_time": "Unknown",
+        "reference": "Unknown",
+    }
+    if matched_cancel and not use_schedule:
+        sd_start, sd_end = parse_service_desk_times_from_subject(
+            resolve_maintenance_subject(email_subject, email_body)
+        )
+        if info.get("start_time") == "Unknown" and sd_start != "Unknown":
+            info["start_time"] = sd_start
+        if info.get("end_time") == "Unknown" and sd_end != "Unknown":
+            info["end_time"] = sd_end
+        ref = resolve_maintenance_subject(email_subject, email_body)
+        if ref:
+            info["reference"] = ref
     pipeline_text = f"{resolved}\n{ex_body}"
     candidates = extract_candidate_game_names(pipeline_text)
     ticket = extract_ticket_card_title(resolved, ex_body) or "Unknown"
@@ -2581,9 +2638,50 @@ def format_maintenance_email_check(
                 "Table / Studio may be wrong until the first notice is located."
             )
 
+    launched_tables: list[str] | None = None
     tok = (tenant_access_token or "").strip()
     if gamelist_configured() and tok and candidates:
-        _to_cp, launched = gamelist_has_launched("\n".join(candidates), tok)
+        _to_cp, launched_tables = gamelist_has_launched("\n".join(candidates), tok)
+
+    card_hdr = ""
+    card_body_preview = ""
+    if use_schedule or not matched_cancel:
+        hdr, _tpl, _md, card_els = build_maintenance_notice(
+            ex_body,
+            email_subject=ex_subj,
+            launched_tables=launched_tables,
+        )
+        card_hdr = hdr
+        card_body_preview = _elements_to_check_preview(card_els or [])
+    elif matched_cancel:
+        prior_for_card = lookup_prior_maintenance_for_cancel(
+            email_subject, email_body
+        )
+        card_hdr = build_cancelled_card_header_title(email_subject, email_body)
+        card_els = build_cancelled_card_elements(
+            info=info,
+            email_subject=email_subject,
+            email_body=email_body,
+            prior=prior_for_card,
+            schedule_subject=schedule_subject,
+            schedule_body=schedule_body,
+        )
+        card_body_preview = _elements_to_check_preview(card_els)
+
+    if card_hdr or card_body_preview:
+        lines.extend(
+            [
+                "",
+                "**Lark card preview** (same as bot sends to group)",
+                f"• Header: {card_hdr}",
+                "",
+                card_body_preview or "（空）",
+            ]
+        )
+
+    tok = (tenant_access_token or "").strip()
+    if gamelist_configured() and tok and candidates:
+        launched = launched_tables or []
         not_cp = [g for g in candidates if g not in launched]
         lines.extend(
             [

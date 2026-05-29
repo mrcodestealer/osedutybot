@@ -2189,6 +2189,80 @@ def _maintenance_search_needles(title: str) -> list[str]:
     return ordered
 
 
+def _fetch_schedule_message_from_prior(
+    needle: str,
+    cancel_subj: str = "",
+    cancel_body: str = "",
+    *,
+    mail: imaplib.IMAP4 | None = None,
+) -> tuple[email.message.Message, str] | None:
+    """Original schedule mail via ``maintenance.json`` prior ``imap_uid``."""
+    prior = _maint_mod.lookup_prior_maintenance_for_cancel(cancel_subj, cancel_body)
+    if not prior:
+        ticket = _maint_mod.extract_ticket_card_title(needle) or ""
+        prior = _maint_mod.find_prior_maintenance_entry(
+            _maint_mod.load_maintenance_state_entries(),
+            cancel_subj or needle,
+            ticket,
+        )
+    if not prior or prior.get("is_cancelled_email"):
+        return None
+    store_key = str(prior.get("imap_uid") or "").strip()
+    if not store_key:
+        return None
+    own_mail = mail is None
+    im = mail
+    if im is None:
+        im = _connect_imap_simple()
+    try:
+        hit = _fetch_message_by_state_imap_uid(im, store_key)
+        if not hit:
+            return None
+        msg, folder = hit
+        body = extract_body_from_message(msg)
+        if _maint_mod.is_maintenance_cancelled_email(body):
+            return None
+        return msg, folder
+    except Exception as ex:
+        if MAIL_VERBOSE:
+            print(f"[maint-mail] checkemail prior IMAP fetch failed: {ex!r}", flush=True)
+        return None
+    finally:
+        if own_mail and im is not None:
+            try:
+                im.logout()
+            except Exception:
+                pass
+
+
+def _schedule_kwargs_from_prior(
+    needle: str,
+    cancel_subj: str = "",
+    cancel_body: str = "",
+) -> dict[str, str]:
+    hit = _fetch_schedule_message_from_prior(needle, cancel_subj, cancel_body)
+    if not hit:
+        return {}
+    msg, folder = hit
+    return {
+        "schedule_subject": _decode_mime_header(msg.get("Subject")) or "",
+        "schedule_body": extract_body_from_message(msg),
+        "schedule_from": _decode_mime_header(msg.get("From")) or "",
+        "schedule_folder": folder,
+    }
+
+
+def _body_looks_like_schedule(body: str) -> bool:
+    low = (body or "").lower()
+    return bool(
+        re.search(
+            r"following tables will be unavailable|going to take place|"
+            r"equipment maintenance is going to",
+            low,
+        )
+    )
+
+
 def find_schedule_message_by_subject_title(
     title: str,
 ) -> tuple[email.message.Message, str] | None:
@@ -2259,8 +2333,11 @@ def find_schedule_message_by_subject_title(
                     continue
                 from_hdr = _decode_mime_header(msg.get("From")) or ""
                 adj = sc
+                has_sched = _body_looks_like_schedule(body)
                 if _maint_mod.from_should_ignore(from_hdr):
-                    adj -= 80
+                    adj -= 40 if has_sched else 80
+                elif has_sched:
+                    adj += 20
                 if adj > best_score or (adj == best_score and ts >= best_ts):
                     best_score = adj
                     best_uid = ub
@@ -2269,6 +2346,11 @@ def find_schedule_message_by_subject_title(
             if best_score >= 180:
                 break
         if best_uid is None:
+            prior_hit = _fetch_schedule_message_from_prior(
+                user_title, mail=mail
+            )
+            if prior_hit is not None:
+                return prior_hit
             return None
         msg = _fetch_uid_message(mail, best_uid)
         if msg is None:
@@ -2434,6 +2516,8 @@ def check_maintenance_email_by_title(
                 "schedule_from": _decode_mime_header(smsg.get("From")) or "",
                 "schedule_folder": sfolder,
             }
+        if not schedule_kw:
+            schedule_kw = _schedule_kwargs_from_prior(needle, subj, body)
 
     return _maint_mod.format_maintenance_email_check(
         email_subject=subj,
