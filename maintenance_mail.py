@@ -1974,7 +1974,7 @@ def _score_maintenance_check_candidate(
     not ``Re:`` / ``Fw:`` bot copies.
     """
     subj = str(headers.get("subj") or "")
-    from_hdr = str(headers.get("from") or "")
+    from_hdr = str(headers.get("from_hdr") or headers.get("from") or "")
     score = 0
     if _maint_mod.from_is_allowed_sender(from_hdr):
         score += 120
@@ -1999,10 +1999,35 @@ def _score_maintenance_check_candidate(
     return score
 
 
+def _uids_by_ticket_subject_scan(
+    mail: imaplib.IMAP4, ticket_id: str, *, cap: int = 900
+) -> list[bytes]:
+    """Client-side scan — reliable when IMAP SUBJECT breaks on ``[Service Desk]``."""
+    since = _checkemail_imap_since()
+    recent = _uid_search(mail, f"(SINCE {since})")
+    if not recent:
+        return []
+    take = recent[-cap:] if len(recent) > cap else recent
+    out: list[bytes] = []
+    for uid in reversed(take):
+        h = _fetch_reply_headers_single(mail, uid)
+        subj = str(h.get("subj") or "")
+        if _maint_mod.tickets_match(
+            _maint_mod.extract_ticket_card_title(subj), ticket_id
+        ):
+            out.append(_uid_as_bytes(uid))
+    return out
+
+
 def _uids_for_maintenance_check(
     mail: imaplib.IMAP4, needles: list[str], ticket_id: str
 ) -> list[bytes]:
-    """Collect UID candidates — subject variants, SINCE+ticket, recent scan."""
+    """
+    Collect UID candidates for ``/checkemail``.
+
+    Do **not** pass ``[Service Desk]…`` to IMAP SUBJECT — ``[`` starts CHARSET
+    in SEARCH and returns nothing on Lark.
+    """
     seen: set[bytes] = set()
     ordered: list[bytes] = []
 
@@ -2013,27 +2038,18 @@ def _uids_for_maintenance_check(
                 seen.add(ub)
                 ordered.append(ub)
 
-    for needle in needles:
-        _add_many(_uid_search_subject_variants(mail, needle))
-        _add_many(_uid_search_jenkins_needle(mail, needle))
-
+    since = _checkemail_imap_since()
     if ticket_id:
-        since = _checkemail_imap_since()
         _add_many(_uid_search(mail, f'(SINCE {since} SUBJECT "{ticket_id}")'))
         _add_many(_uid_search(mail, f'(SINCE {since} TEXT "{ticket_id}")'))
-
-    if not ordered and ticket_id:
-        since = _checkemail_imap_since()
-        recent = _uid_search(mail, f"(SINCE {since})")
-        if recent:
-            cap = min(len(recent), 500)
-            for uid in reversed(recent[-cap:]):
-                h = _fetch_reply_headers_single(mail, uid)
-                subj = str(h.get("subj") or "")
-                if _maint_mod.tickets_match(
-                    _maint_mod.extract_ticket_card_title(subj), ticket_id
-                ):
-                    _add_many([uid])
+        _add_many(_uids_by_ticket_subject_scan(mail, ticket_id))
+    for needle in needles:
+        if ticket_id and needle.upper() == ticket_id.upper():
+            continue
+        if "[" in needle or "]" in needle:
+            continue
+        _add_many(_uid_search_subject_variants(mail, needle))
+        _add_many(_uid_search_jenkins_needle(mail, needle))
     return ordered
 
 
@@ -2090,10 +2106,10 @@ def find_maintenance_message_by_subject_title(
             folder_uids = _uids_for_maintenance_check(mail, needles, ticket_id)
             if not folder_uids:
                 continue
-            for uid in folder_uids[-250:]:
+            for uid in folder_uids[-400:]:
                 h = _fetch_reply_headers_single(mail, uid)
                 subj = str(h.get("subj") or "")
-                if not _maint_mod.subjects_match_for_search(subj, user_title):
+                if not _maint_mod.matches_checkemail_query(subj, user_title):
                     continue
                 score = _score_maintenance_check_candidate(h, user_title)
                 ts = h["ts"]
@@ -2136,11 +2152,12 @@ def check_maintenance_email_by_title(
         folders = ", ".join(MAIL_IMAP_FOLDERS) or "INBOX, OSE Pending"
         return (
             f"❌ No email found matching:\n`{needle}`\n\n"
-            f"Searched folders: {folders} (last {CHECKEMAIL_IMAP_DAYS} days)\n\n"
+            f"Searched **{MAIL_USER}** folders: {folders} "
+            f"(last {CHECKEMAIL_IMAP_DAYS} days)\n\n"
             "Tips:\n"
-            "• Paste the **full** `[Service Desk] … (SD-xxxxx)` subject if you can\n"
-            "• Or use ticket only: `/checkemail SD-7066787` — bot picks the "
-            "**Evolution original**, not `Re:` / `Fw:` copies"
+            "• `/checkemail SD-7066787` — picks Evolution **original**, not `Re:`/`Fw:`\n"
+            "• Full `[Service Desk]…` title also works (spacing/`/ /` normalized)\n"
+            "• Mail must be in **om@** inbox (not only junchen@ forward copy)"
         )
     msg, folder = found
     subj = _decode_mime_header(msg.get("Subject")) or ""

@@ -488,6 +488,15 @@ def tickets_match(a: str | None, b: str | None) -> bool:
     return bool(_ticket_match_keys(a) & _ticket_match_keys(b))
 
 
+def matches_checkemail_query(subject: str, user_title: str) -> bool:
+    """Whether ``subject`` satisfies a ``/checkemail`` title or ticket query."""
+    if subjects_match_for_search(subject, user_title):
+        return True
+    ut = extract_ticket_card_title(user_title) or ""
+    st = extract_ticket_card_title(subject) or ""
+    return bool(ut and st and tickets_match(ut, st))
+
+
 def _ticket_match_keys(ticket_id: str) -> set[str]:
     """``SD-7004356`` and ``TINC-7004356`` match the same Service Desk ticket."""
     tid = (ticket_id or "").strip().upper()
