@@ -361,6 +361,48 @@ def is_maintenance_cancelled_email(body: str | None) -> bool:
     return bool(_CANCEL_BODY_RE.search(text))
 
 
+_UNCANCEL_BODY_RE = re.compile(
+    r"(?:mentioned\s+)?maintenance\s+has\s+not\s+been\s+cancell?ed|"
+    r"not\s+been\s+cancell?ed\s+and\s+has\s+been\s+carried\s+out",
+    re.IGNORECASE,
+)
+
+
+def is_maintenance_uncancel_clarification_email(body: str | None) -> bool:
+    """True when Evolution retracts a cancel and confirms maintenance was completed."""
+    text = (body or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not text.strip():
+        return False
+    return bool(_UNCANCEL_BODY_RE.search(text))
+
+
+def classify_checkemail_step_kind(
+    body: str | None,
+    *,
+    email_subject: str | None = None,
+) -> str:
+    """
+    ``schedule`` | ``cancel`` | ``uncancel`` | ``other`` for ``/checkemail`` timeline.
+    """
+    text = body or ""
+    subj = resolve_maintenance_subject(email_subject, text)
+    if is_maintenance_cancelled_email(text):
+        return "cancel"
+    if is_maintenance_uncancel_clarification_email(text):
+        return "uncancel"
+    pipeline = f"{subj}\n{text}"
+    if extract_candidate_game_names(pipeline):
+        return "schedule"
+    if re.search(
+        r"going\s+to\s+take\s+place|will\s+be\s+unavailable|"
+        r"took\s+place\s+with\s+a\s+downtime|equipment maintenance is going to",
+        text,
+        re.IGNORECASE,
+    ):
+        return "schedule"
+    return "other"
+
+
 def extract_cancel_notice_text(body: str | None) -> str:
     """Core cancellation lines for the Lark card (notice + apology)."""
 
@@ -1037,6 +1079,8 @@ def classify_maintenance_card_kind(
         body,
         re.IGNORECASE,
     ):
+        return "fixed"
+    if is_maintenance_uncancel_clarification_email(body):
         return "fixed"
     if status in ("in progress", "in-progress", "inprogress"):
         return "in_progress"
@@ -2835,6 +2879,171 @@ def build_maintenance_email_check_card(
         "header": {
             "template": ctx.get("card_tpl") or "blue",
             "title": {"tag": "plain_text", "content": hdr},
+        },
+        "body": {"elements": elements},
+    }
+
+
+def build_checkemail_step_preview(
+    *,
+    kind: str,
+    email_subject: str,
+    email_body: str,
+    folder: str = "",
+    tenant_access_token: str | None = None,
+    schedule_subject: str | None = None,
+    schedule_body: str | None = None,
+) -> tuple[str, str, list[dict[str, Any]], str]:
+    """One timeline row — header label, template colour, Lark elements, gamelist md."""
+    labels = {
+        "schedule": "📅 Scheduled",
+        "cancel": "❌ Cancelled",
+        "uncancel": "✅ Clarification (completed)",
+        "other": "📧 Other",
+    }
+    templates = {
+        "schedule": "red",
+        "cancel": "red",
+        "uncancel": "green",
+        "other": "blue",
+    }
+    if kind == "cancel":
+        ctx = _gather_checkemail_context(
+            email_subject=email_subject,
+            email_body=email_body,
+            folder=folder,
+            tenant_access_token=tenant_access_token,
+            schedule_subject=schedule_subject,
+            schedule_body=schedule_body,
+        )
+        return (
+            labels[kind],
+            ctx.get("card_tpl") or templates[kind],
+            ctx.get("card_els") or [],
+            ctx.get("gamelist_md") or "",
+        )
+    ctx = _gather_checkemail_context(
+        email_subject=email_subject,
+        email_body=email_body,
+        folder=folder,
+        tenant_access_token=tenant_access_token,
+    )
+    if kind in ("schedule", "uncancel") and ctx.get("card_els"):
+        return (
+            labels.get(kind, kind),
+            ctx.get("card_tpl") or templates.get(kind, "blue"),
+            ctx["card_els"],
+            ctx.get("gamelist_md") or "",
+        )
+    info = ctx["info"]
+    fallback = [
+        _card_labeled_field("Date", ctx["date"]),
+        _card_labeled_field("Table", ctx["table"]),
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": "\n".join(
+                    [
+                        f"⏰ **Start:** {info.get('start_time', 'Unknown')}",
+                        f"⏰ **End:** {info.get('end_time', 'Unknown')}",
+                        f"📝 **Reason:** {info.get('reason', 'Unknown')}",
+                    ]
+                ),
+            },
+        },
+    ]
+    return (
+        labels.get(kind, kind),
+        templates.get(kind, "blue"),
+        fallback,
+        ctx.get("gamelist_md") or "",
+    )
+
+
+def build_checkemail_timeline_card(
+    *,
+    steps: list[dict[str, Any]],
+    ticket: str,
+) -> dict[str, Any]:
+    """Multi-email ``/checkemail`` preview — oldest → newest."""
+    tid = (ticket or "Maintenance").strip()
+    elements: list[dict[str, Any]] = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": (
+                    "<font color='grey'>🔍 Check only — simulates bot handling "
+                    f"**{len(steps)}** email(s) for `{tid}` (oldest → newest). "
+                    "No email sent.</font>"
+                ),
+            },
+        },
+        {"tag": "hr"},
+    ]
+    for i, step in enumerate(steps, 1):
+        label = str(step.get("label") or f"Step {i}")
+        folder = str(step.get("folder") or "").strip()
+        when = str(step.get("when") or "").strip()
+        title_bits = [f"**{i}. {label}**"]
+        if when:
+            title_bits.append(when)
+        elements.append(
+            {
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": " · ".join(title_bits)},
+            }
+        )
+        if folder:
+            elements.append(
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"<font color='grey'>📁 {folder}</font>",
+                    },
+                }
+            )
+        subj = str(step.get("subject") or "").strip()
+        if subj:
+            elements.append(
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"<font color='grey'>Subject: {subj[:220]}</font>",
+                    },
+                }
+            )
+        for el in step.get("elements") or []:
+            elements.append(el)
+        gamelist_md = str(step.get("gamelist_md") or "").strip()
+        if gamelist_md:
+            elements.extend(
+                [
+                    {"tag": "hr"},
+                    {
+                        "tag": "div",
+                        "text": {
+                            "tag": "lark_md",
+                            "content": lark_md_for_card(gamelist_md),
+                        },
+                    },
+                ]
+            )
+        elements.append({"tag": "hr"})
+    while elements and elements[-1].get("tag") == "hr":
+        elements.pop()
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "blue",
+            "title": {
+                "tag": "plain_text",
+                "content": _truncate_header(f"🔍 Check: {tid} ({len(steps)} emails)"),
+            },
         },
         "body": {"elements": elements},
     }

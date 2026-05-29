@@ -2059,7 +2059,7 @@ def _uids_for_ticket_schedule_lookup(
     if not tid:
         return []
     subj_uids = _uids_by_ticket_subject_scan(
-        mail, tid, cap=max(CHECKEMAIL_SCAN_CAP, 200)
+        mail, tid, cap=max(CHECKEMAIL_SCAN_CAP, 200), max_hits=40
     )
     if subj_uids:
         return subj_uids
@@ -2136,13 +2136,13 @@ def _score_maintenance_check_candidate(
 
 
 def _uids_by_ticket_subject_scan(
-    mail: imaplib.IMAP4, ticket_id: str, *, cap: int | None = None
+    mail: imaplib.IMAP4, ticket_id: str, *, cap: int | None = None, max_hits: int | None = 12
 ) -> list[bytes]:
     """
     Slow fallback — scan recent mail when SUBJECT search returns nothing.
     Uses batched header fetch (not one UID per round-trip).
     """
-    lim = cap if cap is not None else CHECKEMAIL_SCAN_CAP
+    lim = cap if cap is not None else CHECKEEMAIL_SCAN_CAP
     since = _checkemail_imap_since()
     recent = _uid_search(mail, f"(SINCE {since})")
     if not recent:
@@ -2151,6 +2151,7 @@ def _uids_by_ticket_subject_scan(
     pool = list(reversed(take))
     out: list[bytes] = []
     chunk = max(5, _JENKINS_REPLY_HEADER_BATCH)
+    hit_cap = max_hits if max_hits is not None else 10_000
     for off in range(0, len(pool), chunk):
         part = pool[off : off + chunk]
         headers_map = _imap_uid_fetch_headers_batch(mail, part)
@@ -2162,7 +2163,7 @@ def _uids_by_ticket_subject_scan(
                 _maint_mod.extract_ticket_card_title(subj), ticket_id
             ):
                 out.append(ub)
-        if len(out) >= 12:
+        if len(out) >= hit_cap:
             break
     return out
 
@@ -2350,9 +2351,9 @@ def _checkemail_search_folders() -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for name in list(MAIL_IMAP_FOLDERS) + [
+        "Sent",
         "OSE Pending",
         "INBOX",
-        "Sent",
         "CLOSED EMAILS",
     ]:
         n = (name or "").strip()
@@ -2589,6 +2590,92 @@ def find_schedule_message_by_subject_title(
             pass
 
 
+def _message_received_ts(msg: email.message.Message) -> datetime:
+    raw = msg.get("Date") or ""
+    try:
+        ts = parsedate_to_datetime(raw)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts
+    except Exception:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _checkemail_message_dedupe_key(
+    msg: email.message.Message, body: str
+) -> str:
+    subj = _decode_mime_header(msg.get("Subject")) or ""
+    kind = _maint_mod.classify_checkemail_step_kind(body, email_subject=subj)
+    sig = re.sub(r"\s+", " ", (body or "").strip().casefold())[:900]
+    return f"{kind}|{_maint_mod.normalize_subject_for_search(subj)}|{sig}"
+
+
+def find_all_maintenance_messages_by_title(
+    title: str,
+) -> list[tuple[email.message.Message, str, datetime]]:
+    """
+    All maintenance rows for ``/checkemail`` timeline — every folder, oldest first.
+
+    Skips duplicate forwards and internal ``NOT IN CP`` one-liners.
+    """
+    user_title = (title or "").strip()
+    if not user_title:
+        return []
+    ticket_id = _maint_mod.extract_ticket_card_title(user_title) or ""
+    mail = _connect_imap_simple()
+    hits: list[tuple[email.message.Message, str, datetime]] = []
+    seen: set[str] = set()
+    try:
+        for folder in _checkemail_search_folders():
+            resolved = _resolve_imap_folder_name(mail, folder)
+            if not _select_mail_folder(mail, resolved, readonly=True):
+                continue
+            if ticket_id:
+                uids = _uids_by_ticket_subject_scan(
+                    mail,
+                    ticket_id,
+                    cap=max(CHECKEMAIL_SCAN_CAP, 250),
+                    max_hits=40,
+                )
+            else:
+                uids = _uids_for_maintenance_check(
+                    mail, _maintenance_search_needles(user_title), ticket_id
+                )
+            if not uids:
+                continue
+            for uid in sorted({_uid_as_bytes(u) for u in uids}, key=lambda x: int(x)):
+                msg = _fetch_uid_message(mail, uid)
+                if msg is None:
+                    continue
+                subj = _decode_mime_header(msg.get("Subject")) or ""
+                if not _maint_mod.matches_checkemail_query(subj, user_title):
+                    continue
+                body = extract_body_from_message(msg)
+                kind = _maint_mod.classify_checkemail_step_kind(
+                    body, email_subject=subj
+                )
+                if kind == "other":
+                    low = (body or "").casefold()
+                    if "not in cp website" in low and len(body.strip()) < 120:
+                        continue
+                    if not _maint_mod.extract_candidate_game_names(
+                        f"{subj}\n{body}"
+                    ) and not _body_looks_like_schedule(body):
+                        continue
+                key = _checkemail_message_dedupe_key(msg, body)
+                if key in seen:
+                    continue
+                seen.add(key)
+                hits.append((msg, folder, _message_received_ts(msg)))
+        hits.sort(key=lambda x: x[2])
+        return hits
+    finally:
+        try:
+            mail.logout()
+        except Exception:
+            pass
+
+
 def find_maintenance_message_by_subject_title(
     title: str,
 ) -> tuple[email.message.Message, str] | None:
@@ -2603,10 +2690,7 @@ def find_maintenance_message_by_subject_title(
     if not needles:
         return None
     ticket_id = _maint_mod.extract_ticket_card_title(user_title) or ""
-    folders = [f.strip() for f in MAIL_IMAP_FOLDERS if f.strip()] or [
-        "INBOX",
-        "OSE Pending",
-    ]
+    folders = _checkemail_search_folders()
     mail = _connect_imap_simple()
     best_uid: bytes | None = None
     best_folder = ""
@@ -2703,7 +2787,7 @@ def check_maintenance_email_by_title(
     *,
     tenant_access_token: str | None = None,
 ) -> dict[str, Any]:
-    """``/checkemail`` — find om@ mail and return a Lark interactive card."""
+    """``/checkemail`` — find om@ mail(s) and return a Lark interactive card."""
     if not MAIL_PASSWORD:
         return _maint_mod.build_checkemail_error_card(
             "❌ `MAINTENANCE_MAIL_PASSWORD` not set — cannot read om@ IMAP."
@@ -2715,20 +2799,66 @@ def check_maintenance_email_by_title(
             "Example: `/checkemail SD-7066787`",
             title="Check email — usage",
         )
-    found = find_maintenance_message_by_subject_title(needle)
-    if not found:
-        folders = ", ".join(MAIL_IMAP_FOLDERS) or "INBOX, OSE Pending"
+
+    all_msgs = find_all_maintenance_messages_by_title(needle)
+    if not all_msgs:
+        folders = ", ".join(_checkemail_search_folders()) or "INBOX, OSE Pending, Sent"
         return _maint_mod.build_checkemail_error_card(
             f"❌ No email found matching:\n`{needle}`\n\n"
             f"Searched **{MAIL_USER}** folders: {folders} "
             f"(last {CHECKEMAIL_IMAP_DAYS} days)\n\n"
             "Tips:\n"
-            "• `/checkemail SD-7066787` — picks Evolution **original**, not `Re:`/`Fw:`\n"
+            "• `/checkemail SD-7044010` — timeline of schedule → cancel → clarification\n"
             "• Full `[Service Desk]…` title also works (spacing/`/ /` normalized)\n"
-            "• Mail must be in **om@** inbox (not only junchen@ forward copy)",
+            "• Evolution originals may be in **Sent** (om@ forward copies)",
             title="Email not found",
         )
-    msg, folder = found
+
+    ticket = (
+        _maint_mod.extract_ticket_card_title(needle)
+        or _maint_mod.extract_ticket_card_title(
+            _decode_mime_header(all_msgs[0][0].get("Subject")) or ""
+        )
+        or needle
+    )
+
+    if len(all_msgs) >= 2:
+        steps: list[dict[str, Any]] = []
+        schedule_subj = ""
+        schedule_body = ""
+        for msg, folder, ts in all_msgs:
+            subj = _decode_mime_header(msg.get("Subject")) or ""
+            body = extract_body_from_message(msg)
+            kind = _maint_mod.classify_checkemail_step_kind(
+                body, email_subject=subj
+            )
+            use_sched_subj = schedule_subj
+            use_sched_body = schedule_body
+            if kind == "schedule":
+                schedule_subj = subj
+                schedule_body = body
+            label, _tpl, elements, gamelist_md = _maint_mod.build_checkemail_step_preview(
+                kind=kind,
+                email_subject=subj,
+                email_body=body,
+                folder=folder,
+                tenant_access_token=tenant_access_token,
+                schedule_subject=use_sched_subj or None,
+                schedule_body=use_sched_body or None,
+            )
+            steps.append(
+                {
+                    "label": label,
+                    "folder": folder,
+                    "when": _maint_mod.format_received_at(ts.isoformat()),
+                    "subject": subj,
+                    "elements": elements,
+                    "gamelist_md": gamelist_md,
+                }
+            )
+        return _maint_mod.build_checkemail_timeline_card(steps=steps, ticket=ticket)
+
+    msg, folder, _ts = all_msgs[0]
     subj = _decode_mime_header(msg.get("Subject")) or ""
     body = extract_body_from_message(msg)
     from_hdr = _decode_mime_header(msg.get("From")) or ""
