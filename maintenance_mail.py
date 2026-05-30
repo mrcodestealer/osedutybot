@@ -3542,7 +3542,7 @@ def _build_checkemail_timeline_steps_from_msgs(
             )
             label = {
                 "schedule": "📅 Scheduled",
-                "uncancel": "✅ Clarification (completed)",
+                "uncancel": "✅ Uncancelled",
                 "other": "📧 Other",
             }.get(kind, kind)
             elements = card_els or []

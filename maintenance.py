@@ -604,6 +604,38 @@ def extract_cancel_notice_text(body: str | None) -> str:
     return " ".join(parts)
 
 
+def extract_uncancel_notice_text(body: str | None) -> str:
+    """Core uncancel / miscommunication lines for the Lark card."""
+
+    def _norm_line(text: str) -> str:
+        return re.sub(r"\s+", " ", (text or "").strip())
+
+    lines = [
+        _clean_email_line(ln)
+        for ln in (body or "").replace("\r\n", "\n").replace("\r", "\n").splitlines()
+    ]
+    parts: list[str] = []
+    for ln in lines:
+        if not ln:
+            continue
+        if _UNCANCEL_BODY_RE.search(ln):
+            parts.append(_norm_line(ln))
+        elif re.search(r"miscommunication", ln, re.I):
+            parts.append(_norm_line(ln))
+    if not parts:
+        parts.append(
+            "Maintenance has not been cancelled and was carried out as scheduled."
+        )
+    if not any("apolog" in x.lower() for x in parts):
+        for ln in lines:
+            if re.search(r"^we\s+apologize\s+for\s+the\s+inconvenience", ln, re.I):
+                parts.append(_norm_line(ln))
+                break
+        else:
+            parts.append("We apologize for the inconvenience.")
+    return " ".join(parts)
+
+
 def parse_service_desk_date_from_subject(subject: str) -> str:
     """``12/May/26`` from ``[Service Desk] … / 12/May/26 05:30 UTC / …``."""
     s = normalize_display_subject(subject)
@@ -1410,6 +1442,81 @@ def _cancel_fields_for_card(
     )
 
 
+def _uncancel_date_table_for_card(
+    info: dict[str, Any],
+    *,
+    email_subject: str | None,
+    email_body: str | None,
+    table_game: str | None = None,
+    prior: dict[str, Any] | None = None,
+    launched_tables: list[str] | None = None,
+) -> tuple[str, str]:
+    """Date / Table for uncancel cards — no Studio (same idea as Cancelled layout)."""
+    _studio, date, table = _cancel_fields_for_card(
+        info,
+        email_subject=email_subject,
+        email_body=email_body,
+        table_game=table_game,
+        prior=prior,
+    )
+    if launched_tables is not None:
+        table = _table_display(
+            info,
+            launched_tables=launched_tables,
+            email_subject=email_subject,
+        )
+    return (date or "").strip() or "Unknown", (table or "").strip() or "Unknown"
+
+
+def build_uncancelled_card_elements(
+    *,
+    info: dict[str, Any] | None = None,
+    email_subject: str | None = None,
+    email_body: str | None = None,
+    table_game: str | None = None,
+    prior: dict[str, Any] | None = None,
+    launched_tables: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Uncancel card — Date + Table + notice (no Studio)."""
+    inf = info if info is not None else extract_info(
+        email_body or "", email_subject=email_subject
+    )
+    inf = enrich_info_from_prior(
+        inf, prior, email_subject=email_subject, email_body=email_body
+    )
+    date, table = _uncancel_date_table_for_card(
+        inf,
+        email_subject=email_subject,
+        email_body=email_body,
+        table_game=table_game,
+        prior=prior,
+        launched_tables=launched_tables,
+    )
+    notice = extract_uncancel_notice_text(email_body)
+    if prior and (prior.get("title") or "").strip():
+        original = str(prior["title"]).strip()
+    else:
+        original = resolve_maintenance_subject(email_subject, email_body) or _email_ref_line(
+            inf, email_subject, email_body
+        )
+    return [
+        _card_labeled_field("Date", date),
+        _card_labeled_field("Table", table),
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": notice},
+        },
+        {"tag": "hr"},
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"<font color='grey'>📧 Original: {original}</font>",
+            },
+        },
+    ]
+
+
 def _elements_to_check_preview(elements: list[dict[str, Any]]) -> str:
     """Plain-text Lark card body for ``/checkemail``."""
     out: list[str] = []
@@ -1645,11 +1752,13 @@ def classify_maintenance_card_kind(
     email_body: str | None = None,
 ) -> str:
     """
-    ``in_progress`` | ``fixed`` | ``scheduled`` for picture-style Lark cards.
+    ``in_progress`` | ``fixed`` | ``scheduled`` | ``uncancel`` for picture-style Lark cards.
     Cancelled emails are handled separately.
     """
     body = email_body or ""
     subj = resolve_maintenance_subject(email_subject, body)
+    if is_maintenance_uncancel_clarification_email(body):
+        return "uncancel"
     status = (info.get("status") or "").strip().lower()
     subj_low = subj.lower()
     is_sd = "[service desk]" in subj_low or _body_has_service_desk(body)
@@ -1659,8 +1768,6 @@ def classify_maintenance_card_kind(
         body,
         re.IGNORECASE,
     ):
-        return "fixed"
-    if is_maintenance_uncancel_clarification_email(body):
         return "fixed"
     if status in ("in progress", "in-progress", "inprogress"):
         return "in_progress"
@@ -1700,6 +1807,17 @@ def build_fixed_card_header(subject: str, email_body: str | None = None) -> str:
         return _truncate_header(f"✅ [{sd}] {maint} - Fixed")
     ticket = ticket_id_tinc_style(subj, email_body) or "Maintenance"
     return _truncate_header(f"✅ {ticket} - Fixed")
+
+
+def build_uncancelled_card_header(subject: str, email_body: str | None = None) -> str:
+    subj = resolve_maintenance_subject(subject, email_body)
+    if "[service desk]" in subj.lower():
+        meta = parse_service_desk_subject_metadata(subj)
+        sd = meta.get("ticket_sd") or extract_ticket_card_title(subj, email_body) or "SD-?"
+        maint = meta.get("maintenance_type") or "Maintenance"
+        return _truncate_header(f"✅ [{sd}] {maint} - Uncancelled")
+    ticket = ticket_id_tinc_style(subj, email_body) or "Maintenance"
+    return _truncate_header(f"✅ {ticket} - Uncancelled")
 
 
 def build_scheduled_card_header(subject: str, email_body: str | None = None) -> str:
@@ -2373,7 +2491,7 @@ def build_maintenance_notice(
     Picture-style maintenance card:
     ``(header_title, header_template, body_md, body_elements)``.
 
-    ``body_elements`` is set for **In Progress**, **Fixed**, and **Scheduled**.
+    ``body_elements`` is set for **In Progress**, **Fixed**, **Scheduled**, and **Uncancelled**.
     """
     if prior is None and (
         is_maintenance_cancelled_email(email_text)
@@ -2397,6 +2515,19 @@ def build_maintenance_notice(
         "launched_tables": launched_tables,
         "prior": prior,
     }
+    if kind == "uncancel":
+        return (
+            build_uncancelled_card_header(email_subject or "", email_text),
+            "green",
+            "",
+            build_uncancelled_card_elements(
+                info=info,
+                email_subject=email_subject,
+                email_body=email_text,
+                prior=prior,
+                launched_tables=launched_tables,
+            ),
+        )
     if kind == "fixed":
         return (
             build_fixed_card_header(email_subject or "", email_text),
@@ -3677,7 +3808,7 @@ def build_checkemail_step_preview(
     labels = {
         "schedule": "📅 Scheduled",
         "cancel": "❌ Cancelled",
-        "uncancel": "✅ Clarification (completed)",
+        "uncancel": "✅ Uncancelled",
         "other": "📧 Other",
     }
     templates = {
