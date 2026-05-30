@@ -102,10 +102,11 @@ SUBJECT_SEARCH_MAX = int(
     os.getenv("MAINTENANCE_MAIL_SUBJECT_MAX", "").strip() or "300"
 )
 MAIL_TZ = (os.getenv("MAINTENANCE_MAIL_TZ", "").strip() or "Asia/Shanghai")
-# Calendar days to process (local MAIL_TZ): 1 = today only.
+# Calendar days to process (local MAIL_TZ): 1 = today only, 2 = today + yesterday.
+# Default 2 for testing — set MAINTENANCE_MAIL_PROCESS_DAYS=1 in env for today only later.
 PROCESS_DAYS = max(
     1,
-    int(os.getenv("MAINTENANCE_MAIL_PROCESS_DAYS", "").strip() or "1"),
+    int(os.getenv("MAINTENANCE_MAIL_PROCESS_DAYS", "").strip() or "2"),
 )
 # IMAP SINCE lookback (local MAIL_TZ) — wider than PROCESS_DAYS so UTC/internal
 # dates still find mail that belongs to «today» locally; code filters to PROCESS_DAYS.
@@ -272,8 +273,9 @@ def _local_today_iso() -> str:
 
 
 def _imap_since_today() -> str:
-    """IMAP SINCE = start of local calendar day."""
-    return datetime.now(_local_tz()).strftime("%d-%b-%Y")
+    """IMAP SINCE = first day of the local process window (see ``PROCESS_DAYS``)."""
+    d = datetime.now(_local_tz()).date() - timedelta(days=max(0, PROCESS_DAYS - 1))
+    return d.strftime("%d-%b-%Y")
 
 
 def _imap_since_for_search() -> str:
@@ -4699,7 +4701,7 @@ class MaintenanceMailWatcher:
         return uids
 
     def _poll_today_folders(self, mail: imaplib.IMAP4) -> None:
-        """Poll today in each configured folder (seen + unread)."""
+        """Poll process-window mail in each configured folder (seen + unread)."""
         since = _imap_since_today()
         any_mail = False
         any_folder_opened = False
@@ -4710,7 +4712,8 @@ class MaintenanceMailWatcher:
             uids = self._uids_today_matching(mail)
             if not uids:
                 print(
-                    f"[maint-mail] {folder}: 0 mail since {since} ({MAIL_TZ})",
+                    f"[maint-mail] {folder}: 0 mail since {since} "
+                    f"({_process_window_label()})",
                     flush=True,
                 )
                 continue
@@ -4729,7 +4732,8 @@ class MaintenanceMailWatcher:
             )
         elif not any_mail:
             print(
-                f"[maint-mail] all folders empty for today ({MAIL_TZ}): {MAIL_IMAP_FOLDERS!r}",
+                f"[maint-mail] all folders empty for {_process_window_label()}: "
+                f"{MAIL_IMAP_FOLDERS!r}",
                 flush=True,
             )
 
