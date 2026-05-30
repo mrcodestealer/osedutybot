@@ -63,8 +63,23 @@ def _wants_offset(text: str) -> bool:
     return bool(re.search(r"\boffset\b", text or "", re.I))
 
 
+def _is_month_attendance_slash_command(text: str) -> bool:
+    """Bot queries like ``/leave fpms`` — not the OSE leave request form."""
+    s = (text or "").strip()
+    return bool(
+        re.match(
+            r"^/(?:leave(?:wfh)?|wfhleave|wholeave|wfh)(?:\s+\S+)?$",
+            s,
+            re.I,
+        )
+    )
+
+
 def _wants_leave(text: str) -> bool:
-    return bool(re.search(r"\bleave\b", text or "", re.I))
+    s = (text or "").strip()
+    if _is_month_attendance_slash_command(s):
+        return False
+    return bool(re.search(r"\bleave\b", s, re.I))
 
 
 def _fetch_user_display_name(open_id: str, token: str) -> str:
