@@ -2060,6 +2060,7 @@ _CHECKEMAIL_TICKET_UID_CACHE_TTL = max(
     int(os.getenv("MAINTENANCE_MAIL_CHECKEEMAIL_TICKET_CACHE_SEC", "").strip() or "600"),
 )
 _CHECKEMAIL_TICKET_UID_CACHE: dict[tuple[str, str], tuple[float, list[bytes]]] = {}
+_CHECKEEMAIL_TICKET_UID_CACHE = _CHECKEMAIL_TICKET_UID_CACHE  # legacy typo alias
 # Recent UID pool per folder for mail-UI-style subject filtering (Lark SUBJECT often broken).
 CHECKEEMAIL_SUBJECT_POOL = max(
     80,
@@ -2562,7 +2563,7 @@ def _uids_for_checkemail_ticket(
             mail, tid, cap=cap, max_hits=max_hits, newest_only=False
         )
     if out:
-        _CHECKEEMAIL_TICKET_UID_CACHE[cache_key] = (now, out)
+        _CHECKEMAIL_TICKET_UID_CACHE[cache_key] = (now, out)
     return out[:max_hits]
 
 
