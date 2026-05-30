@@ -3006,6 +3006,8 @@ def _checkemail_message_dedupe_key(
 ) -> str:
     subj = _decode_mime_header(msg.get("Subject")) or ""
     kind = _maint_mod.classify_checkemail_step_kind(body, email_subject=subj)
+    if kind == "schedule":
+        return f"schedule|{_maint_mod.checkemail_schedule_content_key(subj, body)}"
     sig = re.sub(r"\s+", " ", (body or "").strip().casefold())[:900]
     return f"{kind}|{_maint_mod.normalize_subject_for_search(subj)}|{sig}"
 
@@ -3375,6 +3377,10 @@ def check_maintenance_email_by_title(
             kind = _maint_mod.classify_checkemail_step_kind(
                 body, email_subject=subj
             )
+            quoted_ts = _maint_mod.parse_embedded_mail_date(
+                extract_body_from_message(msg)
+            )
+            when_ts = quoted_ts or ts
             use_sched_subj = schedule_subj
             use_sched_body = schedule_body
             if kind == "schedule":
@@ -3394,7 +3400,7 @@ def check_maintenance_email_by_title(
                     "kind": kind,
                     "label": label,
                     "folder": folder,
-                    "when": _maint_mod.format_received_at(ts.isoformat()),
+                    "when": _maint_mod.format_received_at(when_ts.isoformat()),
                     "subject": subj,
                     "elements": elements,
                     "gamelist_md": gamelist_md,

@@ -20,6 +20,7 @@ import re
 import os
 import unicodedata
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 from urllib.parse import quote
@@ -550,6 +551,48 @@ def parse_service_desk_date_from_subject(subject: str) -> str:
     s = normalize_display_subject(subject)
     m = re.search(r"/\s*(\d{1,2}/[A-Za-z]{3}/\d{2,4})\b", s)
     return m.group(1).strip() if m else ""
+
+
+def parse_embedded_mail_date(text: str | None) -> datetime | None:
+    """
+    Evolution original timestamp inside om@ ``Re:`` / ``Fw:`` quote (Lark forward meta).
+
+    Example: ``Date: Fri, May 23, 2026, 00:01`` or RFC2822 in quoted block.
+    """
+    hay = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not hay.strip():
+        return None
+    for pat in (
+        r"(?im)^\s*Date:\s*(.+?)\s*$",
+        r"(?i)Date:\s*([^<\n]+?)(?:\s*Subject:|\s*$)",
+    ):
+        for m in re.finditer(pat, hay):
+            raw = (m.group(1) or "").strip()
+            if not raw or re.search(r"^\s*Subject\s*:", raw, re.I):
+                continue
+            try:
+                dt = parsedate_to_datetime(raw)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
+            except Exception:
+                continue
+    return None
+
+
+def checkemail_schedule_content_key(
+    email_subject: str,
+    email_body: str,
+) -> str:
+    """Dedupe key for duplicate om@ ``Re:`` rows sharing the same Evolution schedule."""
+    subj = normalize_display_subject(email_subject or "")
+    seg = extract_best_maintenance_segment(email_body or "")
+    sd_date = parse_service_desk_date_from_subject(subj) or parse_service_desk_date_from_subject(
+        seg
+    )
+    ticket = extract_ticket_card_title(subj, seg) or ""
+    sig = re.sub(r"\s+", " ", seg.strip().casefold())[:500]
+    return f"{ticket}|{sd_date}|{sig}"
 
 
 def parse_service_desk_studio_from_subject(subject: str) -> str:
@@ -2303,7 +2346,18 @@ def extract_info(text: str, *, email_subject: str | None = None):
 
         # ---- Table detection (not ``Table availability:``) ----
         elif re.search(r'^table\s+(?!availability\b)', line, re.IGNORECASE):
-            match = re.search(r'table\s+([^\.]+?)\s+in', line, re.IGNORECASE)
+            match = re.search(
+                r'table\s+(.*?)\s+will\s+be\s+unavailable',
+                line,
+                re.IGNORECASE,
+            )
+            if match:
+                name = match.group(1).strip()
+                if _is_plausible_game_name(name):
+                    info['table'] = name
+                    info['table_names'] = [name]
+            if info['table'] == 'Unknown':
+                match = re.search(r'table\s+([^\.]+?)\s+in', line, re.IGNORECASE)
             if match:
                 info['table'] = match.group(1).strip()
                 info['table_names'] = [info['table']]
@@ -2403,6 +2457,17 @@ def extract_info(text: str, *, email_subject: str | None = None):
         info['end_time'] = "TBA"
     _apply_service_desk_utc_times(info, text, email_subject=email_subject)
     # If table name still unknown, try to extract from "table X in Y" in the first paragraph
+    if info['table'] == 'Unknown':
+        will_unavail = re.search(
+            r'table\s+(.*?)\s+will\s+be\s+unavailable',
+            text,
+            re.IGNORECASE,
+        )
+        if will_unavail:
+            name = will_unavail.group(1).strip()
+            if _is_plausible_game_name(name):
+                info['table'] = name
+                info['table_names'] = [name]
     if info['table'] == 'Unknown':
         table_match = re.search(
             r'(?m)^table\s+(?!availability\b)([^\n\.]+?)\s+in\b',
