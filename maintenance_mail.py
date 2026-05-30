@@ -902,6 +902,8 @@ def _empty_state(*, state_date: str | None = None) -> dict[str, Any]:
         "version": STATE_VERSION,
         "entries": [],
         "handled_uids": [],
+        "handled_message_ids": [],
+        "handled_content_keys": [],
         "state_date": state_date or _local_today_iso(),
     }
 
@@ -953,6 +955,9 @@ def _load_state() -> dict[str, Any]:
     handled = data.get("handled_uids")
     if not isinstance(handled, list):
         data["handled_uids"] = []
+    for key in ("handled_message_ids", "handled_content_keys"):
+        if not isinstance(data.get(key), list):
+            data[key] = []
     data = _migrate_legacy_maintenance_state(data)
     return _maybe_reset_state_for_new_day(data)
 
@@ -992,6 +997,10 @@ def _save_state(data: dict[str, Any]) -> None:
     handled = data.get("handled_uids") or []
     if len(handled) > MAX_ENTRIES * 4:
         data["handled_uids"] = handled[-(MAX_ENTRIES * 4) :]
+    for key in ("handled_message_ids", "handled_content_keys"):
+        items = data.get(key) or []
+        if len(items) > MAX_ENTRIES * 4:
+            data[key] = items[-(MAX_ENTRIES * 4) :]
     tmp = STATE_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -1011,6 +1020,59 @@ def _find_duplicate_title_content(
         if ent.get("content_hash") == content_hash:
             return ent
     return None
+
+
+def _content_dedup_key(
+    ticket_id: str, content_hash: str, title: str = ""
+) -> str:
+    tid = (ticket_id or "").strip().upper()
+    if not tid:
+        tid = (
+            _maint_mod.extract_ticket_card_title(title) or ""
+        ).strip().upper()
+    return f"{tid}|{content_hash}" if tid else f"|{content_hash}"
+
+
+def _normalize_message_id(message_id: str | None) -> str:
+    return (message_id or "").strip().lower().strip("<>")
+
+
+def _already_handled_mail_content(
+    state: dict[str, Any],
+    *,
+    message_id: str | None,
+    content_key: str,
+) -> bool:
+    """Same Evolution mail in INBOX + OSE Pending shares Message-ID / ticket+body hash."""
+    mid = _normalize_message_id(message_id)
+    if mid:
+        seen_mids = {
+            _normalize_message_id(x) for x in (state.get("handled_message_ids") or [])
+        }
+        if mid in seen_mids:
+            return True
+    key = (content_key or "").strip()
+    if key and key in set(state.get("handled_content_keys") or []):
+        return True
+    return False
+
+
+def _mark_handled_mail_content(
+    state: dict[str, Any],
+    *,
+    message_id: str | None,
+    content_key: str,
+) -> None:
+    mid = _normalize_message_id(message_id)
+    if mid:
+        mids = state.setdefault("handled_message_ids", [])
+        if mid not in {_normalize_message_id(x) for x in mids}:
+            mids.append(mid.strip("<>") or message_id or mid)
+    key = (content_key or "").strip()
+    if key:
+        keys = state.setdefault("handled_content_keys", [])
+        if key not in keys:
+            keys.append(key)
 
 
 def _already_processed_uid(entries: list[dict[str, Any]], uid_key: str) -> bool:
@@ -4531,6 +4593,20 @@ class MaintenanceMailWatcher:
         pipeline_in = build_pipeline_input(subject, body)
         chash = _content_hash(pipeline_in)
         ticket_id = maintenance.extract_ticket_card_title(subject, body) or ""
+        message_id = (msg.get("Message-ID") or "").strip()
+        content_key = _content_dedup_key(ticket_id, chash, display_subj)
+
+        if _already_handled_mail_content(
+            state, message_id=message_id, content_key=content_key
+        ):
+            _mark_uid_handled(state, store_key)
+            mail.uid("store", uid, "+FLAGS", "(\\Seen)")
+            print(
+                f"[maint-mail] duplicate ignored (same Message-ID/content) {folder} "
+                f"uid={uid_s} ticket={ticket_id!r}",
+                flush=True,
+            )
+            return
 
         dup = _find_duplicate_title_content(entries, display_subj, chash)
         if dup:
@@ -4747,6 +4823,10 @@ class MaintenanceMailWatcher:
             _record_processed(entries, **record_kw)
         else:
             _mark_uid_handled(state, store_key)
+
+        _mark_handled_mail_content(
+            state, message_id=message_id, content_key=content_key
+        )
 
         mail.uid("store", uid, "+FLAGS", "(\\Seen)")
 
