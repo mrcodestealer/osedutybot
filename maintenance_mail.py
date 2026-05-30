@@ -2042,7 +2042,7 @@ CHECKEMAIL_SCAN_CAP = CHECKEEMAIL_SCAN_CAP  # legacy name used in a few call sit
 # Ticket ``/checkemail SD-xxxxx`` — scan only the newest N headers (Re: threads are recent).
 CHECKEEMAIL_TICKET_SCAN_CAP = max(
     40,
-    int(os.getenv("MAINTENANCE_MAIL_CHECKEEMAIL_TICKET_SCAN_CAP", "").strip() or "430"),
+    int(os.getenv("MAINTENANCE_MAIL_CHECKEEMAIL_TICKET_SCAN_CAP", "").strip() or "280"),
 )
 _CHECKEEMAIL_HEADER_BATCH = min(
     120,
@@ -2247,12 +2247,11 @@ def _checkemail_body_is_useful(
     body: str, subj: str, *, ticket_id: str = ""
 ) -> bool:
     """Skip internal ``NOT IN CP`` one-liners; keep Evolution schedule/cancel rows."""
+    if _maint_mod.is_checkemail_bot_stub_body(body, email_subject=subj):
+        return False
     kind = _maint_mod.classify_checkemail_step_kind(body, email_subject=subj)
     if kind != "other":
         return True
-    low = (body or "").casefold()
-    if "not in cp website" in low and len((body or "").strip()) < 160:
-        return False
     if _maint_mod.extract_candidate_game_names(f"{subj}\n{body}"):
         return True
     return bool(_body_looks_like_schedule(body))
@@ -3069,8 +3068,8 @@ def _append_checkemail_folder_hits(
     hits: list[tuple[email.message.Message, str, datetime]],
     seen: set[str],
     originals_only: bool,
-) -> int:
-    """Fetch and append timeline rows from one folder. Returns matched UID count."""
+) -> tuple[int, int]:
+    """Fetch and append timeline rows from one folder. Returns (matched_uids, stub_skipped)."""
     if ticket_id:
         uids = _uids_for_checkemail_ticket(
             mail, ticket_id, folder=folder, max_hits=15
@@ -3084,10 +3083,11 @@ def _append_checkemail_folder_hits(
                 mail, _maintenance_search_needles(user_title), ticket_id
             )
     if not uids:
-        return 0
+        return 0, 0
     sorted_uids = sorted({_uid_as_bytes(u) for u in uids}, key=lambda x: int(x))
     pre_headers = _imap_uid_fetch_headers_batch(mail, sorted_uids)
     matched = 0
+    stub_skipped = 0
     for uid in sorted_uids:
         h = pre_headers.get(uid) or {}
         subj_pre = str(h.get("subj") or "")
@@ -3096,6 +3096,10 @@ def _append_checkemail_folder_hits(
         ):
             continue
         matched += 1
+        peek = _fetch_body_peek_for_uid(mail, uid, limit=12000)
+        if _maint_mod.is_checkemail_bot_stub_body(peek, email_subject=subj_pre):
+            stub_skipped += 1
+            continue
         msg = _fetch_uid_message(mail, uid)
         if msg is None:
             continue
@@ -3112,7 +3116,7 @@ def _append_checkemail_folder_hits(
             ticket_id=ticket_id,
             originals_only=originals_only,
         )
-    return matched
+    return matched, stub_skipped
 
 
 def _supplement_checkemail_timeline_messages(
@@ -3173,31 +3177,33 @@ def _supplement_checkemail_timeline_messages(
 
 def find_all_maintenance_messages_by_title(
     title: str,
-) -> list[tuple[email.message.Message, str, datetime]]:
+) -> tuple[list[tuple[email.message.Message, str, datetime]], int]:
     """
     All maintenance rows for ``/checkemail`` timeline.
 
     Pass 1: standalone Evolution originals. Pass 2 (if empty): ``Re:`` / ``Fw:``
     om@ threads — extract quoted Evolution schedule / cancel / clarification body.
+
+    Returns ``(hits, stub_skipped)`` — stub count is om@ duty-bot rows with no Evolution body in IMAP.
     """
     user_title = (title or "").strip()
     if not user_title:
-        return []
+        return [], 0
     ticket_id = _maint_mod.extract_ticket_card_title(user_title) or ""
     mail = _connect_imap_simple()
     hits: list[tuple[email.message.Message, str, datetime]] = []
     seen: set[str] = set()
+    stub_skipped = 0
     try:
         # Ticket search: skip originals-only pass (IMAP INBOX scan is slow and
         # om@ usually has Re: threads in OSE Pending, not standalone originals).
         passes = (False,) if ticket_id else (True, False)
         folders = _checkemail_folders_for_query(ticket_id)
-        uid_count = 0
         for originals_only in passes:
             for folder in folders:
                 if not _select_checkemail_folder(mail, folder, readonly=True):
                     continue
-                uid_count = _append_checkemail_folder_hits(
+                _matched, _stubs = _append_checkemail_folder_hits(
                     mail,
                     user_title=user_title,
                     ticket_id=ticket_id,
@@ -3206,17 +3212,18 @@ def find_all_maintenance_messages_by_title(
                     seen=seen,
                     originals_only=originals_only,
                 )
+                stub_skipped += _stubs
                 if (
                     ticket_id
                     and not originals_only
-                    and (uid_count > 0 or hits)
+                    and hits
                     and folder.casefold() == "ose pending"
                 ):
                     break
-            if hits or (ticket_id and uid_count > 0):
+            if hits:
                 break
         hits.sort(key=lambda x: x[2])
-        return hits
+        return hits, stub_skipped
     finally:
         try:
             mail.logout()
@@ -3331,6 +3338,78 @@ def find_maintenance_message_by_subject_title(
             pass
 
 
+def _build_checkemail_timeline_steps_from_msgs(
+    all_msgs: list[tuple[email.message.Message, str, datetime]],
+    *,
+    tenant_access_token: str | None = None,
+) -> list[dict[str, Any]]:
+    """Build timeline step dicts from IMAP messages (oldest → newest sort applied after)."""
+    steps: list[dict[str, Any]] = []
+    schedule_subj = ""
+    schedule_body = ""
+    seen_steps: set[str] = set()
+    _KIND_ORDER = {"schedule": 0, "cancel": 1, "uncancel": 2, "other": 3}
+    for msg, folder, ts in all_msgs:
+        subj = _decode_mime_header(msg.get("Subject")) or ""
+        parse_body = extract_checkemail_parse_body(msg)
+        raw_body = extract_body_from_message(msg)
+        kind = _maint_mod.classify_checkemail_step_kind(parse_body, email_subject=subj)
+        step_key = _maint_mod.checkemail_timeline_dedupe_key(kind, subj, parse_body)
+        if step_key in seen_steps:
+            continue
+        seen_steps.add(step_key)
+        quoted_ts = _maint_mod.parse_embedded_mail_date(raw_body)
+        when_ts = quoted_ts or ts
+        use_sched_subj = schedule_subj
+        use_sched_body = schedule_body
+        gamelist_md = ""
+        if kind == "schedule":
+            schedule_subj = subj
+            schedule_body = parse_body
+        if kind == "cancel":
+            label, _tpl, elements, gamelist_md = _maint_mod.build_checkemail_step_preview(
+                kind=kind,
+                email_subject=subj,
+                email_body=parse_body,
+                folder=folder,
+                tenant_access_token=tenant_access_token,
+                schedule_subject=use_sched_subj or None,
+                schedule_body=use_sched_body or None,
+            )
+        else:
+            resolved = _maint_mod.resolve_maintenance_subject(subj, parse_body)
+            pipeline_in = build_pipeline_input(resolved, parse_body)
+            gamelist_md, _hdr, _tpl, _body_md, card_els = (
+                _maint_mod.process_maintenance_pipeline(
+                    pipeline_in,
+                    tenant_access_token,
+                    email_subject=resolved,
+                    received_at=when_ts.isoformat(),
+                )
+            )
+            label = {
+                "schedule": "📅 Scheduled",
+                "uncancel": "✅ Clarification (completed)",
+                "other": "📧 Other",
+            }.get(kind, kind)
+            elements = card_els or []
+        steps.append(
+            {
+                "kind": kind,
+                "label": label,
+                "folder": folder,
+                "when": _maint_mod.format_received_at(when_ts.isoformat()),
+                "subject": subj,
+                "elements": elements,
+                "gamelist_md": gamelist_md,
+            }
+        )
+    steps.sort(
+        key=lambda s: (_KIND_ORDER.get(str(s.get("kind") or "other"), 9), s["when"])
+    )
+    return steps
+
+
 def check_maintenance_email_by_title(
     title: str,
     *,
@@ -3349,9 +3428,76 @@ def check_maintenance_email_by_title(
             title="Check email — usage",
         )
 
-    all_msgs = find_all_maintenance_messages_by_title(needle)
+    ticket = _maint_mod.extract_ticket_card_title(needle) or ""
+    all_msgs, stub_skipped = find_all_maintenance_messages_by_title(needle)
+    state_entries = (
+        _maint_mod.find_all_maintenance_state_entries_for_ticket(ticket, needle)
+        if ticket
+        else []
+    )
+
+    if ticket and (all_msgs or state_entries):
+        steps = _build_checkemail_timeline_steps_from_msgs(
+            all_msgs, tenant_access_token=tenant_access_token
+        )
+        imap_kinds = {str(s.get("kind") or "") for s in steps}
+        if state_entries:
+            state_steps = _maint_mod.build_checkemail_steps_from_state_entries(
+                state_entries, tenant_access_token=tenant_access_token
+            )
+            merged: list[dict[str, Any]] = list(steps)
+            seen_kinds = set(imap_kinds)
+            for st in state_steps:
+                kind = str(st.get("kind") or "")
+                if kind and kind not in seen_kinds:
+                    merged.append(st)
+                    seen_kinds.add(kind)
+            if not steps:
+                merged = state_steps
+            steps = merged
+            _KIND_ORDER = {"schedule": 0, "cancel": 1, "uncancel": 2, "other": 3}
+            steps.sort(
+                key=lambda s: (
+                    _KIND_ORDER.get(str(s.get("kind") or "other"), 9),
+                    s.get("when") or "",
+                )
+            )
+        if steps:
+            tid = ticket or needle
+            card = _maint_mod.build_checkemail_timeline_card(steps=steps, ticket=tid)
+            if stub_skipped and not all_msgs:
+                note = (
+                    f"\n\n<font color='grey'>ℹ️ IMAP had **{stub_skipped}** om@ auto-reply "
+                    "stub(s) (`NOT IN CP WEBSITE`) — timeline rebuilt from "
+                    "**maintenance.json** watcher history.</font>"
+                )
+                body_els = card.get("body", {}).get("elements") or []
+                if body_els:
+                    body_els.insert(
+                        1,
+                        {
+                            "tag": "div",
+                            "text": {"tag": "lark_md", "content": note.strip()},
+                        },
+                    )
+            return card
+
     if not all_msgs:
         folders = ", ".join(_checkemail_search_folders()) or "Priority, OSE Pending"
+        if stub_skipped:
+            return _maint_mod.build_checkemail_error_card(
+                f"❌ Found **{stub_skipped}** om@ thread(s) for `{needle}` but IMAP bodies "
+                "are duty-bot stubs only (`NOT IN CP WEBSITE`) — no Evolution schedule/cancel "
+                "text.\n\n"
+                "Cancel/uncancel emails visible in Lark **Priority** are often **not synced** "
+                "to om@ IMAP.\n\n"
+                "**Workarounds:**\n"
+                "• Paste the full Evolution email with `/m`\n"
+                "• If the mail watcher already processed them today, retry after watcher runs "
+                "(uses `maintenance.json`)\n"
+                "• Ask IT to fix Lark IMAP sync for Priority originals",
+                title="IMAP stub only — no Evolution body",
+            )
         return _maint_mod.build_checkemail_error_card(
             f"❌ No email found matching:\n`{needle}`\n\n"
             f"Searched **{MAIL_USER}** folders: {folders} "
@@ -3364,7 +3510,7 @@ def check_maintenance_email_by_title(
         )
 
     ticket = (
-        _maint_mod.extract_ticket_card_title(needle)
+        ticket
         or _maint_mod.extract_ticket_card_title(
             _decode_mime_header(all_msgs[0][0].get("Subject")) or ""
         )
@@ -3372,73 +3518,8 @@ def check_maintenance_email_by_title(
     )
 
     if len(all_msgs) >= 2:
-        steps: list[dict[str, Any]] = []
-        schedule_subj = ""
-        schedule_body = ""
-        seen_steps: set[str] = set()
-        _KIND_ORDER = {"schedule": 0, "cancel": 1, "uncancel": 2, "other": 3}
-        for msg, folder, ts in all_msgs:
-            subj = _decode_mime_header(msg.get("Subject")) or ""
-            parse_body = extract_checkemail_parse_body(msg)
-            raw_body = extract_body_from_message(msg)
-            kind = _maint_mod.classify_checkemail_step_kind(
-                parse_body, email_subject=subj
-            )
-            step_key = _maint_mod.checkemail_timeline_dedupe_key(
-                kind, subj, parse_body
-            )
-            if step_key in seen_steps:
-                continue
-            seen_steps.add(step_key)
-            quoted_ts = _maint_mod.parse_embedded_mail_date(raw_body)
-            when_ts = quoted_ts or ts
-            use_sched_subj = schedule_subj
-            use_sched_body = schedule_body
-            if kind == "schedule":
-                schedule_subj = subj
-                schedule_body = parse_body
-            if kind == "cancel":
-                label, _tpl, elements, gamelist_md = (
-                    _maint_mod.build_checkemail_step_preview(
-                        kind=kind,
-                        email_subject=subj,
-                        email_body=parse_body,
-                        folder=folder,
-                        tenant_access_token=tenant_access_token,
-                        schedule_subject=use_sched_subj or None,
-                        schedule_body=use_sched_body or None,
-                    )
-                )
-            else:
-                resolved = _maint_mod.resolve_maintenance_subject(subj, parse_body)
-                pipeline_in = build_pipeline_input(resolved, parse_body)
-                gamelist_md, _hdr, _tpl, _body_md, card_els = (
-                    _maint_mod.process_maintenance_pipeline(
-                        pipeline_in,
-                        tenant_access_token,
-                        email_subject=resolved,
-                        received_at=when_ts.isoformat(),
-                    )
-                )
-                label = {
-                    "schedule": "📅 Scheduled",
-                    "uncancel": "✅ Clarification (completed)",
-                    "other": "📧 Other",
-                }.get(kind, kind)
-                elements = card_els or []
-            steps.append(
-                {
-                    "kind": kind,
-                    "label": label,
-                    "folder": folder,
-                    "when": _maint_mod.format_received_at(when_ts.isoformat()),
-                    "subject": subj,
-                    "elements": elements,
-                    "gamelist_md": gamelist_md,
-                }
-            )
-        steps.sort(
-            key=lambda s: (_KIND_ORDER.get(str(s.get("kind") or "other"), 9), s["when"])
+        steps = _build_checkemail_timeline_steps_from_msgs(
+            all_msgs, tenant_access_token=tenant_access_token
         )
         return _maint_mod.build_checkemail_timeline_card(steps=steps, ticket=ticket)
 

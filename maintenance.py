@@ -485,6 +485,45 @@ def is_service_desk_maintenance_subject(subject: str | None) -> bool:
     return bool(parse_service_desk_subject_metadata(s).get("maintenance_type"))
 
 
+def is_checkemail_bot_stub_body(
+    body: str | None,
+    *,
+    email_subject: str | None = None,
+) -> bool:
+    """
+    om@ ``Re:`` rows whose IMAP body is only the duty-bot stub (no Evolution quote).
+
+    Lark UI may show the full forward; IMAP often has ``NOT IN CP WEBSITE`` only.
+    """
+    text = (body or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return True
+    seg = extract_best_maintenance_segment(text)
+    hay = seg or text
+    low = hay.casefold()
+    if is_maintenance_uncancel_clarification_email(hay):
+        return False
+    if is_maintenance_cancelled_email(hay):
+        return False
+    subj = email_subject or ""
+    if extract_candidate_game_names(f"{subj}\n{hay}"):
+        return False
+    if re.search(
+        r"going\s+to\s+take\s+place|following tables? (?:will be|was|were) unavailable|"
+        r"took\s+place\s+with\s+a\s+downtime|dear casino team",
+        hay,
+        re.IGNORECASE,
+    ):
+        return False
+    if "not in cp website" in low and len(hay) < 220:
+        return True
+    if "from duty bot auto reply" in low and len(hay) < 220:
+        return True
+    if len(hay) < 100 and "dear casino team" not in low:
+        return True
+    return False
+
+
 def classify_checkemail_step_kind(
     body: str | None,
     *,
@@ -493,8 +532,10 @@ def classify_checkemail_step_kind(
     """
     ``schedule`` | ``cancel`` | ``uncancel`` | ``other`` for ``/checkemail`` timeline.
     """
+    subj = resolve_maintenance_subject(email_subject, body or "")
+    if is_checkemail_bot_stub_body(body, email_subject=subj):
+        return "other"
     text = extract_best_maintenance_segment(body or "")
-    subj = resolve_maintenance_subject(email_subject, text)
     combined = f"{subj}\n{text}"
     if is_maintenance_uncancel_clarification_email(combined):
         return "uncancel"
@@ -509,8 +550,6 @@ def classify_checkemail_step_kind(
         text,
         re.IGNORECASE,
     ):
-        return "schedule"
-    if is_service_desk_maintenance_subject(subj):
         return "schedule"
     return "other"
 
@@ -867,6 +906,134 @@ def find_maintenance_state_entry_for_checkemail(
             if _ticket_ok(ent):
                 return ent
     return None
+
+
+def find_all_maintenance_state_entries_for_ticket(
+    ticket_id: str,
+    user_title: str = "",
+) -> list[dict[str, Any]]:
+    """All usable ``maintenance.json`` rows for a ticket (schedule, cancel, …)."""
+    tid = (ticket_id or extract_ticket_card_title(user_title) or "").strip()
+    tkeys = _ticket_match_keys(tid) if tid else set()
+    if not tkeys and not (user_title or "").strip():
+        return []
+
+    def _ticket_ok(ent: dict[str, Any]) -> bool:
+        if not tkeys:
+            return False
+        et = (ent.get("ticket_id") or "").strip().upper()
+        if et in tkeys or bool(_ticket_match_keys(et) & tkeys):
+            return True
+        title_tid = extract_ticket_card_title(str(ent.get("title") or "")) or ""
+        return bool(title_tid and (_ticket_match_keys(title_tid) & tkeys))
+
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    ut = (user_title or "").strip()
+    for ent in load_maintenance_state_entries():
+        ch = str(ent.get("content_hash") or "")
+        if ch.startswith("skip:"):
+            continue
+        if ut and not _ticket_ok(ent):
+            if not subjects_match_for_search(str(ent.get("title") or ""), ut):
+                continue
+        elif not _ticket_ok(ent):
+            continue
+        if ent.get("is_cancelled_email"):
+            kind = "cancel"
+        else:
+            kind = "schedule"
+        sd_date = parse_service_desk_date_from_subject(str(ent.get("title") or ""))
+        dedupe = f"{kind}|{sd_date}|{ch[:16]}"
+        if dedupe in seen:
+            continue
+        seen.add(dedupe)
+        out.append(ent)
+    out.sort(key=lambda e: str(e.get("processed_at") or ""))
+    return out
+
+
+def synthesize_checkemail_body_from_state_entry(ent: dict[str, Any]) -> str:
+    """Rebuild Evolution-like text from mail-watcher ``maintenance.json`` fields."""
+    title = str(ent.get("title") or "")
+    meta = parse_service_desk_subject_metadata(title)
+    maint = (meta.get("maintenance_type") or "Technical maintenance").strip()
+    start, end = parse_service_desk_times_from_subject(title)
+    if ent.get("is_cancelled_email"):
+        return (
+            "Dear Casino Team,\n\n"
+            "This message is to inform that the Technical maintenance has been cancelled.\n\n"
+            "We apologize for the inconvenience."
+        )
+    names = [str(n).strip() for n in (ent.get("table_names") or []) if str(n).strip()]
+    lines = [
+        "Dear Casino Team,",
+        (
+            f"This is to inform you that {maint} is going to take place with a "
+            f"downtime from {start} till {end}, during which following tables "
+            "will be unavailable:"
+        ),
+        "",
+    ]
+    lines.extend(names or ["Unknown"])
+    return "\n".join(lines)
+
+
+def build_checkemail_steps_from_state_entries(
+    entries: list[dict[str, Any]],
+    *,
+    tenant_access_token: str | None = None,
+) -> list[dict[str, Any]]:
+    """Timeline step dicts from ``maintenance.json`` when IMAP bodies are bot stubs."""
+    steps: list[dict[str, Any]] = []
+    schedule_subj = ""
+    schedule_body = ""
+    _KIND_ORDER = {"schedule": 0, "cancel": 1, "uncancel": 2, "other": 3}
+    for ent in entries:
+        subj = str(ent.get("title") or "")
+        body = synthesize_checkemail_body_from_state_entry(ent)
+        kind = "cancel" if ent.get("is_cancelled_email") else "schedule"
+        folder = "maintenance.json (watcher)"
+        when_raw = str(ent.get("processed_at") or "")
+        when = format_received_at(when_raw) if when_raw else ""
+        if kind == "schedule":
+            schedule_subj = subj
+            schedule_body = body
+            resolved = resolve_maintenance_subject(subj, body)
+            pipeline_in = f"{resolved}\n{body}"
+            gamelist_md, _hdr, _tpl, _body_md, card_els = process_maintenance_pipeline(
+                pipeline_in,
+                tenant_access_token,
+                email_subject=resolved,
+                received_at=when_raw or None,
+            )
+            label = "📅 Scheduled"
+            elements = card_els or []
+        else:
+            label, _tpl, elements, gamelist_md = build_checkemail_step_preview(
+                kind=kind,
+                email_subject=subj,
+                email_body=body,
+                folder=folder,
+                tenant_access_token=tenant_access_token,
+                schedule_subject=schedule_subj or None,
+                schedule_body=schedule_body or None,
+            )
+        steps.append(
+            {
+                "kind": kind,
+                "label": label,
+                "folder": folder,
+                "when": when,
+                "subject": subj,
+                "elements": elements,
+                "gamelist_md": gamelist_md,
+            }
+        )
+    steps.sort(
+        key=lambda s: (_KIND_ORDER.get(str(s.get("kind") or "other"), 9), s.get("when") or "")
+    )
+    return steps
 
 
 def find_prior_maintenance_entry(
