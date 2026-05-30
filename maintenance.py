@@ -463,6 +463,8 @@ def extract_best_maintenance_segment(body: str | None) -> str:
             score = 90
         elif re.search(r"going\s+to\s+take\s+place", c, re.IGNORECASE):
             score = 80
+        elif _FOLLOWING_TABLES_UNAVAILABLE_RE.search(c):
+            score = 85
         elif re.search(r"took\s+place\s+with\s+a\s+downtime", c, re.IGNORECASE):
             score = 75
         elif extract_candidate_game_names(c):
@@ -607,13 +609,11 @@ def checkemail_timeline_dedupe_key(
         maint = (meta.get("maintenance_type") or "").strip().casefold()
         return f"schedule|{ticket}|{sd_date}|{maint}"
     if k == "cancel":
-        notice = extract_cancel_notice_text(email_body or "")
-        sig = re.sub(r"\s+", " ", notice.casefold())[:240]
-        return f"cancel|{ticket}|{sig}"
+        sd_date = parse_service_desk_date_from_subject(subj)
+        return f"cancel|{ticket}|{sd_date}"
     if k == "uncancel":
-        seg = extract_best_maintenance_segment(email_body or "")
-        sig = re.sub(r"\s+", " ", seg.casefold())[:240]
-        return f"uncancel|{ticket}|{sig}"
+        sd_date = parse_service_desk_date_from_subject(subj)
+        return f"uncancel|{ticket}|{sd_date}"
     sig = re.sub(r"\s+", " ", (email_body or "").strip().casefold())[:300]
     return f"{k}|{ticket}|{normalize_subject_for_search(subj)}|{sig}"
 
@@ -642,6 +642,7 @@ def rich_checkemail_extraction_body(
             return True
         return bool(
             re.search(r"table\s+.+?\s+will\s+be\s+unavailable", text, re.IGNORECASE)
+            or _FOLLOWING_TABLES_UNAVAILABLE_RE.search(text)
         )
 
     if _has_tables(seg):
@@ -2369,6 +2370,37 @@ def _parse_table_block_after_heading(
     return names, j
 
 
+def _parse_following_unavailable_tables(text: str) -> list[str]:
+    """
+    Table names listed after ``following table(s) will be/was unavailable`` —
+    Service Desk schedule / uncancel format (``Ice Fishing`` on its own line).
+    """
+    hay = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not hay.strip():
+        return []
+    m = re.search(
+        r"following tables?\s+(?:will be|was|were)\s+unavailable\s*:?\s*"
+        r"(.*?)(?:\n\s*\n|You may find summary|Start time\s*:|End time\s*:|"
+        r"Reason\s*:|Table availability\s*:|\Z)",
+        hay,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not m:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in m.group(1).splitlines():
+        chunk = _clean_email_line(line)
+        if not _is_plausible_game_name(chunk):
+            continue
+        key = _cell_norm(chunk).replace(" ", "")
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(chunk)
+    return out
+
+
 def extract_info(text: str, *, email_subject: str | None = None):
     """Parse email text line by line to extract fields."""
     info = {
@@ -2414,10 +2446,10 @@ def extract_info(text: str, *, email_subject: str | None = None):
                     info['table_names'] = [name]
             if info['table'] == 'Unknown':
                 match = re.search(r'table\s+([^\.]+?)\s+in', line, re.IGNORECASE)
-            if match:
-                info['table'] = match.group(1).strip()
-                info['table_names'] = [info['table']]
-            else:
+                if match:
+                    info['table'] = match.group(1).strip()
+                    info['table_names'] = [info['table']]
+            if info['table'] == 'Unknown':
                 match = re.search(r'table\s+(.*?)\s+was', line, re.IGNORECASE)
                 if match:
                     name = match.group(1).strip()
@@ -2498,18 +2530,30 @@ def extract_info(text: str, *, email_subject: str | None = None):
     # --- Fallbacks ---
     # If start time still unknown, try to find it in the first paragraph
     if info['start_time'] == 'Unknown':
-        # Look for "from ... UTC" pattern
         from_match = re.search(r'from\s+(.*?)\s+UTC', text, re.IGNORECASE)
         if from_match:
             info['start_time'] = from_match.group(1).strip() + " UTC"
+        else:
+            st = re.search(r'Start\s*time\s*:\s*([^\n]+)', text, re.IGNORECASE)
+            if st:
+                info['start_time'] = st.group(1).strip()
     if info['end_time'] == 'Unknown':
         till_match = re.search(
             r'(?:till|to|until)\s+(.*?)\s+UTC', text, re.IGNORECASE
         )
         if till_match:
             info['end_time'] = till_match.group(1).strip() + " UTC"
-    # If end time still unknown and "We will inform you" appears, set TBA
-    if info['end_time'] == 'Unknown' and re.search(r'We will inform you as soon', text, re.IGNORECASE):
+        else:
+            et = re.search(r'End\s*time\s*:\s*([^\n]+)', text, re.IGNORECASE)
+            if et:
+                info['end_time'] = et.group(1).strip()
+    # TBA only when no explicit end/till was found (schedule may say both till … and
+    # "Once maintenance is accomplished we will let you know").
+    if info['end_time'] == 'Unknown' and re.search(
+        r'(?:Once maintenance is accomplished|We will inform you as soon)',
+        text,
+        re.IGNORECASE,
+    ):
         info['end_time'] = "TBA"
     _apply_service_desk_utc_times(info, text, email_subject=email_subject)
     # If table name still unknown, try to extract from "table X in Y" in the first paragraph
@@ -2535,6 +2579,11 @@ def extract_info(text: str, *, email_subject: str | None = None):
             if _is_plausible_game_name(name):
                 info['table'] = name
                 info['table_names'] = [name]
+    if info['table'] == 'Unknown':
+        block = _parse_following_unavailable_tables(text)
+        if block:
+            info['table'] = ", ".join(block)
+            info['table_names'] = list(block)
     elif info['table'] != 'Unknown' and not info['table_names']:
         info['table_names'] = [
             x.strip() for x in info['table'].split(',') if x.strip()
