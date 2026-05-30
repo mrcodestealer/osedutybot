@@ -474,6 +474,14 @@ def extract_best_maintenance_segment(body: str | None) -> str:
     return best if best_score > 0 else text
 
 
+def is_service_desk_maintenance_subject(subject: str | None) -> bool:
+    """``[Service Desk] Studio cleaning … / date / …`` — om@ ``Re:`` timeline rows."""
+    s = normalize_display_subject(subject or "")
+    if not re.search(r"\[Service Desk\]", s, re.IGNORECASE):
+        return False
+    return bool(parse_service_desk_subject_metadata(s).get("maintenance_type"))
+
+
 def classify_checkemail_step_kind(
     body: str | None,
     *,
@@ -484,9 +492,10 @@ def classify_checkemail_step_kind(
     """
     text = extract_best_maintenance_segment(body or "")
     subj = resolve_maintenance_subject(email_subject, text)
-    if is_maintenance_uncancel_clarification_email(text):
+    combined = f"{subj}\n{text}"
+    if is_maintenance_uncancel_clarification_email(combined):
         return "uncancel"
-    if is_maintenance_cancelled_email(text):
+    if is_maintenance_cancelled_email(combined):
         return "cancel"
     pipeline = f"{subj}\n{text}"
     if extract_candidate_game_names(pipeline):
@@ -497,6 +506,8 @@ def classify_checkemail_step_kind(
         text,
         re.IGNORECASE,
     ):
+        return "schedule"
+    if is_service_desk_maintenance_subject(subj):
         return "schedule"
     return "other"
 
