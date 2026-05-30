@@ -3888,9 +3888,11 @@ def _record_processed(
     ticket_id: str = "",
     table_names: list[str] | None = None,
     launched_names: list[str] | None = None,
+    game_name: str = "",
     studio: str = "",
     maint_date: str = "",
     is_cancelled_email: bool = False,
+    is_uncancel_email: bool = False,
 ) -> None:
     row: dict[str, Any] = {
         "imap_uid": str(imap_uid),
@@ -3904,12 +3906,19 @@ def _record_processed(
         row["table_names"] = list(table_names)
     if launched_names:
         row["launched_names"] = list(launched_names)
+    gn = (game_name or "").strip()
+    if not gn and table_names:
+        gn = ", ".join(str(n).strip() for n in table_names if str(n).strip())
+    if gn:
+        row["game_name"] = gn
     if (studio or "").strip():
         row["studio"] = studio.strip()
     if (maint_date or "").strip():
         row["maint_date"] = maint_date.strip()
     if is_cancelled_email:
         row["is_cancelled_email"] = True
+    if is_uncancel_email:
+        row["is_uncancel_email"] = True
     entries.append(row)
 
 
@@ -4276,7 +4285,10 @@ class MaintenanceMailWatcher:
 
         token = self._get_token()
         is_cancel = maintenance.is_maintenance_cancelled_email(body)
+        is_uncancel = maintenance.is_maintenance_uncancel_clarification_email(body)
         launched_names: list[str] = []
+        prior: dict[str, Any] | None = None
+        to_cp = False
 
         if is_cancel:
             prior = _find_prior_maintenance_entry(entries, display_subj, ticket_id)
@@ -4311,6 +4323,40 @@ class MaintenanceMailWatcher:
                     f"[maint-mail] cancel uid={uid_s} skip Lark (not on CP, no prior)",
                     flush=True,
                 )
+        elif is_uncancel:
+            prior = _find_prior_maintenance_entry(entries, display_subj, ticket_id)
+            launched_prior = list(prior.get("launched_names") or []) if prior else []
+            if not launched_prior and prior:
+                launched_prior = maintenance.table_names_from_prior_entry(prior)
+            to_cp = len(launched_prior) > 0
+            if not to_cp and prior:
+                to_cp, launched_prior = maintenance.gamelist_has_launched(
+                    "\n".join(prior.get("table_names") or []),
+                    token,
+                )
+            if to_cp or prior:
+                hdr_title, hdr_tpl, _card_body, card_el = (
+                    maintenance.build_maintenance_notice(
+                        pipeline_in,
+                        email_subject=display_subj,
+                        launched_tables=launched_prior or None,
+                        prior=prior,
+                    )
+                )
+                if card_el:
+                    main_card = maintenance.build_maintenance_card(
+                        email_subject=display_subj,
+                        received_at=when,
+                        from_addr=from_addr,
+                        gamelist_section="",
+                        summary_section="",
+                        body_elements=card_el,
+                        email_body=body,
+                        show_meta=False,
+                        header_title=hdr_title,
+                        header_template=hdr_tpl,
+                    )
+                    self._send_lark_card(TARGET_CHAT_ID, main_card)
         else:
             to_cp, launched_names = maintenance.gamelist_has_launched(pipeline_in, token)
             if MAIL_VERBOSE and launched_names:
@@ -4352,9 +4398,21 @@ class MaintenanceMailWatcher:
         }
         if is_cancel:
             record_kw["is_cancelled_email"] = True
-        elif not is_cancel:
+            if prior:
+                record_kw.update(
+                    maintenance.maintenance_record_snapshot_from_prior(prior)
+                )
+        elif is_uncancel:
+            record_kw["is_uncancel_email"] = True
+            if prior:
+                record_kw.update(
+                    maintenance.maintenance_record_snapshot_from_prior(prior)
+                )
+        else:
             candidates = maintenance.extract_candidate_game_names(pipeline_in)
-            record_kw["table_names"] = candidates
+            if candidates:
+                record_kw["table_names"] = candidates
+                record_kw["game_name"] = ", ".join(candidates)
             if launched_names:
                 record_kw["launched_names"] = launched_names
             info_rec = maintenance.extract_info(pipeline_in, email_subject=display_subj)
@@ -4375,6 +4433,15 @@ class MaintenanceMailWatcher:
         if FORWARD_ENABLED:
             try:
                 if is_cancel:
+                    if to_cp or prior:
+                        forward_maintenance_email(
+                            subject=subject, original_msg=msg
+                        )
+                    else:
+                        reply_not_in_cp_email(
+                            subject=subject, original_msg=msg
+                        )
+                elif is_uncancel:
                     if to_cp or prior:
                         forward_maintenance_email(
                             subject=subject, original_msg=msg
@@ -4404,7 +4471,11 @@ class MaintenanceMailWatcher:
                     flush=True,
                 )
 
-        kind = "cancelled" if is_cancel else "processed"
+        kind = (
+            "cancelled"
+            if is_cancel
+            else ("uncancel" if is_uncancel else "processed")
+        )
         print(
             f"[maint-mail] {kind} {folder} uid={uid_s} ticket={ticket_id!r} "
             f"title={display_subj!r}",

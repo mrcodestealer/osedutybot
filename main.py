@@ -3594,13 +3594,50 @@ def lark_webhook():
                 )
                 return _lark_im_done()
             if maintenance.is_maintenance_cancelled_email(email_text):
+                prior = maintenance.lookup_prior_maintenance_schedule(
+                    resolved_subj, email_text
+                )
+                table_game = maintenance.table_display_from_prior(prior) or None
                 cancel_card = maintenance.build_cancelled_maintenance_card(
                     email_subject=resolved_subj,
                     email_body=email_text,
+                    table_game=table_game,
+                    prior=prior,
                 )
                 send_message(
                     chat_id,
                     json.dumps(cancel_card, ensure_ascii=False),
+                    msg_type="interactive",
+                )
+                return _lark_im_done()
+            if maintenance.is_maintenance_uncancel_clarification_email(email_text):
+                prior = maintenance.lookup_prior_maintenance_schedule(
+                    resolved_subj, email_text
+                )
+                launched = (
+                    maintenance.table_names_from_prior_entry(prior) if prior else []
+                )
+                hdr_title, hdr_tpl, _body_md, card_el = (
+                    maintenance.build_maintenance_notice(
+                        email_text,
+                        email_subject=resolved_subj,
+                        launched_tables=launched or None,
+                        prior=prior,
+                    )
+                )
+                card = maintenance.build_maintenance_card(
+                    email_subject=resolved_subj,
+                    gamelist_section="",
+                    summary_section="",
+                    body_elements=card_el,
+                    email_body=email_text,
+                    show_meta=False,
+                    header_title=hdr_title or None,
+                    header_template=hdr_tpl or "green",
+                )
+                send_message(
+                    chat_id,
+                    json.dumps(card, ensure_ascii=False),
                     msg_type="interactive",
                 )
                 return _lark_im_done()

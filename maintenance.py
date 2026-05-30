@@ -952,6 +952,8 @@ def find_all_maintenance_state_entries_for_ticket(
             continue
         if ent.get("is_cancelled_email"):
             kind = "cancel"
+        elif ent.get("is_uncancel_email"):
+            kind = "uncancel"
         else:
             kind = "schedule"
         sd_date = parse_service_desk_date_from_subject(str(ent.get("title") or ""))
@@ -977,6 +979,10 @@ def synthesize_checkemail_body_from_state_entry(ent: dict[str, Any]) -> str:
             "We apologize for the inconvenience."
         )
     names = [str(n).strip() for n in (ent.get("table_names") or []) if str(n).strip()]
+    if not names:
+        gn = str(ent.get("game_name") or "").strip()
+        if gn:
+            names = [p.strip() for p in gn.split(",") if p.strip()]
     lines = [
         "Dear Casino Team,",
         (
@@ -1003,7 +1009,9 @@ def build_checkemail_steps_from_state_entries(
     for ent in entries:
         subj = str(ent.get("title") or "")
         body = synthesize_checkemail_body_from_state_entry(ent)
-        kind = "cancel" if ent.get("is_cancelled_email") else "schedule"
+        kind = "cancel" if ent.get("is_cancelled_email") else (
+            "uncancel" if ent.get("is_uncancel_email") else "schedule"
+        )
         folder = "maintenance.json (watcher)"
         when_raw = str(ent.get("processed_at") or "")
         when = format_received_at(when_raw) if when_raw else ""
@@ -1174,16 +1182,114 @@ def table_names_from_prior_entry(prior: dict[str, Any] | None) -> list[str]:
     ]
     if launched:
         return launched
-    return [
+    names = [
         str(x).strip()
         for x in (prior.get("table_names") or [])
         if str(x).strip()
     ]
+    if names:
+        return names
+    gn = str(prior.get("game_name") or "").strip()
+    if gn and gn.lower() != "unknown":
+        return [p.strip() for p in gn.split(",") if p.strip()]
+    return []
 
 
 def table_display_from_prior(prior: dict[str, Any] | None) -> str:
     names = table_names_from_prior_entry(prior)
     return ", ".join(names) if names else ""
+
+
+def game_name_from_prior_entry(prior: dict[str, Any] | None) -> str:
+    """Game / table label stored on a ``maintenance.json`` schedule row."""
+    if not prior:
+        return ""
+    gn = str(prior.get("game_name") or "").strip()
+    if gn and gn.lower() != "unknown":
+        return gn
+    return table_display_from_prior(prior)
+
+
+def studio_from_prior_entry(prior: dict[str, Any] | None) -> str:
+    """Studio from ``maintenance.json`` or parsed from the stored schedule subject."""
+    if not prior:
+        return ""
+    st = str(prior.get("studio") or "").strip()
+    if st and st.lower() != "unknown":
+        return st
+    title = str(prior.get("title") or "").strip()
+    if title:
+        sd_st = parse_service_desk_studio_from_subject(title)
+        if sd_st:
+            return sd_st
+        tinc = parse_tinc_subject_metadata(title)
+        if (tinc.get("studio") or "").strip():
+            return str(tinc["studio"]).strip()
+    return ""
+
+
+def maintenance_record_snapshot_from_prior(
+    prior: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """
+    Copy game / studio / date from an earlier schedule row into cancel or uncancel
+    ``maintenance.json`` entries.
+    """
+    if not prior:
+        return {}
+    out: dict[str, Any] = {}
+    names = table_names_from_prior_entry(prior)
+    if names:
+        out["table_names"] = list(names)
+    gn = game_name_from_prior_entry(prior)
+    if gn:
+        out["game_name"] = gn
+    studio = studio_from_prior_entry(prior)
+    if studio:
+        out["studio"] = studio
+    md = str(prior.get("maint_date") or "").strip()
+    if md and md.lower() != "unknown":
+        out["maint_date"] = md
+    launched = [
+        str(x).strip()
+        for x in (prior.get("launched_names") or [])
+        if str(x).strip()
+    ]
+    if launched:
+        out["launched_names"] = launched
+    pt = str(prior.get("ticket_id") or "").strip().upper()
+    if pt:
+        out["ticket_id"] = pt
+    return out
+
+
+def lookup_prior_maintenance_schedule(
+    email_subject: str | None,
+    email_body: str | None = None,
+) -> dict[str, Any] | None:
+    """Earlier **schedule** row in ``maintenance.json`` (cancel / uncancel / ``/m``)."""
+    return lookup_prior_maintenance_for_cancel(email_subject, email_body)
+
+
+def enrich_info_from_prior(
+    info: dict[str, Any],
+    prior: dict[str, Any] | None,
+    *,
+    email_subject: str | None = None,
+    email_body: str | None = None,
+) -> dict[str, Any]:
+    """Fill missing table names on parsed ``info`` from ``maintenance.json``."""
+    if not prior:
+        return info
+    out = dict(info)
+    names = table_names_from_prior_entry(prior)
+    if names and not (out.get("table_names") or []):
+        out["table_names"] = list(names)
+    if (out.get("table") or "").strip().lower() in ("", "unknown"):
+        gn = game_name_from_prior_entry(prior)
+        if gn:
+            out["table"] = gn
+    return out
 
 
 def _table_for_cancel(
@@ -1252,8 +1358,13 @@ def _cancel_fields_for_card(
                 date = tinc["date"]
         if table in ("", "Unknown"):
             prior_table = table_display_from_prior(prior)
+            if not prior_table:
+                prior_table = game_name_from_prior_entry(prior)
             if prior_table:
                 table = prior_table
+        pst = studio_from_prior_entry(prior)
+        if pst and studio in ("", "Unknown"):
+            studio = pst
 
     if table in ("", "Unknown") and (schedule_body or "").strip():
         sch_subj = (schedule_subject or email_subject or "").strip()
@@ -1605,6 +1716,8 @@ def _studio_and_date(
     info: dict[str, Any],
     email_subject: str | None,
     email_body: str | None = None,
+    *,
+    prior: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     subj = resolve_maintenance_subject(email_subject, email_body)
     tinc = parse_tinc_subject_metadata(subj)
@@ -1646,6 +1759,13 @@ def _studio_and_date(
             sd_date = parse_service_desk_date_from_subject(subj)
             if sd_date:
                 date = sd_date
+    if prior:
+        pst = studio_from_prior_entry(prior)
+        if pst and studio in ("", "Unknown"):
+            studio = pst
+        pdt = str(prior.get("maint_date") or "").strip()
+        if pdt and pdt.lower() != "unknown" and date in ("", "Unknown"):
+            date = pdt
     return studio, date
 
 
@@ -1918,9 +2038,15 @@ def build_in_progress_card_elements(
     email_subject: str | None = None,
     email_body: str | None = None,
     launched_tables: list[str] | None = None,
+    prior: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Lark body elements matching picture 1 (bisect Studio/Date, hr, footer)."""
-    studio, date = _studio_and_date(info, email_subject, email_body)
+    info = enrich_info_from_prior(
+        info, prior, email_subject=email_subject, email_body=email_body
+    )
+    studio, date = _studio_and_date(
+        info, email_subject, email_body, prior=prior
+    )
     table = _table_display(
         info,
         launched_tables=launched_tables,
@@ -1982,9 +2108,15 @@ def _fixed_card_values(
     email_subject: str | None = None,
     email_body: str | None = None,
     launched_tables: list[str] | None = None,
+    prior: dict[str, Any] | None = None,
 ) -> tuple[str, str, str, str, str, str]:
+    info = enrich_info_from_prior(
+        info, prior, email_subject=email_subject, email_body=email_body
+    )
     subj = resolve_maintenance_subject(email_subject, email_body)
-    studio, date = _studio_and_date(info, email_subject, email_body)
+    studio, date = _studio_and_date(
+        info, email_subject, email_body, prior=prior
+    )
     table = _table_display(
         info,
         launched_tables=launched_tables,
@@ -2002,6 +2134,7 @@ def build_fixed_card_elements(
     email_subject: str | None = None,
     email_body: str | None = None,
     launched_tables: list[str] | None = None,
+    prior: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Lark body elements for Fixed (picture 2 — same field layout as In Progress)."""
     studio, date, table, resolution, reason, email_ref = _fixed_card_values(
@@ -2009,6 +2142,7 @@ def build_fixed_card_elements(
         email_subject=email_subject,
         email_body=email_body,
         launched_tables=launched_tables,
+        prior=prior,
     )
     return [
         {
@@ -2099,7 +2233,11 @@ def _scheduled_card_values(
     email_subject: str | None = None,
     email_body: str | None = None,
     launched_tables: list[str] | None = None,
+    prior: dict[str, Any] | None = None,
 ) -> tuple[str, str, str, str, str, str]:
+    info = enrich_info_from_prior(
+        info, prior, email_subject=email_subject, email_body=email_body
+    )
     subj = resolve_maintenance_subject(email_subject, email_body)
     sd_meta = parse_service_desk_subject_metadata(subj)
     maint_type = (
@@ -2154,6 +2292,7 @@ def build_scheduled_card_elements(
     email_subject: str | None = None,
     email_body: str | None = None,
     launched_tables: list[str] | None = None,
+    prior: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Lark body for Scheduled / Affected (picture 3): one body block, hr, grey Original."""
     table, maint_type, window, avail, original, _subj = _scheduled_card_values(
@@ -2161,6 +2300,7 @@ def build_scheduled_card_elements(
         email_subject=email_subject,
         email_body=email_body,
         launched_tables=launched_tables,
+        prior=prior,
     )
     main_md = _scheduled_card_main_md(table, maint_type, window, avail)
     footer_md = f"<font color='grey'>📧 Original: {original}</font>"
@@ -2203,6 +2343,7 @@ def build_maintenance_notice(
     *,
     email_subject: str | None = None,
     launched_tables: list[str] | None = None,
+    prior: dict[str, Any] | None = None,
 ) -> tuple[str, str, str, list[dict[str, Any]] | None]:
     """
     Picture-style maintenance card:
@@ -2210,7 +2351,19 @@ def build_maintenance_notice(
 
     ``body_elements`` is set for **In Progress**, **Fixed**, and **Scheduled**.
     """
+    if prior is None and (
+        is_maintenance_cancelled_email(email_text)
+        or is_maintenance_uncancel_clarification_email(email_text)
+    ):
+        prior = lookup_prior_maintenance_schedule(email_subject, email_text)
     info = extract_info(email_text, email_subject=email_subject)
+    info = enrich_info_from_prior(
+        info, prior, email_subject=email_subject, email_body=email_text
+    )
+    if launched_tables is None and prior:
+        prior_launched = table_names_from_prior_entry(prior)
+        if prior_launched:
+            launched_tables = prior_launched
     kind = classify_maintenance_card_kind(
         info, email_subject=email_subject, email_body=email_text
     )
@@ -2218,6 +2371,7 @@ def build_maintenance_notice(
         "email_subject": email_subject,
         "email_body": email_text,
         "launched_tables": launched_tables,
+        "prior": prior,
     }
     if kind == "fixed":
         return (
