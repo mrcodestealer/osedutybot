@@ -2042,7 +2042,7 @@ CHECKEMAIL_SCAN_CAP = CHECKEEMAIL_SCAN_CAP  # legacy name used in a few call sit
 # Ticket ``/checkemail SD-xxxxx`` — scan only the newest N headers (Re: threads are recent).
 CHECKEEMAIL_TICKET_SCAN_CAP = max(
     40,
-    int(os.getenv("MAINTENANCE_MAIL_CHECKEEMAIL_TICKET_SCAN_CAP", "").strip() or "120"),
+    int(os.getenv("MAINTENANCE_MAIL_CHECKEEMAIL_TICKET_SCAN_CAP", "").strip() or "400"),
 )
 _CHECKEEMAIL_STUB_PEEK = max(
     256,
@@ -2159,12 +2159,13 @@ def _checkemail_uids_from_state(ticket_id: str) -> list[bytes]:
 
 
 def _checkemail_folders_for_query(ticket_id: str) -> list[str]:
-    """Ticket search: OSE Pending only (Re: threads); title search uses all env folders."""
+    """Ticket search: OSE Pending first, then other env folders if OSE has no hits."""
     folders = _checkemail_search_folders()
     if not (ticket_id or "").strip():
         return folders
     ose = [f for f in folders if f.casefold() == "ose pending"]
-    return ose if ose else folders[:1]
+    rest = [f for f in folders if f.casefold() != "ose pending"]
+    return (ose + rest) if ose else folders
 
 
 def _checkemail_subject_pool_uids(recent: list[bytes], cap: int) -> list[bytes]:
@@ -2231,7 +2232,12 @@ def _subject_matches_checkemail_title(
         return False
     if not _maint_mod.tickets_match(_maint_mod.extract_ticket_card_title(subj), tid):
         return False
-    meta = _maint_mod.parse_service_desk_subject_metadata(user_title)
+    ut_meta = _maint_mod.parse_service_desk_subject_metadata(user_title)
+    if _maint_mod.extract_ticket_card_title(user_title) and not (
+        ut_meta.get("maintenance_type") or ""
+    ).strip():
+        return True
+    meta = ut_meta
     maint = (meta.get("maintenance_type") or "").strip().casefold()
     if maint and maint not in _maint_mod.normalize_subject_for_search(subj):
         return False
@@ -2528,24 +2534,35 @@ def _uids_for_checkemail_ticket(
     recent = _uid_search(mail, f"(SINCE {since})") or []
     if not recent:
         return []
-    pool = list(reversed(recent))[:cap]
-    out: list[bytes] = []
-    scan_chunk = max(20, _CHECKEEMAIL_HEADER_BATCH)
-    for off in range(0, len(pool), scan_chunk):
-        part = pool[off : off + scan_chunk]
-        headers_map = _imap_uid_fetch_headers_batch(
-            mail, part, chunk_size=_CHECKEEMAIL_HEADER_BATCH
+
+    def _scan_pool(pool: list[bytes]) -> list[bytes]:
+        found: list[bytes] = []
+        scan_chunk = max(20, _CHECKEEMAIL_HEADER_BATCH)
+        for off in range(0, len(pool), scan_chunk):
+            part = pool[off : off + scan_chunk]
+            headers_map = _imap_uid_fetch_headers_batch(
+                mail, part, chunk_size=_CHECKEEMAIL_HEADER_BATCH
+            )
+            for uid in part:
+                ub = _uid_as_bytes(uid)
+                h = headers_map.get(ub) or {}
+                subj = str(h.get("subj") or "")
+                if _subject_has_ticket_id(subj, tid):
+                    found.append(ub)
+            if len(found) >= max_hits:
+                break
+        return found
+
+    pool = _checkemail_subject_pool_uids(recent, cap=cap)
+    out = _scan_pool(pool)
+    if not out:
+        out = _scan_pool(list(reversed(recent))[:cap])
+    if not out:
+        out = _uids_by_ticket_subject_scan(
+            mail, tid, cap=cap, max_hits=max_hits, newest_only=False
         )
-        for uid in part:
-            ub = _uid_as_bytes(uid)
-            h = headers_map.get(ub) or {}
-            subj = str(h.get("subj") or "")
-            if _subject_has_ticket_id(subj, tid):
-                out.append(ub)
-        if len(out) >= max_hits:
-            break
     if out:
-        _CHECKEMAIL_TICKET_UID_CACHE[cache_key] = (now, out)
+        _CHECKEEMAIL_TICKET_UID_CACHE[cache_key] = (now, out)
     return out[:max_hits]
 
 
@@ -3062,6 +3079,41 @@ def _checkemail_timeline_kinds(
     return kinds
 
 
+def _checkemail_count_stub_threads(ticket_id: str) -> int:
+    """Count om@ stub rows for a ticket — used when the primary scan found nothing."""
+    tid = (ticket_id or "").strip()
+    if not tid:
+        return 0
+    mail = _connect_imap_simple()
+    count = 0
+    try:
+        for folder in _checkemail_folders_for_query(tid):
+            if not _select_checkemail_folder(mail, folder, readonly=True):
+                continue
+            uids = _uids_for_checkemail_ticket(
+                mail, tid, folder=folder, max_hits=12
+            )
+            if not uids:
+                continue
+            headers = _imap_uid_fetch_headers_batch(mail, uids)
+            for uid in uids:
+                ub = _uid_as_bytes(uid)
+                subj = str((headers.get(ub) or {}).get("subj") or "")
+                if not _subject_has_ticket_id(subj, tid):
+                    continue
+                peek = _fetch_body_peek_for_uid(mail, ub, limit=_CHECKEEMAIL_STUB_PEEK)
+                if _maint_mod.is_checkemail_bot_stub_body(peek, email_subject=subj):
+                    count += 1
+            if count:
+                return count
+    finally:
+        try:
+            mail.logout()
+        except Exception:
+            pass
+    return count
+
+
 def _append_checkemail_folder_hits(
     mail: imaplib.IMAP4,
     *,
@@ -3211,7 +3263,7 @@ def find_all_maintenance_messages_by_title(
                     originals_only=originals_only,
                 )
                 stub_skipped += _stubs
-                if ticket_id and (_stubs > 0 or hits):
+                if ticket_id and (_matched > 0 or _stubs > 0 or hits):
                     break
             if hits:
                 break
@@ -3544,6 +3596,8 @@ def check_maintenance_email_by_title(
         )
         if card is not None:
             return card
+        if not stub_skipped:
+            stub_skipped = _checkemail_count_stub_threads(ticket)
         if stub_skipped:
             return _maint_mod.build_checkemail_error_card(
                 f"❌ Found **{stub_skipped}** om@ thread(s) for `{ticket}` but IMAP bodies "
