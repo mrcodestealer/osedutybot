@@ -736,6 +736,23 @@ def _html_to_text(html: str) -> str:
     return _normalize_body(t)
 
 
+def _body_has_evolution_maintenance(text: str) -> bool:
+    """True when text contains Evolution Service Desk maintenance content."""
+    low = (text or "").casefold()
+    return any(
+        m in low
+        for m in (
+            "dear casino team",
+            "going to take place",
+            "has been cancelled",
+            "not been cancelled",
+            "took place with a downtime",
+            "following table",
+            "following tables",
+        )
+    )
+
+
 def extract_body_from_message(msg: email.message.Message) -> str:
     plain_parts: list[str] = []
     html_parts: list[str] = []
@@ -777,11 +794,43 @@ def extract_body_from_message(msg: email.message.Message) -> str:
             else:
                 plain_parts.append(text)
 
-    if plain_parts:
-        return _normalize_body("\n\n".join(plain_parts))
-    if html_parts:
-        return _html_to_text("\n\n".join(html_parts))
-    return ""
+    plain = _normalize_body("\n\n".join(plain_parts)) if plain_parts else ""
+    html_text = _html_to_text("\n\n".join(html_parts)) if html_parts else ""
+    if plain and html_text:
+        plain_ev = _body_has_evolution_maintenance(plain)
+        html_ev = _body_has_evolution_maintenance(html_text)
+        if html_ev and not plain_ev:
+            return html_text
+        if len(plain.strip()) < 160 and len(html_text) > max(len(plain) * 2, 200):
+            return html_text
+        if html_ev and len(html_text) > len(plain):
+            return html_text
+    if plain:
+        return plain
+    return html_text
+
+
+def extract_checkemail_body_from_message(msg: email.message.Message) -> str:
+    """Body for ``/checkemail`` — originals use full body; Re:/Fw: not searched."""
+    raw = extract_body_from_message(msg)
+    if _checkemail_is_original(msg=msg):
+        return raw.strip()
+    return _maint_mod.extract_best_maintenance_segment(raw)
+
+
+def _checkemail_is_original(
+    subject: str = "",
+    from_hdr: str = "",
+    *,
+    msg: email.message.Message | None = None,
+) -> bool:
+    """True when this row is the Evolution original (not om@ ``Re:`` / ``Fw:``)."""
+    subj = subject
+    frm = from_hdr
+    if msg is not None:
+        subj = _decode_mime_header(msg.get("Subject")) or subj
+        frm = _decode_mime_header(msg.get("From")) or frm
+    return _maint_mod.is_original_maintenance_email(subj, frm)
 
 
 def build_pipeline_input(subject: str, body: str) -> str:
@@ -2094,10 +2143,7 @@ def _subject_matches_checkemail_title(
 def _checkemail_body_is_useful(
     body: str, subj: str, *, ticket_id: str = ""
 ) -> bool:
-    """Skip internal ``NOT IN CP`` one-liners; keep Evolution / schedule rows."""
-    tid = (ticket_id or _maint_mod.extract_ticket_card_title(subj) or "").strip()
-    if tid and _maint_mod.subject_matches_service_desk_ticket(subj, tid):
-        return True
+    """Skip internal ``NOT IN CP`` one-liners; keep Evolution schedule/cancel rows."""
     kind = _maint_mod.classify_checkemail_step_kind(body, email_subject=subj)
     if kind != "other":
         return True
@@ -2144,6 +2190,9 @@ def _uids_by_checkemail_subject_filter(
             ub = _uid_as_bytes(uid)
             h = headers_map.get(ub) or {}
             subj = str(h.get("subj") or "")
+            from_hdr = str(h.get("from_hdr") or "")
+            if not _checkemail_is_original(subj, from_hdr):
+                continue
             if not _subject_matches_checkemail_title(
                 subj, title, ticket_id=tid
             ):
@@ -2319,6 +2368,9 @@ def _uids_by_ticket_subject_scan(
             ub = _uid_as_bytes(uid)
             h = headers_map.get(ub) or {}
             subj = str(h.get("subj") or "")
+            from_hdr = str(h.get("from_hdr") or "")
+            if not _checkemail_is_original(subj, from_hdr):
+                continue
             if _maint_mod.tickets_match(
                 _maint_mod.extract_ticket_card_title(subj), ticket_id
             ):
@@ -2809,8 +2861,10 @@ def _try_add_checkemail_hit(
     want_kinds: set[str] | None = None,
 ) -> bool:
     """Append one useful ``/checkemail`` row when not already deduped."""
+    if not _checkemail_is_original(msg=msg):
+        return False
     subj = _decode_mime_header(msg.get("Subject")) or ""
-    body = extract_body_from_message(msg)
+    body = extract_checkemail_body_from_message(msg)
     if not _checkemail_body_is_useful(body, subj, ticket_id=ticket_id):
         return False
     if want_kinds is not None:
@@ -2831,7 +2885,7 @@ def _checkemail_timeline_kinds(
     kinds: set[str] = set()
     for msg, _folder, _ts in hits:
         subj = _decode_mime_header(msg.get("Subject")) or ""
-        body = extract_body_from_message(msg)
+        body = extract_checkemail_body_from_message(msg)
         kinds.add(
             _maint_mod.classify_checkemail_step_kind(body, email_subject=subj)
         )
@@ -2874,6 +2928,9 @@ def _supplement_checkemail_timeline_messages(
         for uid in sorted_uids:
             h = pre_headers.get(uid) or {}
             subj_pre = str(h.get("subj") or "")
+            from_pre = str(h.get("from_hdr") or "")
+            if subj_pre and not _checkemail_is_original(subj_pre, from_pre):
+                continue
             if subj_pre and not _subject_matches_checkemail_title(
                 subj_pre, user_title, ticket_id=ticket_id
             ):
@@ -2897,9 +2954,10 @@ def find_all_maintenance_messages_by_title(
     title: str,
 ) -> list[tuple[email.message.Message, str, datetime]]:
     """
-    All maintenance rows for ``/checkemail`` timeline — every folder, oldest first.
+    All maintenance rows for ``/checkemail`` timeline — Evolution originals only.
 
-    Skips duplicate forwards and internal ``NOT IN CP`` one-liners.
+    Skips ``Re:`` / ``Fw:`` om@ copies; requires ``[Service Desk]`` / ``TINC-`` from
+    Evolution Service Desk senders.
     """
     user_title = (title or "").strip()
     if not user_title:
@@ -2943,6 +3001,9 @@ def find_all_maintenance_messages_by_title(
                                 ub = _uid_as_bytes(uid)
                                 h = headers_map.get(ub) or {}
                                 subj = str(h.get("subj") or "")
+                                from_hdr = str(h.get("from_hdr") or "")
+                                if not _checkemail_is_original(subj, from_hdr):
+                                    continue
                                 if _maint_mod.tickets_match(
                                     _maint_mod.extract_ticket_card_title(subj),
                                     ticket_id,
@@ -2966,6 +3027,9 @@ def find_all_maintenance_messages_by_title(
             for uid in sorted_uids:
                 h = pre_headers.get(uid) or {}
                 subj_pre = str(h.get("subj") or "")
+                from_pre = str(h.get("from_hdr") or "")
+                if subj_pre and not _checkemail_is_original(subj_pre, from_pre):
+                    continue
                 if subj_pre and not _subject_matches_checkemail_title(
                     subj_pre, user_title, ticket_id=ticket_id
                 ):
@@ -2988,6 +3052,8 @@ def find_all_maintenance_messages_by_title(
                 want.add("cancel")
             if found_kinds & {"schedule", "cancel"} and "uncancel" not in found_kinds:
                 want.add("uncancel")
+            if found_kinds & {"cancel", "uncancel"} and "schedule" not in found_kinds:
+                want.add("schedule")
             if want:
                 _supplement_checkemail_timeline_messages(
                     mail,
@@ -3141,7 +3207,8 @@ def check_maintenance_email_by_title(
             "Tips:\n"
             "• `/checkemail SD-7044010` — timeline of schedule → cancel → clarification\n"
             "• Subject: `[Service Desk] Studio cleaning maintenance / … (SD-xxxxx)`\n"
-            "• Mail must be in **Priority** (IMAP: INBOX) or **OSE Pending**",
+            "• Only **Evolution originals** (`[Service Desk] …`, not `Re:` / `Fw:`)\n"
+            "• Mail in **Priority** (IMAP: INBOX) or **OSE Pending**",
             title="Email not found",
         )
 
@@ -3157,9 +3224,10 @@ def check_maintenance_email_by_title(
         steps: list[dict[str, Any]] = []
         schedule_subj = ""
         schedule_body = ""
+        _KIND_ORDER = {"schedule": 0, "cancel": 1, "uncancel": 2, "other": 3}
         for msg, folder, ts in all_msgs:
             subj = _decode_mime_header(msg.get("Subject")) or ""
-            body = extract_body_from_message(msg)
+            body = extract_checkemail_body_from_message(msg)
             kind = _maint_mod.classify_checkemail_step_kind(
                 body, email_subject=subj
             )
@@ -3179,6 +3247,7 @@ def check_maintenance_email_by_title(
             )
             steps.append(
                 {
+                    "kind": kind,
                     "label": label,
                     "folder": folder,
                     "when": _maint_mod.format_received_at(ts.isoformat()),
@@ -3187,6 +3256,9 @@ def check_maintenance_email_by_title(
                     "gamelist_md": gamelist_md,
                 }
             )
+        steps.sort(
+            key=lambda s: (_KIND_ORDER.get(str(s.get("kind") or "other"), 9), s["when"])
+        )
         return _maint_mod.build_checkemail_timeline_card(steps=steps, ticket=ticket)
 
     msg, folder, _ts = all_msgs[0]

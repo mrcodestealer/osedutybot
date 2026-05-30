@@ -113,6 +113,38 @@ def from_should_ignore(from_addr: str | None) -> bool:
     return False
 
 
+def is_reply_or_forward_subject(subject: str | None) -> bool:
+    """True for ``Re:`` / ``Fw:`` / ``Fwd:`` thread copies."""
+    s = (subject or "").strip()
+    return bool(re.match(r"^(?:Re|Fwd|Fw|Aw):\s*", s, re.IGNORECASE))
+
+
+def is_original_maintenance_subject(subject: str | None) -> bool:
+    """Evolution Service Desk / TINC original — not a ``Re:`` / ``Fw:`` subject."""
+    if is_reply_or_forward_subject(subject):
+        return False
+    disp = normalize_display_subject(subject or "")
+    low = disp.lower()
+    return low.startswith("[service desk]") or disp.upper().startswith("TINC-")
+
+
+def is_original_maintenance_email(
+    subject: str | None,
+    from_addr: str | None = None,
+) -> bool:
+    """
+    Evolution original maintenance mail for ``/checkemail``.
+
+    Requires ``[Service Desk]`` / ``TINC-`` subject (no ``Re:`` / ``Fw:``) and
+    From ``servicedesk@`` / ``no-reply-evolution@`` — not om@ internal copies.
+    """
+    if not is_original_maintenance_subject(subject):
+        return False
+    if from_should_ignore(from_addr):
+        return False
+    return from_is_allowed_sender(from_addr)
+
+
 def subject_should_ignore(subject: str | None) -> bool:
     """True when this maintenance email should be skipped (e.g. C88live_ow.ph tickets)."""
     s = (subject or "").lower()
@@ -360,6 +392,8 @@ def is_maintenance_cancelled_email(body: str | None) -> bool:
     text = (body or "").replace("\r\n", "\n").replace("\r", "\n")
     if not text.strip():
         return False
+    if is_maintenance_uncancel_clarification_email(text):
+        return False
     return bool(_CANCEL_BODY_RE.search(text))
 
 
@@ -380,6 +414,51 @@ def is_maintenance_uncancel_clarification_email(body: str | None) -> bool:
     return bool(_UNCANCEL_BODY_RE.search(text))
 
 
+def extract_best_maintenance_segment(body: str | None) -> str:
+    """
+    Pick the Evolution block from om@ ``Re:`` / ``Fw:`` threads.
+
+    Short plain-text replies (e.g. ``NOT IN CP WEBSITE``) often hide the real
+    maintenance body in the HTML quote — callers should pass the richest body
+    available, then this selects the best ``Dear Casino Team`` section.
+    """
+    text = (body or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return ""
+    chunks = re.split(
+        r"(?=^\s*Dear Casino Team\s*,?\s*$)",
+        text,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    if len(chunks) <= 1:
+        chunks = re.split(r"(?i)(?=Dear Casino Team\s*,)", text)
+    if len(chunks) <= 1:
+        return text
+    best = text
+    best_score = -1
+    for chunk in chunks:
+        c = chunk.strip()
+        if not c:
+            continue
+        score = 0
+        if is_maintenance_uncancel_clarification_email(c):
+            score = 100
+        elif is_maintenance_cancelled_email(c):
+            score = 90
+        elif re.search(r"going\s+to\s+take\s+place", c, re.IGNORECASE):
+            score = 80
+        elif re.search(r"took\s+place\s+with\s+a\s+downtime", c, re.IGNORECASE):
+            score = 75
+        elif extract_candidate_game_names(c):
+            score = 70
+        elif "not in cp website" in c.casefold() and len(c) < 160:
+            score = 0
+        if score > best_score:
+            best_score = score
+            best = c
+    return best if best_score > 0 else text
+
+
 def classify_checkemail_step_kind(
     body: str | None,
     *,
@@ -388,12 +467,12 @@ def classify_checkemail_step_kind(
     """
     ``schedule`` | ``cancel`` | ``uncancel`` | ``other`` for ``/checkemail`` timeline.
     """
-    text = body or ""
+    text = extract_best_maintenance_segment(body or "")
     subj = resolve_maintenance_subject(email_subject, text)
-    if is_maintenance_cancelled_email(text):
-        return "cancel"
     if is_maintenance_uncancel_clarification_email(text):
         return "uncancel"
+    if is_maintenance_cancelled_email(text):
+        return "cancel"
     pipeline = f"{subj}\n{text}"
     if extract_candidate_game_names(pipeline):
         return "schedule"
