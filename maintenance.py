@@ -8,7 +8,8 @@ Env (optional):
   gamelistsheetid / GAMELISTSHEETID — single worksheet id (only this sheet is read).
   Sheet must include header columns ``游戏名称 / Games Name`` and
   ``遊戲入口圖 / Game entrance map`` (often on **row 2**): ``1`` = launched,
-  ``0`` / empty / other = not launched. Each email game is matched against **游戏名称**.
+  ``0`` / empty / other = not launched. Each email game name must **exactly** match
+  **游戏名称** (case / whitespace differences only).
 """
 
 from __future__ import annotations
@@ -146,7 +147,7 @@ def normalize_display_subject(subject: str) -> str:
         hit = re.search(r"(\[Service Desk\]|TINC-)", s, re.IGNORECASE)
         if hit:
             s = s[hit.start() :].strip()
-            break
+        break
         break
     return _normalize_sd_subject_slashes(s)
 
@@ -1867,27 +1868,18 @@ def _game_name_key(s: Any) -> str:
     )
 
 
-def _gamelist_name_match_score(a: Any, b: Any) -> int:
+def _names_match_gamelist(a: Any, b: Any) -> bool:
     """
-    100 = exact; 85 = safe contained match (long names only); 0 = no match.
+    Exact game name match against gamelist **游戏名称**.
 
-    Avoids ``Blackjack`` → ``Blackjack B`` (shorter key < 10 chars).
+    Only ignores case, accent marks, and whitespace — no substring / alias matching
+    (``Lightning Roulette`` must match ``Lightning Roulette``, not ``Lightning Roulette Live``).
     """
     na = _game_name_key(a)
     nb = _game_name_key(b)
     if not na or not nb:
-        return 0
-    if na == nb:
-        return 100
-    short, long = (na, nb) if len(na) <= len(nb) else (nb, na)
-    if len(short) >= 10 and short in long:
-        return 85
-    return 0
-
-
-def _names_match_gamelist(a: Any, b: Any) -> bool:
-    """Match game name against gamelist **游戏名称** (exact or safe fuzzy)."""
-    return _gamelist_name_match_score(a, b) >= 85
+        return False
+    return na == nb
 
 
 def _entrance_header_score(cell_norm: str) -> int:
@@ -2002,24 +1994,17 @@ def _row_launched_for_game(
     if not parsed:
         return None
     hi, ci_name, ci_entrance = parsed
-    best_entrance: Any = None
-    best_score = 0
     for row in grid[hi + 1 :]:
         if not row:
             continue
         name_cell = row[ci_name] if len(row) > ci_name else ""
         entrance_cell = row[ci_entrance] if len(row) > ci_entrance else ""
-        score = max(
-            _gamelist_name_match_score(name_cell, game_name),
-            _gamelist_name_match_score(name_cell, sheet_title)
-            if sheet_title.strip()
-            else 0,
+        match_name = _names_match_gamelist(name_cell, game_name)
+        match_tab = bool(sheet_title.strip()) and _names_match_gamelist(
+            name_cell, sheet_title
         )
-        if score > best_score:
-            best_score = score
-            best_entrance = entrance_cell
-    if best_score >= 85 and best_entrance is not None:
-        return _is_entrance_map_launched(best_entrance)
+        if match_name or match_tab:
+            return _is_entrance_map_launched(entrance_cell)
 
     data_rows = [r for r in grid[hi + 1 :] if r]
     if (
