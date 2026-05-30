@@ -19,7 +19,7 @@ import sys
 import re
 import os
 import unicodedata
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -1338,6 +1338,10 @@ def maintenance_record_snapshot_from_prior(
     ]
     if launched:
         out["launched_names"] = launched
+    for key in ("start_time", "end_time", "time_of_resolution", "expires_on"):
+        val = str(prior.get(key) or "").strip()
+        if val:
+            out[key] = val
     pt = str(prior.get("ticket_id") or "").strip().upper()
     if pt:
         out["ticket_id"] = pt
@@ -2065,7 +2069,7 @@ def _parse_maint_utc_datetime(raw: str) -> datetime | None:
     if not s or s.upper() == "TBA":
         return None
     m = re.search(
-        r"(\d{1,2})/(\w{3})/(\d{2,4})\s+(\d{1,2}):(\d{2})\s*(AM|PM)?\s*UTC",
+        r"(\d{1,2})/(\w{3})/(\d{2,4})\s+(\d{1,2}):(\d{2})\s*(AM|PM)?\s*UTC(?!\s*\+)",
         s,
         re.IGNORECASE,
     )
@@ -2089,6 +2093,198 @@ def _parse_maint_utc_datetime(raw: str) -> datetime | None:
         return datetime(yr, mon, day, hour, minute, tzinfo=timezone.utc)
     except ValueError:
         return None
+
+
+def _parse_slash_date(raw: str) -> date | None:
+    """``29/May/26`` → local calendar date (no time)."""
+    m = re.search(r"(\d{1,2})/(\w{3})/(\d{2,4})\b", (raw or "").strip(), re.IGNORECASE)
+    if not m:
+        return None
+    day = int(m.group(1))
+    mon = _MONTH_MAP.get(m.group(2).lower()[:3])
+    if not mon:
+        return None
+    yr = int(m.group(3))
+    if yr < 100:
+        yr += 2000
+    try:
+        return date(yr, mon, day)
+    except ValueError:
+        return None
+
+
+def parse_maintenance_datetime(raw: str) -> datetime | None:
+    """Parse ``dd/Mon/yy HH:MM UTC`` or ``… UTC+8`` (and AM/PM variants)."""
+    s = (raw or "").strip()
+    if not s or s.upper() in ("TBA", "UNKNOWN"):
+        return None
+    m = re.search(
+        r"(\d{1,2})/(\w{3})/(\d{2,4})\s+(\d{1,2}):(\d{2})\s*(AM|PM)?\s*UTC\s*\+?\s*8\b",
+        s,
+        re.IGNORECASE,
+    )
+    tz = _display_tz()
+    if m:
+        day = int(m.group(1))
+        mon = _MONTH_MAP.get(m.group(2).lower()[:3])
+        if not mon:
+            return None
+        yr = int(m.group(3))
+        if yr < 100:
+            yr += 2000
+        hour = int(m.group(4))
+        minute = int(m.group(5))
+        ampm = (m.group(6) or "").upper()
+        if ampm == "PM" and hour < 12:
+            hour += 12
+        if ampm == "AM" and hour == 12:
+            hour = 0
+        try:
+            return datetime(yr, mon, day, hour, minute, tzinfo=tz)
+        except ValueError:
+            return None
+    dt = _parse_maint_utc_datetime(_ensure_utc_suffix(s))
+    if dt:
+        return dt
+    return None
+
+
+def maintenance_expires_on_local_date(
+    info: dict[str, Any],
+    *,
+    email_subject: str | None = None,
+    email_body: str | None = None,
+    prior: dict[str, Any] | None = None,
+) -> str | None:
+    """
+    Last calendar day this maintenance row stays in ``maintenance.json``
+    (``YYYY-MM-DD`` in ``MAINTENANCE_MAIL_TZ``). Removed when local date is **after** this day.
+
+    Example: end ``29/May/26 20:35 UTC+8`` → ``expires_on=2026-05-29`` (deleted on 30 May).
+    """
+    tz = _display_tz()
+
+    def _date_from_dt(raw: str) -> date | None:
+        dt = parse_maintenance_datetime(raw)
+        if dt:
+            return dt.astimezone(tz).date()
+        return _parse_slash_date(raw)
+
+    end_raw = (info.get("end_time") or "").strip()
+    if end_raw and end_raw.upper() not in ("TBA", "UNKNOWN"):
+        d = _date_from_dt(end_raw)
+        if d:
+            return d.isoformat()
+
+    body = email_body or ""
+    m = re.search(
+        r"Time of resolution:\s*from\s+(.*?)\s+till\s+(.*?)(?:\s*\(|$)",
+        body.replace("\r\n", "\n"),
+        re.IGNORECASE | re.MULTILINE,
+    )
+    if m:
+        d = _date_from_dt(m.group(2).strip())
+        if d:
+            return d.isoformat()
+
+    start_raw = (info.get("start_time") or "").strip()
+    if start_raw and start_raw.upper() not in ("TBA", "UNKNOWN"):
+        d = _date_from_dt(start_raw)
+        if d:
+            return d.isoformat()
+
+    subj = resolve_maintenance_subject(email_subject, body)
+    sd = parse_service_desk_date_from_subject(subj)
+    if sd:
+        d = _parse_slash_date(sd)
+        if d:
+            return d.isoformat()
+
+    if prior:
+        pe = str(prior.get("expires_on") or "").strip()
+        if pe:
+            return pe
+        for key in ("end_time", "maint_date"):
+            pv = str(prior.get(key) or "").strip()
+            if pv:
+                d = _date_from_dt(pv)
+                if d:
+                    return d.isoformat()
+
+    return None
+
+
+def maintenance_times_for_json_record(
+    email_text: str,
+    *,
+    email_subject: str | None = None,
+    prior: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """``start_time`` / ``end_time`` / ``time_of_resolution`` / ``expires_on`` for json."""
+    info = extract_info(email_text, email_subject=email_subject)
+    info = enrich_info_from_prior(
+        info, prior, email_subject=email_subject, email_body=email_text
+    )
+    if prior:
+        for key in ("start_time", "end_time"):
+            if (info.get(key) or "").strip() in ("", "Unknown"):
+                pv = str(prior.get(key) or "").strip()
+                if pv and pv.lower() != "unknown":
+                    info[key] = pv
+
+    out: dict[str, str] = {}
+    start = (info.get("start_time") or "").strip()
+    end = (info.get("end_time") or "").strip()
+    if start and start.lower() != "unknown":
+        out["start_time"] = start
+    if end and end.lower() not in ("unknown", "tba"):
+        out["end_time"] = end
+    resolution = format_time_of_resolution(info, email_text)
+    if resolution and resolution.lower() != "unknown":
+        out["time_of_resolution"] = resolution
+    expires_on = maintenance_expires_on_local_date(
+        info,
+        email_subject=email_subject,
+        email_body=email_text,
+        prior=prior,
+    )
+    if expires_on:
+        out["expires_on"] = expires_on
+    return out
+
+
+def maintenance_entry_is_expired(
+    entry: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """True when local calendar date is after ``expires_on`` (maintenance window ended)."""
+    tz = _display_tz()
+    now_dt = now or datetime.now(tz)
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=tz)
+    else:
+        now_dt = now_dt.astimezone(tz)
+
+    expires_on = str(entry.get("expires_on") or "").strip()
+    if expires_on:
+        try:
+            last_day = date.fromisoformat(expires_on)
+            return now_dt.date() > last_day
+        except ValueError:
+            pass
+
+    pa = str(entry.get("processed_at") or "").strip()
+    if pa:
+        try:
+            pdt = datetime.fromisoformat(pa.replace("Z", "+00:00"))
+            if pdt.tzinfo is None:
+                pdt = pdt.replace(tzinfo=timezone.utc)
+            fallback_last = pdt.astimezone(tz).date() + timedelta(days=7)
+            return now_dt.date() > fallback_last
+        except ValueError:
+            pass
+    return False
 
 
 def _ensure_utc_suffix(ts: str) -> str:

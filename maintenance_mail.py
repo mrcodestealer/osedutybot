@@ -13,9 +13,13 @@ card with Studio/Date/Table + cancellation text; forward like other CP mails.
 bodies are ignored.
 
 State file: ``maintenance.json`` — **CP-launched games only** (``launched_names``),
-for cancel/``/checkemail`` lookup. ``Re:/Fw:`` subjects and om@ copies are ignored
-(not stored). Non-CP Evolution mail is deduped via ``handled_uids`` (not in
-``entries``). ``entries`` reset at local midnight (``MAINTENANCE_MAIL_TZ``).
+with ``start_time`` / ``end_time`` / ``time_of_resolution`` / ``expires_on``.
+Rows are removed after the maintenance **end date** passes (e.g. end 29/May → deleted
+on 30/May local ``MAINTENANCE_MAIL_TZ``). ``Re:/Fw:`` and om@ copies are not stored.
+Non-CP mail is deduped via ``handled_uids`` only.
+
+IMAP watcher processes **today's mail only** (local ``MAINTENANCE_MAIL_TZ``,
+``PROCESS_DAYS=1``). Set ``MAINTENANCE_MAIL_PROCESS_DAYS=2`` to include yesterday.
 """
 
 from __future__ import annotations
@@ -103,11 +107,10 @@ SUBJECT_SEARCH_MAX = int(
     os.getenv("MAINTENANCE_MAIL_SUBJECT_MAX", "").strip() or "300"
 )
 MAIL_TZ = (os.getenv("MAINTENANCE_MAIL_TZ", "").strip() or "Asia/Shanghai")
-# Calendar days to process (local MAIL_TZ): 1 = today only, 2 = today + yesterday.
-# Default 2 for testing — set MAINTENANCE_MAIL_PROCESS_DAYS=1 in env for today only later.
+# Calendar days to process (local MAIL_TZ): 1 = **today only** (default).
 PROCESS_DAYS = max(
     1,
-    int(os.getenv("MAINTENANCE_MAIL_PROCESS_DAYS", "").strip() or "2"),
+    int(os.getenv("MAINTENANCE_MAIL_PROCESS_DAYS", "").strip() or "1"),
 )
 # IMAP SINCE lookback (local MAIL_TZ) — wider than PROCESS_DAYS so UTC/internal
 # dates still find mail that belongs to «today» locally; code filters to PROCESS_DAYS.
@@ -393,10 +396,12 @@ def _should_accept_carryover(
     mail: imaplib.IMAP4, uid: bytes, when: str | None
 ) -> bool:
     """
-    After midnight (``PROCESS_DAYS=1``): yesterday's Date outside the window may
-    still be accepted if UNSEEN (unfinished). When state was cleared for backfill,
-    accept local yesterday even if already ``\\Seen``.
+    Yesterday's mail outside the window — only when ``PROCESS_DAYS`` > 1.
+
+    With today-only mode (``PROCESS_DAYS=1``), yesterday is never carried over.
     """
+    if PROCESS_DAYS <= 1:
+        return False
     if not when or _received_in_process_window(when):
         return False
     if not _is_carryover_local_date(when):
@@ -901,41 +906,35 @@ def _empty_state(*, state_date: str | None = None) -> dict[str, Any]:
     }
 
 
-def _maybe_reset_state_for_new_day(data: dict[str, Any]) -> dict[str, Any]:
-    """
-    Clear ``entries`` after local midnight once ``state_date`` is established.
-
-    Legacy files without ``state_date``: keep all entries, set ``state_date`` to today
-    (no clear on deploy — avoids re-processing today's mail after a code pull).
-    """
-    today = _local_today_iso()
+def _prune_expired_maintenance_state(data: dict[str, Any]) -> dict[str, Any]:
+    """Drop ``maintenance.json`` rows whose ``expires_on`` date has passed."""
     if not isinstance(data.get("entries"), list):
         data["entries"] = []
     data["version"] = STATE_VERSION
-
-    prev_date = (data.get("state_date") or "").strip()
-    if not prev_date:
-        data["state_date"] = today
-        n = len(data["entries"])
-        if n:
-            print(
-                f"[maint-mail] maintenance.json: state_date={today}, kept {n} "
-                f"entries (daily clear from next midnight {MAIL_TZ})",
-                flush=True,
-            )
-        return data
-
-    if prev_date == today:
-        return data
-
-    n = len(data["entries"])
-    if n:
+    entries = data.get("entries") or []
+    kept = [
+        e for e in entries if isinstance(e, dict) and not _entry_is_expired(e)
+    ]
+    removed = len(entries) - len(kept)
+    if removed:
         print(
-            f"[maint-mail] new day {today} ({MAIL_TZ}): cleared maintenance.json "
-            f"({n} entries from {prev_date})",
+            f"[maint-mail] pruned {removed} expired maintenance.json "
+            f"entr{'y' if removed == 1 else 'ies'} "
+            f"(local date > expires_on, tz={MAIL_TZ})",
             flush=True,
         )
-    return _empty_state(state_date=today)
+    data["entries"] = kept
+    data["state_date"] = _local_today_iso()
+    return data
+
+
+def _entry_is_expired(entry: dict[str, Any]) -> bool:
+    return _maint_mod.maintenance_entry_is_expired(entry)
+
+
+def _maybe_reset_state_for_new_day(data: dict[str, Any]) -> dict[str, Any]:
+    """Legacy hook — expiry prune replaces midnight full clear."""
+    return _prune_expired_maintenance_state(data)
 
 
 def _load_state() -> dict[str, Any]:
@@ -985,7 +984,7 @@ def _migrate_legacy_maintenance_state(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _save_state(data: dict[str, Any]) -> None:
-    data["state_date"] = _local_today_iso()
+    data = _prune_expired_maintenance_state(data)
     data["version"] = STATE_VERSION
     entries = data.get("entries") or []
     if len(entries) > MAX_ENTRIES:
@@ -3979,6 +3978,10 @@ def _record_processed(
     game_name: str = "",
     studio: str = "",
     maint_date: str = "",
+    start_time: str = "",
+    end_time: str = "",
+    time_of_resolution: str = "",
+    expires_on: str = "",
     is_cancelled_email: bool = False,
     is_uncancel_email: bool = False,
 ) -> None:
@@ -4003,6 +4006,14 @@ def _record_processed(
         row["studio"] = studio.strip()
     if (maint_date or "").strip():
         row["maint_date"] = maint_date.strip()
+    for key, val in (
+        ("start_time", start_time),
+        ("end_time", end_time),
+        ("time_of_resolution", time_of_resolution),
+        ("expires_on", expires_on),
+    ):
+        if (val or "").strip():
+            row[key] = val.strip()
     if is_cancelled_email:
         row["is_cancelled_email"] = True
     if is_uncancel_email:
@@ -4727,6 +4738,12 @@ class MaintenanceMailWatcher:
                     ) or date_val
                 if date_val and date_val != "Unknown":
                     record_kw["maint_date"] = date_val
+            times_kw = maintenance.maintenance_times_for_json_record(
+                pipeline_in,
+                email_subject=display_subj,
+                prior=prior,
+            )
+            record_kw.update(times_kw)
             _record_processed(entries, **record_kw)
         else:
             _mark_uid_handled(state, store_key)
