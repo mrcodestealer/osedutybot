@@ -124,6 +124,32 @@ def _append_department_leave_wfh_footer(reply: str, command: str) -> str:
     return reply
 
 
+def _send_month_attendance_card(chat_id: str, clean_text: str, mode: str) -> None:
+    """Send /leave, /wfh, or /leavewfh month card; optional department arg e.g. ``/leave fpms``."""
+    try:
+        import leavewfh as _leavewfh
+    except ImportError:
+        import leave as _leavewfh  # type: ignore[no-redef]
+
+    dept_key, dept_err = _leavewfh.parse_month_attendance_department(clean_text)
+    if dept_err:
+        send_message(chat_id, dept_err)
+        return
+    if mode == "leave":
+        payload = _leavewfh.get_leave_month_payload(department_key=dept_key)
+    elif mode == "wfh":
+        payload = _leavewfh.get_wfh_month_payload(department_key=dept_key)
+    else:
+        payload = _leavewfh.get_leave_wfh_month_payload(department_key=dept_key)
+    card = payload.get("lark_card")
+    if isinstance(card, dict):
+        resp = send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
+        if resp.get("code") != 0:
+            send_message(chat_id, payload.get("text") or "❌ Leave/WFH card failed.")
+    else:
+        send_message(chat_id, payload.get("text") or "❌ Could not load leave/WFH data.")
+
+
 # ================= CONFIGURATION =================
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET") 
@@ -3221,20 +3247,14 @@ def lark_webhook():
     elif clean_text.lower() == '/date':
         today = get_today_date()
         reply = f"Today's date is {today}."
-    elif re.match(r"^/leave\b", clean_text, re.I) or re.match(r"^/wfh\b", clean_text, re.I):
-        try:
-            import leavewfh as _leavewfh
-        except ImportError:
-            import leave as _leavewfh  # type: ignore[no-redef]
-
-        payload = _leavewfh.get_leave_today_payload()
-        card = payload.get("lark_card")
-        if isinstance(card, dict):
-            resp = send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
-            if resp.get("code") != 0:
-                send_message(chat_id, payload.get("text") or "❌ Leave/WFH card failed.")
-        else:
-            send_message(chat_id, payload.get("text") or "❌ Could not load leave/WFH data.")
+    elif re.match(r"^/leavewfh\b", clean_text, re.I) or re.match(r"^/wfhleave\b", clean_text, re.I):
+        _send_month_attendance_card(chat_id, clean_text, "both")
+        return _lark_im_done()
+    elif re.match(r"^/leave\b", clean_text, re.I):
+        _send_month_attendance_card(chat_id, clean_text, "leave")
+        return _lark_im_done()
+    elif re.match(r"^/wfh\b", clean_text, re.I):
+        _send_month_attendance_card(chat_id, clean_text, "wfh")
         return _lark_im_done()
     elif re.match(r"^/wholeave\b", clean_text, re.I):
         try:

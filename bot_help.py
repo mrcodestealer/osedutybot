@@ -42,14 +42,19 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
                 ("/holiday", "Upcoming public holidays", "即将到来的公共假期"),
                 ("/holidaythismonth", "Holidays this month", "本月假期"),
                 (
-                    "/leave",
-                    "@bot — leave & WFH today (dutyList.csv; OSE + other dept)",
-                    "@机器人 — 今日请假与 WFH（dutyList；OSE 及其他部门）",
+                    "/leave [dept]",
+                    "@bot — leave this month; e.g. /leave fpms, /leave ote, /leave bi",
+                    "@机器人 — 本月请假；如 /leave fpms、/leave ote",
                 ),
                 (
-                    "/wfh",
-                    "Same card as /leave (leave + WFH sections)",
-                    "与 /leave 相同卡片（含请假与 WFH）",
+                    "/wfh [dept]",
+                    "@bot — WFH this month; e.g. /wfh fpms, /wfh sre",
+                    "@机器人 — 本月 WFH；如 /wfh fpms、/wfh sre",
+                ),
+                (
+                    "/leavewfh [dept]",
+                    "Leave + WFH this month; alias /wfhleave; e.g. /leavewfh cpms",
+                    "本月请假与 WFH；别名 /wfhleave；如 /leavewfh cpms",
                 ),
                 (
                     "/wholeave",

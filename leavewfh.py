@@ -1749,6 +1749,41 @@ def rows_on_wfh_date(rows: list[dict[str, Any]], on_date: date) -> list[dict[str
     return out
 
 
+def _row_is_wfh(row: dict[str, Any]) -> bool:
+    lt = (row.get("leave_type") or "").strip().lower()
+    return lt == WFH_TYPE.lower() or "wfh" in lt or "work from home" in lt
+
+
+def rows_in_month(
+    rows: list[dict[str, Any]],
+    year: int,
+    month: int,
+    *,
+    wfh: bool,
+) -> list[dict[str, Any]]:
+    """HRMS rows overlapping ``year``/``month`` — leave-only or WFH-only."""
+    by_key: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for r in rows:
+        if not _overlaps_month(r["start"], r["end"], year, month):
+            continue
+        if wfh:
+            if not _row_is_wfh(r):
+                continue
+        elif _row_is_wfh(r):
+            continue
+        key = (
+            r["name"].strip().lower(),
+            r["start"],
+            r["end"],
+            (r.get("leave_type") or "").strip().lower(),
+        )
+        if key not in by_key:
+            by_key[key] = r
+    out = list(by_key.values())
+    out.sort(key=lambda r: (r["start"], r["name"].lower()))
+    return out
+
+
 def _attendance_span_for_row(row: dict[str, Any], on_date: date) -> str:
     st, ed = row["start"], row["end"]
     if st == ed:
@@ -1796,6 +1831,50 @@ def _dutylist_bucket_rows(
     return ose_out, other_out
 
 
+def _dutylist_bucket_rows_for_month(
+    hrms_rows: list[dict[str, Any]],
+    year: int,
+    month: int,
+    *,
+    wfh: bool,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Map HRMS month rows → dutyList names; split OSE vs other departments."""
+    import duty_list_match as dlm
+
+    duty = dlm.load_duty_list()
+    in_month = rows_in_month(hrms_rows, year, month, wfh=wfh)
+    ose_out: list[dict[str, Any]] = []
+    other_out: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for r in in_month:
+        entry = dlm.match_duty_entry(r.get("name") or "", duty)
+        if not entry:
+            continue
+        key = (
+            entry["name"].lower(),
+            r["start"],
+            r["end"],
+            (r.get("leave_type") or "").strip().lower(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        item = {
+            **r,
+            "name": entry["name"],
+            "department": entry["department"],
+        }
+        if dlm.is_ose_department(entry["department"]):
+            ose_out.append(item)
+        else:
+            other_out.append(item)
+    ose_out.sort(key=lambda x: (x["start"], x["leave_type"].lower(), x["name"].lower()))
+    other_out.sort(
+        key=lambda x: (x["department"].lower(), x["start"], x["name"].lower())
+    )
+    return ose_out, other_out
+
+
 def get_dutylist_leave_wfh_for_date(ref_date: Optional[date] = None) -> dict[str, Any]:
     """
     HRMS leave + WFH for ``ref_date``, only people in dutyList.csv.
@@ -1824,6 +1903,50 @@ def get_dutylist_leave_wfh_for_date(ref_date: Optional[date] = None) -> dict[str
     except Exception as exc:
         return {
             "date": on_date.isoformat(),
+            "ose_leave": [],
+            "other_leave": [],
+            "ose_wfh": [],
+            "other_wfh": [],
+            "warnings": [str(exc)],
+            "error": str(exc),
+        }
+
+
+def get_dutylist_leave_wfh_for_month(ref_date: Optional[date] = None) -> dict[str, Any]:
+    """
+    HRMS leave + WFH for the calendar month of ``ref_date``,
+    only people in dutyList.csv.
+    """
+    on_date = ref_date or date.today()
+    year, month = on_date.year, on_date.month
+    warnings: list[str] = []
+    try:
+        token = get_tenant_access_token()
+        leave_rows, w0 = fetch_leave_from_company_leave_calendar(token, year, month)
+        wfh_rows, w1 = fetch_wfh_from_company_calendar(token, year, month)
+        warnings.extend(w0)
+        warnings.extend(w1)
+        ose_leave, other_leave = _dutylist_bucket_rows_for_month(
+            leave_rows, year, month, wfh=False
+        )
+        ose_wfh, other_wfh = _dutylist_bucket_rows_for_month(
+            wfh_rows, year, month, wfh=True
+        )
+        return {
+            "date": on_date.isoformat(),
+            "year": year,
+            "month": month,
+            "ose_leave": ose_leave,
+            "other_leave": other_leave,
+            "ose_wfh": ose_wfh,
+            "other_wfh": other_wfh,
+            "warnings": warnings,
+        }
+    except Exception as exc:
+        return {
+            "date": on_date.isoformat(),
+            "year": year,
+            "month": month,
             "ose_leave": [],
             "other_leave": [],
             "ose_wfh": [],
@@ -1963,6 +2086,64 @@ def _department_command_label(command_key: str) -> str:
         "ft": "F&T",
     }
     return labels.get((command_key or "").strip().lower(), (command_key or "").upper())
+
+
+DEPARTMENT_DUTY_COMMAND_KEYS: tuple[str, ...] = (
+    "fpms",
+    "ote",
+    "bi",
+    "fe",
+    "sre",
+    "db",
+    "dba",
+    "cpms",
+    "pms",
+    "ft",
+)
+
+
+def normalize_department_command_key(raw: str) -> Optional[str]:
+    key = (raw or "").strip().lower().lstrip("/")
+    if key in DEPARTMENT_DUTY_COMMAND_KEYS:
+        return key
+    if key in ("f&t",):
+        return "ft"
+    return None
+
+
+def parse_month_attendance_department(clean_text: str) -> tuple[Optional[str], Optional[str]]:
+    """Return ``(department_key, error_message)`` from ``/leave fpms``-style commands."""
+    parts = (clean_text or "").strip().split()
+    if len(parts) < 2:
+        return None, None
+    dept = normalize_department_command_key(parts[1])
+    if dept:
+        return dept, None
+    valid = ", ".join(DEPARTMENT_DUTY_COMMAND_KEYS)
+    return None, f"❌ Unknown department `{parts[1]}`. Valid: {valid}"
+
+
+def _filter_month_data_by_department(
+    data: dict[str, Any],
+    department_key: str,
+) -> dict[str, Any]:
+    key = department_key.strip().lower()
+
+    def _filt(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            r
+            for r in rows
+            if department_matches_command(r.get("department") or "", key)
+        ]
+
+    return {
+        **data,
+        "department_key": key,
+        "ose_leave": _filt(data.get("ose_leave") or []),
+        "other_leave": _filt(data.get("other_leave") or []),
+        "ose_wfh": _filt(data.get("ose_wfh") or []),
+        "other_wfh": _filt(data.get("other_wfh") or []),
+    }
 
 
 def format_department_leave_wfh_footer(
@@ -2183,6 +2364,272 @@ def build_dutylist_attendance_card(
         },
         "body": {"elements": elements},
     }
+
+
+def _attendance_span_for_month_row(row: dict[str, Any]) -> str:
+    st, ed = row["start"], row["end"]
+    if st == ed:
+        return _format_leave_day(st)
+    return f"{_format_leave_day(st)} → {_format_leave_day(ed)}"
+
+
+def _attendance_person_line_month(row: dict[str, Any]) -> str:
+    lt = str(row.get("leave_type") or "Leave").strip()
+    emoji = _leave_type_emoji(lt)
+    span = _attendance_span_for_month_row(row)
+    return f"- **{row['name']}** · {emoji} {lt} · {span}"
+
+
+def _dept_block_markdown_month(
+    dept_label: str,
+    leave_rows: list[dict[str, Any]],
+    wfh_rows: list[dict[str, Any]],
+    *,
+    department: Optional[str] = None,
+) -> str:
+    if department is not None:
+        leave_in = _rows_for_department(leave_rows, department)
+        wfh_in = _rows_for_department(wfh_rows, department)
+    else:
+        leave_in = leave_rows
+        wfh_in = wfh_rows
+    leave_in.sort(key=lambda r: (r["start"], str(r.get("name") or "").lower()))
+    wfh_in.sort(key=lambda r: (r["start"], str(r.get("name") or "").lower()))
+    if not leave_in and not wfh_in:
+        return ""
+    lines = [f"**{dept_label}**"]
+    if leave_in:
+        lines.append("**LEAVE**")
+        lines.extend(_attendance_person_line_month(r) for r in leave_in)
+    if wfh_in:
+        if leave_in:
+            lines.append("")
+        lines.append("**WFH**")
+        lines.extend(_attendance_person_line_month(r) for r in wfh_in)
+    return "\n".join(lines)
+
+
+def _tier_department_markdowns_month(
+    tier: int,
+    dept_names: list[str],
+    all_leave: list[dict[str, Any]],
+    all_wfh: list[dict[str, Any]],
+) -> list[str]:
+    blocks: list[str] = []
+    for dept in sorted(set(dept_names), key=lambda d: _department_order_in_tier(d, tier)):
+        md = _dept_block_markdown_month(dept, all_leave, all_wfh, department=dept)
+        if md:
+            blocks.append(md)
+    return blocks
+
+
+def build_dutylist_month_leave_wfh_elements(
+    data: dict[str, Any],
+    *,
+    mode: str = "both",
+) -> list[dict[str, Any]]:
+    """
+    Lark card body for a calendar month.
+    ``mode``: ``leave`` | ``wfh`` | ``both``
+    """
+    all_leave = list(data.get("ose_leave") or []) + list(data.get("other_leave") or [])
+    all_wfh = list(data.get("ose_wfh") or []) + list(data.get("other_wfh") or [])
+    mode_key = (mode or "both").strip().lower()
+    if mode_key == "leave":
+        all_wfh = []
+    elif mode_key == "wfh":
+        all_leave = []
+    if not all_leave and not all_wfh:
+        return []
+
+    leave_depts = set((r.get("department") or "").strip() for r in all_leave if r.get("department"))
+    wfh_depts = set((r.get("department") or "").strip() for r in all_wfh if r.get("department"))
+    all_depts = {d for d in leave_depts | wfh_depts if d}
+
+    by_tier: dict[int, list[str]] = {1: [], 2: [], 3: []}
+    for dept in all_depts:
+        by_tier[_department_display_tier(dept)].append(dept)
+
+    tier_blocks: list[list[str]] = []
+    t1 = _tier_department_markdowns_month(1, by_tier[1], all_leave, all_wfh)
+    if t1:
+        tier_blocks.append(t1)
+    t2 = _tier_department_markdowns_month(2, by_tier[2], all_leave, all_wfh)
+    if t2:
+        tier_blocks.append(t2)
+    t3_leave = _tier3_rows(all_leave)
+    t3_wfh = _tier3_rows(all_wfh)
+    other_md = _dept_block_markdown_month("Other", t3_leave, t3_wfh)
+    if other_md:
+        tier_blocks.append([other_md])
+
+    elements: list[dict[str, Any]] = []
+    for blocks in tier_blocks:
+        if not blocks:
+            continue
+        if elements:
+            elements.append(_lark_hr_element())
+        for md in blocks:
+            elements.append(_lark_md_element(md))
+    return elements
+
+
+def build_dutylist_month_attendance_card(
+    data: dict[str, Any],
+    *,
+    mode: str = "both",
+) -> dict[str, Any]:
+    """Lark card: leave and/or WFH this month for dutyList.csv people."""
+    mode_key = (mode or "both").strip().lower()
+    year = int(data.get("year") or date.today().year)
+    month = int(data.get("month") or date.today().month)
+    month_label = date(year, month, 1).strftime("%B %Y")
+
+    ose_leave = data.get("ose_leave") or []
+    other_leave = data.get("other_leave") or []
+    ose_wfh = data.get("ose_wfh") or []
+    other_wfh = data.get("other_wfh") or []
+    warnings = list(data.get("warnings") or [])
+    dept_key = (data.get("department_key") or "").strip().lower()
+    dept_label = _department_command_label(dept_key) if dept_key else ""
+    dept_suffix = f" · {dept_label}" if dept_label else ""
+    scope = f"**{dept_label}**" if dept_label else "**dutyList.csv**"
+
+    if mode_key == "leave":
+        total = len(ose_leave) + len(other_leave)
+        empty_msg = f"✅ No leave this month for {scope}."
+        header_title = f"Leave — {month_label}{dept_suffix}"
+        card_title = (
+            f"🏖️ Leave — {dept_label} ({total})"
+            if dept_label and total
+            else (f"🏖️ Leave ({total})" if total else "✅ No Leave This Month")
+        )
+    elif mode_key == "wfh":
+        total = len(ose_wfh) + len(other_wfh)
+        empty_msg = f"✅ No WFH this month for {scope}."
+        header_title = f"WFH — {month_label}{dept_suffix}"
+        card_title = (
+            f"🏠 WFH — {dept_label} ({total})"
+            if dept_label and total
+            else (f"🏠 WFH ({total})" if total else "✅ No WFH This Month")
+        )
+    else:
+        total = len(ose_leave) + len(other_leave) + len(ose_wfh) + len(other_wfh)
+        empty_msg = f"✅ No leave or WFH this month for {scope}."
+        header_title = f"Leave & WFH — {month_label}{dept_suffix}"
+        card_title = (
+            f"Leave & WFH — {dept_label} ({total})"
+            if dept_label and total
+            else (f"Leave & WFH ({total})" if total else "✅ No Leave / WFH This Month")
+        )
+
+    elements: list[dict[str, Any]] = [
+        _lark_md_element(f"📅 **{header_title}**"),
+    ]
+    body = build_dutylist_month_leave_wfh_elements(data, mode=mode_key)
+    if body:
+        if total:
+            elements.append(_lark_md_element(f"👥 **{total}** record(s) (dutyList.csv)"))
+        elements.extend(body)
+        template = "orange"
+        header_plain = card_title
+    else:
+        elements.append(_lark_md_element(empty_msg))
+        template = "green"
+        header_plain = card_title
+
+    for w in warnings[:2]:
+        elements.append(_lark_md_element(f"⚠️ {w}"))
+
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": template,
+            "title": {"tag": "plain_text", "content": header_plain},
+        },
+        "body": {"elements": elements},
+    }
+
+
+def get_dutylist_month_payload(
+    ref_date: Optional[date] = None,
+    *,
+    mode: str = "both",
+    department_key: Optional[str] = None,
+) -> dict[str, Any]:
+    """Month view for dutyList.csv — ``mode``: leave | wfh | both; optional department filter."""
+    on_date = ref_date or date.today()
+    mode_key = (mode or "both").strip().lower()
+    data = get_dutylist_leave_wfh_for_month(on_date)
+    if data.get("error"):
+        return {
+            "text": f"❌ Could not load leave/WFH: {data['error']}",
+            "lark_card": None,
+            "count": 0,
+            "date": on_date.isoformat(),
+            "source": "dutylist_hrms",
+        }
+    if department_key:
+        data = _filter_month_data_by_department(data, department_key)
+    dept_label = (
+        _department_command_label(data["department_key"])
+        if data.get("department_key")
+        else ""
+    )
+    if mode_key == "leave":
+        total = len(data.get("ose_leave") or []) + len(data.get("other_leave") or [])
+        label = "Leave"
+    elif mode_key == "wfh":
+        total = len(data.get("ose_wfh") or []) + len(data.get("other_wfh") or [])
+        label = "WFH"
+    else:
+        total = (
+            len(data.get("ose_leave") or [])
+            + len(data.get("other_leave") or [])
+            + len(data.get("ose_wfh") or [])
+            + len(data.get("other_wfh") or [])
+        )
+        label = "Leave & WFH"
+    month_label = date(data["year"], data["month"], 1).strftime("%B %Y")
+    card = build_dutylist_month_attendance_card(data, mode=mode_key)
+    dept_part = f" · {dept_label}" if dept_label else ""
+    return {
+        "text": f"{label} — {month_label}{dept_part} ({total} in dutyList.csv)",
+        "lark_card": card,
+        "count": total,
+        "date": on_date.isoformat(),
+        "source": "dutylist_hrms",
+        "data": data,
+    }
+
+
+def get_leave_month_payload(
+    ref_date: Optional[date] = None,
+    *,
+    department_key: Optional[str] = None,
+) -> dict[str, Any]:
+    return get_dutylist_month_payload(
+        ref_date, mode="leave", department_key=department_key
+    )
+
+
+def get_wfh_month_payload(
+    ref_date: Optional[date] = None,
+    *,
+    department_key: Optional[str] = None,
+) -> dict[str, Any]:
+    return get_dutylist_month_payload(ref_date, mode="wfh", department_key=department_key)
+
+
+def get_leave_wfh_month_payload(
+    ref_date: Optional[date] = None,
+    *,
+    department_key: Optional[str] = None,
+) -> dict[str, Any]:
+    return get_dutylist_month_payload(
+        ref_date, mode="both", department_key=department_key
+    )
 
 
 def format_leave_today_text(
