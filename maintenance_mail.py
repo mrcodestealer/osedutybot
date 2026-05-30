@@ -2038,6 +2038,7 @@ CHECKEEMAIL_SCAN_CAP = max(
     1,
     int(os.getenv("MAINTENANCE_MAIL_CHECKEEMAIL_SCAN_CAP", "").strip() or "200"),
 )
+CHECKEMAIL_SCAN_CAP = CHECKEEMAIL_SCAN_CAP  # legacy name used in a few call sites
 # Ticket ``/checkemail SD-xxxxx`` — scan only the newest N headers (Re: threads are recent).
 CHECKEEMAIL_TICKET_SCAN_CAP = max(
     40,
