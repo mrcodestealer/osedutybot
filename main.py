@@ -3788,7 +3788,7 @@ def lark_webhook():
             reply = tbp.get_tbp_info(query)
         send_message(chat_id, reply)
         return _lark_im_done()
-    elif clean_text.lower().startswith('/cp'):
+    elif clean_text.lower().startswith('/cp') and not clean_text.lower().startswith('/cpms'):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
             reply = "❌ Usage: `/cp <asset_number(s)>`\nExamples: `/cp 1234`, `/cp cp2839 cp2378`, `/cp cp2839,cp2378`"
