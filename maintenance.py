@@ -92,6 +92,21 @@ def from_is_allowed_sender(from_addr: str | None) -> bool:
     return email in _allowed_sender_emails()
 
 
+def from_is_evolution_maintenance_sender(from_addr: str | None) -> bool:
+    """
+    Evolution notification senders for ``/checkemail`` originals.
+
+    Accepts known addresses plus any ``*@evolution.com`` (Service Desk display
+    name is often ``Evolution Service Desk`` with varying local parts).
+    """
+    email = _parse_from_email_address(from_addr)
+    if not email:
+        return False
+    if email in _allowed_sender_emails():
+        return True
+    return email.endswith("@evolution.com")
+
+
 def from_should_ignore(from_addr: str | None) -> bool:
     """Skip outbound copies from our own mailbox (OM-PH / om@…)."""
     raw = (from_addr or "").strip()
@@ -142,7 +157,7 @@ def is_original_maintenance_email(
         return False
     if from_should_ignore(from_addr):
         return False
-    return from_is_allowed_sender(from_addr)
+    return from_is_evolution_maintenance_sender(from_addr)
 
 
 def subject_should_ignore(subject: str | None) -> bool:
