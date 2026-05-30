@@ -402,6 +402,12 @@ _FOLLOWING_TABLES_UNAVAILABLE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Service Desk schedule: ``following tables are going to take place with a downtime``
+_DOWNTIME_SCHEDULE_TABLES_RE = re.compile(
+    r"following tables? (?:are )?going to take place with a downtime",
+    re.IGNORECASE,
+)
+
 
 def is_maintenance_cancelled_email(body: str | None) -> bool:
     """True when the email body is a maintenance cancellation notice (not the original schedule)."""
@@ -703,21 +709,39 @@ def rich_checkemail_extraction_body(
 
 
 def parse_service_desk_studio_from_subject(subject: str) -> str:
-    """``EU CA`` from ``… / 26/May/26 03:50 UTC / EU CA / …``."""
+    """
+    Studio from Service Desk subject slashes after the first ``UTC /``.
+
+    Examples::
+
+        … / 27/May/26 06:00 UTC / EU CA / Riga Studio / Table Availability …
+        → ``Riga Studio`` (prefer segment containing ``Studio``)
+
+        … / 26/May/26 03:50 UTC / EU CA / Table Availability …
+        → ``EU CA`` (region-only subjects)
+    """
     s = normalize_display_subject(subject)
-    m = re.search(
-        r"UTC\s*/\s*([^/]+?)\s*/\s*(?:/\s*)?(?:Table\s+Availability|\(SD-)",
-        s,
-        re.IGNORECASE,
-    )
-    if not m:
+    utc_m = re.search(r"UTC\s*/\s*(.+)$", s, re.IGNORECASE)
+    if not utc_m:
         return ""
-    seg = m.group(1).strip()
-    if not seg or seg.lower() in ("affected", "not affected"):
-        return ""
-    if re.search(r"table\s+availability", seg, re.IGNORECASE):
-        return ""
-    return seg
+    parts: list[str] = []
+    for raw in utc_m.group(1).split(" / "):
+        seg = raw.strip()
+        if not seg:
+            continue
+        if re.search(r"table\s+availability", seg, re.IGNORECASE):
+            break
+        if re.match(r"^\(SD-", seg, re.IGNORECASE):
+            break
+        if seg.lower() in ("affected", "not affected"):
+            continue
+        parts.append(seg)
+    for seg in parts:
+        if re.search(r"\bstudio\b", seg, re.IGNORECASE):
+            return seg
+    if parts:
+        return parts[0]
+    return ""
 
 
 _SD_SUBJECT_UTC_RE = re.compile(
@@ -2770,6 +2794,61 @@ def _parse_following_unavailable_tables(text: str) -> list[str]:
     return out
 
 
+def _parse_downtime_schedule_tables(text: str) -> list[str]:
+    """
+    Table names after ``following table(s) … going to take place with a downtime`` —
+    Service Desk schedule format (``Immersive Roulette`` on its own line).
+    """
+    hay = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not hay.strip():
+        return []
+    m = re.search(
+        r"following tables?\s+(?:are\s+)?going to take place with a downtime\s*:?\s*"
+        r"(.*?)(?:\n\s*\n|You may find summary|Start time\s*:|End time\s*:|"
+        r"Reason\s*:|Table availability\s*:|\Z)",
+        hay,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not m:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in m.group(1).splitlines():
+        chunk = _clean_email_line(line)
+        if not _is_plausible_game_name(chunk):
+            continue
+        key = _cell_norm(chunk).replace(" ", "")
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(chunk)
+    return out
+
+
+def _extract_table_name_from_sentence(fragment: str) -> str | None:
+    """
+    ``table Speed Baccarat A in Riga Studio was unavailable`` and similar —
+    table name may appear mid-sentence (Service Desk Fixed / notice emails).
+    """
+    hay = (fragment or "").strip()
+    if not hay or not re.search(r"\btable\s+(?!availability\b)", hay, re.I):
+        return None
+    patterns = (
+        r"table\s+(.*?)\s+in\s+.+?\s+was\s+unavailable",
+        r"table\s+(.*?)\s+will\s+be\s+unavailable",
+        r"table\s+(.*?)\s+was\s+unavailable",
+        r"table\s+(?!availability\b)([^\n\.]+?)\s+in\b",
+    )
+    for pat in patterns:
+        m = re.search(pat, hay, re.IGNORECASE)
+        if not m:
+            continue
+        name = m.group(1).strip()
+        if _is_plausible_game_name(name):
+            return name
+    return None
+
+
 def extract_info(text: str, *, email_subject: str | None = None):
     """Parse email text line by line to extract fields."""
     info = {
@@ -2802,29 +2881,11 @@ def extract_info(text: str, *, email_subject: str | None = None):
                     table_availability_value = val
 
         # ---- Table detection (not ``Table availability:``) ----
-        elif re.search(r'^table\s+(?!availability\b)', line, re.IGNORECASE):
-            match = re.search(
-                r'table\s+(.*?)\s+will\s+be\s+unavailable',
-                line,
-                re.IGNORECASE,
-            )
-            if match:
-                name = match.group(1).strip()
-                if _is_plausible_game_name(name):
-                    info['table'] = name
-                    info['table_names'] = [name]
-            if info['table'] == 'Unknown':
-                match = re.search(r'table\s+([^\.]+?)\s+in', line, re.IGNORECASE)
-                if match:
-                    info['table'] = match.group(1).strip()
-                    info['table_names'] = [info['table']]
-            if info['table'] == 'Unknown':
-                match = re.search(r'table\s+(.*?)\s+was', line, re.IGNORECASE)
-                if match:
-                    name = match.group(1).strip()
-                    if _is_plausible_game_name(name):
-                        info['table'] = name
-                        info['table_names'] = [name]
+        elif re.search(r"\btable\s+(?!availability\b)", line, re.IGNORECASE):
+            name = _extract_table_name_from_sentence(line)
+            if name:
+                info["table"] = name
+                info["table_names"] = [name]
         elif re.search(
             r'^Affected tables?(?:/-s)?\s*:', line, re.IGNORECASE
         ):
@@ -2835,6 +2896,13 @@ def extract_info(text: str, *, email_subject: str | None = None):
             i = j
             continue
         elif _FOLLOWING_TABLES_UNAVAILABLE_RE.search(line):
+            block_names, j = _parse_table_block_after_heading(lines, i)
+            if block_names:
+                info["table"] = ", ".join(block_names)
+                info["table_names"] = list(block_names)
+            i = j
+            continue
+        elif _DOWNTIME_SCHEDULE_TABLES_RE.search(line):
             block_names, j = _parse_table_block_after_heading(lines, i)
             if block_names:
                 info["table"] = ", ".join(block_names)
@@ -2925,31 +2993,19 @@ def extract_info(text: str, *, email_subject: str | None = None):
     ):
         info['end_time'] = "TBA"
     _apply_service_desk_utc_times(info, text, email_subject=email_subject)
-    # If table name still unknown, try to extract from "table X in Y" in the first paragraph
+    # If table name still unknown, try mid-sentence ``table X in Y was unavailable``
     if info['table'] == 'Unknown':
-        will_unavail = re.search(
-            r'table\s+(.*?)\s+will\s+be\s+unavailable',
-            text,
-            re.IGNORECASE,
-        )
-        if will_unavail:
-            name = will_unavail.group(1).strip()
-            if _is_plausible_game_name(name):
-                info['table'] = name
-                info['table_names'] = [name]
-    if info['table'] == 'Unknown':
-        table_match = re.search(
-            r'(?m)^table\s+(?!availability\b)([^\n\.]+?)\s+in\b',
-            text,
-            re.IGNORECASE,
-        )
-        if table_match:
-            name = table_match.group(1).strip()
-            if _is_plausible_game_name(name):
-                info['table'] = name
-                info['table_names'] = [name]
+        name = _extract_table_name_from_sentence(text)
+        if name:
+            info['table'] = name
+            info['table_names'] = [name]
     if info['table'] == 'Unknown':
         block = _parse_following_unavailable_tables(text)
+        if block:
+            info['table'] = ", ".join(block)
+            info['table_names'] = list(block)
+    if info['table'] == 'Unknown':
+        block = _parse_downtime_schedule_tables(text)
         if block:
             info['table'] = ", ".join(block)
             info['table_names'] = list(block)

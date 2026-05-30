@@ -4623,6 +4623,13 @@ class MaintenanceMailWatcher:
                     f"[maint-mail] gamelist launched: {launched_names!r} to_cp={to_cp}",
                     flush=True,
                 )
+            if not to_cp:
+                cands = maintenance.extract_candidate_game_names(pipeline_in)
+                print(
+                    f"[maint-mail] NOT IN CP check uid={uid_s} ticket={ticket_id!r} "
+                    f"candidates={cands!r} launched={launched_names!r}",
+                    flush=True,
+                )
 
             if to_cp:
                 _, hdr_title, hdr_tpl, card_body, card_el = (
