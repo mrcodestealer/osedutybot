@@ -2033,7 +2033,7 @@ CHECKEMAIL_IMAP_FOLDERS = [
     f.strip()
     for f in (
         os.getenv("MAINTENANCE_MAIL_CHECKEEMAIL_FOLDERS", "").strip()
-        or "Priority,OSE Pending"
+        or "OSE Pending,Priority"
     ).split(",")
     if f.strip()
 ]
@@ -2070,10 +2070,12 @@ def _uids_spread_pool(uids: list[bytes], cap: int = 80) -> list[bytes]:
 
 
 def _checkemail_pool_cap(folder: str) -> int:
-    """Folder-specific recent-mail pool (Priority/INBOX is large on om@)."""
+    """Folder-specific recent-mail pool (INBOX is huge; OSE Pending has threads)."""
     cf = (folder or "").casefold()
     if cf in ("inbox", "priority"):
-        return max(CHECKEEMAIL_SUBJECT_POOL, 1600)
+        return min(CHECKEEMAIL_SUBJECT_POOL, 400)
+    if cf == "ose pending":
+        return CHECKEEMAIL_SUBJECT_POOL
     if cf == "sent":
         return max(CHECKEEMAIL_SUBJECT_POOL, 360)
     return CHECKEEMAIL_SUBJECT_POOL
@@ -2593,7 +2595,7 @@ def _checkemail_search_folders() -> list[str]:
             continue
         seen.add(n)
         out.append(n)
-    return out or ["Priority", "OSE Pending"]
+    return out or ["OSE Pending", "Priority"]
 
 
 def _checkemail_folder_select_aliases(folder: str) -> list[str]:
@@ -3071,7 +3073,10 @@ def find_all_maintenance_messages_by_title(
     hits: list[tuple[email.message.Message, str, datetime]] = []
     seen: set[str] = set()
     try:
-        for originals_only in (True, False):
+        # Ticket search: skip originals-only pass (IMAP INBOX scan is slow and
+        # om@ usually has Re: threads in OSE Pending, not standalone originals).
+        passes = (False,) if ticket_id else (True, False)
+        for originals_only in passes:
             for folder in _checkemail_search_folders():
                 if not _select_checkemail_folder(mail, folder, readonly=True):
                     continue
@@ -3084,6 +3089,13 @@ def find_all_maintenance_messages_by_title(
                     seen=seen,
                     originals_only=originals_only,
                 )
+                if (
+                    ticket_id
+                    and not originals_only
+                    and hits
+                    and folder.casefold() == "ose pending"
+                ):
+                    break
             if hits:
                 break
         if ticket_id and hits:
