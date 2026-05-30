@@ -494,32 +494,43 @@ def is_checkemail_bot_stub_body(
     om@ ``Re:`` rows whose IMAP body is only the duty-bot stub (no Evolution quote).
 
     Lark UI may show the full forward; IMAP often has ``NOT IN CP WEBSITE`` only.
+    Long HTML forwards may quote ``Dear Casino Team`` without table names — still a stub.
     """
     text = (body or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     if not text:
         return True
-    seg = extract_best_maintenance_segment(text)
-    hay = seg or text
-    low = hay.casefold()
-    if is_maintenance_uncancel_clarification_email(hay):
-        return False
-    if is_maintenance_cancelled_email(hay):
-        return False
+    full_low = text.casefold()
     subj = email_subject or ""
-    if extract_candidate_game_names(f"{subj}\n{hay}"):
+
+    if is_maintenance_uncancel_clarification_email(text):
         return False
-    if re.search(
-        r"going\s+to\s+take\s+place|following tables? (?:will be|was|were) unavailable|"
-        r"took\s+place\s+with\s+a\s+downtime|dear casino team",
-        hay,
-        re.IGNORECASE,
+    if is_maintenance_cancelled_email(text):
+        return False
+
+    combined = f"{subj}\n{text}"
+    if extract_candidate_game_names(combined):
+        return False
+    if _FOLLOWING_TABLES_UNAVAILABLE_RE.search(text) and extract_candidate_game_names(
+        text
     ):
         return False
-    if "not in cp website" in low and len(hay) < 220:
+
+    if "not in cp website" in full_low or "from duty bot auto reply" in full_low:
         return True
-    if "from duty bot auto reply" in low and len(hay) < 220:
+
+    seg = extract_best_maintenance_segment(text)
+    hay = seg or text
+    if extract_candidate_game_names(f"{subj}\n{hay}"):
+        return False
+    if is_maintenance_cancelled_email(hay) or is_maintenance_uncancel_clarification_email(
+        hay
+    ):
+        return False
+    if _FOLLOWING_TABLES_UNAVAILABLE_RE.search(hay) and extract_candidate_game_names(hay):
+        return False
+    if re.search(r"going\s+to\s+take\s+place", hay, re.IGNORECASE):
         return True
-    if len(hay) < 100 and "dear casino team" not in low:
+    if len(hay.strip()) < 120:
         return True
     return False
 
@@ -1034,6 +1045,43 @@ def build_checkemail_steps_from_state_entries(
         key=lambda s: (_KIND_ORDER.get(str(s.get("kind") or "other"), 9), s.get("when") or "")
     )
     return steps
+
+
+def merge_checkemail_timeline_steps(
+    imap_steps: list[dict[str, Any]],
+    state_steps: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Prefer ``maintenance.json`` watcher steps over weak IMAP stub parses.
+
+    When the watcher recorded schedule/cancel for a ticket, use those rows instead of
+    om@ ``NOT IN CP`` Re: copies that only share the subject line.
+    """
+    if not state_steps:
+        return imap_steps
+    if not imap_steps:
+        return state_steps
+    _KIND_ORDER = {"schedule": 0, "cancel": 1, "uncancel": 2, "other": 3}
+    state_by_kind: dict[str, dict[str, Any]] = {}
+    for st in state_steps:
+        k = str(st.get("kind") or "other")
+        state_by_kind[k] = st
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for kind in ("schedule", "cancel", "uncancel", "other"):
+        if kind in state_by_kind:
+            merged.append(state_by_kind[kind])
+            seen.add(kind)
+    for st in imap_steps:
+        k = str(st.get("kind") or "other")
+        if k in seen:
+            continue
+        merged.append(st)
+        seen.add(k)
+    merged.sort(
+        key=lambda s: (_KIND_ORDER.get(str(s.get("kind") or "other"), 9), s.get("when") or "")
+    )
+    return merged
 
 
 def find_prior_maintenance_entry(
@@ -3119,6 +3167,8 @@ def _gather_checkemail_context(
         ex_body = ""
     else:
         ex_body = rich_checkemail_extraction_body(ex_subj, raw_ex)
+    if is_checkemail_bot_stub_body(raw_ex, email_subject=ex_subj):
+        ex_body = ""
     resolved = resolve_maintenance_subject(ex_subj, ex_body or raw_ex)
     info = extract_info(ex_body, email_subject=ex_subj) if ex_body.strip() else {
         "table": "Unknown",
@@ -3129,6 +3179,35 @@ def _gather_checkemail_context(
         "end_time": "Unknown",
         "reference": "Unknown",
     }
+    ticket_key = extract_ticket_card_title(resolved, ex_body or raw_ex) or ""
+    if ticket_key:
+        state_ent = find_maintenance_state_entry_for_checkemail(resolved, ticket_key)
+        if not state_ent:
+            for ent in find_all_maintenance_state_entries_for_ticket(ticket_key, resolved):
+                if not ent.get("is_cancelled_email"):
+                    state_ent = ent
+                    break
+        if state_ent:
+            st_names = [
+                str(n).strip()
+                for n in (state_ent.get("table_names") or [])
+                if str(n).strip()
+            ]
+            if st_names:
+                info["table_names"] = st_names
+                info["table"] = ", ".join(st_names)
+            st_subj = str(state_ent.get("title") or "")
+            if st_subj and is_checkemail_bot_stub_body(raw_ex, email_subject=ex_subj):
+                ex_subj = st_subj
+                resolved = resolve_maintenance_subject(st_subj, ex_body)
+                ex_body = synthesize_checkemail_body_from_state_entry(state_ent)
+                info = extract_info(ex_body, email_subject=ex_subj)
+            else:
+                ss, se = parse_service_desk_times_from_subject(st_subj)
+                if info.get("start_time") == "Unknown" and ss != "Unknown":
+                    info["start_time"] = ss
+                if info.get("end_time") == "Unknown" and se != "Unknown":
+                    info["end_time"] = se
     if matched_cancel and not use_schedule:
         sd_start, sd_end = parse_service_desk_times_from_subject(
             resolve_maintenance_subject(email_subject, email_body)
