@@ -12,9 +12,10 @@ card with Studio/Date/Table + cancellation text; forward like other CP mails.
 ``Table`` uses the earlier same-subject notice when available. Duplicate cancel
 bodies are ignored.
 
-State file: ``maintenance.json`` (titles + content hashes + IMAP UIDs) to avoid
-re-processing after bot restart. Entries reset at local midnight (``MAINTENANCE_MAIL_TZ``)
-only after ``state_date`` is already set (upgrade keeps existing entries until next day).
+State file: ``maintenance.json`` — **CP-launched games only** (``launched_names``),
+for cancel/``/checkemail`` lookup. ``Re:/Fw:`` subjects and om@ copies are ignored
+(not stored). Non-CP Evolution mail is deduped via ``handled_uids`` (not in
+``entries``). ``entries`` reset at local midnight (``MAINTENANCE_MAIL_TZ``).
 """
 
 from __future__ import annotations
@@ -459,12 +460,14 @@ def _normalize_subject(subject: str) -> str:
 
 def subject_matches(subject: str) -> bool:
     """
-    True when the subject starts with ``TINC-`` or ``[Service Desk]`` after stripping
-    leading ``Re:/Fwd:`` prefixes (Evolution update mails often keep ``Re:``).
+    True for Evolution **original** subjects — ``TINC-`` or ``[Service Desk]`` only.
 
-    om@ / duty-bot copies are still dropped later via :func:`from_should_ignore`.
+    ``Re:/Fw:/Fwd:`` thread copies are ignored (om@ Fw/Re stubs and Evolution
+    forwards). om@ outbound copies are still dropped via :func:`from_should_ignore`.
     """
     if _maint_mod.subject_should_ignore(subject):
+        return False
+    if _maint_mod.is_reply_or_forward_subject(subject):
         return False
     s = _normalize_subject(subject)
     if not s:
@@ -893,6 +896,7 @@ def _empty_state(*, state_date: str | None = None) -> dict[str, Any]:
     return {
         "version": STATE_VERSION,
         "entries": [],
+        "handled_uids": [],
         "state_date": state_date or _local_today_iso(),
     }
 
@@ -947,7 +951,37 @@ def _load_state() -> dict[str, Any]:
     entries = data.get("entries")
     if not isinstance(entries, list):
         data["entries"] = []
+    handled = data.get("handled_uids")
+    if not isinstance(handled, list):
+        data["handled_uids"] = []
+    data = _migrate_legacy_maintenance_state(data)
     return _maybe_reset_state_for_new_day(data)
+
+
+def _migrate_legacy_maintenance_state(data: dict[str, Any]) -> dict[str, Any]:
+    """Drop ``skip:*`` rows from old json; move their UIDs to ``handled_uids``."""
+    entries = data.get("entries") or []
+    if not isinstance(entries, list):
+        data["entries"] = []
+        return data
+    handled = list(data.get("handled_uids") or [])
+    handled_set = {str(x) for x in handled}
+    kept: list[dict[str, Any]] = []
+    for ent in entries:
+        if not isinstance(ent, dict):
+            continue
+        ch = str(ent.get("content_hash") or "")
+        if ch.startswith("skip:"):
+            uid = str(ent.get("imap_uid") or "").strip()
+            if uid and uid not in handled_set:
+                handled.append(uid)
+                handled_set.add(uid)
+            continue
+        kept.append(ent)
+    if len(kept) != len(entries):
+        data["entries"] = kept
+        data["handled_uids"] = handled
+    return data
 
 
 def _save_state(data: dict[str, Any]) -> None:
@@ -956,6 +990,9 @@ def _save_state(data: dict[str, Any]) -> None:
     entries = data.get("entries") or []
     if len(entries) > MAX_ENTRIES:
         data["entries"] = entries[-MAX_ENTRIES:]
+    handled = data.get("handled_uids") or []
+    if len(handled) > MAX_ENTRIES * 4:
+        data["handled_uids"] = handled[-(MAX_ENTRIES * 4) :]
     tmp = STATE_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -987,6 +1024,24 @@ def _already_processed_uid(entries: list[dict[str, Any]], uid_key: str) -> bool:
         if ":" not in stored and key.endswith(":" + stored):
             return True
     return False
+
+
+def _uid_already_handled(
+    state: dict[str, Any], entries: list[dict[str, Any]], uid_key: str
+) -> bool:
+    """True when this IMAP UID was handled (CP ``entries`` or non-CP ``handled_uids``)."""
+    if _already_processed_uid(entries, uid_key):
+        return True
+    handled = state.get("handled_uids") or []
+    return str(uid_key) in {str(x) for x in handled}
+
+
+def _mark_uid_handled(state: dict[str, Any], uid_key: str) -> None:
+    """Remember non-CP / duplicate UIDs so we do not re-send NOT IN CP every poll."""
+    handled = state.setdefault("handled_uids", [])
+    key = str(uid_key)
+    if key not in handled:
+        handled.append(key)
 
 
 def _forward_subject(subject: str) -> str:
@@ -3963,6 +4018,7 @@ def classify_watcher_skip(
     folder: str,
     uid_s: str,
     entries: list[dict[str, Any]],
+    handled_uids: list[str] | None = None,
     mail: imaplib.IMAP4 | None = None,
     uid: bytes | None = None,
 ) -> str:
@@ -3977,22 +4033,21 @@ def classify_watcher_skip(
             (e for e in reversed(entries) if str(e.get("imap_uid") or "") == store_key),
             None,
         )
-        ch = str((ent or {}).get("content_hash") or "")
-        if ch.startswith("skip:"):
-            return f"already_in_json ({ch})"
         if ent and ent.get("is_cancelled_email"):
             return "already_in_json (processed cancel)"
         if ent and ent.get("is_uncancel_email"):
             return "already_in_json (processed uncancel)"
-        return "already_in_json (processed schedule/duplicate)"
+        return "already_in_json (processed on CP)"
+    if store_key in {str(x) for x in (handled_uids or [])}:
+        return "already_handled (not on CP / duplicate)"
 
     if _maint_mod.subject_should_ignore(subject):
         return "skip:subject_ignore_marker"
 
+    if _maint_mod.is_reply_or_forward_subject(subject):
+        return "skip:reply_or_forward (Re/Fw ignored)"
+
     if not subject_matches(subject):
-        subj = (subject or "").strip()
-        if re.match(r"^(?:Re|Fw|Fwd):", subj, re.IGNORECASE):
-            return "skip:not_maintenance_subject (Re/Fw with no TINC-/SD after strip)"
         return "skip:not_maintenance_subject"
 
     if _maint_mod.from_should_ignore(from_hdr):
@@ -4031,6 +4086,7 @@ def _audit_classify_uid_batch(
     *,
     folder: str,
     entries: list[dict[str, Any]],
+    handled_uids: list[str] | None = None,
     yesterday: date,
     today: date,
     verbose: bool,
@@ -4066,6 +4122,7 @@ def _audit_classify_uid_batch(
             folder=folder,
             uid_s=uid_s,
             entries=entries,
+            handled_uids=handled_uids,
             mail=mail,
             uid=uid,
         )
@@ -4104,6 +4161,7 @@ def audit_maintenance_process_window(
     scan_folders = folders or list(MAIL_IMAP_FOLDERS)
     state = _load_state()
     entries: list[dict[str, Any]] = [] if ignore_json else state["entries"]
+    handled_uids: list[str] = [] if ignore_json else list(state.get("handled_uids") or [])
     yesterday = _local_yesterday_date()
     today = datetime.now(_local_tz()).date()
     watcher = MaintenanceMailWatcher(
@@ -4148,6 +4206,7 @@ def audit_maintenance_process_window(
                 raw,
                 folder=folder,
                 entries=entries,
+                handled_uids=handled_uids,
                 yesterday=yesterday,
                 today=today,
                 verbose=verbose,
@@ -4374,7 +4433,7 @@ class MaintenanceMailWatcher:
         entries: list[dict[str, Any]] = state["entries"]
         store_key = _uid_key(folder, uid_s)
 
-        if _already_processed_uid(entries, store_key):
+        if _uid_already_handled(state, entries, store_key):
             return
 
         subject, when, from_hdr = self._fetch_header_preview(mail, uid)
@@ -4388,16 +4447,6 @@ class MaintenanceMailWatcher:
             return
 
         if _maint_mod.from_should_ignore(from_hdr):
-            ticket_skip = _maint_mod.extract_ticket_card_title(subject) or ""
-            _record_processed(
-                entries,
-                imap_uid=store_key,
-                message_id="",
-                title=subject or "",
-                content_hash="skip:from_self",
-                ticket_id=ticket_skip,
-            )
-            mail.uid("store", uid, "+FLAGS", "(\\Seen)")
             print(
                 f"[maint-mail] skip uid={uid_s} (from OM-PH / om@): {subject!r}",
                 flush=True,
@@ -4405,16 +4454,6 @@ class MaintenanceMailWatcher:
             return
 
         if not _maint_mod.from_is_evolution_maintenance_sender(from_hdr):
-            ticket_skip = _maint_mod.extract_ticket_card_title(subject) or ""
-            _record_processed(
-                entries,
-                imap_uid=store_key,
-                message_id="",
-                title=subject or "",
-                content_hash="skip:from_not_allowed",
-                ticket_id=ticket_skip,
-            )
-            mail.uid("store", uid, "+FLAGS", "(\\Seen)")
             if MAIL_VERBOSE:
                 print(
                     f"[maint-mail] skip uid={uid_s} (sender not Evolution): {from_hdr!r}",
@@ -4463,16 +4502,6 @@ class MaintenanceMailWatcher:
         display_subj = maintenance.normalize_display_subject(subject)
         from_addr = _decode_mime_header(msg.get("From"))
         if maintenance.from_should_ignore(from_addr):
-            ticket_skip = maintenance.extract_ticket_card_title(subject) or ""
-            _record_processed(
-                entries,
-                imap_uid=store_key,
-                message_id=msg.get("Message-ID") or "",
-                title=display_subj,
-                content_hash="skip:from_self",
-                ticket_id=ticket_skip,
-            )
-            mail.uid("store", uid, "+FLAGS", "(\\Seen)")
             print(
                 f"[maint-mail] skip uid={uid_s} (from OM-PH / om@): {display_subj!r}",
                 flush=True,
@@ -4480,16 +4509,6 @@ class MaintenanceMailWatcher:
             return
 
         if not maintenance.from_is_evolution_maintenance_sender(from_addr):
-            ticket_skip = maintenance.extract_ticket_card_title(subject) or ""
-            _record_processed(
-                entries,
-                imap_uid=store_key,
-                message_id=msg.get("Message-ID") or "",
-                title=display_subj,
-                content_hash="skip:from_not_allowed",
-                ticket_id=ticket_skip,
-            )
-            mail.uid("store", uid, "+FLAGS", "(\\Seen)")
             if MAIL_VERBOSE:
                 print(
                     f"[maint-mail] skip uid={uid_s} (sender not allowed): {from_addr!r}",
@@ -4504,14 +4523,7 @@ class MaintenanceMailWatcher:
 
         dup = _find_duplicate_title_content(entries, display_subj, chash)
         if dup:
-            _record_processed(
-                entries,
-                imap_uid=store_key,
-                message_id=msg.get("Message-ID") or "",
-                title=display_subj,
-                content_hash=chash,
-                ticket_id=ticket_id,
-            )
+            _mark_uid_handled(state, store_key)
             mail.uid("store", uid, "+FLAGS", "(\\Seen)")
             print(
                 f"[maint-mail] duplicate ignored (same title+content) {folder} "
@@ -4546,6 +4558,7 @@ class MaintenanceMailWatcher:
         is_cancel = maintenance.is_maintenance_cancelled_email(body)
         is_uncancel = maintenance.is_maintenance_uncancel_clarification_email(body)
         launched_names: list[str] = []
+        launched_prior: list[str] = []
         prior: dict[str, Any] | None = None
         to_cp = False
 
@@ -4561,14 +4574,17 @@ class MaintenanceMailWatcher:
                     "\n".join(prior.get("table_names") or []),
                     token,
                 )
+            if not to_cp:
+                to_cp, launched_prior = maintenance.gamelist_has_launched(
+                    pipeline_in, token
+                )
             if MAIL_VERBOSE:
                 print(
                     f"[maint-mail] cancel uid={uid_s} prior={bool(prior)} "
                     f"table_game={table_game!r} to_cp={to_cp}",
                     flush=True,
                 )
-            cancel_to_group = to_cp or bool(prior)
-            if cancel_to_group:
+            if to_cp:
                 cancel_card = maintenance.build_cancelled_maintenance_card(
                     email_subject=display_subj,
                     email_body=body,
@@ -4579,7 +4595,7 @@ class MaintenanceMailWatcher:
                 self._send_lark_card(TARGET_CHAT_ID, cancel_card)
             elif MAIL_VERBOSE:
                 print(
-                    f"[maint-mail] cancel uid={uid_s} skip Lark (not on CP, no prior)",
+                    f"[maint-mail] cancel uid={uid_s} skip Lark (not on CP gamelist)",
                     flush=True,
                 )
         elif is_uncancel:
@@ -4593,7 +4609,11 @@ class MaintenanceMailWatcher:
                     "\n".join(prior.get("table_names") or []),
                     token,
                 )
-            if to_cp or prior:
+            if not to_cp:
+                to_cp, launched_prior = maintenance.gamelist_has_launched(
+                    pipeline_in, token
+                )
+            if to_cp:
                 hdr_title, hdr_tpl, _card_body, card_el = (
                     maintenance.build_maintenance_notice(
                         pipeline_in,
@@ -4655,51 +4675,68 @@ class MaintenanceMailWatcher:
                     )
                     self._send_lark_card(TARGET_CHAT_ID, main_card)
 
-        record_kw: dict[str, Any] = {
-            "imap_uid": store_key,
-            "message_id": msg.get("Message-ID") or "",
-            "title": display_subj,
-            "content_hash": chash,
-            "ticket_id": ticket_id,
-        }
-        if is_cancel:
-            record_kw["is_cancelled_email"] = True
-            if prior:
-                record_kw.update(
-                    maintenance.maintenance_record_snapshot_from_prior(prior)
+        if to_cp:
+            record_kw: dict[str, Any] = {
+                "imap_uid": store_key,
+                "message_id": msg.get("Message-ID") or "",
+                "title": display_subj,
+                "content_hash": chash,
+                "ticket_id": ticket_id,
+            }
+            cp_names = list(launched_prior if is_cancel or is_uncancel else launched_names)
+            if cp_names:
+                record_kw["table_names"] = cp_names
+                record_kw["launched_names"] = cp_names
+                record_kw["game_name"] = ", ".join(cp_names)
+            if is_cancel:
+                record_kw["is_cancelled_email"] = True
+                if prior:
+                    snap = maintenance.maintenance_record_snapshot_from_prior(prior)
+                    if not cp_names:
+                        cp_names = [
+                            str(x).strip()
+                            for x in (snap.get("launched_names") or snap.get("table_names") or [])
+                            if str(x).strip()
+                        ]
+                    if cp_names and not record_kw.get("table_names"):
+                        record_kw["table_names"] = cp_names
+                        record_kw["launched_names"] = cp_names
+                        record_kw["game_name"] = ", ".join(cp_names)
+                    for key in ("studio", "maint_date"):
+                        if snap.get(key) and not record_kw.get(key):
+                            record_kw[key] = snap[key]
+            elif is_uncancel:
+                record_kw["is_uncancel_email"] = True
+                if prior:
+                    snap = maintenance.maintenance_record_snapshot_from_prior(prior)
+                    for key in ("studio", "maint_date"):
+                        if snap.get(key) and not record_kw.get(key):
+                            record_kw[key] = snap[key]
+            else:
+                info_rec = maintenance.extract_info(
+                    pipeline_in, email_subject=display_subj
                 )
-        elif is_uncancel:
-            record_kw["is_uncancel_email"] = True
-            if prior:
-                record_kw.update(
-                    maintenance.maintenance_record_snapshot_from_prior(prior)
+                studio_val, date_val = maintenance._studio_and_date(
+                    info_rec, display_subj, pipeline_in
                 )
+                if studio_val and studio_val != "Unknown":
+                    record_kw["studio"] = studio_val
+                if not date_val or date_val == "Unknown":
+                    date_val = maintenance.parse_service_desk_date_from_subject(
+                        display_subj
+                    ) or date_val
+                if date_val and date_val != "Unknown":
+                    record_kw["maint_date"] = date_val
+            _record_processed(entries, **record_kw)
         else:
-            candidates = maintenance.extract_candidate_game_names(pipeline_in)
-            if candidates:
-                record_kw["table_names"] = candidates
-                record_kw["game_name"] = ", ".join(candidates)
-            if launched_names:
-                record_kw["launched_names"] = launched_names
-            info_rec = maintenance.extract_info(pipeline_in, email_subject=display_subj)
-            studio_val, date_val = maintenance._studio_and_date(
-                info_rec, display_subj, pipeline_in
-            )
-            if studio_val and studio_val != "Unknown":
-                record_kw["studio"] = studio_val
-            if not date_val or date_val == "Unknown":
-                date_val = maintenance.parse_service_desk_date_from_subject(
-                    display_subj
-                ) or date_val
-            if date_val and date_val != "Unknown":
-                record_kw["maint_date"] = date_val
-        _record_processed(entries, **record_kw)
+            _mark_uid_handled(state, store_key)
+
         mail.uid("store", uid, "+FLAGS", "(\\Seen)")
 
         if FORWARD_ENABLED:
             try:
                 if is_cancel:
-                    if to_cp or prior:
+                    if to_cp:
                         forward_maintenance_email(
                             subject=subject, original_msg=msg
                         )
@@ -4708,7 +4745,7 @@ class MaintenanceMailWatcher:
                             subject=subject, original_msg=msg
                         )
                 elif is_uncancel:
-                    if to_cp or prior:
+                    if to_cp:
                         forward_maintenance_email(
                             subject=subject, original_msg=msg
                         )
@@ -4725,15 +4762,15 @@ class MaintenanceMailWatcher:
                         subject=subject, original_msg=msg
                     )
             except Exception as ex:
-                action = "forward" if (is_cancel or to_cp) else "NOT IN CP reply"
+                action = "forward" if to_cp else "NOT IN CP reply"
                 lark_note = (
                     "Lark already sent; "
-                    if (is_cancel or to_cp)
+                    if to_cp
                     else "no Lark (not on CP gamelist); "
                 )
                 print(
                     f"[maint-mail] {action} failed uid={uid_s} ticket={ticket_id!r}: {ex!r} "
-                    f"({lark_note}UID recorded — no duplicate)",
+                    f"({lark_note}UID deduped — no duplicate)",
                     flush=True,
                 )
 
@@ -4752,7 +4789,7 @@ class MaintenanceMailWatcher:
         self,
         mail: imaplib.IMAP4,
         uids: list[bytes],
-        entries: list[dict[str, Any]],
+        state: dict[str, Any],
         *,
         folder: str,
     ) -> tuple[list[bytes], dict[str, int]]:
@@ -4760,6 +4797,7 @@ class MaintenanceMailWatcher:
         Header-only pass (oldest first). Only UIDs that match TINC- / [Service Desk]
         and the process window (``PROCESS_DAYS``, if Date known) proceed to full fetch.
         """
+        entries: list[dict[str, Any]] = state["entries"]
         stats = {
             "imap_hits": len(uids),
             "already_done": 0,
@@ -4772,7 +4810,8 @@ class MaintenanceMailWatcher:
         todo: list[bytes] = []
         for uid in uids:
             uid_s = uid.decode() if isinstance(uid, bytes) else str(uid)
-            if _already_processed_uid(entries, _uid_key(folder, uid_s)):
+            store_key = _uid_key(folder, uid_s)
+            if _uid_already_handled(state, entries, store_key):
                 stats["already_done"] += 1
                 continue
             subject, when, from_hdr = self._fetch_header_preview(mail, uid)
@@ -4784,32 +4823,17 @@ class MaintenanceMailWatcher:
                         flush=True,
                     )
                 continue
+            if _maint_mod.is_reply_or_forward_subject(subject):
+                stats["not_maintenance"] += 1
+                continue
             if not subject_matches(subject):
                 stats["not_maintenance"] += 1
                 continue
             if _maint_mod.from_should_ignore(from_hdr):
                 stats["ignored"] += 1
-                ticket_skip = _maint_mod.extract_ticket_card_title(subject) or ""
-                _record_processed(
-                    entries,
-                    imap_uid=_uid_key(folder, uid_s),
-                    message_id="",
-                    title=subject or "",
-                    content_hash="skip:from_self",
-                    ticket_id=ticket_skip,
-                )
                 continue
             if not _maint_mod.from_is_evolution_maintenance_sender(from_hdr):
                 stats["ignored"] += 1
-                ticket_skip = _maint_mod.extract_ticket_card_title(subject) or ""
-                _record_processed(
-                    entries,
-                    imap_uid=_uid_key(folder, uid_s),
-                    message_id="",
-                    title=subject or "",
-                    content_hash="skip:from_not_allowed",
-                    ticket_id=ticket_skip,
-                )
                 if MAIL_VERBOSE:
                     print(
                         f"[maint-mail] ignore uid={uid_s} (sender not Evolution): {from_hdr!r}",
@@ -4839,7 +4863,7 @@ class MaintenanceMailWatcher:
         with _state_lock:
             state = _load_state()
             entries: list[dict[str, Any]] = state["entries"]
-        todo, stats = self._prefilter_uids(mail, uids, entries, folder=folder)
+        todo, stats = self._prefilter_uids(mail, uids, state, folder=folder)
         if not todo:
             print(
                 f"[maint-mail] {label}: "
