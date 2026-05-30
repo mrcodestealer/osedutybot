@@ -373,16 +373,30 @@ def _uid_is_unseen(mail: imaplib.IMAP4, uid: bytes) -> bool:
     return True
 
 
+def _carryover_allows_seen_mail() -> bool:
+    """
+    When ``maintenance.json`` is **missing** (deleted for backfill), do not require
+    UNSEEN for carryover. If the file exists — including after midnight daily reset
+    with empty ``entries`` — still require UNSEEN so yesterday's handled mail is not
+    re-sent.
+    """
+    return not os.path.isfile(STATE_PATH)
+
+
 def _should_accept_carryover(
     mail: imaplib.IMAP4, uid: bytes, when: str | None
 ) -> bool:
     """
-    After midnight state reset: yesterday's Date + still UNSEEN ⇒ never finished.
+    After midnight (``PROCESS_DAYS=1``): yesterday's Date outside the window may
+    still be accepted if UNSEEN (unfinished). When state was cleared for backfill,
+    accept local yesterday even if already ``\\Seen``.
     """
     if not when or _received_in_process_window(when):
         return False
     if not _is_carryover_local_date(when):
         return False
+    if _carryover_allows_seen_mail():
+        return True
     return _uid_is_unseen(mail, uid)
 
 
@@ -4494,12 +4508,12 @@ class MaintenanceMailWatcher:
     ) -> tuple[list[bytes], dict[str, int]]:
         """
         Header-only pass (oldest first). Only UIDs that match TINC- / [Service Desk]
-        and local-today (if Date known) proceed to full fetch.
+        and the process window (``PROCESS_DAYS``, if Date known) proceed to full fetch.
         """
         stats = {
             "imap_hits": len(uids),
             "already_done": 0,
-            "not_today": 0,
+            "not_in_window": 0,
             "carryover": 0,
             "ignored": 0,
             "not_maintenance": 0,
@@ -4553,7 +4567,7 @@ class MaintenanceMailWatcher:
                     )
                 continue
             if when and not _accept_message_date(mail, uid, when):
-                stats["not_today"] += 1
+                stats["not_in_window"] += 1
                 continue
             if when and _should_accept_carryover(mail, uid, when):
                 stats["carryover"] += 1
@@ -4582,7 +4596,7 @@ class MaintenanceMailWatcher:
                 f"imap={stats['imap_hits']} "
                 f"done={stats['already_done']} "
                 f"ignored={stats['ignored']} "
-                f"not_today={stats['not_today']} "
+                f"not_in_window={stats['not_in_window']} "
                 f"carryover={stats['carryover']} "
                 f"not_maint={stats['not_maintenance']} "
                 f"→ 0 to process",
@@ -4603,8 +4617,9 @@ class MaintenanceMailWatcher:
                 self._process_one(mail, uid, state, folder=folder)
             except Exception as ex:
                 print(f"[maint-mail] process error uid={uid!r}: {ex!r}", flush=True)
-        with _state_lock:
-            _save_state(state)
+            finally:
+                with _state_lock:
+                    _save_state(state)
 
     def _uids_maintenance_subject_search(
         self, mail: imaplib.IMAP4, since: str
@@ -4629,18 +4644,15 @@ class MaintenanceMailWatcher:
             f"scanning headers to keep all {_process_window_label()}",
             flush=True,
         )
-        keep_today: list[bytes] = []
+        keep_in_window: list[bytes] = []
         keep_unknown: list[bytes] = []
-        keep_carryover: list[bytes] = []
-        for uid in reversed(uids):
+        for uid in uids:
             _, when, _ = self._fetch_header_preview(mail, uid)
             if not when:
                 keep_unknown.append(uid)
-            elif _received_in_process_window(when):
-                keep_today.append(uid)
-            elif _should_accept_carryover(mail, uid, when):
-                keep_carryover.append(uid)
-        out = _merge_uid_lists(keep_today, keep_unknown, keep_carryover)
+            elif _accept_message_date(mail, uid, when):
+                keep_in_window.append(uid)
+        out = _merge_uid_lists(keep_in_window, keep_unknown)
         if out:
             dropped = len(uids) - len(out)
             print(
@@ -4650,11 +4662,11 @@ class MaintenanceMailWatcher:
             )
             return out
         print(
-            f"[maint-mail] no {_process_window_label()} in scan; "
-            f"fallback newest {SUBJECT_SEARCH_MAX}",
+            f"[maint-mail] no {_process_window_label()} in {len(uids)} subject hit(s); "
+            "not using arbitrary UID slice",
             flush=True,
         )
-        return uids[-SUBJECT_SEARCH_MAX:]
+        return []
 
     def _uids_broad_since(self, mail: imaplib.IMAP4, since: str) -> list[bytes]:
         """Fallback when SUBJECT search returns nothing (some Lark setups)."""
