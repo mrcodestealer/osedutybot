@@ -325,6 +325,11 @@ def _received_today(when: str | None) -> bool:
     return _received_in_process_window(when)
 
 
+def _local_yesterday_date() -> date:
+    """Yesterday in ``MAIL_TZ``."""
+    return datetime.now(_local_tz()).date() - timedelta(days=1)
+
+
 def _message_local_date(when: str | None) -> date | None:
     if not (when or "").strip():
         return None
@@ -4007,25 +4012,118 @@ def classify_watcher_skip(
     return "WOULD_PROCESS"
 
 
+def _raw_maintenance_subject_uids(
+    watcher: MaintenanceMailWatcher, mail: imaplib.IMAP4
+) -> list[bytes]:
+    """All IMAP SUBJECT hits (before date cap) for the process-window SINCE range."""
+    since_today = _imap_since_today()
+    since_search = _imap_since_for_search()
+    return _merge_uid_lists(
+        watcher._uids_maintenance_subject_search(mail, since_today),
+        watcher._uids_maintenance_subject_search(mail, since_search),
+    )
+
+
+def _audit_classify_uid_batch(
+    mail: imaplib.IMAP4,
+    watcher: MaintenanceMailWatcher,
+    uids: list[bytes],
+    *,
+    folder: str,
+    entries: list[dict[str, Any]],
+    yesterday: date,
+    today: date,
+    verbose: bool,
+) -> dict[str, Any]:
+    counts: dict[str, Any] = {
+        "total": len(uids),
+        "yesterday": 0,
+        "today": 0,
+        "other_date": 0,
+        "no_date": 0,
+        "would_process": 0,
+        "would_process_yesterday": 0,
+        "would_process_today": 0,
+        "skip_reasons": {},
+    }
+    for uid in uids:
+        uid_s = uid.decode() if isinstance(uid, bytes) else str(uid)
+        subject, when, from_hdr = watcher._fetch_header_preview(mail, uid)
+        local_d = _message_local_date(when)
+        if local_d is None:
+            counts["no_date"] += 1
+        elif local_d == yesterday:
+            counts["yesterday"] += 1
+        elif local_d == today:
+            counts["today"] += 1
+        else:
+            counts["other_date"] += 1
+
+        reason = classify_watcher_skip(
+            subject=subject,
+            when=when,
+            from_hdr=from_hdr,
+            folder=folder,
+            uid_s=uid_s,
+            entries=entries,
+            mail=mail,
+            uid=uid,
+        )
+        if reason == "WOULD_PROCESS":
+            counts["would_process"] += 1
+            if local_d == yesterday:
+                counts["would_process_yesterday"] += 1
+            elif local_d == today:
+                counts["would_process_today"] += 1
+        else:
+            key = reason.split(" (")[0]
+            counts["skip_reasons"][key] = counts["skip_reasons"].get(key, 0) + 1
+
+        if verbose:
+            ticket = _maint_mod.extract_ticket_card_title(subject) or ""
+            tag = "OK" if reason == "WOULD_PROCESS" else "SKIP"
+            subj_short = (subject or "")[:90]
+            print(
+                f"  [{tag}] {folder}:{uid_s} date={local_d} "
+                f"ticket={ticket!r} | {reason} | {subj_short!r}",
+                flush=True,
+            )
+    return counts
+
+
 def audit_maintenance_process_window(
     *,
     folders: list[str] | None = None,
+    ignore_json: bool = False,
+    verbose: bool = True,
 ) -> int:
     """
-    List every IMAP hit for TINC- / [Service Desk] in the process window and why
-    the watcher would skip or process it. Run on the server after a missed batch.
+    List IMAP TINC / [Service Desk] hits in the process window with yesterday/today
+    counts. ``ignore_json=True`` ignores ``maintenance.json`` (CLI: ``--fresh``).
     """
     scan_folders = folders or list(MAIL_IMAP_FOLDERS)
     state = _load_state()
-    entries: list[dict[str, Any]] = state["entries"]
-    watcher = MaintenanceMailWatcher()
+    entries: list[dict[str, Any]] = [] if ignore_json else state["entries"]
+    yesterday = _local_yesterday_date()
+    today = datetime.now(_local_tz()).date()
+    watcher = MaintenanceMailWatcher(
+        send_message_func=lambda *_a, **_k: None,
+        get_token_func=lambda: None,
+    )
     mail = watcher._connect()
-    would = 0
-    skipped: dict[str, int] = {}
+    totals = {
+        "raw_imap": 0,
+        "after_cap": 0,
+        "yesterday": 0,
+        "today": 0,
+        "would_process": 0,
+        "would_process_yesterday": 0,
+    }
     print(
         f"[maint-audit] window={_process_window_label()} "
-        f"PROCESS_DAYS={PROCESS_DAYS} folders={scan_folders!r} "
-        f"json_entries={len(entries)}",
+        f"PROCESS_DAYS={PROCESS_DAYS} yesterday={yesterday} today={today} "
+        f"folders={scan_folders!r} json_entries={len(state.get('entries') or [])} "
+        f"ignore_json={ignore_json}",
         flush=True,
     )
     try:
@@ -4033,48 +4131,51 @@ def audit_maintenance_process_window(
             if not _select_mail_folder(mail, folder):
                 print(f"[maint-audit] SELECT failed: {folder!r}", flush=True)
                 continue
-            uids = watcher._uids_today_matching(mail)
+            raw = _raw_maintenance_subject_uids(watcher, mail)
+            capped = watcher._uids_today_matching(mail)
             print(
-                f"[maint-audit] {folder}: {len(uids)} UID(s) after subject+date cap",
+                f"[maint-audit] {folder}: raw_subject_hits={len(raw)} "
+                f"after_cap={len(capped)}",
                 flush=True,
             )
-            for uid in uids:
-                uid_s = uid.decode() if isinstance(uid, bytes) else str(uid)
-                subject, when, from_hdr = watcher._fetch_header_preview(mail, uid)
-                reason = classify_watcher_skip(
-                    subject=subject,
-                    when=when,
-                    from_hdr=from_hdr,
-                    folder=folder,
-                    uid_s=uid_s,
-                    entries=entries,
-                    mail=mail,
-                    uid=uid,
-                )
-                ticket = _maint_mod.extract_ticket_card_title(subject) or ""
-                local_d = _message_local_date(when)
-                if reason == "WOULD_PROCESS":
-                    would += 1
-                    tag = "OK"
-                else:
-                    skipped[reason.split(" (")[0]] = (
-                        skipped.get(reason.split(" (")[0], 0) + 1
-                    )
-                    tag = "SKIP"
-                subj_short = (subject or "")[:90]
-                print(
-                    f"  [{tag}] {folder}:{uid_s} date={local_d} "
-                    f"ticket={ticket!r} | {reason} | {subj_short!r}",
-                    flush=True,
-                )
+            totals["raw_imap"] += len(raw)
+            totals["after_cap"] += len(capped)
+            if verbose:
+                print(f"[maint-audit] {folder}: --- raw IMAP subject hits ---", flush=True)
+            raw_counts = _audit_classify_uid_batch(
+                mail,
+                watcher,
+                raw,
+                folder=folder,
+                entries=entries,
+                yesterday=yesterday,
+                today=today,
+                verbose=verbose,
+            )
+            print(
+                f"[maint-audit] {folder} RAW: total={raw_counts['total']} "
+                f"yesterday={raw_counts['yesterday']} today={raw_counts['today']} "
+                f"other_date={raw_counts['other_date']} no_date={raw_counts['no_date']} "
+                f"would_process={raw_counts['would_process']} "
+                f"(yesterday_ok={raw_counts['would_process_yesterday']} "
+                f"today_ok={raw_counts['would_process_today']}) "
+                f"skip={raw_counts['skip_reasons']}",
+                flush=True,
+            )
+            totals["yesterday"] += raw_counts["yesterday"]
+            totals["today"] += raw_counts["today"]
+            totals["would_process"] += raw_counts["would_process"]
+            totals["would_process_yesterday"] += raw_counts["would_process_yesterday"]
     finally:
         try:
             mail.logout()
         except Exception:
             pass
     print(
-        f"[maint-audit] summary: would_process={would} "
-        f"skip_reasons={dict(skipped)}",
+        f"[maint-audit] TOTAL raw_imap={totals['raw_imap']} after_cap={totals['after_cap']} | "
+        f"dates: yesterday={totals['yesterday']} today={totals['today']} | "
+        f"would_process={totals['would_process']} "
+        f"(yesterday_ok={totals['would_process_yesterday']})",
         flush=True,
     )
     return 0
@@ -4807,10 +4908,10 @@ class MaintenanceMailWatcher:
             return out
         print(
             f"[maint-mail] no {_process_window_label()} in {len(uids)} subject hit(s); "
-            f"fallback newest {SUBJECT_SEARCH_MAX}",
+            f"spread fallback {SUBJECT_SEARCH_MAX} (oldest+newest UIDs)",
             flush=True,
         )
-        return uids[-SUBJECT_SEARCH_MAX:]
+        return _uids_spread_pool(uids, SUBJECT_SEARCH_MAX)
 
     def _uids_broad_since(self, mail: imaplib.IMAP4, since: str) -> list[bytes]:
         """Fallback when SUBJECT search returns nothing (some Lark setups)."""
@@ -5086,11 +5187,21 @@ if __name__ == "__main__":
     if len(sys.argv) >= 2 and sys.argv[1] == "jenkins-reply-search":
         _needle = sys.argv[2] if len(sys.argv) > 2 else "TESTING BOT"
         raise SystemExit(debug_jenkins_reply_search(_needle))
-    if len(sys.argv) >= 2 and sys.argv[1] == "audit-window":
-        raise SystemExit(audit_maintenance_process_window())
+    if len(sys.argv) >= 2 and sys.argv[1] in (
+        "audit-window",
+        "audit-maintenance-mail",
+        "audit",
+    ):
+        _extra = sys.argv[2:]
+        raise SystemExit(
+            audit_maintenance_process_window(
+                ignore_json="--fresh" in _extra,
+                verbose="--quiet" not in _extra,
+            )
+        )
     print(
         "Usage:\n"
-        "  python3 maintenance_mail.py audit-window\n"
+        "  python3 maintenance_mail.py audit-window [--fresh] [--quiet]\n"
         "  python3 maintenance_mail.py jenkins-reply-search [subject]",
         flush=True,
     )
