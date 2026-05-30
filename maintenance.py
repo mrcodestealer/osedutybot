@@ -2652,7 +2652,7 @@ def _is_garbage_table_cell(name: str) -> bool:
 def _is_plausible_game_name(name: str) -> bool:
     """Reject summary lines / URLs mistaken as table names."""
     t = (name or "").strip()
-    if not t or len(t) > 80:
+    if re.match(r"^[\.\-–—_,;]+$", t):
         return False
     low = t.lower()
     if re.search(r"https?://|@|\.com\b|evolution\b", low):
@@ -2772,17 +2772,24 @@ def _parse_following_unavailable_tables(text: str) -> list[str]:
     if not hay.strip():
         return []
     m = re.search(
-        r"following tables?\s+(?:will be|was|were)\s+unavailable\s*:?\s*"
+        r"following tables?\s+(?:will be|was|were)\s+unavailable\.?\s*"
+        r"(?:"
+        r":\s*([^\n]+)"
+        r"|\n+\s*"
         r"(.*?)(?:\n\s*\n|You may find summary|Start time\s*:|End time\s*:|"
-        r"Reason\s*:|Table availability\s*:|\Z)",
+        r"Reason\s*:|Table availability\s*:|\Z)"
+        r")",
         hay,
         re.IGNORECASE | re.DOTALL,
     )
     if not m:
         return []
+    block = (m.group(1) or m.group(2) or "").strip()
+    if not block:
+        return []
     out: list[str] = []
     seen: set[str] = set()
-    for line in m.group(1).splitlines():
+    for line in block.splitlines() if "\n" in block else [block]:
         chunk = _clean_email_line(line)
         if not _is_plausible_game_name(chunk):
             continue
@@ -2881,11 +2888,6 @@ def extract_info(text: str, *, email_subject: str | None = None):
                     table_availability_value = val
 
         # ---- Table detection (not ``Table availability:``) ----
-        elif re.search(r"\btable\s+(?!availability\b)", line, re.IGNORECASE):
-            name = _extract_table_name_from_sentence(line)
-            if name:
-                info["table"] = name
-                info["table_names"] = [name]
         elif re.search(
             r'^Affected tables?(?:/-s)?\s*:', line, re.IGNORECASE
         ):
@@ -2909,6 +2911,14 @@ def extract_info(text: str, *, email_subject: str | None = None):
                 info["table_names"] = list(block_names)
             i = j
             continue
+        elif re.search(r"\btable\s+(?!availability\b)", line, re.IGNORECASE):
+            if _FOLLOWING_TABLES_UNAVAILABLE_RE.search(line):
+                i += 1
+                continue
+            name = _extract_table_name_from_sentence(line)
+            if name:
+                info["table"] = name
+                info["table_names"] = [name]
 
         # ---- Reason / Technical Reason ----
         elif re.search(r'^(?:Technical\s+)?Reason\s*:', line, re.IGNORECASE):
