@@ -90,6 +90,40 @@ def _get_jenkinsupdate():
         return None
 
 
+_DUTY_LEAVE_WFH_FOOTER_COMMANDS: dict[str, str] = {
+    "/fpms": "fpms",
+    "/ote": "ote",
+    "/bi": "bi",
+    "/fe": "fe",
+    "/sre": "sre",
+    "/db": "db",
+    "/dba": "db",
+    "/cpms": "cpms",
+    "/pms": "pms",
+    "/ft": "ft",
+}
+
+
+def _append_department_leave_wfh_footer(reply: str, command: str) -> str:
+    """Append today's leave/WFH for department duty commands."""
+    dept_key = _DUTY_LEAVE_WFH_FOOTER_COMMANDS.get((command or "").strip().lower())
+    if not dept_key or not reply:
+        return reply
+    try:
+        import leavewfh as lw
+
+        footer = lw.format_department_leave_wfh_footer(
+            dept_key,
+            use_html="<b>" in reply,
+        )
+    except Exception as exc:
+        print(f"⚠️ leave/WFH footer failed for {command}: {exc}")
+        return reply
+    if footer:
+        return f"{reply}\n\n{footer}"
+    return reply
+
+
 # ================= CONFIGURATION =================
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET") 
@@ -3348,9 +3382,7 @@ def lark_webhook():
         return _lark_im_done()
     elif clean_text.lower() == '/cpms':
         results = cpms_duty.get_cpms_three_days()
-        formatted = cpms_duty.format_output(results)
-        send_message(chat_id, formatted)
-        return _lark_im_done()
+        reply = cpms_duty.format_output(results)
     elif clean_text.lower().startswith('/cpmscheck'):
         parts = clean_text.split()
         if len(parts) > 1:
@@ -3450,8 +3482,10 @@ def lark_webhook():
         send_message(chat_id, reply)
         return _lark_im_done()
     elif clean_text.lower() == '/ft':
-        duty_schedule = ft.get_ft_three_days()
-        send_message(chat_id, duty_schedule)   
+        duty_schedule = _append_department_leave_wfh_footer(
+            ft.get_ft_three_days(), "/ft"
+        )
+        send_message(chat_id, duty_schedule)
         fyi_message = """FYI
         Phan Qi Xiang - Try whatsapp first, else use phone line 
         Kevin Lim       - Call phone number , not whatapps call
@@ -4075,6 +4109,9 @@ def lark_webhook():
 
     # 如果前面没有任何命令匹配，并且 reply 为空，则忽略
     if reply:
+        cmd_token = (clean_text.split()[0] if clean_text else "").lower()
+        if cmd_token in _DUTY_LEAVE_WFH_FOOTER_COMMANDS:
+            reply = _append_department_leave_wfh_footer(reply, cmd_token)
         send_message(chat_id, reply)
         print(f"✅ Replied to chat {chat_id}: {reply}")
     else:

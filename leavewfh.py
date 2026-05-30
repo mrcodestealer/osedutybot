@@ -1915,6 +1915,99 @@ def _attendance_person_line(row: dict[str, Any], on_date: date) -> str:
     return f"- **{row['name']}** · {emoji} {lt} · {span}"
 
 
+def _attendance_person_line_plain(row: dict[str, Any], on_date: date) -> str:
+    span = _attendance_span_for_row(row, on_date)
+    lt = str(row.get("leave_type") or "Leave").strip()
+    emoji = _leave_type_emoji(lt)
+    return f"• {row['name']} · {emoji} {lt} · {span}"
+
+
+def department_matches_command(department: str, command_key: str) -> bool:
+    """Match dutyList.csv department to a bot duty command (/fpms, /ote, /bi, …)."""
+    d = (department or "").strip().upper()
+    key = (command_key or "").strip().lower()
+    if not d or not key:
+        return False
+    if key == "fpms":
+        return d == "FPMS"
+    if key == "ote":
+        return d == "OTE"
+    if key == "bi":
+        return d == "BI"
+    if key == "fe":
+        return d == "FE" or d.startswith("FE ") or d.startswith("FE PO") or "FRONT END" in d
+    if key == "sre":
+        return "SRE" in d
+    if key in ("db", "dba"):
+        return d in ("DB", "DBA")
+    if key == "cpms":
+        return d.startswith("CPMS")
+    if key == "pms":
+        return d == "PMS"
+    if key == "ft":
+        return d in ("F&T", "FT")
+    return False
+
+
+def _department_command_label(command_key: str) -> str:
+    labels = {
+        "fpms": "FPMS",
+        "ote": "OTE",
+        "bi": "BI",
+        "fe": "FE",
+        "sre": "SRE",
+        "db": "DB",
+        "dba": "DB",
+        "cpms": "CPMS",
+        "pms": "PMS",
+        "ft": "F&T",
+    }
+    return labels.get((command_key or "").strip().lower(), (command_key or "").upper())
+
+
+def format_department_leave_wfh_footer(
+    command_key: str,
+    ref_date: Optional[date] = None,
+    *,
+    use_html: bool = False,
+) -> str:
+    """
+    Footer for department duty replies (/fpms, /ote, /bi, /fe, /sre, …):
+    today's leave + WFH for people in that department (dutyList.csv).
+    """
+    on_date = ref_date or date.today()
+    data = get_dutylist_leave_wfh_for_date(on_date)
+    all_leave = list(data.get("ose_leave") or []) + list(data.get("other_leave") or [])
+    all_wfh = list(data.get("ose_wfh") or []) + list(data.get("other_wfh") or [])
+    leave_rows = [
+        r for r in all_leave if department_matches_command(r.get("department") or "", command_key)
+    ]
+    wfh_rows = [
+        r for r in all_wfh if department_matches_command(r.get("department") or "", command_key)
+    ]
+    leave_rows.sort(key=lambda r: str(r.get("name") or "").lower())
+    wfh_rows.sort(key=lambda r: str(r.get("name") or "").lower())
+    if not leave_rows and not wfh_rows:
+        return ""
+
+    label = _department_command_label(command_key)
+    date_str = on_date.strftime("%d/%m/%Y")
+    if use_html:
+        lines = [f"<b>Leave & WFH — {date_str} ({label})</b>"]
+    else:
+        lines = [f"Leave & WFH — {date_str} ({label})"]
+
+    if leave_rows:
+        lines.append("LEAVE" if not use_html else "<b>LEAVE</b>")
+        lines.extend(_attendance_person_line_plain(r, on_date) for r in leave_rows)
+    if wfh_rows:
+        if leave_rows:
+            lines.append("")
+        lines.append("WFH" if not use_html else "<b>WFH</b>")
+        lines.extend(_attendance_person_line_plain(r, on_date) for r in wfh_rows)
+    return "\n".join(lines)
+
+
 def _rows_for_department(rows: list[dict[str, Any]], department: str) -> list[dict[str, Any]]:
     dept = (department or "").strip()
     out = [r for r in rows if (r.get("department") or "").strip() == dept]
