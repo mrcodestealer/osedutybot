@@ -2081,9 +2081,32 @@ def _subject_matches_checkemail_title(
     if maint and maint not in _maint_mod.normalize_subject_for_search(subj):
         return False
     sd_date = _maint_mod.parse_service_desk_date_from_subject(user_title)
-    if sd_date and sd_date not in (subj or ""):
-        return False
+    if sd_date:
+        subj_date = _maint_mod.parse_service_desk_date_from_subject(subj)
+        if subj_date:
+            if subj_date.casefold() != sd_date.casefold():
+                return False
+        elif sd_date.casefold() not in (subj or "").casefold():
+            return False
     return True
+
+
+def _checkemail_body_is_useful(
+    body: str, subj: str, *, ticket_id: str = ""
+) -> bool:
+    """Skip internal ``NOT IN CP`` one-liners; keep Evolution / schedule rows."""
+    tid = (ticket_id or _maint_mod.extract_ticket_card_title(subj) or "").strip()
+    if tid and _maint_mod.subject_matches_service_desk_ticket(subj, tid):
+        return True
+    kind = _maint_mod.classify_checkemail_step_kind(body, email_subject=subj)
+    if kind != "other":
+        return True
+    low = (body or "").casefold()
+    if "not in cp website" in low and len((body or "").strip()) < 160:
+        return False
+    if _maint_mod.extract_candidate_game_names(f"{subj}\n{body}"):
+        return True
+    return bool(_body_looks_like_schedule(body))
 
 
 def _uids_by_checkemail_subject_filter(
@@ -2129,19 +2152,6 @@ def _uids_by_checkemail_subject_filter(
             if len(out) >= max_hits:
                 return out
     return out
-
-
-def _checkemail_body_is_useful(body: str, subj: str) -> bool:
-    """Skip internal ``NOT IN CP`` one-liners; keep Evolution / schedule rows."""
-    kind = _maint_mod.classify_checkemail_step_kind(body, email_subject=subj)
-    if kind != "other":
-        return True
-    low = (body or "").casefold()
-    if "not in cp website" in low and len((body or "").strip()) < 160:
-        return False
-    if _maint_mod.extract_candidate_game_names(f"{subj}\n{body}"):
-        return True
-    return bool(_body_looks_like_schedule(body))
 
 
 def _uids_by_ticket_imap_search(mail: imaplib.IMAP4, ticket_id: str) -> list[bytes]:
@@ -2515,6 +2525,31 @@ def _checkemail_search_folders() -> list[str]:
     return out or ["Priority", "OSE Pending"]
 
 
+def _checkemail_folder_select_aliases(folder: str) -> list[str]:
+    """
+    Lark UI **Priority** is usually IMAP ``INBOX`` (no mailbox named Priority).
+
+    Keep the UI label in error messages; try ``INBOX`` when ``Priority`` fails.
+    """
+    f = (folder or "").strip()
+    if not f:
+        return ["INBOX"]
+    if f.casefold() == "priority":
+        return ["Priority", "INBOX"]
+    return [f]
+
+
+def _select_checkemail_folder(
+    mail: imaplib.IMAP4, folder: str, *, readonly: bool = True
+) -> str | None:
+    """SELECT a ``/checkemail`` folder; return resolved IMAP name or ``None``."""
+    for candidate in _checkemail_folder_select_aliases(folder):
+        resolved = _resolve_imap_folder_name(mail, candidate)
+        if _select_mail_folder(mail, resolved, readonly=readonly):
+            return resolved
+    return None
+
+
 def _checkemail_primary_folders() -> list[str]:
     """Same as ``_checkemail_search_folders`` (legacy alias)."""
     return _checkemail_search_folders()
@@ -2538,8 +2573,7 @@ def _schedule_message_by_ticket_scan(
     global_best: tuple[email.message.Message, str] | None = None
     global_score = (-1, -1, float("-inf"))
     for folder in _checkemail_search_folders():
-        resolved = _resolve_imap_folder_name(mail, folder)
-        if not _select_mail_folder(mail, resolved, readonly=True):
+        if not _select_checkemail_folder(mail, folder, readonly=True):
             continue
         uids = _uids_for_ticket_schedule_lookup(mail, tid, user_title=tid)
         if not uids:
@@ -2690,8 +2724,7 @@ def find_schedule_message_by_subject_title(
                 return hit
 
         for folder in folders:
-            resolved = _resolve_imap_folder_name(mail, folder)
-            if not _select_mail_folder(mail, resolved, readonly=True):
+            if not _select_checkemail_folder(mail, folder, readonly=True):
                 continue
             folder_uids = _uids_for_maintenance_check(mail, needles, ticket_id)
             if not folder_uids:
@@ -2772,12 +2805,13 @@ def _try_add_checkemail_hit(
     msg: email.message.Message,
     folder: str,
     *,
+    ticket_id: str = "",
     want_kinds: set[str] | None = None,
 ) -> bool:
     """Append one useful ``/checkemail`` row when not already deduped."""
     subj = _decode_mime_header(msg.get("Subject")) or ""
     body = extract_body_from_message(msg)
-    if not _checkemail_body_is_useful(body, subj):
+    if not _checkemail_body_is_useful(body, subj, ticket_id=ticket_id):
         return False
     if want_kinds is not None:
         kind = _maint_mod.classify_checkemail_step_kind(body, email_subject=subj)
@@ -2817,8 +2851,7 @@ def _supplement_checkemail_timeline_messages(
     if not ticket_id or not want_kinds:
         return
     for folder in _checkemail_search_folders():
-        resolved = _resolve_imap_folder_name(mail, folder)
-        if not _select_mail_folder(mail, resolved, readonly=True):
+        if not _select_checkemail_folder(mail, folder, readonly=True):
             continue
         uids = _uids_by_checkemail_subject_filter(
             mail,
@@ -2854,7 +2887,9 @@ def _supplement_checkemail_timeline_messages(
             ):
                 continue
             _try_add_checkemail_hit(
-                hits, seen, msg, folder, want_kinds=want_kinds
+                hits, seen, msg, folder,
+                ticket_id=ticket_id,
+                want_kinds=want_kinds,
             )
 
 
@@ -2875,8 +2910,7 @@ def find_all_maintenance_messages_by_title(
     seen: set[str] = set()
     try:
         for folder in _checkemail_search_folders():
-            resolved = _resolve_imap_folder_name(mail, folder)
-            if not _select_mail_folder(mail, resolved, readonly=True):
+            if not _select_checkemail_folder(mail, folder, readonly=True):
                 continue
             if ticket_id:
                 uids = _uids_by_checkemail_subject_filter(
@@ -2944,7 +2978,9 @@ def find_all_maintenance_messages_by_title(
                     subj, user_title, ticket_id=ticket_id
                 ):
                     continue
-                _try_add_checkemail_hit(hits, seen, msg, folder)
+                _try_add_checkemail_hit(
+                    hits, seen, msg, folder, ticket_id=ticket_id
+                )
         if ticket_id and hits:
             found_kinds = _checkemail_timeline_kinds(hits)
             want: set[str] = set()
@@ -3032,16 +3068,14 @@ def find_maintenance_message_by_subject_title(
                     best_ts = ts
 
         for folder in folders:
-            resolved = _resolve_imap_folder_name(mail, folder)
-            if not _select_mail_folder(mail, resolved, readonly=True):
+            if not _select_checkemail_folder(mail, folder, readonly=True):
                 continue
             _consider_folder_uids(folder, _uids_for_maintenance_check(mail, needles, ticket_id))
             if best_score >= 200:
                 break
         if best_uid is None and ticket_id:
             for folder in folders:
-                resolved = _resolve_imap_folder_name(mail, folder)
-                if not _select_mail_folder(mail, resolved, readonly=True):
+                if not _select_checkemail_folder(mail, folder, readonly=True):
                     continue
                 _consider_folder_uids(
                     folder,
@@ -3107,7 +3141,7 @@ def check_maintenance_email_by_title(
             "Tips:\n"
             "• `/checkemail SD-7044010` — timeline of schedule → cancel → clarification\n"
             "• Subject: `[Service Desk] Studio cleaning maintenance / … (SD-xxxxx)`\n"
-            "• Mail must be in **Priority** or **OSE Pending**",
+            "• Mail must be in **Priority** (IMAP: INBOX) or **OSE Pending**",
             title="Email not found",
         )
 
