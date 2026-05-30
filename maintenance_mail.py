@@ -810,17 +810,24 @@ def extract_body_from_message(msg: email.message.Message) -> str:
     return html_text
 
 
-def extract_checkemail_body_from_message(msg: email.message.Message) -> str:
+def extract_checkemail_parse_body(msg: email.message.Message) -> str:
     """
-    Body for ``/checkemail``.
-
-    Standalone Evolution mail → full body. ``Re:`` / ``Fw:`` om@ thread → extract the
-    quoted Evolution block (schedule / cancel / clarification), not the om@ stub.
+    Richest body for ``/checkemail`` parse — matches mail-watcher ``pipeline_in`` body.
     """
     raw = extract_body_from_message(msg)
     if _checkemail_is_original(msg=msg):
         return raw.strip()
-    return _maint_mod.extract_best_maintenance_segment(raw)
+    subj = _decode_mime_header(msg.get("Subject")) or ""
+    return _maint_mod.rich_checkemail_extraction_body(subj, raw)
+
+
+def extract_checkemail_body_from_message(msg: email.message.Message) -> str:
+    """
+    Body for ``/checkemail`` classify + parse.
+
+    Uses full om@ quote when the ``Dear Casino Team`` segment alone has no table names.
+    """
+    return extract_checkemail_parse_body(msg)
 
 
 def _checkemail_is_original(
@@ -3006,10 +3013,7 @@ def _checkemail_message_dedupe_key(
 ) -> str:
     subj = _decode_mime_header(msg.get("Subject")) or ""
     kind = _maint_mod.classify_checkemail_step_kind(body, email_subject=subj)
-    if kind == "schedule":
-        return f"schedule|{_maint_mod.checkemail_schedule_content_key(subj, body)}"
-    sig = re.sub(r"\s+", " ", (body or "").strip().casefold())[:900]
-    return f"{kind}|{_maint_mod.normalize_subject_for_search(subj)}|{sig}"
+    return _maint_mod.checkemail_timeline_dedupe_key(kind, subj, body)
 
 
 def _try_add_checkemail_hit(
@@ -3370,31 +3374,57 @@ def check_maintenance_email_by_title(
         steps: list[dict[str, Any]] = []
         schedule_subj = ""
         schedule_body = ""
+        seen_steps: set[str] = set()
         _KIND_ORDER = {"schedule": 0, "cancel": 1, "uncancel": 2, "other": 3}
         for msg, folder, ts in all_msgs:
             subj = _decode_mime_header(msg.get("Subject")) or ""
-            body = extract_checkemail_body_from_message(msg)
+            parse_body = extract_checkemail_parse_body(msg)
+            raw_body = extract_body_from_message(msg)
             kind = _maint_mod.classify_checkemail_step_kind(
-                body, email_subject=subj
+                parse_body, email_subject=subj
             )
-            quoted_ts = _maint_mod.parse_embedded_mail_date(
-                extract_body_from_message(msg)
+            step_key = _maint_mod.checkemail_timeline_dedupe_key(
+                kind, subj, parse_body
             )
+            if step_key in seen_steps:
+                continue
+            seen_steps.add(step_key)
+            quoted_ts = _maint_mod.parse_embedded_mail_date(raw_body)
             when_ts = quoted_ts or ts
             use_sched_subj = schedule_subj
             use_sched_body = schedule_body
             if kind == "schedule":
                 schedule_subj = subj
-                schedule_body = body
-            label, _tpl, elements, gamelist_md = _maint_mod.build_checkemail_step_preview(
-                kind=kind,
-                email_subject=subj,
-                email_body=body,
-                folder=folder,
-                tenant_access_token=tenant_access_token,
-                schedule_subject=use_sched_subj or None,
-                schedule_body=use_sched_body or None,
-            )
+                schedule_body = parse_body
+            if kind == "cancel":
+                label, _tpl, elements, gamelist_md = (
+                    _maint_mod.build_checkemail_step_preview(
+                        kind=kind,
+                        email_subject=subj,
+                        email_body=parse_body,
+                        folder=folder,
+                        tenant_access_token=tenant_access_token,
+                        schedule_subject=use_sched_subj or None,
+                        schedule_body=use_sched_body or None,
+                    )
+                )
+            else:
+                resolved = _maint_mod.resolve_maintenance_subject(subj, parse_body)
+                pipeline_in = build_pipeline_input(resolved, parse_body)
+                gamelist_md, _hdr, _tpl, _body_md, card_els = (
+                    _maint_mod.process_maintenance_pipeline(
+                        pipeline_in,
+                        tenant_access_token,
+                        email_subject=resolved,
+                        received_at=when_ts.isoformat(),
+                    )
+                )
+                label = {
+                    "schedule": "📅 Scheduled",
+                    "uncancel": "✅ Clarification (completed)",
+                    "other": "📧 Other",
+                }.get(kind, kind)
+                elements = card_els or []
             steps.append(
                 {
                     "kind": kind,

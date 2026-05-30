@@ -585,14 +585,70 @@ def checkemail_schedule_content_key(
     email_body: str,
 ) -> str:
     """Dedupe key for duplicate om@ ``Re:`` rows sharing the same Evolution schedule."""
+    return checkemail_timeline_dedupe_key("schedule", email_subject, email_body)
+
+
+def checkemail_timeline_dedupe_key(
+    kind: str,
+    email_subject: str,
+    email_body: str = "",
+) -> str:
+    """
+    Timeline dedupe — same SD schedule/cancel/uncancel content → one row.
+
+    om@ ``Re:`` copies often differ only by ``Hi @CS`` stub; match on ticket + SD meta.
+    """
     subj = normalize_display_subject(email_subject or "")
-    seg = extract_best_maintenance_segment(email_body or "")
-    sd_date = parse_service_desk_date_from_subject(subj) or parse_service_desk_date_from_subject(
-        seg
-    )
-    ticket = extract_ticket_card_title(subj, seg) or ""
-    sig = re.sub(r"\s+", " ", seg.strip().casefold())[:500]
-    return f"{ticket}|{sd_date}|{sig}"
+    ticket = extract_ticket_card_title(subj, email_body) or ""
+    k = (kind or "other").strip().casefold()
+    if k == "schedule":
+        meta = parse_service_desk_subject_metadata(subj)
+        sd_date = parse_service_desk_date_from_subject(subj)
+        maint = (meta.get("maintenance_type") or "").strip().casefold()
+        return f"schedule|{ticket}|{sd_date}|{maint}"
+    if k == "cancel":
+        notice = extract_cancel_notice_text(email_body or "")
+        sig = re.sub(r"\s+", " ", notice.casefold())[:240]
+        return f"cancel|{ticket}|{sig}"
+    if k == "uncancel":
+        seg = extract_best_maintenance_segment(email_body or "")
+        sig = re.sub(r"\s+", " ", seg.casefold())[:240]
+        return f"uncancel|{ticket}|{sig}"
+    sig = re.sub(r"\s+", " ", (email_body or "").strip().casefold())[:300]
+    return f"{k}|{ticket}|{normalize_subject_for_search(subj)}|{sig}"
+
+
+def rich_checkemail_extraction_body(
+    email_subject: str,
+    email_body: str,
+) -> str:
+    """
+    Parse body for ``/checkemail`` — same richness as mail-watcher ``pipeline_in``.
+
+    Prefer Evolution quote segment; fall back to full om@ ``Re:`` body when the
+    segment is a stub (table names live in HTML quote).
+    """
+    body = (email_body or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not body:
+        return ""
+    subj = email_subject or ""
+    resolved = resolve_maintenance_subject(subj, body)
+    seg = extract_best_maintenance_segment(body)
+
+    def _has_tables(text: str) -> bool:
+        if not (text or "").strip():
+            return False
+        if extract_candidate_game_names(f"{resolved}\n{text}"):
+            return True
+        return bool(
+            re.search(r"table\s+.+?\s+will\s+be\s+unavailable", text, re.IGNORECASE)
+        )
+
+    if _has_tables(seg):
+        return seg.strip()
+    if _has_tables(body):
+        return body
+    return (seg or body).strip()
 
 
 def parse_service_desk_studio_from_subject(subject: str) -> str:
@@ -2842,10 +2898,12 @@ def _gather_checkemail_context(
     matched_cancel = is_maintenance_cancelled_email(email_body)
     use_schedule = bool((schedule_body or "").strip())
     ex_subj = (schedule_subject or email_subject) or ""
-    ex_body = (schedule_body or email_body) or ""
+    raw_ex = (schedule_body or email_body) or ""
     if matched_cancel and not use_schedule:
         ex_body = ""
-    resolved = resolve_maintenance_subject(ex_subj, ex_body)
+    else:
+        ex_body = rich_checkemail_extraction_body(ex_subj, raw_ex)
+    resolved = resolve_maintenance_subject(ex_subj, ex_body or raw_ex)
     info = extract_info(ex_body, email_subject=ex_subj) if ex_body.strip() else {
         "table": "Unknown",
         "table_names": [],
