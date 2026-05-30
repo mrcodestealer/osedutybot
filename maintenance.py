@@ -436,6 +436,31 @@ def is_maintenance_uncancel_clarification_email(body: str | None) -> bool:
     return bool(_UNCANCEL_BODY_RE.search(text))
 
 
+_COMPLETED_BODY_RE = re.compile(
+    r"successfully\s+accomplished(?:\s+and\s+live\s+casino\s+games\s+are\s+currently\s+available)?",
+    re.IGNORECASE,
+)
+
+
+def is_maintenance_completed_email(body: str | None) -> bool:
+    """
+    Service Desk «maintenance successfully accomplished» notice with summary +
+    ``Affected table/-s:`` list (Facilities / studio-wide completion mails).
+    """
+    text = (body or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not text.strip():
+        return False
+    if not _COMPLETED_BODY_RE.search(text):
+        return False
+    if re.search(r"affected\s+table", text, re.IGNORECASE):
+        return True
+    if re.search(
+        r"live\s+casino\s+games\s+are\s+currently\s+available", text, re.IGNORECASE
+    ):
+        return True
+    return False
+
+
 def extract_best_maintenance_segment(body: str | None) -> str:
     """
     Pick the Evolution block from om@ ``Re:`` / ``Fw:`` threads.
@@ -1752,13 +1777,15 @@ def classify_maintenance_card_kind(
     email_body: str | None = None,
 ) -> str:
     """
-    ``in_progress`` | ``fixed`` | ``scheduled`` | ``uncancel`` for picture-style Lark cards.
+    ``in_progress`` | ``fixed`` | ``completed`` | ``scheduled`` | ``uncancel`` for picture-style Lark cards.
     Cancelled emails are handled separately.
     """
     body = email_body or ""
     subj = resolve_maintenance_subject(email_subject, body)
     if is_maintenance_uncancel_clarification_email(body):
         return "uncancel"
+    if is_maintenance_completed_email(body):
+        return "completed"
     status = (info.get("status") or "").strip().lower()
     subj_low = subj.lower()
     is_sd = "[service desk]" in subj_low or _body_has_service_desk(body)
@@ -1807,6 +1834,17 @@ def build_fixed_card_header(subject: str, email_body: str | None = None) -> str:
         return _truncate_header(f"✅ [{sd}] {maint} - Fixed")
     ticket = ticket_id_tinc_style(subj, email_body) or "Maintenance"
     return _truncate_header(f"✅ {ticket} - Fixed")
+
+
+def build_completed_card_header(subject: str, email_body: str | None = None) -> str:
+    subj = resolve_maintenance_subject(subject, email_body)
+    if "[service desk]" in subj.lower():
+        meta = parse_service_desk_subject_metadata(subj)
+        sd = meta.get("ticket_sd") or extract_ticket_card_title(subj, email_body) or "SD-?"
+        maint = meta.get("maintenance_type") or "Maintenance"
+        return _truncate_header(f"✅ [{sd}] {maint} - Completed")
+    ticket = ticket_id_tinc_style(subj, email_body) or "Maintenance"
+    return _truncate_header(f"✅ {ticket} - Completed")
 
 
 def build_uncancelled_card_header(subject: str, email_body: str | None = None) -> str:
@@ -2527,6 +2565,13 @@ def build_maintenance_notice(
                 prior=prior,
                 launched_tables=launched_tables,
             ),
+        )
+    if kind == "completed":
+        return (
+            build_completed_card_header(email_subject or "", email_text),
+            "green",
+            "",
+            build_fixed_card_elements(info, **kw),
         )
     if kind == "fixed":
         return (
