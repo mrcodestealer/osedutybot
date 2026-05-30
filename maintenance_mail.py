@@ -2,9 +2,9 @@
 """
 IMAP watcher for om@hotelstotsenberg.com (or MAINTENANCE_MAIL_USER).
 
-Processes inbox messages whose subject **literally** starts with ``TINC-`` or
-``[Service Desk]`` (not ``Re:`` / ``Fwd:`` replies), **and** whose From address is
-``no-reply-evolution@evolution.com`` (Jira) or ``servicedesk@evolution.com`` (Service Desk).
+Processes inbox messages whose subject is (or becomes after stripping ``Re:/Fwd:``)
+``TINC-…`` or ``[Service Desk]…``, **and** whose From address is Evolution
+(``no-reply-evolution@evolution.com``, ``servicedesk@evolution.com``, etc.).
 Runs the same pipeline as ``/m``, and posts to a fixed Lark group.
 
 Cancellation notices post a red ``❌ [SD-…] … - Cancelled`` (or ``❌ TINC-… - Cancelled``)
@@ -441,15 +441,27 @@ def _uid_search(mail: imaplib.IMAP4, criteria: str) -> list[bytes]:
 _watcher_started = False
 
 
+def _normalize_subject(subject: str) -> str:
+    """Strip Re:/Fwd:/FW: prefixes so ``Re: TINC-…`` / ``Fw: [Service Desk]…`` still match."""
+    s = (subject or "").strip()
+    for _ in range(8):
+        m = re.match(r"^(?:Re|Fwd|FW|Fw|Aw):\s*", s, re.IGNORECASE)
+        if not m:
+            break
+        s = s[m.end() :].strip()
+    return s
+
+
 def subject_matches(subject: str) -> bool:
     """
-    True only when the subject **starts** with ``TINC-`` or ``[Service Desk]``.
+    True when the subject starts with ``TINC-`` or ``[Service Desk]`` after stripping
+    leading ``Re:/Fwd:`` prefixes (Evolution update mails often keep ``Re:``).
 
-    ``Re: TINC-…`` / ``Fwd: TINC-…`` are **not** matched (QA acks, thread replies).
+    om@ / duty-bot copies are still dropped later via :func:`from_should_ignore`.
     """
     if _maint_mod.subject_should_ignore(subject):
         return False
-    s = (subject or "").strip()
+    s = _normalize_subject(subject)
     if not s:
         return False
     if re.match(r"^TINC-", s, re.IGNORECASE):
@@ -3938,6 +3950,136 @@ def _record_processed(
     entries.append(row)
 
 
+def classify_watcher_skip(
+    *,
+    subject: str,
+    when: str | None,
+    from_hdr: str,
+    folder: str,
+    uid_s: str,
+    entries: list[dict[str, Any]],
+    mail: imaplib.IMAP4 | None = None,
+    uid: bytes | None = None,
+) -> str:
+    """
+    Human-readable reason a message would not be fully processed by the watcher.
+
+    Used by ``audit-window`` and troubleshooting; mirrors ``_prefilter_uids`` order.
+    """
+    store_key = _uid_key(folder, uid_s)
+    if _already_processed_uid(entries, store_key):
+        ent = next(
+            (e for e in reversed(entries) if str(e.get("imap_uid") or "") == store_key),
+            None,
+        )
+        ch = str((ent or {}).get("content_hash") or "")
+        if ch.startswith("skip:"):
+            return f"already_in_json ({ch})"
+        if ent and ent.get("is_cancelled_email"):
+            return "already_in_json (processed cancel)"
+        if ent and ent.get("is_uncancel_email"):
+            return "already_in_json (processed uncancel)"
+        return "already_in_json (processed schedule/duplicate)"
+
+    if _maint_mod.subject_should_ignore(subject):
+        return "skip:subject_ignore_marker"
+
+    if not subject_matches(subject):
+        subj = (subject or "").strip()
+        if re.match(r"^(?:Re|Fw|Fwd):", subj, re.IGNORECASE):
+            return "skip:not_maintenance_subject (Re/Fw with no TINC-/SD after strip)"
+        return "skip:not_maintenance_subject"
+
+    if _maint_mod.from_should_ignore(from_hdr):
+        return "skip:from_self (om@ / OM-PH — not Evolution)"
+
+    if not _maint_mod.from_is_evolution_maintenance_sender(from_hdr):
+        return f"skip:not_evolution_sender ({from_hdr!r})"
+
+    if when and mail is not None and uid is not None:
+        if not _accept_message_date(mail, uid, when):
+            local_d = _message_local_date(when)
+            return (
+                f"skip:not_in_window (email Date local={local_d}, "
+                f"window={_process_window_label()})"
+            )
+
+    return "WOULD_PROCESS"
+
+
+def audit_maintenance_process_window(
+    *,
+    folders: list[str] | None = None,
+) -> int:
+    """
+    List every IMAP hit for TINC- / [Service Desk] in the process window and why
+    the watcher would skip or process it. Run on the server after a missed batch.
+    """
+    scan_folders = folders or list(MAIL_IMAP_FOLDERS)
+    state = _load_state()
+    entries: list[dict[str, Any]] = state["entries"]
+    watcher = MaintenanceMailWatcher()
+    mail = watcher._connect()
+    would = 0
+    skipped: dict[str, int] = {}
+    print(
+        f"[maint-audit] window={_process_window_label()} "
+        f"PROCESS_DAYS={PROCESS_DAYS} folders={scan_folders!r} "
+        f"json_entries={len(entries)}",
+        flush=True,
+    )
+    try:
+        for folder in scan_folders:
+            if not _select_mail_folder(mail, folder):
+                print(f"[maint-audit] SELECT failed: {folder!r}", flush=True)
+                continue
+            uids = watcher._uids_today_matching(mail)
+            print(
+                f"[maint-audit] {folder}: {len(uids)} UID(s) after subject+date cap",
+                flush=True,
+            )
+            for uid in uids:
+                uid_s = uid.decode() if isinstance(uid, bytes) else str(uid)
+                subject, when, from_hdr = watcher._fetch_header_preview(mail, uid)
+                reason = classify_watcher_skip(
+                    subject=subject,
+                    when=when,
+                    from_hdr=from_hdr,
+                    folder=folder,
+                    uid_s=uid_s,
+                    entries=entries,
+                    mail=mail,
+                    uid=uid,
+                )
+                ticket = _maint_mod.extract_ticket_card_title(subject) or ""
+                local_d = _message_local_date(when)
+                if reason == "WOULD_PROCESS":
+                    would += 1
+                    tag = "OK"
+                else:
+                    skipped[reason.split(" (")[0]] = (
+                        skipped.get(reason.split(" (")[0], 0) + 1
+                    )
+                    tag = "SKIP"
+                subj_short = (subject or "")[:90]
+                print(
+                    f"  [{tag}] {folder}:{uid_s} date={local_d} "
+                    f"ticket={ticket!r} | {reason} | {subj_short!r}",
+                    flush=True,
+                )
+    finally:
+        try:
+            mail.logout()
+        except Exception:
+            pass
+    print(
+        f"[maint-audit] summary: would_process={would} "
+        f"skip_reasons={dict(skipped)}",
+        flush=True,
+    )
+    return 0
+
+
 def _find_prior_maintenance_entry(
     entries: list[dict[str, Any]],
     display_subj: str,
@@ -4136,6 +4278,14 @@ class MaintenanceMailWatcher:
 
         subject, when, from_hdr = self._fetch_header_preview(mail, uid)
 
+        if not subject_matches(subject):
+            if subject and MAIL_VERBOSE:
+                print(
+                    f"[maint-mail] skip uid={uid_s} (subject not TINC- / [Service Desk]): {subject!r}",
+                    flush=True,
+                )
+            return
+
         if _maint_mod.from_should_ignore(from_hdr):
             ticket_skip = _maint_mod.extract_ticket_card_title(subject) or ""
             _record_processed(
@@ -4153,15 +4303,7 @@ class MaintenanceMailWatcher:
             )
             return
 
-        if not subject_matches(subject):
-            if subject and MAIL_VERBOSE:
-                print(
-                    f"[maint-mail] skip uid={uid_s} (subject not TINC- / [Service Desk]): {subject!r}",
-                    flush=True,
-                )
-            return
-
-        if not _maint_mod.from_is_allowed_sender(from_hdr):
+        if not _maint_mod.from_is_evolution_maintenance_sender(from_hdr):
             ticket_skip = _maint_mod.extract_ticket_card_title(subject) or ""
             _record_processed(
                 entries,
@@ -4174,7 +4316,7 @@ class MaintenanceMailWatcher:
             mail.uid("store", uid, "+FLAGS", "(\\Seen)")
             if MAIL_VERBOSE:
                 print(
-                    f"[maint-mail] skip uid={uid_s} (sender not allowed): {from_hdr!r}",
+                    f"[maint-mail] skip uid={uid_s} (sender not Evolution): {from_hdr!r}",
                     flush=True,
                 )
             return
@@ -4236,7 +4378,7 @@ class MaintenanceMailWatcher:
             )
             return
 
-        if not maintenance.from_is_allowed_sender(from_addr):
+        if not maintenance.from_is_evolution_maintenance_sender(from_addr):
             ticket_skip = maintenance.extract_ticket_card_title(subject) or ""
             _record_processed(
                 entries,
@@ -4526,6 +4668,17 @@ class MaintenanceMailWatcher:
                 stats["already_done"] += 1
                 continue
             subject, when, from_hdr = self._fetch_header_preview(mail, uid)
+            if _maint_mod.subject_should_ignore(subject):
+                stats["ignored"] += 1
+                if MAIL_VERBOSE:
+                    print(
+                        f"[maint-mail] ignore uid={uid_s} (subject filter): {subject!r}",
+                        flush=True,
+                    )
+                continue
+            if not subject_matches(subject):
+                stats["not_maintenance"] += 1
+                continue
             if _maint_mod.from_should_ignore(from_hdr):
                 stats["ignored"] += 1
                 ticket_skip = _maint_mod.extract_ticket_card_title(subject) or ""
@@ -4538,18 +4691,7 @@ class MaintenanceMailWatcher:
                     ticket_id=ticket_skip,
                 )
                 continue
-            if _maint_mod.subject_should_ignore(subject):
-                stats["ignored"] += 1
-                if MAIL_VERBOSE:
-                    print(
-                        f"[maint-mail] ignore uid={uid_s} (subject filter): {subject!r}",
-                        flush=True,
-                    )
-                continue
-            if not subject_matches(subject):
-                stats["not_maintenance"] += 1
-                continue
-            if not _maint_mod.from_is_allowed_sender(from_hdr):
+            if not _maint_mod.from_is_evolution_maintenance_sender(from_hdr):
                 stats["ignored"] += 1
                 ticket_skip = _maint_mod.extract_ticket_card_title(subject) or ""
                 _record_processed(
@@ -4562,7 +4704,7 @@ class MaintenanceMailWatcher:
                 )
                 if MAIL_VERBOSE:
                     print(
-                        f"[maint-mail] ignore uid={uid_s} (sender not allowed): {from_hdr!r}",
+                        f"[maint-mail] ignore uid={uid_s} (sender not Evolution): {from_hdr!r}",
                         flush=True,
                     )
                 continue
@@ -4624,10 +4766,12 @@ class MaintenanceMailWatcher:
     def _uids_maintenance_subject_search(
         self, mail: imaplib.IMAP4, since: str
     ) -> list[bytes]:
-        """IMAP SUBJECT search — tight tokens only (avoid broad «Service Desk»)."""
+        """IMAP SUBJECT search — broad tokens (Lark servers vary); filter in code."""
         return _merge_uid_lists(
+            _uid_search(mail, f'(SINCE {since} SUBJECT "TINC")'),
             _uid_search(mail, f'(SINCE {since} SUBJECT "TINC-")'),
             _uid_search(mail, f'(SINCE {since} SUBJECT "[Service Desk]")'),
+            _uid_search(mail, f'(SINCE {since} SUBJECT "Service Desk")'),
         )
 
     def _cap_uids_keep_process_window(
@@ -4663,10 +4807,10 @@ class MaintenanceMailWatcher:
             return out
         print(
             f"[maint-mail] no {_process_window_label()} in {len(uids)} subject hit(s); "
-            "not using arbitrary UID slice",
+            f"fallback newest {SUBJECT_SEARCH_MAX}",
             flush=True,
         )
-        return []
+        return uids[-SUBJECT_SEARCH_MAX:]
 
     def _uids_broad_since(self, mail: imaplib.IMAP4, since: str) -> list[bytes]:
         """Fallback when SUBJECT search returns nothing (some Lark setups)."""
@@ -4675,9 +4819,11 @@ class MaintenanceMailWatcher:
             return []
         print(
             f"[maint-mail] broad SINCE {since}: {len(uids)} mail(s), "
-            "filter TINC- / [Service Desk] in code",
+            f"filter in code (cap {POLL_LIMIT})",
             flush=True,
         )
+        if len(uids) > POLL_LIMIT:
+            return uids[-POLL_LIMIT:]
         return uids
 
     def _uids_today_matching(self, mail: imaplib.IMAP4) -> list[bytes]:
@@ -4810,7 +4956,8 @@ class MaintenanceMailWatcher:
                 mail = self._connect()
                 print(
                     f"[maint-mail] connected {MAIL_USER}@{MAIL_IMAP_HOST}:{MAIL_IMAP_PORT} "
-                    f"→ chat {TARGET_CHAT_ID} folders={MAIL_IMAP_FOLDERS!r}",
+                    f"→ chat {TARGET_CHAT_ID} folders={MAIL_IMAP_FOLDERS!r} "
+                    f"process={_process_window_label()} (PROCESS_DAYS={PROCESS_DAYS})",
                     flush=True,
                 )
                 self._poll_today_folders(mail)
@@ -4939,8 +5086,12 @@ if __name__ == "__main__":
     if len(sys.argv) >= 2 and sys.argv[1] == "jenkins-reply-search":
         _needle = sys.argv[2] if len(sys.argv) > 2 else "TESTING BOT"
         raise SystemExit(debug_jenkins_reply_search(_needle))
+    if len(sys.argv) >= 2 and sys.argv[1] == "audit-window":
+        raise SystemExit(audit_maintenance_process_window())
     print(
-        "Usage: python3 maintenance_mail.py jenkins-reply-search [subject]",
+        "Usage:\n"
+        "  python3 maintenance_mail.py audit-window\n"
+        "  python3 maintenance_mail.py jenkins-reply-search [subject]",
         flush=True,
     )
     raise SystemExit(2)
