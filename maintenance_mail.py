@@ -5303,6 +5303,97 @@ def debug_jenkins_reply_search(needle: str = "TESTING BOT") -> int:
             pass
 
 
+def reset_maintenance_ticket(
+    ticket_id: str,
+    *,
+    content_hash: str | None = None,
+) -> int:
+    """
+    Remove one ticket (or one ``content_hash`` row) from ``maintenance.json`` so the
+    watcher can process those IMAP messages again.
+
+    CLI: ``python3 maintenance_mail.py reset-ticket TINC-720579``
+    """
+    ticket = (ticket_id or "").strip().upper()
+    if not ticket:
+        print("[maint-mail] reset-ticket: missing ticket id", flush=True)
+        return 2
+    ch_filter = (content_hash or "").strip().lower()
+
+    with _state_lock:
+        state = _load_state()
+        entries: list[dict[str, Any]] = list(state.get("entries") or [])
+        removed: list[dict[str, Any]] = []
+        kept: list[dict[str, Any]] = []
+        for ent in entries:
+            if not isinstance(ent, dict):
+                continue
+            tid = (ent.get("ticket_id") or "").strip().upper()
+            if tid != ticket and ticket not in (
+                ent.get("title") or ""
+            ).upper():
+                kept.append(ent)
+                continue
+            if ch_filter and str(ent.get("content_hash") or "").lower() != ch_filter:
+                kept.append(ent)
+                continue
+            removed.append(ent)
+        state["entries"] = kept
+
+        removed_uids = {str(e.get("imap_uid") or "") for e in removed if e.get("imap_uid")}
+        removed_mids = {
+            _normalize_message_id(str(e.get("message_id") or ""))
+            for e in removed
+            if (e.get("message_id") or "").strip()
+        }
+        removed_keys = {
+            _content_dedup_key(
+                ticket,
+                str(e.get("content_hash") or ""),
+                str(e.get("title") or ""),
+            )
+            for e in removed
+            if e.get("content_hash")
+        }
+
+        state["handled_uids"] = [
+            u for u in (state.get("handled_uids") or []) if u not in removed_uids
+        ]
+        state["handled_message_ids"] = [
+            m
+            for m in (state.get("handled_message_ids") or [])
+            if _normalize_message_id(m) not in removed_mids
+        ]
+        hk = state.get("handled_content_keys") or []
+        if ch_filter:
+            prefix = f"{ticket}|"
+            state["handled_content_keys"] = [
+                k
+                for k in hk
+                if k not in removed_keys
+                and not (k.startswith(prefix) and k.lower().endswith(ch_filter))
+            ]
+        else:
+            state["handled_content_keys"] = [
+                k for k in hk if not k.startswith(f"{ticket}|")
+            ]
+        _save_state(state)
+
+    print(
+        f"[maint-mail] reset-ticket {ticket}: removed {len(removed)} entr"
+        f"{'y' if len(removed) == 1 else 'ies'}",
+        flush=True,
+    )
+    if removed_uids:
+        print(f"[maint-mail] cleared UIDs: {sorted(removed_uids)}", flush=True)
+    if removed_keys:
+        print(f"[maint-mail] cleared content keys: {len(removed_keys)}", flush=True)
+    if not removed and not removed_keys and ch_filter:
+        print("[maint-mail] no entry matched that content_hash", flush=True)
+        return 1
+    return 0
+
+
 if __name__ == "__main__":
     import sys
 
@@ -5321,9 +5412,17 @@ if __name__ == "__main__":
                 verbose="--quiet" not in _extra,
             )
         )
+    if len(sys.argv) >= 3 and sys.argv[1] in ("reset-ticket", "reset-ticket-state"):
+        _ch = None
+        if "--hash" in sys.argv:
+            _i = sys.argv.index("--hash")
+            if _i + 1 < len(sys.argv):
+                _ch = sys.argv[_i + 1]
+        raise SystemExit(reset_maintenance_ticket(sys.argv[2], content_hash=_ch))
     print(
         "Usage:\n"
         "  python3 maintenance_mail.py audit-window [--fresh] [--quiet]\n"
+        "  python3 maintenance_mail.py reset-ticket TINC-720579 [--hash <sha256>]\n"
         "  python3 maintenance_mail.py jenkins-reply-search [subject]",
         flush=True,
     )
