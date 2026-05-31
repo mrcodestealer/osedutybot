@@ -935,12 +935,13 @@ def sync_wfh_calendar_to_bitable(
     month_changed = state.get("year") != year or state.get("month") != month
 
     source_rows, warnings = fetch_wfh_from_company_calendar(token, year, month)
-    if not source_rows:
+    if not source_rows and not month_changed and not force_resync:
         return {
             "ok": False,
             "skipped": True,
             "year": year,
             "month": month,
+            "month_changed": month_changed,
             "message": "No WFH events found on HRMS WFH Calendar for this month.",
             "warnings": warnings,
         }
@@ -1572,7 +1573,7 @@ def sync_leave_calendar_to_bitable(
     source_rows, meta = collect_leave_source_rows(
         token, year, month, include_bitable=False
     )
-    if not source_rows:
+    if not source_rows and not month_changed and not force_resync:
         return {
             "ok": False,
             "skipped": True,
@@ -1585,8 +1586,7 @@ def sync_leave_calendar_to_bitable(
             "source_rows": 0,
             "warnings": meta.get("warnings") or [],
             "message": (
-                "No leave data found (Bitable empty and Leave2026 sheet not readable). "
-                "Tracking table was not modified."
+                "No leave data found for this month; tracking table was not modified."
             ),
         }
 
