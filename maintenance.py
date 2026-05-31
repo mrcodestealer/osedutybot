@@ -95,10 +95,10 @@ def from_is_allowed_sender(from_addr: str | None) -> bool:
 
 def from_is_evolution_maintenance_sender(from_addr: str | None) -> bool:
     """
-    Evolution notification senders for ``/checkemail`` originals.
+    Evolution maintenance senders for mail watcher / ``/checkemail``.
 
-    Accepts known addresses plus any ``*@evolution.com`` (Service Desk display
-    name is often ``Evolution Service Desk`` with varying local parts).
+    Accepts ``no-reply-evolution@evolution.com``, ``servicedesk@evolution.com``,
+    ``MAINTENANCE_ALLOWED_FROM`` extras, and any ``*@evolution.com``.
     """
     email = _parse_from_email_address(from_addr)
     if not email:

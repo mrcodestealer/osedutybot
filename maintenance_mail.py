@@ -3,8 +3,10 @@
 IMAP watcher for om@hotelstotsenberg.com (or MAINTENANCE_MAIL_USER).
 
 Processes inbox messages whose subject is (or becomes after stripping ``Re:/Fwd:``)
-``TINC-…`` or ``[Service Desk]…``, **and** whose From address is Evolution
-(``no-reply-evolution@evolution.com``, ``servicedesk@evolution.com``, etc.).
+``TINC-…`` or ``[Service Desk]…``. **From** must be Evolution
+(``no-reply-evolution@evolution.com``, ``servicedesk@evolution.com``, or any
+``*@evolution.com``) — om@ / OM-PH copies are skipped. ``Re:/Fw:`` subjects are
+allowed for Evolution senders. Same title + same content is deduped.
 Runs the same pipeline as ``/m``, and posts to a fixed Lark group.
 
 Cancellation notices post a red ``❌ [SD-…] … - Cancelled`` (or ``❌ TINC-… - Cancelled``)
@@ -15,8 +17,8 @@ bodies are ignored.
 State file: ``maintenance.json`` — **CP-launched games only** (``launched_names``),
 with ``start_time`` / ``end_time`` / ``time_of_resolution`` / ``expires_on``.
 Rows are removed after the maintenance **end date** passes (e.g. end 29/May → deleted
-on 30/May local ``MAINTENANCE_MAIL_TZ``). ``Re:/Fw:`` and om@ copies are not stored.
-Non-CP mail is deduped via ``handled_uids`` only.
+on 30/May local ``MAINTENANCE_MAIL_TZ``). om@ outbound copies are not stored.
+Non-CP mail is deduped via ``handled_uids`` / Message-ID / content hash.
 
 IMAP watcher processes **today's mail only** (local ``MAINTENANCE_MAIL_TZ``,
 ``PROCESS_DAYS=1``). Set ``MAINTENANCE_MAIL_PROCESS_DAYS=2`` to include yesterday.
@@ -465,14 +467,12 @@ def _normalize_subject(subject: str) -> str:
 
 def subject_matches(subject: str) -> bool:
     """
-    True for Evolution **original** subjects — ``TINC-`` or ``[Service Desk]`` only.
+    True when subject is (after stripping ``Re:/Fwd:``) ``TINC-`` or ``[Service Desk]``.
 
-    ``Re:/Fw:/Fwd:`` thread copies are ignored (om@ Fw/Re stubs and Evolution
-    forwards). om@ outbound copies are still dropped via :func:`from_should_ignore`.
+    ``Re:/Fw:`` prefixes are **not** rejected here — sender allowlist + om@ filter
+    drop internal copies instead.
     """
     if _maint_mod.subject_should_ignore(subject):
-        return False
-    if _maint_mod.is_reply_or_forward_subject(subject):
         return False
     s = _normalize_subject(subject)
     if not s:
@@ -2589,7 +2589,7 @@ def _score_maintenance_check_candidate(
     subj = str(headers.get("subj") or "")
     from_hdr = str(headers.get("from_hdr") or headers.get("from") or "")
     score = 0
-    if _maint_mod.from_is_allowed_sender(from_hdr):
+    if _maint_mod.from_is_evolution_maintenance_sender(from_hdr):
         score += 120
     elif _maint_mod.from_should_ignore(from_hdr):
         score -= 60
@@ -2864,7 +2864,7 @@ def _schedule_pick_score(
 ) -> tuple[int, int, float]:
     """Higher is better — more tables, Evolution original, older mail."""
     from_hdr = _decode_mime_header(msg.get("From")) or ""
-    from_bonus = 1 if _maint_mod.from_is_allowed_sender(from_hdr) else 0
+    from_bonus = 1 if _maint_mod.from_is_evolution_maintenance_sender(from_hdr) else 0
     raw_date = msg.get("Date") or ""
     try:
         ts = parsedate_to_datetime(raw_date)
@@ -4117,9 +4117,6 @@ def classify_watcher_skip(
     if _maint_mod.subject_should_ignore(subject):
         return "skip:subject_ignore_marker"
 
-    if _maint_mod.is_reply_or_forward_subject(subject):
-        return "skip:reply_or_forward (Re/Fw ignored)"
-
     if not subject_matches(subject):
         return "skip:not_maintenance_subject"
 
@@ -4127,7 +4124,7 @@ def classify_watcher_skip(
         return "skip:from_self (om@ / OM-PH — not Evolution)"
 
     if not _maint_mod.from_is_evolution_maintenance_sender(from_hdr):
-        return f"skip:not_evolution_sender ({from_hdr!r})"
+        return f"skip:not_allowed_sender ({from_hdr!r})"
 
     if when and mail is not None and uid is not None:
         if not _accept_message_date(mail, uid, when):
@@ -4529,7 +4526,7 @@ class MaintenanceMailWatcher:
         if not _maint_mod.from_is_evolution_maintenance_sender(from_hdr):
             if MAIL_VERBOSE:
                 print(
-                    f"[maint-mail] skip uid={uid_s} (sender not Evolution): {from_hdr!r}",
+                    f"[maint-mail] skip uid={uid_s} (sender not allowed): {from_hdr!r}",
                     flush=True,
                 )
             return
@@ -4920,9 +4917,6 @@ class MaintenanceMailWatcher:
                         flush=True,
                     )
                 continue
-            if _maint_mod.is_reply_or_forward_subject(subject):
-                stats["not_maintenance"] += 1
-                continue
             if not subject_matches(subject):
                 stats["not_maintenance"] += 1
                 continue
@@ -4933,7 +4927,7 @@ class MaintenanceMailWatcher:
                 stats["ignored"] += 1
                 if MAIL_VERBOSE:
                     print(
-                        f"[maint-mail] ignore uid={uid_s} (sender not Evolution): {from_hdr!r}",
+                        f"[maint-mail] ignore uid={uid_s} (sender not allowed): {from_hdr!r}",
                         flush=True,
                     )
                 continue
