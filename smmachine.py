@@ -1926,9 +1926,34 @@ def resolve_prod_batch_bot_targets(
                 if dedupe in seen:
                     continue
                 seen.add(dedupe)
-                matched.append({"belongs": belongs, "machine": machine_name})
+                matched.append(
+                    {
+                        "belongs": belongs,
+                        "machine": machine_name,
+                        "status": str(row.get("status") or "").strip(),
+                        "online": str(row.get("online") or "").strip(),
+                        "is_test": bool(row.get("is_test")),
+                    }
+                )
 
     return matched, not_found
+
+
+def _prod_batch_format_matched_line(m: dict) -> str:
+    """One confirm-card bullet — name from live EGM row + status / online."""
+    head = f"{m.get('belongs', '')} — {m.get('machine', '')}"
+    bits: list[str] = []
+    st = (m.get("status") or "").strip()
+    onl = (m.get("online") or "").strip()
+    if st:
+        bits.append(st)
+    if onl:
+        bits.append(onl)
+    if m.get("is_test"):
+        bits.append("TEST")
+    if bits:
+        return f"• {head} — {' / '.join(bits)}"
+    return f"• {head}"
 
 
 def _prod_batch_cleanup_pending() -> None:
@@ -1960,10 +1985,10 @@ def _prod_batch_confirm_card(
         f"**{label}** ({env_code})",
         intro,
         "",
-        f"**Matched ({len(matched)}):**",
+        f"**Matched ({len(matched)})** — names from live EGM (not copied from your message):",
     ]
     for m in matched[:80]:
-        lines.append(f"• {m.get('belongs', '')} — {m.get('machine', '')}")
+        lines.append(_prod_batch_format_matched_line(m))
     if len(matched) > 80:
         lines.append(f"... and {len(matched) - 80} more")
     if not_found:
