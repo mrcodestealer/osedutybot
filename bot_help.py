@@ -156,7 +156,7 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
                 "indigo",
                 [
                     ("/update <keyword>", "Match job → confirm → build", "匹配任务→确认→构建"),
-                    ("/updatemore …", "Multiple updates (same / not same env)", "批量更新"),
+                    ("/updatemore …", "Multiple updates (each UPDATE … line)", "批量更新（每段 UPDATE 行）"),
                     ("/jenkinsupdate …", "Alias of /update", "同上（别名）"),
                     ("/updatejenkins …", "Alias of /update", "同上（别名）"),
                 ],

@@ -16,6 +16,11 @@ _SAME_MARKER = "same"
 _NOT_SAME_MARKERS = frozenset({"not same", "notsame"})
 _SEGMENT_MARKERS = frozenset({_SAME_MARKER, *_NOT_SAME_MARKERS})
 _SKIP_BUILD_LINES = frozenset({"skip build", "skip-build", "skipbuild"})
+# ``UPDATE FPMS UAT MASTER`` / ``update fpms uat branch`` — starts a new segment (no ``same`` / ``not same``).
+_CONFIG_KEY_LINE_RE = re.compile(
+    r"^(?:environment|branch|version|services?)\s*[:\-–—]",
+    re.IGNORECASE,
+)
 
 
 def parse_email_subject_from_line(line: str) -> str | None:
@@ -101,6 +106,22 @@ def _normalize_lines(body: str) -> list[str]:
 
 def _is_segment_marker(line: str) -> bool:
     return (line or "").strip().casefold() in _SEGMENT_MARKERS
+
+
+def _is_update_env_line(line: str) -> bool:
+    """
+    True when a line is a Jenkins job keyword headline (e.g. ``UPDATE FPMS UAT MASTER``).
+
+    Used to split ``/updatemore`` into segments without ``same`` / ``not same``.
+    """
+    s = (line or "").strip()
+    if not s or _is_segment_marker(s):
+        return False
+    if re.match(r"^\s*email\b", s, re.I):
+        return False
+    if _CONFIG_KEY_LINE_RE.match(s):
+        return False
+    return bool(re.match(r"^\s*update\b", s, re.I))
 
 
 def _normalize_updatemore_body(body: str) -> str:
@@ -192,10 +213,13 @@ def parse_updatemore_body(body: str) -> list[dict[str, Any]]:
     Parse ``/updatemore`` message into ordered segments.
 
     Each segment dict:
-      - ``env_line`` — keyword line (e.g. ``update fpms uat``)
+      - ``env_line`` — keyword line (e.g. ``UPDATE FPMS UAT MASTER``)
       - ``lines`` — branch/version/services config lines
       - ``email_subject`` — only when this segment has an explicit ``Email:`` line
       - ``same_as_prev`` — True when preceded by ``same`` (reuse previous **environment** only)
+
+    A new segment starts on each ``UPDATE …`` headline line. Optional ``same`` / ``not same``
+    between blocks still work for backward compatibility.
     """
     lines = _normalize_lines(_normalize_updatemore_body(body))
     lines = _strip_skip_build_lines(lines)
@@ -217,7 +241,7 @@ def parse_updatemore_body(body: str) -> list[dict[str, Any]]:
         j = start
         while j < len(lines):
             ln = lines[j].strip()
-            if _is_segment_marker(ln):
+            if _is_segment_marker(ln) or _is_update_env_line(ln):
                 break
             em = parse_email_subject_from_line(lines[j])
             if em:
@@ -242,7 +266,8 @@ def parse_updatemore_body(body: str) -> list[dict[str, Any]]:
     )
 
     while i < len(lines):
-        marker = lines[i].strip().casefold()
+        raw_ln = lines[i].strip()
+        marker = raw_ln.casefold()
         i += 1
         if marker == _SAME_MARKER:
             if not segments:
@@ -273,8 +298,21 @@ def parse_updatemore_body(body: str) -> list[dict[str, Any]]:
                     "same_as_prev": False,
                 }
             )
+        elif _is_update_env_line(raw_ln):
+            env_line = raw_ln
+            cfg, email, i = consume_config(i, env_line)
+            segments.append(
+                {
+                    "env_line": env_line,
+                    "lines": cfg,
+                    "email_subject": email,
+                    "same_as_prev": False,
+                }
+            )
         else:
-            raise ValueError(f"Expected `same` or `not same`, got: {lines[i - 1]!r}")
+            raise ValueError(
+                f"Expected another `UPDATE …` job line, `same`, or `not same`, got: {lines[i - 1]!r}"
+            )
 
     assign_email_batches(segments)
     return segments
