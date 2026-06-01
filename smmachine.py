@@ -68,14 +68,20 @@ Programmatic read-only export (for dashboards / ``webapp``):
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import re
 import sys
+import threading
 import time
+import uuid
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 from urllib.parse import quote
+
+logger = logging.getLogger(__name__)
 
 _ROOT_DIR = Path(__file__).resolve().parent
 try:
@@ -380,6 +386,8 @@ def smachine_collect_rows_at_backend(
     headless: bool | None = None,
     max_pages: int | None = None,
     timeout_ms: int = 120_000,
+    stall_check: Callable[[], bool] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> tuple[list[dict], str | None]:
     """
     Log in to one explicit EGM origin, optionally dismiss the QAT warning dialog, walk
@@ -415,6 +423,16 @@ def smachine_collect_rows_at_backend(
     trunc_msg: str | None = None
     expected_total: int | None = None
 
+    def _tick(pages: int, rows: int) -> None:
+        if on_progress:
+            on_progress(pages, rows)
+
+    def _maybe_stall(where: str) -> None:
+        if stall_check and stall_check():
+            raise RuntimeError(f"EGM scrape stalled ({where}; no progress detected)")
+
+    _tick(0, 0)
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=hl)
         try:
@@ -427,9 +445,12 @@ def smachine_collect_rows_at_backend(
 
             page.goto(login_url, wait_until="domcontentloaded")
             page.wait_for_timeout(900)
+            _maybe_stall("login page")
 
             pwd_box = page.locator('input[type="password"]').first
             pwd_box.wait_for(state="visible", timeout=min(30_000, timeout_ms))
+            _tick(0, 0)
+            _maybe_stall("login form")
             form = pwd_box.locator("xpath=ancestor::form[1]")
             if form.count():
                 tin = form.locator(
@@ -446,6 +467,8 @@ def smachine_collect_rows_at_backend(
                 page.locator('button[type="submit"], button.el-button--primary').first.click()
 
             page.wait_for_timeout(1800)
+            _tick(0, 0)
+            _maybe_stall("after login")
             if dismiss_warning_dialog:
                 _dismiss_warning_dialog(page, timeout_ms)
             if path not in (page.url or ""):
@@ -455,6 +478,8 @@ def smachine_collect_rows_at_backend(
 
             page.wait_for_selector(".app-container, .filter-container, .el-table", timeout=timeout_ms)
             _wait_table_idle(page, timeout_ms)
+            _tick(0, 0)
+            _maybe_stall("machine table")
 
             _go_first_page(page, timeout_ms=timeout_ms, max_steps=limit)
             _wait_table_idle(page, timeout_ms)
@@ -462,6 +487,7 @@ def smachine_collect_rows_at_backend(
 
             next_clicks = 0
             while True:
+                _maybe_stall("pagination")
                 for mn, test, game_type, st, onl in _collect_visible_table_machine_rows(page, timeout_ms=timeout_ms):
                     collected.append(
                         {
@@ -474,6 +500,8 @@ def smachine_collect_rows_at_backend(
                             "is_test": test,
                         }
                     )
+
+                _tick(next_clicks + 1, len(collected))
 
                 if not _can_pagination_next(page):
                     break
@@ -1063,6 +1091,8 @@ def smachine_collect_all_machine_rows(
     headless: bool | None = None,
     max_pages: int | None = None,
     timeout_ms: int = 120_000,
+    stall_check: Callable[[], bool] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> tuple[list[dict], str | None]:
     """
     Log in to one backend (same routing as CLI), walk the EGM status table from first page forward,
@@ -1101,6 +1131,8 @@ def smachine_collect_all_machine_rows(
         headless=headless,
         max_pages=max_pages,
         timeout_ms=timeout_ms,
+        stall_check=stall_check,
+        on_progress=on_progress,
     )
 
 
@@ -1511,6 +1543,860 @@ def main() -> None:
             time.sleep(afk_sec)
         finally:
             browser.close()
+
+
+# ---------------------------------------------------------------------------
+# Lark bot: /{site}{set|unset}{maintenance|test|maintenancetest|…} + machine lines
+# ---------------------------------------------------------------------------
+
+PROD_BATCH_BOT_CARD_KEY = "prod_batch_set"
+PROD_BATCH_BOT_CARD_CALLBACK_KEYS = frozenset({PROD_BATCH_BOT_CARD_KEY})
+
+_PROD_BATCH_BOT_CMD_RE = re.compile(
+    r"/(?P<site>nwr|np|nch|nc|new|tbr|tbp|mdr|dhs|cp|osm|wf|winford)"
+    r"(?P<op>set|unset)"
+    r"(?P<what>maintenancetest|testmaintenance|maintenance|test)\b",
+    re.I,
+)
+
+_PROD_BATCH_SITE_ENV: dict[str, str] = {
+    "nwr": "NWR",
+    "np": "NWR",
+    "nch": "NCH",
+    "nc": "NCH",
+    "new": "NCH",
+    "tbr": "TBR",
+    "tbp": "TBP",
+    "mdr": "MDR",
+    "dhs": "DHS",
+    "cp": "CP",
+    "osm": "CP",
+    "wf": "WF",
+    "winford": "WF",
+}
+
+_PROD_BATCH_PENDING: dict[str, dict[str, Any]] = {}
+_PROD_BATCH_PENDING_LOCK = threading.Lock()
+_PROD_BATCH_PENDING_TTL_SEC = 600
+
+_PROD_BATCH_JOBS: dict[str, dict[str, Any]] = {}
+_PROD_BATCH_JOBS_LOCK = threading.Lock()
+
+_PROD_BATCH_ENV_TO_SITE: dict[str, str] = {
+    "NWR": "nwr",
+    "NCH": "nch",
+    "TBR": "tbr",
+    "TBP": "tbp",
+    "MDR": "mdr",
+    "DHS": "dhs",
+    "CP": "cp",
+    "WF": "wf",
+}
+
+
+def _prod_batch_action_from_parts(op: str, what: str) -> str | None:
+    op_l = (op or "").strip().lower()
+    what_l = (what or "").strip().lower()
+    set_map = {
+        "maintenance": "set_maint",
+        "test": "set_test",
+        "maintenancetest": "set_both",
+        "testmaintenance": "set_both",
+    }
+    unset_map = {
+        "maintenance": "unset_maint",
+        "test": "unset_test",
+        "maintenancetest": "unset_both",
+        "testmaintenance": "unset_both",
+    }
+    if op_l == "set":
+        return set_map.get(what_l)
+    if op_l == "unset":
+        return unset_map.get(what_l)
+    return None
+
+
+def _prod_batch_machine_env_from_name(machine_name: str) -> str | None:
+    """Match SET PROD MACHINE page (``wm_prod_set`` ``machineEnvFromName``)."""
+    raw = (machine_name or "").strip()
+    if not raw:
+        return None
+    seg = raw.replace("\\", "/").split("/")[-1].strip()
+    alnum = re.sub(r"[^A-Za-z0-9]", "", seg).upper()
+    if re.match(r"^DHS", seg, re.I) or alnum.startswith("DHS"):
+        return "DHS"
+    if re.match(r"^NCH", seg, re.I) or alnum.startswith("NCH"):
+        return "NCH"
+    if re.match(r"^OSM", seg, re.I) or alnum.startswith("OSM"):
+        return "CP"
+    if re.match(r"^CP", seg, re.I) or alnum.startswith("CP"):
+        return "CP"
+    if re.match(r"^MDR", seg, re.I) or alnum.startswith("MDR"):
+        return "MDR"
+    if re.match(r"^TBR", seg, re.I) or alnum.startswith("TBR"):
+        return "TBR"
+    if re.match(r"^TBP", seg, re.I) or alnum.startswith("TBP"):
+        return "TBP"
+    if re.match(r"^NWR", seg, re.I) or alnum.startswith("NWR") or re.search(r"NWR[0-9]", alnum):
+        return "NWR"
+    if re.search(r"winford", raw, re.I):
+        return "WF"
+    if re.match(r"^WF", seg, re.I) or alnum.startswith("WF"):
+        return "WF"
+    return None
+
+
+def _prod_batch_row_matches_env(row: dict, env_code: str) -> bool:
+    env = (env_code or "").strip().upper()
+    if not env or env == "ALL":
+        return True
+    belongs = str(row.get("belongs") or "").upper()
+    machine = str(row.get("name") or row.get("machine") or "")
+    if env == "NWR":
+        return _prod_batch_machine_env_from_name(machine) == "NWR"
+    if env == "CP":
+        return belongs in ("CP", "OSM") or _prod_batch_machine_env_from_name(machine) == "CP"
+    return belongs == env or _prod_batch_machine_env_from_name(machine) == env
+
+
+def _prod_batch_split_target_tokens(line: str) -> list[str]:
+    out: list[str] = []
+    for chunk in re.split(r"[\s,;]+", (line or "").strip()):
+        chunk = chunk.strip()
+        if chunk:
+            out.append(chunk)
+    return out
+
+
+def _prod_batch_strip_mention_text(text: str, mention_keys: Sequence[str]) -> str:
+    t = text or ""
+    for key in mention_keys:
+        t = t.replace(key, "")
+    t = re.sub(r"@_user_\d+", "", t)
+    t = re.sub(r"<[^>]+>", "", t)
+    return t
+
+
+def parse_prod_batch_bot_command(text: str) -> dict[str, Any] | None:
+    m = _PROD_BATCH_BOT_CMD_RE.search(text or "")
+    if not m:
+        return None
+    site = m.group("site").lower()
+    action = _prod_batch_action_from_parts(m.group("op"), m.group("what"))
+    env_code = _PROD_BATCH_SITE_ENV.get(site)
+    if not action or not env_code:
+        return None
+    return {
+        "action": action,
+        "env_code": env_code,
+        "site": site,
+        "match": m,
+    }
+
+
+def is_prod_batch_bot_message(original_text: str, mention_keys: Sequence[str]) -> bool:
+    body = _prod_batch_strip_mention_text(original_text, mention_keys)
+    return parse_prod_batch_bot_command(body) is not None
+
+
+def _prod_batch_scrape_stall_sec() -> int:
+    try:
+        return max(60, int((os.environ.get("PROD_BATCH_SCRAPE_STALL_SEC") or "180").strip()))
+    except ValueError:
+        return 180
+
+
+def _prod_batch_scrape_site_rows(site: str) -> tuple[list[dict], str]:
+    """
+    Live read-only EGM scrape for one PROD backend.
+
+    While ``⏳ Scraping…`` is shown, only a **stall** (no login/table/page progress for
+    ``PROD_BATCH_SCRAPE_STALL_SEC``, default 180s) is treated as a scrape error. Slow but
+    moving scrapes are allowed to run until finished.
+    """
+    sk = (site or "").strip().lower()
+    if not sk:
+        return [], "empty site"
+
+    stall_sec = _prod_batch_scrape_stall_sec()
+    progress = {"last_at": time.monotonic()}
+    progress_lock = threading.Lock()
+
+    def on_progress(_pages: int, _rows: int) -> None:
+        with progress_lock:
+            progress["last_at"] = time.monotonic()
+
+    def stall_check() -> bool:
+        with progress_lock:
+            idle = time.monotonic() - progress["last_at"]
+        return idle >= stall_sec
+
+    try:
+        rows, twarn = smachine_collect_all_machine_rows(
+            sk,
+            headless=True,
+            stall_check=stall_check,
+            on_progress=on_progress,
+            timeout_ms=max(120_000, stall_sec * 1000 + 60_000),
+        )
+        src = f"live EGM ({sk.upper()})"
+        if twarn:
+            src = f"{src} — {twarn}"
+        return rows, src
+    except RuntimeError as exc:
+        if "stalled" in str(exc).lower():
+            return [], (
+                f"Scrape stuck — no progress for {stall_sec}s "
+                f"(EGM login or table may be hung). Try again later."
+            )
+        raise
+    except Exception as exc:
+        logger.exception("prod-batch bot scrape failed for %r", sk)
+        return [], str(exc)
+
+
+def _prod_batch_format_live_summary_md(action: str, summary: dict, *, title_prefix: str) -> str:
+    from prod_machine_batch import ACTION_LABELS
+
+    ok = summary.get("success") or []
+    fail = summary.get("failed") or []
+    lines = [
+        f"**{title_prefix} — {ACTION_LABELS.get(action, action)}**",
+        f"**Done:** {len(ok)}",
+        f"**Not done:** {len(fail)}",
+        "",
+    ]
+    if ok:
+        lines.append("**Done (goal met on EGM):**")
+        for m in ok[:40]:
+            lines.append(f"✓ {m.get('belongs', '')} — {m.get('machine', '')}")
+        if len(ok) > 40:
+            lines.append(f"... and {len(ok) - 40} more")
+    if fail:
+        lines.append("")
+        lines.append("**Not done:**")
+        for m in fail[:40]:
+            err = (m.get("error") or "").strip()
+            suffix = f" ({err})" if err else ""
+            lines.append(f"✗ {m.get('belongs', '')} — {m.get('machine', '')}{suffix}")
+        if len(fail) > 40:
+            lines.append(f"... and {len(fail) - 40} more")
+    return "\n".join(lines)
+
+
+def _prod_batch_cancel_button(job_id: str) -> dict:
+    return {
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": "Cancel"},
+        "type": "danger",
+        "behaviors": [
+            {
+                "type": "callback",
+                "value": {
+                    "k": PROD_BATCH_BOT_CARD_KEY,
+                    "j": job_id,
+                    "a": "job_cancel",
+                },
+            }
+        ],
+    }
+
+
+def _prod_batch_job_is_running(job_id: str) -> bool:
+    with _PROD_BATCH_JOBS_LOCK:
+        job = _PROD_BATCH_JOBS.get(job_id)
+        return bool(job and job.get("status") == "running")
+
+
+def _prod_batch_request_job_cancel(
+    job_id: str,
+    chat_id: str,
+    send_message: Callable[..., Any],
+) -> None:
+    with _PROD_BATCH_JOBS_LOCK:
+        job = _PROD_BATCH_JOBS.get(job_id)
+        if not job:
+            send_message(chat_id, "⏭️ Job not found or already finished.")
+            return
+        if job.get("status") != "running":
+            send_message(chat_id, "⏭️ Job already finished.")
+            return
+        job["cancel_requested"] = True
+    send_message(chat_id, "🛑 Cancel requested — stopping after the current step…")
+
+
+def _prod_batch_send_cancel_live_summary(
+    job_id: str,
+    send_message: Callable[..., Any],
+) -> None:
+    from prod_machine_batch import ACTION_LABELS, live_verify_prod_machines
+
+    with _PROD_BATCH_JOBS_LOCK:
+        job = _PROD_BATCH_JOBS.get(job_id)
+        if not job or job.get("cancel_summary_sent"):
+            return
+        job["cancel_summary_sent"] = True
+        job["status"] = "cancelled"
+        action = str(job.get("action") or "")
+        machines = list(job.get("machines") or [])
+        chat_id = str(job.get("chat_id") or "")
+
+    if not chat_id or not action or not machines:
+        return
+
+    try:
+        summary = live_verify_prod_machines(action, machines)
+    except Exception as exc:
+        logger.exception("prod-batch bot cancel verify %s failed", job_id)
+        summary = {
+            "action": action,
+            "success": [],
+            "failed": [
+                {
+                    "belongs": m.get("belongs", ""),
+                    "machine": m.get("machine") or m.get("name") or "",
+                    "error": str(exc),
+                }
+                for m in machines
+            ],
+        }
+
+    with _PROD_BATCH_JOBS_LOCK:
+        if job_id in _PROD_BATCH_JOBS:
+            _PROD_BATCH_JOBS[job_id]["summary"] = summary
+
+    fail_n = len(summary.get("failed") or [])
+    tpl = "red" if fail_n else "green"
+    _prod_batch_send_lark_md(
+        chat_id,
+        f"Cancelled — {ACTION_LABELS.get(action, action)}",
+        _prod_batch_format_live_summary_md(action, summary, title_prefix="Cancelled"),
+        send_message,
+        header_template=tpl,
+    )
+
+
+def resolve_prod_batch_bot_targets(
+    env_code: str,
+    target_lines: list[str],
+    all_rows: list[dict],
+) -> tuple[list[dict], list[str]]:
+    matched: list[dict] = []
+    not_found: list[str] = []
+    seen: set[tuple[str, str]] = set()
+
+    for line in target_lines:
+        for token in _prod_batch_split_target_tokens(line):
+            try:
+                kind, key = _parse_target_line(token)
+            except ValueError:
+                not_found.append(token)
+                continue
+            hits: list[dict] = []
+            for row in all_rows:
+                if not _prod_batch_row_matches_env(row, env_code):
+                    continue
+                machine_name = str(row.get("name") or row.get("machine") or "").strip()
+                if not machine_name:
+                    continue
+                if _row_text_matches(kind, key, machine_name):
+                    hits.append(row)
+            if not hits:
+                not_found.append(token)
+                continue
+            for row in hits:
+                belongs = str(row.get("belongs") or "").strip()
+                machine_name = str(row.get("name") or row.get("machine") or "").strip()
+                dedupe = (belongs.upper(), machine_name)
+                if dedupe in seen:
+                    continue
+                seen.add(dedupe)
+                matched.append({"belongs": belongs, "machine": machine_name})
+
+    return matched, not_found
+
+
+def _prod_batch_cleanup_pending() -> None:
+    now = time.time()
+    with _PROD_BATCH_PENDING_LOCK:
+        expired = [
+            tok
+            for tok, ent in _PROD_BATCH_PENDING.items()
+            if now - float(ent.get("created_at") or 0) > _PROD_BATCH_PENDING_TTL_SEC
+        ]
+        for tok in expired:
+            _PROD_BATCH_PENDING.pop(tok, None)
+
+
+def _prod_batch_confirm_card(
+    *,
+    token: str,
+    action: str,
+    env_code: str,
+    matched: list[dict],
+    not_found: list[str],
+    data_src: str,
+) -> dict:
+    from prod_machine_batch import ACTION_LABELS, LARK_INTRO
+
+    intro = LARK_INTRO.get(action, action)
+    label = ACTION_LABELS.get(action, action)
+    lines = [
+        f"**{label}** ({env_code})",
+        intro,
+        "",
+        f"**Matched ({len(matched)}):**",
+    ]
+    for m in matched[:80]:
+        lines.append(f"• {m.get('belongs', '')} — {m.get('machine', '')}")
+    if len(matched) > 80:
+        lines.append(f"... and {len(matched) - 80} more")
+    if not_found:
+        lines.append("")
+        lines.append(f"**Not found ({len(not_found)}):**")
+        for nf in not_found[:40]:
+            lines.append(f"• {nf}")
+        if len(not_found) > 40:
+            lines.append(f"... and {len(not_found) - 40} more")
+    if data_src:
+        lines.append("")
+        lines.append(f"_Source: {data_src}_")
+    body_md = "\n".join(lines)
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": f"Confirm — {label}"[:80]},
+        },
+        "body": {
+            "elements": [
+                {"tag": "div", "text": {"tag": "lark_md", "content": body_md[:4000]}},
+                {
+                    "tag": "column_set",
+                    "flex_mode": "none",
+                    "columns": [
+                        {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 1,
+                            "elements": [
+                                {
+                                    "tag": "button",
+                                    "text": {"tag": "plain_text", "content": "Proceed"},
+                                    "type": "primary",
+                                    "behaviors": [
+                                        {
+                                            "type": "callback",
+                                            "value": {
+                                                "k": PROD_BATCH_BOT_CARD_KEY,
+                                                "t": token,
+                                                "a": "proceed",
+                                            },
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                        {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 1,
+                            "elements": [
+                                {
+                                    "tag": "button",
+                                    "text": {"tag": "plain_text", "content": "Cancel"},
+                                    "type": "default",
+                                    "behaviors": [
+                                        {
+                                            "type": "callback",
+                                            "value": {
+                                                "k": PROD_BATCH_BOT_CARD_KEY,
+                                                "t": token,
+                                                "a": "cancel",
+                                            },
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                    ],
+                },
+            ]
+        },
+    }
+
+
+def _prod_batch_send_lark_card(
+    chat_id: str,
+    card: dict,
+    send_message: Callable[..., Any],
+) -> None:
+    send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
+
+
+def _prod_batch_send_lark_md(
+    chat_id: str,
+    title: str,
+    body_md: str,
+    send_message: Callable[..., Any],
+    *,
+    header_template: str | None = None,
+    job_id: str | None = None,
+) -> None:
+    header: dict[str, Any] = {"title": {"tag": "plain_text", "content": title[:80]}}
+    if header_template:
+        header["template"] = header_template
+    elements: list[dict] = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": body_md[:4000]}},
+    ]
+    if job_id and _prod_batch_job_is_running(job_id):
+        elements.append(
+            {
+                "tag": "action",
+                "actions": [_prod_batch_cancel_button(job_id)],
+            }
+        )
+    card = {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": header,
+        "body": {"elements": elements},
+    }
+    _prod_batch_send_lark_card(chat_id, card, send_message)
+
+
+def _run_prod_batch_bot_job_thread(
+    job_id: str,
+    chat_id: str,
+    action: str,
+    remark: str,
+    machines: list[dict],
+    send_message: Callable[..., Any],
+) -> None:
+    from prod_machine_batch import ACTION_LABELS, run_prod_batch_job
+
+    with _PROD_BATCH_JOBS_LOCK:
+        if job_id not in _PROD_BATCH_JOBS:
+            _PROD_BATCH_JOBS[job_id] = {
+                "status": "running",
+                "action": action,
+                "machines": machines,
+                "chat_id": chat_id,
+                "cancel_requested": False,
+                "cancel_summary_sent": False,
+            }
+        else:
+            _PROD_BATCH_JOBS[job_id]["status"] = "running"
+
+    def cancel_check() -> bool:
+        with _PROD_BATCH_JOBS_LOCK:
+            return bool(_PROD_BATCH_JOBS.get(job_id, {}).get("cancel_requested"))
+
+    def manual_stop_check() -> bool:
+        with _PROD_BATCH_JOBS_LOCK:
+            return bool(_PROD_BATCH_JOBS.get(job_id, {}).get("manual_stop"))
+
+    def on_manual(summary: dict) -> None:
+        fail_n = len(summary.get("failed") or [])
+        _prod_batch_send_lark_md(
+            chat_id,
+            f"Manual needed — {ACTION_LABELS.get(action, action)}",
+            (
+                f"Some machines failed ({fail_n}) — may have players inside.\n"
+                "Finish manually on EGM, then check live status.\n\n"
+                "Tap **Cancel** below to stop retries."
+            ),
+            send_message,
+            header_template="red",
+            job_id=job_id,
+        )
+
+    def on_phase_retry(step_verify: str, attempt: int, failed: list) -> None:
+        from prod_machine_batch import PHASE_LABELS
+
+        label = PHASE_LABELS.get(step_verify, step_verify)
+        lines = [
+            f"**{label} — failed ({len(failed)} machine(s))**",
+            "Occupy / game is currently running — will retry when the row allows batch action.",
+            f"Will retry automatically (attempt {attempt}) unless you tap **Cancel** below.",
+            "",
+        ]
+        for m in failed[:30]:
+            nm = m.get("machine") or m.get("name") or ""
+            err = (m.get("error") or "").strip()
+            suffix = f" — {err}" if err else ""
+            lines.append(f"• {m.get('belongs', '')} — {nm}{suffix}")
+        if len(failed) > 30:
+            lines.append(f"... and {len(failed) - 30} more")
+        _prod_batch_send_lark_md(
+            chat_id,
+            f"{label} — retry {attempt}",
+            "\n".join(lines),
+            send_message,
+            header_template="red",
+            job_id=job_id,
+        )
+
+    cancelled = False
+    try:
+        summary = run_prod_batch_job(
+            action,
+            machines,
+            remark=remark,
+            cancel_check=cancel_check,
+            manual_stop_check=manual_stop_check,
+            on_manual_stop=on_manual,
+            on_phase_retry=on_phase_retry,
+        )
+        with _PROD_BATCH_JOBS_LOCK:
+            cancelled = bool(_PROD_BATCH_JOBS.get(job_id, {}).get("cancel_requested"))
+            if cancelled:
+                _PROD_BATCH_JOBS[job_id]["status"] = "cancelled"
+            else:
+                _PROD_BATCH_JOBS[job_id]["status"] = "done"
+                _PROD_BATCH_JOBS[job_id]["summary"] = summary
+
+        if cancelled:
+            _prod_batch_send_cancel_live_summary(job_id, send_message)
+            return
+
+        ok_n = len(summary.get("success") or [])
+        fail_n = len(summary.get("failed") or [])
+        lines = [
+            f"**SUMMARY — {ACTION_LABELS.get(action, action)}**",
+            f"Success: {ok_n}",
+            f"Failed: {fail_n}",
+            "",
+        ]
+        for m in (summary.get("success") or [])[:30]:
+            lines.append(f"✓ {m.get('belongs')} — {m.get('machine')}")
+        if fail_n:
+            lines.append("")
+            lines.append("**Still failed:**")
+        for m in (summary.get("failed") or [])[:30]:
+            err = (m.get("error") or "").strip()
+            suffix = f" ({err})" if err else ""
+            lines.append(f"✗ {m.get('belongs')} — {m.get('machine')}{suffix}")
+        if fail_n > 30:
+            lines.append(f"... and {fail_n - 30} more failed")
+        tpl = "red" if fail_n else "green"
+        title = (
+            f"Failed — {ACTION_LABELS.get(action, action)}"
+            if fail_n
+            else f"Success — {ACTION_LABELS.get(action, action)}"
+        )
+        _prod_batch_send_lark_md(chat_id, title, "\n".join(lines), send_message, header_template=tpl)
+    except Exception as exc:
+        logger.exception("prod-batch bot job %s failed", job_id)
+        with _PROD_BATCH_JOBS_LOCK:
+            if job_id in _PROD_BATCH_JOBS:
+                _PROD_BATCH_JOBS[job_id]["status"] = "done"
+        _prod_batch_send_lark_md(
+            chat_id,
+            f"Failed — {ACTION_LABELS.get(action, action)}",
+            f"**Job error**\n\n{str(exc)[:3500]}",
+            send_message,
+            header_template="red",
+        )
+
+
+def _prod_batch_bot_prepare_confirm(
+    parsed: dict[str, Any],
+    target_lines: list[str],
+    *,
+    chat_id: str,
+    send_message: Callable[..., Any],
+) -> None:
+    env_code = parsed["env_code"]
+    site = _PROD_BATCH_ENV_TO_SITE.get(env_code) or parsed.get("site") or ""
+    rows, data_src = _prod_batch_scrape_site_rows(site)
+    if "stuck" in data_src.lower() or "stalled" in data_src.lower():
+        send_message(chat_id, f"❌ {data_src}")
+        return
+    if not rows:
+        if data_src and data_src not in ("empty site",):
+            send_message(
+                chat_id,
+                f"❌ Could not load machines from live EGM ({env_code}). {data_src}",
+            )
+        else:
+            send_message(chat_id, f"❌ Live EGM ({env_code}) returned no machines.")
+        return
+
+    matched, not_found = resolve_prod_batch_bot_targets(env_code, target_lines, rows)
+    if not matched:
+        nf = ", ".join(not_found[:20]) if not_found else "(none parsed)"
+        send_message(chat_id, f"❌ No machines matched for **{env_code}**. Not found: {nf}")
+        return
+
+    token = uuid.uuid4().hex[:16]
+    with _PROD_BATCH_PENDING_LOCK:
+        _PROD_BATCH_PENDING[token] = {
+            "action": parsed["action"],
+            "env_code": env_code,
+            "machines": matched,
+            "not_found": not_found,
+            "chat_id": chat_id,
+            "created_at": time.time(),
+        }
+
+    card = _prod_batch_confirm_card(
+        token=token,
+        action=parsed["action"],
+        env_code=env_code,
+        matched=matched,
+        not_found=not_found,
+        data_src=data_src,
+    )
+    _prod_batch_send_lark_card(chat_id, card, send_message)
+
+
+def handle_prod_batch_bot_command(
+    original_text: str,
+    mention_keys: Sequence[str],
+    *,
+    chat_id: str,
+    send_message: Callable[..., Any],
+) -> tuple[bool, str | None]:
+    """
+    Parse bot message, live-scrape EGM for the command site, send confirm card.
+    Returns ``(handled, optional_error_text)``.
+    """
+    _prod_batch_cleanup_pending()
+    body = _prod_batch_strip_mention_text(original_text, mention_keys)
+    parsed = parse_prod_batch_bot_command(body)
+    if not parsed:
+        return False, None
+
+    m = parsed["match"]
+    first_line = body.splitlines()[0] if body.splitlines() else body
+    rest_first = first_line[m.end() :].strip()
+
+    target_lines: list[str] = []
+    if rest_first:
+        target_lines.append(rest_first)
+    for ln in body.splitlines()[1:]:
+        ln = ln.strip()
+        if ln:
+            target_lines.append(ln)
+
+    if not target_lines:
+        from prod_machine_batch import ACTION_LABELS
+
+        site = parsed["site"]
+        label = ACTION_LABELS.get(parsed["action"], parsed["action"])
+        usage = (
+            f"❌ Usage: `/{site}{'set' if 'set_' in parsed['action'] else 'unset'}…` "
+            f"then machine name(s) on the next lines.\n\n"
+            f"Example:\n"
+            f"@bot /{site}setmaintenancetest\n"
+            f"NCH1422\n"
+            f"1423\n\n"
+            f"Action: {label}"
+        )
+        return True, usage
+
+    env_code = parsed["env_code"]
+    send_message(
+        chat_id,
+        f"⏳ 正在读取 live EGM（**{env_code}**）… 慢没关系，只有卡住无进展才会报错",
+    )
+    threading.Thread(
+        target=_prod_batch_bot_prepare_confirm,
+        args=(parsed, target_lines),
+        kwargs={"chat_id": chat_id, "send_message": send_message},
+        daemon=True,
+    ).start()
+    return True, None
+
+
+def handle_prod_batch_card_callback(
+    parsed: dict[str, Any],
+    *,
+    chat_id: str,
+    send_message: Callable[..., Any],
+) -> bool:
+    key = str(parsed.get("k") or "").strip().lower()
+    if key != PROD_BATCH_BOT_CARD_KEY:
+        return False
+
+    job_id = str(parsed.get("j") or "").strip()
+    action_btn = str(parsed.get("a") or "").strip().lower()
+
+    if job_id and action_btn == "job_cancel":
+        _prod_batch_request_job_cancel(job_id, chat_id, send_message)
+        return True
+
+    token = str(parsed.get("t") or "").strip()
+    if not token:
+        send_message(chat_id, "⏭️ This confirmation expired or was already handled. Send the command again.")
+        return True
+
+    _prod_batch_cleanup_pending()
+
+    with _PROD_BATCH_PENDING_LOCK:
+        pending = _PROD_BATCH_PENDING.pop(token, None)
+
+    if not pending:
+        send_message(chat_id, "⏭️ This confirmation expired or was already handled. Send the command again.")
+        return True
+
+    if action_btn == "cancel":
+        send_message(chat_id, "Cancelled — no machines were changed.")
+        return True
+
+    if action_btn != "proceed":
+        send_message(chat_id, "❌ Unknown action on confirmation card.")
+        return True
+
+    machines = pending.get("machines") or []
+    action = str(pending.get("action") or "").strip()
+    if not machines or not action:
+        send_message(chat_id, "❌ Confirmation data missing. Send the command again.")
+        return True
+
+    from prod_machine_batch import ACTION_LABELS, LARK_INTRO
+
+    run_job_id = uuid.uuid4().hex
+    intro = LARK_INTRO.get(action, action)
+    lines = [
+        f"**{ACTION_LABELS.get(action, action)}** — started",
+        intro,
+        "",
+        "Tap **Cancel** below to stop and receive a live EGM done / not-done summary.",
+        "",
+    ]
+    for m in machines[:40]:
+        lines.append(f"• {m.get('belongs', '')} — {m.get('machine', '')}")
+    if len(machines) > 40:
+        lines.append(f"... and {len(machines) - 40} more")
+
+    with _PROD_BATCH_JOBS_LOCK:
+        _PROD_BATCH_JOBS[run_job_id] = {
+            "status": "running",
+            "action": action,
+            "machines": machines,
+            "chat_id": chat_id,
+            "cancel_requested": False,
+            "cancel_summary_sent": False,
+        }
+
+    _prod_batch_send_lark_md(
+        chat_id,
+        f"Started — {ACTION_LABELS.get(action, action)}",
+        "\n".join(lines),
+        send_message,
+        header_template="blue",
+        job_id=run_job_id,
+    )
+
+    threading.Thread(
+        target=_run_prod_batch_bot_job_thread,
+        args=(run_job_id, chat_id, action, "", machines, send_message),
+        daemon=True,
+    ).start()
+    return True
 
 
 if __name__ == "__main__":

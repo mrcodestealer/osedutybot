@@ -57,6 +57,7 @@ import cp
 import tbp
 import dhs
 import mdr
+import smmachine
 
 import p0
 import p1
@@ -2648,6 +2649,12 @@ def lark_webhook():
                             daemon=True,
                         ).start()
                     return
+                if isinstance(parsed_ca, dict) and smmachine.handle_prod_batch_card_callback(
+                    parsed_ca,
+                    chat_id=chat_id_ca,
+                    send_message=send_message,
+                ):
+                    return
                 try:
                     import offsetleave as _offsetleave
 
@@ -3772,6 +3779,20 @@ def lark_webhook():
             msg_type="interactive",
         )
         return _lark_im_done()
+    elif smmachine.is_prod_batch_bot_message(original_text, mention_keys):
+        if chat_type == "group" and not bot_mentioned:
+            print("⏭️ prod-batch command ignored (bot not @mentioned in group)", flush=True)
+            return _lark_im_done()
+        handled_pb, pb_reply = smmachine.handle_prod_batch_bot_command(
+            original_text,
+            mention_keys,
+            chat_id=chat_id,
+            send_message=send_message,
+        )
+        if handled_pb:
+            if pb_reply:
+                send_message(chat_id, pb_reply)
+            return _lark_im_done()
     elif clean_text.lower().startswith('/nch'):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
