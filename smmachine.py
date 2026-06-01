@@ -1660,12 +1660,27 @@ def _prod_batch_row_matches_env(row: dict, env_code: str) -> bool:
 
 
 def _prod_batch_split_target_tokens(line: str) -> list[str]:
-    out: list[str] = []
-    for chunk in re.split(r"[\s,;]+", (line or "").strip()):
-        chunk = chunk.strip()
-        if chunk:
-            out.append(chunk)
-    return out
+    """
+    One pasted machine name per line (may contain spaces, e.g. ``5 Dragons-NWR2113``).
+
+    Only ``,`` / ``;`` split multiple names on the same line — never split on whitespace
+    inside a display name (otherwise ``5`` matches every machine with ``5`` in the title).
+    """
+    line = (line or "").strip()
+    if not line:
+        return []
+    if re.search(r"[,;]", line):
+        return [p.strip() for p in re.split(r"[,;]+", line) if p.strip()]
+    # Full display name with spaces + asset digits — keep whole line.
+    if re.search(r"(?:NWR|MDR|NCH|TBR|TBP|DHS|CP|OSM|WF|WINFORD)\s*-?\s*\d", line, re.I):
+        return [line]
+    if re.search(r"\d", line) and len(line) > 12:
+        return [line]
+    # Same-line shorthand: ``NWR2113 NWR2114`` or ``2113 2114``
+    parts = line.split()
+    if len(parts) > 1:
+        return parts
+    return [line]
 
 
 def _prod_batch_strip_mention_text(text: str, mention_keys: Sequence[str]) -> str:
