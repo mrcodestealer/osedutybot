@@ -1,0 +1,4 @@
+period,start,end,sharpe,return_pct,max_dd_pct,trades,trades_per_month,win_rate_pct,profit_factor,final_equity
+FULL DATASET,2004-06-17,2025-07-09,0.3922,608.41,-63.34,2791,11.05,51.5,1.102,354.2
+Development (<unseen),2004-06-17,2024-12-31,0.3481,396.74,-63.34,2722,11.05,51.2,1.071,248.37
+UNSEEN (holdout),2025-01-01,2025-07-09,2.5249,201.92,-19.55,69,11.11,60.9,1.584,150.96

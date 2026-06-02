@@ -1,0 +1,2 @@
+strategy,params,holdout_sharpe,holdout_tpm,holdout_return
+donchian_break,"StrategyParams(strategy='donchian_break', atr_mult_sl=2.0, partial_r=2.0, trail_atr_frac=0.1, cooldown_bars=4, ema_fast=20, ema_slow=50, vol_z=1.0, donchian=15, rsi_entry=40.0, long_only=False)",2.2819227883964706,10.749981981981982,402.7224714285691
