@@ -5,9 +5,31 @@ import time
 import logging
 import json
 import os
+import sys
+
+STRATEGY_NAME = "allweather"
+STRATEGY_VERSION = "2.0"
 
 # ----------------------------- 配置 (allweather — 与 backtest.py 一致) -----------------------------
-oanda_mt5_path = r'/Users/junchen/Library/Application Support/net.metaquotes.wine.metatrader5/drive_c/Program Files/MetaTrader 5/terminal64.exe'
+def _default_mt5_path() -> str | None:
+    env = os.environ.get("MT5_TERMINAL_PATH")
+    if env and os.path.isfile(env):
+        return env
+    if sys.platform == "win32":
+        for p in (
+            r"C:\Program Files\MetaTrader 5\terminal64.exe",
+            r"C:\Program Files\OANDA MetaTrader Second\terminal64.exe",
+            r"C:\Program Files\OANDA - MetaTrader 5\terminal64.exe",
+        ):
+            if os.path.isfile(p):
+                return p
+        return None  # Windows: auto-detect installed terminal
+    return (
+        r"/Users/junchen/Library/Application Support/net.metaquotes.wine.metatrader5"
+        r"/drive_c/Program Files/MetaTrader 5/terminal64.exe"
+    )
+
+MT5_TERMINAL_PATH = _default_mt5_path()
 
 server = "OANDA_Global-Demo-1"
 login = 1715532098
@@ -40,8 +62,12 @@ logging.basicConfig(filename='strategy_logGold.log', level=logging.INFO,
 
 # ----------------------------- MT5 基础 -----------------------------
 def initialize_mt5():
-    if not mt5.initialize(oanda_mt5_path):
+    ok = mt5.initialize(MT5_TERMINAL_PATH) if MT5_TERMINAL_PATH else mt5.initialize()
+    if not ok:
         print("Failed to initialize MetaTrader 5")
+        if MT5_TERMINAL_PATH:
+            print(f"  Tried path: {MT5_TERMINAL_PATH}")
+        print("  Set env MT5_TERMINAL_PATH to terminal64.exe or install MT5")
         mt5.shutdown()
         return False
     authorized = mt5.login(login, password, server)
@@ -443,7 +469,12 @@ def main():
         else:
             print(f"Restored active order: {ticket} {direction} @ {entry_price}")
 
-    print("Strategy: allweather | 1H signals | long+short | 0.002 lots")
+    print("=" * 70)
+    print(f"gold.py  {STRATEGY_NAME.upper()} ONLY  v{STRATEGY_VERSION}")
+    print("Expected log: 'AllWeather | bar=... ADX=... RSI=... signal=...'")
+    print("If you see GoldenCross / Market Structure → you are running OLD gold.py")
+    print("=" * 70)
+    print(f"Strategy: {STRATEGY_NAME} | 1H signals | long+short | {VOLUME} lots")
     print(f"Params: donchian={DONCHIAN} adx={ADX_THRESH} rsi={RSI_ENTRY} "
           f"atr_sl={ATR_MULTIPLIER_SL} cooldown={COOLDOWN_BARS}h")
 
