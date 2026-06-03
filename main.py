@@ -3612,15 +3612,64 @@ def lark_webhook():
         send_message(chat_id, reply)
         return _lark_im_done()
     elif re.search(
-        r"(?:^|\s)/(maintenance|maintenanceshort|m)\s+",
+        r"(?:^|\s)/m\s+",
         clean_text,
         re.I,
     ):
-        # Do not use ^... on original_text: Lark often prefixes <at>...</at> or
-        # mention keys before “/m …”, so the body must be sliced after the
-        # first “/m ” (or /maintenance) in the raw message.
+        # EVO multi-ticket batch paste — CP filter, outbound email, result card.
+        cmd_m = re.search(r"/m\s+", original_text, re.IGNORECASE | re.DOTALL)
+        email_text = original_text[cmd_m.end() :].strip() if cmd_m else ""
+        if email_text.startswith('"') and email_text.endswith('"'):
+            email_text = email_text[1:-1]
+        if not email_text:
+            send_message(
+                chat_id,
+                "请粘贴 EVO 批量维护通知（`※SD-xxxxx※` + `====` 分隔）。\n"
+                "单封邮件解析请用 `/ms` 或 `/maintenance`。",
+            )
+            return _lark_im_done()
+        if not maintenance.is_evo_sd_batch_paste(email_text):
+            send_message(
+                chat_id,
+                "⚠️ 未识别为 EVO 批量维护格式。请粘贴含 `※SD-xxxxx※` 的多条通知，"
+                "或使用 `/ms` 解析单封 Service Desk 邮件。",
+            )
+            return _lark_im_done()
+        try:
+            token = get_tenant_access_token()
+            batch = maintenance.process_evo_sd_batch_maintenance(email_text, token)
+            import maintenance_mail as _maint_mail
+
+            if batch.get("email_sent"):
+                _maint_mail.send_evo_batch_maintenance_email(
+                    subject=batch["email_subject"],
+                    body=batch["email_body"],
+                )
+                fwd_chat = (
+                    os.getenv("MAINTENANCE_MAIL_TARGET_CHAT_ID", "").strip()
+                    or os.getenv("maintenance_mail_target_chat_id", "").strip()
+                )
+                if fwd_chat:
+                    fwd_body = (batch.get("email_body") or "").strip()
+                    if len(fwd_body) > 3800:
+                        fwd_body = fwd_body[:3800] + "\n…"
+                    send_message(fwd_chat, fwd_body)
+            send_message(
+                chat_id,
+                json.dumps(batch["result_card"], ensure_ascii=False),
+                msg_type="interactive",
+            )
+        except Exception as ex:
+            send_message(chat_id, f"❌ EVO 批量 `/m` 处理失败: `{ex}`")
+        return _lark_im_done()
+    elif re.search(
+        r"(?:^|\s)/(maintenance|maintenanceshort|ms)\s+",
+        clean_text,
+        re.I,
+    ):
+        # Single pasted email — preview card only (no outbound SMTP).
         cmd_m = re.search(
-            r"/(maintenance|maintenanceshort|m)\s+",
+            r"/(maintenance|maintenanceshort|ms)\s+",
             original_text,
             re.IGNORECASE | re.DOTALL,
         )
@@ -3632,7 +3681,7 @@ def lark_webhook():
             email_text = ""
         if email_text:
             token = get_tenant_access_token()
-            subj = maintenance.parse_subject_from_pasted_email(email_text) or "Maintenance (/m)"
+            subj = maintenance.parse_subject_from_pasted_email(email_text) or "Maintenance (/ms)"
             resolved_subj = maintenance.resolve_maintenance_subject(subj, email_text)
             if maintenance.subject_should_ignore(resolved_subj):
                 send_message(
@@ -3749,7 +3798,8 @@ def lark_webhook():
             send_message(
                 chat_id,
                 "Please paste email content after the command.\n"
-                "Examples: `/m …`, `/maintenance …`, `/maintenanceshort …`",
+                "Examples: `/ms …`, `/maintenance …`, `/maintenanceshort …` "
+                "(EVO batch + email: `/m …`)",
             )
         return _lark_im_done()
     elif cmd == "/checkemail":

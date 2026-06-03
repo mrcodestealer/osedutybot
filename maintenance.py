@@ -4276,6 +4276,339 @@ def parse_subject_from_pasted_email(text: str) -> str | None:
     return find_tinc_reference_line(text) or find_service_desk_reference_line(text)
 
 
+# ---- EVO Service Desk batch paste (@EVO Bot /m) ----
+
+_EVO_SD_BATCH_MARKER_RE = re.compile(r"※\s*SD-\d+", re.IGNORECASE)
+_EVO_SD_TICKET_RE = re.compile(r"※\s*(SD-\d+)\s*※", re.IGNORECASE)
+def is_evo_sd_batch_paste(text: str) -> bool:
+    """True for multi-block Evolution paste (``※SD-xxxxx※`` + ``====`` separators)."""
+    hay = (text or "").replace("\r\n", "\n")
+    if not hay.strip():
+        return False
+    markers = _EVO_SD_BATCH_MARKER_RE.findall(hay)
+    if not markers:
+        return False
+    if "================================" in hay or len(markers) >= 2:
+        return True
+    return bool(
+        re.search(r"Dear Casino Team", hay, re.I)
+        and re.search(r"定期维护通知", hay)
+        and re.search(r"following tables will be unavailable", hay, re.I)
+    )
+
+
+def _clean_evo_game_line(line: str) -> str:
+    t = (line or "").strip()
+    t = re.sub(r"^[\s○●⭐\u2b50\ufe0f\ufe0e]+", "", t, flags=re.IGNORECASE)
+    return t.strip()
+
+
+def split_evo_sd_batch_blocks(text: str) -> list[str]:
+    hay = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not hay:
+        return []
+    parts = re.split(r"\n={10,}\s*\n", hay)
+    blocks: list[str] = []
+    for part in parts:
+        p = part.strip()
+        if _EVO_SD_BATCH_MARKER_RE.search(p):
+            blocks.append(p)
+    if blocks:
+        return blocks
+    if _EVO_SD_BATCH_MARKER_RE.search(hay):
+        return [hay]
+    return []
+
+
+def _evo_block_ticket_id(block: str) -> str:
+    m = _EVO_SD_TICKET_RE.search(block or "")
+    if m:
+        return m.group(1).upper()
+    m2 = re.search(r"(SD-\d+)", block or "", re.I)
+    return m2.group(1).upper() if m2 else "SD-?"
+
+
+def _evo_block_game_lists(block: str) -> tuple[list[str], list[str]]:
+    """English + Chinese table names (order preserved; EN used for CP check)."""
+    hay = (block or "").replace("\r\n", "\n")
+    en: list[str] = []
+    zh: list[str] = []
+    m_en = re.search(
+        r"following tables will be unavailable:\s*\n(.*?)"
+        r"(?=\n\s*●\s*Start\s*Time:|\n\s*Start\s*Time:|\n-{10,}|\n※\s*SD-|\Z)",
+        hay,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if m_en:
+        for line in m_en.group(1).splitlines():
+            chunk = _clean_evo_game_line(line)
+            if chunk and _is_plausible_game_name(chunk):
+                en.append(chunk)
+    m_zh = re.search(
+        r"受影响游戏[：:]\s*\n(.*?)(?=\n\s*●\s*影响状况|\Z)",
+        hay,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if m_zh:
+        for line in m_zh.group(1).splitlines():
+            chunk = _clean_evo_game_line(line)
+            if chunk and not re.match(r"^[\.\-–—]+$", chunk):
+                zh.append(chunk)
+    return en, zh
+
+
+def _evo_block_field(block: str, label: str) -> str:
+    pat = rf"●\s*{re.escape(label)}\s*:\s*(.+?)(?:\n|$)"
+    m = re.search(pat, block or "", re.IGNORECASE)
+    return m.group(1).strip() if m else ""
+
+
+def _evo_block_downtime_utc(block: str) -> tuple[str, str]:
+    m = re.search(
+        r"downtime from\s+(.+?)\s+UTC\s+till\s+(.+?)\s+UTC",
+        block or "",
+        re.IGNORECASE,
+    )
+    if not m:
+        return "", ""
+    return m.group(1).strip(), m.group(2).strip()
+
+
+def _evo_block_beijing_line(block: str) -> str:
+    for label in ("北京时间", "UTC+8 Time"):
+        v = _evo_block_field(block, label)
+        if v:
+            return v
+    m = re.search(
+        r"●\s*北京时间[：:]\s*(.+?)(?:\n|$)",
+        block or "",
+        re.IGNORECASE,
+    )
+    return m.group(1).strip() if m else ""
+
+
+def _evo_game_display_label(en: str, zh: str | None) -> str:
+    en = (en or "").strip()
+    zh = (zh or "").strip()
+    if zh and zh != en:
+        return f"{en}({zh})"
+    return en
+
+
+def _evo_cp_launched_set(
+    english_names: list[str], tenant_access_token: str | None
+) -> set[str]:
+    tok = (tenant_access_token or "").strip()
+    names = [str(x).strip() for x in english_names if str(x).strip()]
+    if not names:
+        return set()
+    _ok, launched = gamelist_launched_for_candidates(names, tok)
+    return {_cell_norm(x).replace(" ", "") for x in launched}
+
+
+def _format_evo_outbound_block(
+    *,
+    ticket: str,
+    utc_from: str,
+    utc_till: str,
+    pairs: list[tuple[str, str]],
+    utc8_line: str,
+    reason: str,
+    beijing_line: str,
+) -> str:
+    en_games = "\n".join(f"⭐ {en}" for en, _zh in pairs)
+    zh_games = "\n".join(f"⭐ {zh}" for _en, zh in pairs)
+    utc8_en = utc8_line or beijing_line
+    if utc8_en and "UTC +8" not in utc8_en.upper():
+        utc8_en = f"{utc8_en} UTC +8" if "UTC" not in utc8_en.upper() else utc8_en
+    reason_en = reason or "Equipment maintenance"
+    return (
+        f"================================\n\n"
+        f"※{ticket}※\n\n"
+        f"Dear Casino Team,\n\n"
+        f"This is to inform you that an exceptional maintenance is going to take place "
+        f"with a downtime from {utc_from} UTC till {utc_till} UTC, during which the "
+        f"following tables will be unavailable:\n\n"
+        f"{en_games}\n\n"
+        f"● UTC+8 Time: {utc8_en}\n\n"
+        f"● Reason: {reason_en}\n\n"
+        f"● Table availability: Affected\n\n"
+        f"We apologize for the inconvenience.\n\n"
+        f"------------------------------------------------\n\n"
+        f"※{ticket}定期维护通知※\n\n"
+        f"亲爱的团队您好，\n\n"
+        f"我司进行列表时间进行定期维护，该部分游戏将受到影响\n\n"
+        f"● 受影响游戏：\n\n"
+        f"{zh_games}\n\n"
+        f"● 影响状况：玩家无法进行游戏\n\n"
+        f"● 北京时间：{beijing_line}\n\n"
+        f"● 维护事由：{reason_en}\n\n"
+        f"因本通知为统一发出，如以上内容包含不属于贵司的赌桌，敬请直接忽略该维护项目。"
+        f"造成您的不便，希望您能谅解。\n\n"
+        f"================================\n"
+    )
+
+
+def _evo_email_subject_date(blocks_out: list[str]) -> str:
+    dates: list[str] = []
+    for block in blocks_out:
+        uf, _ut = _evo_block_downtime_utc(block)
+        m = re.match(r"(\d{4}-\d{2}-\d{2})", uf or "")
+        if m:
+            dates.append(m.group(1))
+    if dates:
+        return min(dates).replace("-", "")
+    return datetime.now(_display_tz()).strftime("%Y%m%d")
+
+
+def build_evo_batch_result_card(
+    *,
+    valid_labels: list[str],
+    filtered_labels: list[str],
+    email_subject: str,
+    email_sent: bool,
+    forward_sent: bool,
+) -> dict[str, Any]:
+    lines = [
+        "✅ **维护通知处理完成**",
+        "",
+        "📊 **处理结果：**",
+        f"• 有效游戏：**{len(valid_labels)}** 个",
+        f"• 过滤游戏：**{len(filtered_labels)}** 个",
+    ]
+    if email_sent:
+        lines.append(f"• 邮件（EVO_TO）：**已发送**")
+        lines.append(f"  └ 主题：`{email_subject}`")
+    else:
+        lines.append("• 邮件（EVO_TO）：**未发送**（无 CP 上线游戏）")
+    if forward_sent:
+        lines.append("• 转发群（维护正文）：**已发送**")
+    else:
+        lines.append("• 转发群（维护正文）：**未发送**")
+    if valid_labels:
+        lines.extend(["", "✅ **已处理的游戏：**"])
+        for lb in valid_labels:
+            lines.append(f"• {lb}")
+    if filtered_labels:
+        lines.extend(["", "⚠️ **被过滤的游戏：**"])
+        for lb in filtered_labels:
+            lines.append(f"• {lb}")
+    body_md = "\n".join(lines)
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "green",
+            "title": {"tag": "plain_text", "content": "维护通知处理结果"},
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": lark_md_for_card(body_md)},
+                }
+            ]
+        },
+    }
+
+
+def process_evo_sd_batch_maintenance(
+    pasted_text: str,
+    tenant_access_token: str | None,
+) -> dict[str, Any]:
+    """
+    Parse EVO multi-ticket paste, filter by CP gamelist (English names only),
+    build outbound email body + Lark summary card payload.
+    """
+    blocks = split_evo_sd_batch_blocks(pasted_text)
+    if not blocks:
+        raise ValueError("未能识别 ※SD-xxxxx※ 维护块")
+
+    tok = (tenant_access_token or "").strip()
+    if not gamelist_configured() or not tok:
+        raise ValueError("Gamelist 未配置或缺少 token，无法核对 CP 上线游戏")
+
+    all_en: list[str] = []
+    parsed_blocks: list[dict[str, Any]] = []
+    for block in blocks:
+        en_list, zh_list = _evo_block_game_lists(block)
+        all_en.extend(en_list)
+        parsed_blocks.append(
+            {
+                "raw": block,
+                "ticket": _evo_block_ticket_id(block),
+                "en": en_list,
+                "zh": zh_list,
+                "utc_from": _evo_block_downtime_utc(block)[0],
+                "utc_till": _evo_block_downtime_utc(block)[1],
+                "utc8": _evo_block_field(block, "UTC+8 Time"),
+                "beijing": _evo_block_beijing_line(block),
+                "reason": _evo_block_field(block, "Reason")
+                or _evo_block_field(block, "维护事由")
+                or "Equipment maintenance",
+            }
+        )
+
+    launched_keys = _evo_cp_launched_set(all_en, tok)
+
+    valid_labels: list[str] = []
+    filtered_labels: list[str] = []
+    seen_valid: set[str] = set()
+    seen_filtered: set[str] = set()
+    outbound_parts: list[str] = []
+
+    for pb in parsed_blocks:
+        pairs_launched: list[tuple[str, str]] = []
+        for i, en in enumerate(pb["en"]):
+            zh = pb["zh"][i] if i < len(pb["zh"]) else ""
+            key = _cell_norm(en).replace(" ", "")
+            label = _evo_game_display_label(en, zh)
+            if key in launched_keys:
+                if label not in seen_valid:
+                    seen_valid.add(label)
+                    valid_labels.append(label)
+                pairs_launched.append((en, zh or en))
+            else:
+                if label not in seen_filtered:
+                    seen_filtered.add(label)
+                    filtered_labels.append(label)
+        if not pairs_launched:
+            continue
+        outbound_parts.append(
+            _format_evo_outbound_block(
+                ticket=pb["ticket"],
+                utc_from=pb["utc_from"],
+                utc_till=pb["utc_till"],
+                pairs=pairs_launched,
+                utc8_line=pb["utc8"],
+                reason=pb["reason"],
+                beijing_line=pb["beijing"],
+            )
+        )
+
+    date_suffix = _evo_email_subject_date(outbound_parts)
+    email_subject = f"EGS EVO MAINTENANCE {date_suffix}"
+    email_body = (
+        "Hi team,\n\n" + "\n".join(outbound_parts).strip() if outbound_parts else ""
+    )
+    email_sent = bool(email_body.strip())
+
+    return {
+        "valid_labels": valid_labels,
+        "filtered_labels": filtered_labels,
+        "email_subject": email_subject,
+        "email_body": email_body,
+        "email_sent": email_sent,
+        "result_card": build_evo_batch_result_card(
+            valid_labels=valid_labels,
+            filtered_labels=filtered_labels,
+            email_subject=email_subject,
+            email_sent=email_sent,
+            forward_sent=email_sent,
+        ),
+    }
+
+
 def main():
     """Command‑line interface."""
     if len(sys.argv) > 1:

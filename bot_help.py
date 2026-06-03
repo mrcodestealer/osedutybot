@@ -171,7 +171,8 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
                 _SECTION_ICONS["ops"],
                 "grey",
                 [
-                    ("/m <email> | /maintenance …", "Parse maintenance email", "解析维护邮件"),
+                    ("/m <EVO batch>", "EVO SD batch → CP filter + email", "EVO 批量维护 + 发信"),
+                    ("/ms <email> | /maintenance …", "Parse single maintenance email", "解析单封维护邮件"),
                     ("/cashout", "Cashout reminder template", "出款提醒模板"),
                     ("/restartA", "Pi restart one-liner", "Pi 重启命令"),
                 ],

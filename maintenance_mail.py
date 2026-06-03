@@ -1270,6 +1270,30 @@ def forward_maintenance_email(
     print(f"[maint-mail] forwarded {subj!r} → {route}", flush=True)
 
 
+def send_evo_batch_maintenance_email(*, subject: str, body: str) -> None:
+    """Outbound EVO batch summary: om@ → junchen@ + Cc om@ (plain text)."""
+    if not MAIL_PASSWORD:
+        raise RuntimeError("MAINTENANCE_MAIL_PASSWORD not set")
+    subj = (subject or "").strip() or "EGS EVO MAINTENANCE"
+    text = (body or "").strip()
+    if not text:
+        raise ValueError("empty EVO batch email body")
+    msg = MIMEText(text, "plain", "utf-8")
+    msg["Subject"] = Header(subj, "utf-8")
+    msg["From"] = formataddr((FORWARD_FROM_NAME, MAIL_USER))
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid()
+    msg["To"] = formataddr((FORWARD_TO_NAME, FORWARD_TO))
+    msg["Cc"] = formataddr((NOT_CP_REPLY_CC_NAME, FORWARD_CC))
+    recipients = [FORWARD_TO, FORWARD_CC]
+    route = f"{FORWARD_TO} cc={FORWARD_CC}"
+    ctx = ssl.create_default_context()
+    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=IMAP_TIMEOUT, context=ctx) as smtp:
+        smtp.login(MAIL_USER, MAIL_PASSWORD)
+        smtp.sendmail(MAIL_USER, recipients, msg.as_string())
+    print(f"[maint-mail] EVO batch {subj!r} → {route}", flush=True)
+
+
 JENKINS_DONE_REPLY_TO = (
     os.getenv("JENKINS_UPDATE_DONE_REPLY_TO", "").strip() or "junchen@snsoft.my"
 )
