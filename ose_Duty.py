@@ -49,10 +49,11 @@ OSE_LEAVE_TABLE_ID = os.getenv("OSE_LEAVE_TABLE_ID", OSE_ALL_LEAVE_TABLE_ID).str
 OSE_OFFSET_TABLE_ID = os.getenv("OSE_OFFSET_TABLE_ID", "tblC5T2MAydwT42j")
 
 # Bump when leave/admin Bitable routing changes (check /api/admin/leave-list meta).
-OSE_LEAVE_API_BUILD = "20260603-leaveose-only-v3"
+OSE_LEAVE_API_BUILD = "20260603-leaveose-pinned-v4"
 
-# Alias: webapp / calendar / bot OSE leave display MUST use this table only.
-LEAVEOSE_TABLE_ID = OSE_HRMS_LEAVE_TABLE_ID
+# leaveose sheet — OSE display MUST use this table ID (env cannot point at leave 全员).
+LEAVEOSE_TABLE_ID_CANONICAL = "tblvoXE0hsPjgb0j"
+LEAVEOSE_TABLE_ID = LEAVEOSE_TABLE_ID_CANONICAL
 
 TARGET_NAMES = [
     "Louie",
@@ -621,13 +622,25 @@ def sync_ose_leave_offset_bitable() -> str:
     )
 
 
+def _leaveose_table_id_for_display() -> str:
+    """Always leaveose (``tblvoXE0hsPjgb0j``). Ignores mis-set ``OSE_HRMS_LEAVE_TABLE_ID`` / ``TRACK_LEAVE_TABLE_ID``."""
+    configured = (os.getenv("OSE_HRMS_LEAVE_TABLE_ID") or os.getenv("TRACK_LEAVE_TABLE_ID") or "").strip()
+    if configured and configured not in (LEAVEOSE_TABLE_ID_CANONICAL, ""):
+        print(
+            f"[ose_Duty] WARNING: OSE_HRMS_LEAVE_TABLE_ID={configured!r} ignored; "
+            f"display reads leaveose {LEAVEOSE_TABLE_ID_CANONICAL!r} only",
+            flush=True,
+        )
+    return LEAVEOSE_TABLE_ID_CANONICAL
+
+
 def _fetch_leaveose_bitable_records(token: str) -> list[dict[str, Any]]:
-    """Read **leaveose** sheet only (``OSE_HRMS_LEAVE_TABLE_ID``). Never ``OSE_ALL_LEAVE_TABLE_ID``."""
-    table_id = OSE_HRMS_LEAVE_TABLE_ID
+    """Read **leaveose** sheet only. Never ``OSE_ALL_LEAVE_TABLE_ID`` (leave 全员)."""
+    table_id = _leaveose_table_id_for_display()
     if table_id == OSE_ALL_LEAVE_TABLE_ID:
         raise RuntimeError(
-            "OSE_HRMS_LEAVE_TABLE_ID must differ from OSE_ALL_LEAVE_TABLE_ID (leaveose vs leave 全员). "
-            f"Both are {table_id!r}; fix .env: OSE_HRMS_LEAVE_TABLE_ID=tblvoXE0hsPjgb0j"
+            "leaveose table id must differ from leave 全员 table; "
+            f"got {table_id!r} — check OSE_ALL_LEAVE_TABLE_ID / OSE_LEAVE_TABLE_ID in .env"
         )
     return _bitable_get_all_records(token, OSE_BASE_TOKEN, table_id)
 
@@ -1429,15 +1442,17 @@ def get_ose_leave_bitable_meta(*, scope: str = "") -> dict[str, Any]:
     return {
         "api_build": OSE_LEAVE_API_BUILD,
         "scope": scope or "display",
-        "leaveose_table_id": OSE_HRMS_LEAVE_TABLE_ID,
+        "leaveose_table_id": LEAVEOSE_TABLE_ID_CANONICAL,
+        "leaveose_table_id_enforced": True,
         "leaveose_only_display": True,
-        "ose_hrms_leave_table_id": OSE_HRMS_LEAVE_TABLE_ID,
+        "env_ose_hrms_leave_table_id": OSE_HRMS_LEAVE_TABLE_ID,
+        "ose_hrms_leave_table_id": LEAVEOSE_TABLE_ID_CANONICAL,
         "ose_all_leave_table_id": OSE_ALL_LEAVE_TABLE_ID,
         "ose_leave_approval_table_id": OSE_LEAVE_TABLE_ID,
         "base_token": OSE_BASE_TOKEN,
         "ose_hrms_url": (
             f"https://casinoplus.sg.larksuite.com/base/{OSE_BASE_TOKEN}"
-            f"?table={OSE_HRMS_LEAVE_TABLE_ID}"
+            f"?table={LEAVEOSE_TABLE_ID_CANONICAL}"
         ),
     }
 

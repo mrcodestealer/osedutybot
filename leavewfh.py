@@ -116,7 +116,7 @@ ALL_LEAVE_TABLE_ID = os.getenv(
 
 # Legacy .env sometimes set TRACK_LEAVE_TABLE_ID to leave 全员 — never sync/display OSE there.
 if TRACK_TABLE_ID == ALL_LEAVE_TABLE_ID:
-    TRACK_TABLE_ID = od.OSE_HRMS_LEAVE_TABLE_ID
+    TRACK_TABLE_ID = od.LEAVEOSE_TABLE_ID_CANONICAL
 ALL_LEAVE_SYNC_STATE_FILE = Path(
     os.getenv("ALL_LEAVE_CALENDAR_SYNC_STATE", ".all_leave_calendar_sync_state.json")
 )

@@ -3652,16 +3652,35 @@ _ADMIN_LEAVE_PAGE = """<!DOCTYPE html>
       }
     }
 
-    function showAdminSourceMeta(data) {
+    var EXPECTED_LEAVE_API_BUILD = "20260603-leaveose-pinned-v4";
+    var EXPECTED_LEAVEOSE_TABLE = "tblvoXE0hsPjgb0j";
+
+    function leaveApiLooksStale(m) {
+      if (!m) return true;
+      if (m.api_build !== EXPECTED_LEAVE_API_BUILD) return true;
+      if (m.ose_hrms_leave_table_id !== EXPECTED_LEAVEOSE_TABLE) return true;
+      if (filterMode === "all" && m.scope && m.scope !== "display") return true;
+      return false;
+    }
+
+    function showAdminSourceMeta(data, stale) {
       var el = document.getElementById("adm-source-meta");
       var m = data && data.meta;
-      if (!el || !m) return;
+      if (!el) return;
+      if (stale || leaveApiLooksStale(m)) {
+        el.style.color = "#fca5a5";
+        el.textContent =
+          "Wrong backend (still reading leave 全员?). build=" + (m && m.api_build ? m.api_build : "missing") +
+          " · need build " + EXPECTED_LEAVE_API_BUILD + " · table " + EXPECTED_LEAVEOSE_TABLE +
+          " · restart larkbot after deploy, then Refresh.";
+        return;
+      }
+      el.style.color = "";
       el.textContent =
-        "build " + (m.api_build || "?") + " · scope " + (m.scope || "?") +
-        " · OSE sheet " + (m.ose_hrms_leave_table_id || "?") +
-        " (raw " + (m.display_table_raw_rows != null ? m.display_table_raw_rows : "?") +
-        ", shown " + (m.items_after_ose_dutylist_filter != null ? m.items_after_ose_dutylist_filter : (data.items || []).length) + ")" +
-        (m.scope === "display" ? "" : (" · approval sheet " + (m.ose_leave_approval_table_id || "?") +
+        "build " + m.api_build + " · scope " + (m.scope || "?") +
+        " · leaveose " + m.ose_hrms_leave_table_id +
+        " (raw " + m.display_table_raw_rows + ", OSE shown " + m.items_after_ose_dutylist_filter + ")" +
+        (m.scope === "display" ? "" : (" · approval " + (m.ose_leave_approval_table_id || "?") +
         " (raw " + (m.approval_table_raw_rows != null ? m.approval_table_raw_rows : "?") + ")"));
     }
     function loadList(forceRefresh) {
@@ -3670,10 +3689,15 @@ _ADMIN_LEAVE_PAGE = """<!DOCTYPE html>
       tbody.innerHTML = '<tr><td class="adm-records-empty" colspan="20">Loading…</td></tr>';
       fetch(url).then(function (r) { return r.json(); }).then(function (data) {
         if (!data || data.ok === false) throw new Error((data && data.error) || "Load failed");
-        showAdminSourceMeta(data);
+        var stale = leaveApiLooksStale(data.meta);
+        showAdminSourceMeta(data, stale);
+        if (stale) {
+          render({ items: [] });
+          return;
+        }
         render(data);
       }).catch(function () {
-        showAdminSourceMeta({});
+        showAdminSourceMeta({}, true);
         render({ items: [] });
       });
     }
@@ -5527,7 +5551,13 @@ def api_admin_leave_list():
         if (request.args.get("refresh") or "").strip().lower() in ("1", "true", "yes"):
             od.invalidate_ose_bitable_cache()
         scope = (request.args.get("scope") or "display").strip().lower()
-        return jsonify(od.get_ose_leave_records_admin(scope=scope))
+        if scope not in ("display", "pending"):
+            scope = "display"
+        payload = od.get_ose_leave_records_admin(scope=scope)
+        resp = jsonify(payload)
+        resp.headers["X-OSE-Leave-Api-Build"] = od.OSE_LEAVE_API_BUILD
+        resp.headers["X-OSE-Leaveose-Table"] = od.LEAVEOSE_TABLE_ID_CANONICAL
+        return resp
     except Exception as e:
         return jsonify(ok=False, error=str(e)), 400
 
@@ -5827,6 +5857,20 @@ def register_webapp(flask_app: Flask, *, url_prefix: str | None = None) -> None:
             pref = "/" + pref
         flask_app.register_blueprint(wm_bp, url_prefix=pref.rstrip("/") or "/")
     _ensure_machine_data_file()
+    try:
+        import ose_Duty as _od
+
+        print(
+            "[webapp] OSE leave display: leaveose %s (build %s); leave 全员 %s (not used for Admin ALL)"
+            % (
+                _od.LEAVEOSE_TABLE_ID_CANONICAL,
+                _od.OSE_LEAVE_API_BUILD,
+                _od.OSE_ALL_LEAVE_TABLE_ID,
+            ),
+            flush=True,
+        )
+    except Exception as _e:
+        print("[webapp] OSE leave routing check skipped: %r" % (_e,), flush=True)
 
 
 register_webmachine = register_webapp
