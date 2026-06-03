@@ -12,7 +12,7 @@ Monthly leave calendar sync (OSE tracking Bitable):
   - Write to TRACK_LEAVE_BASE_ID / TRACK_LEAVE_TABLE_ID (defaults = OSE leave table URL)
   - On a new calendar month: delete **all** rows in the tracking table, then refill that month only
   - During the month: **add** new leave rows when they appear; remove auto-synced rows that were cancelled
-  - Tracking table: OSE leave Bitable (``TRACK_LEAVE_*`` / URL tblmHJHe12BCJRD8)
+  - Tracking table: HRMS → OSE leave display Bitable (``TRACK_LEAVE_*`` / tblvoXE0hsPjgb0j)
   - Annual Leave rows are always included when they overlap the month
 
 Usage:
@@ -75,14 +75,15 @@ def _leave_source_ids() -> tuple[str, str]:
 
 BASE_ID, TABLE_ID = _leave_source_ids()
 
-# Destination: https://casinoplus.sg.larksuite.com/base/CpdEbEofwaYyyEsSjlElKNxzgec?table=tblmHJHe12BCJRD8
+# HRMS sync destination (webapp OSE leave display):
+# https://casinoplus.sg.larksuite.com/base/CpdEbEofwaYyyEsSjlElKNxzgec?table=tblvoXE0hsPjgb0j
 TRACK_BASE_ID = os.getenv(
     "TRACK_LEAVE_BASE_ID",
     os.getenv("OSE_BASE_TOKEN", "CpdEbEofwaYyyEsSjlElKNxzgec"),
 )
 TRACK_TABLE_ID = os.getenv(
     "TRACK_LEAVE_TABLE_ID",
-    os.getenv("OSE_LEAVE_TABLE_ID", "tblmHJHe12BCJRD8"),
+    os.getenv("OSE_HRMS_LEAVE_TABLE_ID", "tblvoXE0hsPjgb0j"),
 )
 
 # WFH tracking: https://casinoplus.sg.larksuite.com/base/.../table=tblWBI5BxrtFiJul
@@ -170,6 +171,7 @@ def delete_record(token: str, app_token: str, table_id: str, record_id: str) -> 
 def create_record(token: str, app_token: str, table_id: str, fields: dict[str, Any]) -> str:
     if app_token == od.OSE_BASE_TOKEN and table_id in (
         od.OSE_LEAVE_TABLE_ID,
+        od.OSE_HRMS_LEAVE_TABLE_ID,
         TRACK_WFH_TABLE_ID,
     ):
         res = od._bitable_create_record(token, table_id, fields)
@@ -1548,7 +1550,7 @@ def sync_leave_calendar_to_bitable(
     force_resync: bool = False,
 ) -> dict[str, Any]:
     """
-    Sync leave for ``year``/``month`` into the OSE tracking Bitable (tblmHJHe12BCJRD8).
+    Sync leave for ``year``/``month`` into the HRMS OSE display Bitable (tblvoXE0hsPjgb0j).
 
     - **New month** (vs last sync): delete every row in the table, insert this month only.
     - **Same month**: keep existing rows; **add** new leave not already present; remove rows
@@ -2724,13 +2726,13 @@ def build_leave_today_lark_card(
     }
 
 
-_WHOLEAVE_BITABLE_SOURCE = "OSE leave Bitable (approved records)"
+_WHOLEAVE_BITABLE_SOURCE = "OSE HRMS leave Bitable (display table)"
 
 
 def get_wholeave_today_payload(ref_date: Optional[date] = None) -> dict[str, Any]:
     """
-    Text + Lark card for who is on leave today — from the OSE leave Bitable
-    (``OSE_BASE_TOKEN`` / ``OSE_LEAVE_TABLE_ID``, same as /ose duty leave list).
+    Text + Lark card for who is on leave today — from the HRMS-synced OSE display Bitable
+    (``OSE_HRMS_LEAVE_TABLE_ID`` / ``TRACK_LEAVE_TABLE_ID``, same as webapp OSE leave list).
     """
     on_date = ref_date or date.today()
     try:
@@ -2740,14 +2742,14 @@ def get_wholeave_today_payload(ref_date: Optional[date] = None) -> dict[str, Any
             on_date.year,
             on_date.month,
             app_token=_OSE_BITABLE_BASE,
-            table_id=_OSE_BITABLE_LEAVE_TABLE,
-            require_approved=True,
+            table_id=od.OSE_HRMS_LEAVE_TABLE_ID,
+            require_approved=False,
         )
         today_rows = rows_on_leave_date(rows, on_date)
         warnings: list[str] = []
         if not rows:
             warnings.append(
-                f"No approved leave rows in OSE Bitable for {on_date.year}-{on_date.month:02d}."
+                f"No HRMS leave rows in OSE display Bitable for {on_date.year}-{on_date.month:02d}."
             )
         return {
             "text": format_leave_today_text(

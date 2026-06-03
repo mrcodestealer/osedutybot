@@ -3,7 +3,8 @@
 OSE Duty + Leave + Offset
 
 - Shift source: OSE sheet (`D`=day, `N`=night)
-- Leave source: Lark Bitable (Approved + date range)
+- Leave display: HRMS-synced Bitable (``OSE_HRMS_LEAVE_TABLE_ID``)
+- Leave requests: Lark Bitable approval table (``OSE_LEAVE_TABLE_ID``)
 - Offset source: Lark Bitable (Approved + Original/Exchange date)
 """
 
@@ -30,6 +31,13 @@ SHEET_ID = os.getenv("OSE_SHEET_ID")
 
 # Leave / Offset Bitable (defaults from user-provided URLs).
 OSE_BASE_TOKEN = os.getenv("OSE_BASE_TOKEN", "CpdEbEofwaYyyEsSjlElKNxzgec")
+# HRMS calendar sync → display on webapp / OSE duty calendar (read-only).
+OSE_HRMS_LEAVE_TABLE_ID = (
+    os.getenv("OSE_HRMS_LEAVE_TABLE_ID")
+    or os.getenv("TRACK_LEAVE_TABLE_ID")
+    or "tblvoXE0hsPjgb0j"
+).strip()
+# OSE leave requests + admin approval workflow.
 OSE_LEAVE_TABLE_ID = os.getenv("OSE_LEAVE_TABLE_ID", "tblmHJHe12BCJRD8")
 OSE_OFFSET_TABLE_ID = os.getenv("OSE_OFFSET_TABLE_ID", "tblC5T2MAydwT42j")
 
@@ -514,7 +522,9 @@ def get_ose_month_calendar(year: int, month: int) -> dict[str, Any]:
         offset_lines: list[str] = []
         if leave_items and token:
             try:
-                leave_entries = _extract_leave_entries_for_date(d, token, items=leave_items)
+                leave_entries = _extract_leave_entries_for_date(
+                    d, token, items=leave_items, require_approved=False
+                )
             except Exception:
                 leave_entries = []
         if offset_items and token:
@@ -558,7 +568,8 @@ def get_ose_month_calendar(year: int, month: int) -> dict[str, Any]:
 # Set OSE_BITABLE_CACHE_SEC=0 to disable. Daily cron calls ``invalidate_ose_bitable_cache``.
 _OSE_BITABLE_RAW: dict[str, Any] = {
     "monotonic": 0.0,
-    "leave": None,
+    "leave_display": None,
+    "leave_approval": None,
     "offset": None,
     "person_ids": None,
     "offset_person_options": None,
@@ -568,7 +579,8 @@ _OSE_BITABLE_TTL_SEC = int(os.getenv("OSE_BITABLE_CACHE_SEC", "120"))
 
 def invalidate_ose_bitable_cache() -> None:
     """Clear cached leave/offset rows (e.g. after daily sync job)."""
-    _OSE_BITABLE_RAW["leave"] = None
+    _OSE_BITABLE_RAW["leave_display"] = None
+    _OSE_BITABLE_RAW["leave_approval"] = None
     _OSE_BITABLE_RAW["offset"] = None
     _OSE_BITABLE_RAW["person_ids"] = None
     _OSE_BITABLE_RAW["offset_person_options"] = None
@@ -586,30 +598,82 @@ def sync_ose_leave_offset_bitable() -> str:
         return f"❌ OSE Bitable sync (token): {e}"
     invalidate_ose_bitable_cache()
     try:
-        leave, offset = _get_bitable_raw_pair(token)
+        leave_disp, leave_appr, offset = _get_bitable_raw_triple(token)
     except Exception as e:
         return f"❌ OSE Bitable sync: {e}"
-    return f"✅ OSE leave/offset Bitable synced ({len(leave)} leave, {len(offset)} offset rows)"
+    return (
+        f"✅ OSE Bitable synced ({len(leave_disp)} HRMS leave, "
+        f"{len(leave_appr)} approval leave, {len(offset)} offset rows)"
+    )
+
+
+def _get_leave_display_raw(token: str) -> list[dict[str, Any]]:
+    """HRMS-synced leave rows for webapp display and OSE duty calendar."""
+    now = time.monotonic()
+    cached = _OSE_BITABLE_RAW.get("leave_display")
+    ts = float(_OSE_BITABLE_RAW.get("monotonic") or 0)
+    if _OSE_BITABLE_TTL_SEC > 0 and isinstance(cached, list) and now - ts < _OSE_BITABLE_TTL_SEC:
+        return cached
+    items = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_HRMS_LEAVE_TABLE_ID)
+    _OSE_BITABLE_RAW["leave_display"] = items
+    _OSE_BITABLE_RAW["monotonic"] = now
+    return items
+
+
+def _get_leave_approval_raw(token: str) -> list[dict[str, Any]]:
+    """OSE leave request / approval workflow table."""
+    now = time.monotonic()
+    cached = _OSE_BITABLE_RAW.get("leave_approval")
+    ts = float(_OSE_BITABLE_RAW.get("monotonic") or 0)
+    if _OSE_BITABLE_TTL_SEC > 0 and isinstance(cached, list) and now - ts < _OSE_BITABLE_TTL_SEC:
+        return cached
+    items = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_LEAVE_TABLE_ID)
+    _OSE_BITABLE_RAW["leave_approval"] = items
+    _OSE_BITABLE_RAW["monotonic"] = now
+    return items
+
+
+def _get_offset_raw(token: str) -> list[dict[str, Any]]:
+    now = time.monotonic()
+    cached = _OSE_BITABLE_RAW.get("offset")
+    ts = float(_OSE_BITABLE_RAW.get("monotonic") or 0)
+    if _OSE_BITABLE_TTL_SEC > 0 and isinstance(cached, list) and now - ts < _OSE_BITABLE_TTL_SEC:
+        return cached
+    items = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_OFFSET_TABLE_ID)
+    _OSE_BITABLE_RAW["offset"] = items
+    _OSE_BITABLE_RAW["monotonic"] = now
+    return items
 
 
 def _get_bitable_raw_pair(token: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """(HRMS leave display, offset) — backward-compatible pair for calendar/bot."""
+    leave_disp, _, offset = _get_bitable_raw_triple(token)
+    return leave_disp, offset
+
+
+def _get_bitable_raw_triple(token: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     now = time.monotonic()
-    leave = _OSE_BITABLE_RAW.get("leave")
+    leave_disp = _OSE_BITABLE_RAW.get("leave_display")
+    leave_appr = _OSE_BITABLE_RAW.get("leave_approval")
     offset = _OSE_BITABLE_RAW.get("offset")
     ts = float(_OSE_BITABLE_RAW.get("monotonic") or 0)
-    if (
+    fresh = (
         _OSE_BITABLE_TTL_SEC > 0
-        and isinstance(leave, list)
+        and isinstance(leave_disp, list)
+        and isinstance(leave_appr, list)
         and isinstance(offset, list)
         and now - ts < _OSE_BITABLE_TTL_SEC
-    ):
-        return leave, offset
-    leave = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_LEAVE_TABLE_ID)
+    )
+    if fresh:
+        return leave_disp, leave_appr, offset
+    leave_disp = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_HRMS_LEAVE_TABLE_ID)
+    leave_appr = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_LEAVE_TABLE_ID)
     offset = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_OFFSET_TABLE_ID)
     _OSE_BITABLE_RAW["monotonic"] = now
-    _OSE_BITABLE_RAW["leave"] = leave
+    _OSE_BITABLE_RAW["leave_display"] = leave_disp
+    _OSE_BITABLE_RAW["leave_approval"] = leave_appr
     _OSE_BITABLE_RAW["offset"] = offset
-    return leave, offset
+    return leave_disp, leave_appr, offset
 
 
 def _bitable_get_all_records(token: str, app_token: str, table_id: str) -> list[dict[str, Any]]:
@@ -636,22 +700,31 @@ def _is_approved(v: Any) -> bool:
     return _field_text(v).strip().lower() == "approved"
 
 
+def _is_ose_roster_leave_name(name: str) -> bool:
+    nm = _title_name(name)
+    if not nm:
+        return False
+    return any(_names_same_person(nm, roster) for roster in OSE_LEAVE_FORM_NAMES)
+
+
 def _extract_leave_entries_for_date(
     target_date: date,
     token: str,
     *,
     items: Optional[list[dict[str, Any]]] = None,
+    require_approved: bool = True,
 ) -> list[dict[str, Any]]:
     if items is None:
-        items = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_LEAVE_TABLE_ID)
+        items = _get_leave_display_raw(token)
     out: list[dict[str, Any]] = []
     for it in items:
         f = it.get("fields") or {}
-        status_v = _get_field_by_aliases(f, ["Status", "Approval Status"])
-        if not _is_approved(status_v):
-            continue
+        if require_approved:
+            status_v = _get_field_by_aliases(f, ["Status", "Approval Status"])
+            if not _is_approved(status_v):
+                continue
         name = _title_name(_field_text(_get_field_by_aliases(f, ["Name", "Employee Name", "Person"])))
-        if not name:
+        if not name or not _is_ose_roster_leave_name(name):
             continue
         st = _parse_date_value(_get_field_by_aliases(f, ["Start Date", "Leave Start Date", "From"]))
         ed = _parse_date_value(_get_field_by_aliases(f, ["End Date", "Leave End Date", "To"]))
@@ -734,7 +807,9 @@ def _build_ose_context(target_date: date, mode: str) -> tuple[list[str], list[st
 
         token = get_tenant_access_token()
         leave_items, offset_items = _get_bitable_raw_pair(token)
-        leave_entries = _extract_leave_entries_for_date(target_date, token, items=leave_items)
+        leave_entries = _extract_leave_entries_for_date(
+            target_date, token, items=leave_items, require_approved=False
+        )
         offset_lines = _extract_offset_lines_for_date(target_date, token, items=offset_items)
     except Exception as e:
         return [], [], [], [], f"❌ OSE data load failed: {e}"
@@ -1112,8 +1187,8 @@ def _get_ose_person_open_id_index(token: str) -> dict[str, str]:
     cached = _OSE_BITABLE_RAW.get("person_ids")
     if isinstance(cached, dict):
         return cached
-    leave, offset = _get_bitable_raw_pair(token)
-    idx = _build_ose_person_open_id_index(leave, offset)
+    leave_disp, leave_appr, offset = _get_bitable_raw_triple(token)
+    idx = _build_ose_person_open_id_index(leave_disp + leave_appr, offset)
     _OSE_BITABLE_RAW["person_ids"] = idx
     return idx
 
@@ -1263,7 +1338,7 @@ def _leave_rows_for_calendar(items: list[dict[str, Any]]) -> list[dict[str, Any]
     for it in items:
         f = it.get("fields") or {}
         name = _title_name(_field_text(_get_field_by_aliases(f, ["Name", "Employee Name", "Person"])))
-        if not name:
+        if not name or not _is_ose_roster_leave_name(name):
             continue
         st = _parse_date_value(_get_field_by_aliases(f, ["Start Date", "Leave Start Date", "From"]))
         ed = _parse_date_value(_get_field_by_aliases(f, ["End Date", "Leave End Date", "To"]))
@@ -1288,14 +1363,14 @@ def _record_approval_fields(fields: dict[str, Any]) -> dict[str, str]:
 
 
 def get_ose_leave_records_list() -> dict[str, Any]:
-    """All leave rows for the submit-leave page (LeaveID shown when present)."""
+    """HRMS-synced OSE leave rows for webapp display (read-only; no approval workflow)."""
     token = get_tenant_access_token()
-    items, _ = _get_bitable_raw_pair(token)
+    items = _get_leave_display_raw(token)
     rows: list[dict[str, str]] = []
     for it in items:
         f = it.get("fields") or {}
         name = _title_name(_field_text(_get_field_by_aliases(f, ["Name", "Employee Name", "Person"])))
-        if not name:
+        if not name or not _is_ose_roster_leave_name(name):
             continue
         st = _parse_date_value(_get_field_by_aliases(f, ["Start Date", "Leave Start Date", "From"]))
         ed = _parse_date_value(_get_field_by_aliases(f, ["End Date", "Leave End Date", "To"]))
@@ -1328,7 +1403,7 @@ def get_ose_leave_records_list() -> dict[str, Any]:
 def get_ose_leave_records_admin() -> dict[str, Any]:
     """Leave rows for admin approval (includes Bitable record_id)."""
     token = get_tenant_access_token()
-    items, _ = _get_bitable_raw_pair(token)
+    items = _get_leave_approval_raw(token)
     rows: list[dict[str, str]] = []
     for it in items:
         f = it.get("fields") or {}
@@ -1692,11 +1767,11 @@ def build_ose_showoffset_card(year: int, month: int) -> dict[str, Any]:
 
 
 def get_ose_leave_names_calendar(year: int, month: int) -> dict[str, Any]:
-    """Per-day leave names for a month (all dated rows; LeaveID ignored)."""
+    """Per-day leave names for a month (HRMS display table; OSE roster only)."""
     if month < 1 or month > 12:
         raise ValueError("month must be 1–12")
     token = get_tenant_access_token()
-    items, _ = _get_bitable_raw_pair(token)
+    items = _get_leave_display_raw(token)
     rows = _leave_rows_for_calendar(items)
     month_start = date(year, month, 1)
     _, last = calendar.monthrange(year, month)
