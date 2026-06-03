@@ -2823,7 +2823,8 @@ _OSE_SUBMIT_LEAVE_PAGE = """<!DOCTYPE html>
         <h2>OSE leave (HRMS)</h2>
         <button type="button" class="ose-records-refresh-btn" id="ose-leave-refresh">Refresh</button>
       </div>
-      <p class="ose-records-hint">Read-only from HRMS sync Bitable. Empty fields show as —.</p>
+      <p class="ose-records-hint">Read-only from HRMS OSE leave sheet. Empty fields show as —.</p>
+      <p class="ose-records-hint" id="ose-leave-source-meta" style="font-size:0.68rem;opacity:0.85;"></p>
       <div class="ose-records-wrap">
         <table class="ose-records-table">
           <thead>
@@ -2940,7 +2941,14 @@ _OSE_SUBMIT_LEAVE_PAGE = """<!DOCTYPE html>
       }
       tr.appendChild(td);
     }
+    function showLeaveSourceMeta(data) {
+      var el = document.getElementById("ose-leave-source-meta");
+      var m = data && data.meta;
+      if (!el || !m) return;
+      el.textContent = "Sheet: " + (m.ose_hrms_leave_table_id || "?") + " (OSE HRMS) · items shown: " + ((data.items || []).length);
+    }
     function renderLeaveList(data) {
+      showLeaveSourceMeta(data);
       var body = document.getElementById("ose-leave-list-body");
       if (!body) return;
       body.innerHTML = "";
@@ -3468,6 +3476,7 @@ _ADMIN_LEAVE_PAGE = """<!DOCTYPE html>
       </div>
       <button type="button" class="env-filter-btn" id="adm-refresh">Refresh</button>
     </div>
+    <p id="adm-source-meta" class="ose-records-hint" style="margin:0 0 0.65rem;font-size:0.72rem;color:var(--muted);"></p>
     <div class="adm-table-wrap">
       <table>
         <thead id="adm-thead"></thead>
@@ -3643,14 +3652,28 @@ _ADMIN_LEAVE_PAGE = """<!DOCTYPE html>
       }
     }
 
+    function showAdminSourceMeta(data) {
+      var el = document.getElementById("adm-source-meta");
+      var m = data && data.meta;
+      if (!el || !m) return;
+      el.textContent =
+        "build " + (m.api_build || "?") + " · scope " + (m.scope || "?") +
+        " · OSE sheet " + (m.ose_hrms_leave_table_id || "?") +
+        " (raw " + (m.display_table_raw_rows != null ? m.display_table_raw_rows : "?") +
+        ", shown " + (m.items_after_ose_dutylist_filter != null ? m.items_after_ose_dutylist_filter : (data.items || []).length) + ")" +
+        (m.scope === "display" ? "" : (" · approval sheet " + (m.ose_leave_approval_table_id || "?") +
+        " (raw " + (m.approval_table_raw_rows != null ? m.approval_table_raw_rows : "?") + ")"));
+    }
     function loadList(forceRefresh) {
-      var url = API_LIST;
-      if (forceRefresh) url += (url.indexOf("?") >= 0 ? "&" : "?") + "refresh=1";
+      var url = API_LIST + "?scope=" + (filterMode === "todo" ? "pending" : "display");
+      if (forceRefresh) url += "&refresh=1";
       tbody.innerHTML = '<tr><td class="adm-records-empty" colspan="20">Loading…</td></tr>';
       fetch(url).then(function (r) { return r.json(); }).then(function (data) {
         if (!data || data.ok === false) throw new Error((data && data.error) || "Load failed");
+        showAdminSourceMeta(data);
         render(data);
       }).catch(function () {
+        showAdminSourceMeta({});
         render({ items: [] });
       });
     }
@@ -5503,7 +5526,8 @@ def api_admin_leave_list():
 
         if (request.args.get("refresh") or "").strip().lower() in ("1", "true", "yes"):
             od.invalidate_ose_bitable_cache()
-        return jsonify(od.get_ose_leave_records_admin())
+        scope = (request.args.get("scope") or "display").strip().lower()
+        return jsonify(od.get_ose_leave_records_admin(scope=scope))
     except Exception as e:
         return jsonify(ok=False, error=str(e)), 400
 
