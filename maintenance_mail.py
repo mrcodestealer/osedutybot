@@ -3926,8 +3926,7 @@ def reply_jenkins_update_done_email(
     body = (
         "Hi team,\n\n"
         + "\n\n".join(blocks)
-        + "\nTHIS IS JUST THE BOT AUTO REPLIED EMAIL. IT IS STILL TESTING KINDLY IGNORE...\n\n"
-        "Best Regards,\n"
+        + "\n\nBest Regards,\n"
         "JC\n"
     )
     orig_found = find_jenkins_reply_message_by_subject_title(title)

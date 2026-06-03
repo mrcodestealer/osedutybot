@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import threading
 from typing import Any, Callable
@@ -828,6 +829,26 @@ def resolve_duty_command_body(*parts: str | None) -> str:
     return candidates[0] if candidates else ""
 
 
+def _send_manual_reply_email_card(
+    send: Callable[..., Any],
+    chat_id: str,
+    *,
+    detail_md: str,
+    completions: list[tuple[str, str]] | None = None,
+) -> None:
+    import maintenance as maint
+
+    card = maint.build_jenkins_manual_reply_email_card(
+        detail_md,
+        completions=completions,
+    )
+    payload = json.dumps(card, ensure_ascii=False)
+    try:
+        send(chat_id, payload, msg_type="interactive")
+    except TypeError:
+        send(chat_id, payload)
+
+
 def _send_jenkins_email_reply(
     send: Callable[..., Any],
     chat_id: str,
@@ -844,26 +865,31 @@ def _send_jenkins_email_reply(
         )
     except mm.JenkinsReplyOnlyBouncesError as ex:
         folders = ", ".join(mm.JENKINS_REPLY_IMAP_FOLDERS)
-        send(
-            chat_id,
+        detail = (
             "❌ **Email not found** — no reply sent.\n"
             f"Searched **{folders}** for `{email_title}` — only **Failed to send** / "
             "mailer-daemon notices found (no normal thread with To/Cc).\n"
             "Keep the original notification in **OSE Pending** or **INBOX**, or fix "
             "invalid addresses on past bounces.\n"
-            f"_{ex}_",
+            f"_{ex}_"
+        )
+        send(chat_id, detail)
+        _send_manual_reply_email_card(
+            send, chat_id, detail_md=detail, completions=completions
         )
         return
     except mm.EmailThreadNotFoundError:
         folders = ", ".join(mm.JENKINS_REPLY_IMAP_FOLDERS)
-        send(
-            chat_id,
+        detail = (
             "❌ **Email not found** — no reply sent.\n"
             f"Searched **{folders}** for the latest mail whose subject contains: `{email_title}`\n"
             "Check the **Email:** line in your `/update` matches the original mail subject.\n"
             "Tip: keep the original thread in **OSE Pending** / **INBOX** (not only "
-            "**Failed to send** bounce notices). Restart the duty bot after pulling "
-            "mail-search fixes if folders still list **Priority** first.",
+            "**Failed to send** bounce notices)."
+        )
+        send(chat_id, detail)
+        _send_manual_reply_email_card(
+            send, chat_id, detail_md=detail, completions=completions
         )
         return
     except Exception as ex:

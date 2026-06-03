@@ -2382,8 +2382,24 @@ def _card_labeled_field(label: str, value: str) -> dict[str, Any]:
     }
 
 
+def _extracted_field_unknown(value: str | None) -> bool:
+    """True when a parsed display field is empty or placeholder ``Unknown``."""
+    v = (value or "").strip()
+    return not v or v.lower() == "unknown"
+
+
+def _studio_for_display(studio: str | None) -> str | None:
+    """Studio label value for cards — omit when unknown."""
+    if _extracted_field_unknown(studio):
+        return None
+    return (studio or "").strip()
+
+
 def _card_studio_date_columns(studio: str, date: str) -> dict[str, Any]:
-    """Two-column Studio | Date row (picture 1)."""
+    """Studio | Date row (picture 1); Studio column omitted when unknown."""
+    studio_val = _studio_for_display(studio)
+    if studio_val is None:
+        return _card_labeled_field("Date", date)
     return {
         "tag": "column_set",
         "flex_mode": "bisect",
@@ -2395,7 +2411,7 @@ def _card_studio_date_columns(studio: str, date: str) -> dict[str, Any]:
                 "width": "weighted",
                 "weight": 1,
                 "vertical_align": "top",
-                "elements": [_card_labeled_field("Studio", studio)],
+                "elements": [_card_labeled_field("Studio", studio_val)],
             },
             {
                 "tag": "column",
@@ -2465,9 +2481,12 @@ def build_in_progress_card_body(
     )
     reason = _reason_display(info, email_body)
     email_ref = _email_ref_line(info, email_subject, email_body)
-    return "\n".join(
+    body_lines: list[str] = []
+    studio_disp = _studio_for_display(studio)
+    if studio_disp:
+        body_lines.append(f"**Studio:**\n{studio_disp}")
+    body_lines.extend(
         [
-            f"**Studio:**\n{studio}",
             f"**Date:**\n{date}",
             f"**Table:**\n{table}",
             f"**Reason:**\n{reason}",
@@ -2476,6 +2495,7 @@ def build_in_progress_card_body(
             f"📧 Email: {email_ref}",
         ]
     )
+    return "\n".join(body_lines)
 
 
 def _fixed_card_values(
@@ -2562,12 +2582,16 @@ def build_fixed_card_body(
         email_body=email_body,
         launched_tables=launched_tables,
     )
-    return "\n".join(
+    lines = [
+        f"Hi {_at_cs_team()}",
+        "",
+        "**Kindly unset maintenance.**",
+    ]
+    studio_disp = _studio_for_display(studio)
+    if studio_disp:
+        lines.append(f"**Studio:**\n{studio_disp}")
+    lines.extend(
         [
-            f"Hi {_at_cs_team()}",
-            "",
-            "**Kindly unset maintenance.**",
-            f"**Studio:**\n{studio}",
             f"**Date:**\n{date}",
             f"**Table:**\n{table}",
             f"**Time of resolution:**\n{resolution}",
@@ -2577,6 +2601,7 @@ def build_fixed_card_body(
             f"📧 Email: {email_ref}",
         ]
     )
+    return "\n".join(lines)
 
 
 def _scheduled_table_display(
@@ -3937,6 +3962,44 @@ def build_checkemail_error_card(
     }
 
 
+def build_jenkins_manual_reply_email_card(
+    message_md: str,
+    *,
+    title: str = "Kindly manual reply email",
+    completions: list[tuple[str, str]] | None = None,
+) -> dict[str, Any]:
+    """Orange Lark card when Jenkins auto-reply cannot find the mail thread."""
+    parts = [message_md.strip()]
+    if completions:
+        blocks = [
+            f"**Done {env.strip()}**\nRemarks : {when.strip()}"
+            for env, when in completions
+        ]
+        parts.append(
+            "**Suggested manual reply** (paste into Reply-All on the original mail):\n\n"
+            + "\n\n".join(blocks)
+        )
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "orange",
+            "title": {"tag": "plain_text", "content": title[:200]},
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": lark_md_for_card("\n\n".join(p for p in parts if p)),
+                    },
+                }
+            ]
+        },
+    }
+
+
 def build_maintenance_email_check_card(
     *,
     email_subject: str,
@@ -4237,17 +4300,23 @@ def format_maintenance_email_check(
         "",
         "**Parsed fields**",
         f"• Ticket: `{ctx['ticket']}`",
-        f"• Studio: {ctx['studio']}",
-        f"• Date: {ctx['date']}",
-        f"• Table: {ctx['table']}",
-        "• table_names: "
-        + (", ".join(ctx["candidates"]) if ctx["candidates"] else "（无）"),
-        f"• Status: {info.get('status', 'Unknown')}",
-        f"• Start: {info.get('start_time', 'Unknown')}",
-        f"• End: {info.get('end_time', 'Unknown')}",
-        f"• Reason: {info.get('reason', 'Unknown')}",
-        f"• Cancel email: {'yes' if ctx['matched_cancel'] else 'no'}",
     ]
+    studio_disp = _studio_for_display(str(ctx.get("studio") or ""))
+    if studio_disp:
+        lines.append(f"• Studio: {studio_disp}")
+    lines.extend(
+        [
+            f"• Date: {ctx['date']}",
+            f"• Table: {ctx['table']}",
+            "• table_names: "
+            + (", ".join(ctx["candidates"]) if ctx["candidates"] else "（无）"),
+            f"• Status: {info.get('status', 'Unknown')}",
+            f"• Start: {info.get('start_time', 'Unknown')}",
+            f"• End: {info.get('end_time', 'Unknown')}",
+            f"• Reason: {info.get('reason', 'Unknown')}",
+            f"• Cancel email: {'yes' if ctx['matched_cancel'] else 'no'}",
+        ]
+    )
     if ctx["card_hdr"]:
         preview = _elements_to_check_preview(ctx["card_els"] or [])
         lines.extend(
