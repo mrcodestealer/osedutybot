@@ -1766,6 +1766,40 @@ def sync_all_leave_calendar_to_bitable(
     )
 
 
+def sync_hrms_to_tracking_bitables(
+    *,
+    year: Optional[int] = None,
+    month: Optional[int] = None,
+    ref_date: Optional[date] = None,
+) -> dict[str, Any]:
+    """
+    Pull HRMS calendars → Lark Bitable tracking sheets (webapp / bot read these only).
+
+    - **leaveose** (``TRACK_TABLE_ID`` / tblvoXE0hsPjgb0j): OSE names in dutyList.csv only
+    - **leave 全员** (``ALL_LEAVE_TABLE_ID`` / tblmHJHe12BCJRD8): all company leave
+    - **WFH** (``TRACK_WFH_TABLE_ID``): work-from-home
+    """
+    ref = ref_date or date.today()
+    y = int(year if year is not None else ref.year)
+    m = int(month if month is not None else ref.month)
+    leaveose = sync_leave_calendar_to_bitable(year=y, month=m, ref_date=ref, ose_only=True)
+    leave_all = sync_all_leave_calendar_to_bitable(year=y, month=m, ref_date=ref)
+    wfh = sync_wfh_calendar_to_bitable(year=y, month=m, ref_date=ref)
+    try:
+        import ose_Duty as od
+
+        od.invalidate_ose_bitable_cache()
+    except Exception:
+        pass
+    return {
+        "year": y,
+        "month": m,
+        "leaveose": leaveose,
+        "leave_all": leave_all,
+        "wfh": wfh,
+    }
+
+
 def _leave_type_emoji(leave_type: str) -> str:
     lt = (leave_type or "").strip().lower()
     if "annual" in lt or lt == "al":

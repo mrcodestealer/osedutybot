@@ -4940,6 +4940,88 @@ def start_background_scrape_loop() -> None:
     th.start()
 
 
+_hrms_sync_started = False
+_hrms_sync_run_lock = threading.Lock()
+
+
+def _leave_wfh_sync_enabled() -> bool:
+    return os.getenv("LEAVE_WFH_SYNC_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _run_hrms_bitable_sync_once() -> None:
+    """HRMS calendars → leaveose + leave 全员 + WFH Bitables; webapp reads sheets only."""
+    if not _hrms_sync_run_lock.acquire(blocking=False):
+        print("[HRMS→Bitable] skipped (sync already running)", flush=True)
+        return
+    try:
+        import leavewfh as lw
+
+        bundle = lw.sync_hrms_to_tracking_bitables()
+        y, m = bundle["year"], bundle["month"]
+        lo, la, wfh = bundle["leaveose"], bundle["leave_all"], bundle["wfh"]
+        print(
+            f"[HRMS→Bitable] {y}-{m:02d} leaveose +{lo.get('added', lo.get('created', 0))} "
+            f"leave全员 +{la.get('added', la.get('created', 0))} "
+            f"WFH +{wfh.get('added', 0)} "
+            f"(skipped leaveose={lo.get('skipped')} wfh={wfh.get('skipped')})",
+            flush=True,
+        )
+        for label, res in ("leaveose", lo), ("leave_all", la), ("wfh", wfh):
+            for w in res.get("warnings") or []:
+                print(f"[HRMS→Bitable] {label} warning: {w}", flush=True)
+    except Exception as exc:
+        print(f"[HRMS→Bitable] failed: {exc!r}", flush=True)
+    finally:
+        _hrms_sync_run_lock.release()
+
+
+def _hrms_bitable_sync_worker() -> None:
+    try:
+        interval_min = max(30, int(os.getenv("LEAVE_WFH_SYNC_INTERVAL_MIN", "120")))
+    except ValueError:
+        interval_min = 120
+    _run_hrms_bitable_sync_once()
+    while True:
+        time.sleep(interval_min * 60)
+        _run_hrms_bitable_sync_once()
+
+
+def start_hrms_bitable_sync_loop() -> None:
+    """
+    Standalone ``webapp.py`` only — sync HRMS → Bitable on startup + interval.
+
+    **Production:** run ``main.py`` instead; it mounts webapp and uses APScheduler
+    (``LEAVE_WFH_SYNC_*``). Set ``WEBAPP_HRMS_SYNC=0`` or use ``main.py`` only.
+    """
+    global _hrms_sync_started
+    if os.getenv("WEBAPP_MOUNTED_IN_MAIN", "").strip().lower() in ("1", "true", "yes", "on"):
+        return
+    if os.getenv("WEBAPP_HRMS_SYNC", "0").strip().lower() in ("0", "false", "no", "off"):
+        print(
+            "[HRMS→Bitable] webapp standalone sync off (use main.py; set WEBAPP_HRMS_SYNC=1 to force here)",
+            flush=True,
+        )
+        return
+    if not _leave_wfh_sync_enabled():
+        print("[HRMS→Bitable] disabled (LEAVE_WFH_SYNC_ENABLED=0)", flush=True)
+        return
+    with _bg_lock:
+        if _hrms_sync_started:
+            return
+        _hrms_sync_started = True
+    try:
+        interval_min = max(30, int(os.getenv("LEAVE_WFH_SYNC_INTERVAL_MIN", "120")))
+    except ValueError:
+        interval_min = 120
+    print(
+        f"[HRMS→Bitable] auto sync ON: HRMS → leaveose + leave全员 + WFH every {interval_min} min; "
+        "webapp/admin read Bitable sheets only",
+        flush=True,
+    )
+    th = threading.Thread(target=_hrms_bitable_sync_worker, name="hrms-bitable-sync", daemon=True)
+    th.start()
+
+
 def _machines_last_updated_str() -> str:
     """Local ``YYYY-mm-dd HH:MM:SS`` for last machine list refresh (live scrape time, else data file mtime)."""
     with _scrape_lock:
@@ -5541,12 +5623,19 @@ def admin_logout():
     return redirect(url_for("wm.index"))
 
 
+def _reload_ose_duty():
+    """Flask often keeps a stale ``ose_Duty`` module until the process restarts — reload from disk."""
+    import ose_Duty as od
+
+    return importlib.reload(od)
+
+
 @wm_bp.get("/api/admin/leave-list")
 def api_admin_leave_list():
     if not _admin_session_who():
         return jsonify(ok=False, error="unauthorized"), 401
     try:
-        import ose_Duty as od
+        od = _reload_ose_duty()
 
         if (request.args.get("refresh") or "").strip().lower() in ("1", "true", "yes"):
             od.invalidate_ose_bitable_cache()
@@ -5835,15 +5924,20 @@ def _ensure_flask_secret_key(flask_app: Flask) -> None:
     flask_app.config["SECRET_KEY"] = key
 
 
-def register_webapp(flask_app: Flask, *, url_prefix: str | None = None) -> None:
+def register_webapp(flask_app: Flask, *, url_prefix: str | None = None, mounted_in_main: bool = False) -> None:
     """
     Register routes on an existing Flask app (e.g. Duty ``main.app``).
 
     ``url_prefix`` ``None`` / ``""`` / ``"/"`` → mount at application root.
     Otherwise use e.g. ``"/wm"`` so the dashboard lives under that prefix.
 
+    When ``mounted_in_main=True`` (``main.py``), HRMS→Bitable sync is handled by
+    ``main.py`` APScheduler — do not run ``webapp.py`` as a separate process.
+
     Background scraping starts when :func:`start_background_scrape_loop` is called (see ``main.py`` / ``webapp.main``); scrape is **on by default** unless ``WEBMACHINE_SCRAPE=0``.
     """
+    if mounted_in_main:
+        os.environ["WEBAPP_MOUNTED_IN_MAIN"] = "1"
     flask_app.config.setdefault(
         "SECRET_KEY",
         os.environ.get("WEBAPP_SECRET_KEY") or os.environ.get("APP_SECRET") or "change-me",
@@ -5869,6 +5963,12 @@ def register_webapp(flask_app: Flask, *, url_prefix: str | None = None) -> None:
             ),
             flush=True,
         )
+        if mounted_in_main:
+            print(
+                "[webapp] mounted in main.py — HRMS→Bitable sync via main scheduler (LEAVE_WFH_SYNC_*); "
+                "do not run webapp.py separately",
+                flush=True,
+            )
     except Exception as _e:
         print("[webapp] OSE leave routing check skipped: %r" % (_e,), flush=True)
 
@@ -5889,11 +5989,13 @@ def main() -> int:
         return 1
     host = (os.environ.get("WEBMACHINE_HOST") or "0.0.0.0").strip() or "0.0.0.0"
     print(
-        f"[webapp] http://{host}:{port}/  (Lark Web app homepage → public https URL that proxies here)\n"
+        f"[webapp] http://{host}:{port}/  (standalone dev server)\n"
+        f"[webapp] Production: run python3 main.py — webapp is mounted automatically.\n"
         f"[webapp] Data: live scrape (default on) + {_ROOT / 'webmachine_data.json'}; WEBMACHINE_SCRAPE=0 to disable",
         flush=True,
     )
     start_background_scrape_loop()
+    start_hrms_bitable_sync_loop()
     app.run(host=host, port=port, debug=_truthy_env("WEBMACHINE_DEBUG"), threaded=True)
     return 0
 

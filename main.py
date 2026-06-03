@@ -1505,7 +1505,7 @@ def ose_leave_offset_daily_sync():
 
 def ose_leave_wfh_calendar_sync():
     """
-    Sync HRMS company Leave + WFH calendars into OSE tracking Bitables (leavewfh.py).
+    Sync HRMS company Leave + WFH calendars into tracking Bitables (leavewfh.py).
 
     Same month: add new rows when someone is approved on Lark calendars.
     New calendar month: each table is cleared and refilled for that month only.
@@ -1519,19 +1519,24 @@ def ose_leave_wfh_calendar_sync():
         except ImportError:
             import leave as lw  # type: ignore[no-redef]
 
-        today = datetime.now().date()
-        y, m = today.year, today.month
-        leave_res = lw.sync_leave_calendar_to_bitable(year=y, month=m)
-        wfh_res = lw.sync_wfh_calendar_to_bitable(year=y, month=m)
+        bundle = lw.sync_hrms_to_tracking_bitables()
+        y, m = bundle["year"], bundle["month"]
+        leave_res = bundle["leaveose"]
+        leave_all_res = bundle["leave_all"]
+        wfh_res = bundle["wfh"]
         print(
-            f"[Leave/WFH sync] {y}-{m:02d} leave: "
+            f"[Leave/WFH sync] {y}-{m:02d} leaveose: "
             f"deleted={leave_res.get('deleted', 0)} added={leave_res.get('added', leave_res.get('created', 0))} "
-            f"skipped={leave_res.get('skipped', False)} | "
-            f"WFH: deleted={wfh_res.get('deleted', 0)} added={wfh_res.get('added', 0)} "
-            f"skipped={wfh_res.get('skipped', False)}",
+            f"| leave全员: deleted={leave_all_res.get('deleted', 0)} "
+            f"added={leave_all_res.get('added', leave_all_res.get('created', 0))} "
+            f"| WFH: deleted={wfh_res.get('deleted', 0)} added={wfh_res.get('added', 0)}",
             flush=True,
         )
-        for label, res in ("leave", leave_res), ("wfh", wfh_res):
+        for label, res in (
+            ("leaveose", leave_res),
+            ("leave_all", leave_all_res),
+            ("wfh", wfh_res),
+        ):
             for w in res.get("warnings") or []:
                 print(f"[Leave/WFH sync] {label} warning: {w}", flush=True)
             for err in res.get("create_errors") or []:
@@ -4287,13 +4292,20 @@ def _try_mount_webapp_blueprint() -> None:
     if prefix and not prefix.startswith("/"):
         prefix = "/" + prefix
     try:
-        _wm.register_webapp(app, url_prefix=prefix)
+        _wm.register_webapp(app, url_prefix=prefix, mounted_in_main=True)
         _wm.start_background_scrape_loop()
         print(
             "[webapp] dashboard registered at prefix %r (live scrape on by default; WEBMACHINE_SCRAPE=0 to disable)"
             % prefix,
             flush=True,
         )
+        if os.getenv("LEAVE_WFH_SYNC_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on"):
+            threading.Thread(
+                target=ose_leave_wfh_calendar_sync,
+                name="hrms-bitable-startup-sync",
+                daemon=True,
+            ).start()
+            print("[webapp] HRMS→Bitable startup sync queued (main.py scheduler handles ongoing sync)", flush=True)
     except Exception as e:
         print("[webapp] optional mount failed: %r" % (e,), flush=True)
 
