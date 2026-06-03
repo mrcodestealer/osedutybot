@@ -1575,7 +1575,12 @@ def sync_leave_calendar_to_bitable(
     source_rows, meta = collect_leave_source_rows(
         token, year, month, include_bitable=False
     )
-    if not source_rows and not month_changed and not force_resync:
+    import duty_list_match as dlm
+
+    company_hrms_rows = int(meta.get("company_leave_calendar_rows") or 0)
+    source_rows = dlm.filter_leave_rows_to_ose_dutylist(source_rows)
+    meta = {**meta, "ose_dutylist_rows": len(source_rows)}
+    if company_hrms_rows == 0 and not month_changed and not force_resync:
         return {
             "ok": False,
             "skipped": True,
@@ -1588,7 +1593,7 @@ def sync_leave_calendar_to_bitable(
             "source_rows": 0,
             "warnings": meta.get("warnings") or [],
             "message": (
-                "No leave data found for this month; tracking table was not modified."
+                "No HRMS leave calendar data for this month; OSE display table was not modified."
             ),
         }
 

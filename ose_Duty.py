@@ -21,6 +21,8 @@ from typing import Any, Optional
 import requests
 from dotenv import load_dotenv
 
+import duty_list_match as dlm
+
 load_dotenv()
 
 APP_ID = os.getenv("APP_ID")
@@ -700,11 +702,9 @@ def _is_approved(v: Any) -> bool:
     return _field_text(v).strip().lower() == "approved"
 
 
-def _is_ose_roster_leave_name(name: str) -> bool:
-    nm = _title_name(name)
-    if not nm:
-        return False
-    return any(_names_same_person(nm, roster) for roster in OSE_LEAVE_FORM_NAMES)
+def _is_ose_dutylist_leave_name(name: str) -> bool:
+    """OSE = dutyList.csv department OSE / OSE Senior / Team Lead / Manager (not hardcoded roster)."""
+    return dlm.is_ose_dutylist_name(name)
 
 
 def _extract_leave_entries_for_date(
@@ -724,8 +724,10 @@ def _extract_leave_entries_for_date(
             if not _is_approved(status_v):
                 continue
         name = _title_name(_field_text(_get_field_by_aliases(f, ["Name", "Employee Name", "Person"])))
-        if not name or not _is_ose_roster_leave_name(name):
+        if not name or not _is_ose_dutylist_leave_name(name):
             continue
+        entry = dlm.match_duty_entry(name)
+        display_name = entry["name"] if entry else name
         st = _parse_date_value(_get_field_by_aliases(f, ["Start Date", "Leave Start Date", "From"]))
         ed = _parse_date_value(_get_field_by_aliases(f, ["End Date", "Leave End Date", "To"]))
         if not st or not ed:
@@ -733,7 +735,7 @@ def _extract_leave_entries_for_date(
         if st <= target_date <= ed:
             out.append(
                 {
-                    "name": name,
+                    "name": display_name,
                     "leave_type": _field_text(_get_field_by_aliases(f, ["Leave Type", "Type"])) or "Leave",
                     "start": st,
                     "end": ed,
@@ -1338,13 +1340,15 @@ def _leave_rows_for_calendar(items: list[dict[str, Any]]) -> list[dict[str, Any]
     for it in items:
         f = it.get("fields") or {}
         name = _title_name(_field_text(_get_field_by_aliases(f, ["Name", "Employee Name", "Person"])))
-        if not name or not _is_ose_roster_leave_name(name):
+        if not name or not _is_ose_dutylist_leave_name(name):
             continue
+        entry = dlm.match_duty_entry(name)
+        canon = entry["name"] if entry else name
         st = _parse_date_value(_get_field_by_aliases(f, ["Start Date", "Leave Start Date", "From"]))
         ed = _parse_date_value(_get_field_by_aliases(f, ["End Date", "Leave End Date", "To"]))
         if not st or not ed:
             continue
-        rows.append({"name": name, "start": st, "end": ed})
+        rows.append({"name": canon, "start": st, "end": ed})
     return rows
 
 
@@ -1370,15 +1374,17 @@ def get_ose_leave_records_list() -> dict[str, Any]:
     for it in items:
         f = it.get("fields") or {}
         name = _title_name(_field_text(_get_field_by_aliases(f, ["Name", "Employee Name", "Person"])))
-        if not name or not _is_ose_roster_leave_name(name):
+        if not name or not _is_ose_dutylist_leave_name(name):
             continue
+        entry = dlm.match_duty_entry(name)
+        canon = entry["name"] if entry else name
         st = _parse_date_value(_get_field_by_aliases(f, ["Start Date", "Leave Start Date", "From"]))
         ed = _parse_date_value(_get_field_by_aliases(f, ["End Date", "Leave End Date", "To"]))
         approval = _record_approval_fields(f)
         rows.append(
             {
                 "leave_id": _field_text(_get_field_by_aliases(f, ["LeaveID", "Leave ID", "Leave Id"])),
-                "name": name,
+                "name": canon,
                 "leave_type": _field_text(_get_field_by_aliases(f, ["Leave Type", "Type"])),
                 "start_date": _format_yyyymmdd(st),
                 "end_date": _format_yyyymmdd(ed),
@@ -1401,15 +1407,18 @@ def get_ose_leave_records_list() -> dict[str, Any]:
 
 
 def get_ose_leave_records_admin() -> dict[str, Any]:
-    """Leave rows for admin approval (includes Bitable record_id)."""
+    """Leave rows for admin approval (includes Bitable record_id; OSE dutyList.csv only)."""
     token = get_tenant_access_token()
     items = _get_leave_approval_raw(token)
     rows: list[dict[str, str]] = []
     for it in items:
         f = it.get("fields") or {}
         name = _title_name(_field_text(_get_field_by_aliases(f, ["Name", "Employee Name", "Person"])))
-        if not name:
+        if not name or not _is_ose_dutylist_leave_name(name):
             continue
+        entry = dlm.match_duty_entry(name)
+        if entry:
+            name = entry["name"]
         st = _parse_date_value(_get_field_by_aliases(f, ["Start Date", "Leave Start Date", "From"]))
         ed = _parse_date_value(_get_field_by_aliases(f, ["End Date", "Leave End Date", "To"]))
         approval = _record_approval_fields(f)

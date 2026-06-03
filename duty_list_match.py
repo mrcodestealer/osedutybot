@@ -9,7 +9,7 @@ import os
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DUTY_CSV = ROOT / "dutyList.csv"
@@ -188,3 +188,54 @@ def match_duty_name(
 ) -> Optional[str]:
     row = match_duty_entry(name, duty_entries, csv_path=csv_path)
     return row["name"] if row else None
+
+
+def is_ose_dutylist_name(
+    name: str,
+    duty_entries: Optional[list[dict[str, str]]] = None,
+    *,
+    csv_path: Optional[Path] = None,
+) -> bool:
+    """True when ``name`` maps to a dutyList.csv row whose department is OSE (incl. OSE Senior / Team Lead)."""
+    row = match_duty_entry(name, duty_entries, csv_path=csv_path)
+    return bool(row and is_ose_department(row["department"]))
+
+
+def list_ose_dutylist_names(*, csv_path: Optional[Path] = None) -> list[str]:
+    """Canonical OSE names from dutyList.csv (sorted)."""
+    entries = load_duty_list(csv_path)
+    names = sorted(
+        {e["name"] for e in entries if is_ose_department(e["department"])},
+        key=lambda x: x.lower(),
+    )
+    return names
+
+
+def filter_leave_rows_to_ose_dutylist(
+    rows: list[dict],
+    duty_entries: Optional[list[dict[str, str]]] = None,
+    *,
+    csv_path: Optional[Path] = None,
+) -> list[dict]:
+    """Keep only HRMS/Bitable leave rows for people in dutyList.csv with OSE department."""
+    entries = duty_entries if duty_entries is not None else load_duty_list(csv_path)
+    out: list[dict] = []
+    seen: set[tuple[Any, ...]] = set()
+    for row in rows:
+        entry = match_duty_entry(str(row.get("name") or ""), entries)
+        if not entry or not is_ose_department(entry["department"]):
+            continue
+        key = (
+            entry["name"].lower(),
+            row.get("start"),
+            row.get("end"),
+            str(row.get("leave_type") or "").strip().lower(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        merged = dict(row)
+        merged["name"] = entry["name"]
+        merged["department"] = entry["department"]
+        out.append(merged)
+    return out
