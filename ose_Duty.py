@@ -1366,35 +1366,50 @@ def _record_approval_fields(fields: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _leave_row_key_for_admin(row: dict[str, str]) -> tuple[str, str, str, str]:
+    return (
+        (row.get("name") or "").strip().lower(),
+        row.get("start_date") or "",
+        row.get("end_date") or "",
+        (row.get("leave_type") or "").strip().lower(),
+    )
+
+
+def _admin_leave_row_from_bitable_item(it: dict[str, Any]) -> Optional[dict[str, str]]:
+    f = it.get("fields") or {}
+    name = _title_name(_field_text(_get_field_by_aliases(f, ["Name", "Employee Name", "Person"])))
+    if not name:
+        return None
+    entry = dlm.match_duty_entry(name)
+    if entry:
+        name = entry["name"]
+    st = _parse_date_value(_get_field_by_aliases(f, ["Start Date", "Leave Start Date", "From"]))
+    ed = _parse_date_value(_get_field_by_aliases(f, ["End Date", "Leave End Date", "To"]))
+    approval = _record_approval_fields(f)
+    return {
+        "record_id": str(it.get("record_id") or "").strip(),
+        "leave_id": _field_text(_get_field_by_aliases(f, ["LeaveID", "Leave ID", "Leave Id"])),
+        "name": name,
+        "leave_type": _field_text(_get_field_by_aliases(f, ["Leave Type", "Type"])),
+        "start_date": _format_yyyymmdd(st),
+        "end_date": _format_yyyymmdd(ed),
+        "reason": _field_text(_get_field_by_aliases(f, ["Reason"])),
+        "status": approval["status"],
+        "approver": approval["approver"],
+        "approval_date": approval["approval_date"],
+        "remarks": approval["remarks"],
+    }
+
+
 def get_ose_leave_records_list() -> dict[str, Any]:
     """HRMS-synced OSE leave rows for webapp display (read-only; no approval workflow)."""
     token = get_tenant_access_token()
-    items = _get_leave_display_raw(token)
     rows: list[dict[str, str]] = []
-    for it in items:
-        f = it.get("fields") or {}
-        name = _title_name(_field_text(_get_field_by_aliases(f, ["Name", "Employee Name", "Person"])))
-        if not name or not _is_ose_dutylist_leave_name(name):
+    for it in _get_leave_display_raw(token):
+        row = _admin_leave_row_from_bitable_item(it)
+        if not row or not _is_ose_dutylist_leave_name(row["name"]):
             continue
-        entry = dlm.match_duty_entry(name)
-        canon = entry["name"] if entry else name
-        st = _parse_date_value(_get_field_by_aliases(f, ["Start Date", "Leave Start Date", "From"]))
-        ed = _parse_date_value(_get_field_by_aliases(f, ["End Date", "Leave End Date", "To"]))
-        approval = _record_approval_fields(f)
-        rows.append(
-            {
-                "leave_id": _field_text(_get_field_by_aliases(f, ["LeaveID", "Leave ID", "Leave Id"])),
-                "name": canon,
-                "leave_type": _field_text(_get_field_by_aliases(f, ["Leave Type", "Type"])),
-                "start_date": _format_yyyymmdd(st),
-                "end_date": _format_yyyymmdd(ed),
-                "reason": _field_text(_get_field_by_aliases(f, ["Reason"])),
-                "status": approval["status"],
-                "approver": approval["approver"],
-                "approval_date": approval["approval_date"],
-                "remarks": approval["remarks"],
-            }
-        )
+        rows.append({k: v for k, v in row.items() if k != "record_id"})
     rows.sort(
         key=lambda r: (
             r.get("start_date") or "",
@@ -1407,37 +1422,37 @@ def get_ose_leave_records_list() -> dict[str, Any]:
 
 
 def get_ose_leave_records_admin() -> dict[str, Any]:
-    """Leave rows for admin approval (includes Bitable record_id; OSE dutyList.csv only)."""
+    """
+    Admin leave list:
+    - HRMS OSE rows from display Bitable (``OSE_HRMS_LEAVE_TABLE_ID``)
+    - Plus OSE form submissions / pending rows from approval Bitable only
+    - Never company-wide HRMS rows wrongly synced into the approval table
+    """
     token = get_tenant_access_token()
-    items = _get_leave_approval_raw(token)
-    rows: list[dict[str, str]] = []
-    for it in items:
-        f = it.get("fields") or {}
-        name = _title_name(_field_text(_get_field_by_aliases(f, ["Name", "Employee Name", "Person"])))
-        if not name or not _is_ose_dutylist_leave_name(name):
+    merged: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+
+    for it in _get_leave_display_raw(token):
+        row = _admin_leave_row_from_bitable_item(it)
+        if not row or not _is_ose_dutylist_leave_name(row["name"]):
             continue
-        entry = dlm.match_duty_entry(name)
-        if entry:
-            name = entry["name"]
-        st = _parse_date_value(_get_field_by_aliases(f, ["Start Date", "Leave Start Date", "From"]))
-        ed = _parse_date_value(_get_field_by_aliases(f, ["End Date", "Leave End Date", "To"]))
-        approval = _record_approval_fields(f)
-        rows.append(
-            {
-                "record_id": str(it.get("record_id") or "").strip(),
-                "leave_id": _field_text(_get_field_by_aliases(f, ["LeaveID", "Leave ID", "Leave Id"])),
-                "name": name,
-                "leave_type": _field_text(_get_field_by_aliases(f, ["Leave Type", "Type"])),
-                "start_date": _format_yyyymmdd(st),
-                "end_date": _format_yyyymmdd(ed),
-                "reason": _field_text(_get_field_by_aliases(f, ["Reason"])),
-                "status": approval["status"],
-                "approver": approval["approver"],
-                "approval_date": approval["approval_date"],
-                "remarks": approval["remarks"],
-                "pending": _is_pending_approval(_get_field_by_aliases(f, ["Status", "Approval Status"])),
-            }
+        row["pending"] = False
+        merged[_leave_row_key_for_admin(row)] = row
+
+    for it in _get_leave_approval_raw(token):
+        row = _admin_leave_row_from_bitable_item(it)
+        if not row or not _is_ose_dutylist_leave_name(row["name"]):
+            continue
+        pending = _is_pending_approval(
+            _get_field_by_aliases(it.get("fields") or {}, ["Status", "Approval Status"])
         )
+        reason = (row.get("reason") or "").strip()
+        leave_id = (row.get("leave_id") or "").strip()
+        if not pending and not reason and not leave_id:
+            continue
+        row["pending"] = pending
+        merged[_leave_row_key_for_admin(row)] = row
+
+    rows = list(merged.values())
     rows.sort(
         key=lambda r: (
             r.get("start_date") or "",
