@@ -33,14 +33,13 @@ SHEET_ID = os.getenv("OSE_SHEET_ID")
 
 # Leave / Offset Bitable (defaults from user-provided URLs).
 OSE_BASE_TOKEN = os.getenv("OSE_BASE_TOKEN", "CpdEbEofwaYyyEsSjlElKNxzgec")
-# HRMS calendar sync → display on webapp / OSE duty calendar (read-only).
-OSE_HRMS_LEAVE_TABLE_ID = (
-    os.getenv("OSE_HRMS_LEAVE_TABLE_ID")
-    or os.getenv("TRACK_LEAVE_TABLE_ID")
-    or "tblvoXE0hsPjgb0j"
-).strip()
-# OSE leave requests + admin approval workflow.
-OSE_LEAVE_TABLE_ID = os.getenv("OSE_LEAVE_TABLE_ID", "tblmHJHe12BCJRD8")
+# HRMS → OSE display sheet (webapp / admin ALL / duty calendar leave list).
+# https://casinoplus.sg.larksuite.com/base/CpdEbEofwaYyyEsSjlElKNxzgec?table=tblvoXE0hsPjgb0j
+# Do not fall back to TRACK_LEAVE_TABLE_ID — legacy env may still point at tblmHJHe12BCJRD8.
+OSE_HRMS_LEAVE_TABLE_ID = os.getenv("OSE_HRMS_LEAVE_TABLE_ID", "tblvoXE0hsPjgb0j").strip()
+# OSE leave request + approval workflow (Submit Leave form writes here).
+# https://casinoplus.sg.larksuite.com/base/CpdEbEofwaYyyEsSjlElKNxzgec?table=tblmHJHe12BCJRD8
+OSE_LEAVE_TABLE_ID = os.getenv("OSE_LEAVE_TABLE_ID", "tblmHJHe12BCJRD8").strip()
 OSE_OFFSET_TABLE_ID = os.getenv("OSE_OFFSET_TABLE_ID", "tblC5T2MAydwT42j")
 
 TARGET_NAMES = [
@@ -1401,6 +1400,19 @@ def _admin_leave_row_from_bitable_item(it: dict[str, Any]) -> Optional[dict[str,
     }
 
 
+def get_ose_leave_bitable_meta() -> dict[str, Any]:
+    """Which Lark tables the app uses (for debugging Admin / webapp data source)."""
+    return {
+        "ose_hrms_leave_table_id": OSE_HRMS_LEAVE_TABLE_ID,
+        "ose_leave_approval_table_id": OSE_LEAVE_TABLE_ID,
+        "base_token": OSE_BASE_TOKEN,
+        "ose_hrms_url": (
+            f"https://casinoplus.sg.larksuite.com/base/{OSE_BASE_TOKEN}"
+            f"?table={OSE_HRMS_LEAVE_TABLE_ID}"
+        ),
+    }
+
+
 def get_ose_leave_records_list() -> dict[str, Any]:
     """HRMS-synced OSE leave rows for webapp display (read-only; no approval workflow)."""
     token = get_tenant_access_token()
@@ -1418,7 +1430,14 @@ def get_ose_leave_records_list() -> dict[str, Any]:
         ),
         reverse=True,
     )
-    return {"ok": True, "items": rows}
+    return {
+        "ok": True,
+        "items": rows,
+        "meta": {
+            **get_ose_leave_bitable_meta(),
+            "source": "ose_hrms_leave_table",
+        },
+    }
 
 
 def get_ose_leave_records_admin() -> dict[str, Any]:
@@ -1430,15 +1449,17 @@ def get_ose_leave_records_admin() -> dict[str, Any]:
     """
     token = get_tenant_access_token()
     merged: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    display_items = _get_leave_display_raw(token)
+    approval_items = _get_leave_approval_raw(token)
 
-    for it in _get_leave_display_raw(token):
+    for it in display_items:
         row = _admin_leave_row_from_bitable_item(it)
         if not row or not _is_ose_dutylist_leave_name(row["name"]):
             continue
         row["pending"] = False
         merged[_leave_row_key_for_admin(row)] = row
 
-    for it in _get_leave_approval_raw(token):
+    for it in approval_items:
         row = _admin_leave_row_from_bitable_item(it)
         if not row or not _is_ose_dutylist_leave_name(row["name"]):
             continue
@@ -1461,7 +1482,19 @@ def get_ose_leave_records_admin() -> dict[str, Any]:
         ),
         reverse=True,
     )
-    return {"ok": True, "items": rows}
+    disp_n = len(display_items)
+    appr_n = len(approval_items)
+    return {
+        "ok": True,
+        "items": rows,
+        "meta": {
+            **get_ose_leave_bitable_meta(),
+            "display_table_raw_rows": disp_n,
+            "approval_table_raw_rows": appr_n,
+            "items_after_ose_dutylist_filter": len(rows),
+            "source": "ose_hrms_leave_table + ose_pending_approval_only",
+        },
+    }
 
 
 def get_ose_offset_records_admin() -> dict[str, Any]:
