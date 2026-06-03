@@ -4588,9 +4588,14 @@ def process_evo_sd_batch_maintenance(
 
     date_suffix = _evo_email_subject_date(outbound_parts)
     email_subject = f"EGS EVO MAINTENANCE {date_suffix}"
-    email_body = (
-        "Hi team,\n\n" + "\n".join(outbound_parts).strip() if outbound_parts else ""
-    )
+    if outbound_parts:
+        email_body = (
+            "Hi team,\n\n"
+            + "\n".join(outbound_parts).strip()
+            + "\n\nBest Regards,\nJC"
+        )
+    else:
+        email_body = ""
     email_sent = bool(email_body.strip())
 
     return {
