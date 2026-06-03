@@ -3,8 +3,9 @@
 OSE Duty + Leave + Offset
 
 - Shift source: OSE sheet (`D`=day, `N`=night)
-- Leave display: HRMS-synced Bitable (``OSE_HRMS_LEAVE_TABLE_ID``)
-- Leave requests: Lark Bitable approval table (``OSE_LEAVE_TABLE_ID``)
+- leaveose (OSE HRMS display): ``OSE_HRMS_LEAVE_TABLE_ID`` → tblvoXE0hsPjgb0j
+- leave 全员 (company HRMS): ``OSE_ALL_LEAVE_TABLE_ID`` → tblmHJHe12BCJRD8 (``--sync-all-leave-month``)
+- OSE submit / approve: ``OSE_LEAVE_TABLE_ID`` (default same as leave 全员 table)
 - Offset source: Lark Bitable (Approved + Original/Exchange date)
 """
 
@@ -37,9 +38,14 @@ OSE_BASE_TOKEN = os.getenv("OSE_BASE_TOKEN", "CpdEbEofwaYyyEsSjlElKNxzgec")
 # https://casinoplus.sg.larksuite.com/base/CpdEbEofwaYyyEsSjlElKNxzgec?table=tblvoXE0hsPjgb0j
 # Do not fall back to TRACK_LEAVE_TABLE_ID — legacy env may still point at tblmHJHe12BCJRD8.
 OSE_HRMS_LEAVE_TABLE_ID = os.getenv("OSE_HRMS_LEAVE_TABLE_ID", "tblvoXE0hsPjgb0j").strip()
-# OSE leave request + approval workflow (Submit Leave form writes here).
+# leave 全员 — company-wide HRMS leave (sync via leavewfh ``--sync-all-leave-month``).
 # https://casinoplus.sg.larksuite.com/base/CpdEbEofwaYyyEsSjlElKNxzgec?table=tblmHJHe12BCJRD8
-OSE_LEAVE_TABLE_ID = os.getenv("OSE_LEAVE_TABLE_ID", "tblmHJHe12BCJRD8").strip()
+OSE_ALL_LEAVE_TABLE_ID = os.getenv(
+    "OSE_ALL_LEAVE_TABLE_ID",
+    os.getenv("OSE_LEAVE_TABLE_ID", "tblmHJHe12BCJRD8"),
+).strip()
+# OSE leave request + approval (Submit Leave form; not the same as webapp OSE display list).
+OSE_LEAVE_TABLE_ID = os.getenv("OSE_LEAVE_TABLE_ID", OSE_ALL_LEAVE_TABLE_ID).strip()
 OSE_OFFSET_TABLE_ID = os.getenv("OSE_OFFSET_TABLE_ID", "tblC5T2MAydwT42j")
 
 # Bump when leave/admin Bitable routing changes (check /api/admin/leave-list meta).
@@ -1409,6 +1415,7 @@ def get_ose_leave_bitable_meta(*, scope: str = "") -> dict[str, Any]:
         "api_build": OSE_LEAVE_API_BUILD,
         "scope": scope or "merged",
         "ose_hrms_leave_table_id": OSE_HRMS_LEAVE_TABLE_ID,
+        "ose_all_leave_table_id": OSE_ALL_LEAVE_TABLE_ID,
         "ose_leave_approval_table_id": OSE_LEAVE_TABLE_ID,
         "base_token": OSE_BASE_TOKEN,
         "ose_hrms_url": (

@@ -20,15 +20,14 @@ Usage:
     ./leave.py --csv               # Output CSV
     ./leave.py --calendar          # Print this month's leave calendar (names per day)
     ./leave.py --calendar 2026-05  # Calendar for a specific month
-    ./leave.py --sync-month        # Sync this month to tracking Bitable
-    ./leave.py --sync-month 2026-05
-    ./leave.py --resync-month 2026-05   # rewrite auto-synced rows (e.g. after Name → Text)
-    ./leave.py --calendar-wfh 2026-05    # Who is WFH this month (console)
-    ./leave.py --sync-wfh-month         # Sync WFH → tblWBI5BxrtFiJul
+    ./leave.py --sync-month 2026-06        # HRMS → leaveose OSE only (tblvoXE0hsPjgb0j)
+    ./leave.py --resync-month 2026-06
+    ./leave.py --sync-all-leave-month      # HRMS → leave 全员 (tblmHJHe12BCJRD8)
+    ./leave.py --resync-all-leave-month 2026-06
+    ./leave.py --calendar-wfh 2026-05
+    ./leave.py --sync-wfh-month
     ./leave.py --resync-wfh-month 2026-05
-    ./leave.py --leave-today       # Print today's leave (console)
-    ./leave.py --purge-non-ose-approval           # Delete non-OSE rows from approval Bitable
-    ./leave.py --purge-non-ose-approval --dry-run # List only; no delete
+    ./leave.py --leave-today
     ./leave.py --debug             # Show raw API responses
 """
 
@@ -77,7 +76,7 @@ def _leave_source_ids() -> tuple[str, str]:
 
 BASE_ID, TABLE_ID = _leave_source_ids()
 
-# HRMS sync destination (webapp OSE leave display):
+# leaveose — OSE only (webapp / Admin OSE / duty calendar):
 # https://casinoplus.sg.larksuite.com/base/CpdEbEofwaYyyEsSjlElKNxzgec?table=tblvoXE0hsPjgb0j
 TRACK_BASE_ID = os.getenv(
     "TRACK_LEAVE_BASE_ID",
@@ -86,6 +85,20 @@ TRACK_BASE_ID = os.getenv(
 TRACK_TABLE_ID = os.getenv(
     "TRACK_LEAVE_TABLE_ID",
     os.getenv("OSE_HRMS_LEAVE_TABLE_ID", "tblvoXE0hsPjgb0j"),
+)
+
+# leave 全员 — company-wide HRMS leave (do not purge; use --sync-all-leave-month):
+# https://casinoplus.sg.larksuite.com/base/CpdEbEofwaYyyEsSjlElKNxzgec?table=tblmHJHe12BCJRD8
+ALL_LEAVE_BASE_ID = os.getenv(
+    "ALL_LEAVE_BASE_ID",
+    os.getenv("TRACK_LEAVE_BASE_ID", os.getenv("OSE_BASE_TOKEN", "CpdEbEofwaYyyEsSjlElKNxzgec")),
+)
+ALL_LEAVE_TABLE_ID = os.getenv(
+    "ALL_LEAVE_TABLE_ID",
+    os.getenv("OSE_ALL_LEAVE_TABLE_ID", os.getenv("OSE_LEAVE_TABLE_ID", "tblmHJHe12BCJRD8")),
+).strip()
+ALL_LEAVE_SYNC_STATE_FILE = Path(
+    os.getenv("ALL_LEAVE_CALENDAR_SYNC_STATE", ".all_leave_calendar_sync_state.json")
 )
 
 # WFH tracking: https://casinoplus.sg.larksuite.com/base/.../table=tblWBI5BxrtFiJul
@@ -1550,25 +1563,31 @@ def sync_leave_calendar_to_bitable(
     month: Optional[int] = None,
     ref_date: Optional[date] = None,
     force_resync: bool = False,
+    track_base_id: Optional[str] = None,
+    track_table_id: Optional[str] = None,
+    ose_only: bool = True,
+    sync_state_path: Optional[Path] = None,
 ) -> dict[str, Any]:
     """
-    Sync leave for ``year``/``month`` into the HRMS OSE display Bitable (tblvoXE0hsPjgb0j).
+    Sync HRMS leave for ``year``/``month`` into a Bitable.
 
-    - **New month** (vs last sync): delete every row in the table, insert this month only.
-    - **Same month**: keep existing rows; **add** new leave not already present; remove rows
-      whose key no longer appears in HRMS (cancelled leave).
-    - **force_resync** (``--resync-month``): delete all existing rows and rewrite from HRMS.
+    Default (``ose_only=True``): **leaveose** ``tblvoXE0hsPjgb0j``, OSE names in dutyList.csv only.
+
+    ``ose_only=False``: **leave 全员** ``tblmHJHe12BCJRD8``, all company calendar rows.
     """
     ref = ref_date or date.today()
     year = int(year if year is not None else ref.year)
     month = int(month if month is not None else ref.month)
     if month < 1 or month > 12:
         raise ValueError("month must be 1–12")
-    if not TRACK_BASE_ID or not TRACK_TABLE_ID:
-        raise ValueError("TRACK_LEAVE_BASE_ID and TRACK_LEAVE_TABLE_ID must be set")
+    track_base = (track_base_id or TRACK_BASE_ID or "").strip()
+    track_table = (track_table_id or TRACK_TABLE_ID or "").strip()
+    state_path = sync_state_path or SYNC_STATE_FILE
+    if not track_base or not track_table:
+        raise ValueError("Leave sync base/table IDs must be set")
 
     token = get_tenant_access_token()
-    state = _load_sync_state()
+    state = _load_sync_state(state_path)
     prev_year = state.get("year")
     prev_month = state.get("month")
     month_changed = prev_year != year or prev_month != month
@@ -1577,12 +1596,14 @@ def sync_leave_calendar_to_bitable(
     source_rows, meta = collect_leave_source_rows(
         token, year, month, include_bitable=False
     )
-    import duty_list_match as dlm
-
     company_hrms_rows = int(meta.get("company_leave_calendar_rows") or 0)
-    source_rows = dlm.filter_leave_rows_to_ose_dutylist(source_rows)
-    meta = {**meta, "ose_dutylist_rows": len(source_rows)}
+    if ose_only:
+        import duty_list_match as dlm
+
+        source_rows = dlm.filter_leave_rows_to_ose_dutylist(source_rows)
+        meta = {**meta, "ose_dutylist_rows": len(source_rows)}
     if company_hrms_rows == 0 and not month_changed and not force_resync:
+        target_label = "OSE leaveose" if ose_only else "leave (all staff)"
         return {
             "ok": False,
             "skipped": True,
@@ -1595,11 +1616,11 @@ def sync_leave_calendar_to_bitable(
             "source_rows": 0,
             "warnings": meta.get("warnings") or [],
             "message": (
-                "No HRMS leave calendar data for this month; OSE display table was not modified."
+                f"No HRMS leave calendar data for this month; {target_label} table was not modified."
             ),
         }
 
-    existing = get_all_records(token, TRACK_BASE_ID, TRACK_TABLE_ID)
+    existing = get_all_records(token, track_base, track_table)
     source_by_key = {_leave_row_key(r): r for r in source_rows}
     synced_by_key = _existing_synced_rows_by_key(existing)
 
@@ -1611,7 +1632,7 @@ def sync_leave_calendar_to_bitable(
             if not rid:
                 continue
             try:
-                delete_record(token, TRACK_BASE_ID, TRACK_TABLE_ID, rid)
+                delete_record(token, track_base, track_table, rid)
                 deleted += 1
             except Exception as exc:
                 delete_errors.append(f"{rid}: {exc}")
@@ -1622,7 +1643,7 @@ def sync_leave_calendar_to_bitable(
             if not rid:
                 continue
             try:
-                delete_record(token, TRACK_BASE_ID, TRACK_TABLE_ID, rid)
+                delete_record(token, track_base, track_table, rid)
                 deleted += 1
             except Exception as exc:
                 delete_errors.append(f"{rid}: {exc}")
@@ -1632,7 +1653,7 @@ def sync_leave_calendar_to_bitable(
             if key in source_by_key:
                 continue
             try:
-                delete_record(token, TRACK_BASE_ID, TRACK_TABLE_ID, rid)
+                delete_record(token, track_base, track_table, rid)
                 deleted += 1
             except Exception as exc:
                 delete_errors.append(f"{rid}: {exc}")
@@ -1650,13 +1671,13 @@ def sync_leave_calendar_to_bitable(
     for row in rows_to_add:
         try:
             fields = _build_tracking_fields(token, row, open_map=open_map)
-            rid = create_record(token, TRACK_BASE_ID, TRACK_TABLE_ID, fields)
+            rid = create_record(token, track_base, track_table, fields)
             if rid:
                 created_ids.append(rid)
         except Exception as exc:
             create_errors.append(f"{row.get('name')}: {exc}")
 
-    existing_after = get_all_records(token, TRACK_BASE_ID, TRACK_TABLE_ID)
+    existing_after = get_all_records(token, track_base, track_table)
     synced_ids: list[str] = []
     for rec in existing_after:
         parsed = _parse_leave_row(rec, require_approved=False)
@@ -1671,7 +1692,9 @@ def sync_leave_calendar_to_bitable(
             "synced_at": datetime.now().isoformat(timespec="seconds"),
             "synced_record_ids": synced_ids,
             "month_changed": month_changed,
-        }
+            "ose_only": ose_only,
+        },
+        state_path,
     )
 
     od.invalidate_ose_bitable_cache()
@@ -1687,6 +1710,7 @@ def sync_leave_calendar_to_bitable(
         "already_synced": len(source_rows) - len(rows_to_add),
         "annual_leave_rows": annual_count,
         "source_rows": len(source_rows),
+        "ose_only": ose_only,
         "company_leave_calendar_rows": meta.get("company_leave_calendar_rows", 0),
         "lark_profile_rows": meta.get("lark_profile_rows", 0),
         "lark_calendar_rows": meta.get("lark_calendar_rows", 0),
@@ -1697,9 +1721,29 @@ def sync_leave_calendar_to_bitable(
         "warnings": meta.get("warnings") or [],
         "delete_errors": delete_errors,
         "create_errors": create_errors,
-        "tracking_base": TRACK_BASE_ID,
-        "tracking_table": TRACK_TABLE_ID,
+        "tracking_base": track_base,
+        "tracking_table": track_table,
     }
+
+
+def sync_all_leave_calendar_to_bitable(
+    *,
+    year: Optional[int] = None,
+    month: Optional[int] = None,
+    ref_date: Optional[date] = None,
+    force_resync: bool = False,
+) -> dict[str, Any]:
+    """HRMS → leave 全员 Bitable (``ALL_LEAVE_TABLE_ID`` / tblmHJHe12BCJRD8)."""
+    return sync_leave_calendar_to_bitable(
+        year=year,
+        month=month,
+        ref_date=ref_date,
+        force_resync=force_resync,
+        track_base_id=ALL_LEAVE_BASE_ID,
+        track_table_id=ALL_LEAVE_TABLE_ID,
+        ose_only=False,
+        sync_state_path=ALL_LEAVE_SYNC_STATE_FILE,
+    )
 
 
 def _leave_type_emoji(leave_type: str) -> str:
@@ -2865,52 +2909,6 @@ def _print_wfh_calendar(cal: dict[str, Any]) -> None:
         print("  (no WFH entries this month)")
 
 
-def purge_non_ose_leave_approval_rows(*, dry_run: bool = False) -> dict[str, Any]:
-    """Remove rows in ``OSE_LEAVE_TABLE_ID`` whose Name is not OSE in dutyList.csv."""
-    import duty_list_match as dlm
-
-    token = get_tenant_access_token()
-    base = od.OSE_BASE_TOKEN
-    table = od.OSE_LEAVE_TABLE_ID
-    items = get_all_records(token, base, table)
-    to_delete: list[tuple[str, str]] = []
-    keep = 0
-    for it in items:
-        rid = str(it.get("record_id") or "").strip()
-        f = it.get("fields") or {}
-        name = od._field_text(od._get_field_by_aliases(f, ["Name", "Employee Name", "Person"]))
-        if dlm.is_ose_dutylist_name(name):
-            keep += 1
-            continue
-        if rid:
-            to_delete.append((rid, name))
-
-    print(f"Table {table}: total={len(items)} keep_ose={keep} delete_non_ose={len(to_delete)}")
-    for rid, name in to_delete[:20]:
-        print(f"  delete: {name!r} ({rid})")
-    if len(to_delete) > 20:
-        print(f"  ... and {len(to_delete) - 20} more")
-
-    deleted = 0
-    if not dry_run:
-        for rid, _ in to_delete:
-            delete_record(token, base, table, rid)
-            deleted += 1
-        print(f"Deleted {deleted} row(s).")
-        od.invalidate_ose_bitable_cache()
-    else:
-        print("Dry run — no deletes.")
-
-    return {
-        "table": table,
-        "total": len(items),
-        "keep_ose": keep,
-        "delete_non_ose": len(to_delete),
-        "deleted": deleted,
-        "dry_run": dry_run,
-    }
-
-
 def main():
     global DEBUG
     args = sys.argv[1:]
@@ -2921,18 +2919,27 @@ def main():
     show_wfh_calendar = False
     sync_wfh_month = False
     resync_wfh_month = False
-    purge_non_ose_approval = False
-    purge_dry_run = False
+    sync_all_leave_month = False
+    resync_all_leave_month = False
     cal_year: Optional[int] = None
     cal_month: Optional[int] = None
 
     i = 0
     while i < len(args):
         arg = args[i]
-        if arg == "--purge-non-ose-approval":
-            purge_non_ose_approval = True
-        elif arg == "--dry-run":
-            purge_dry_run = True
+        if arg == "--sync-all-leave-month":
+            sync_all_leave_month = True
+            if i + 1 < len(args) and re.match(r"^\d{4}-\d{1,2}$", args[i + 1]):
+                i += 1
+                y_s, m_s = args[i].split("-", 1)
+                cal_year, cal_month = int(y_s), int(m_s)
+        elif arg == "--resync-all-leave-month":
+            sync_all_leave_month = True
+            resync_all_leave_month = True
+            if i + 1 < len(args) and re.match(r"^\d{4}-\d{1,2}$", args[i + 1]):
+                i += 1
+                y_s, m_s = args[i].split("-", 1)
+                cal_year, cal_month = int(y_s), int(m_s)
         elif arg == "--debug":
             DEBUG = True
         elif arg == "--csv":
@@ -2985,9 +2992,33 @@ def main():
         i += 1
 
     try:
-        if purge_non_ose_approval:
-            purge_non_ose_leave_approval_rows(dry_run=purge_dry_run)
-            return
+        if sync_all_leave_month:
+            today = date.today()
+            y = cal_year if cal_year is not None else today.year
+            m = cal_month if cal_month is not None else today.month
+            result = sync_all_leave_calendar_to_bitable(
+                year=y, month=m, force_resync=resync_all_leave_month
+            )
+            if result.get("skipped"):
+                print(f"Sync skipped: {result.get('message', 'no data')}")
+                for w in result.get("warnings") or []:
+                    print(f"  ⚠️  {w}")
+                sys.exit(1)
+            print(
+                f"Sync all-staff leave {y}-{m:02d}: deleted {result['deleted']} row(s), "
+                f"added {result.get('added', result['created'])} new, "
+                f"{result.get('already_synced', 0)} unchanged "
+                f"(annual leave: {result['annual_leave_rows']}), "
+                f"month_changed={result['month_changed']}"
+            )
+            print(f"  Table (leave 全员): {result.get('tracking_base')} / {result.get('tracking_table')}")
+            for w in result.get("warnings") or []:
+                print(f"  ⚠️  {w}")
+            if result.get("delete_errors"):
+                print("Delete errors:", result["delete_errors"], file=sys.stderr)
+            if result.get("create_errors"):
+                print("Create errors:", result["create_errors"], file=sys.stderr)
+            sys.exit(0 if result.get("ok") else 1)
         if sync_month:
             today = date.today()
             y = cal_year if cal_year is not None else today.year
