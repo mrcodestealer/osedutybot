@@ -27,6 +27,8 @@ Usage:
     ./leave.py --sync-wfh-month         # Sync WFH → tblWBI5BxrtFiJul
     ./leave.py --resync-wfh-month 2026-05
     ./leave.py --leave-today       # Print today's leave (console)
+    ./leave.py --purge-non-ose-approval           # Delete non-OSE rows from approval Bitable
+    ./leave.py --purge-non-ose-approval --dry-run # List only; no delete
     ./leave.py --debug             # Show raw API responses
 """
 
@@ -2863,6 +2865,52 @@ def _print_wfh_calendar(cal: dict[str, Any]) -> None:
         print("  (no WFH entries this month)")
 
 
+def purge_non_ose_leave_approval_rows(*, dry_run: bool = False) -> dict[str, Any]:
+    """Remove rows in ``OSE_LEAVE_TABLE_ID`` whose Name is not OSE in dutyList.csv."""
+    import duty_list_match as dlm
+
+    token = get_tenant_access_token()
+    base = od.OSE_BASE_TOKEN
+    table = od.OSE_LEAVE_TABLE_ID
+    items = get_all_records(token, base, table)
+    to_delete: list[tuple[str, str]] = []
+    keep = 0
+    for it in items:
+        rid = str(it.get("record_id") or "").strip()
+        f = it.get("fields") or {}
+        name = od._field_text(od._get_field_by_aliases(f, ["Name", "Employee Name", "Person"]))
+        if dlm.is_ose_dutylist_name(name):
+            keep += 1
+            continue
+        if rid:
+            to_delete.append((rid, name))
+
+    print(f"Table {table}: total={len(items)} keep_ose={keep} delete_non_ose={len(to_delete)}")
+    for rid, name in to_delete[:20]:
+        print(f"  delete: {name!r} ({rid})")
+    if len(to_delete) > 20:
+        print(f"  ... and {len(to_delete) - 20} more")
+
+    deleted = 0
+    if not dry_run:
+        for rid, _ in to_delete:
+            delete_record(token, base, table, rid)
+            deleted += 1
+        print(f"Deleted {deleted} row(s).")
+        od.invalidate_ose_bitable_cache()
+    else:
+        print("Dry run — no deletes.")
+
+    return {
+        "table": table,
+        "total": len(items),
+        "keep_ose": keep,
+        "delete_non_ose": len(to_delete),
+        "deleted": deleted,
+        "dry_run": dry_run,
+    }
+
+
 def main():
     global DEBUG
     args = sys.argv[1:]
@@ -2873,13 +2921,19 @@ def main():
     show_wfh_calendar = False
     sync_wfh_month = False
     resync_wfh_month = False
+    purge_non_ose_approval = False
+    purge_dry_run = False
     cal_year: Optional[int] = None
     cal_month: Optional[int] = None
 
     i = 0
     while i < len(args):
         arg = args[i]
-        if arg == "--debug":
+        if arg == "--purge-non-ose-approval":
+            purge_non_ose_approval = True
+        elif arg == "--dry-run":
+            purge_dry_run = True
+        elif arg == "--debug":
             DEBUG = True
         elif arg == "--csv":
             output_csv = True
@@ -2931,6 +2985,9 @@ def main():
         i += 1
 
     try:
+        if purge_non_ose_approval:
+            purge_non_ose_leave_approval_rows(dry_run=purge_dry_run)
+            return
         if sync_month:
             today = date.today()
             y = cal_year if cal_year is not None else today.year
