@@ -2820,10 +2820,10 @@ _OSE_SUBMIT_LEAVE_PAGE = """<!DOCTYPE html>
     </section>
     <section class="ose-records-card">
       <div class="ose-records-head">
-        <h2>All leave records</h2>
+        <h2>OSE leave (HRMS)</h2>
         <button type="button" class="ose-records-refresh-btn" id="ose-leave-refresh">Refresh</button>
       </div>
-      <p class="ose-records-hint">Scroll horizontally if needed. Empty fields show as —.</p>
+      <p class="ose-records-hint">Read-only from HRMS sync Bitable. Empty fields show as —.</p>
       <div class="ose-records-wrap">
         <table class="ose-records-table">
           <thead>
