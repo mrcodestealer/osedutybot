@@ -54,40 +54,56 @@ APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
 
 _OSE_BITABLE_BASE = (os.getenv("OSE_BASE_TOKEN") or "CpdEbEofwaYyyEsSjlElKNxzgec").strip()
-_OSE_BITABLE_LEAVE_TABLE = (os.getenv("OSE_LEAVE_TABLE_ID") or "tblmHJHe12BCJRD8").strip()
 _OSE_SPREADSHEET = (os.getenv("OSE_SPREADSHEET_TOKEN") or "").strip()
+_LEAVEOSE_TABLE_DEFAULT = "tblvoXE0hsPjgb0j"
+_ALL_LEAVE_TABLE_DEFAULT = "tblmHJHe12BCJRD8"
+
+
+def _all_leave_source_ids() -> tuple[str, str]:
+    """leave 全员 Bitable (company-wide HRMS). Not used for OSE webapp display."""
+    base = (
+        os.getenv("ALL_LEAVE_BASE_ID")
+        or os.getenv("TRACK_LEAVE_BASE_ID")
+        or _OSE_BITABLE_BASE
+        or ""
+    ).strip()
+    table = (
+        os.getenv("ALL_LEAVE_TABLE_ID")
+        or os.getenv("OSE_ALL_LEAVE_TABLE_ID")
+        or os.getenv("OSE_LEAVE_TABLE_ID")
+        or _ALL_LEAVE_TABLE_DEFAULT
+    ).strip()
+    return base, table
 
 
 def _leave_source_ids() -> tuple[str, str]:
     """
-  Resolve source Bitable for leave reads.
+    Default CLI table listing = **leave 全员** (``ALL_LEAVE_*`` / tblmHJHe12BCJRD8).
 
-  ``.env`` often sets ``LEAVE_BASE_ID`` to the OSE *spreadsheet* token (not Bitable);
-  in that case fall back to ``OSE_BASE_TOKEN`` / ``OSE_LEAVE_TABLE_ID``.
+    OSE webapp / Admin ALL / bot use ``od.OSE_HRMS_LEAVE_TABLE_ID`` (leaveose), not this pair.
     """
     base = (os.getenv("LEAVE_BASE_ID") or "").strip()
     table = (os.getenv("LEAVE_TABLE_ID") or "").strip()
     if not base or (_OSE_SPREADSHEET and base == _OSE_SPREADSHEET):
         base = _OSE_BITABLE_BASE
     if not table or table == "tblfC3XoBP3as3Ci":
-        table = _OSE_BITABLE_LEAVE_TABLE
+        base, table = _all_leave_source_ids()
     return base, table
 
 
 BASE_ID, TABLE_ID = _leave_source_ids()
 
-# leaveose — OSE only (webapp / Admin OSE / duty calendar):
+# leaveose — OSE HRMS display (webapp / ``--sync-month`` target):
 # https://casinoplus.sg.larksuite.com/base/CpdEbEofwaYyyEsSjlElKNxzgec?table=tblvoXE0hsPjgb0j
 TRACK_BASE_ID = os.getenv(
     "TRACK_LEAVE_BASE_ID",
     os.getenv("OSE_BASE_TOKEN", "CpdEbEofwaYyyEsSjlElKNxzgec"),
 )
-TRACK_TABLE_ID = os.getenv(
-    "TRACK_LEAVE_TABLE_ID",
-    os.getenv("OSE_HRMS_LEAVE_TABLE_ID", "tblvoXE0hsPjgb0j"),
-)
+TRACK_TABLE_ID = (
+    os.getenv("TRACK_LEAVE_TABLE_ID") or os.getenv("OSE_HRMS_LEAVE_TABLE_ID") or _LEAVEOSE_TABLE_DEFAULT
+).strip()
 
-# leave 全员 — company-wide HRMS leave (do not purge; use --sync-all-leave-month):
+# leave 全员 — company-wide HRMS leave (``--sync-all-leave-month``):
 # https://casinoplus.sg.larksuite.com/base/CpdEbEofwaYyyEsSjlElKNxzgec?table=tblmHJHe12BCJRD8
 ALL_LEAVE_BASE_ID = os.getenv(
     "ALL_LEAVE_BASE_ID",
@@ -95,8 +111,12 @@ ALL_LEAVE_BASE_ID = os.getenv(
 )
 ALL_LEAVE_TABLE_ID = os.getenv(
     "ALL_LEAVE_TABLE_ID",
-    os.getenv("OSE_ALL_LEAVE_TABLE_ID", os.getenv("OSE_LEAVE_TABLE_ID", "tblmHJHe12BCJRD8")),
+    os.getenv("OSE_ALL_LEAVE_TABLE_ID", os.getenv("OSE_LEAVE_TABLE_ID", _ALL_LEAVE_TABLE_DEFAULT)),
 ).strip()
+
+# Legacy .env sometimes set TRACK_LEAVE_TABLE_ID to leave 全员 — never sync/display OSE there.
+if TRACK_TABLE_ID == ALL_LEAVE_TABLE_ID:
+    TRACK_TABLE_ID = od.OSE_HRMS_LEAVE_TABLE_ID
 ALL_LEAVE_SYNC_STATE_FILE = Path(
     os.getenv("ALL_LEAVE_CALENDAR_SYNC_STATE", ".all_leave_calendar_sync_state.json")
 )

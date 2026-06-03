@@ -49,7 +49,10 @@ OSE_LEAVE_TABLE_ID = os.getenv("OSE_LEAVE_TABLE_ID", OSE_ALL_LEAVE_TABLE_ID).str
 OSE_OFFSET_TABLE_ID = os.getenv("OSE_OFFSET_TABLE_ID", "tblC5T2MAydwT42j")
 
 # Bump when leave/admin Bitable routing changes (check /api/admin/leave-list meta).
-OSE_LEAVE_API_BUILD = "20260603-dutylist-v2"
+OSE_LEAVE_API_BUILD = "20260603-leaveose-only-v3"
+
+# Alias: webapp / calendar / bot OSE leave display MUST use this table only.
+LEAVEOSE_TABLE_ID = OSE_HRMS_LEAVE_TABLE_ID
 
 TARGET_NAMES = [
     "Louie",
@@ -497,7 +500,8 @@ def get_ose_month_calendar(year: int, month: int) -> dict[str, Any]:
     token: Optional[str] = None
     try:
         token = get_tenant_access_token()
-        leave_items, offset_items = _get_bitable_raw_pair(token)
+        leave_items = _get_leave_display_raw(token)
+        _, offset_items = _get_bitable_raw_pair(token)
     except Exception as e:
         bitable_warning = f"Leave filter skipped: {e}"
 
@@ -617,14 +621,25 @@ def sync_ose_leave_offset_bitable() -> str:
     )
 
 
+def _fetch_leaveose_bitable_records(token: str) -> list[dict[str, Any]]:
+    """Read **leaveose** sheet only (``OSE_HRMS_LEAVE_TABLE_ID``). Never ``OSE_ALL_LEAVE_TABLE_ID``."""
+    table_id = OSE_HRMS_LEAVE_TABLE_ID
+    if table_id == OSE_ALL_LEAVE_TABLE_ID:
+        raise RuntimeError(
+            "OSE_HRMS_LEAVE_TABLE_ID must differ from OSE_ALL_LEAVE_TABLE_ID (leaveose vs leave 全员). "
+            f"Both are {table_id!r}; fix .env: OSE_HRMS_LEAVE_TABLE_ID=tblvoXE0hsPjgb0j"
+        )
+    return _bitable_get_all_records(token, OSE_BASE_TOKEN, table_id)
+
+
 def _get_leave_display_raw(token: str) -> list[dict[str, Any]]:
-    """HRMS-synced leave rows for webapp display and OSE duty calendar."""
+    """HRMS-synced OSE leave rows (leaveose sheet) for webapp, Admin ALL, duty calendar."""
     now = time.monotonic()
     cached = _OSE_BITABLE_RAW.get("leave_display")
     ts = float(_OSE_BITABLE_RAW.get("monotonic") or 0)
     if _OSE_BITABLE_TTL_SEC > 0 and isinstance(cached, list) and now - ts < _OSE_BITABLE_TTL_SEC:
         return cached
-    items = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_HRMS_LEAVE_TABLE_ID)
+    items = _fetch_leaveose_bitable_records(token)
     _OSE_BITABLE_RAW["leave_display"] = items
     _OSE_BITABLE_RAW["monotonic"] = now
     return items
@@ -676,7 +691,7 @@ def _get_bitable_raw_triple(token: str) -> tuple[list[dict[str, Any]], list[dict
     )
     if fresh:
         return leave_disp, leave_appr, offset
-    leave_disp = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_HRMS_LEAVE_TABLE_ID)
+    leave_disp = _fetch_leaveose_bitable_records(token)
     leave_appr = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_LEAVE_TABLE_ID)
     offset = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_OFFSET_TABLE_ID)
     _OSE_BITABLE_RAW["monotonic"] = now
@@ -1413,7 +1428,9 @@ def get_ose_leave_bitable_meta(*, scope: str = "") -> dict[str, Any]:
     """Which Lark tables the app uses (for debugging Admin / webapp data source)."""
     return {
         "api_build": OSE_LEAVE_API_BUILD,
-        "scope": scope or "merged",
+        "scope": scope or "display",
+        "leaveose_table_id": OSE_HRMS_LEAVE_TABLE_ID,
+        "leaveose_only_display": True,
         "ose_hrms_leave_table_id": OSE_HRMS_LEAVE_TABLE_ID,
         "ose_all_leave_table_id": OSE_ALL_LEAVE_TABLE_ID,
         "ose_leave_approval_table_id": OSE_LEAVE_TABLE_ID,
@@ -1456,22 +1473,22 @@ def get_ose_leave_records_admin(*, scope: str = "display") -> dict[str, Any]:
     """
     Admin leave list (``dutyList.csv`` OSE only).
 
-    ``scope=display`` (Admin ALL): **only** ``OSE_HRMS_LEAVE_TABLE_ID`` — never the old
-    leave/approval sheet that may contain company-wide HRMS rows.
+    ``scope=display`` (Admin ALL): **leaveose only** — ``OSE_HRMS_LEAVE_TABLE_ID`` / tblvoXE0hsPjgb0j.
+    Does **not** read leave 全员 (``OSE_ALL_LEAVE_TABLE_ID`` / tblmHJHe12BCJRD8).
 
-    ``scope=pending`` (Admin TODO): only pending OSE rows from ``OSE_LEAVE_TABLE_ID``.
-
-    ``scope=merged``: display + pending OSE submissions (legacy).
+    ``scope=pending`` (Admin TODO): pending OSE form rows from ``OSE_LEAVE_TABLE_ID`` only.
     """
     scope_s = (scope or "display").strip().lower()
-    if scope_s not in ("display", "pending", "merged"):
+    if scope_s in ("merged", "all", "approval", "leave"):
+        scope_s = "display"
+    if scope_s not in ("display", "pending"):
         scope_s = "display"
     token = get_tenant_access_token()
     merged: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     display_items: list[dict[str, Any]] = []
     approval_items: list[dict[str, Any]] = []
 
-    if scope_s in ("display", "merged"):
+    if scope_s == "display":
         display_items = _get_leave_display_raw(token)
         for it in display_items:
             row = _admin_leave_row_from_bitable_item(it)
@@ -1480,7 +1497,7 @@ def get_ose_leave_records_admin(*, scope: str = "display") -> dict[str, Any]:
             row["pending"] = False
             merged[_leave_row_key_for_admin(row)] = row
 
-    if scope_s in ("pending", "merged"):
+    if scope_s == "pending":
         approval_items = _get_leave_approval_raw(token)
         for it in approval_items:
             row = _admin_leave_row_from_bitable_item(it)
@@ -1509,9 +1526,8 @@ def get_ose_leave_records_admin(*, scope: str = "display") -> dict[str, Any]:
         reverse=True,
     )
     source = {
-        "display": "ose_hrms_leave_table_only",
+        "display": "leaveose_table_only",
         "pending": "ose_leave_approval_pending_only",
-        "merged": "ose_hrms_leave_table + ose_pending_approval_only",
     }[scope_s]
     return {
         "ok": True,
