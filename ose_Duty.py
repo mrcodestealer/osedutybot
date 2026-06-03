@@ -42,6 +42,9 @@ OSE_HRMS_LEAVE_TABLE_ID = os.getenv("OSE_HRMS_LEAVE_TABLE_ID", "tblvoXE0hsPjgb0j
 OSE_LEAVE_TABLE_ID = os.getenv("OSE_LEAVE_TABLE_ID", "tblmHJHe12BCJRD8").strip()
 OSE_OFFSET_TABLE_ID = os.getenv("OSE_OFFSET_TABLE_ID", "tblC5T2MAydwT42j")
 
+# Bump when leave/admin Bitable routing changes (check /api/admin/leave-list meta).
+OSE_LEAVE_API_BUILD = "20260603-dutylist-v2"
+
 TARGET_NAMES = [
     "Louie",
     "Bryan Peh",
@@ -1400,9 +1403,11 @@ def _admin_leave_row_from_bitable_item(it: dict[str, Any]) -> Optional[dict[str,
     }
 
 
-def get_ose_leave_bitable_meta() -> dict[str, Any]:
+def get_ose_leave_bitable_meta(*, scope: str = "") -> dict[str, Any]:
     """Which Lark tables the app uses (for debugging Admin / webapp data source)."""
     return {
+        "api_build": OSE_LEAVE_API_BUILD,
+        "scope": scope or "merged",
         "ose_hrms_leave_table_id": OSE_HRMS_LEAVE_TABLE_ID,
         "ose_leave_approval_table_id": OSE_LEAVE_TABLE_ID,
         "base_token": OSE_BASE_TOKEN,
@@ -1440,38 +1445,52 @@ def get_ose_leave_records_list() -> dict[str, Any]:
     }
 
 
-def get_ose_leave_records_admin() -> dict[str, Any]:
+def get_ose_leave_records_admin(*, scope: str = "display") -> dict[str, Any]:
     """
-    Admin leave list:
-    - HRMS OSE rows from display Bitable (``OSE_HRMS_LEAVE_TABLE_ID``)
-    - Plus OSE form submissions / pending rows from approval Bitable only
-    - Never company-wide HRMS rows wrongly synced into the approval table
+    Admin leave list (``dutyList.csv`` OSE only).
+
+    ``scope=display`` (Admin ALL): **only** ``OSE_HRMS_LEAVE_TABLE_ID`` — never the old
+    leave/approval sheet that may contain company-wide HRMS rows.
+
+    ``scope=pending`` (Admin TODO): only pending OSE rows from ``OSE_LEAVE_TABLE_ID``.
+
+    ``scope=merged``: display + pending OSE submissions (legacy).
     """
+    scope_s = (scope or "display").strip().lower()
+    if scope_s not in ("display", "pending", "merged"):
+        scope_s = "display"
     token = get_tenant_access_token()
     merged: dict[tuple[str, str, str, str], dict[str, Any]] = {}
-    display_items = _get_leave_display_raw(token)
-    approval_items = _get_leave_approval_raw(token)
+    display_items: list[dict[str, Any]] = []
+    approval_items: list[dict[str, Any]] = []
 
-    for it in display_items:
-        row = _admin_leave_row_from_bitable_item(it)
-        if not row or not _is_ose_dutylist_leave_name(row["name"]):
-            continue
-        row["pending"] = False
-        merged[_leave_row_key_for_admin(row)] = row
+    if scope_s in ("display", "merged"):
+        display_items = _get_leave_display_raw(token)
+        for it in display_items:
+            row = _admin_leave_row_from_bitable_item(it)
+            if not row or not _is_ose_dutylist_leave_name(row["name"]):
+                continue
+            row["pending"] = False
+            merged[_leave_row_key_for_admin(row)] = row
 
-    for it in approval_items:
-        row = _admin_leave_row_from_bitable_item(it)
-        if not row or not _is_ose_dutylist_leave_name(row["name"]):
-            continue
-        pending = _is_pending_approval(
-            _get_field_by_aliases(it.get("fields") or {}, ["Status", "Approval Status"])
-        )
-        reason = (row.get("reason") or "").strip()
-        leave_id = (row.get("leave_id") or "").strip()
-        if not pending and not reason and not leave_id:
-            continue
-        row["pending"] = pending
-        merged[_leave_row_key_for_admin(row)] = row
+    if scope_s in ("pending", "merged"):
+        approval_items = _get_leave_approval_raw(token)
+        for it in approval_items:
+            row = _admin_leave_row_from_bitable_item(it)
+            if not row or not _is_ose_dutylist_leave_name(row["name"]):
+                continue
+            pending = _is_pending_approval(
+                _get_field_by_aliases(it.get("fields") or {}, ["Status", "Approval Status"])
+            )
+            reason = (row.get("reason") or "").strip()
+            leave_id = (row.get("leave_id") or "").strip()
+            if scope_s == "pending":
+                if not pending:
+                    continue
+            elif not pending and not reason and not leave_id:
+                continue
+            row["pending"] = pending
+            merged[_leave_row_key_for_admin(row)] = row
 
     rows = list(merged.values())
     rows.sort(
@@ -1482,17 +1501,20 @@ def get_ose_leave_records_admin() -> dict[str, Any]:
         ),
         reverse=True,
     )
-    disp_n = len(display_items)
-    appr_n = len(approval_items)
+    source = {
+        "display": "ose_hrms_leave_table_only",
+        "pending": "ose_leave_approval_pending_only",
+        "merged": "ose_hrms_leave_table + ose_pending_approval_only",
+    }[scope_s]
     return {
         "ok": True,
         "items": rows,
         "meta": {
-            **get_ose_leave_bitable_meta(),
-            "display_table_raw_rows": disp_n,
-            "approval_table_raw_rows": appr_n,
+            **get_ose_leave_bitable_meta(scope=scope_s),
+            "display_table_raw_rows": len(display_items),
+            "approval_table_raw_rows": len(approval_items),
             "items_after_ose_dutylist_filter": len(rows),
-            "source": "ose_hrms_leave_table + ose_pending_approval_only",
+            "source": source,
         },
     }
 
