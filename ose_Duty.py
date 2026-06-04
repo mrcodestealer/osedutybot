@@ -390,13 +390,11 @@ def _get_cached_ose_sheet_values() -> tuple[Optional[list[list[Any]]], Optional[
     return values, None
 
 
-def _shift_names_from_matrix(values: list[list[Any]], target_date: date) -> tuple[list[str], list[str]]:
-    """Parse ``D`` / ``N`` for one calendar day from preloaded sheet ``values`` (same rules as legacy scan)."""
+def _date_column_for_matrix(values: list[list[Any]], target_date: date) -> Optional[int]:
+    """Column index for ``target_date`` on the OSE shift sheet (same header rules as legacy scan)."""
     current_year = target_date.year
     current_month = target_date.month
     current_day = target_date.day
-
-    date_col = None
     for row_idx in range(1, min(15, len(values))):
         row = values[row_idx] if row_idx < len(values) else []
         for col in range(len(row)):
@@ -413,13 +411,11 @@ def _shift_names_from_matrix(values: list[list[Any]], target_date: date) -> tupl
                     break
             mon_num, year = parse_month_year(header)
             if mon_num == current_month and year == current_year:
-                date_col = col
-                break
-        if date_col is not None:
-            break
-    if date_col is None:
-        return [], []
+                return col
+    return None
 
+
+def _target_name_rows_from_matrix(values: list[list[Any]]) -> dict[str, int]:
     name_rows: dict[str, int] = {}
     for row_idx in range(2, len(values)):
         row = values[row_idx]
@@ -433,10 +429,21 @@ def _shift_names_from_matrix(values: list[list[Any]], target_date: date) -> tupl
             if up.startswith(target.upper()) and target not in name_rows:
                 name_rows[target] = row_idx
                 break
+    return name_rows
+
+
+def _shift_codes_from_matrix(
+    values: list[list[Any]], target_date: date
+) -> tuple[list[str], list[str], list[str]]:
+    """Parse ``D`` / ``N`` / roster ``L`` (leave) for one calendar day."""
+    date_col = _date_column_for_matrix(values, target_date)
+    if date_col is None:
+        return [], [], []
 
     morning: list[str] = []
     night: list[str] = []
-    for name, row_idx in name_rows.items():
+    roster_leave: list[str] = []
+    for name, row_idx in _target_name_rows_from_matrix(values).items():
         row = values[row_idx]
         if date_col >= len(row):
             continue
@@ -445,7 +452,39 @@ def _shift_names_from_matrix(values: list[list[Any]], target_date: date) -> tupl
             morning.append(_title_name(name))
         elif code == "N":
             night.append(_title_name(name))
-    return sorted(morning), sorted(night)
+        elif code == "L":
+            roster_leave.append(_title_name(name))
+    return sorted(morning), sorted(night), sorted(roster_leave)
+
+
+def _merge_roster_sheet_leave(
+    leave_entries: list[dict[str, Any]],
+    roster_leave_names: list[str],
+    target_date: date,
+) -> list[dict[str, Any]]:
+    """Add OSE sheet ``L`` markers when not already covered by Bitable leave."""
+    if not roster_leave_names:
+        return leave_entries
+    out = list(leave_entries)
+    for name in roster_leave_names:
+        if any(_names_same_person(name, str(r.get("name") or "")) for r in out):
+            continue
+        out.append(
+            {
+                "name": _title_name(name),
+                "leave_type": "Leave",
+                "start": target_date,
+                "end": target_date,
+                "source": "roster",
+            }
+        )
+    return sorted(out, key=lambda x: str(x.get("name") or "").lower())
+
+
+def _shift_names_from_matrix(values: list[list[Any]], target_date: date) -> tuple[list[str], list[str]]:
+    """Parse ``D`` / ``N`` for one calendar day from preloaded sheet ``values`` (same rules as legacy scan)."""
+    morning, night, _ = _shift_codes_from_matrix(values, target_date)
+    return morning, night
 
 
 def get_shift_names_for_date(target_date: date) -> tuple[list[str], list[str]]:
@@ -532,7 +571,7 @@ def get_ose_month_calendar(year: int, month: int) -> dict[str, Any]:
     day_payload: dict[int, dict[str, Any]] = {}
     for dnum in range(1, last_day + 1):
         d = date(year, month, dnum)
-        morning, night = _shift_names_from_matrix(values, d)
+        morning, night, roster_leave = _shift_codes_from_matrix(values, d)
         leave_entries: list[dict[str, Any]] = []
         offset_lines: list[str] = []
         if leave_items and token:
@@ -542,6 +581,7 @@ def get_ose_month_calendar(year: int, month: int) -> dict[str, Any]:
                 )
             except Exception:
                 leave_entries = []
+        leave_entries = _merge_roster_sheet_leave(leave_entries, roster_leave, d)
         if offset_items and token:
             try:
                 offset_lines = _extract_offset_lines_for_date(d, token, items=offset_items)
@@ -849,6 +889,10 @@ def _build_ose_context(target_date: date, mode: str) -> tuple[list[str], list[st
             target_date, token, items=leave_items, require_approved=False
         )
         offset_lines = _extract_offset_lines_for_date(target_date, token, items=offset_items)
+        values, _sheet_err = _get_cached_ose_sheet_values()
+        if values:
+            _, _, roster_leave = _shift_codes_from_matrix(values, target_date)
+            leave_entries = _merge_roster_sheet_leave(leave_entries, roster_leave, target_date)
     except Exception as e:
         return [], [], [], [], f"❌ OSE data load failed: {e}"
 
@@ -898,7 +942,7 @@ def build_ose_message_card(
                 leave_lines.append(
                     f"• {name} ({lt}) - From {_format_ddmmyyyy(st)} until {_format_ddmmyyyy(ed)}"
                 )
-        lines.extend(_section_lines("🏖️ Leave (OSE Bitable)", leave_lines))
+        lines.extend(_section_lines("🏖️ Leave", leave_lines))
     body_elements: list[dict[str, Any]] = [
         {
             "tag": "div",
@@ -971,7 +1015,7 @@ def get_ose_payload_for_date(target_date: date, mode: str = "date", *, include_t
         lines.extend(offset_lines)
     if leave_entries:
         lines.append("")
-        lines.append("Leave (OSE Bitable)")
+        lines.append("Leave")
         for row in leave_entries:
             name = row["name"]
             lt = row["leave_type"]

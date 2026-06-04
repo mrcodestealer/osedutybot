@@ -256,11 +256,15 @@ def _cell_is_on_leave(code: str) -> bool:
     s = (code or "").strip()
     if not s or s.upper() in _SHIFT_CODES:
         return False
+    if s.upper() == "L":
+        return True
     return bool(_LEAVE_CELL_RE.search(s))
 
 
 def _leave_type_from_cell(cell: str) -> str:
     s = (cell or "").strip().lower()
+    if s == "l":
+        return "Leave"
     if "annual" in s or re.search(r"\bal\b", s):
         return ANNUAL_LEAVE_TYPE
     if "sick" in s or re.search(r"\bsl\b", s):
