@@ -4073,6 +4073,59 @@ def reply_not_in_cp_email(
     print(f"[maint-mail] NOT IN CP reply {subj!r} → {route}", flush=True)
 
 
+def post_maintenance_confirm_to_chat(
+    send_message_func: Callable[[str, str], Any],
+    *,
+    email_name: str,
+    game_names: list[str],
+    in_cp: bool,
+    email_replied: bool = True,
+) -> None:
+    """Confirm group: summary line; NOT IN CP also sends a second @tag + game name."""
+    if not in_cp:
+        game_names = maintenance.english_game_names_only(game_names)
+    chat_id = maintenance.maintenance_confirm_chat_id()
+    if not chat_id:
+        print("[maint-mail] confirm notify skipped — no MAINTENANCE_CONFIRM_CHAT_ID", flush=True)
+        return
+    text = maintenance.build_maintenance_confirm_notify_text(
+        email_name=email_name,
+        game_names=game_names,
+        in_cp=in_cp,
+        email_replied=email_replied,
+    )
+    try:
+        resp = send_message_func(chat_id, text)
+        if isinstance(resp, dict) and resp.get("code") not in (None, 0):
+            print(f"[maint-mail] confirm notify failed chat={chat_id}: {resp}", flush=True)
+            return
+        print(
+            f"[maint-mail] confirm notify sent chat={chat_id} in_cp={in_cp} "
+            f"games={game_names!r}",
+            flush=True,
+        )
+    except Exception as ex:
+        print(f"[maint-mail] confirm notify error chat={chat_id}: {ex!r}", flush=True)
+        return
+    if not in_cp:
+        tag_text = maintenance.build_maintenance_not_cp_tag_text(game_names)
+        try:
+            resp2 = send_message_func(chat_id, tag_text)
+            if isinstance(resp2, dict) and resp2.get("code") not in (None, 0):
+                print(
+                    f"[maint-mail] NOT IN CP tag notify failed chat={chat_id}: {resp2}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[maint-mail] NOT IN CP tag notify sent chat={chat_id} "
+                    f"tag={maintenance.maintenance_not_cp_tag_open_id()!r} games={game_names!r}",
+                    flush=True,
+                )
+        except Exception as ex:
+            print(f"[maint-mail] NOT IN CP tag notify error chat={chat_id}: {ex!r}", flush=True)
+
+
 def _record_processed(
     entries: list[dict[str, Any]],
     *,
@@ -4447,31 +4500,13 @@ class MaintenanceMailWatcher:
         in_cp: bool,
         email_replied: bool = True,
     ) -> None:
-        chat_id = maintenance.maintenance_confirm_chat_id()
-        if not chat_id:
-            print("[maint-mail] confirm notify skipped — no MAINTENANCE_CONFIRM_CHAT_ID", flush=True)
-            return
-        text = maintenance.build_maintenance_confirm_notify_text(
+        post_maintenance_confirm_to_chat(
+            self._send,
             email_name=email_name,
             game_names=game_names,
             in_cp=in_cp,
             email_replied=email_replied,
         )
-        try:
-            resp = self._send(chat_id, text)
-            if isinstance(resp, dict) and resp.get("code") not in (None, 0):
-                print(
-                    f"[maint-mail] confirm notify failed chat={chat_id}: {resp}",
-                    flush=True,
-                )
-            else:
-                print(
-                    f"[maint-mail] confirm notify sent chat={chat_id} "
-                    f"in_cp={in_cp} games={game_names!r}",
-                    flush=True,
-                )
-        except Exception as ex:
-            print(f"[maint-mail] confirm notify error chat={chat_id}: {ex!r}", flush=True)
 
     def _send_lark_card(self, chat_id: str, card: dict[str, Any]) -> None:
         try:

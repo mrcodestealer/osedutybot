@@ -4566,6 +4566,45 @@ def plain_lark_at_open_id(open_id: str) -> str:
     return f'<at user_id="{oid}"></at>' if oid else "JC"
 
 
+def maintenance_not_cp_tag_open_id() -> str:
+    """Second NOT IN CP ping in confirm group (after Done replied message)."""
+    return (
+        os.getenv("MAINTENANCE_NOT_CP_TAG_OPEN_ID", "").strip()
+        or os.getenv("maintenance_not_cp_tag_open_id", "").strip()
+        or "ou_8faac9cb9f7bf3ee69dc09f8e1f147bc"
+    )
+
+
+def english_game_name_only(name: str) -> str:
+    """``Speed Baccarat W(极速百家乐 W)`` → ``Speed Baccarat W``."""
+    t = (name or "").strip()
+    for sep in ("(", "（"):
+        if sep in t:
+            t = t.split(sep, 1)[0].strip()
+            break
+    return t
+
+
+def english_game_names_only(game_names: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in game_names or []:
+        en = english_game_name_only(str(raw))
+        if not en:
+            continue
+        key = en.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(en)
+    return out
+
+
+def _game_names_display(game_names: list[str]) -> str:
+    games = ", ".join(str(g).strip() for g in (game_names or []) if str(g).strip())
+    return games or "Unknown"
+
+
 def build_maintenance_confirm_notify_text(
     *,
     email_name: str,
@@ -4574,9 +4613,7 @@ def build_maintenance_confirm_notify_text(
     email_replied: bool = True,
 ) -> str:
     """Notify ops after CP / NOT IN CP maintenance email handling."""
-    games = ", ".join(str(g).strip() for g in (game_names or []) if str(g).strip())
-    if not games:
-        games = "Unknown"
+    games = _game_names_display(game_names)
     name = (email_name or "").strip() or "Maintenance email"
     verb = "replied" if email_replied else "checked"
     cp_line = "is in CP website" if in_cp else "is not in CP website"
@@ -4585,6 +4622,12 @@ def build_maintenance_confirm_notify_text(
         f"Done {verb} {name}. As checked, {games} {cp_line}. "
         f"Kindly double confirm. Any issue please tag {jc} to do fixing."
     )
+
+
+def build_maintenance_not_cp_tag_text(game_names: list[str]) -> str:
+    """Follow-up in confirm group: @tag + game name(s) when NOT IN CP."""
+    tag = plain_lark_at_open_id(maintenance_not_cp_tag_open_id())
+    return f"{tag} {_game_names_display(game_names)}"
 
 
 def is_evo_batch_forward_only_chat(chat_id: str | None) -> bool:

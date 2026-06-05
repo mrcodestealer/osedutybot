@@ -3666,29 +3666,21 @@ def lark_webhook():
                         json.dumps(fwd_card, ensure_ascii=False),
                         msg_type="interactive",
                     )
-                confirm_chat = maintenance.maintenance_confirm_chat_id()
-                if confirm_chat and batch.get("valid_labels"):
-                    send_message(
-                        confirm_chat,
-                        maintenance.build_maintenance_confirm_notify_text(
-                            email_name=batch["email_subject"],
-                            game_names=batch["valid_labels"],
-                            in_cp=True,
-                            email_replied=True,
-                        ),
-                    )
+                _maint_mail.post_maintenance_confirm_to_chat(
+                    send_message,
+                    email_name=batch["email_subject"],
+                    game_names=batch["valid_labels"],
+                    in_cp=True,
+                    email_replied=True,
+                )
             elif batch.get("filtered_labels"):
-                confirm_chat = maintenance.maintenance_confirm_chat_id()
-                if confirm_chat:
-                    send_message(
-                        confirm_chat,
-                        maintenance.build_maintenance_confirm_notify_text(
-                            email_name=batch.get("email_subject") or "EVO batch",
-                            game_names=batch["filtered_labels"],
-                            in_cp=False,
-                            email_replied=False,
-                        ),
-                    )
+                _maint_mail.post_maintenance_confirm_to_chat(
+                    send_message,
+                    email_name=batch.get("email_subject") or "EVO batch",
+                    game_names=batch["filtered_labels"],
+                    in_cp=False,
+                    email_replied=False,
+                )
             send_message(
                 chat_id,
                 json.dumps(batch["result_card"], ensure_ascii=False),
