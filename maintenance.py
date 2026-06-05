@@ -4530,6 +4530,39 @@ def _evo_email_subject_date(blocks_out: list[str]) -> str:
     return datetime.now(_display_tz()).strftime("%Y%m%d")
 
 
+EVO_BATCH_FORWARD_CHAT_ID_DEFAULT = "oc_9ffa9a76810abf72e39d597aee37d65a"
+
+
+def evo_batch_forward_chat_id() -> str:
+    """Lark group for ``/m`` filtered maintenance body (转发群)."""
+    return (
+        os.getenv("EVO_BATCH_FORWARD_CHAT_ID", "").strip()
+        or os.getenv("evo_batch_forward_chat_id", "").strip()
+        or EVO_BATCH_FORWARD_CHAT_ID_DEFAULT
+    )
+
+
+def is_evo_batch_forward_only_chat(chat_id: str | None) -> bool:
+    """True for the outbound-only EVO group — bot ignores all inbound @mentions there."""
+    cid = (chat_id or "").strip()
+    return bool(cid) and cid == evo_batch_forward_chat_id()
+
+
+def evo_batch_mail_to_display() -> str:
+    """Recipient for ``/m`` CP maintenance email (SNSoft evolive mailbox)."""
+    addr = (
+        os.getenv("EVO_BATCH_MAIL_TO", "").strip()
+        or os.getenv("evo_batch_mail_to", "").strip()
+        or "evolive.maintenance@om.hotelstotsenberg.com"
+    )
+    name = (
+        os.getenv("EVO_BATCH_MAIL_TO_NAME", "").strip()
+        or os.getenv("evo_batch_mail_to_name", "").strip()
+        or "SNSoft - OM - evolive.maintenance"
+    )
+    return f"{name} <{addr}>"
+
+
 def build_evo_batch_result_card(
     *,
     valid_labels: list[str],
@@ -4537,6 +4570,7 @@ def build_evo_batch_result_card(
     email_subject: str,
     email_sent: bool,
     forward_sent: bool,
+    email_to: str | None = None,
 ) -> dict[str, Any]:
     lines = [
         "✅ **维护通知处理完成**",
@@ -4548,6 +4582,8 @@ def build_evo_batch_result_card(
     if email_sent:
         lines.append(f"• 邮件（EVO_TO）：**已发送**")
         lines.append(f"  └ 主题：`{email_subject}`")
+        if (email_to or "").strip():
+            lines.append(f"  └ 收件人：`{email_to.strip()}`")
     else:
         lines.append("• 邮件（EVO_TO）：**未发送**（无 CP 上线游戏）")
     if forward_sent:
@@ -4562,6 +4598,12 @@ def build_evo_batch_result_card(
         lines.extend(["", "⚠️ **被过滤的游戏：**"])
         for lb in filtered_labels:
             lines.append(f"• {lb}")
+    lines.extend(
+        [
+            "",
+            "📝 维护通知已按飞书表 列 C（游戏名）+ 列 H=1 过滤；仅转发入口为开启的游戏。",
+        ]
+    )
     body_md = "\n".join(lines)
     return {
         "schema": "2.0",
@@ -4578,6 +4620,134 @@ def build_evo_batch_result_card(
                 }
             ]
         },
+    }
+
+
+_EVO_BATCH_FORWARD_CARD_BODY_MAX = 3800
+_EVO_BLOCK_EN_ZH_SPLIT = re.compile(r"\n-{10,}\s*\n")
+
+
+def evo_batch_extracted_body(outbound_parts: list[str]) -> str:
+    """Maintenance blocks only — no email ``Hi team`` / signature."""
+    return "\n".join(outbound_parts).strip()
+
+
+def _strip_evo_block_border_lines(text: str) -> str:
+    """Drop ``====`` wrapper lines — card uses ``hr`` elements instead."""
+    kept: list[str] = []
+    for line in (text or "").splitlines():
+        if re.match(r"^={10,}\s*$", line.strip()):
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def _evo_block_card_elements(block_text: str) -> list[dict[str, Any]]:
+    """
+    One SD block → EN section, ``hr``, ZH section (picture-style forward card).
+    """
+    text = _strip_evo_block_border_lines(block_text)
+    if not text:
+        return []
+    parts = _EVO_BLOCK_EN_ZH_SPLIT.split(text, maxsplit=1)
+    elements: list[dict[str, Any]] = []
+    en_part = (parts[0] if parts else "").strip()
+    zh_part = (parts[1] if len(parts) > 1 else "").strip()
+    if en_part:
+        elements.append(
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": lark_md_for_card(en_part),
+                },
+            }
+        )
+    if zh_part:
+        if elements:
+            elements.append({"tag": "hr"})
+        elements.append(
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": lark_md_for_card(zh_part),
+                },
+            }
+        )
+    return elements
+
+
+def build_evo_batch_forward_card(
+    *,
+    email_subject: str,
+    outbound_parts: list[str],
+) -> dict[str, Any]:
+    """
+    Forward-group card: title ``EGS EVO MAINTENANCE {date}``, @ QA + CS,
+    then each CP block with ``hr`` between EN/ZH and between games.
+    """
+    title = (email_subject or "").strip() or "EGS EVO MAINTENANCE"
+    if len(title) > _CARD_HEADER_TITLE_MAX:
+        title = title[: _CARD_HEADER_TITLE_MAX - 3] + "..."
+    mention_line = " ".join(
+        [
+            lark_card_at_open_id(_QA_SUPPORT_OPEN_ID),
+            lark_card_at_open_id(_CS_TEAM_OPEN_ID),
+        ]
+    ).strip()
+    elements: list[dict[str, Any]] = [
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": mention_line},
+        },
+    ]
+    char_budget = _EVO_BATCH_FORWARD_CARD_BODY_MAX
+    blocks_used = 0
+    for i, part in enumerate(outbound_parts or []):
+        block_els = _evo_block_card_elements(part)
+        if not block_els:
+            continue
+        block_chars = sum(
+            len(str(el.get("text", {}).get("content") or ""))
+            for el in block_els
+            if el.get("tag") == "div"
+        )
+        if char_budget <= 0:
+            break
+        if block_chars > char_budget:
+            for el in block_els:
+                if el.get("tag") != "div":
+                    continue
+                txt = str(el["text"]["content"])
+                if len(txt) > char_budget:
+                    el["text"]["content"] = txt[:char_budget] + "\n…"
+                    char_budget = 0
+                else:
+                    char_budget -= len(txt)
+        else:
+            char_budget -= block_chars
+        if blocks_used > 0:
+            elements.append({"tag": "hr"})
+        elements.extend(block_els)
+        blocks_used += 1
+    if blocks_used == 0:
+        elements.append(
+            {
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": "_No CP maintenance blocks._"},
+            }
+        )
+    while elements and elements[-1].get("tag") == "hr":
+        elements.pop()
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "orange",
+            "title": {"tag": "plain_text", "content": title},
+        },
+        "body": {"elements": elements},
     }
 
 
@@ -4657,28 +4827,38 @@ def process_evo_sd_batch_maintenance(
 
     date_suffix = _evo_email_subject_date(outbound_parts)
     email_subject = f"EGS EVO MAINTENANCE {date_suffix}"
-    if outbound_parts:
-        email_body = (
-            "Hi team,\n\n"
-            + "\n".join(outbound_parts).strip()
-            + "\n\nBest Regards,\nJC"
-        )
+    extracted_body = evo_batch_extracted_body(outbound_parts)
+    if extracted_body:
+        email_body = extracted_body + "\n\nBest Regards,\nJC"
+        email_body = "Hi team,\n\n" + email_body
     else:
         email_body = ""
-    email_sent = bool(email_body.strip())
+    email_sent = bool(extracted_body)
+
+    forward_card = (
+        build_evo_batch_forward_card(
+            email_subject=email_subject,
+            outbound_parts=outbound_parts,
+        )
+        if extracted_body
+        else None
+    )
 
     return {
         "valid_labels": valid_labels,
         "filtered_labels": filtered_labels,
         "email_subject": email_subject,
         "email_body": email_body,
+        "extracted_body": extracted_body,
         "email_sent": email_sent,
+        "forward_card": forward_card,
         "result_card": build_evo_batch_result_card(
             valid_labels=valid_labels,
             filtered_labels=filtered_labels,
             email_subject=email_subject,
             email_sent=email_sent,
             forward_sent=email_sent,
+            email_to=evo_batch_mail_to_display(),
         ),
     }
 

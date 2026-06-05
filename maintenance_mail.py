@@ -78,7 +78,9 @@ MAIL_IMAP_PORT = int(
 TARGET_CHAT_ID = (
     os.getenv("MAINTENANCE_MAIL_TARGET_CHAT_ID", "").strip()
     or os.getenv("maintenance_mail_target_chat_id", "").strip()
-    or "oc_9de3d63fc589df6feeb9b0bee9c45b72"
+    or os.getenv("EVO_BATCH_FORWARD_CHAT_ID", "").strip()
+    or os.getenv("evo_batch_forward_chat_id", "").strip()
+    or _maint_mod.EVO_BATCH_FORWARD_CHAT_ID_DEFAULT
 )
 POLL_SECONDS = float(
     os.getenv("MAINTENANCE_MAIL_POLL_SECONDS", "").strip() or "3"
@@ -149,6 +151,27 @@ FORWARD_FROM_NAME = (
 )
 NOT_CP_REPLY_CC_NAME = (
     os.getenv("MAINTENANCE_MAIL_NOT_CP_CC_NAME", "").strip() or "CP OM Duty"
+)
+# ``/m`` EVO batch (CP games) — SNSoft evolive maintenance mailbox, not junchen@.
+EVO_BATCH_MAIL_TO = (
+    os.getenv("EVO_BATCH_MAIL_TO", "").strip()
+    or os.getenv("evo_batch_mail_to", "").strip()
+    or "evolive.maintenance@om.hotelstotsenberg.com"
+)
+EVO_BATCH_MAIL_TO_NAME = (
+    os.getenv("EVO_BATCH_MAIL_TO_NAME", "").strip()
+    or os.getenv("evo_batch_mail_to_name", "").strip()
+    or "SNSoft - OM - evolive.maintenance"
+)
+EVO_BATCH_MAIL_CC = (
+    os.getenv("EVO_BATCH_MAIL_CC", "").strip()
+    or os.getenv("evo_batch_mail_cc", "").strip()
+    or FORWARD_CC
+)
+EVO_BATCH_MAIL_CC_NAME = (
+    os.getenv("EVO_BATCH_MAIL_CC_NAME", "").strip()
+    or os.getenv("evo_batch_mail_cc_name", "").strip()
+    or NOT_CP_REPLY_CC_NAME
 )
 # Link Fw: to the incoming maintenance mail in om@ (In-Reply-To). Set 0 if Show/Hide breaks.
 FORWARD_THREAD_HEADERS = (
@@ -1271,7 +1294,7 @@ def forward_maintenance_email(
 
 
 def send_evo_batch_maintenance_email(*, subject: str, body: str) -> None:
-    """Outbound EVO batch summary: om@ → junchen@ + Cc om@ (plain text)."""
+    """Outbound EVO batch summary: om@ → evolive.maintenance@ + Cc om@ (plain text)."""
     if not MAIL_PASSWORD:
         raise RuntimeError("MAINTENANCE_MAIL_PASSWORD not set")
     subj = (subject or "").strip() or "EGS EVO MAINTENANCE"
@@ -1283,10 +1306,10 @@ def send_evo_batch_maintenance_email(*, subject: str, body: str) -> None:
     msg["From"] = formataddr((FORWARD_FROM_NAME, MAIL_USER))
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid()
-    msg["To"] = formataddr((FORWARD_TO_NAME, FORWARD_TO))
-    msg["Cc"] = formataddr((NOT_CP_REPLY_CC_NAME, FORWARD_CC))
-    recipients = [FORWARD_TO, FORWARD_CC]
-    route = f"{FORWARD_TO} cc={FORWARD_CC}"
+    msg["To"] = formataddr((EVO_BATCH_MAIL_TO_NAME, EVO_BATCH_MAIL_TO))
+    msg["Cc"] = formataddr((EVO_BATCH_MAIL_CC_NAME, EVO_BATCH_MAIL_CC))
+    recipients = [EVO_BATCH_MAIL_TO, EVO_BATCH_MAIL_CC]
+    route = f"{EVO_BATCH_MAIL_TO} cc={EVO_BATCH_MAIL_CC}"
     ctx = ssl.create_default_context()
     with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=IMAP_TIMEOUT, context=ctx) as smtp:
         smtp.login(MAIL_USER, MAIL_PASSWORD)

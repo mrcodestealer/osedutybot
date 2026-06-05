@@ -2598,6 +2598,12 @@ def lark_webhook():
             if eid_ca and _remember_processed_message_id(eid_ca):
                 print(f"⏭️ Duplicate card callback {eid_ca} ignored ({hdr_et!r})", flush=True)
                 return
+            if maintenance.is_evo_batch_forward_only_chat(chat_id_ca):
+                print(
+                    f"⏭️ EVO forward-only group — ignoring card callback ({chat_id_ca})",
+                    flush=True,
+                )
+                return
             if not chat_id_ca:
                 parsed_pref = _lark_parse_card_action_value(val_ca)
                 try:
@@ -2966,6 +2972,13 @@ def lark_webhook():
             return _lark_http_card_callback_ok()
         print("❌ Could not extract chat_id or text")
         return jsonify({"error": "Missing data"}), 400
+
+    if maintenance.is_evo_batch_forward_only_chat(chat_id):
+        print(
+            f"⏭️ EVO forward-only group — ignoring inbound message ({chat_id})",
+            flush=True,
+        )
+        return _lark_im_done()
 
     if text == "我要验牌":
         reply = f'<at user_id="{sender_id}"></at> 给我擦皮鞋'
@@ -3645,15 +3658,14 @@ def lark_webhook():
                     subject=batch["email_subject"],
                     body=batch["email_body"],
                 )
-                fwd_chat = (
-                    os.getenv("MAINTENANCE_MAIL_TARGET_CHAT_ID", "").strip()
-                    or os.getenv("maintenance_mail_target_chat_id", "").strip()
-                )
-                if fwd_chat:
-                    fwd_body = (batch.get("email_body") or "").strip()
-                    if len(fwd_body) > 3800:
-                        fwd_body = fwd_body[:3800] + "\n…"
-                    send_message(fwd_chat, fwd_body)
+                fwd_chat = maintenance.evo_batch_forward_chat_id()
+                fwd_card = batch.get("forward_card")
+                if fwd_chat and fwd_card:
+                    send_message(
+                        fwd_chat,
+                        json.dumps(fwd_card, ensure_ascii=False),
+                        msg_type="interactive",
+                    )
             send_message(
                 chat_id,
                 json.dumps(batch["result_card"], ensure_ascii=False),
