@@ -4132,7 +4132,7 @@ def post_maintenance_confirm_to_chat(
     in_cp: bool,
     email_replied: bool = True,
 ) -> bool:
-    """Confirm group: summary line + second @tag + English game name(s)."""
+    """Confirm group: interactive verify card + plain @tag + game name(s)."""
     summary_games = (
         _maint_mod.english_game_names_only(game_names)
         if not in_cp
@@ -4143,19 +4143,23 @@ def post_maintenance_confirm_to_chat(
     if not chat_id:
         print("[maint-mail] confirm notify skipped — no MAINTENANCE_CONFIRM_CHAT_ID", flush=True)
         return False
-    text = _maint_mod.build_maintenance_confirm_notify_text(
+    card = _maint_mod.build_maintenance_confirm_card(
         email_name=email_name,
         game_names=summary_games,
         in_cp=in_cp,
-        email_replied=email_replied,
     )
+    card_json = json.dumps(card, ensure_ascii=False)
     try:
-        resp = send_message_func(chat_id, text)
+        try:
+            resp = send_message_func(chat_id, card_json, msg_type="interactive")
+        except TypeError:
+            resp = send_message_func(chat_id, card_json)
         if isinstance(resp, dict) and resp.get("code") not in (None, 0):
-            print(f"[maint-mail] confirm notify failed chat={chat_id}: {resp}", flush=True)
+            print(f"[maint-mail] confirm card failed chat={chat_id}: {resp}", flush=True)
             return False
         print(
-            f"[maint-mail] confirm notify sent chat={chat_id} in_cp={in_cp} "
+            f"[maint-mail] confirm card sent chat={chat_id} in_cp={in_cp} "
+            f"title={_maint_mod.confirm_verify_card_title(email_name)!r} "
             f"games={summary_games!r}",
             flush=True,
         )

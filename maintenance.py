@@ -4561,11 +4561,11 @@ def jc_open_id_for_mention() -> str:
 
 
 def jc_tag_display() -> str:
-    """Plain name in confirm-group text (no Lark @mention)."""
+    """Plain name in confirm-group card/text (no Lark @mention)."""
     return (
         os.getenv("MAINTENANCE_JC_TAG_NAME", "").strip()
         or os.getenv("maintenance_jc_tag_name", "").strip()
-        or "JC"
+        or "Jun Chen"
     )
 
 
@@ -4614,6 +4614,61 @@ def _game_names_display(game_names: list[str]) -> str:
     return games or "Unknown"
 
 
+def confirm_verify_card_title(email_name: str) -> str:
+    """``Verify SD-7099193`` for confirm-group interactive card header."""
+    tid = extract_ticket_card_title(email_name)
+    if tid:
+        m = re.match(r"^(?:TINC|SD)[-\s]?(\d{6,8})\b", tid.strip(), re.IGNORECASE)
+        if m:
+            return f"Verify SD-{m.group(1)}"
+    return "Verify Maintenance"
+
+
+def build_maintenance_confirm_card_body(
+    *,
+    game_names: list[str],
+    in_cp: bool,
+) -> str:
+    games = _game_names_display(game_names)
+    cp_line = "is in CP website" if in_cp else "is not in CP website"
+    icon = "✅" if in_cp else "⚠️"
+    jc = jc_tag_display()
+    return (
+        f"{icon} As checked, **{games}** {cp_line}.\n\n"
+        f"Any issue please tag **{jc}** to do fixing."
+    )
+
+
+def build_maintenance_confirm_card(
+    *,
+    email_name: str,
+    game_names: list[str],
+    in_cp: bool,
+) -> dict[str, Any]:
+    """Interactive card for ops confirm group (message 1)."""
+    title = confirm_verify_card_title(email_name)
+    body_md = build_maintenance_confirm_card_body(
+        game_names=game_names,
+        in_cp=in_cp,
+    )
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "green" if in_cp else "orange",
+            "title": {"tag": "plain_text", "content": f"🔍 {title}"},
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": lark_md_for_card(body_md)},
+                }
+            ]
+        },
+    }
+
+
 def build_maintenance_confirm_notify_text(
     *,
     email_name: str,
@@ -4621,16 +4676,10 @@ def build_maintenance_confirm_notify_text(
     in_cp: bool,
     email_replied: bool = True,
 ) -> str:
-    """Notify ops after CP / NOT IN CP maintenance email handling."""
-    games = _game_names_display(game_names)
-    name = (email_name or "").strip() or "Maintenance email"
-    verb = "replied" if email_replied else "checked"
-    cp_line = "is in CP website" if in_cp else "is not in CP website"
-    jc = jc_tag_display()
-    return (
-        f"Done {verb} {name}. As checked, {games} {cp_line}. "
-        f"Kindly double confirm. Any issue please tag {jc} to do fixing."
-    )
+    """Plain-text fallback for confirm notify (prefer :func:`build_maintenance_confirm_card`)."""
+    _ = email_replied
+    body = build_maintenance_confirm_card_body(game_names=game_names, in_cp=in_cp)
+    return f"{confirm_verify_card_title(email_name)}\n\n{body}"
 
 
 def build_maintenance_confirm_followup_text(game_names: list[str]) -> str:
