@@ -1256,12 +1256,12 @@ def forward_maintenance_email(
     original_msg: email.message.Message | None = None,
 ) -> None:
     """
-    SMTP forward from om@… → junchen@snsoft.my + Cc om@.
+    SMTP forward from om@… → evolive.maintenance@ + Cc om@ (CP gamelist only).
 
     Uses ``Fw:`` + Lark ``history-quote-wrapper`` HTML (``--header`` block) for
     **Show/Hide email thread**. When ``MAINTENANCE_MAIL_FORWARD_THREAD=1`` (default),
     sets ``In-Reply-To`` so the ``Fw:`` appears in the **same conversation** as the
-    incoming maintenance mail in om@ (cannot merge into junchen@'s inbox — no original).
+    incoming maintenance mail in om@.
     """
     if not MAIL_PASSWORD:
         raise RuntimeError("MAINTENANCE_MAIL_PASSWORD not set")
@@ -1280,11 +1280,11 @@ def forward_maintenance_email(
     msg["Message-ID"] = make_msgid()
     if FORWARD_THREAD_HEADERS:
         _apply_in_reply_to_headers(msg, original_msg)
-    msg["To"] = formataddr((FORWARD_TO_NAME, FORWARD_TO))
-    msg["Cc"] = formataddr((NOT_CP_REPLY_CC_NAME, FORWARD_CC))
-    recipients = [FORWARD_TO, FORWARD_CC]
+    msg["To"] = formataddr((EVO_BATCH_MAIL_TO_NAME, EVO_BATCH_MAIL_TO))
+    msg["Cc"] = formataddr((EVO_BATCH_MAIL_CC_NAME, EVO_BATCH_MAIL_CC))
+    recipients = [EVO_BATCH_MAIL_TO, EVO_BATCH_MAIL_CC]
     thread_note = " threaded" if FORWARD_THREAD_HEADERS and original_msg else ""
-    route = f"{FORWARD_TO} cc={FORWARD_CC}{thread_note}"
+    route = f"{EVO_BATCH_MAIL_TO} cc={EVO_BATCH_MAIL_CC}{thread_note}"
 
     ctx = ssl.create_default_context()
     with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=IMAP_TIMEOUT, context=ctx) as smtp:

@@ -235,7 +235,7 @@ def extract_status_for_card(subject: str, extra_text: str | None = None) -> str 
     return None
 
 
-FORWARD_DONE_BODY = "Done forward to junchen@snsoft.my"
+FORWARD_DONE_BODY = "Done forward to evolive.maintenance@om.hotelstotsenberg.com"
 NOT_IN_CP_WEBSITE_BODY = (
     "NOT IN CP WEBSITE\n"
     "From Duty Bot Auto Reply\n"
