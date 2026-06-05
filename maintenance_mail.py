@@ -4449,6 +4449,7 @@ class MaintenanceMailWatcher:
     ) -> None:
         chat_id = maintenance.maintenance_confirm_chat_id()
         if not chat_id:
+            print("[maint-mail] confirm notify skipped — no MAINTENANCE_CONFIRM_CHAT_ID", flush=True)
             return
         text = maintenance.build_maintenance_confirm_notify_text(
             email_name=email_name,
@@ -4456,7 +4457,21 @@ class MaintenanceMailWatcher:
             in_cp=in_cp,
             email_replied=email_replied,
         )
-        self._send_lark(chat_id, text)
+        try:
+            resp = self._send(chat_id, text)
+            if isinstance(resp, dict) and resp.get("code") not in (None, 0):
+                print(
+                    f"[maint-mail] confirm notify failed chat={chat_id}: {resp}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[maint-mail] confirm notify sent chat={chat_id} "
+                    f"in_cp={in_cp} games={game_names!r}",
+                    flush=True,
+                )
+        except Exception as ex:
+            print(f"[maint-mail] confirm notify error chat={chat_id}: {ex!r}", flush=True)
 
     def _send_lark_card(self, chat_id: str, card: dict[str, Any]) -> None:
         try:
@@ -4893,6 +4908,7 @@ class MaintenanceMailWatcher:
         mail.uid("store", uid, "+FLAGS", "(\\Seen)")
 
         if FORWARD_ENABLED:
+            email_action_ok = False
             try:
                 if is_cancel:
                     if to_cp:
@@ -4920,6 +4936,20 @@ class MaintenanceMailWatcher:
                     reply_not_in_cp_email(
                         subject=subject, original_msg=msg
                     )
+                email_action_ok = True
+            except Exception as ex:
+                action = "forward" if to_cp else "NOT IN CP reply"
+                lark_note = (
+                    "Lark already sent; "
+                    if to_cp
+                    else "no Lark (not on CP gamelist); "
+                )
+                print(
+                    f"[maint-mail] {action} failed uid={uid_s} ticket={ticket_id!r}: {ex!r} "
+                    f"({lark_note}UID deduped — no duplicate)",
+                    flush=True,
+                )
+            if email_action_ok:
                 if to_cp:
                     confirm_games = list(
                         launched_prior if (is_cancel or is_uncancel) else launched_names
@@ -4935,18 +4965,6 @@ class MaintenanceMailWatcher:
                     game_names=confirm_games,
                     in_cp=to_cp,
                     email_replied=True,
-                )
-            except Exception as ex:
-                action = "forward" if to_cp else "NOT IN CP reply"
-                lark_note = (
-                    "Lark already sent; "
-                    if to_cp
-                    else "no Lark (not on CP gamelist); "
-                )
-                print(
-                    f"[maint-mail] {action} failed uid={uid_s} ticket={ticket_id!r}: {ex!r} "
-                    f"({lark_note}UID deduped — no duplicate)",
-                    flush=True,
                 )
 
         kind = (
