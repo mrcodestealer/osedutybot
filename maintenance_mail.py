@@ -927,6 +927,8 @@ def _empty_state(*, state_date: str | None = None) -> dict[str, Any]:
         "handled_uids": [],
         "handled_message_ids": [],
         "handled_content_keys": [],
+        "confirm_notified_uids": [],
+        "confirm_notified_keys": [],
         "state_date": state_date or _local_today_iso(),
     }
 
@@ -1126,6 +1128,29 @@ def _mark_uid_handled(state: dict[str, Any], uid_key: str) -> None:
     key = str(uid_key)
     if key not in handled:
         handled.append(key)
+
+
+def _needs_confirm_retry(state: dict[str, Any], store_key: str) -> bool:
+    """NOT IN CP mail was deduped before confirm group notify succeeded."""
+    key = str(store_key)
+    handled = {str(x) for x in (state.get("handled_uids") or [])}
+    notified = {str(x) for x in (state.get("confirm_notified_uids") or [])}
+    return key in handled and key not in notified
+
+
+def _mark_confirm_notified(
+    state: dict[str, Any], *, store_key: str, content_key: str = ""
+) -> None:
+    for raw, bucket in (
+        (store_key, "confirm_notified_uids"),
+        (content_key, "confirm_notified_keys"),
+    ):
+        k = str(raw or "").strip()
+        if not k:
+            continue
+        lst = state.setdefault(bucket, [])
+        if k not in lst:
+            lst.append(k)
 
 
 def _forward_subject(subject: str) -> str:
@@ -4080,14 +4105,14 @@ def post_maintenance_confirm_to_chat(
     game_names: list[str],
     in_cp: bool,
     email_replied: bool = True,
-) -> None:
+) -> bool:
     """Confirm group: summary line; NOT IN CP also sends a second @tag + game name."""
     if not in_cp:
         game_names = maintenance.english_game_names_only(game_names)
     chat_id = maintenance.maintenance_confirm_chat_id()
     if not chat_id:
         print("[maint-mail] confirm notify skipped — no MAINTENANCE_CONFIRM_CHAT_ID", flush=True)
-        return
+        return False
     text = maintenance.build_maintenance_confirm_notify_text(
         email_name=email_name,
         game_names=game_names,
@@ -4098,7 +4123,7 @@ def post_maintenance_confirm_to_chat(
         resp = send_message_func(chat_id, text)
         if isinstance(resp, dict) and resp.get("code") not in (None, 0):
             print(f"[maint-mail] confirm notify failed chat={chat_id}: {resp}", flush=True)
-            return
+            return False
         print(
             f"[maint-mail] confirm notify sent chat={chat_id} in_cp={in_cp} "
             f"games={game_names!r}",
@@ -4106,7 +4131,7 @@ def post_maintenance_confirm_to_chat(
         )
     except Exception as ex:
         print(f"[maint-mail] confirm notify error chat={chat_id}: {ex!r}", flush=True)
-        return
+        return False
     if not in_cp:
         tag_text = maintenance.build_maintenance_not_cp_tag_text(game_names)
         try:
@@ -4116,14 +4141,16 @@ def post_maintenance_confirm_to_chat(
                     f"[maint-mail] NOT IN CP tag notify failed chat={chat_id}: {resp2}",
                     flush=True,
                 )
-            else:
-                print(
-                    f"[maint-mail] NOT IN CP tag notify sent chat={chat_id} "
-                    f"tag={maintenance.maintenance_not_cp_tag_open_id()!r} games={game_names!r}",
-                    flush=True,
-                )
+                return False
+            print(
+                f"[maint-mail] NOT IN CP tag notify sent chat={chat_id} "
+                f"tag={maintenance.maintenance_not_cp_tag_open_id()!r} games={game_names!r}",
+                flush=True,
+            )
         except Exception as ex:
             print(f"[maint-mail] NOT IN CP tag notify error chat={chat_id}: {ex!r}", flush=True)
+            return False
+    return True
 
 
 def _record_processed(
@@ -4617,8 +4644,9 @@ class MaintenanceMailWatcher:
         uid_s = uid.decode() if isinstance(uid, bytes) else str(uid)
         entries: list[dict[str, Any]] = state["entries"]
         store_key = _uid_key(folder, uid_s)
+        retry_confirm_only = _needs_confirm_retry(state, store_key)
 
-        if _uid_already_handled(state, entries, store_key):
+        if _uid_already_handled(state, entries, store_key) and not retry_confirm_only:
             return
 
         subject, when, from_hdr = self._fetch_header_preview(mail, uid)
@@ -4711,14 +4739,21 @@ class MaintenanceMailWatcher:
         if _already_handled_mail_content(
             state, message_id=message_id, content_key=content_key
         ):
-            _mark_uid_handled(state, store_key)
-            mail.uid("store", uid, "+FLAGS", "(\\Seen)")
+            if not retry_confirm_only:
+                _mark_uid_handled(state, store_key)
+                mail.uid("store", uid, "+FLAGS", "(\\Seen)")
+                print(
+                    f"[maint-mail] duplicate ignored (same Message-ID/content) {folder} "
+                    f"uid={uid_s} ticket={ticket_id!r}",
+                    flush=True,
+                )
+                return
+            retry_confirm_only = True
             print(
-                f"[maint-mail] duplicate ignored (same Message-ID/content) {folder} "
+                f"[maint-mail] confirm retry (deduped before group notify) {folder} "
                 f"uid={uid_s} ticket={ticket_id!r}",
                 flush=True,
             )
-            return
 
         dup = _find_duplicate_title_content(entries, display_subj, chash)
         if dup:
@@ -4784,7 +4819,7 @@ class MaintenanceMailWatcher:
                     f"table_game={table_game!r} to_cp={to_cp}",
                     flush=True,
                 )
-            if to_cp:
+            if to_cp and not retry_confirm_only:
                 cancel_card = maintenance.build_cancelled_maintenance_card(
                     email_subject=display_subj,
                     email_body=body,
@@ -4813,7 +4848,7 @@ class MaintenanceMailWatcher:
                 to_cp, launched_prior = maintenance.gamelist_has_launched(
                     pipeline_in, token
                 )
-            if to_cp:
+            if to_cp and not retry_confirm_only:
                 hdr_title, hdr_tpl, _card_body, card_el = (
                     maintenance.build_maintenance_notice(
                         pipeline_in,
@@ -4850,7 +4885,7 @@ class MaintenanceMailWatcher:
                     flush=True,
                 )
 
-            if to_cp:
+            if to_cp and not retry_confirm_only:
                 _, hdr_title, hdr_tpl, card_body, card_el = (
                     maintenance.process_maintenance_pipeline(
                         pipeline_in,
@@ -4874,7 +4909,7 @@ class MaintenanceMailWatcher:
                     )
                     self._send_lark_card(TARGET_CHAT_ID, main_card)
 
-        if to_cp:
+        if to_cp and not retry_confirm_only:
             record_kw: dict[str, Any] = {
                 "imap_uid": store_key,
                 "message_id": msg.get("Message-ID") or "",
@@ -4933,16 +4968,11 @@ class MaintenanceMailWatcher:
             )
             record_kw.update(times_kw)
             _record_processed(entries, **record_kw)
-        else:
-            _mark_uid_handled(state, store_key)
 
-        _mark_handled_mail_content(
-            state, message_id=message_id, content_key=content_key
-        )
+        email_action_ok = retry_confirm_only
+        confirm_ok = False
 
-        mail.uid("store", uid, "+FLAGS", "(\\Seen)")
-
-        if FORWARD_ENABLED:
+        if FORWARD_ENABLED and not retry_confirm_only:
             email_action_ok = False
             try:
                 if is_cancel:
@@ -4981,26 +5011,41 @@ class MaintenanceMailWatcher:
                 )
                 print(
                     f"[maint-mail] {action} failed uid={uid_s} ticket={ticket_id!r}: {ex!r} "
-                    f"({lark_note}UID deduped — no duplicate)",
+                    f"({lark_note}will retry on next poll)",
                     flush=True,
                 )
-            if email_action_ok:
-                if to_cp:
-                    confirm_games = list(
-                        launched_prior if (is_cancel or is_uncancel) else launched_names
-                    )
-                else:
-                    confirm_games = list(candidate_names)
-                    if not confirm_games and prior:
-                        confirm_games = maintenance.table_names_from_prior_entry(
-                            prior
-                        )
-                self._notify_maintenance_confirm(
-                    email_name=display_subj,
-                    game_names=confirm_games,
-                    in_cp=to_cp,
-                    email_replied=True,
+
+        if not to_cp and email_action_ok:
+            _mark_uid_handled(state, store_key)
+
+        if email_action_ok:
+            if to_cp:
+                confirm_games = list(
+                    launched_prior if (is_cancel or is_uncancel) else launched_names
                 )
+            else:
+                confirm_games = list(candidate_names)
+                if not confirm_games and prior:
+                    confirm_games = maintenance.table_names_from_prior_entry(
+                        prior
+                    )
+            confirm_ok = post_maintenance_confirm_to_chat(
+                self._send,
+                email_name=display_subj,
+                game_names=confirm_games,
+                in_cp=to_cp,
+                email_replied=not retry_confirm_only,
+            )
+
+        _mark_handled_mail_content(
+            state, message_id=message_id, content_key=content_key
+        )
+        mail.uid("store", uid, "+FLAGS", "(\\Seen)")
+
+        if confirm_ok:
+            _mark_confirm_notified(
+                state, store_key=store_key, content_key=content_key
+            )
 
         kind = (
             "cancelled"
@@ -5039,7 +5084,9 @@ class MaintenanceMailWatcher:
         for uid in uids:
             uid_s = uid.decode() if isinstance(uid, bytes) else str(uid)
             store_key = _uid_key(folder, uid_s)
-            if _uid_already_handled(state, entries, store_key):
+            if _uid_already_handled(state, entries, store_key) and not _needs_confirm_retry(
+                state, store_key
+            ):
                 stats["already_done"] += 1
                 continue
             subject, when, from_hdr = self._fetch_header_preview(mail, uid)
