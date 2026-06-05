@@ -1130,12 +1130,23 @@ def _mark_uid_handled(state: dict[str, Any], uid_key: str) -> None:
         handled.append(key)
 
 
-def _needs_confirm_retry(state: dict[str, Any], store_key: str) -> bool:
-    """NOT IN CP mail was deduped before confirm group notify succeeded."""
+def _needs_confirm_retry(
+    state: dict[str, Any],
+    store_key: str,
+    content_key: str = "",
+) -> bool:
+    """Mail was deduped before confirm group notify succeeded (uid or content key)."""
     key = str(store_key)
     handled = {str(x) for x in (state.get("handled_uids") or [])}
-    notified = {str(x) for x in (state.get("confirm_notified_uids") or [])}
-    return key in handled and key not in notified
+    notified_uids = {str(x) for x in (state.get("confirm_notified_uids") or [])}
+    if key in handled and key not in notified_uids:
+        return True
+    ck = str(content_key or "").strip()
+    if not ck:
+        return False
+    content_handled = {str(x) for x in (state.get("handled_content_keys") or [])}
+    notified_keys = {str(x) for x in (state.get("confirm_notified_keys") or [])}
+    return ck in content_handled and ck not in notified_keys
 
 
 def _mark_confirm_notified(
@@ -4108,12 +4119,12 @@ def post_maintenance_confirm_to_chat(
 ) -> bool:
     """Confirm group: summary line; NOT IN CP also sends a second @tag + game name."""
     if not in_cp:
-        game_names = maintenance.english_game_names_only(game_names)
-    chat_id = maintenance.maintenance_confirm_chat_id()
+        game_names = _maint_mod.english_game_names_only(game_names)
+    chat_id = _maint_mod.maintenance_confirm_chat_id()
     if not chat_id:
         print("[maint-mail] confirm notify skipped — no MAINTENANCE_CONFIRM_CHAT_ID", flush=True)
         return False
-    text = maintenance.build_maintenance_confirm_notify_text(
+    text = _maint_mod.build_maintenance_confirm_notify_text(
         email_name=email_name,
         game_names=game_names,
         in_cp=in_cp,
@@ -4133,7 +4144,7 @@ def post_maintenance_confirm_to_chat(
         print(f"[maint-mail] confirm notify error chat={chat_id}: {ex!r}", flush=True)
         return False
     if not in_cp:
-        tag_text = maintenance.build_maintenance_not_cp_tag_text(game_names)
+        tag_text = _maint_mod.build_maintenance_not_cp_tag_text(game_names)
         try:
             resp2 = send_message_func(chat_id, tag_text)
             if isinstance(resp2, dict) and resp2.get("code") not in (None, 0):
@@ -4144,7 +4155,7 @@ def post_maintenance_confirm_to_chat(
                 return False
             print(
                 f"[maint-mail] NOT IN CP tag notify sent chat={chat_id} "
-                f"tag={maintenance.maintenance_not_cp_tag_open_id()!r} games={game_names!r}",
+                f"tag={_maint_mod.maintenance_not_cp_tag_open_id()!r} games={game_names!r}",
                 flush=True,
             )
         except Exception as ex:
@@ -4675,13 +4686,19 @@ class MaintenanceMailWatcher:
             return
 
         if when and not _accept_message_date(mail, uid, when):
+            if not retry_confirm_only:
+                print(
+                    f"[maint-mail] skip uid={uid_s} (not {_process_window_label()}, "
+                    f"date={when!r}): {subject!r}",
+                    flush=True,
+                )
+                return
             print(
-                f"[maint-mail] skip uid={uid_s} (not {_process_window_label()}, "
-                f"date={when!r}): {subject!r}",
+                f"[maint-mail] confirm retry bypasses date window uid={uid_s} "
+                f"date={when!r}",
                 flush=True,
             )
-            return
-        if when and _should_accept_carryover(mail, uid, when):
+        elif when and _should_accept_carryover(mail, uid, when):
             print(
                 f"[maint-mail] carryover uid={uid_s} (unread, local yesterday {MAIL_TZ}): "
                 f"{subject!r}",
@@ -4739,7 +4756,7 @@ class MaintenanceMailWatcher:
         if _already_handled_mail_content(
             state, message_id=message_id, content_key=content_key
         ):
-            if not retry_confirm_only:
+            if not _needs_confirm_retry(state, store_key, content_key):
                 _mark_uid_handled(state, store_key)
                 mail.uid("store", uid, "+FLAGS", "(\\Seen)")
                 print(
@@ -4751,12 +4768,12 @@ class MaintenanceMailWatcher:
             retry_confirm_only = True
             print(
                 f"[maint-mail] confirm retry (deduped before group notify) {folder} "
-                f"uid={uid_s} ticket={ticket_id!r}",
+                f"uid={uid_s} ticket={ticket_id!r} content_key={content_key!r}",
                 flush=True,
             )
 
         dup = _find_duplicate_title_content(entries, display_subj, chash)
-        if dup:
+        if dup and not retry_confirm_only:
             _mark_uid_handled(state, store_key)
             mail.uid("store", uid, "+FLAGS", "(\\Seen)")
             print(
@@ -4775,13 +4792,19 @@ class MaintenanceMailWatcher:
                 when = None
 
         if when and not _accept_message_date(mail, uid, when):
+            if not retry_confirm_only:
+                print(
+                    f"[maint-mail] skip uid={uid_s} (not {_process_window_label()}, "
+                    f"date={when!r}): {display_subj!r}",
+                    flush=True,
+                )
+                return
             print(
-                f"[maint-mail] skip uid={uid_s} (not {_process_window_label()}, "
-                f"date={when!r}): {display_subj!r}",
+                f"[maint-mail] confirm retry bypasses date window uid={uid_s} "
+                f"date={when!r} ticket={ticket_id!r}",
                 flush=True,
             )
-            return
-        if when and _should_accept_carryover(mail, uid, when):
+        elif when and _should_accept_carryover(mail, uid, when):
             print(
                 f"[maint-mail] carryover uid={uid_s} (unread, local yesterday {MAIL_TZ}): "
                 f"{display_subj!r}",
@@ -5018,7 +5041,16 @@ class MaintenanceMailWatcher:
         if not to_cp and email_action_ok:
             _mark_uid_handled(state, store_key)
 
-        if email_action_ok:
+        should_confirm = bool(email_action_ok or retry_confirm_only)
+        if not should_confirm and not to_cp:
+            should_confirm = True
+            print(
+                f"[maint-mail] NOT IN CP: sending confirm group notify even though "
+                f"SMTP reply failed uid={uid_s} ticket={ticket_id!r}",
+                flush=True,
+            )
+
+        if should_confirm:
             if to_cp:
                 confirm_games = list(
                     launched_prior if (is_cancel or is_uncancel) else launched_names
@@ -5034,12 +5066,20 @@ class MaintenanceMailWatcher:
                 email_name=display_subj,
                 game_names=confirm_games,
                 in_cp=to_cp,
-                email_replied=not retry_confirm_only,
+                email_replied=bool(email_action_ok and not retry_confirm_only),
             )
+            if not confirm_ok:
+                print(
+                    f"[maint-mail] confirm group notify FAILED chat="
+                    f"{maintenance.maintenance_confirm_chat_id()!r} "
+                    f"uid={uid_s} ticket={ticket_id!r} in_cp={to_cp}",
+                    flush=True,
+                )
 
-        _mark_handled_mail_content(
-            state, message_id=message_id, content_key=content_key
-        )
+        if email_action_ok or confirm_ok:
+            _mark_handled_mail_content(
+                state, message_id=message_id, content_key=content_key
+            )
         mail.uid("store", uid, "+FLAGS", "(\\Seen)")
 
         if confirm_ok:
@@ -5084,9 +5124,8 @@ class MaintenanceMailWatcher:
         for uid in uids:
             uid_s = uid.decode() if isinstance(uid, bytes) else str(uid)
             store_key = _uid_key(folder, uid_s)
-            if _uid_already_handled(state, entries, store_key) and not _needs_confirm_retry(
-                state, store_key
-            ):
+            confirm_retry = _needs_confirm_retry(state, store_key)
+            if _uid_already_handled(state, entries, store_key) and not confirm_retry:
                 stats["already_done"] += 1
                 continue
             subject, when, from_hdr = self._fetch_header_preview(mail, uid)
@@ -5113,9 +5152,10 @@ class MaintenanceMailWatcher:
                     )
                 continue
             if when and not _accept_message_date(mail, uid, when):
-                stats["not_in_window"] += 1
-                continue
-            if when and _should_accept_carryover(mail, uid, when):
+                if not confirm_retry:
+                    stats["not_in_window"] += 1
+                    continue
+            elif when and _should_accept_carryover(mail, uid, when):
                 stats["carryover"] += 1
             todo.append(uid)
         stats["todo"] = len(todo)
@@ -5575,9 +5615,54 @@ def reset_maintenance_ticket(
     return 0
 
 
+def debug_test_confirm_group() -> int:
+    """Send a one-line test to MAINTENANCE_CONFIRM_CHAT_ID (diagnose Lark permissions)."""
+    import requests
+
+    chat_id = _maint_mod.maintenance_confirm_chat_id()
+    if not chat_id:
+        print("[maint-mail] test-confirm: no maintenance_confirm_chat_id()", flush=True)
+        return 1
+    app_id = os.getenv("APP_ID", "").strip()
+    app_secret = os.getenv("APP_SECRET", "").strip()
+    if not app_id or not app_secret:
+        print("[maint-mail] test-confirm: APP_ID / APP_SECRET missing in .env", flush=True)
+        return 1
+    tok_resp = requests.post(
+        "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal",
+        json={"app_id": app_id, "app_secret": app_secret},
+        timeout=15,
+    ).json()
+    token = tok_resp.get("tenant_access_token")
+    if not token:
+        print(f"[maint-mail] test-confirm: token failed {tok_resp!r}", flush=True)
+        return 1
+    text = (
+        "[maint-mail] test-confirm — if you see this, bot can post to the confirm group."
+    )
+    msg_resp = requests.post(
+        "https://open.larksuite.com/open-apis/im/v1/messages",
+        params={"receive_id_type": "chat_id"},
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "receive_id": chat_id,
+            "msg_type": "text",
+            "content": json.dumps({"text": text}),
+        },
+        timeout=15,
+    ).json()
+    print(
+        f"[maint-mail] test-confirm chat={chat_id} resp={msg_resp!r}",
+        flush=True,
+    )
+    return 0 if msg_resp.get("code") in (None, 0) else 1
+
+
 if __name__ == "__main__":
     import sys
 
+    if len(sys.argv) >= 2 and sys.argv[1] == "test-confirm-group":
+        raise SystemExit(debug_test_confirm_group())
     if len(sys.argv) >= 2 and sys.argv[1] == "jenkins-reply-search":
         _needle = sys.argv[2] if len(sys.argv) > 2 else "TESTING BOT"
         raise SystemExit(debug_jenkins_reply_search(_needle))
@@ -5604,7 +5689,8 @@ if __name__ == "__main__":
         "Usage:\n"
         "  python3 maintenance_mail.py audit-window [--fresh] [--quiet]\n"
         "  python3 maintenance_mail.py reset-ticket TINC-720579 [--hash <sha256>]\n"
-        "  python3 maintenance_mail.py jenkins-reply-search [subject]",
+        "  python3 maintenance_mail.py jenkins-reply-search [subject]\n"
+        "  python3 maintenance_mail.py test-confirm-group",
         flush=True,
     )
     raise SystemExit(2)
