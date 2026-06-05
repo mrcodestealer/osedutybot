@@ -1135,18 +1135,33 @@ def _needs_confirm_retry(
     store_key: str,
     content_key: str = "",
 ) -> bool:
-    """Mail was deduped before confirm group notify succeeded (uid or content key)."""
-    key = str(store_key)
-    handled = {str(x) for x in (state.get("handled_uids") or [])}
-    notified_uids = {str(x) for x in (state.get("confirm_notified_uids") or [])}
-    if key in handled and key not in notified_uids:
-        return True
-    ck = str(content_key or "").strip()
-    if not ck:
-        return False
-    content_handled = {str(x) for x in (state.get("handled_content_keys") or [])}
-    notified_keys = {str(x) for x in (state.get("confirm_notified_keys") or [])}
-    return ck in content_handled and ck not in notified_keys
+    """Disabled — restart must not backfill confirm messages for old handled mail."""
+    return False
+
+
+def _suppress_stale_confirm_retries(state: dict[str, Any]) -> int:
+    """
+    On watcher startup: mark prior handled mail as confirm-complete so a restart
+    does not flood the ops group with backfilled notifications.
+    """
+    n = 0
+    notified_uids = state.setdefault("confirm_notified_uids", [])
+    uid_seen = {str(x) for x in notified_uids}
+    for uid in state.get("handled_uids") or []:
+        key = str(uid)
+        if key and key not in uid_seen:
+            notified_uids.append(key)
+            uid_seen.add(key)
+            n += 1
+    notified_keys = state.setdefault("confirm_notified_keys", [])
+    key_seen = {str(x) for x in notified_keys}
+    for ck in state.get("handled_content_keys") or []:
+        key = str(ck)
+        if key and key not in key_seen:
+            notified_keys.append(key)
+            key_seen.add(key)
+            n += 1
+    return n
 
 
 def _mark_confirm_notified(
@@ -4117,16 +4132,20 @@ def post_maintenance_confirm_to_chat(
     in_cp: bool,
     email_replied: bool = True,
 ) -> bool:
-    """Confirm group: summary line; NOT IN CP also sends a second @tag + game name."""
-    if not in_cp:
-        game_names = _maint_mod.english_game_names_only(game_names)
+    """Confirm group: summary line + second @tag + English game name(s)."""
+    summary_games = (
+        _maint_mod.english_game_names_only(game_names)
+        if not in_cp
+        else list(game_names or [])
+    )
+    followup_games = _maint_mod.english_game_names_only(game_names)
     chat_id = _maint_mod.maintenance_confirm_chat_id()
     if not chat_id:
         print("[maint-mail] confirm notify skipped — no MAINTENANCE_CONFIRM_CHAT_ID", flush=True)
         return False
     text = _maint_mod.build_maintenance_confirm_notify_text(
         email_name=email_name,
-        game_names=game_names,
+        game_names=summary_games,
         in_cp=in_cp,
         email_replied=email_replied,
     )
@@ -4137,30 +4156,29 @@ def post_maintenance_confirm_to_chat(
             return False
         print(
             f"[maint-mail] confirm notify sent chat={chat_id} in_cp={in_cp} "
-            f"games={game_names!r}",
+            f"games={summary_games!r}",
             flush=True,
         )
     except Exception as ex:
         print(f"[maint-mail] confirm notify error chat={chat_id}: {ex!r}", flush=True)
         return False
-    if not in_cp:
-        tag_text = _maint_mod.build_maintenance_not_cp_tag_text(game_names)
-        try:
-            resp2 = send_message_func(chat_id, tag_text)
-            if isinstance(resp2, dict) and resp2.get("code") not in (None, 0):
-                print(
-                    f"[maint-mail] NOT IN CP tag notify failed chat={chat_id}: {resp2}",
-                    flush=True,
-                )
-                return False
+    tag_text = _maint_mod.build_maintenance_confirm_followup_text(followup_games)
+    try:
+        resp2 = send_message_func(chat_id, tag_text)
+        if isinstance(resp2, dict) and resp2.get("code") not in (None, 0):
             print(
-                f"[maint-mail] NOT IN CP tag notify sent chat={chat_id} "
-                f"tag={_maint_mod.maintenance_not_cp_tag_open_id()!r} games={game_names!r}",
+                f"[maint-mail] confirm follow-up failed chat={chat_id}: {resp2}",
                 flush=True,
             )
-        except Exception as ex:
-            print(f"[maint-mail] NOT IN CP tag notify error chat={chat_id}: {ex!r}", flush=True)
             return False
+        print(
+            f"[maint-mail] confirm follow-up sent chat={chat_id} "
+            f"tag={_maint_mod.maintenance_not_cp_tag_open_id()!r} games={followup_games!r}",
+            flush=True,
+        )
+    except Exception as ex:
+        print(f"[maint-mail] confirm follow-up error chat={chat_id}: {ex!r}", flush=True)
+        return False
     return True
 
 
@@ -5456,6 +5474,17 @@ def start_maintenance_mail_watcher(
     if not TARGET_CHAT_ID:
         print("[maint-mail] not started — MAINTENANCE_MAIL_TARGET_CHAT_ID empty", flush=True)
         return False
+
+    with _state_lock:
+        _state = _load_state()
+        _skipped = _suppress_stale_confirm_retries(_state)
+        if _skipped:
+            _save_state(_state)
+            print(
+                f"[maint-mail] startup: will not backfill confirm for {_skipped} "
+                f"prior handled mail item(s) — new mail only from this run",
+                flush=True,
+            )
 
     watcher = MaintenanceMailWatcher(
         send_message_func=send_message_func,

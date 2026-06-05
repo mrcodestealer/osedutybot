@@ -4560,6 +4560,15 @@ def jc_open_id_for_mention() -> str:
     )
 
 
+def jc_tag_display() -> str:
+    """Plain name in confirm-group text (no Lark @mention)."""
+    return (
+        os.getenv("MAINTENANCE_JC_TAG_NAME", "").strip()
+        or os.getenv("maintenance_jc_tag_name", "").strip()
+        or "JC"
+    )
+
+
 def plain_lark_at_open_id(open_id: str) -> str:
     """@mention in plain IM messages (not interactive cards)."""
     oid = (open_id or "").strip()
@@ -4617,17 +4626,21 @@ def build_maintenance_confirm_notify_text(
     name = (email_name or "").strip() or "Maintenance email"
     verb = "replied" if email_replied else "checked"
     cp_line = "is in CP website" if in_cp else "is not in CP website"
-    jc = plain_lark_at_open_id(jc_open_id_for_mention())
+    jc = jc_tag_display()
     return (
         f"Done {verb} {name}. As checked, {games} {cp_line}. "
         f"Kindly double confirm. Any issue please tag {jc} to do fixing."
     )
 
 
-def build_maintenance_not_cp_tag_text(game_names: list[str]) -> str:
-    """Follow-up in confirm group: @tag + game name(s) when NOT IN CP."""
+def build_maintenance_confirm_followup_text(game_names: list[str]) -> str:
+    """Second confirm-group line: @tag + English game name(s) (CP and NOT IN CP)."""
     tag = plain_lark_at_open_id(maintenance_not_cp_tag_open_id())
     return f"{tag} {_game_names_display(game_names)}"
+
+
+def build_maintenance_not_cp_tag_text(game_names: list[str]) -> str:
+    return build_maintenance_confirm_followup_text(game_names)
 
 
 def is_evo_batch_forward_only_chat(chat_id: str | None) -> bool:
