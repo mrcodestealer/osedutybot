@@ -4531,6 +4531,7 @@ def _evo_email_subject_date(blocks_out: list[str]) -> str:
 
 
 EVO_BATCH_FORWARD_CHAT_ID_DEFAULT = "oc_9ffa9a76810abf72e39d597aee37d65a"
+MAINTENANCE_CONFIRM_CHAT_ID_DEFAULT = "oc_9de3d63fc589df6feeb9b0bee9c45b72"
 
 
 def evo_batch_forward_chat_id() -> str:
@@ -4539,6 +4540,50 @@ def evo_batch_forward_chat_id() -> str:
         os.getenv("EVO_BATCH_FORWARD_CHAT_ID", "").strip()
         or os.getenv("evo_batch_forward_chat_id", "").strip()
         or EVO_BATCH_FORWARD_CHAT_ID_DEFAULT
+    )
+
+
+def maintenance_confirm_chat_id() -> str:
+    """Ops confirm group after maintenance email reply / forward."""
+    return (
+        os.getenv("MAINTENANCE_CONFIRM_CHAT_ID", "").strip()
+        or os.getenv("maintenance_confirm_chat_id", "").strip()
+        or MAINTENANCE_CONFIRM_CHAT_ID_DEFAULT
+    )
+
+
+def jc_open_id_for_mention() -> str:
+    return (
+        os.getenv("junchen", "").strip()
+        or os.getenv("JC_OPEN_ID", "").strip()
+        or "ou_5f660c0fb0769d184aca635d02209272"
+    )
+
+
+def plain_lark_at_open_id(open_id: str) -> str:
+    """@mention in plain IM messages (not interactive cards)."""
+    oid = (open_id or "").strip()
+    return f'<at user_id="{oid}"></at>' if oid else "JC"
+
+
+def build_maintenance_confirm_notify_text(
+    *,
+    email_name: str,
+    game_names: list[str],
+    in_cp: bool,
+    email_replied: bool = True,
+) -> str:
+    """Notify ops after CP / NOT IN CP maintenance email handling."""
+    games = ", ".join(str(g).strip() for g in (game_names or []) if str(g).strip())
+    if not games:
+        games = "Unknown"
+    name = (email_name or "").strip() or "Maintenance email"
+    verb = "replied" if email_replied else "checked"
+    cp_line = "is in CP website" if in_cp else "is not in CP website"
+    jc = plain_lark_at_open_id(jc_open_id_for_mention())
+    return (
+        f"Done {verb} {name}. As checked, {games} {cp_line}. "
+        f"Kindly double confirm. Any issue please tag {jc} to do fixing."
     )
 
 

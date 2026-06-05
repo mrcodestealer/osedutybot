@@ -4439,6 +4439,25 @@ class MaintenanceMailWatcher:
         except Exception as ex:
             print(f"[maint-mail] send_message error: {ex!r}", flush=True)
 
+    def _notify_maintenance_confirm(
+        self,
+        *,
+        email_name: str,
+        game_names: list[str],
+        in_cp: bool,
+        email_replied: bool = True,
+    ) -> None:
+        chat_id = maintenance.maintenance_confirm_chat_id()
+        if not chat_id:
+            return
+        text = maintenance.build_maintenance_confirm_notify_text(
+            email_name=email_name,
+            game_names=game_names,
+            in_cp=in_cp,
+            email_replied=email_replied,
+        )
+        self._send_lark(chat_id, text)
+
     def _send_lark_card(self, chat_id: str, card: dict[str, Any]) -> None:
         try:
             payload = json.dumps(card, ensure_ascii=False)
@@ -4691,6 +4710,7 @@ class MaintenanceMailWatcher:
         launched_prior: list[str] = []
         prior: dict[str, Any] | None = None
         to_cp = False
+        candidate_names = maintenance.extract_candidate_game_names(pipeline_in)
 
         if is_cancel:
             prior = _find_prior_maintenance_entry(entries, display_subj, ticket_id)
@@ -4774,10 +4794,9 @@ class MaintenanceMailWatcher:
                     flush=True,
                 )
             if not to_cp:
-                cands = maintenance.extract_candidate_game_names(pipeline_in)
                 print(
                     f"[maint-mail] NOT IN CP check uid={uid_s} ticket={ticket_id!r} "
-                    f"candidates={cands!r} launched={launched_names!r}",
+                    f"candidates={candidate_names!r} launched={launched_names!r}",
                     flush=True,
                 )
 
@@ -4901,6 +4920,22 @@ class MaintenanceMailWatcher:
                     reply_not_in_cp_email(
                         subject=subject, original_msg=msg
                     )
+                if to_cp:
+                    confirm_games = list(
+                        launched_prior if (is_cancel or is_uncancel) else launched_names
+                    )
+                else:
+                    confirm_games = list(candidate_names)
+                    if not confirm_games and prior:
+                        confirm_games = maintenance.table_names_from_prior_entry(
+                            prior
+                        )
+                self._notify_maintenance_confirm(
+                    email_name=display_subj,
+                    game_names=confirm_games,
+                    in_cp=to_cp,
+                    email_replied=True,
+                )
             except Exception as ex:
                 action = "forward" if to_cp else "NOT IN CP reply"
                 lark_note = (
