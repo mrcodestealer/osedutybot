@@ -153,6 +153,13 @@ def _normalize_updatemore_body(body: str) -> str:
             count=1,
             flags=re.I,
         )
+        s = re.sub(
+            r"(/updatemore\b(?:\s+skip[\s-]?build)?)\s+(.+)$",
+            r"\1\n\2",
+            s,
+            count=1,
+            flags=re.I,
+        )
         if (
             re.search(r"\ssame\b", s, re.I)
             and not re.match(r"^same\b", s, re.I)
@@ -219,8 +226,10 @@ def parse_updatemore_body(body: str) -> list[dict[str, Any]]:
       - ``email_subject`` — only when this segment has an explicit ``Email:`` line
       - ``same_as_prev`` — True when preceded by ``same`` (reuse previous **environment** only)
 
-    A new segment starts on each ``UPDATE …`` headline line. Optional ``same`` / ``not same``
-    between blocks still work for backward compatibility.
+    A new segment starts on each ``UPDATE …`` headline line. When the next segment uses the
+    **same** job headline as the previous one (e.g. two ``update fpms prod script`` blocks),
+    ``same_as_prev`` is set automatically so Jenkins segment 2 waits for segment 1 to finish.
+    Optional explicit ``same`` / ``not same`` still work.
     """
     lines = _normalize_lines(_normalize_updatemore_body(body))
     lines = _strip_skip_build_lines(lines)
@@ -228,7 +237,14 @@ def parse_updatemore_body(body: str) -> list[dict[str, Any]]:
         lines.pop(0)
     if not lines or not UPDATEMORE_CMD_RE.search(lines[0]):
         raise ValueError("First line must include `/updatemore`.")
-    lines = lines[1:]
+    first_cmd = lines[0]
+    first_remainder = UPDATEMORE_CMD_RE.sub("", first_cmd, count=1).strip()
+    if first_remainder.casefold() in _SKIP_BUILD_LINES:
+        first_remainder = ""
+    if first_remainder:
+        lines = [first_remainder, *lines[1:]]
+    else:
+        lines = lines[1:]
     while lines and not lines[0].strip():
         lines.pop(0)
     if not lines:
@@ -302,12 +318,15 @@ def parse_updatemore_body(body: str) -> list[dict[str, Any]]:
         elif _is_update_env_line(raw_ln):
             env_line = raw_ln
             cfg, email, i = consume_config(i, env_line)
+            same_env = _env_lines_equivalent(
+                segments[-1]["env_line"], env_line
+            )
             segments.append(
                 {
                     "env_line": env_line,
                     "lines": cfg,
                     "email_subject": email,
-                    "same_as_prev": False,
+                    "same_as_prev": same_env,
                 }
             )
         else:
@@ -330,7 +349,17 @@ def segment_to_update_body(segment: dict[str, Any]) -> str:
 
 
 def normalize_env_key(env_line: str) -> str:
-    return re.sub(r"\s+", " ", (env_line or "").strip().casefold())
+    """Case/space-normalize job headline; strip optional leading ``update `` for comparison."""
+    s = re.sub(r"\s+", " ", (env_line or "").strip().casefold())
+    if s.startswith("update "):
+        s = s[7:].strip()
+    return s
+
+
+def _env_lines_equivalent(a: str, b: str) -> bool:
+    ka = normalize_env_key(a)
+    kb = normalize_env_key(b)
+    return bool(ka) and ka == kb
 
 
 def queue_summary(segments: list[dict[str, Any]]) -> str:
@@ -472,7 +501,13 @@ def next_segment_same_env(q: dict[str, Any]) -> bool:
     idx = int(q.get("index") or 0)
     if idx + 1 >= len(segs):
         return False
-    return bool(segs[idx + 1].get("same_as_prev"))
+    nxt = segs[idx + 1]
+    if bool(nxt.get("same_as_prev")):
+        return True
+    return _env_lines_equivalent(
+        segs[idx].get("env_line") or "",
+        nxt.get("env_line") or "",
+    )
 
 
 def segment_has_email(q: dict[str, Any]) -> bool:
