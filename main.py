@@ -3672,6 +3672,7 @@ def lark_webhook():
                     game_names=batch["valid_labels"],
                     in_cp=True,
                     email_replied=True,
+                    get_token_func=get_tenant_access_token,
                 )
             elif batch.get("filtered_labels"):
                 _maint_mail.post_maintenance_confirm_to_chat(
@@ -3680,6 +3681,7 @@ def lark_webhook():
                     game_names=batch["filtered_labels"],
                     in_cp=False,
                     email_replied=False,
+                    get_token_func=get_tenant_access_token,
                 )
             send_message(
                 chat_id,

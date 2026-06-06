@@ -4639,13 +4639,20 @@ def build_maintenance_confirm_card_body(
     )
 
 
+def build_maintenance_confirm_followup_card_line(game_names: list[str]) -> str:
+    """@tag + game name(s) as a second block inside the confirm card."""
+    tag = lark_card_at_open_id(maintenance_not_cp_tag_open_id())
+    games = _game_names_display(game_names)
+    return f"{tag} {games}"
+
+
 def build_maintenance_confirm_card(
     *,
     email_name: str,
     game_names: list[str],
     in_cp: bool,
 ) -> dict[str, Any]:
-    """Interactive card for ops confirm group (message 1)."""
+    """Interactive card for ops confirm group (thread root message)."""
     title = confirm_verify_card_title(email_name)
     body_md = build_maintenance_confirm_card_body(
         game_names=game_names,
@@ -4663,7 +4670,7 @@ def build_maintenance_confirm_card(
                 {
                     "tag": "div",
                     "text": {"tag": "lark_md", "content": lark_md_for_card(body_md)},
-                }
+                },
             ]
         },
     }
@@ -4683,7 +4690,7 @@ def build_maintenance_confirm_notify_text(
 
 
 def build_maintenance_confirm_followup_text(game_names: list[str]) -> str:
-    """Second confirm-group line: @tag + English game name(s) (CP and NOT IN CP)."""
+    """Plain-text @tag line (prefer :func:`build_maintenance_confirm_followup_card_line` in cards)."""
     tag = plain_lark_at_open_id(maintenance_not_cp_tag_open_id())
     return f"{tag} {_game_names_display(game_names)}"
 

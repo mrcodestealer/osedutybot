@@ -4124,15 +4124,58 @@ def reply_not_in_cp_email(
     print(f"[maint-mail] NOT IN CP reply {subj!r} → {route}", flush=True)
 
 
+def _extract_lark_message_id(resp: Any) -> str:
+    if not isinstance(resp, dict):
+        return ""
+    data = resp.get("data") or {}
+    if not isinstance(data, dict):
+        return ""
+    mid = str(data.get("message_id") or "").strip()
+    if mid:
+        return mid
+    nested = data.get("message") or {}
+    if isinstance(nested, dict):
+        return str(nested.get("message_id") or "").strip()
+    return ""
+
+
+def reply_lark_message_in_thread(
+    *,
+    message_id: str,
+    text: str,
+    get_token_func: Callable[[], str | None],
+) -> dict[str, Any]:
+    """
+    Reply inside a message thread only (reply_in_thread=true — not main chat stream).
+    """
+    import requests
+
+    mid = (message_id or "").strip()
+    if not mid:
+        return {"code": -1, "msg": "no message_id"}
+    token = get_token_func()
+    if not token:
+        return {"code": -1, "msg": "no tenant_access_token"}
+    url = f"https://open.larksuite.com/open-apis/im/v1/messages/{mid}/reply"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    body = {
+        "msg_type": "text",
+        "content": json.dumps({"text": text}),
+        "reply_in_thread": True,
+    }
+    return requests.post(url, headers=headers, json=body, timeout=15).json()
+
+
 def post_maintenance_confirm_to_chat(
-    send_message_func: Callable[[str, str], Any],
+    send_message_func: Callable[..., Any],
     *,
     email_name: str,
     game_names: list[str],
     in_cp: bool,
     email_replied: bool = True,
+    get_token_func: Callable[[], str | None] | None = None,
 ) -> bool:
-    """Confirm group: interactive verify card + plain @tag + game name(s)."""
+    """Confirm group: verify card + thread reply (@tag + game name, not in main stream)."""
     summary_games = (
         _maint_mod.english_game_names_only(game_names)
         if not in_cp
@@ -4157,31 +4200,46 @@ def post_maintenance_confirm_to_chat(
         if isinstance(resp, dict) and resp.get("code") not in (None, 0):
             print(f"[maint-mail] confirm card failed chat={chat_id}: {resp}", flush=True)
             return False
+        parent_id = _extract_lark_message_id(resp)
         print(
             f"[maint-mail] confirm card sent chat={chat_id} in_cp={in_cp} "
             f"title={_maint_mod.confirm_verify_card_title(email_name)!r} "
-            f"games={summary_games!r}",
+            f"games={summary_games!r} message_id={parent_id!r}",
             flush=True,
         )
     except Exception as ex:
         print(f"[maint-mail] confirm notify error chat={chat_id}: {ex!r}", flush=True)
         return False
+    if not parent_id:
+        print("[maint-mail] confirm thread skipped — no message_id from card send", flush=True)
+        return False
+    if not get_token_func:
+        print("[maint-mail] confirm thread skipped — no get_token_func", flush=True)
+        return False
     tag_text = _maint_mod.build_maintenance_confirm_followup_text(followup_games)
     try:
-        resp2 = send_message_func(chat_id, tag_text)
-        if isinstance(resp2, dict) and resp2.get("code") not in (None, 0):
+        thread_resp = reply_lark_message_in_thread(
+            message_id=parent_id,
+            text=tag_text,
+            get_token_func=get_token_func,
+        )
+        if isinstance(thread_resp, dict) and thread_resp.get("code") not in (None, 0):
             print(
-                f"[maint-mail] confirm follow-up failed chat={chat_id}: {resp2}",
+                f"[maint-mail] confirm thread reply failed parent={parent_id!r}: "
+                f"{thread_resp}",
                 flush=True,
             )
             return False
         print(
-            f"[maint-mail] confirm follow-up sent chat={chat_id} "
+            f"[maint-mail] confirm thread reply sent parent={parent_id!r} "
             f"tag={_maint_mod.maintenance_not_cp_tag_open_id()!r} games={followup_games!r}",
             flush=True,
         )
     except Exception as ex:
-        print(f"[maint-mail] confirm follow-up error chat={chat_id}: {ex!r}", flush=True)
+        print(
+            f"[maint-mail] confirm thread reply error parent={parent_id!r}: {ex!r}",
+            flush=True,
+        )
         return False
     return True
 
@@ -4566,6 +4624,7 @@ class MaintenanceMailWatcher:
             game_names=game_names,
             in_cp=in_cp,
             email_replied=email_replied,
+            get_token_func=self._get_token,
         )
 
     def _send_lark_card(self, chat_id: str, card: dict[str, Any]) -> None:
@@ -5089,6 +5148,7 @@ class MaintenanceMailWatcher:
                 game_names=confirm_games,
                 in_cp=to_cp,
                 email_replied=bool(email_action_ok and not retry_confirm_only),
+                get_token_func=self._get_token,
             )
             if not confirm_ok:
                 print(
