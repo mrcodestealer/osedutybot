@@ -4578,6 +4578,48 @@ def _fpms_lark_session_key(chat_id: str, sender_id: str) -> str:
     return f"{chat_id}:{sender_id}"
 
 
+def _fpms_lark_wrap_thread_send(chat_id: str, session_key: str, send):
+    """Route ``send`` through main.update thread helpers when a thread root exists."""
+    try:
+        import main as _main_mod
+
+        make = getattr(_main_mod, "make_update_thread_send", None)
+        if callable(make):
+            return make(chat_id, session_key, send)
+    except Exception:
+        pass
+    return send
+
+
+def _fpms_lark_begin_update_thread(
+    chat_id: str,
+    session_key: str,
+    body_or_summary: str,
+    lark_message_id: str | None = None,
+    *,
+    force_new: bool = False,
+) -> str | None:
+    try:
+        import main as _main_mod
+
+        begin = getattr(_main_mod, "update_begin_thread", None)
+        summ_fn = getattr(_main_mod, "update_thread_summary", None)
+        if not callable(begin):
+            return None
+        raw = (body_or_summary or "").strip()
+        summary = summ_fn(raw) if callable(summ_fn) else raw[:200]
+        return begin(
+            chat_id,
+            session_key,
+            summary or "/update",
+            fallback_parent_id=(lark_message_id or "").strip() or None,
+            force_new=force_new,
+        )
+    except Exception as ex:
+        print(f"[jenkinsupdate] update thread begin failed: {ex!r}", flush=True)
+        return None
+
+
 def _fpms_lark_unregister_picker_sid_from_sess(sess: dict) -> None:
     """Remove job-picker and service-picker card ``sid`` keys from the global map."""
     keys = (
@@ -6824,6 +6866,9 @@ def _fpms_lark_spawn_run(
 
         upload_image_fn = getattr(_main_mod, "upload_image_lark", None)
         send_image_fn = getattr(_main_mod, "send_image_message", None)
+        make_img = getattr(_main_mod, "make_update_thread_send_image", None)
+        if callable(make_img):
+            send_image_fn = make_img(chat_id, session_key, send_image_fn)
     except Exception:
         pass
 
@@ -7579,6 +7624,15 @@ def _dispatch_lark_update_command_body(
 ) -> bool:
     """Core ``/update`` job match + dispatch (shared by ``/update`` and ``/updatemore``)."""
     key = session_key
+    send = _fpms_lark_wrap_thread_send(chat_id, key, send)
+    if not from_updatemore:
+        _fpms_lark_begin_update_thread(
+            chat_id,
+            key,
+            body,
+            lark_message_id,
+            force_new=True,
+        )
     try:
         import updatemore as _um_guard
 
@@ -7771,6 +7825,7 @@ def handle_lark_jenkins_update_message(
     Returns **True** if this message was consumed (caller should stop processing).
     """
     key = _fpms_lark_session_key(chat_id, sender_id)
+    send = _fpms_lark_wrap_thread_send(chat_id, key, send)
     low = (clean_text or "").strip().casefold()
     body_early = (original_text or clean_text or "").replace("\r\n", "\n").strip()
 
@@ -7852,6 +7907,13 @@ def handle_lark_jenkins_update_message(
                 skip_build=skip_build,
             )
             _fpms_lark_sessions[key] = {"updatemore_queue": q}
+        _fpms_lark_begin_update_thread(
+            chat_id,
+            key,
+            f"updatemore — {len(segments)} segment(s)",
+            lark_message_id,
+            force_new=True,
+        )
         if skip_build:
             send(chat_id, um.skip_build_manual_instructions(segments, q))
             return True
@@ -8390,6 +8452,8 @@ def handle_lark_jenkins_card_action(
         resolved = resolve_jenkins_job_card_session(chat_id, sid)
         if resolved:
             chat_id, sender_id = resolved
+    sk = _fpms_lark_session_key(chat_id, sender_id)
+    send = _fpms_lark_wrap_thread_send(chat_id, sk, send)
     k = str(parsed.get("k") or "").strip().lower()
     if k in ("svc", "svc_go", "svc_clr", "svc_can"):
         if _fpms_lark_handle_service_pick_callbacks(chat_id, sender_id, parsed, send):

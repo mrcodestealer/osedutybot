@@ -1511,6 +1511,122 @@ def _get_checkcredit_np_pending(chat_id: str, max_age_sec: float = 3600.0):
         return None
     return ent["payload"]
 
+# ``/update`` / ``/jenkinsupdate`` — thread replies under a starter card (same as checkcredit).
+UPDATE_THREAD_ROOT: dict[str, dict] = {}
+
+
+def _set_update_thread_root(session_key: str, message_id: str) -> None:
+    sk = (session_key or "").strip()
+    mid = (message_id or "").strip()
+    if not sk or not mid:
+        return
+    UPDATE_THREAD_ROOT[sk] = {"message_id": mid, "ts": time.time()}
+
+
+def _get_update_thread_root(session_key: str, max_age_sec: float = 7200.0) -> Optional[str]:
+    ent = UPDATE_THREAD_ROOT.get((session_key or "").strip())
+    if not ent:
+        return None
+    if time.time() - ent["ts"] > max_age_sec:
+        del UPDATE_THREAD_ROOT[(session_key or "").strip()]
+        return None
+    return str(ent.get("message_id") or "").strip() or None
+
+
+def update_thread_summary(body: str) -> str:
+    for line in (body or "").replace("\r\n", "\n").split("\n"):
+        s = line.strip()
+        if not s or s.lower().startswith("email:"):
+            continue
+        s = re.sub(
+            r"^/?(?:update|jenkinsupdate|updatejenkins|updatemore)\b\s*",
+            "",
+            s,
+            count=1,
+            flags=re.I,
+        ).strip()
+        return s[:200] if s else "/update"
+    return "/update"
+
+
+def _build_update_thread_starter_card(summary: str) -> dict:
+    title = "🔧 /update"
+    body = (summary or "").strip()[:500] or "Jenkins update"
+    return {
+        "schema": "2.0",
+        "config": {"width_mode": "fill"},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": title},
+        },
+        "body": {
+            "elements": [
+                {"tag": "div", "text": {"tag": "lark_md", "content": body}},
+            ]
+        },
+    }
+
+
+def update_begin_thread(
+    chat_id: str,
+    session_key: str,
+    summary: str,
+    *,
+    fallback_parent_id: Optional[str] = None,
+    force_new: bool = False,
+) -> Optional[str]:
+    """Post starter card to main chat; ``/update`` steps reply in thread only."""
+    sk = (session_key or "").strip()
+    if not force_new:
+        existing = _get_update_thread_root(sk)
+        if existing:
+            return existing
+    card = _build_update_thread_starter_card(summary)
+    resp = send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
+    parent: Optional[str] = None
+    if isinstance(resp, dict) and resp.get("code") not in (None, 0):
+        print(f"[update] starter card failed chat={chat_id}: {resp}", flush=True)
+    else:
+        parent = _extract_lark_message_id(resp) or None
+    if not parent:
+        parent = (fallback_parent_id or "").strip() or None
+    if parent and sk:
+        _set_update_thread_root(sk, parent)
+    return parent
+
+
+def make_update_thread_send(chat_id: str, session_key: str, base_send=None):
+    if base_send is None:
+        base_send = send_message
+
+    def _send(cid, text, msg_type="text", mentions=None, **kwargs):
+        root = _get_update_thread_root((session_key or "").strip())
+        if root and cid == chat_id:
+            return reply_message_in_thread(root, text, msg_type=msg_type, mentions=mentions)
+        try:
+            return base_send(cid, text, msg_type=msg_type, mentions=mentions, **kwargs)
+        except TypeError:
+            try:
+                return base_send(cid, text, msg_type=msg_type)
+            except TypeError:
+                return base_send(cid, text)
+
+    return _send
+
+
+def make_update_thread_send_image(chat_id: str, session_key: str, base_send=None):
+    if base_send is None:
+        base_send = send_image_message
+
+    def _send_img(cid, image_key):
+        root = _get_update_thread_root((session_key or "").strip())
+        if root and cid == chat_id:
+            return reply_message_in_thread(root, image_key, msg_type="image")
+        return base_send(cid, image_key)
+
+    return _send_img
+
+
 _CAT_FILE_TOKEN = None
 def get_cat_file_token():
     global _CAT_FILE_TOKEN
@@ -3315,7 +3431,7 @@ def lark_webhook():
         send_message,
         allow_start=bot_mentioned,
         lark_sender_union_id=sender_union_id,
-        lark_message_id=message_id if lark_reactions_enabled else None,
+        lark_message_id=(message_id or "").strip() or None,
     ):
         return _lark_im_done()
 
