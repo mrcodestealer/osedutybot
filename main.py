@@ -394,12 +394,26 @@ def run_smscheckplayer_check(chat_id, player_id: str):
         print(f"[SMS check player] error: {e!r}")
 
 
-def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str, mode: str = "default", navigator_logic_log_basename: Optional[str] = None):
+def run_checkcredit_finderror(
+    chat_id,
+    machine_query: str,
+    date_str: str,
+    mode: str = "default",
+    navigator_logic_log_basename: Optional[str] = None,
+    thread_root_message_id: Optional[str] = None,
+):
     """Background: same as checkcredit + `--date`. Uses OSS HTTP if CHECKCREDIT_USE_OSS is set."""
+    thread_root = (thread_root_message_id or _get_checkcredit_thread_root(chat_id) or "").strip() or None
+    if thread_root:
+        _set_checkcredit_thread_root(chat_id, thread_root)
+
+    def _cc_send(text, **kwargs):
+        return _checkcredit_send(chat_id, text, thread_root=thread_root, **kwargs)
+
     try:
         import checkcredit
     except ImportError as e:
-        send_message(chat_id, f"❌ Cannot load checkcredit module: {e}")
+        _cc_send(f"❌ Cannot load checkcredit module: {e}")
         return
     try:
         td = datetime.strptime(date_str.strip(), "%Y-%m-%d").date()
@@ -525,27 +539,26 @@ def run_checkcredit_finderror(chat_id, machine_query: str, date_str: str, mode: 
                     if preview_img_err
                     else "⚠️ EGM preview screenshot unavailable."
                 )
-                send_message(chat_id, msg)
+                _cc_send(msg)
         card = out.get("lark_card_candidates")
         if isinstance(card, dict):
             card_json = json.dumps(card)
-            resp = send_message(chat_id, card_json, msg_type="interactive")
+            resp = _cc_send(card_json, msg_type="interactive")
             if resp.get("code") != 0:
-                send_message(chat_id, text if text else "(no output)")
+                _cc_send(text if text else "(no output)")
             if machineerror_fb and str(mode or "").strip().lower() == "error_only":
-                send_message(
-                    chat_id,
+                _cc_send(
                     "⚠️ Error log images unavailable (PNG render or Lark upload failed). Text context:\n\n"
                     + "\n\n".join(machineerror_fb),
                 )
         else:
-            send_message(chat_id, text if text else "(no output)")
+            _cc_send(text if text else "(no output)")
 
         if isinstance(np, dict):
-            _set_checkcredit_np_pending(chat_id, np)
+            _set_checkcredit_np_pending(chat_id, np, thread_root=thread_root)
     except Exception as e:
         cmd = "machineerror" if str(mode or "").strip().lower() == "error_only" else "checkcredit"
-        send_message(chat_id, f"❌ {cmd} failed: {e}")
+        _cc_send(f"❌ {cmd} failed: {e}")
         print(f"[{cmd}] error: {e!r}")
 
 
@@ -553,7 +566,7 @@ def run_checkcredit_navigator_next_log(chat_id: str) -> None:
     """Open the next same-day logic log in LogNavigator (Duty Bot card **check another logs**)."""
     use_oss = os.getenv("CHECKCREDIT_USE_OSS", "").strip().lower() in ("1", "true", "yes", "on")
     if use_oss:
-        send_message(
+        _checkcredit_send(
             chat_id,
             "❌ Alternate logic logs only apply when **CHECKCREDIT_USE_OSS** is off (LogNavigator browser mode).",
         )
@@ -562,7 +575,7 @@ def run_checkcredit_navigator_next_log(chat_id: str) -> None:
     files = (pend or {}).get("navigator_logic_log_files") or []
     opened = str((pend or {}).get("navigator_opened_logic_log_basename") or "").strip()
     if not pend or len(files) < 2:
-        send_message(
+        _checkcredit_send(
             chat_id,
             "❌ No alternate LogNavigator files in context — run `/checkcreditdate …` again.",
         )
@@ -574,15 +587,23 @@ def run_checkcredit_navigator_next_log(chat_id: str) -> None:
     next_idx = (idx + 1) % len(files)
     next_fn = str(files[next_idx] or "").strip()
     if not next_fn:
-        send_message(chat_id, "❌ Could not resolve next log filename.")
+        _checkcredit_send(chat_id, "❌ Could not resolve next log filename.")
         return
     mq = str((pend.get("machine_display") or "")).strip()
     date_iso = str((pend.get("target_date") or "")).strip()
     if not mq or not date_iso:
-        send_message(chat_id, "❌ Pending machine/date missing — run `/checkcreditdate …` again.")
+        _checkcredit_send(chat_id, "❌ Pending machine/date missing — run `/checkcreditdate …` again.")
         return
-    send_message(chat_id, f"⏳ LogNavigator: opening `{next_fn}` …")
-    run_checkcredit_finderror(chat_id, mq, date_iso, mode="default", navigator_logic_log_basename=next_fn)
+    thread_root = _get_checkcredit_thread_root(chat_id)
+    _checkcredit_send(chat_id, f"⏳ LogNavigator: opening `{next_fn}` …", thread_root=thread_root)
+    run_checkcredit_finderror(
+        chat_id,
+        mq,
+        date_iso,
+        mode="default",
+        navigator_logic_log_basename=next_fn,
+        thread_root_message_id=thread_root,
+    )
 
 
 def run_checkcredit_player_job(chat_id: str, machine: str, player_id: str, date_iso: str) -> None:
@@ -709,10 +730,10 @@ def _np_run_screenshot_worker(
 
         screenshot_np_recharge_detail = checkcredit.screenshot_np_recharge_detail
     except ImportError as e:
-        send_message(chat_id, f"❌ Cannot load checkcredit module: {e}")
+        _checkcredit_send(chat_id, f"❌ Cannot load checkcredit module: {e}")
         return
     except AttributeError:
-        send_message(
+        _checkcredit_send(
             chat_id,
             "❌ checkcredit.screenshot_np_recharge_detail missing — deploy the latest `checkcredit.py`.",
         )
@@ -720,7 +741,7 @@ def _np_run_screenshot_worker(
     backend_tag = getattr(checkcredit, "_np_log_backend_tag", lambda _: "NP")(
         (machine_display or "").strip() or None
     )
-    send_message(
+    _checkcredit_send(
         chat_id,
         f"⏳ {backend_tag} backend (Playwright): login → Log Third Http Req → recharge → Detail screenshot…",
     )
@@ -738,11 +759,11 @@ def _np_run_screenshot_worker(
         )
         key = upload_image_lark(path)
         if not key:
-            send_message(chat_id, "❌ Failed to upload screenshot to Lark.")
+            _checkcredit_send(chat_id, "❌ Failed to upload screenshot to Lark.")
             return
-        r = send_image_message(chat_id, key)
+        r = _checkcredit_send_image(chat_id, key)
         if r.get("code") != 0:
-            send_message(chat_id, f"❌ Failed to send image: {r}")
+            _checkcredit_send(chat_id, f"❌ Failed to send image: {r}")
     except Exception as e:
         tip = (
             "\n💡 Duty Bot runs this screenshot **headless**. Try raising `NP_BACKEND_MAX_PAGES` / "
@@ -758,7 +779,7 @@ def _np_run_screenshot_worker(
             f"machine_display={machine_display!r}",
             flush=True,
         )
-        send_message(chat_id, f"❌ {backend_tag} third-http screenshot failed: {e}{tip}")
+        _checkcredit_send(chat_id, f"❌ {backend_tag} third-http screenshot failed: {e}{tip}")
         print(f"[npthirdhttp] error: {e!r}")
     finally:
         if path and os.path.isfile(path):
@@ -773,7 +794,7 @@ def run_np_third_http_by_choice(chat_id: str, choice_idx: int) -> None:
     pend = _get_checkcredit_np_pending(chat_id)
     choices = (pend or {}).get("np_choices") or []
     if not pend or choice_idx < 1 or choice_idx > len(choices):
-        send_message(
+        _checkcredit_send(
             chat_id,
             "❌ No active NP choice list — run `/checkcreditdate …` again, then reply **1**–**4**.",
         )
@@ -783,7 +804,7 @@ def run_np_third_http_by_choice(chat_id: str, choice_idx: int) -> None:
     date_iso = (pend.get("target_date") or "").strip()
     time_short = (ch.get("time_short") or "").strip()
     if not uid or not date_iso or not time_short:
-        send_message(chat_id, "❌ Pending NP choice is incomplete — use `/npthirdhttp …` with full date/time.")
+        _checkcredit_send(chat_id, "❌ Pending NP choice is incomplete — use `/npthirdhttp …` with full date/time.")
         return
     ms = (pend.get("machine_match_substr") or "").strip() or None
     exp = ch.get("credit_value")
@@ -816,7 +837,7 @@ def run_np_third_http_by_choice(chat_id: str, choice_idx: int) -> None:
                     or ""
                 ).strip()
                 if cur_member and cur_member == uid:
-                    send_message(chat_id, "Player haven't out the machine")
+                    _checkcredit_send(chat_id, "Player haven't out the machine")
                     return
         except Exception as e:
             print(f"[npthirdhttp] EGM member pre-check skipped: {e!r}", flush=True)
@@ -1270,6 +1291,38 @@ def send_message(chat_id, text, msg_type="text", mentions=None, receive_id_type=
     response = requests.post(url, headers=headers, params=params, json=body)
     return response.json()
 
+
+def reply_message_in_thread(
+    parent_message_id: str,
+    text: str,
+    msg_type: str = "text",
+    mentions=None,
+) -> dict:
+    """Reply inside a thread only (``reply_in_thread=true`` — not main chat stream)."""
+    mid = (parent_message_id or "").strip()
+    if not mid:
+        return {"code": -1, "msg": "no message_id"}
+    token = get_tenant_access_token()
+    if not token:
+        print("[lark] reply_message_in_thread skipped: no tenant_access_token", flush=True)
+        return {"code": -1, "msg": "no tenant_access_token"}
+    url = f"https://open.larksuite.com/open-apis/im/v1/messages/{mid}/reply"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    if msg_type == "interactive":
+        content = text if isinstance(text, str) else json.dumps(text)
+    elif msg_type == "image":
+        content = json.dumps({"image_key": text})
+    else:
+        content = json.dumps({"text": text})
+    body = {
+        "msg_type": msg_type,
+        "content": content,
+        "reply_in_thread": True,
+    }
+    if mentions:
+        body["mentions"] = mentions
+    return requests.post(url, headers=headers, json=body).json()
+
 def send_file(chat_id, file_token):
     token = get_tenant_access_token()
     url = "https://open.larksuite.com/open-apis/im/v1/messages"
@@ -1334,10 +1387,56 @@ def send_image_message(chat_id, image_key: str):
 
 # Last `/checkcreditdate` result in this chat — used by `/npthirdhttp` for date + credit time window.
 CHECKCREDIT_NP_PENDING = {}
+CHECKCREDIT_THREAD_ROOT: dict[str, dict] = {}
 
 
-def _set_checkcredit_np_pending(chat_id: str, payload: dict) -> None:
-    CHECKCREDIT_NP_PENDING[chat_id] = {"payload": payload, "ts": time.time()}
+def _set_checkcredit_thread_root(chat_id: str, message_id: str) -> None:
+    mid = (message_id or "").strip()
+    if not mid:
+        return
+    CHECKCREDIT_THREAD_ROOT[chat_id] = {"message_id": mid, "ts": time.time()}
+
+
+def _get_checkcredit_thread_root(chat_id: str, max_age_sec: float = 3600.0) -> Optional[str]:
+    ent = CHECKCREDIT_THREAD_ROOT.get(chat_id)
+    if not ent:
+        return None
+    if time.time() - ent["ts"] > max_age_sec:
+        del CHECKCREDIT_THREAD_ROOT[chat_id]
+        return None
+    return str(ent.get("message_id") or "").strip() or None
+
+
+def _checkcredit_send(
+    chat_id: str,
+    text: str,
+    *,
+    thread_root: Optional[str] = None,
+    msg_type: str = "text",
+    mentions=None,
+) -> dict:
+    root = (thread_root or _get_checkcredit_thread_root(chat_id) or "").strip()
+    if root:
+        return reply_message_in_thread(root, text, msg_type=msg_type, mentions=mentions)
+    return send_message(chat_id, text, msg_type=msg_type, mentions=mentions)
+
+
+def _checkcredit_send_image(chat_id: str, image_key: str, *, thread_root: Optional[str] = None) -> dict:
+    root = (thread_root or _get_checkcredit_thread_root(chat_id) or "").strip()
+    if root:
+        return reply_message_in_thread(root, image_key, msg_type="image")
+    return send_image_message(chat_id, image_key)
+
+
+def _set_checkcredit_np_pending(
+    chat_id: str,
+    payload: dict,
+    thread_root: Optional[str] = None,
+) -> None:
+    root = (thread_root or _get_checkcredit_thread_root(chat_id) or "").strip() or None
+    CHECKCREDIT_NP_PENDING[chat_id] = {"payload": payload, "ts": time.time(), "thread_root": root}
+    if root:
+        _set_checkcredit_thread_root(chat_id, root)
 
 
 def _get_checkcredit_np_pending(chat_id: str, max_age_sec: float = 3600.0):
@@ -4045,18 +4144,19 @@ def lark_webhook():
             )
             return _lark_im_done()
         use_oss_wait = os.getenv("CHECKCREDIT_USE_OSS", "").strip().lower() in ("1", "true", "yes", "on")
-        send_message(
-            chat_id,
-            (
-                "⏳ Running machineerror via OSS HTTP, please wait..."
-                if cmd_cc == "machineerror" and use_oss_wait
-                else "⏳ Running machineerror, browser may take a while — please wait..."
-                if cmd_cc == "machineerror"
-                else "⏳ Running checkcredit via OSS HTTP , please wait..."
-                if use_oss_wait
-                else "⏳ Running LogNavigator checkcredit, browser may take a while — please wait..."
-            )
+        thread_root = (message_id or "").strip() if lark_reactions_enabled else None
+        if thread_root:
+            _set_checkcredit_thread_root(chat_id, thread_root)
+        wait_msg = (
+            "⏳ Running machineerror via OSS HTTP, please wait..."
+            if cmd_cc == "machineerror" and use_oss_wait
+            else "⏳ Running machineerror, browser may take a while — please wait..."
+            if cmd_cc == "machineerror"
+            else "⏳ Running checkcredit via OSS HTTP , please wait..."
+            if use_oss_wait
+            else "⏳ Running LogNavigator checkcredit, browser may take a while — please wait..."
         )
+        _checkcredit_send(chat_id, wait_msg, thread_root=thread_root)
         threading.Thread(
             target=lark_background_task,
             args=(
@@ -4065,6 +4165,8 @@ def lark_webhook():
                 machine_q,
                 date_arg,
                 "error_only" if cmd_cc == "machineerror" else "default",
+                None,
+                thread_root,
             ),
             daemon=True,
         ).start()
