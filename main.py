@@ -1863,33 +1863,39 @@ def _add_scheduler_job(job_id: str, func, trigger: str, **trigger_kwargs) -> Non
     )
 
 
-# Lark leave/offset: clear in-process cache + prefetch before morning OSE card (same TZ as hour=7 job).
-_add_scheduler_job("ose_leave_offset_daily_sync", ose_leave_offset_daily_sync, "cron", hour=6, minute=50)
-if os.getenv("LEAVE_WFH_SYNC_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on"):
-    _lwfh_hour = int(os.getenv("LEAVE_WFH_SYNC_CRON_HOUR", "7"))
-    _lwfh_min = int(os.getenv("LEAVE_WFH_SYNC_CRON_MINUTE", "20"))
+# HRMS → leaveose / leave全员 / WFH Bitables — always on (no .env toggles).
+# Full sync can take a few minutes; 06:40 finishes before the 07:00 morning OSE card.
+_LEAVE_WFH_SYNC_INTERVAL_MIN = 60
+_LEAVE_WFH_PRE_MORNING_HOUR = 6
+_LEAVE_WFH_PRE_MORNING_MINUTE = 40
+
+
+def _register_leave_wfh_sync_jobs() -> None:
     _add_scheduler_job(
-        "ose_leave_wfh_calendar_sync",
+        "ose_leave_wfh_calendar_sync_pre_morning",
         ose_leave_wfh_calendar_sync,
         "cron",
-        hour=_lwfh_hour,
-        minute=_lwfh_min,
+        hour=_LEAVE_WFH_PRE_MORNING_HOUR,
+        minute=_LEAVE_WFH_PRE_MORNING_MINUTE,
     )
-    _lwfh_interval = int(os.getenv("LEAVE_WFH_SYNC_INTERVAL_MIN", "120"))
-    if _lwfh_interval > 0:
-        _add_scheduler_job(
-            "ose_leave_wfh_calendar_sync_interval",
-            ose_leave_wfh_calendar_sync,
-            "interval",
-            minutes=max(30, _lwfh_interval),
-        )
+    _add_scheduler_job(
+        "ose_leave_wfh_calendar_sync_interval",
+        ose_leave_wfh_calendar_sync,
+        "interval",
+        minutes=_LEAVE_WFH_SYNC_INTERVAL_MIN,
+        next_run_time=datetime.now(),
+    )
     print(
-        f"[Leave/WFH sync] scheduled daily {_lwfh_hour:02d}:{_lwfh_min:02d}"
-        + (f" + every {_lwfh_interval} min" if _lwfh_interval > 0 else ""),
+        f"[Leave/WFH sync] always on: pre-morning "
+        f"{_LEAVE_WFH_PRE_MORNING_HOUR:02d}:{_LEAVE_WFH_PRE_MORNING_MINUTE:02d} "
+        f"+ every {_LEAVE_WFH_SYNC_INTERVAL_MIN} min (first run on startup)",
         flush=True,
     )
-else:
-    print("[Leave/WFH sync] disabled (LEAVE_WFH_SYNC_ENABLED=0)", flush=True)
+
+
+# Lark leave/offset: clear in-process cache + prefetch before morning OSE card (same TZ as hour=7 job).
+_add_scheduler_job("ose_leave_offset_daily_sync", ose_leave_offset_daily_sync, "cron", hour=6, minute=50)
+_register_leave_wfh_sync_jobs()
 _add_scheduler_job("morning_reminder", morning_reminder, "cron", hour=7, minute=0)
 _add_scheduler_job("evening_reminder", evening_reminder, "cron", hour=19, minute=0)
 _offset_approver_poll_min = int(os.getenv("OSE_OFFSET_APPROVER_POLL_MIN", "3"))
@@ -4663,13 +4669,12 @@ def _try_mount_webapp_blueprint() -> None:
             % prefix,
             flush=True,
         )
-        if os.getenv("LEAVE_WFH_SYNC_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on"):
-            threading.Thread(
-                target=ose_leave_wfh_calendar_sync,
-                name="hrms-bitable-startup-sync",
-                daemon=True,
-            ).start()
-            print("[webapp] HRMS→Bitable startup sync queued (main.py scheduler handles ongoing sync)", flush=True)
+        threading.Thread(
+            target=ose_leave_wfh_calendar_sync,
+            name="hrms-bitable-startup-sync",
+            daemon=True,
+        ).start()
+        print("[webapp] HRMS→Bitable startup sync queued (main.py scheduler handles ongoing sync)", flush=True)
     except Exception as e:
         print("[webapp] optional mount failed: %r" % (e,), flush=True)
 
