@@ -4615,12 +4615,10 @@ def _game_names_display(game_names: list[str]) -> str:
 
 
 def confirm_verify_card_title(email_name: str) -> str:
-    """``Verify SD-7099193`` for confirm-group interactive card header."""
+    """``Verify TINC-720579`` or ``Verify SD-7099193`` — prefix matches the maintenance email."""
     tid = extract_ticket_card_title(email_name)
     if tid:
-        m = re.match(r"^(?:TINC|SD)[-\s]?(\d{6,8})\b", tid.strip(), re.IGNORECASE)
-        if m:
-            return f"Verify SD-{m.group(1)}"
+        return f"Verify {tid}"
     return "Verify Maintenance"
 
 
