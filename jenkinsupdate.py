@@ -628,6 +628,7 @@ ENVIRONMENTS = [
     "fpms-nt-uat-master",
     "fpms-nt-uat2-master",
     "fpms-nt-uat3-master",
+    "fpms-nt-uat-bo",
 ]
 
 # Checkbox ``value`` / label text for **FPMS UAT branch update** job only (same order as Jenkins UI).
@@ -659,8 +660,11 @@ FPMS_UAT_BRANCH_SERVICES = [
     "settlement-report",
     "settlement-schedule",
     "settlement-server",
-    # FPMS_NT_UAT_MASTER_UPDATE / FPMS_NT_UAT_BO_UPDATE services:
+    # FPMS_NT_UAT_BO_UPDATE services:
     "ccms-web",
+    "micro-fe-ccms",
+    "micro-web",
+    # FPMS_NT_UAT_MASTER_UPDATE services:
     "admin-rollout",
     "auth-rollout",
     "card-rollout",
@@ -1037,9 +1041,11 @@ def _environment_hint_from_banner(line: str) -> str | None:
     # ``Update NT Auth/Player MASTER`` — FPMS_NT master job (not PMS-UAT-UPDATE).
     if re.search(r"\bnt\s+auth\b", s) and re.search(r"\bmaster\b", s):
         return "fpms-nt-uat-master"
-    # CCMSFE UAT MASTER → ``FPMS_NT_UAT_BO_UPDATE`` (before generic ``UAT`` → branch).
+    # CCMSFE / CCMS UAT FE BO → ``FPMS_NT_UAT_BO_UPDATE`` (env ``fpms-nt-uat-bo``).
     if re.search(r"\bccmsfe[\s-]*uat[\s-]*master\b", s):
-        return "fpms-nt-uat-master"
+        return "fpms-nt-uat-bo"
+    if re.search(r"\bccms[\s-]*uat[\s-]*fe[\s-]*bo\b", s):
+        return "fpms-nt-uat-bo"
     # FPMS NT UAT MASTER jobs (same fill flow, different env values).
     if re.search(r"\bfpms[\s-]*nt[\s-]*uat[\s-]*master\b", s):
         return "fpms-nt-uat-master"
@@ -4827,7 +4833,7 @@ def _environment_for_fpms_jenkins_job_url(raw_url: str) -> str | None:
     if "/job/fpms_nt/view/all/job/fpms_nt_uat_master_update/" in ul:
         return "fpms-nt-uat-master"
     if "fpms_nt_uat_bo_update" in ul:
-        return "fpms-nt-uat-master"
+        return "fpms-nt-uat-bo"
     return None
 
 
@@ -5094,7 +5100,9 @@ def _environment_from_bot_trigger_line(head: str) -> str | None:
         return hint
     s = head.casefold().replace("_", " ")
     if re.search(r"\bccmsfe[\s-]*uat[\s-]*master\b", s):
-        return "fpms-nt-uat-master"
+        return "fpms-nt-uat-bo"
+    if re.search(r"\bccms[\s-]*uat[\s-]*fe[\s-]*bo\b", s):
+        return "fpms-nt-uat-bo"
     if re.search(r"\bfpms[\s-]*nt[\s-]*uat[\s-]*master\b", s):
         return "fpms-nt-uat-master"
     if re.search(r"\bfpms[\s-]*uat[\s-]*master\b", s):
