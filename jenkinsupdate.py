@@ -123,6 +123,9 @@ BUILD_URL = (
 BI_API_UPDATE_BUILD_URL = (
     "https://jenkins.client8.me/job/BI-GO/job/BI-API-UPDATE/build?delay=0sec"
 )
+FPMS_NT_UAT_BO_UPDATE_URL = (
+    "https://jenkins.client8.me/job/FPMS_NT/job/FPMS_NT_UAT_BO_UPDATE/build?delay=0sec"
+)
 
 # Jenkins REPOSITORY dropdown (BI-API-UPDATE) — keep in sync with the job parameter list.
 BI_API_UPDATE_DEFAULT_ENVIRONMENT = "prod"
@@ -208,7 +211,19 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
     ),
     "ccms uat fe bo": (
         "FPMS_NT_UAT_BO_UPDATE",
-        "https://jenkins.client8.me/job/FPMS_NT/view/all/job/FPMS_NT_UAT_BO_UPDATE/build?delay=0sec",
+        FPMS_NT_UAT_BO_UPDATE_URL,
+    ),
+    "ccmsfe uat master": (
+        "FPMS_NT_UAT_BO_UPDATE",
+        FPMS_NT_UAT_BO_UPDATE_URL,
+    ),
+    "ccmsfe uat": (
+        "FPMS_NT_UAT_BO_UPDATE",
+        FPMS_NT_UAT_BO_UPDATE_URL,
+    ),
+    "update ccmsfe uat master": (
+        "FPMS_NT_UAT_BO_UPDATE",
+        FPMS_NT_UAT_BO_UPDATE_URL,
     ),
     "cpms uat update": (
         "CPMS-UAT-UPDATE",
@@ -644,7 +659,8 @@ FPMS_UAT_BRANCH_SERVICES = [
     "settlement-report",
     "settlement-schedule",
     "settlement-server",
-    # FPMS_NT_UAT_MASTER_UPDATE services:
+    # FPMS_NT_UAT_MASTER_UPDATE / FPMS_NT_UAT_BO_UPDATE services:
+    "ccms-web",
     "admin-rollout",
     "auth-rollout",
     "card-rollout",
@@ -1020,6 +1036,9 @@ def _environment_hint_from_banner(line: str) -> str | None:
     s = line.casefold().replace("_", " ")
     # ``Update NT Auth/Player MASTER`` — FPMS_NT master job (not PMS-UAT-UPDATE).
     if re.search(r"\bnt\s+auth\b", s) and re.search(r"\bmaster\b", s):
+        return "fpms-nt-uat-master"
+    # CCMSFE UAT MASTER → ``FPMS_NT_UAT_BO_UPDATE`` (before generic ``UAT`` → branch).
+    if re.search(r"\bccmsfe[\s-]*uat[\s-]*master\b", s):
         return "fpms-nt-uat-master"
     # FPMS NT UAT MASTER jobs (same fill flow, different env values).
     if re.search(r"\bfpms[\s-]*nt[\s-]*uat[\s-]*master\b", s):
@@ -4780,6 +4799,8 @@ def _jenkins_update_job_automation_profile(raw_urls: str) -> str | None:
         return "fpms"
     if "/job/fpms_nt/view/all/job/fpms_nt_uat_master_update/" in ul:
         return "fpms"
+    if "fpms_nt_uat_bo_update" in ul:
+        return "fpms"
     if "/job/fnt/job/fnt_uat_script_run/" in ul or "/job/fnt/job/rc-uat-update/" in ul:
         return "fnt_rc"
     if "/job/sms/job/uat/job/sms-uat-update/" in ul:
@@ -4804,6 +4825,8 @@ def _environment_for_fpms_jenkins_job_url(raw_url: str) -> str | None:
     if "/job/fpms/view/fpms-uat/job/fpms_uat_master_update/" in ul:
         return "fpms-uat-master"
     if "/job/fpms_nt/view/all/job/fpms_nt_uat_master_update/" in ul:
+        return "fpms-nt-uat-master"
+    if "fpms_nt_uat_bo_update" in ul:
         return "fpms-nt-uat-master"
     return None
 
@@ -5070,6 +5093,8 @@ def _environment_from_bot_trigger_line(head: str) -> str | None:
     if hint:
         return hint
     s = head.casefold().replace("_", " ")
+    if re.search(r"\bccmsfe[\s-]*uat[\s-]*master\b", s):
+        return "fpms-nt-uat-master"
     if re.search(r"\bfpms[\s-]*nt[\s-]*uat[\s-]*master\b", s):
         return "fpms-nt-uat-master"
     if re.search(r"\bfpms[\s-]*uat[\s-]*master\b", s):
