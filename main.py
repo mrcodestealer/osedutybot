@@ -1627,6 +1627,71 @@ def make_update_thread_send_image(chat_id: str, session_key: str, base_send=None
     return _send_img
 
 
+# ``/nchsetmaintenance`` etc. — thread replies under the user's command message only.
+PROD_BATCH_THREAD_ROOT: dict[str, dict] = {}
+
+
+def _set_prod_batch_thread_root(chat_id: str, message_id: str) -> None:
+    cid = (chat_id or "").strip()
+    mid = (message_id or "").strip()
+    if not cid or not mid:
+        return
+    PROD_BATCH_THREAD_ROOT[cid] = {"message_id": mid, "ts": time.time()}
+
+
+def _prod_batch_thread_root_from_incoming_message(message: dict, *, message_id: Optional[str] = None) -> Optional[str]:
+    """Prefer ``root_id`` when the command was sent inside an existing thread."""
+    root = str((message or {}).get("root_id") or "").strip()
+    if root:
+        return root
+    mid = (message_id or (message or {}).get("message_id") or "").strip()
+    return mid or None
+
+
+def _get_prod_batch_thread_root(chat_id: str, max_age_sec: float = 7200.0) -> Optional[str]:
+    ent = PROD_BATCH_THREAD_ROOT.get((chat_id or "").strip())
+    if not ent:
+        return None
+    if time.time() - ent["ts"] > max_age_sec:
+        del PROD_BATCH_THREAD_ROOT[(chat_id or "").strip()]
+        return None
+    return str(ent.get("message_id") or "").strip() or None
+
+
+def make_prod_batch_thread_send(
+    chat_id: str,
+    *,
+    thread_root: Optional[str] = None,
+    base_send=None,
+):
+    if base_send is None:
+        base_send = send_message
+    cid = (chat_id or "").strip()
+    bound_root = (thread_root or "").strip() or None
+
+    def _send(target_chat_id, text, msg_type="text", mentions=None, **kwargs):
+        root = (bound_root or _get_prod_batch_thread_root(cid) or "").strip()
+        if root and (target_chat_id or "").strip() == cid:
+            return reply_message_in_thread(root, text, msg_type=msg_type, mentions=mentions)
+        try:
+            return base_send(target_chat_id, text, msg_type=msg_type, mentions=mentions, **kwargs)
+        except TypeError:
+            try:
+                return base_send(target_chat_id, text, msg_type=msg_type)
+            except TypeError:
+                return base_send(target_chat_id, text)
+
+    return _send
+
+
+def prod_batch_send_image_message(chat_id: str, image_key: str) -> dict:
+    cid = (chat_id or "").strip()
+    root = (_get_prod_batch_thread_root(cid) or "").strip()
+    if root:
+        return reply_message_in_thread(root, image_key, msg_type="image")
+    return send_image_message(chat_id, image_key)
+
+
 _CAT_FILE_TOKEN = None
 def get_cat_file_token():
     global _CAT_FILE_TOKEN
@@ -2947,7 +3012,7 @@ def lark_webhook():
                 if isinstance(parsed_ca, dict) and smmachine.handle_prod_batch_card_callback(
                     parsed_ca,
                     chat_id=chat_id_ca,
-                    send_message=send_message,
+                    send_message=make_prod_batch_thread_send(chat_id_ca),
                 ):
                     return
                 try:
@@ -4151,15 +4216,26 @@ def lark_webhook():
         if chat_type == "group" and not bot_mentioned:
             print("⏭️ prod-batch command ignored (bot not @mentioned in group)", flush=True)
             return _lark_im_done()
+        if data.get("header", {}).get("event_type") == "im.message.receive_v1":
+            msg_obj = (data.get("event") or {}).get("message") or {}
+            thread_root = _prod_batch_thread_root_from_incoming_message(
+                msg_obj, message_id=message_id
+            )
+        else:
+            thread_root = (message_id or "").strip() or None
+        if thread_root:
+            _set_prod_batch_thread_root(chat_id, thread_root)
+        pb_send = make_prod_batch_thread_send(chat_id, thread_root=thread_root)
         handled_pb, pb_reply = smmachine.handle_prod_batch_bot_command(
             original_text,
             mention_keys,
             chat_id=chat_id,
-            send_message=send_message,
+            send_message=pb_send,
+            thread_root_message_id=thread_root,
         )
         if handled_pb:
             if pb_reply:
-                send_message(chat_id, pb_reply)
+                pb_send(chat_id, pb_reply)
             return _lark_im_done()
     elif clean_text.lower().startswith('/nch'):
         parts = clean_text.split(maxsplit=1)

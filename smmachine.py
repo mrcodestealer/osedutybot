@@ -2063,7 +2063,15 @@ def _prod_batch_request_job_cancel(
         if job.get("status") != "running":
             send_message(chat_id, "⏭️ Job already finished.")
             return
+        thread_root = (job.get("thread_root_message_id") or "").strip() or None
         job["cancel_requested"] = True
+    if thread_root:
+        try:
+            import main as _main_mod  # noqa: WPS433
+
+            _main_mod._set_prod_batch_thread_root(chat_id, thread_root)
+        except Exception:
+            pass
     send_message(chat_id, "🛑 Cancel requested — stopping after the current step…")
 
 
@@ -2082,6 +2090,15 @@ def _prod_batch_send_cancel_live_summary(
         action = str(job.get("action") or "")
         machines = list(job.get("machines") or [])
         chat_id = str(job.get("chat_id") or "")
+        thread_root = (job.get("thread_root_message_id") or "").strip() or None
+
+    if thread_root and chat_id:
+        try:
+            import main as _main_mod  # noqa: WPS433
+
+            _main_mod._set_prod_batch_thread_root(chat_id, thread_root)
+        except Exception:
+            pass
 
     if not chat_id or not action or not machines:
         return
@@ -2308,7 +2325,9 @@ def _prod_batch_resolve_image_helpers() -> tuple[Callable[..., Any] | None, Call
         import main as _main_mod  # noqa: WPS433
 
         up = getattr(_main_mod, "upload_image_lark", None)
-        si = getattr(_main_mod, "send_image_message", None)
+        si = getattr(_main_mod, "prod_batch_send_image_message", None)
+        if not callable(si):
+            si = getattr(_main_mod, "send_image_message", None)
         if callable(up) and callable(si):
             return up, si
     except Exception:
@@ -2581,6 +2600,7 @@ def _prod_batch_bot_prepare_confirm(
     *,
     chat_id: str,
     send_message: Callable[..., Any],
+    thread_root_message_id: str | None = None,
 ) -> None:
     env_code = parsed["env_code"]
     site = _PROD_BATCH_ENV_TO_SITE.get(env_code) or parsed.get("site") or ""
@@ -2601,6 +2621,7 @@ def _prod_batch_bot_prepare_confirm(
             "machines": matched,
             "not_found": not_found,
             "chat_id": chat_id,
+            "thread_root_message_id": (thread_root_message_id or "").strip() or None,
             "created_at": time.time(),
         }
 
@@ -2621,6 +2642,7 @@ def handle_prod_batch_bot_command(
     *,
     chat_id: str,
     send_message: Callable[..., Any],
+    thread_root_message_id: str | None = None,
 ) -> tuple[bool, str | None]:
     """
     Parse bot message, live-scrape EGM for the command site, send confirm card.
@@ -2668,7 +2690,11 @@ def handle_prod_batch_bot_command(
     threading.Thread(
         target=_prod_batch_bot_prepare_confirm,
         args=(parsed, target_lines),
-        kwargs={"chat_id": chat_id, "send_message": send_message},
+        kwargs={
+            "chat_id": chat_id,
+            "send_message": send_message,
+            "thread_root_message_id": thread_root_message_id,
+        },
         daemon=True,
     ).start()
     return True, None
@@ -2719,6 +2745,15 @@ def handle_prod_batch_card_callback(
         send_message(chat_id, "❌ Confirmation data missing. Send the command again.")
         return True
 
+    thread_root = (pending.get("thread_root_message_id") or "").strip() or None
+    if thread_root:
+        try:
+            import main as _main_mod  # noqa: WPS433
+
+            _main_mod._set_prod_batch_thread_root(chat_id, thread_root)
+        except Exception:
+            pass
+
     from prod_machine_batch import ACTION_LABELS, LARK_INTRO
 
     run_job_id = uuid.uuid4().hex
@@ -2741,6 +2776,7 @@ def handle_prod_batch_card_callback(
             "action": action,
             "machines": machines,
             "chat_id": chat_id,
+            "thread_root_message_id": (pending.get("thread_root_message_id") or "").strip() or None,
             "cancel_requested": False,
             "cancel_summary_sent": False,
         }
