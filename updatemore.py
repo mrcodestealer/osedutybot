@@ -396,6 +396,24 @@ def sync_chat_updatemore_queue(chat_id: str, q: dict[str, Any] | None) -> None:
             _chat_updatemore_queues[cid] = q
 
 
+def persist_queue(q: dict[str, Any] | None) -> None:
+    """Persist in-memory queue mutations to the per-chat fallback store."""
+    if not isinstance(q, dict) or q.get("stopped"):
+        return
+    sync_chat_updatemore_queue(str(q.get("chat_id") or ""), q)
+
+
+def queue_owner_session_key(q: dict[str, Any] | None) -> str | None:
+    """``chat_id:sender_id`` for the user who started the queue."""
+    if not isinstance(q, dict):
+        return None
+    cid = str(q.get("chat_id") or "").strip()
+    sid = str(q.get("sender_id") or "").strip()
+    if cid and sid:
+        return f"{cid}:{sid}"
+    return None
+
+
 def init_queue(
     segments: list[dict[str, Any]],
     *,
@@ -719,7 +737,7 @@ def find_waiting_queue_for_chat(
                 return str(sk), q, sess
     _k, q, sess = _find_chat_fallback_queue(chat_id)
     if q and q.get("waiting_jenkins"):
-        return _k, q, sess
+        return queue_owner_session_key(q), q, sess
     return None, None, None
 
 
@@ -739,7 +757,31 @@ def find_active_queue_for_chat(
             q = get_queue(sess)
             if q and not q.get("stopped"):
                 return str(sk), q, sess
-    return _find_chat_fallback_queue(chat_id)
+    _k, q, sess = _find_chat_fallback_queue(chat_id)
+    if q and not q.get("stopped"):
+        return queue_owner_session_key(q), q, sess
+    return None, None, None
+
+
+def attach_queue_to_session(
+    q: dict[str, Any],
+    sessions: dict,
+    sessions_lock: threading.Lock,
+) -> str | None:
+    """Re-bind a fallback queue to ``sessions`` before dispatching the next segment."""
+    sk = queue_owner_session_key(q)
+    if not sk:
+        return None
+    with sessions_lock:
+        prev = sessions.get(sk)
+        stub: dict[str, Any] = {"updatemore_queue": q}
+        if isinstance(prev, dict):
+            em = (prev.get("email_reply_subject") or "").strip()
+            if em:
+                stub["email_reply_subject"] = em
+        sessions[sk] = stub
+    persist_queue(q)
+    return sk
 
 
 def _strip_lark_mentions(text: str) -> str:
@@ -1030,15 +1072,18 @@ def handle_jenkins_email_done(
                     send(chat_id, "✅ All `/updatemore` segments finished.")
                     return True
                 next_body = segment_to_update_body(segs[next_idx])
+                persist_queue(q)
             send(chat_id, f"▶️ Next `/updatemore` segment ({next_idx + 1})…")
-            if key:
-                dispatch_update_body(
-                    chat_id,
-                    key,
-                    next_body,
-                    send,
-                    from_updatemore=True,
-                )
+            dispatch_sk = key or attach_queue_to_session(q, sessions, sessions_lock)
+            if not dispatch_sk:
+                dispatch_sk = session_key_fn(chat_id, sender_id)
+            dispatch_update_body(
+                chat_id,
+                dispatch_sk,
+                next_body,
+                send,
+                from_updatemore=True,
+            )
         return True
 
     # Single ``/update`` with Email (no queue)
@@ -1168,10 +1213,14 @@ def handle_jenkinsbot_callback(
                 send(chat_id, "✅ All `/updatemore` segments finished.")
                 return True
             next_body = segment_to_update_body(segs[idx])
+            persist_queue(q)
         send(chat_id, f"▶️ Next `/updatemore` segment ({idx + 1})…")
+        dispatch_sk = key or attach_queue_to_session(q, sessions, sessions_lock)
+        if not dispatch_sk:
+            dispatch_sk = session_key_fn(chat_id, sender_id)
         dispatch_update_body(
             chat_id,
-            key or session_key_fn(chat_id, sender_id),
+            dispatch_sk,
             next_body,
             send,
             from_updatemore=True,

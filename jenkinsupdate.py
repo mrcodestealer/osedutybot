@@ -5831,6 +5831,13 @@ def _fpms_lark_short_line(s: str, max_len: int = 80) -> str:
     return t[: max(1, max_len - 1)] + "…"
 
 
+def _fpms_lark_service_pick_tap_confirms(ranked: list[str], *, pick_n_total: int = 0) -> bool:
+    """True when tapping a number should submit immediately (no **Confirm** step)."""
+    if len(ranked) <= 1:
+        return True
+    return int(pick_n_total) > 1
+
+
 def _fpms_lark_service_pick_card_json(
     token: str,
     ranked: list[str],
@@ -5847,17 +5854,29 @@ def _fpms_lark_service_pick_card_json(
     ps = (service_pick_sid or "").strip()
     ntot = int(pick_n_total) if pick_n_total is not None else 0
     pos = int(pick_pos_1based) if pick_pos_1based is not None else 0
+    tap_confirms = _fpms_lark_service_pick_tap_confirms(ranked, pick_n_total=ntot)
     if ntot > 1 and pos >= 1:
         head = f"**Service search ({pos}/{ntot}):** {_fpms_lark_short_line(token, 120)}"
         title_txt = f"Service {pos}/{ntot}: {_fpms_lark_short_line(token, 56)}"
+        pick_hint = (
+            "Tap **1–N** to choose for **this** service line — no **Confirm** needed. "
+            f"**{max(0, ntot - pos)}** more service line(s) after this."
+        )
+    elif tap_confirms:
+        head = f"**Service search:** {_fpms_lark_short_line(token, 120)}"
+        title_txt = f"Service search: {_fpms_lark_short_line(token, 56)}"
+        pick_hint = "Tap **1** below to choose — no **Confirm** needed."
     else:
         head = f"**Service search:** {_fpms_lark_short_line(token, 120)}"
         title_txt = f"Service search: {_fpms_lark_short_line(token, 56)}"
+        pick_hint = (
+            "Tap **1–N** below to **stage** services (any order), then **Confirm**. "
+            "You can still type numbers (e.g. **1 2**) if you prefer."
+        )
     lines_md: list[str] = [
         head,
         "",
-        "Tap **1–N** below to **stage** services (any order), then **Confirm**. "
-        "You can still type numbers (e.g. **1 2**) if you prefer.",
+        pick_hint,
         "",
     ]
     for i, name in enumerate(ranked, start=1):
@@ -5887,17 +5906,25 @@ def _fpms_lark_service_pick_card_json(
         body_elements.append(_fpms_lark_v2_column_set_button_row(chunk))
     body_elements.append({"tag": "hr"})
     row2: list[dict[str, object]] = []
-    for label, kk, eid in (
-        ("Confirm", "svc_go", "svc_go"),
-        ("Clear", "svc_clr", "svc_clr"),
-        ("Cancel", "svc_can", "svc_can"),
-    ):
-        p2: dict[str, object] = {"k": kk}
-        if ps:
-            p2["sid"] = ps
-        row2.append(
-            _fpms_lark_v2_callback_button(label, "primary" if kk == "svc_go" else "default", p2, element_id=eid[:20])
-        )
+    if not tap_confirms:
+        for label, kk, eid in (
+            ("Confirm", "svc_go", "svc_go"),
+            ("Clear", "svc_clr", "svc_clr"),
+        ):
+            p2: dict[str, object] = {"k": kk}
+            if ps:
+                p2["sid"] = ps
+            row2.append(
+                _fpms_lark_v2_callback_button(
+                    label, "primary" if kk == "svc_go" else "default", p2, element_id=eid[:20]
+                )
+            )
+    p2: dict[str, object] = {"k": "svc_can"}
+    if ps:
+        p2["sid"] = ps
+    row2.append(
+        _fpms_lark_v2_callback_button("Cancel", "default", p2, element_id="svc_can")
+    )
     body_elements.append(_fpms_lark_v2_column_set_button_row(row2))
     card: dict[str, object] = {
         "schema": "2.0",
@@ -6905,7 +6932,7 @@ def _fpms_lark_spawn_run(
             print(f"[jenkinsupdate bot] run failed: {ex!r}", flush=True)
         finally:
             _fpms_lark_mark_trigger_message_done(trigger_mid)
-            _fpms_lark_clear_session_key(session_key)
+            _fpms_lark_finish_jenkins_run_session(session_key, chat_id)
 
     threading.Thread(target=_job, name="fpms-uat-jenkins", daemon=True).start()
 
@@ -7062,15 +7089,7 @@ def _fpms_lark_dispatch_fnt_rc_parameter_flow(
         )
         return True
     resolved_ids: list[str] = []
-    tokens_to_pick: list[str] = []
-    for tok in tokens:
-        t = (tok or "").strip()
-        hit = _fnt_rc_canonical_service_id(t)
-        if hit is not None:
-            if hit not in resolved_ids:
-                resolved_ids.append(hit)
-        else:
-            tokens_to_pick.append(tok)
+    tokens_to_pick: list[str] = list(tokens)
     if not tokens_to_pick:
         if not resolved_ids:
             send(chat_id, "❌ No RC services parsed.")
@@ -7153,15 +7172,7 @@ def _fpms_lark_dispatch_sms_uat_parameter_flow(
         )
         return True
     resolved_ids: list[str] = []
-    tokens_to_pick: list[str] = []
-    for tok in tokens:
-        t = (tok or "").strip()
-        hit = _sms_uat_canonical_service_id(t)
-        if hit is not None:
-            if hit not in resolved_ids:
-                resolved_ids.append(hit)
-        else:
-            tokens_to_pick.append(tok)
+    tokens_to_pick: list[str] = list(tokens)
     if not tokens_to_pick:
         if not resolved_ids:
             send(chat_id, "❌ No SMS UAT services parsed.")
@@ -7277,16 +7288,6 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
                         resolved_ids.append(sid)
                 continue
         tokens_to_pick.append(tok)
-    exact_svc_fn = (
-        _pms_uat_catalog_exact_service_id if jp == "pms_uat" else _fpms_uat_catalog_exact_service_id
-    )
-    while tokens_to_pick:
-        hit = exact_svc_fn(tokens_to_pick[0])
-        if hit is None:
-            break
-        if hit not in resolved_ids:
-            resolved_ids.append(hit)
-        tokens_to_pick = tokens_to_pick[1:]
     if not tokens_to_pick:
         if not resolved_ids:
             send(chat_id, "❌ No services parsed after resolving ports.")
@@ -7465,10 +7466,36 @@ def _fpms_lark_preserve_updatemore_queue(prev: dict | None, sess: dict) -> dict:
         q = prev.get("updatemore_queue")
         if isinstance(q, dict):
             sess["updatemore_queue"] = q
+            try:
+                import updatemore as um
+
+                um.persist_queue(q)
+            except Exception:
+                pass
         em = (prev.get("email_reply_subject") or "").strip()
         if em:
             sess["email_reply_subject"] = em
     return sess
+
+
+def _fpms_lark_finish_jenkins_run_session(session_key: str, chat_id: str) -> None:
+    """
+    End a Playwright Jenkins run without destroying an active ``/updatemore`` queue.
+
+    Segment 1's browser thread must not wipe segment 2's in-flight pick / Jenkins session.
+    """
+    try:
+        import updatemore as um
+    except Exception:
+        _fpms_lark_clear_session_key(session_key)
+        return
+    with _fpms_lark_sessions_lock:
+        sess = _fpms_lark_sessions.get(session_key)
+    q = um.get_queue(sess if isinstance(sess, dict) else None)
+    if isinstance(q, dict) and not q.get("stopped"):
+        um.persist_queue(q)
+        return
+    _fpms_lark_clear_session_key(session_key)
 
 
 def _fpms_lark_session_email_subject(session_key: str) -> str:
@@ -7577,6 +7604,7 @@ def _fpms_lark_notify_jenkins_after_build_click(
                 q2 = sess2.get("updatemore_queue")
                 if isinstance(q2, dict):
                     q2["waiting_jenkins"] = True
+                    um.persist_queue(q2)
         send(
             chat_id,
             "⏳ Same environment — waiting for Jenkins to finish before the next segment…",
@@ -7593,6 +7621,7 @@ def _fpms_lark_notify_jenkins_after_build_click(
                     q3 = sess3.get("updatemore_queue")
                     if isinstance(q3, dict):
                         q3["index"] = idx
+                        um.persist_queue(q3)
             send(chat_id, f"▶️ Different environment — starting segment {idx + 1}…")
             _dispatch_lark_update_command_body(
                 chat_id,
@@ -8136,6 +8165,8 @@ def handle_lark_jenkins_update_message(
                 )
 
             if sess["pick_index"] >= len(sess["service_tokens"]):
+                with _fpms_lark_sessions_lock:
+                    _fpms_lark_sessions[key] = sess
                 _run_jenkins_when_pick_done()
                 return True
 
@@ -8202,29 +8233,6 @@ def handle_lark_jenkins_update_message(
                     )
                     return True
 
-                exact_id: str | None = None
-                if jp_sess == "pms_uat":
-                    exact_id = _pms_uat_catalog_exact_service_id(next_tok)
-                elif jp_sess == "fpms":
-                    exact_id = _fpms_uat_catalog_exact_service_id(next_tok)
-                elif jp_sess == "fnt_rc":
-                    exact_id = _fnt_rc_canonical_service_id(next_tok)
-                elif jp_sess == "sms_uat":
-                    exact_id = _sms_uat_canonical_service_id(next_tok)
-
-                if exact_id is not None:
-                    if exact_id not in sess["resolved_ids"]:
-                        sess["resolved_ids"].append(exact_id)
-                    sess["pick_index"] = int(sess["pick_index"]) + 1
-                    if sess["pick_index"] >= len(sess["service_tokens"]):
-                        with _fpms_lark_sessions_lock:
-                            _fpms_lark_sessions[key] = sess
-                        _run_jenkins_when_pick_done()
-                        return True
-                    with _fpms_lark_sessions_lock:
-                        _fpms_lark_sessions[key] = sess
-                    continue
-
                 q = next_tok.replace("_", "-")
                 if jp_sess == "fnt_rc":
                     nranked = _rank_fnt_rc_services_by_query(q, limit=12, for_menu=True)
@@ -8242,7 +8250,7 @@ def handle_lark_jenkins_update_message(
                 sess["svc_staged"] = []
                 with _fpms_lark_sessions_lock:
                     _fpms_lark_sessions[key] = sess
-                _fpms_lark_refresh_service_pick_card(chat_id, key, send)
+                _fpms_lark_send_service_pick_card(chat_id, key, next_tok, nranked, send)
                 return True
 
         _fpms_lark_clear_session(chat_id, sender_id)
@@ -8419,12 +8427,27 @@ def _fpms_lark_handle_service_pick_callbacks(
             ranked = list(sess.get("current_ranked") or [])
             if idx < 1 or idx > len(ranked):
                 return False
-            choice = ranked[idx - 1]
-            staged = list(dict.fromkeys(sess.get("svc_staged") or []))
-            if choice not in staged:
-                staged.append(choice)
-            sess["svc_staged"] = staged
-            _fpms_lark_sessions[sk] = sess
+            ntot = len(sess.get("service_tokens") or [])
+            tap_confirms = _fpms_lark_service_pick_tap_confirms(ranked, pick_n_total=ntot)
+            if tap_confirms:
+                _fpms_lark_sessions[sk] = sess
+            else:
+                choice = ranked[idx - 1]
+                staged = list(dict.fromkeys(sess.get("svc_staged") or []))
+                if choice not in staged:
+                    staged.append(choice)
+                sess["svc_staged"] = staged
+                _fpms_lark_sessions[sk] = sess
+        if tap_confirms:
+            token = str(idx)
+            return handle_lark_jenkins_update_message(
+                chat_id,
+                sender_id,
+                token,
+                token,
+                send,
+                allow_start=True,
+            )
         _fpms_lark_refresh_service_pick_card(chat_id, sk, send)
         return True
     return False
