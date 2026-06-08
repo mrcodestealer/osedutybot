@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import tempfile
 import time
 from typing import Any, Callable, Optional
 from urllib.parse import quote
@@ -23,6 +24,7 @@ from smmachine import (
     _parse_target_line,
     _resolve_collect_page_limit,
     _row_report_fields,
+    _row_text_matches,
     _site_synthetic_machine,
     _smachine_resolve_headless,
     _table_body_rows,
@@ -145,11 +147,166 @@ def _default_timeout_ms() -> int:
     return int(os.environ.get("PROD_SET_TIMEOUT_MS", "600000"))
 
 
+def prod_batch_screenshots_enabled() -> bool:
+    """After set/unset maintenance/test, capture EGM operation-window PNGs (default on)."""
+    return (os.environ.get("PROD_BATCH_SCREENSHOTS", "1").strip().lower() not in ("0", "false", "no", "off"))
+
+
+def _close_egm_operation_dialog(page) -> None:
+    try:
+        page.keyboard.press("Escape")
+        _page_pause(page, 350)
+    except Exception:
+        pass
+
+
+def capture_machine_operation_screenshot_on_page(
+    page,
+    machine_name: str,
+    *,
+    timeout_ms: int,
+    max_pages: int,
+) -> str:
+    """Open the cog operation dialog for one row and screenshot it (caller owns ``page``)."""
+    from checkcredit import (  # noqa: WPS433
+        _egm_click_hide_grid_if_shown,
+        _egm_expand_operation_dialog_for_capture,
+        _egm_wait_visible_operation_dialog,
+        _pick_enabled_egm_cog_button,
+    )
+
+    row = _find_machine_row_live(page, machine_name, timeout_ms=timeout_ms, max_pages=max_pages)
+    if row is None:
+        raise RuntimeError(f"machine not found on EGM page: {machine_name!r}")
+
+    op_cell = row.locator("td").last
+    cog_btn = _pick_enabled_egm_cog_button(op_cell)
+    cog_btn.click(timeout=min(60_000, timeout_ms))
+
+    dlg = _egm_wait_visible_operation_dialog(page, timeout_ms=timeout_ms)
+    _page_pause(page, 1000)
+    _egm_click_hide_grid_if_shown(dlg, timeout_ms=min(15_000, timeout_ms))
+    _page_pause(page, 350)
+    dlg.scroll_into_view_if_needed(timeout=min(15_000, timeout_ms))
+    _egm_expand_operation_dialog_for_capture(page, dlg)
+
+    fd, out_path = tempfile.mkstemp(suffix=".png", prefix="prod_batch_egm_")
+    os.close(fd)
+    dlg.screenshot(path=out_path, animations="disabled", scale="css")
+    _close_egm_operation_dialog(page)
+    return out_path
+
+
+def _capture_prod_batch_screenshots_on_page(
+    page,
+    machines: list[dict],
+    *,
+    timeout_ms: int,
+    max_pages: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    shots: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    by_env: dict[str, list[dict]] = {}
+    for m in machines:
+        b = _belongs_for_machine(m.get("belongs", ""))
+        by_env.setdefault(b, []).append(m)
+
+    for belongs, env_machines in by_env.items():
+        if not _ensure_env_egm_page(page, belongs, timeout_ms=timeout_ms, max_pages=max_pages):
+            for m in env_machines:
+                name = _machine_display_name(m)
+                errors.append(
+                    {
+                        "belongs": m.get("belongs", belongs),
+                        "machine": name,
+                        "error": "login failed",
+                    }
+                )
+            continue
+        for m in env_machines:
+            name = _machine_display_name(m)
+            if not name:
+                continue
+            try:
+                path = capture_machine_operation_screenshot_on_page(
+                    page, name, timeout_ms=timeout_ms, max_pages=max_pages
+                )
+                shots.append({"belongs": m.get("belongs", belongs), "machine": name, "path": path})
+            except Exception as exc:
+                logger.warning("prod-batch screenshot failed for %s: %s", name, exc)
+                errors.append(
+                    {
+                        "belongs": m.get("belongs", belongs),
+                        "machine": name,
+                        "error": str(exc),
+                    }
+                )
+                _close_egm_operation_dialog(page)
+    return shots, errors
+
+
+def capture_prod_machine_screenshots(
+    machines: list[dict],
+    *,
+    headless: bool | None = None,
+    timeout_ms: int | None = None,
+    max_pages: int | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Dedicated browser session — EGM operation-window PNG for each machine."""
+    from playwright.sync_api import sync_playwright
+
+    if not machines:
+        return [], []
+
+    timeout_ms = timeout_ms or _default_timeout_ms()
+    if max_pages is None:
+        max_pages = int(os.environ.get("SM_MACHINE_MAX_PAGES") or 0) or None
+    hl = _smachine_resolve_headless(headless)
+    if headless is None:
+        hl = _smachine_resolve_headless(
+            os.environ.get("SMACHINE_HEADLESS", "1").strip().lower() not in ("0", "false", "no")
+        )
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=hl)
+        context = browser.new_context(
+            viewport={"width": 1600, "height": 900},
+            ignore_https_errors=True,
+        )
+        page = context.new_page()
+        page.set_default_timeout(timeout_ms)
+        try:
+            return _capture_prod_batch_screenshots_on_page(
+                page, machines, timeout_ms=timeout_ms, max_pages=max_pages
+            )
+        finally:
+            try:
+                context.close()
+            except Exception:
+                pass
+            browser.close()
+
+
 def _max_phase_retries() -> int:
     try:
         return max(1, int((os.environ.get("PROD_SET_MAX_PHASE_RETRIES") or "10").strip()))
     except ValueError:
         return 10
+
+
+def _prod_batch_fast_mode() -> bool:
+    """Shorter UI settles and batch pagination (default on). Set ``PROD_BATCH_FAST=0`` to disable."""
+    return (os.environ.get("PROD_BATCH_FAST", "1").strip().lower() not in ("0", "false", "no", "off"))
+
+
+def _fast_ms(ms: int) -> int:
+    if not _prod_batch_fast_mode():
+        return ms
+    return max(40, int(ms * 0.35))
+
+
+def _page_pause(page, ms: int) -> None:
+    page.wait_for_timeout(_fast_ms(ms))
 
 
 def _list_path() -> str:
@@ -179,7 +336,7 @@ def _login_egm_backend(page, base: str, user: str, pw: str, *, timeout_ms: int) 
     list_url = f"{base.rstrip('/')}{path}"
 
     page.goto(login_url, wait_until="domcontentloaded")
-    page.wait_for_timeout(900)
+    _page_pause(page, 900)
 
     pwd_box = page.locator('input[type="password"]').first
     pwd_box.wait_for(state="visible", timeout=min(30_000, timeout_ms))
@@ -198,7 +355,7 @@ def _login_egm_backend(page, base: str, user: str, pw: str, *, timeout_ms: int) 
     else:
         page.locator('button[type="submit"], button.el-button--primary').first.click()
 
-    page.wait_for_timeout(1800)
+    page.wait_for_timeout(_fast_ms(1800))
     if path not in (page.url or ""):
         page.goto(list_url, wait_until="domcontentloaded")
     if not _egm_table_ready(page, timeout_ms):
@@ -237,6 +394,164 @@ def _ensure_env_egm_page(page, belongs: str, *, timeout_ms: int, max_pages: int)
         return False
 
 
+def _find_all_rows_for_target(page, kind: str, key: str, *, timeout_ms: int):
+    rows = _table_body_rows(page)
+    try:
+        rows.first.wait_for(state="visible", timeout=min(15_000, timeout_ms))
+    except Exception:
+        pass
+    matched = []
+    n = rows.count()
+    for i in range(n):
+        row = rows.nth(i)
+        try:
+            txt = row.inner_text(timeout=min(8_000, timeout_ms))
+        except Exception:
+            continue
+        if _row_text_matches(kind, key, txt):
+            matched.append(row)
+    return matched
+
+
+def _machine_lookup_specs(machines: list[dict]) -> list[tuple[str, dict, str, str]]:
+    specs: list[tuple[str, dict, str, str]] = []
+    for m in machines:
+        name = _machine_display_name(m)
+        if not name:
+            continue
+        kind, key = _machine_target(name)
+        specs.append((name, m, kind, key))
+    return specs
+
+
+def _batch_select_machines_on_live_page(
+    page,
+    machines: list[dict],
+    *,
+    timeout_ms: int,
+    max_pages: int,
+) -> tuple[list[dict], list[dict]]:
+    specs = _machine_lookup_specs(machines)
+    if not specs:
+        return [], []
+
+    pending = list(specs)
+    limit = _resolve_collect_page_limit(max_pages)
+    _go_first_page(page, timeout_ms=timeout_ms, max_steps=limit)
+    _wait_table_idle(page, timeout_ms)
+
+    selected: list[dict] = []
+    fail_list: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    steps = 0
+    safety = 0
+
+    while pending:
+        safety += 1
+        if safety > limit * max(len(specs), 1) + 50:
+            break
+
+        resolved: list[tuple[str, dict, str, str]] = []
+        for spec in list(pending):
+            name, m, kind, key = spec
+            rows = _find_all_rows_for_target(page, kind, key, timeout_ms=timeout_ms)
+            if not rows:
+                continue
+            dedupe = (str(m.get("belongs") or "").upper(), name)
+            if dedupe not in seen:
+                try:
+                    _ensure_row_checkbox_checked(page, rows[0], timeout_ms=timeout_ms)
+                    seen.add(dedupe)
+                    selected.append(m)
+                except Exception as exc:
+                    fail_list.append(
+                        {"belongs": m.get("belongs", ""), "machine": name, "error": str(exc)}
+                    )
+            if kind == "full":
+                resolved.append(spec)
+
+        for spec in resolved:
+            pending.remove(spec)
+
+        if not pending:
+            break
+        if not _can_pagination_next(page) or steps >= limit:
+            break
+        _click_pagination_next(page, timeout_ms=timeout_ms)
+        steps += 1
+        _wait_table_idle(page, timeout_ms)
+
+    for name, m, _kind, _key in pending:
+        if any(_machine_display_name(x) == name for x in selected):
+            continue
+        fail_list.append(
+            {
+                "belongs": m.get("belongs", ""),
+                "machine": name,
+                "error": "machine not found on EGM page",
+            }
+        )
+    return selected, fail_list
+
+
+def _batch_read_live_states(
+    page,
+    machines: list[dict],
+    *,
+    timeout_ms: int,
+    max_pages: int,
+) -> dict[str, dict[str, Any] | None]:
+    specs = _machine_lookup_specs(machines)
+    if not specs:
+        return {}
+
+    pending = list(specs)
+    limit = _resolve_collect_page_limit(max_pages)
+    _go_first_page(page, timeout_ms=timeout_ms, max_steps=limit)
+    _wait_table_idle(page, timeout_ms)
+
+    out: dict[str, dict[str, Any] | None] = {name: None for name, _m, _k, _key in specs}
+    steps = 0
+    safety = 0
+
+    while pending:
+        safety += 1
+        if safety > limit * max(len(specs), 1) + 50:
+            break
+
+        resolved: list[tuple[str, dict, str, str]] = []
+        for spec in list(pending):
+            name, _m, kind, key = spec
+            rows = _find_all_rows_for_target(page, kind, key, timeout_ms=timeout_ms)
+            if not rows:
+                continue
+            try:
+                mn, is_test, _gt, status, online = _row_report_fields(rows[0], timeout_ms=timeout_ms)
+                out[name] = {
+                    "name": mn,
+                    "test": bool(is_test),
+                    "status": (status or "").strip(),
+                    "online": (online or "").strip(),
+                }
+            except Exception:
+                out[name] = None
+            if kind == "full":
+                resolved.append(spec)
+
+        for spec in resolved:
+            pending.remove(spec)
+
+        if not pending:
+            break
+        if not _can_pagination_next(page) or steps >= limit:
+            break
+        _click_pagination_next(page, timeout_ms=timeout_ms)
+        steps += 1
+        _wait_table_idle(page, timeout_ms)
+
+    return out
+
+
 def _find_machine_row_live(page, machine_name: str, *, timeout_ms: int, max_pages: int):
     """Locate a machine row by scanning the **current** EGM table (paginate if needed)."""
     kind, key = _machine_target(machine_name)
@@ -246,9 +561,9 @@ def _find_machine_row_live(page, machine_name: str, *, timeout_ms: int, max_page
 
     steps = 0
     while True:
-        row = _find_row_for_target(page, kind, key, timeout_ms)
-        if row is not None:
-            return row
+        rows = _find_all_rows_for_target(page, kind, key, timeout_ms=timeout_ms)
+        if rows:
+            return rows[0]
         if not _can_pagination_next(page) or steps >= limit:
             return None
         _click_pagination_next(page, timeout_ms=timeout_ms)
@@ -377,7 +692,7 @@ def _wait_batch_toolbar_ready(page, label: str, *, timeout_ms: int, wait_ms: int
         btn = _locate_batch_toolbar_button(page, label)
         if btn.count() and _batch_toolbar_button_actionable(btn):
             return True
-        page.wait_for_timeout(250)
+        page.wait_for_timeout(_fast_ms(250))
     btn = _locate_batch_toolbar_button(page, label)
     return btn.count() > 0 and _batch_toolbar_button_actionable(btn)
 
@@ -393,18 +708,18 @@ def _click_batch_button(page, label: str, *, timeout_ms: int, force: bool = Fals
         return False, "not found"
     try:
         btn.click(timeout=min(30_000, timeout_ms))
-        page.wait_for_timeout(400)
+        _page_pause(page, 400)
         return True, ""
     except Exception:
         if force:
             try:
                 btn.click(force=True, timeout=min(30_000, timeout_ms))
-                page.wait_for_timeout(400)
+                _page_pause(page, 400)
                 return True, ""
             except Exception:
                 try:
                     btn.evaluate("el => el.click()")
-                    page.wait_for_timeout(400)
+                    _page_pause(page, 400)
                     return True, ""
                 except Exception:
                     pass
@@ -422,7 +737,7 @@ def _submit_batch_action(page, label: str, remark: str, *, timeout_ms: int) -> t
     if not clicked:
         return False, why
 
-    page.wait_for_timeout(500)
+    _page_pause(page, 500)
     if _visible_confirm_layer(page) is not None:
         try:
             _click_save_confirm(page, remark, timeout_ms=timeout_ms)
@@ -430,7 +745,7 @@ def _submit_batch_action(page, label: str, remark: str, *, timeout_ms: int) -> t
         except Exception as e:
             return False, f"confirm/save failed: {e}"
     else:
-        page.wait_for_timeout(800)
+        _page_pause(page, 800)
         if _visible_confirm_layer(page) is not None:
             try:
                 _click_save_confirm(page, remark, timeout_ms=timeout_ms)
@@ -473,7 +788,7 @@ def _visible_confirm_layer(page):
 
 def _dismiss_batch_confirm_cancel(page, *, timeout_ms: int) -> bool:
     """Close Warning / confirm UI with **Cancel** — never Save."""
-    page.wait_for_timeout(350)
+    _page_pause(page, 350)
     layer = _visible_confirm_layer(page)
     if layer is None:
         try:
@@ -785,7 +1100,7 @@ def _truthy_env(name: str) -> bool:
 
 
 def _click_save_confirm(page, remark: str, *, timeout_ms: int) -> None:
-    page.wait_for_timeout(500)
+    _page_pause(page, 500)
     dlg = page.locator(".el-dialog__wrapper").filter(has=page.locator(".el-dialog")).last
     if dlg.count() == 0:
         dlg = page.locator(".el-dialog").last
@@ -811,14 +1126,14 @@ def _wait_batch_done(page, *, timeout_ms: int) -> None:
     deadline = time.monotonic() + min(timeout_ms / 1000.0, 120.0)
     while time.monotonic() < deadline:
         _wait_table_idle(page, min(15_000, timeout_ms))
-        page.wait_for_timeout(350)
+        _page_pause(page, 350)
         try:
             busy = page.locator(".el-loading-mask").filter(has=page.locator(":visible")).count()
             if busy == 0:
                 break
         except Exception:
             break
-    page.wait_for_timeout(600)
+    _page_pause(page, 600)
 
 
 def _process_env(
@@ -882,11 +1197,17 @@ def _batch_disabled_error(
 ) -> str:
     """Human-readable reason when a toolbar batch button stays disabled."""
     hints: list[str] = []
+    try:
+        live_states = _batch_read_live_states(
+            page, machines, timeout_ms=timeout_ms, max_pages=max_pages
+        )
+    except Exception:
+        live_states = {}
     for m in machines:
         name = _machine_display_name(m)
         if not name:
             continue
-        live = _read_live_row_state(page, name, timeout_ms=timeout_ms, max_pages=max_pages)
+        live = live_states.get(name)
         if live is None:
             hints.append(f"{name}: not on current EGM table (or lost selection)")
             continue
@@ -935,86 +1256,85 @@ def _process_env_batch(
     ok_list: list[dict],
     fail_list: list[dict],
 ) -> tuple[list[dict], list[dict]]:
-    selected: list[dict] = []
-    for m in machines:
-        if cancel_check() or manual_stop_check():
-            break
-        name = _machine_display_name(m)
-        if not name:
-            continue
-        try:
-            if not _select_machine_on_live_page(
-                page, name, timeout_ms=timeout_ms, max_pages=max_pages
-            ):
-                fail_list.append(
-                    {
-                        "belongs": m.get("belongs", belongs),
-                        "machine": name,
-                        "error": "machine not found on EGM page",
-                    }
-                )
-                continue
-            selected.append(m)
-        except Exception as e:
+    if cancel_check() or manual_stop_check():
+        return ok_list, fail_list
+
+    try:
+        selected, select_fail = _batch_select_machines_on_live_page(
+            page, machines, timeout_ms=timeout_ms, max_pages=max_pages
+        )
+        fail_list.extend(select_fail)
+    except Exception as exc:
+        for m in machines:
             fail_list.append(
-                {"belongs": m.get("belongs", belongs), "machine": name, "error": str(e)}
+                {
+                    "belongs": m.get("belongs", belongs),
+                    "machine": _machine_display_name(m),
+                    "error": str(exc),
+                }
             )
+        return ok_list, fail_list
 
     if cancel_check() or manual_stop_check() or not selected:
         return ok_list, fail_list
 
-    # Retry path: if live EGM already matches this phase (e.g. maintenance set on prior attempt),
-    # skip batch clicks — BatchMaintenance stays disabled once row is in maintenance.
+    # Retry path: if live EGM already matches this phase, skip batch clicks.
     still_need: list[dict] = []
+    try:
+        live_states = _batch_read_live_states(
+            page, selected, timeout_ms=timeout_ms, max_pages=max_pages
+        )
+    except Exception as exc:
+        for m in selected:
+            fail_list.append(
+                {
+                    "belongs": m.get("belongs", belongs),
+                    "machine": _machine_display_name(m),
+                    "error": str(exc),
+                }
+            )
+        return ok_list, fail_list
+
     for m in selected:
         if cancel_check() or manual_stop_check():
             break
         name = _machine_display_name(m)
         if not name:
             continue
-        try:
-            if _verify_machine_live(
-                page, name, verify_action, timeout_ms=timeout_ms, max_pages=max_pages
-            ):
-                ok_list.append({"belongs": m.get("belongs", belongs), "machine": name})
-            else:
-                still_need.append(m)
-        except Exception as e:
+        live = live_states.get(name)
+        if live and _verify_live_state(live, verify_action):
+            ok_list.append({"belongs": m.get("belongs", belongs), "machine": name})
+        elif live is None:
             fail_list.append(
-                {"belongs": m.get("belongs", belongs), "machine": name, "error": str(e)}
+                {
+                    "belongs": m.get("belongs", belongs),
+                    "machine": name,
+                    "error": "machine not found on EGM page",
+                }
             )
+        else:
+            still_need.append(m)
 
     if cancel_check() or manual_stop_check() or not still_need:
         return ok_list, fail_list
 
-    selected = still_need
-
-    # Live verify paginates the table and can clear row checkboxes — re-select before batch click.
     _clear_table_row_selection(page, timeout_ms=timeout_ms)
-    reselected: list[dict] = []
-    for m in selected:
-        if cancel_check() or manual_stop_check():
-            break
-        name = _machine_display_name(m)
-        if not name:
-            continue
-        try:
-            if _select_machine_on_live_page(
-                page, name, timeout_ms=timeout_ms, max_pages=max_pages
-            ):
-                reselected.append(m)
-            else:
-                fail_list.append(
-                    {
-                        "belongs": m.get("belongs", belongs),
-                        "machine": name,
-                        "error": "machine not found on EGM page before batch click",
-                    }
-                )
-        except Exception as e:
+    try:
+        reselected, reselect_fail = _batch_select_machines_on_live_page(
+            page, still_need, timeout_ms=timeout_ms, max_pages=max_pages
+        )
+        fail_list.extend(reselect_fail)
+    except Exception as exc:
+        for m in still_need:
             fail_list.append(
-                {"belongs": m.get("belongs", belongs), "machine": name, "error": str(e)}
+                {
+                    "belongs": m.get("belongs", belongs),
+                    "machine": _machine_display_name(m),
+                    "error": str(exc),
+                }
             )
+        return ok_list, fail_list
+
     if cancel_check() or manual_stop_check() or not reselected:
         return ok_list, fail_list
     selected = reselected
@@ -1048,34 +1368,40 @@ def _process_env_batch(
 
     _refresh_egm_table(page, timeout_ms=timeout_ms, max_pages=max_pages)
 
+    try:
+        post_states = _batch_read_live_states(
+            page, selected, timeout_ms=timeout_ms, max_pages=max_pages
+        )
+    except Exception as exc:
+        for m in selected:
+            fail_list.append(
+                {
+                    "belongs": m.get("belongs", belongs),
+                    "machine": _machine_display_name(m),
+                    "error": str(exc),
+                }
+            )
+        return ok_list, fail_list
+
     for m in selected:
         if cancel_check() or manual_stop_check():
             break
         name = _machine_display_name(m)
         if not name:
             continue
-        try:
-            if _verify_machine_live(
-                page, name, verify_action, timeout_ms=timeout_ms, max_pages=max_pages
-            ):
-                ok_list.append({"belongs": m.get("belongs", belongs), "machine": name})
-            else:
-                live = _read_live_row_state(
-                    page, name, timeout_ms=timeout_ms, max_pages=max_pages
-                )
-                detail = ""
-                if live:
-                    detail = f" (live status={live.get('status')!r}, test={live.get('test')})"
-                fail_list.append(
-                    {
-                        "belongs": m.get("belongs", belongs),
-                        "machine": name,
-                        "error": f"status not as expected on EGM page{detail}",
-                    }
-                )
-        except Exception as e:
+        live = post_states.get(name)
+        if live and _verify_live_state(live, verify_action):
+            ok_list.append({"belongs": m.get("belongs", belongs), "machine": name})
+        else:
+            detail = ""
+            if live:
+                detail = f" (live status={live.get('status')!r}, test={live.get('test')})"
             fail_list.append(
-                {"belongs": m.get("belongs", belongs), "machine": name, "error": str(e)}
+                {
+                    "belongs": m.get("belongs", belongs),
+                    "machine": name,
+                    "error": f"status not as expected on EGM page{detail}",
+                }
             )
 
     return ok_list, fail_list
@@ -1179,37 +1505,11 @@ def _run_single_action_env(
     if not passed:
         return [], still_fail
 
-    all_ok: list[dict] = []
-    all_fail: list[dict] = []
-    _refresh_egm_table(page, timeout_ms=timeout_ms, max_pages=max_pages)
-    for m in targets:
-        if cancel_check() or manual_stop_check():
-            break
-        name = _machine_display_name(m)
-        if not name:
-            continue
-        try:
-            if _verify_machine_live(
-                page, name, action, timeout_ms=timeout_ms, max_pages=max_pages
-            ):
-                all_ok.append({"belongs": m.get("belongs", belongs), "machine": name})
-            else:
-                live = _read_live_row_state(page, name, timeout_ms=timeout_ms, max_pages=max_pages)
-                detail = ""
-                if live:
-                    detail = f" (live status={live.get('status')!r}, test={live.get('test')})"
-                all_fail.append(
-                    {
-                        "belongs": m.get("belongs", belongs),
-                        "machine": name,
-                        "error": f"status not as expected on EGM page{detail}",
-                    }
-                )
-        except Exception as e:
-            all_fail.append(
-                {"belongs": m.get("belongs", belongs), "machine": name, "error": str(e)}
-            )
-    return all_ok, all_fail
+    return [
+        {"belongs": m.get("belongs", belongs), "machine": _machine_display_name(m)}
+        for m in targets
+        if _machine_display_name(m)
+    ], []
 
 
 def _run_phased_env(
@@ -1260,32 +1560,40 @@ def _run_phased_env(
             return all_ok, all_fail
 
     _refresh_egm_table(page, timeout_ms=timeout_ms, max_pages=max_pages)
+    try:
+        final_states = _batch_read_live_states(
+            page, targets, timeout_ms=timeout_ms, max_pages=max_pages
+        )
+    except Exception as exc:
+        return all_ok, [
+            {
+                "belongs": m.get("belongs", belongs),
+                "machine": _machine_display_name(m),
+                "error": str(exc),
+            }
+            for m in targets
+            if _machine_display_name(m)
+        ]
+
     for m in targets:
         if cancel_check() or manual_stop_check():
             break
         name = _machine_display_name(m)
         if not name:
             continue
-        try:
-            if _verify_machine_live(
-                page, name, parent_action, timeout_ms=timeout_ms, max_pages=max_pages
-            ):
-                all_ok.append({"belongs": m.get("belongs", belongs), "machine": name})
-            else:
-                live = _read_live_row_state(page, name, timeout_ms=timeout_ms, max_pages=max_pages)
-                detail = ""
-                if live:
-                    detail = f" (live status={live.get('status')!r}, test={live.get('test')})"
-                all_fail.append(
-                    {
-                        "belongs": m.get("belongs", belongs),
-                        "machine": name,
-                        "error": f"final EGM check failed{detail}",
-                    }
-                )
-        except Exception as e:
+        live = final_states.get(name)
+        if live and _verify_live_state(live, parent_action):
+            all_ok.append({"belongs": m.get("belongs", belongs), "machine": name})
+        else:
+            detail = ""
+            if live:
+                detail = f" (live status={live.get('status')!r}, test={live.get('test')})"
             all_fail.append(
-                {"belongs": m.get("belongs", belongs), "machine": name, "error": str(e)}
+                {
+                    "belongs": m.get("belongs", belongs),
+                    "machine": name,
+                    "error": f"final EGM check failed{detail}",
+                }
             )
 
     return all_ok, all_fail
@@ -1300,6 +1608,7 @@ def run_prod_batch_job(
     manual_stop_check: Optional[Callable[[], bool]] = None,
     on_manual_stop: Optional[Callable[[dict], None]] = None,
     on_phase_retry: Optional[Callable[[str, int, list[dict]], None]] = None,
+    capture_screenshots: bool | None = None,
 ) -> dict[str, Any]:
     """
     Run batch job grouped by environment. Returns summary with success/failed lists
@@ -1321,6 +1630,9 @@ def run_prod_batch_job(
 
     all_ok: list[dict] = []
     all_fail: list[dict] = []
+    shot_list: list[dict[str, Any]] = []
+    shot_errs: list[dict[str, Any]] = []
+    want_shots = capture_screenshots if capture_screenshots is not None else prod_batch_screenshots_enabled()
 
     timeout_ms = _default_timeout_ms()
     max_pages = int(os.environ.get("SM_MACHINE_MAX_PAGES") or 0) or None
@@ -1382,6 +1694,15 @@ def run_prod_batch_job(
                     )
                 all_ok.extend(ok)
                 all_fail.extend(fail)
+
+            if want_shots and machines and not cancel_check() and not _prod_batch_fast_mode():
+                try:
+                    shot_list, shot_errs = _capture_prod_batch_screenshots_on_page(
+                        page, machines, timeout_ms=timeout_ms, max_pages=max_pages
+                    )
+                except Exception as exc:
+                    logger.exception("prod-batch screenshot batch failed")
+                    shot_errs.append({"belongs": "", "machine": "", "error": str(exc)})
         finally:
             try:
                 context.close()
@@ -1395,6 +1716,8 @@ def run_prod_batch_job(
         "failed": all_fail,
         "ok": [f"{x['belongs']}::{x['machine']}" for x in all_ok],
         "failed_keys": [f"{x['belongs']}::{x['machine']}" for x in all_fail],
+        "screenshots": shot_list,
+        "screenshot_errors": shot_errs,
     }
 
 

@@ -915,6 +915,93 @@ def _scan_targets_report_only(
     return found
 
 
+def _find_all_rows_for_target_on_page(page, kind: str, key: str, *, timeout_ms: int):
+    rows = _table_body_rows(page)
+    try:
+        rows.first.wait_for(state="visible", timeout=min(15_000, timeout_ms))
+    except Exception:
+        pass
+    matched = []
+    n = rows.count()
+    for i in range(n):
+        row = rows.nth(i)
+        try:
+            txt = row.inner_text(timeout=min(8_000, timeout_ms))
+        except Exception:
+            continue
+        if _row_text_matches(kind, key, txt):
+            matched.append(row)
+    return matched
+
+
+def _scan_targets_collect_rows(
+    page,
+    targets: list[tuple[str, str, str]],
+    *,
+    belongs: str,
+    deployment: str,
+    timeout_ms: int,
+    max_pages: int,
+) -> tuple[list[dict], list[str]]:
+    """Paginate until target tokens are resolved; return normalized rows + not-found tokens."""
+    pending = targets.copy()
+    collected: list[dict] = []
+    seen_names: set[str] = set()
+    dep_label = (deployment or "PROD").strip().upper() or "PROD"
+    belong_label = (belongs or "—").strip() or "—"
+    next_clicks = 0
+    safety = 0
+
+    while pending:
+        safety += 1
+        if safety > max_pages * max(len(targets), 1) + 50:
+            break
+
+        resolved: list[tuple[str, str, str]] = []
+        for spec in list(pending):
+            line, kind, key = spec
+            if kind == "invalid":
+                continue
+            matched_here = False
+            for row in _find_all_rows_for_target_on_page(page, kind, key, timeout_ms=timeout_ms):
+                matched_here = True
+                mn, test, game_type, st, onl = _row_report_fields(row, timeout_ms=timeout_ms)
+                name_key = (mn or "").strip()
+                if not name_key or name_key in seen_names:
+                    continue
+                seen_names.add(name_key)
+                collected.append(
+                    {
+                        "environment": dep_label,
+                        "belongs": belong_label,
+                        "name": mn,
+                        "game_type": game_type,
+                        "status": st,
+                        "online": onl,
+                        "is_test": test,
+                    }
+                )
+            if kind == "full" and matched_here:
+                resolved.append(spec)
+
+        for spec in resolved:
+            pending.remove(spec)
+
+        if not pending:
+            break
+        if not _can_pagination_next(page):
+            break
+        if next_clicks >= max_pages:
+            break
+        _click_pagination_next(page, timeout_ms=timeout_ms)
+        next_clicks += 1
+        _wait_table_idle(page, timeout_ms)
+
+    not_found = [line for line, kind, _key in pending if kind != "invalid"]
+    not_found.extend(line for line, kind, _key in targets if kind == "invalid")
+    return collected, not_found
+
+
 def _table_body_rows(page):
     """
     Data rows only (not header). Target **main** scroll body only — fixed-column tables also use
@@ -1721,6 +1808,146 @@ def _prod_batch_scrape_stall_sec() -> int:
         return 180
 
 
+def _prod_batch_lookup_target_rows(
+    site: str,
+    env_code: str,
+    target_lines: list[str],
+) -> tuple[list[dict], list[str], str]:
+    """
+    Login once and paginate only until requested machine tokens are resolved (fast path).
+    Falls back to the same stall detection as the old full-site scrape.
+    """
+    sk = (site or "").strip().lower()
+    if not sk:
+        return [], ["empty site"], "empty site"
+
+    target_specs: list[tuple[str, str, str]] = []
+    parse_not_found: list[str] = []
+    for line in target_lines:
+        for token in _prod_batch_split_target_tokens(line):
+            try:
+                kind, key = _parse_target_line(token)
+            except ValueError:
+                parse_not_found.append(token)
+                continue
+            target_specs.append((token, kind, key))
+
+    if not target_specs:
+        return [], parse_not_found, "no valid machine tokens"
+
+    try:
+        from checkcredit import _np_resolve_backend  # noqa: WPS433
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        return [], parse_not_found, str(exc)
+
+    try:
+        synth = _site_synthetic_machine(sk)
+    except SystemExit as exc:
+        return [], parse_not_found, str(exc)
+
+    base, user, pw = _np_resolve_backend(synth)
+    if not user or not pw:
+        return [], parse_not_found, f"missing credentials for {sk!r}"
+
+    path = (os.environ.get("SM_MACHINE_PATH") or "/egm/egmStatusList").strip() or "/egm/egmStatusList"
+    if not path.startswith("/"):
+        path = "/" + path
+    login_url = f"{base.rstrip('/')}/login?redirect={quote(path, safe='')}"
+    list_url = f"{base.rstrip('/')}{path}"
+    max_pages = _resolve_collect_page_limit(None)
+    stall_sec = _prod_batch_scrape_stall_sec()
+    timeout_ms = max(120_000, stall_sec * 1000 + 60_000)
+    progress = {"last_at": time.monotonic()}
+    progress_lock = threading.Lock()
+
+    def on_progress(_pages: int, _rows: int) -> None:
+        with progress_lock:
+            progress["last_at"] = time.monotonic()
+
+    def stall_check() -> bool:
+        with progress_lock:
+            idle = time.monotonic() - progress["last_at"]
+        return idle >= stall_sec
+
+    belong_label = _site_belongs_label(sk)
+    rows: list[dict] = []
+    scan_not_found: list[str] = []
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            try:
+                page = browser.new_page(
+                    viewport={"width": 1600, "height": 900},
+                    ignore_https_errors=True,
+                )
+                page.set_default_timeout(timeout_ms)
+                on_progress(0, 0)
+
+                page.goto(login_url, wait_until="domcontentloaded")
+                page.wait_for_timeout(900)
+                if stall_check():
+                    raise RuntimeError(f"EGM scrape stalled (login page; no progress for {stall_sec}s)")
+
+                pwd_box = page.locator('input[type="password"]').first
+                pwd_box.wait_for(state="visible", timeout=min(30_000, timeout_ms))
+                form = pwd_box.locator("xpath=ancestor::form[1]")
+                if form.count():
+                    tin = form.locator(
+                        'input[type="text"], input:not([type]), input[type="tel"], input[type="email"]'
+                    ).first
+                    tin.fill(user)
+                else:
+                    page.locator('input[type="text"]').first.fill(user)
+                pwd_box.fill(pw)
+                lb = page.get_by_role("button", name=re.compile(r"login|sign in|log in", re.I))
+                if lb.count():
+                    lb.first.click()
+                else:
+                    page.locator('button[type="submit"], button.el-button--primary').first.click()
+
+                page.wait_for_timeout(1800)
+                on_progress(0, 0)
+                if stall_check():
+                    raise RuntimeError(f"EGM scrape stalled (after login; no progress for {stall_sec}s)")
+                if path not in (page.url or ""):
+                    page.goto(list_url, wait_until="domcontentloaded")
+
+                page.wait_for_selector(".app-container, .filter-container, .el-table", timeout=timeout_ms)
+                _wait_table_idle(page, timeout_ms)
+                _go_first_page(page, timeout_ms=timeout_ms, max_steps=max_pages)
+                _wait_table_idle(page, timeout_ms)
+                on_progress(0, 0)
+
+                rows, scan_not_found = _scan_targets_collect_rows(
+                    page,
+                    target_specs,
+                    belongs=belong_label,
+                    deployment="PROD",
+                    timeout_ms=timeout_ms,
+                    max_pages=max_pages,
+                )
+                on_progress(1, len(rows))
+            finally:
+                browser.close()
+    except RuntimeError as exc:
+        if "stalled" in str(exc).lower():
+            return [], parse_not_found, (
+                f"Scrape stuck — no progress for {stall_sec}s "
+                f"(EGM login or table may be hung). Try again later."
+            )
+        raise
+    except Exception as exc:
+        logger.exception("prod-batch bot targeted lookup failed for %r", sk)
+        return [], parse_not_found, str(exc)
+
+    matched, resolve_not_found = resolve_prod_batch_bot_targets(env_code, target_lines, rows)
+    not_found = list(dict.fromkeys(parse_not_found + scan_not_found + resolve_not_found))
+    data_src = f"live EGM fast lookup ({sk.upper()}, {len(matched)} matched)"
+    return matched, not_found, data_src
+
+
 def _prod_batch_scrape_site_rows(site: str) -> tuple[list[dict], str]:
     """
     Live read-only EGM scrape for one PROD backend.
@@ -1889,6 +2116,7 @@ def _prod_batch_send_cancel_live_summary(
         send_message,
         header_template=tpl,
     )
+    _prod_batch_send_machine_screenshots_background(chat_id, machines, summary, send_message)
 
 
 def resolve_prod_batch_bot_targets(
@@ -2075,6 +2303,111 @@ def _prod_batch_send_lark_card(
     send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
 
 
+def _prod_batch_resolve_image_helpers() -> tuple[Callable[..., Any] | None, Callable[..., Any] | None]:
+    try:
+        import main as _main_mod  # noqa: WPS433
+
+        up = getattr(_main_mod, "upload_image_lark", None)
+        si = getattr(_main_mod, "send_image_message", None)
+        if callable(up) and callable(si):
+            return up, si
+    except Exception:
+        pass
+    return None, None
+
+
+def _prod_batch_cleanup_screenshot_paths(paths: list[str]) -> None:
+    for pth in paths:
+        if not pth:
+            continue
+        try:
+            os.remove(pth)
+        except OSError:
+            pass
+
+
+def _prod_batch_send_machine_screenshots_background(
+    chat_id: str,
+    machines: list[dict],
+    summary: dict | None,
+    send_message: Callable[..., Any],
+) -> None:
+    threading.Thread(
+        target=_prod_batch_send_machine_screenshots,
+        args=(chat_id, machines, summary, send_message),
+        daemon=True,
+        name="prod-batch-screenshots",
+    ).start()
+
+
+def _prod_batch_send_machine_screenshots(
+    chat_id: str,
+    machines: list[dict],
+    summary: dict | None,
+    send_message: Callable[..., Any],
+) -> None:
+    from prod_machine_batch import capture_prod_machine_screenshots, prod_batch_screenshots_enabled
+
+    if not prod_batch_screenshots_enabled():
+        return
+
+    shots = list((summary or {}).get("screenshots") or [])
+    shot_errors = list((summary or {}).get("screenshot_errors") or [])
+
+    if not shots and machines:
+        try:
+            shots, extra_err = capture_prod_machine_screenshots(machines)
+            shot_errors.extend(extra_err)
+        except Exception as exc:
+            logger.exception("prod-batch bot standalone screenshot capture failed")
+            send_message(chat_id, f"⚠️ Machine screenshots unavailable: {exc}")
+            return
+
+    if not shots:
+        if shot_errors:
+            send_message(
+                chat_id,
+                f"⚠️ Could not capture machine screenshots ({len(shot_errors)} failed).",
+            )
+        return
+
+    upload_fn, send_img_fn = _prod_batch_resolve_image_helpers()
+    paths_to_clean: list[str] = []
+    if not upload_fn or not send_img_fn:
+        for item in shots:
+            pth = str(item.get("path") or "")
+            if pth:
+                paths_to_clean.append(pth)
+        _prod_batch_cleanup_screenshot_paths(paths_to_clean)
+        send_message(
+            chat_id,
+            "⚠️ Machine screenshots were captured but Lark image upload is unavailable on this host.",
+        )
+        return
+
+    sent = 0
+    for item in shots:
+        pth = str(item.get("path") or "")
+        if not pth:
+            continue
+        paths_to_clean.append(pth)
+        key = upload_fn(pth) or ""
+        if not key:
+            continue
+        belongs = str(item.get("belongs") or "").strip()
+        machine = str(item.get("machine") or "").strip()
+        label = f"{belongs} — {machine}".strip(" —")
+        send_message(chat_id, f"📸 **{label}**")
+        resp = send_img_fn(chat_id, key)
+        if isinstance(resp, dict) and resp.get("code") == 0:
+            sent += 1
+
+    _prod_batch_cleanup_screenshot_paths(paths_to_clean)
+
+    if sent < len(shots):
+        send_message(chat_id, f"⚠️ Sent {sent}/{len(shots)} machine screenshot(s).")
+
+
 def _prod_batch_send_lark_md(
     chat_id: str,
     title: str,
@@ -2227,6 +2560,7 @@ def _run_prod_batch_bot_job_thread(
             else f"Success — {ACTION_LABELS.get(action, action)}"
         )
         _prod_batch_send_lark_md(chat_id, title, "\n".join(lines), send_message, header_template=tpl)
+        _prod_batch_send_machine_screenshots_background(chat_id, machines, summary, send_message)
     except Exception as exc:
         logger.exception("prod-batch bot job %s failed", job_id)
         with _PROD_BATCH_JOBS_LOCK:
@@ -2250,21 +2584,10 @@ def _prod_batch_bot_prepare_confirm(
 ) -> None:
     env_code = parsed["env_code"]
     site = _PROD_BATCH_ENV_TO_SITE.get(env_code) or parsed.get("site") or ""
-    rows, data_src = _prod_batch_scrape_site_rows(site)
+    matched, not_found, data_src = _prod_batch_lookup_target_rows(site, env_code, target_lines)
     if "stuck" in data_src.lower() or "stalled" in data_src.lower():
         send_message(chat_id, f"❌ {data_src}")
         return
-    if not rows:
-        if data_src and data_src not in ("empty site",):
-            send_message(
-                chat_id,
-                f"❌ Could not load machines from live EGM ({env_code}). {data_src}",
-            )
-        else:
-            send_message(chat_id, f"❌ Live EGM ({env_code}) returned no machines.")
-        return
-
-    matched, not_found = resolve_prod_batch_bot_targets(env_code, target_lines, rows)
     if not matched:
         nf = ", ".join(not_found[:20]) if not_found else "(none parsed)"
         send_message(chat_id, f"❌ No machines matched for **{env_code}**. Not found: {nf}")
@@ -2340,7 +2663,7 @@ def handle_prod_batch_bot_command(
     env_code = parsed["env_code"]
     send_message(
         chat_id,
-        f"⏳ 正在读取 live EGM（**{env_code}**）… 慢没关系，只有卡住无进展才会报错",
+        f"⏳ 正在 fast lookup live EGM（**{env_code}**）… 只查你列出的机器",
     )
     threading.Thread(
         target=_prod_batch_bot_prepare_confirm,
