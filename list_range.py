@@ -14,6 +14,7 @@ USAGE_EXAMPLES = (
     "Usage: `/list <start>-<end>`, `/list <start>,<end>`, or `/list id1,id2,...`\n"
     "Examples:\n"
     "• `/list NWR8900-NWR8911`\n"
+    "• `/list NWR2133-NWR2142, NWR2144-NWR2150` (multiple ranges)\n"
     "• `/list 8900-8911` or `/list 8905,8910`\n"
     "• `/list 8900,8901` (explicit ids)\n"
     "• `/list 8900until8911` (also `til` / `to`)"
@@ -44,6 +45,33 @@ def _expand_pair(start_t: str, end_t: str) -> tuple[str | None, int, int]:
     return prefix, start_num, end_num
 
 
+def _is_range_segment(segment: str) -> bool:
+    s = (segment or "").strip()
+    if not s:
+        return False
+    if _UNTIL_RE.match(s):
+        return True
+    return "-" in s
+
+
+def _parse_single_range(raw: str) -> tuple[str | None, int, int]:
+    """Parse one range segment (no comma splitting)."""
+    raw = (raw or "").strip()
+    if not raw:
+        raise ValueError("missing range")
+
+    until_m = _UNTIL_RE.match(raw)
+    if until_m:
+        start_t, end_t = until_m.group(1).strip(), until_m.group(2).strip()
+    elif "-" in raw:
+        start_t, end_t = raw.split("-", 1)
+        start_t, end_t = start_t.strip(), end_t.strip()
+    else:
+        raise ValueError("use - or until/til/to between start and end")
+
+    return _expand_pair(start_t, end_t)
+
+
 def parse_list_range(query: str) -> tuple[str | None, int, int]:
     """
     Parse range specs such as:
@@ -57,25 +85,25 @@ def parse_list_range(query: str) -> tuple[str | None, int, int]:
     if not raw:
         raise ValueError("missing range")
 
-    until_m = _UNTIL_RE.match(raw)
-    if until_m:
-        start_t, end_t = until_m.group(1).strip(), until_m.group(2).strip()
-    elif "," in raw:
+    if "," in raw:
         parts = [p.strip() for p in raw.split(",") if p.strip()]
-        if len(parts) != 2:
-            raise ValueError("comma range needs exactly start,end (or use as explicit id list)")
-        start_t, end_t = parts
-    elif "-" in raw:
-        start_t, end_t = raw.split("-", 1)
-        start_t, end_t = start_t.strip(), end_t.strip()
-    else:
-        raise ValueError("use -, comma, or until/til/to between start and end")
+        if len(parts) != 2 or any(_is_range_segment(p) for p in parts):
+            raise ValueError("expected a single range (use comma to join multiple ranges or ids)")
+        return _expand_pair(parts[0], parts[1])
 
-    return _expand_pair(start_t, end_t)
+    return _parse_single_range(raw)
 
 
 def _format_item(prefix: str | None, num: int) -> str:
     return f"{prefix}{num}" if prefix else str(num)
+
+
+def _expand_segment(part: str) -> list[str]:
+    part = (part or "").strip()
+    if _is_range_segment(part):
+        prefix, start_num, end_num = _parse_single_range(part)
+        return [_format_item(prefix, n) for n in range(start_num, end_num + 1)]
+    return [_format_item(*_parse_token(part))]
 
 
 def expand_list_range(query: str, *, max_items: int = _MAX_ITEMS) -> list[str]:
@@ -87,21 +115,22 @@ def expand_list_range(query: str, *, max_items: int = _MAX_ITEMS) -> list[str]:
         parts = [p.strip() for p in raw.split(",") if p.strip()]
         if not parts:
             raise ValueError("empty list")
-        if len(parts) == 2:
+        if len(parts) == 2 and not any(_is_range_segment(p) for p in parts):
             prefix, start_num, end_num = _expand_pair(parts[0], parts[1])
-            count = end_num - start_num + 1
-            if count > max_items:
-                raise ValueError(f"range too large ({count} items; max {max_items})")
-            return [_format_item(prefix, n) for n in range(start_num, end_num + 1)]
-        if len(parts) > max_items:
-            raise ValueError(f"list too large ({len(parts)} items; max {max_items})")
-        return [_format_item(*_parse_token(p)) for p in parts]
+            items = [_format_item(prefix, n) for n in range(start_num, end_num + 1)]
+        else:
+            items: list[str] = []
+            for part in parts:
+                items.extend(_expand_segment(part))
+    elif _is_range_segment(raw):
+        prefix, start_num, end_num = _parse_single_range(raw)
+        items = [_format_item(prefix, n) for n in range(start_num, end_num + 1)]
+    else:
+        items = [_format_item(*_parse_token(raw))]
 
-    prefix, start_num, end_num = parse_list_range(raw)
-    count = end_num - start_num + 1
-    if count > max_items:
-        raise ValueError(f"range too large ({count} items; max {max_items})")
-    return [_format_item(prefix, n) for n in range(start_num, end_num + 1)]
+    if len(items) > max_items:
+        raise ValueError(f"list too large ({len(items)} items; max {max_items})")
+    return items
 
 
 def format_list_range(query: str) -> str:
