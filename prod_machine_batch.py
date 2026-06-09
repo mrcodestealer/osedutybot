@@ -241,7 +241,7 @@ def _capture_prod_batch_screenshots_on_page(
                     if kind == "full":
                         resolved.append(spec)
                     continue
-                rows = _find_all_rows_for_target_on_page(page, kind, key, timeout_ms=timeout_ms)
+                rows = _find_all_rows_for_target(page, kind, key, timeout_ms=timeout_ms)
                 if not rows:
                     continue
                 try:
