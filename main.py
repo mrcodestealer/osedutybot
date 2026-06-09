@@ -3013,6 +3013,9 @@ def lark_webhook():
                     parsed_ca,
                     chat_id=chat_id_ca,
                     send_message=make_prod_batch_thread_send(chat_id_ca),
+                    action_obj=(
+                        ev_ca.get("action") if isinstance(ev_ca.get("action"), dict) else None
+                    ),
                 ):
                     return
                 try:
@@ -4212,6 +4215,29 @@ def lark_webhook():
             msg_type="interactive",
         )
         return _lark_im_done()
+    elif smmachine.is_prod_batch_sm_command(original_text, mention_keys):
+        if chat_type == "group" and not bot_mentioned:
+            print("⏭️ /sm command ignored (bot not @mentioned in group)", flush=True)
+            return _lark_im_done()
+        if data.get("header", {}).get("event_type") == "im.message.receive_v1":
+            msg_obj = (data.get("event") or {}).get("message") or {}
+            thread_root = _prod_batch_thread_root_from_incoming_message(
+                msg_obj, message_id=message_id
+            )
+        else:
+            thread_root = (message_id or "").strip() or None
+        if thread_root:
+            _set_prod_batch_thread_root(chat_id, thread_root)
+        pb_send = make_prod_batch_thread_send(chat_id, thread_root=thread_root)
+        handled_sm, sm_reply = smmachine.handle_prod_batch_sm_command(
+            chat_id=chat_id,
+            send_message=pb_send,
+            thread_root_message_id=thread_root,
+        )
+        if handled_sm:
+            if sm_reply:
+                pb_send(chat_id, sm_reply)
+            return _lark_im_done()
     elif smmachine.is_prod_batch_bot_message(original_text, mention_keys):
         if chat_type == "group" and not bot_mentioned:
             print("⏭️ prod-batch command ignored (bot not @mentioned in group)", flush=True)

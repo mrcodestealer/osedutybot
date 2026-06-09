@@ -1801,6 +1801,414 @@ def is_prod_batch_bot_message(original_text: str, mention_keys: Sequence[str]) -
     return parse_prod_batch_bot_command(body) is not None
 
 
+# ---------------------------------------------------------------------------
+# Lark bot: @bot /sm — env picker → action form → confirm (thread replies)
+# ---------------------------------------------------------------------------
+
+_PROD_BATCH_SM_CMD_RE = re.compile(r"/sm\b", re.I)
+
+_PROD_BATCH_SM_ENV_CODES: tuple[str, ...] = (
+    "NWR",
+    "NCH",
+    "TBR",
+    "TBP",
+    "MDR",
+    "DHS",
+    "CP",
+    "WF",
+)
+
+_PROD_BATCH_SM_ACTION_BUTTONS: tuple[tuple[str, str], ...] = (
+    ("set_maint", "Set maintenance"),
+    ("set_test", "Set test"),
+    ("set_both", "Set both"),
+    ("unset_maint", "Unset maintenance"),
+    ("unset_test", "Unset test"),
+    ("unset_both", "Unset both"),
+)
+
+_PROD_BATCH_SM_SESSIONS: dict[str, dict[str, Any]] = {}
+_PROD_BATCH_SM_SESSIONS_LOCK = threading.Lock()
+_PROD_BATCH_SM_SESSION_TTL_SEC = 7200
+
+
+def is_prod_batch_sm_command(original_text: str, mention_keys: Sequence[str]) -> bool:
+    body = _prod_batch_strip_mention_text(original_text, mention_keys)
+    return bool(_PROD_BATCH_SM_CMD_RE.search(body or ""))
+
+
+def _prod_batch_sm_cleanup_sessions() -> None:
+    now = time.time()
+    with _PROD_BATCH_SM_SESSIONS_LOCK:
+        expired = [
+            sid
+            for sid, ent in _PROD_BATCH_SM_SESSIONS.items()
+            if now - float(ent.get("created_at") or 0) > _PROD_BATCH_SM_SESSION_TTL_SEC
+        ]
+        for sid in expired:
+            _PROD_BATCH_SM_SESSIONS.pop(sid, None)
+
+
+def _prod_batch_sm_get_session(session_id: str) -> dict[str, Any] | None:
+    sid = (session_id or "").strip()
+    if not sid:
+        return None
+    with _PROD_BATCH_SM_SESSIONS_LOCK:
+        ent = _PROD_BATCH_SM_SESSIONS.get(sid)
+        if not ent:
+            return None
+        if time.time() - float(ent.get("created_at") or 0) > _PROD_BATCH_SM_SESSION_TTL_SEC:
+            _PROD_BATCH_SM_SESSIONS.pop(sid, None)
+            return None
+        return dict(ent)
+
+
+def _prod_batch_sm_touch_session(session_id: str, **updates: Any) -> dict[str, Any] | None:
+    sid = (session_id or "").strip()
+    if not sid:
+        return None
+    with _PROD_BATCH_SM_SESSIONS_LOCK:
+        ent = _PROD_BATCH_SM_SESSIONS.get(sid)
+        if not ent:
+            return None
+        ent.update(updates)
+        ent["created_at"] = time.time()
+        return dict(ent)
+
+
+def _prod_batch_form_field_text(
+    name: str,
+    *,
+    action_obj: dict | None = None,
+    parsed: dict | None = None,
+) -> str:
+    def _text(v: Any) -> str:
+        if v is None:
+            return ""
+        if isinstance(v, str):
+            return v.strip()
+        if isinstance(v, (int, float)):
+            return str(v).strip()
+        if isinstance(v, dict):
+            for key in ("text", "value", "input", "content"):
+                t = _text(v.get(key))
+                if t:
+                    return t
+        if isinstance(v, list) and v:
+            return _text(v[0])
+        return ""
+
+    if isinstance(action_obj, dict):
+        fv = action_obj.get("form_value")
+        if isinstance(fv, dict):
+            t = _text(fv.get(name))
+            if t:
+                return t
+    if isinstance(parsed, dict):
+        fv = parsed.get("form_value")
+        if isinstance(fv, dict):
+            t = _text(fv.get(name))
+            if t:
+                return t
+        t = _text(parsed.get(name))
+        if t:
+            return t
+    return ""
+
+
+def _prod_batch_target_lines_from_text(raw: str) -> list[str]:
+    lines: list[str] = []
+    for line in (raw or "").replace("\r", "\n").split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        lines.extend(_prod_batch_split_target_tokens(line))
+    return lines
+
+
+def _prod_batch_sm_refresh_thread_root(chat_id: str, thread_root: str | None) -> None:
+    if not thread_root:
+        return
+    try:
+        import main as _main_mod  # noqa: WPS433
+
+        _main_mod._set_prod_batch_thread_root(chat_id, thread_root)
+    except Exception:
+        pass
+
+
+def _prod_batch_sm_env_picker_card(session_id: str) -> dict:
+    elements: list[dict] = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": "**Step 1 — Choose environment**",
+            },
+        }
+    ]
+    for i in range(0, len(_PROD_BATCH_SM_ENV_CODES), 4):
+        chunk = _PROD_BATCH_SM_ENV_CODES[i : i + 4]
+        columns = []
+        for env in chunk:
+            columns.append(
+                {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "elements": [
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": env},
+                            "type": "primary",
+                            "behaviors": [
+                                {
+                                    "type": "callback",
+                                    "value": {
+                                        "k": PROD_BATCH_BOT_CARD_KEY,
+                                        "a": "sm_env",
+                                        "s": session_id,
+                                        "e": env,
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                }
+            )
+        elements.append({"tag": "column_set", "flex_mode": "bisect", "columns": columns})
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": "Set machine (/sm)"[:80]},
+        },
+        "body": {"elements": elements},
+    }
+
+
+def _prod_batch_sm_action_form_card(session_id: str, env_code: str) -> dict:
+    form_elements: list[dict] = [
+        {
+            "tag": "input",
+            "name": "machines",
+            "input_type": "multiline_text",
+            "rows": 6,
+            "auto_resize": True,
+            "max_rows": 15,
+            "width": "fill",
+            "label": {"tag": "plain_text", "content": "Machine name(s)"},
+            "label_position": "top",
+            "placeholder": {
+                "tag": "plain_text",
+                "content": "One per line — e.g. NCH1299",
+            },
+            "required": True,
+            "max_length": 4000,
+        },
+    ]
+    for row_start in (0, 3):
+        row_actions = _PROD_BATCH_SM_ACTION_BUTTONS[row_start : row_start + 3]
+        columns = []
+        for act, label in row_actions:
+            columns.append(
+                {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "elements": [
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": label[:40]},
+                            "type": "primary" if act.startswith("set_") else "default",
+                            "form_action_type": "submit",
+                            "behaviors": [
+                                {
+                                    "type": "callback",
+                                    "value": {
+                                        "k": PROD_BATCH_BOT_CARD_KEY,
+                                        "a": "sm_action",
+                                        "s": session_id,
+                                        "act": act,
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                }
+            )
+        form_elements.append({"tag": "column_set", "flex_mode": "bisect", "columns": columns})
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "blue",
+            "title": {
+                "tag": "plain_text",
+                "content": f"Set machine — {env_code}"[:80],
+            },
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": (
+                            f"**Environment:** {env_code}\n\n"
+                            "**Step 2** — Enter machine name(s), then tap an action button."
+                        ),
+                    },
+                },
+                {"tag": "form", "name": "sm_batch_form", "elements": form_elements},
+            ]
+        },
+    }
+
+
+def handle_prod_batch_sm_command(
+    *,
+    chat_id: str,
+    send_message: Callable[..., Any],
+    thread_root_message_id: str | None = None,
+) -> tuple[bool, str | None]:
+    """Start ``/sm`` wizard — environment picker card in thread."""
+    _prod_batch_cleanup_pending()
+    _prod_batch_sm_cleanup_sessions()
+    session_id = uuid.uuid4().hex[:16]
+    with _PROD_BATCH_SM_SESSIONS_LOCK:
+        _PROD_BATCH_SM_SESSIONS[session_id] = {
+            "chat_id": chat_id,
+            "thread_root_message_id": (thread_root_message_id or "").strip() or None,
+            "env_code": None,
+            "created_at": time.time(),
+        }
+    card = _prod_batch_sm_env_picker_card(session_id)
+    _prod_batch_send_lark_card(chat_id, card, send_message)
+    return True, None
+
+
+def _prod_batch_sm_on_env_picked(
+    parsed: dict[str, Any],
+    chat_id: str,
+    send_message: Callable[..., Any],
+) -> bool:
+    session_id = str(parsed.get("s") or "").strip()
+    env_code = str(parsed.get("e") or "").strip().upper()
+    session = _prod_batch_sm_get_session(session_id)
+    if not session:
+        send_message(chat_id, "⏭️ Session expired. Send `@bot /sm` again.")
+        return True
+    if env_code not in _PROD_BATCH_SM_ENV_CODES:
+        send_message(chat_id, f"❌ Unknown environment: {env_code!r}")
+        return True
+    if str(session.get("chat_id") or "") != chat_id:
+        send_message(chat_id, "❌ Session chat mismatch. Send `@bot /sm` again.")
+        return True
+    _prod_batch_sm_touch_session(session_id, env_code=env_code)
+    thread_root = (session.get("thread_root_message_id") or "").strip() or None
+    _prod_batch_sm_refresh_thread_root(chat_id, thread_root)
+    card = _prod_batch_sm_action_form_card(session_id, env_code)
+    _prod_batch_send_lark_card(chat_id, card, send_message)
+    return True
+
+
+def _prod_batch_sm_bot_prepare_confirm(
+    session_id: str,
+    env_code: str,
+    action: str,
+    target_lines: list[str],
+    *,
+    chat_id: str,
+    send_message: Callable[..., Any],
+    thread_root_message_id: str | None,
+) -> None:
+    site = _PROD_BATCH_ENV_TO_SITE.get(env_code) or env_code.lower()
+    matched, not_found, data_src = _prod_batch_lookup_target_rows(site, env_code, target_lines)
+    if "stuck" in data_src.lower() or "stalled" in data_src.lower():
+        send_message(chat_id, f"❌ {data_src}")
+        return
+    if not matched:
+        nf = ", ".join(not_found[:20]) if not_found else "(none parsed)"
+        send_message(chat_id, f"❌ No machines matched for **{env_code}**. Not found: {nf}")
+        return
+
+    token = uuid.uuid4().hex[:16]
+    with _PROD_BATCH_PENDING_LOCK:
+        _PROD_BATCH_PENDING[token] = {
+            "action": action,
+            "env_code": env_code,
+            "machines": matched,
+            "not_found": not_found,
+            "chat_id": chat_id,
+            "thread_root_message_id": (thread_root_message_id or "").strip() or None,
+            "created_at": time.time(),
+        }
+
+    card = _prod_batch_confirm_card(
+        token=token,
+        action=action,
+        env_code=env_code,
+        matched=matched,
+        not_found=not_found,
+        data_src=data_src,
+    )
+    _prod_batch_send_lark_card(chat_id, card, send_message)
+
+
+def _prod_batch_sm_on_action_submit(
+    parsed: dict[str, Any],
+    chat_id: str,
+    send_message: Callable[..., Any],
+    action_obj: dict | None,
+) -> bool:
+    session_id = str(parsed.get("s") or "").strip()
+    action = str(parsed.get("act") or "").strip()
+    session = _prod_batch_sm_get_session(session_id)
+    if not session:
+        send_message(chat_id, "⏭️ Session expired. Send `@bot /sm` again.")
+        return True
+    if str(session.get("chat_id") or "") != chat_id:
+        send_message(chat_id, "❌ Session chat mismatch. Send `@bot /sm` again.")
+        return True
+    env_code = str(session.get("env_code") or "").strip().upper()
+    if not env_code:
+        send_message(chat_id, "❌ Pick an environment first.")
+        return True
+    from prod_machine_batch import ACTION_LABELS
+
+    if action not in ACTION_LABELS:
+        send_message(chat_id, f"❌ Unknown action: {action!r}")
+        return True
+
+    machines_raw = _prod_batch_form_field_text(
+        "machines", action_obj=action_obj, parsed=parsed
+    )
+    target_lines = _prod_batch_target_lines_from_text(machines_raw)
+    if not target_lines:
+        send_message(chat_id, "❌ Enter at least one machine name in the text box.")
+        return True
+
+    thread_root = (session.get("thread_root_message_id") or "").strip() or None
+    _prod_batch_sm_refresh_thread_root(chat_id, thread_root)
+    send_message(
+        chat_id,
+        f"⏳ Checking live EGM (**{env_code}**) for **{ACTION_LABELS.get(action, action)}**…",
+    )
+    threading.Thread(
+        target=_prod_batch_sm_bot_prepare_confirm,
+        args=(session_id, env_code, action, target_lines),
+        kwargs={
+            "chat_id": chat_id,
+            "send_message": send_message,
+            "thread_root_message_id": thread_root,
+        },
+        daemon=True,
+    ).start()
+    return True
+
+
 def _prod_batch_scrape_stall_sec() -> int:
     try:
         return max(60, int((os.environ.get("PROD_BATCH_SCRAPE_STALL_SEC") or "180").strip()))
@@ -2705,6 +3113,7 @@ def handle_prod_batch_card_callback(
     *,
     chat_id: str,
     send_message: Callable[..., Any],
+    action_obj: dict | None = None,
 ) -> bool:
     key = str(parsed.get("k") or "").strip().lower()
     if key != PROD_BATCH_BOT_CARD_KEY:
@@ -2716,6 +3125,11 @@ def handle_prod_batch_card_callback(
     if job_id and action_btn == "job_cancel":
         _prod_batch_request_job_cancel(job_id, chat_id, send_message)
         return True
+
+    if action_btn == "sm_env":
+        return _prod_batch_sm_on_env_picked(parsed, chat_id, send_message)
+    if action_btn == "sm_action":
+        return _prod_batch_sm_on_action_submit(parsed, chat_id, send_message, action_obj)
 
     token = str(parsed.get("t") or "").strip()
     if not token:
@@ -2732,7 +3146,7 @@ def handle_prod_batch_card_callback(
         return True
 
     if action_btn == "cancel":
-        send_message(chat_id, "Cancelled — no machines were changed.")
+        send_message(chat_id, "Cancelled")
         return True
 
     if action_btn != "proceed":
@@ -2754,22 +3168,7 @@ def handle_prod_batch_card_callback(
         except Exception:
             pass
 
-    from prod_machine_batch import ACTION_LABELS, LARK_INTRO
-
     run_job_id = uuid.uuid4().hex
-    intro = LARK_INTRO.get(action, action)
-    lines = [
-        f"**{ACTION_LABELS.get(action, action)}** — started",
-        intro,
-        "",
-        "Tap **Cancel** below to stop and receive a live EGM done / not-done summary.",
-        "",
-    ]
-    for m in machines[:40]:
-        lines.append(f"• {m.get('belongs', '')} — {m.get('machine', '')}")
-    if len(machines) > 40:
-        lines.append(f"... and {len(machines) - 40} more")
-
     with _PROD_BATCH_JOBS_LOCK:
         _PROD_BATCH_JOBS[run_job_id] = {
             "status": "running",
@@ -2781,14 +3180,7 @@ def handle_prod_batch_card_callback(
             "cancel_summary_sent": False,
         }
 
-    _prod_batch_send_lark_md(
-        chat_id,
-        f"Started — {ACTION_LABELS.get(action, action)}",
-        "\n".join(lines),
-        send_message,
-        header_template="blue",
-        job_id=run_job_id,
-    )
+    send_message(chat_id, "Proceeding... Please wait...")
 
     threading.Thread(
         target=_run_prod_batch_bot_job_thread,
