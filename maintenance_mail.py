@@ -3660,7 +3660,7 @@ def _build_checkemail_timeline_steps_from_msgs(
     schedule_subj = ""
     schedule_body = ""
     seen_steps: set[str] = set()
-    _KIND_ORDER = {"schedule": 0, "cancel": 1, "uncancel": 2, "other": 3}
+    _KIND_ORDER = {"schedule": 0, "prolong": 1, "cancel": 2, "uncancel": 3, "other": 4}
     for msg, folder, ts in all_msgs:
         subj = _decode_mime_header(msg.get("Subject")) or ""
         parse_body = extract_checkemail_parse_body(msg)
@@ -3678,7 +3678,7 @@ def _build_checkemail_timeline_steps_from_msgs(
         if kind == "schedule":
             schedule_subj = subj
             schedule_body = parse_body
-        if kind == "cancel":
+        if kind in ("cancel", "prolong"):
             label, _tpl, elements, gamelist_md = _maint_mod.build_checkemail_step_preview(
                 kind=kind,
                 email_subject=subj,
@@ -3701,6 +3701,7 @@ def _build_checkemail_timeline_steps_from_msgs(
             )
             label = {
                 "schedule": "📅 Scheduled",
+                "prolong": "⏱️ Prolonged",
                 "uncancel": "✅ Uncancelled",
                 "other": "📧 Other",
             }.get(kind, kind)
@@ -4263,6 +4264,7 @@ def _record_processed(
     expires_on: str = "",
     is_cancelled_email: bool = False,
     is_uncancel_email: bool = False,
+    is_prolonged_email: bool = False,
 ) -> None:
     row: dict[str, Any] = {
         "imap_uid": str(imap_uid),
@@ -4297,6 +4299,8 @@ def _record_processed(
         row["is_cancelled_email"] = True
     if is_uncancel_email:
         row["is_uncancel_email"] = True
+    if is_prolonged_email:
+        row["is_prolonged_email"] = True
     entries.append(row)
 
 
@@ -4895,6 +4899,7 @@ class MaintenanceMailWatcher:
         token = self._get_token()
         is_cancel = maintenance.is_maintenance_cancelled_email(body)
         is_uncancel = maintenance.is_maintenance_uncancel_clarification_email(body)
+        is_prolong = maintenance.is_maintenance_prolonged_email(body)
         launched_names: list[str] = []
         launched_prior: list[str] = []
         prior: dict[str, Any] | None = None
@@ -4975,6 +4980,37 @@ class MaintenanceMailWatcher:
                         header_template=hdr_tpl,
                     )
                     self._send_lark_card(TARGET_CHAT_ID, main_card)
+        elif is_prolong:
+            prior = _find_prior_maintenance_entry(entries, display_subj, ticket_id)
+            table_game = maintenance.table_display_from_prior(prior) or None
+            launched_prior = list(prior.get("launched_names") or []) if prior else []
+            to_cp = len(launched_prior) > 0
+            if not to_cp and prior:
+                to_cp, launched_prior = maintenance.gamelist_has_launched(
+                    "\n".join(prior.get("table_names") or []),
+                    token,
+                )
+            if MAIL_VERBOSE:
+                print(
+                    f"[maint-mail] prolong uid={uid_s} prior={bool(prior)} "
+                    f"table_game={table_game!r} to_cp={to_cp}",
+                    flush=True,
+                )
+            if to_cp and not retry_confirm_only:
+                prolong_card = maintenance.build_prolonged_maintenance_card(
+                    email_subject=display_subj,
+                    email_body=body,
+                    table_game=table_game,
+                    prior=prior,
+                    received_at=when,
+                    launched_tables=launched_prior or None,
+                )
+                self._send_lark_card(TARGET_CHAT_ID, prolong_card)
+            elif MAIL_VERBOSE:
+                print(
+                    f"[maint-mail] prolong uid={uid_s} skip Lark (not on CP gamelist)",
+                    flush=True,
+                )
         else:
             to_cp, launched_names = maintenance.gamelist_has_launched(pipeline_in, token)
             if MAIL_VERBOSE and launched_names:
@@ -5021,7 +5057,9 @@ class MaintenanceMailWatcher:
                 "content_hash": chash,
                 "ticket_id": ticket_id,
             }
-            cp_names = list(launched_prior if is_cancel or is_uncancel else launched_names)
+            cp_names = list(
+                launched_prior if (is_cancel or is_uncancel or is_prolong) else launched_names
+            )
             if cp_names:
                 record_kw["table_names"] = cp_names
                 record_kw["launched_names"] = cp_names
@@ -5047,6 +5085,25 @@ class MaintenanceMailWatcher:
                 record_kw["is_uncancel_email"] = True
                 if prior:
                     snap = maintenance.maintenance_record_snapshot_from_prior(prior)
+                    for key in ("studio", "maint_date"):
+                        if snap.get(key) and not record_kw.get(key):
+                            record_kw[key] = snap[key]
+            elif is_prolong:
+                record_kw["is_prolonged_email"] = True
+                if prior:
+                    snap = maintenance.maintenance_record_snapshot_from_prior(prior)
+                    if not cp_names:
+                        cp_names = [
+                            str(x).strip()
+                            for x in (
+                                snap.get("launched_names") or snap.get("table_names") or []
+                            )
+                            if str(x).strip()
+                        ]
+                    if cp_names and not record_kw.get("table_names"):
+                        record_kw["table_names"] = cp_names
+                        record_kw["launched_names"] = cp_names
+                        record_kw["game_name"] = ", ".join(cp_names)
                     for key in ("studio", "maint_date"):
                         if snap.get(key) and not record_kw.get(key):
                             record_kw[key] = snap[key]
@@ -5097,6 +5154,15 @@ class MaintenanceMailWatcher:
                         reply_not_in_cp_email(
                             subject=subject, original_msg=msg
                         )
+                elif is_prolong:
+                    if to_cp:
+                        forward_maintenance_email(
+                            subject=subject, original_msg=msg
+                        )
+                    else:
+                        reply_not_in_cp_email(
+                            subject=subject, original_msg=msg
+                        )
                 elif to_cp:
                     forward_maintenance_email(
                         subject=subject, original_msg=msg
@@ -5134,7 +5200,9 @@ class MaintenanceMailWatcher:
         if should_confirm:
             if to_cp:
                 confirm_games = list(
-                    launched_prior if (is_cancel or is_uncancel) else launched_names
+                    launched_prior
+                    if (is_cancel or is_uncancel or is_prolong)
+                    else launched_names
                 )
             else:
                 confirm_games = list(candidate_names)
@@ -5172,7 +5240,11 @@ class MaintenanceMailWatcher:
         kind = (
             "cancelled"
             if is_cancel
-            else ("uncancel" if is_uncancel else "processed")
+            else (
+                "uncancel"
+                if is_uncancel
+                else ("prolonged" if is_prolong else "processed")
+            )
         )
         print(
             f"[maint-mail] {kind} {folder} uid={uid_s} ticket={ticket_id!r} "

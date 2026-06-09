@@ -442,6 +442,24 @@ _COMPLETED_BODY_RE = re.compile(
 )
 
 
+_PROLONG_BODY_RE = re.compile(
+    r"maintenance\s+has\s+been\s+prolonged",
+    re.IGNORECASE,
+)
+
+
+def is_maintenance_prolonged_email(body: str | None) -> bool:
+    """True when Evolution extends an existing maintenance window (no table list in body)."""
+    text = (body or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not text.strip():
+        return False
+    if is_maintenance_cancelled_email(text) or is_maintenance_uncancel_clarification_email(
+        text
+    ):
+        return False
+    return bool(_PROLONG_BODY_RE.search(text))
+
+
 def is_maintenance_completed_email(body: str | None) -> bool:
     """
     Service Desk «maintenance successfully accomplished» notice with summary +
@@ -492,6 +510,8 @@ def extract_best_maintenance_segment(body: str | None) -> str:
             score = 100
         elif is_maintenance_cancelled_email(c):
             score = 90
+        elif is_maintenance_prolonged_email(c):
+            score = 88
         elif re.search(r"going\s+to\s+take\s+place", c, re.IGNORECASE):
             score = 80
         elif _FOLLOWING_TABLES_UNAVAILABLE_RE.search(c):
@@ -536,6 +556,8 @@ def is_checkemail_bot_stub_body(
     if is_maintenance_uncancel_clarification_email(text):
         return False
     if is_maintenance_cancelled_email(text):
+        return False
+    if is_maintenance_prolonged_email(text):
         return False
 
     combined = f"{subj}\n{text}"
@@ -583,6 +605,8 @@ def classify_checkemail_step_kind(
         return "uncancel"
     if is_maintenance_cancelled_email(combined):
         return "cancel"
+    if is_maintenance_prolonged_email(text):
+        return "prolong"
     pipeline = f"{subj}\n{text}"
     if extract_candidate_game_names(pipeline):
         return "schedule"
@@ -658,6 +682,40 @@ def extract_uncancel_notice_text(body: str | None) -> str:
                 break
         else:
             parts.append("We apologize for the inconvenience.")
+    return " ".join(parts)
+
+
+def extract_prolong_notice_text(body: str | None) -> str:
+    """Core prolongation lines for the Lark card (notice + follow-up + apology)."""
+
+    def _norm_line(text: str) -> str:
+        return re.sub(r"\s+", " ", (text or "").strip())
+
+    lines = [
+        _clean_email_line(ln)
+        for ln in (body or "").replace("\r\n", "\n").replace("\r", "\n").splitlines()
+    ]
+    parts: list[str] = []
+    for ln in lines:
+        if not ln:
+            continue
+        if _PROLONG_BODY_RE.search(ln):
+            parts.append(_norm_line(ln))
+        elif re.search(
+            r"^once\s+maintenance\s+is\s+accomplished", ln, re.IGNORECASE
+        ):
+            parts.append(_norm_line(ln))
+        elif re.search(r"^we\s+apologize\s+for\s+the\s+inconvenience", ln, re.I):
+            parts.append(_norm_line(ln))
+    if not parts or not any(_PROLONG_BODY_RE.search(p) for p in parts):
+        parts.insert(
+            0,
+            "This message to inform you that the Equipment maintenance has been prolonged.",
+        )
+    if not any("accomplished" in x.lower() for x in parts):
+        parts.append("Once maintenance is accomplished we will let you know.")
+    if not any("apolog" in x.lower() for x in parts):
+        parts.append("We apologize for the inconvenience.")
     return " ".join(parts)
 
 
@@ -1059,6 +1117,13 @@ def synthesize_checkemail_body_from_state_entry(ent: dict[str, Any]) -> str:
             "This message is to inform that the Technical maintenance has been cancelled.\n\n"
             "We apologize for the inconvenience."
         )
+    if ent.get("is_prolonged_email"):
+        return (
+            "Dear Casino Team,\n\n"
+            "This message to inform you that the Equipment maintenance has been prolonged.\n\n"
+            "Once maintenance is accomplished we will let you know.\n\n"
+            "We apologize for the inconvenience."
+        )
     names = [str(n).strip() for n in (ent.get("table_names") or []) if str(n).strip()]
     if not names:
         gn = str(ent.get("game_name") or "").strip()
@@ -1086,13 +1151,18 @@ def build_checkemail_steps_from_state_entries(
     steps: list[dict[str, Any]] = []
     schedule_subj = ""
     schedule_body = ""
-    _KIND_ORDER = {"schedule": 0, "cancel": 1, "uncancel": 2, "other": 3}
+    _KIND_ORDER = {"schedule": 0, "prolong": 1, "cancel": 2, "uncancel": 3, "other": 4}
     for ent in entries:
         subj = str(ent.get("title") or "")
         body = synthesize_checkemail_body_from_state_entry(ent)
-        kind = "cancel" if ent.get("is_cancelled_email") else (
-            "uncancel" if ent.get("is_uncancel_email") else "schedule"
-        )
+        if ent.get("is_cancelled_email"):
+            kind = "cancel"
+        elif ent.get("is_uncancel_email"):
+            kind = "uncancel"
+        elif ent.get("is_prolonged_email"):
+            kind = "prolong"
+        else:
+            kind = "schedule"
         folder = "maintenance.json (watcher)"
         when_raw = str(ent.get("processed_at") or "")
         when = format_received_at(when_raw) if when_raw else ""
@@ -1150,14 +1220,14 @@ def merge_checkemail_timeline_steps(
         return imap_steps
     if not imap_steps:
         return state_steps
-    _KIND_ORDER = {"schedule": 0, "cancel": 1, "uncancel": 2, "other": 3}
+    _KIND_ORDER = {"schedule": 0, "prolong": 1, "cancel": 2, "uncancel": 3, "other": 4}
     state_by_kind: dict[str, dict[str, Any]] = {}
     for st in state_steps:
         k = str(st.get("kind") or "other")
         state_by_kind[k] = st
     merged: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for kind in ("schedule", "cancel", "uncancel", "other"):
+    for kind in ("schedule", "prolong", "cancel", "uncancel", "other"):
         if kind in state_by_kind:
             merged.append(state_by_kind[kind])
             seen.add(kind)
@@ -1191,6 +1261,8 @@ def find_prior_maintenance_entry(
             return False
         if ent.get("is_cancelled_email"):
             return False
+        if ent.get("is_prolonged_email"):
+            return False
         return True
 
     for ent in reversed(entries):
@@ -1220,6 +1292,18 @@ def lookup_prior_maintenance_for_cancel(
     return find_prior_maintenance_entry(
         load_maintenance_state_entries(), subj, tid
     )
+
+
+def build_prolonged_card_header(subject: str, email_body: str | None = None) -> str:
+    """``⚠️ [SD-7050222] Equipment maintenance - Prolonged``."""
+    subj = resolve_maintenance_subject(subject, email_body)
+    if "[service desk]" in subj.lower():
+        meta = parse_service_desk_subject_metadata(subj)
+        sd = meta.get("ticket_sd") or extract_ticket_card_title(subj, email_body) or "SD-?"
+        maint = meta.get("maintenance_type") or "Maintenance"
+        return _truncate_header(f"⚠️ [{sd}] {maint} - Prolonged")
+    ticket = ticket_id_tinc_style(subj, email_body) or "Maintenance"
+    return _truncate_header(f"⚠️ {ticket} - Prolonged")
 
 
 def build_cancelled_card_header_title(subject: str, extra_text: str | None = None) -> str:
@@ -1644,6 +1728,110 @@ def build_cancelled_maintenance_card(
     )
 
 
+def build_prolonged_card_elements(
+    *,
+    info: dict[str, Any] | None = None,
+    email_subject: str | None = None,
+    email_body: str | None = None,
+    table_game: str | None = None,
+    prior: dict[str, Any] | None = None,
+    launched_tables: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Prolongation card — Date + Table from prior schedule + prolong notice."""
+    inf = info if info is not None else extract_info(
+        email_body or "", email_subject=email_subject
+    )
+    if prior is None:
+        prior = lookup_prior_maintenance_schedule(email_subject, email_body)
+    inf = enrich_info_from_prior(
+        inf, prior, email_subject=email_subject, email_body=email_body
+    )
+    studio, date = _studio_date_for_cancel(
+        inf, email_subject=email_subject, email_body=email_body
+    )
+    if prior:
+        pst = str(prior.get("studio") or "").strip()
+        if pst and studio in ("", "Unknown"):
+            studio = pst
+        pdt = str(prior.get("maint_date") or "").strip()
+        if pdt and date in ("", "Unknown"):
+            date = pdt
+        prior_title = str(prior.get("title") or "").strip()
+        if prior_title and date in ("", "Unknown"):
+            sd_d = parse_service_desk_date_from_subject(prior_title)
+            if sd_d:
+                date = sd_d
+    tg = (table_game or "").strip()
+    if tg and tg.lower() != "unknown":
+        table = tg
+    elif launched_tables:
+        table = ", ".join(launched_tables)
+    else:
+        table = table_display_from_prior(prior) or _scheduled_table_display(
+            inf,
+            launched_tables=launched_tables,
+            email_subject=email_subject,
+            email_body=email_body,
+        )
+    notice = extract_prolong_notice_text(email_body)
+    if prior and (prior.get("title") or "").strip():
+        original = str(prior["title"]).strip()
+    else:
+        original = resolve_maintenance_subject(email_subject, email_body) or _email_ref_line(
+            inf, email_subject, email_body
+        )
+    return [
+        _card_labeled_field("Date", date),
+        _card_labeled_field("Table", table),
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": notice},
+        },
+        {"tag": "hr"},
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"<font color='grey'>📧 Original: {original}</font>",
+            },
+        },
+    ]
+
+
+def build_prolonged_maintenance_card(
+    *,
+    email_subject: str,
+    email_body: str | None = None,
+    table_game: str | None = None,
+    prior: dict[str, Any] | None = None,
+    received_at: str | None = None,
+    launched_tables: list[str] | None = None,
+) -> dict[str, Any]:
+    """Full orange interactive card for a maintenance prolongation notice."""
+    info = extract_info(email_body or "", email_subject=email_subject)
+    if prior is None:
+        prior = lookup_prior_maintenance_schedule(email_subject, email_body)
+    if launched_tables is None and prior:
+        launched_tables = table_names_from_prior_entry(prior) or None
+    return build_maintenance_card(
+        email_subject=email_subject,
+        received_at=received_at,
+        summary_section="",
+        body_elements=build_prolonged_card_elements(
+            info=info,
+            email_subject=email_subject,
+            email_body=email_body,
+            table_game=table_game,
+            prior=prior,
+            launched_tables=launched_tables,
+        ),
+        email_body=email_body,
+        show_meta=False,
+        header_title=build_prolonged_card_header(email_subject, email_body),
+        header_template="orange",
+    )
+
+
 def build_cancelled_summary(
     *,
     table_game: str,
@@ -1781,11 +1969,13 @@ def classify_maintenance_card_kind(
     email_body: str | None = None,
 ) -> str:
     """
-    ``in_progress`` | ``fixed`` | ``completed`` | ``scheduled`` | ``uncancel`` for picture-style Lark cards.
-    Cancelled emails are handled separately.
+    ``in_progress`` | ``fixed`` | ``completed`` | ``scheduled`` | ``uncancel`` | ``prolonged``
+    for picture-style Lark cards. Cancelled emails are handled separately.
     """
     body = email_body or ""
     subj = resolve_maintenance_subject(email_subject, body)
+    if is_maintenance_prolonged_email(body):
+        return "prolonged"
     if is_maintenance_uncancel_clarification_email(body):
         return "uncancel"
     if is_maintenance_completed_email(body):
@@ -2755,6 +2945,7 @@ def build_maintenance_notice(
     if prior is None and (
         is_maintenance_cancelled_email(email_text)
         or is_maintenance_uncancel_clarification_email(email_text)
+        or is_maintenance_prolonged_email(email_text)
     ):
         prior = lookup_prior_maintenance_schedule(email_subject, email_text)
     info = extract_info(email_text, email_subject=email_subject)
@@ -2780,6 +2971,19 @@ def build_maintenance_notice(
             "green",
             "",
             build_uncancelled_card_elements(
+                info=info,
+                email_subject=email_subject,
+                email_body=email_text,
+                prior=prior,
+                launched_tables=launched_tables,
+            ),
+        )
+    if kind == "prolonged":
+        return (
+            build_prolonged_card_header(email_subject or "", email_text),
+            "orange",
+            "",
+            build_prolonged_card_elements(
                 info=info,
                 email_subject=email_subject,
                 email_body=email_text,
@@ -3716,19 +3920,26 @@ def process_maintenance_pipeline(
         )
 
     candidates = extract_candidate_game_names(email_text)
+    prior_for_pipeline: dict[str, Any] | None = None
+    if not candidates and is_maintenance_prolonged_email(email_text):
+        prior_for_pipeline = lookup_prior_maintenance_schedule(
+            resolved_subj, email_text
+        )
+        if prior_for_pipeline:
+            candidates = table_names_from_prior_entry(prior_for_pipeline)
     if not candidates:
         h, t, b, el = build_maintenance_notice(
             email_text,
             email_subject=resolved_subj,
             launched_tables=[],
+            prior=prior_for_pipeline,
         )
-        return (
-            "⚠️ 未能从邮件中识别游戏/表名。",
-            h,
-            t,
-            b,
-            el,
+        msg = (
+            "⚠️ 延期邮件：未能从同标题 schedule 记录识别游戏/表名。"
+            if is_maintenance_prolonged_email(email_text)
+            else "⚠️ 未能从邮件中识别游戏/表名。"
         )
+        return (msg, h, t, b, el)
 
     launched_list: list[str] = []
     not_cp_list: list[str] = []
@@ -3757,6 +3968,7 @@ def process_maintenance_pipeline(
         email_text,
         email_subject=resolved_subj,
         launched_tables=launched_list,
+        prior=prior_for_pipeline,
     )
 
     return msg1, hdr_title, hdr_tpl, msg2, card_el
@@ -3777,6 +3989,7 @@ def _gather_checkemail_context(
 ) -> dict[str, Any]:
     """Shared parse + card preview data for ``/checkemail``."""
     matched_cancel = is_maintenance_cancelled_email(email_body)
+    matched_prolong = is_maintenance_prolonged_email(email_body)
     use_schedule = bool((schedule_body or "").strip())
     ex_subj = (schedule_subject or email_subject) or ""
     raw_ex = (schedule_body or email_body) or ""
@@ -3825,7 +4038,11 @@ def _gather_checkemail_context(
                     info["start_time"] = ss
                 if info.get("end_time") == "Unknown" and se != "Unknown":
                     info["end_time"] = se
-    if matched_cancel and not use_schedule:
+    if (matched_cancel or matched_prolong) and not use_schedule:
+        prior_for_info = lookup_prior_maintenance_schedule(email_subject, email_body)
+        info = enrich_info_from_prior(
+            info, prior_for_info, email_subject=email_subject, email_body=email_body
+        )
         sd_start, sd_end = parse_service_desk_times_from_subject(
             resolve_maintenance_subject(email_subject, email_body)
         )
@@ -3881,6 +4098,31 @@ def _gather_checkemail_context(
             schedule_subject=schedule_subject,
             schedule_body=schedule_body,
         )
+    elif matched_prolong:
+        prior_for_card = lookup_prior_maintenance_schedule(
+            email_subject, email_body
+        )
+        card_hdr = build_prolonged_card_header(email_subject, email_body)
+        card_tpl = "orange"
+        if not tg or tg.lower() == "unknown":
+            if (schedule_body or "").strip():
+                sch_names = extract_candidate_game_names(
+                    f"{(schedule_subject or email_subject or '').strip()}\n{schedule_body}"
+                )
+                if sch_names:
+                    tg = ", ".join(sch_names)
+            if (not tg or tg.lower() == "unknown") and prior_for_card:
+                pt = table_display_from_prior(prior_for_card)
+                if pt:
+                    tg = pt
+        card_els = build_prolonged_card_elements(
+            info=info,
+            email_subject=email_subject,
+            email_body=email_body,
+            prior=prior_for_card,
+            table_game=tg or None,
+            launched_tables=launched_tables,
+        )
     else:
         card_hdr, card_tpl, _md, card_els = build_maintenance_notice(
             ex_body,
@@ -3891,7 +4133,11 @@ def _gather_checkemail_context(
     prior = (
         lookup_prior_maintenance_for_cancel(email_subject, email_body)
         if matched_cancel
-        else None
+        else (
+            lookup_prior_maintenance_schedule(email_subject, email_body)
+            if matched_prolong
+            else None
+        )
     )
     gamelist_md = ""
     if gamelist_configured() and tok and candidates:
@@ -3911,6 +4157,7 @@ def _gather_checkemail_context(
 
     return {
         "matched_cancel": matched_cancel,
+        "matched_prolong": matched_prolong,
         "use_schedule": use_schedule,
         "schedule_resolved": schedule_resolved,
         "email_subject": email_subject,
@@ -4113,15 +4360,17 @@ def build_checkemail_step_preview(
         "schedule": "📅 Scheduled",
         "cancel": "❌ Cancelled",
         "uncancel": "✅ Uncancelled",
+        "prolong": "⏱️ Prolonged",
         "other": "📧 Other",
     }
     templates = {
         "schedule": "red",
         "cancel": "red",
         "uncancel": "green",
+        "prolong": "orange",
         "other": "blue",
     }
-    if kind == "cancel":
+    if kind in ("cancel", "prolong"):
         ctx = _gather_checkemail_context(
             email_subject=email_subject,
             email_body=email_body,
@@ -4142,7 +4391,7 @@ def build_checkemail_step_preview(
         folder=folder,
         tenant_access_token=tenant_access_token,
     )
-    if kind in ("schedule", "uncancel") and ctx.get("card_els"):
+    if kind in ("schedule", "uncancel", "prolong") and ctx.get("card_els"):
         return (
             labels.get(kind, kind),
             ctx.get("card_tpl") or templates.get(kind, "blue"),
