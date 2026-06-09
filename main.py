@@ -2427,6 +2427,16 @@ def _lark_http_card_callback_ok():
     return Response(b"{}", status=200, mimetype="application/json")
 
 
+def _lark_http_card_callback_response(body: dict) -> Response:
+    """Return card.callback body (toast and/or in-place card update) within the 3s window."""
+    print(f"[lark] HTTP 200 card callback response keys={list(body.keys())!r}", flush=True)
+    return Response(
+        json.dumps(body, ensure_ascii=False),
+        status=200,
+        mimetype="application/json",
+    )
+
+
 def _lark_parse_card_action_value(val):
     # type: (object) -> Optional[dict]
     """Decode ``event.action.value`` (object or JSON string)."""
@@ -2942,6 +2952,19 @@ def lark_webhook():
         chat_id_ca, sender_id_ca, val_ca, eid_ca = card_resolved
         if sender_id_ca and sender_id_ca == BOT_OPEN_ID:
             return _lark_http_card_callback_ok()
+        parsed_sync = _lark_parse_card_action_value(val_ca)
+        if isinstance(parsed_sync, dict):
+            thread_r = str(parsed_sync.get("r") or "").strip()
+            if thread_r and chat_id_ca:
+                _set_prod_batch_thread_root(chat_id_ca, thread_r)
+            sm_sync = smmachine.try_prod_batch_sm_env_card_response(
+                parsed_sync,
+                chat_id=chat_id_ca or "",
+            )
+            if sm_sync is not None:
+                if eid_ca:
+                    _remember_processed_message_id(eid_ca)
+                return _lark_http_card_callback_response(sm_sync)
         # Never wait on ``processed_lock`` in this thread — Lark times out ~3s; lock contention → ``code: undefined``.
         def _run_card_callback_worker() -> None:
             if eid_ca and _remember_processed_message_id(eid_ca):
@@ -2977,6 +3000,10 @@ def lark_webhook():
                 ev_ca = data.get("event") if isinstance(data.get("event"), dict) else {}
                 op_ca = ev_ca.get("operator") if isinstance(ev_ca.get("operator"), dict) else {}
                 parsed_ca = _lark_parse_card_action_value(val_ca)
+                if isinstance(parsed_ca, dict):
+                    thread_r = str(parsed_ca.get("r") or "").strip()
+                    if thread_r and chat_id_ca:
+                        _set_prod_batch_thread_root(chat_id_ca, thread_r)
                 if isinstance(parsed_ca, dict) and str(parsed_ca.get("k") or "").strip().lower() == "test_hi":
                     at_id = (
                         (op_ca.get("open_id") or "").strip()

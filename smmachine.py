@@ -1830,6 +1830,85 @@ _PROD_BATCH_SM_ACTION_BUTTONS: tuple[tuple[str, str], ...] = (
 _PROD_BATCH_SM_SESSIONS: dict[str, dict[str, Any]] = {}
 _PROD_BATCH_SM_SESSIONS_LOCK = threading.Lock()
 _PROD_BATCH_SM_SESSION_TTL_SEC = 7200
+_PROD_BATCH_SM_STATE_FILE = (
+    os.environ.get("PROD_BATCH_SM_STATE_FILE") or ".prod_batch_sm_sessions.json"
+).strip()
+_PROD_BATCH_SM_LOADED = False
+
+
+def _prod_batch_sm_state_path() -> Path:
+    p = Path(_PROD_BATCH_SM_STATE_FILE)
+    if not p.is_absolute():
+        p = Path(__file__).resolve().parent / p
+    return p
+
+
+def _prod_batch_sm_load_sessions_from_disk() -> None:
+    global _PROD_BATCH_SM_LOADED
+    path = _prod_batch_sm_state_path()
+    if not path.is_file():
+        _PROD_BATCH_SM_LOADED = True
+        return
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            now = time.time()
+            for sid, ent in raw.items():
+                if not isinstance(ent, dict):
+                    continue
+                if now - float(ent.get("created_at") or 0) > _PROD_BATCH_SM_SESSION_TTL_SEC:
+                    continue
+                _PROD_BATCH_SM_SESSIONS[str(sid)] = ent
+    except Exception as exc:
+        print(f"[prod_batch_sm] load sessions failed: {exc!r}", flush=True)
+    _PROD_BATCH_SM_LOADED = True
+
+
+def _prod_batch_sm_save_sessions_to_disk() -> None:
+    path = _prod_batch_sm_state_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _PROD_BATCH_SM_SESSIONS_LOCK:
+            payload = dict(_PROD_BATCH_SM_SESSIONS)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        print(f"[prod_batch_sm] save sessions failed: {exc!r}", flush=True)
+
+
+def _prod_batch_sm_ensure_sessions_loaded() -> None:
+    if _PROD_BATCH_SM_LOADED:
+        return
+    with _PROD_BATCH_SM_SESSIONS_LOCK:
+        if not _PROD_BATCH_SM_LOADED:
+            _prod_batch_sm_load_sessions_from_disk()
+
+
+def _prod_batch_sm_chat_match(stored: str, incoming: str) -> bool:
+    a = (stored or "").strip()
+    b = (incoming or "").strip()
+    return bool(a and b and a == b)
+
+
+def _prod_batch_sm_upsert_session(
+    session_id: str,
+    *,
+    chat_id: str,
+    thread_root_message_id: str | None = None,
+    env_code: str | None = None,
+) -> dict[str, Any]:
+    sid = (session_id or "").strip()
+    _prod_batch_sm_ensure_sessions_loaded()
+    with _PROD_BATCH_SM_SESSIONS_LOCK:
+        ent = dict(_PROD_BATCH_SM_SESSIONS.get(sid) or {})
+        ent["chat_id"] = (chat_id or "").strip()
+        if thread_root_message_id:
+            ent["thread_root_message_id"] = (thread_root_message_id or "").strip() or None
+        if env_code:
+            ent["env_code"] = (env_code or "").strip().upper()
+        ent["created_at"] = time.time()
+        _PROD_BATCH_SM_SESSIONS[sid] = ent
+    _prod_batch_sm_save_sessions_to_disk()
+    return dict(ent)
 
 
 def is_prod_batch_sm_command(original_text: str, mention_keys: Sequence[str]) -> bool:
@@ -1839,6 +1918,8 @@ def is_prod_batch_sm_command(original_text: str, mention_keys: Sequence[str]) ->
 
 def _prod_batch_sm_cleanup_sessions() -> None:
     now = time.time()
+    changed = False
+    _prod_batch_sm_ensure_sessions_loaded()
     with _PROD_BATCH_SM_SESSIONS_LOCK:
         expired = [
             sid
@@ -1847,12 +1928,16 @@ def _prod_batch_sm_cleanup_sessions() -> None:
         ]
         for sid in expired:
             _PROD_BATCH_SM_SESSIONS.pop(sid, None)
+            changed = True
+    if changed:
+        _prod_batch_sm_save_sessions_to_disk()
 
 
 def _prod_batch_sm_get_session(session_id: str) -> dict[str, Any] | None:
     sid = (session_id or "").strip()
     if not sid:
         return None
+    _prod_batch_sm_ensure_sessions_loaded()
     with _PROD_BATCH_SM_SESSIONS_LOCK:
         ent = _PROD_BATCH_SM_SESSIONS.get(sid)
         if not ent:
@@ -1867,13 +1952,16 @@ def _prod_batch_sm_touch_session(session_id: str, **updates: Any) -> dict[str, A
     sid = (session_id or "").strip()
     if not sid:
         return None
+    _prod_batch_sm_ensure_sessions_loaded()
     with _PROD_BATCH_SM_SESSIONS_LOCK:
         ent = _PROD_BATCH_SM_SESSIONS.get(sid)
         if not ent:
             return None
         ent.update(updates)
         ent["created_at"] = time.time()
-        return dict(ent)
+        out = dict(ent)
+    _prod_batch_sm_save_sessions_to_disk()
+    return out
 
 
 def _prod_batch_form_field_text(
@@ -1937,7 +2025,7 @@ def _prod_batch_sm_refresh_thread_root(chat_id: str, thread_root: str | None) ->
         pass
 
 
-def _prod_batch_sm_env_picker_card(session_id: str) -> dict:
+def _prod_batch_sm_env_picker_card(session_id: str, *, thread_root: str | None = None) -> dict:
     elements: list[dict] = [
         {
             "tag": "div",
@@ -1947,10 +2035,19 @@ def _prod_batch_sm_env_picker_card(session_id: str) -> dict:
             },
         }
     ]
+    thread_root = (thread_root or "").strip() or None
     for i in range(0, len(_PROD_BATCH_SM_ENV_CODES), 4):
         chunk = _PROD_BATCH_SM_ENV_CODES[i : i + 4]
         columns = []
         for env in chunk:
+            cb_value: dict[str, Any] = {
+                "k": PROD_BATCH_BOT_CARD_KEY,
+                "a": "sm_env",
+                "s": session_id,
+                "e": env,
+            }
+            if thread_root:
+                cb_value["r"] = thread_root
             columns.append(
                 {
                     "tag": "column",
@@ -1964,12 +2061,7 @@ def _prod_batch_sm_env_picker_card(session_id: str) -> dict:
                             "behaviors": [
                                 {
                                     "type": "callback",
-                                    "value": {
-                                        "k": PROD_BATCH_BOT_CARD_KEY,
-                                        "a": "sm_env",
-                                        "s": session_id,
-                                        "e": env,
-                                    },
+                                    "value": cb_value,
                                 }
                             ],
                         }
@@ -1988,7 +2080,13 @@ def _prod_batch_sm_env_picker_card(session_id: str) -> dict:
     }
 
 
-def _prod_batch_sm_action_form_card(session_id: str, env_code: str) -> dict:
+def _prod_batch_sm_action_form_card(
+    session_id: str,
+    env_code: str,
+    *,
+    thread_root: str | None = None,
+) -> dict:
+    thread_root = (thread_root or "").strip() or None
     form_elements: list[dict] = [
         {
             "tag": "input",
@@ -2012,6 +2110,14 @@ def _prod_batch_sm_action_form_card(session_id: str, env_code: str) -> dict:
         row_actions = _PROD_BATCH_SM_ACTION_BUTTONS[row_start : row_start + 3]
         columns = []
         for act, label in row_actions:
+            cb_value: dict[str, Any] = {
+                "k": PROD_BATCH_BOT_CARD_KEY,
+                "a": "sm_action",
+                "s": session_id,
+                "act": act,
+            }
+            if thread_root:
+                cb_value["r"] = thread_root
             columns.append(
                 {
                     "tag": "column",
@@ -2026,12 +2132,7 @@ def _prod_batch_sm_action_form_card(session_id: str, env_code: str) -> dict:
                             "behaviors": [
                                 {
                                     "type": "callback",
-                                    "value": {
-                                        "k": PROD_BATCH_BOT_CARD_KEY,
-                                        "a": "sm_action",
-                                        "s": session_id,
-                                        "act": act,
-                                    },
+                                    "value": cb_value,
                                 }
                             ],
                         }
@@ -2077,16 +2178,65 @@ def handle_prod_batch_sm_command(
     _prod_batch_cleanup_pending()
     _prod_batch_sm_cleanup_sessions()
     session_id = uuid.uuid4().hex[:16]
-    with _PROD_BATCH_SM_SESSIONS_LOCK:
-        _PROD_BATCH_SM_SESSIONS[session_id] = {
-            "chat_id": chat_id,
-            "thread_root_message_id": (thread_root_message_id or "").strip() or None,
-            "env_code": None,
-            "created_at": time.time(),
-        }
-    card = _prod_batch_sm_env_picker_card(session_id)
+    thread_root = (thread_root_message_id or "").strip() or None
+    _prod_batch_sm_upsert_session(
+        session_id,
+        chat_id=chat_id,
+        thread_root_message_id=thread_root,
+    )
+    card = _prod_batch_sm_env_picker_card(session_id, thread_root=thread_root)
     _prod_batch_send_lark_card(chat_id, card, send_message)
     return True, None
+
+
+def try_prod_batch_sm_env_card_response(
+    parsed: dict[str, Any],
+    *,
+    chat_id: str,
+) -> dict[str, Any] | None:
+    """
+    Build synchronous card.callback HTTP body for Step 1 → Step 2 (in-place card update).
+    Returns ``None`` when this callback is not ``sm_env``.
+    """
+    action_btn = str(parsed.get("a") or "").strip().lower()
+    if action_btn != "sm_env":
+        return None
+
+    session_id = str(parsed.get("s") or "").strip()
+    env_code = str(parsed.get("e") or "").strip().upper()
+    thread_root = str(parsed.get("r") or "").strip() or None
+
+    if env_code not in _PROD_BATCH_SM_ENV_CODES:
+        return {
+            "toast": {
+                "type": "error",
+                "content": f"Unknown environment: {env_code}",
+            }
+        }
+
+    session = _prod_batch_sm_get_session(session_id)
+    if session and not _prod_batch_sm_chat_match(str(session.get("chat_id") or ""), chat_id):
+        return {
+            "toast": {
+                "type": "error",
+                "content": "Session chat mismatch. Send @bot /sm again.",
+            }
+        }
+
+    if not session:
+        _prod_batch_sm_upsert_session(
+            session_id,
+            chat_id=chat_id,
+            thread_root_message_id=thread_root,
+            env_code=env_code,
+        )
+    else:
+        thread_root = thread_root or (session.get("thread_root_message_id") or "").strip() or None
+        _prod_batch_sm_touch_session(session_id, env_code=env_code)
+
+    _prod_batch_sm_refresh_thread_root(chat_id, thread_root)
+    card = _prod_batch_sm_action_form_card(session_id, env_code, thread_root=thread_root)
+    return {"card": {"type": "raw", "data": card}}
 
 
 def _prod_batch_sm_on_env_picked(
@@ -2094,22 +2244,31 @@ def _prod_batch_sm_on_env_picked(
     chat_id: str,
     send_message: Callable[..., Any],
 ) -> bool:
+    """Fallback when synchronous card update is unavailable — send Step 2 as a new message."""
     session_id = str(parsed.get("s") or "").strip()
     env_code = str(parsed.get("e") or "").strip().upper()
+    thread_root = str(parsed.get("r") or "").strip() or None
     session = _prod_batch_sm_get_session(session_id)
     if not session:
-        send_message(chat_id, "⏭️ Session expired. Send `@bot /sm` again.")
-        return True
+        if not session_id or env_code not in _PROD_BATCH_SM_ENV_CODES:
+            send_message(chat_id, "⏭️ Session expired. Send `@bot /sm` again.")
+            return True
+        session = _prod_batch_sm_upsert_session(
+            session_id,
+            chat_id=chat_id,
+            thread_root_message_id=thread_root,
+            env_code=env_code,
+        )
     if env_code not in _PROD_BATCH_SM_ENV_CODES:
         send_message(chat_id, f"❌ Unknown environment: {env_code!r}")
         return True
-    if str(session.get("chat_id") or "") != chat_id:
+    if not _prod_batch_sm_chat_match(str(session.get("chat_id") or ""), chat_id):
         send_message(chat_id, "❌ Session chat mismatch. Send `@bot /sm` again.")
         return True
     _prod_batch_sm_touch_session(session_id, env_code=env_code)
-    thread_root = (session.get("thread_root_message_id") or "").strip() or None
+    thread_root = thread_root or (session.get("thread_root_message_id") or "").strip() or None
     _prod_batch_sm_refresh_thread_root(chat_id, thread_root)
-    card = _prod_batch_sm_action_form_card(session_id, env_code)
+    card = _prod_batch_sm_action_form_card(session_id, env_code, thread_root=thread_root)
     _prod_batch_send_lark_card(chat_id, card, send_message)
     return True
 
@@ -2169,7 +2328,7 @@ def _prod_batch_sm_on_action_submit(
     if not session:
         send_message(chat_id, "⏭️ Session expired. Send `@bot /sm` again.")
         return True
-    if str(session.get("chat_id") or "") != chat_id:
+    if not _prod_batch_sm_chat_match(str(session.get("chat_id") or ""), chat_id):
         send_message(chat_id, "❌ Session chat mismatch. Send `@bot /sm` again.")
         return True
     env_code = str(session.get("env_code") or "").strip().upper()
@@ -2190,7 +2349,11 @@ def _prod_batch_sm_on_action_submit(
         send_message(chat_id, "❌ Enter at least one machine name in the text box.")
         return True
 
-    thread_root = (session.get("thread_root_message_id") or "").strip() or None
+    thread_root = (
+        str(parsed.get("r") or "").strip()
+        or (session.get("thread_root_message_id") or "").strip()
+        or None
+    )
     _prod_batch_sm_refresh_thread_root(chat_id, thread_root)
     send_message(
         chat_id,
@@ -2725,7 +2888,9 @@ def _prod_batch_send_lark_card(
     card: dict,
     send_message: Callable[..., Any],
 ) -> None:
-    send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
+    resp = send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
+    if isinstance(resp, dict) and int(resp.get("code", 0)) != 0:
+        print(f"[prod_batch] send card failed chat={chat_id!r}: {resp!r}", flush=True)
 
 
 def _prod_batch_resolve_image_helpers() -> tuple[Callable[..., Any] | None, Callable[..., Any] | None]:
