@@ -148,16 +148,35 @@ def _default_timeout_ms() -> int:
 
 
 def prod_batch_screenshots_enabled() -> bool:
-    """After set/unset maintenance/test, capture EGM operation-window PNGs (default on)."""
+    """After set/unset maintenance/test, capture EGM status-row PNGs (default on)."""
     return (os.environ.get("PROD_BATCH_SCREENSHOTS", "1").strip().lower() not in ("0", "false", "no", "off"))
 
 
-def _close_egm_operation_dialog(page) -> None:
+def _screenshot_egm_row_locator(page, row, *, timeout_ms: int) -> str:
+    """PNG of one EGM table row only — no View / cog / operation dialog."""
     try:
-        page.keyboard.press("Escape")
-        _page_pause(page, 350)
+        row.scroll_into_view_if_needed(timeout=min(15_000, timeout_ms))
     except Exception:
         pass
+    _page_pause(page, 200)
+    fd, out_path = tempfile.mkstemp(suffix=".png", prefix="prod_batch_egm_row_")
+    os.close(fd)
+    row.screenshot(path=out_path, animations="disabled", scale="css")
+    return out_path
+
+
+def capture_machine_row_screenshot_on_page(
+    page,
+    machine_name: str,
+    *,
+    timeout_ms: int,
+    max_pages: int,
+) -> str:
+    """Locate one machine row on the live EGM table and screenshot that row only."""
+    row = _find_machine_row_live(page, machine_name, timeout_ms=timeout_ms, max_pages=max_pages)
+    if row is None:
+        raise RuntimeError(f"machine not found on EGM page: {machine_name!r}")
+    return _screenshot_egm_row_locator(page, row, timeout_ms=timeout_ms)
 
 
 def capture_machine_operation_screenshot_on_page(
@@ -167,34 +186,10 @@ def capture_machine_operation_screenshot_on_page(
     timeout_ms: int,
     max_pages: int,
 ) -> str:
-    """Open the cog operation dialog for one row and screenshot it (caller owns ``page``)."""
-    from checkcredit import (  # noqa: WPS433
-        _egm_click_hide_grid_if_shown,
-        _egm_expand_operation_dialog_for_capture,
-        _egm_wait_visible_operation_dialog,
-        _pick_enabled_egm_cog_button,
+    """Alias — prod batch uses table-row capture (no operation dialog)."""
+    return capture_machine_row_screenshot_on_page(
+        page, machine_name, timeout_ms=timeout_ms, max_pages=max_pages
     )
-
-    row = _find_machine_row_live(page, machine_name, timeout_ms=timeout_ms, max_pages=max_pages)
-    if row is None:
-        raise RuntimeError(f"machine not found on EGM page: {machine_name!r}")
-
-    op_cell = row.locator("td").last
-    cog_btn = _pick_enabled_egm_cog_button(op_cell)
-    cog_btn.click(timeout=min(60_000, timeout_ms))
-
-    dlg = _egm_wait_visible_operation_dialog(page, timeout_ms=timeout_ms)
-    _page_pause(page, 1000)
-    _egm_click_hide_grid_if_shown(dlg, timeout_ms=min(15_000, timeout_ms))
-    _page_pause(page, 350)
-    dlg.scroll_into_view_if_needed(timeout=min(15_000, timeout_ms))
-    _egm_expand_operation_dialog_for_capture(page, dlg)
-
-    fd, out_path = tempfile.mkstemp(suffix=".png", prefix="prod_batch_egm_")
-    os.close(fd)
-    dlg.screenshot(path=out_path, animations="disabled", scale="css")
-    _close_egm_operation_dialog(page)
-    return out_path
 
 
 def _capture_prod_batch_screenshots_on_page(
@@ -223,25 +218,70 @@ def _capture_prod_batch_screenshots_on_page(
                     }
                 )
             continue
-        for m in env_machines:
-            name = _machine_display_name(m)
-            if not name:
+
+        specs = _machine_lookup_specs(env_machines)
+        pending = list(specs)
+        limit = _resolve_collect_page_limit(max_pages)
+        _go_first_page(page, timeout_ms=timeout_ms, max_steps=limit)
+        _wait_table_idle(page, timeout_ms)
+        steps = 0
+        safety = 0
+        shot_names: set[tuple[str, str]] = set()
+
+        while pending:
+            safety += 1
+            if safety > limit * max(len(specs), 1) + 50:
+                break
+
+            resolved: list[tuple[str, dict, str, str]] = []
+            for spec in list(pending):
+                name, m, kind, key = spec
+                dedupe = (str(m.get("belongs") or belongs).upper(), name)
+                if dedupe in shot_names:
+                    if kind == "full":
+                        resolved.append(spec)
+                    continue
+                rows = _find_all_rows_for_target_on_page(page, kind, key, timeout_ms=timeout_ms)
+                if not rows:
+                    continue
+                try:
+                    path = _screenshot_egm_row_locator(page, rows[0], timeout_ms=timeout_ms)
+                    shots.append({"belongs": m.get("belongs", belongs), "machine": name, "path": path})
+                    shot_names.add(dedupe)
+                except Exception as exc:
+                    logger.warning("prod-batch row screenshot failed for %s: %s", name, exc)
+                    errors.append(
+                        {
+                            "belongs": m.get("belongs", belongs),
+                            "machine": name,
+                            "error": str(exc),
+                        }
+                    )
+                if kind == "full":
+                    resolved.append(spec)
+
+            for spec in resolved:
+                pending.remove(spec)
+
+            if not pending:
+                break
+            if not _can_pagination_next(page) or steps >= limit:
+                break
+            _click_pagination_next(page, timeout_ms=timeout_ms)
+            steps += 1
+            _wait_table_idle(page, timeout_ms)
+
+        for name, m, _kind, _key in pending:
+            dedupe = (str(m.get("belongs") or belongs).upper(), name)
+            if dedupe in shot_names:
                 continue
-            try:
-                path = capture_machine_operation_screenshot_on_page(
-                    page, name, timeout_ms=timeout_ms, max_pages=max_pages
-                )
-                shots.append({"belongs": m.get("belongs", belongs), "machine": name, "path": path})
-            except Exception as exc:
-                logger.warning("prod-batch screenshot failed for %s: %s", name, exc)
-                errors.append(
-                    {
-                        "belongs": m.get("belongs", belongs),
-                        "machine": name,
-                        "error": str(exc),
-                    }
-                )
-                _close_egm_operation_dialog(page)
+            errors.append(
+                {
+                    "belongs": m.get("belongs", belongs),
+                    "machine": name,
+                    "error": "machine not found on EGM page",
+                }
+            )
     return shots, errors
 
 
@@ -252,7 +292,7 @@ def capture_prod_machine_screenshots(
     timeout_ms: int | None = None,
     max_pages: int | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Dedicated browser session — EGM operation-window PNG for each machine."""
+    """Dedicated browser session — EGM status-table row PNG for each machine."""
     from playwright.sync_api import sync_playwright
 
     if not machines:
