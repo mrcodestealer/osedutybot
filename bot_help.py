@@ -121,8 +121,8 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
             [
                 (
                     "/list <range>",
-                    "Expand id range; e.g. NWR8900-NWR8911, 8900-8911, 8900until8911",
-                    "展开编号区间；如 NWR8900-NWR8911、8900-8911、8900until8911",
+                    "Expand ids; e.g. 8900-8911, 8905,8910, 8900,8901",
+                    "展开编号；如 8900-8911、8905,8910、8900,8901",
                 ),
                 ("/nch <id>", "NCH machine info", "NCH 机台"),
                 ("/nwr <id>", "NWR machine info", "NWR 机台"),

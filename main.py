@@ -4294,13 +4294,7 @@ def lark_webhook():
     elif clean_text.lower().startswith("/list"):
         parts = clean_text.split(maxsplit=1)
         if len(parts) == 1:
-            reply = (
-                "❌ Usage: `/list <start>-<end>` or `/list <start>until<end>`\n"
-                "Examples:\n"
-                "• `/list NWR8900-NWR8911`\n"
-                "• `/list 8900-8911`\n"
-                "• `/list 8900until8911` (also `til` / `to`)"
-            )
+            reply = "❌ " + list_range.USAGE_EXAMPLES
         else:
             reply = list_range.format_list_range(parts[1])
         send_message(chat_id, reply)
