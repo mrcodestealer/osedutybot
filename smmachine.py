@@ -267,8 +267,11 @@ def _normalize_machine_target_line(line: str) -> str:
 
 def _parse_target_line(line: str) -> tuple[str, str]:
     """
-    Returns (kind, key) where kind is 'digits' or 'full'.
-    digits: standalone numeric id match in row text; full: alphanumeric substring match (case-insensitive).
+    Returns (kind, key) where kind is ``digits`` or ``full``.
+
+    * ``digits`` — standalone numeric asset id (exact match on machine suffix).
+    * ``full`` — alphanumeric token; also matches by trailing asset id when the title is typo'd
+      (e.g. ``Echo FTBP8671``, ``TP8674``, ``Echo Fornes-TBP8673``).
     """
     raw = _normalize_machine_target_line(line)
     if not raw:
@@ -530,12 +533,67 @@ def smachine_collect_rows_at_backend(
     return collected, trunc_msg
 
 
+def _machine_name_alnum_upper(text: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", (text or "").upper())
+
+
+def _machine_asset_digits_from_name(name: str) -> str | None:
+    """Trailing asset id from a live EGM display name (e.g. ``Echo Fortunes-TBP8671`` → ``8671``)."""
+    alnum = _machine_name_alnum_upper(name)
+    if not alnum:
+        return None
+    m = re.search(
+        r"(?:NWR|NCH|NC|NP|TBR|TBP|MDR|DHS|CP|OSM|WF|WINFORD)(\d+)$",
+        alnum,
+    )
+    if m:
+        return m.group(1)
+    m2 = re.search(r"(\d+)$", alnum)
+    return m2.group(1) if m2 else None
+
+
+def _query_asset_digits_from_key(key_alnum: str) -> str | None:
+    """Trailing asset id digits parsed from a user token (``TP8674``, ``8673``, full title, …)."""
+    key_alnum = (key_alnum or "").upper()
+    m = re.search(
+        r"(?:NWR|NCH|NC|NP|TBR|TBP|MDR|DHS|CP|OSM|WF|WINFORD)(\d+)$",
+        key_alnum,
+    )
+    if m:
+        return m.group(1)
+    m2 = re.search(r"(\d+)$", key_alnum)
+    return m2.group(1) if m2 else None
+
+
 def _row_text_matches(kind: str, key: str, row_text: str) -> bool:
-    t = (row_text or "").upper()
-    if kind == "full":
-        return key in re.sub(r"[^A-Z0-9]", "", t)
-    # digits — avoid matching a shorter number inside a longer id when possible
-    return bool(re.search(rf"(?<![0-9]){re.escape(key)}(?![0-9])", t))
+    """
+    Match a scraped EGM row to a user token.
+
+    * **digits** — exact asset id on the machine (``8671`` matches ``…-TBP8671``, not ``…-TBP8617``).
+    * **full** — alnum substring, suffix, or same trailing asset id (typos like ``TP8674`` / ``Echo Fornes-…8673``).
+    """
+    row_alnum = _machine_name_alnum_upper(row_text)
+    if not row_alnum:
+        return False
+
+    if kind == "digits":
+        row_asset = _machine_asset_digits_from_name(row_text)
+        if row_asset is not None:
+            return row_asset == key
+        return bool(re.search(rf"(?<![0-9]){re.escape(key)}(?![0-9])", row_alnum))
+
+    key_alnum = key.upper()
+    if key_alnum in row_alnum:
+        return True
+    if len(key_alnum) >= 4 and row_alnum.endswith(key_alnum):
+        return True
+
+    q_digits = _query_asset_digits_from_key(key_alnum)
+    r_digits = _machine_asset_digits_from_name(row_text)
+    if q_digits and r_digits and q_digits == r_digits:
+        return True
+
+    return False
 
 
 def _wait_table_idle(page, timeout_ms: int) -> None:
@@ -981,7 +1039,7 @@ def _scan_targets_collect_rows(
                         "is_test": test,
                     }
                 )
-            if kind == "full" and matched_here:
+            if matched_here:
                 resolved.append(spec)
 
         for spec in resolved:
