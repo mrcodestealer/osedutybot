@@ -23,6 +23,7 @@ from smmachine import (
     _go_first_page,
     _parse_target_line,
     _resolve_collect_page_limit,
+    _row_match_text_for_target,
     _row_report_fields,
     _row_text_matches,
     _site_synthetic_machine,
@@ -444,9 +445,8 @@ def _find_all_rows_for_target(page, kind: str, key: str, *, timeout_ms: int):
     n = rows.count()
     for i in range(n):
         row = rows.nth(i)
-        try:
-            txt = row.inner_text(timeout=min(8_000, timeout_ms))
-        except Exception:
+        txt = _row_match_text_for_target(row, timeout_ms=timeout_ms)
+        if not txt:
             continue
         if _row_text_matches(kind, key, txt):
             matched.append(row)

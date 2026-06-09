@@ -538,18 +538,21 @@ def _machine_name_alnum_upper(text: str) -> str:
 
 
 def _machine_asset_digits_from_name(name: str) -> str | None:
-    """Trailing asset id from a live EGM display name (e.g. ``Echo Fortunes-TBP8671`` → ``8671``)."""
+    """Asset id digits from a machine label or full table row text (e.g. ``…-TBP8671`` → ``8671``)."""
     alnum = _machine_name_alnum_upper(name)
     if not alnum:
         return None
-    m = re.search(
-        r"(?:NWR|NCH|NC|NP|TBR|TBP|MDR|DHS|CP|OSM|WF|WINFORD)(\d+)$",
-        alnum,
+    env_pat = re.compile(
+        r"(?:NWR|NCH|NC|NP|TBR|TBP|MDR|DHS|CP|OSM|WF|WINFORD)(\d+)",
+        re.I,
     )
-    if m:
-        return m.group(1)
-    m2 = re.search(r"(\d+)$", alnum)
-    return m2.group(1) if m2 else None
+    matches = list(env_pat.finditer(alnum))
+    if matches:
+        return matches[-1].group(1)
+    digit_runs = list(re.finditer(r"\d+", alnum))
+    if digit_runs:
+        return digit_runs[-1].group(0)
+    return None
 
 
 def _query_asset_digits_from_key(key_alnum: str) -> str | None:
@@ -862,6 +865,20 @@ def _row_report_fields(row, *, timeout_ms: int) -> tuple[str, bool, str, str, st
     return name, is_test, game_type, status, online_disp
 
 
+def _row_match_text_for_target(row, *, timeout_ms: int) -> str:
+    """Prefer machine-name column for token matching; fall back to full row ``inner_text``."""
+    try:
+        machine_name, _, _, _, _ = _row_report_fields(row, timeout_ms=timeout_ms)
+        if (machine_name or "").strip():
+            return machine_name.strip()
+    except Exception:
+        pass
+    try:
+        return row.inner_text(timeout=min(8_000, timeout_ms))
+    except Exception:
+        return ""
+
+
 def _norm_online_word(onl: str) -> str:
     ol = " ".join((onl or "").lower().split())
     if "offline" in ol:
@@ -983,9 +1000,8 @@ def _find_all_rows_for_target_on_page(page, kind: str, key: str, *, timeout_ms: 
     n = rows.count()
     for i in range(n):
         row = rows.nth(i)
-        try:
-            txt = row.inner_text(timeout=min(8_000, timeout_ms))
-        except Exception:
+        txt = _row_match_text_for_target(row, timeout_ms=timeout_ms)
+        if not txt:
             continue
         if _row_text_matches(kind, key, txt):
             matched.append(row)
@@ -1099,9 +1115,8 @@ def _find_row_for_target(
     matched_indices: list[int] = []
     for i in range(n):
         row = rows.nth(i)
-        try:
-            txt = row.inner_text(timeout=min(8_000, timeout_ms))
-        except Exception:
+        txt = _row_match_text_for_target(row, timeout_ms=timeout_ms)
+        if not txt:
             continue
         if _row_text_matches(kind, key, txt):
             if not prefer_checked:
