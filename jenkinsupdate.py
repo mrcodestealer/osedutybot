@@ -4629,6 +4629,7 @@ def _fpms_lark_begin_update_thread(
     body_or_summary: str,
     lark_message_id: str | None = None,
     *,
+    lark_thread_root_id: str | None = None,
     force_new: bool = False,
 ) -> str | None:
     try:
@@ -4640,11 +4641,12 @@ def _fpms_lark_begin_update_thread(
             return None
         raw = (body_or_summary or "").strip()
         summary = summ_fn(raw) if callable(summ_fn) else raw[:200]
+        thread_root = (lark_thread_root_id or lark_message_id or "").strip() or None
         return begin(
             chat_id,
             session_key,
             summary or "/update",
-            fallback_parent_id=(lark_message_id or "").strip() or None,
+            fallback_parent_id=thread_root,
             force_new=force_new,
         )
     except Exception as ex:
@@ -7693,6 +7695,7 @@ def _dispatch_lark_update_command_body(
     *,
     from_updatemore: bool = False,
     lark_message_id: str | None = None,
+    lark_thread_root_id: str | None = None,
 ) -> bool:
     """Core ``/update`` job match + dispatch (shared by ``/update`` and ``/updatemore``)."""
     key = session_key
@@ -7703,6 +7706,7 @@ def _dispatch_lark_update_command_body(
             key,
             body,
             lark_message_id,
+            lark_thread_root_id=lark_thread_root_id,
             force_new=True,
         )
     try:
@@ -7882,6 +7886,7 @@ def handle_lark_jenkins_update_message(
     allow_start: bool,
     lark_sender_union_id: str | None = None,
     lark_message_id: str | None = None,
+    lark_thread_root_id: str | None = None,
 ) -> bool:
     """
     Lark ``/jenkinsupdate``: match a registered Jenkins job from keywords (or ask 1–N),
@@ -7984,6 +7989,7 @@ def handle_lark_jenkins_update_message(
             key,
             f"updatemore — {len(segments)} segment(s)",
             lark_message_id,
+            lark_thread_root_id=lark_thread_root_id,
             force_new=True,
         )
         if skip_build:
@@ -7997,6 +8003,7 @@ def handle_lark_jenkins_update_message(
             send,
             from_updatemore=True,
             lark_message_id=lark_message_id,
+            lark_thread_root_id=lark_thread_root_id,
         )
 
     with _fpms_lark_sessions_lock:
@@ -8323,6 +8330,7 @@ def handle_lark_jenkins_update_message(
         body,
         send,
         lark_message_id=lark_message_id,
+        lark_thread_root_id=lark_thread_root_id,
     )
 
 

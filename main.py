@@ -1512,7 +1512,7 @@ def _get_checkcredit_np_pending(chat_id: str, max_age_sec: float = 3600.0):
         return None
     return ent["payload"]
 
-# ``/update`` / ``/jenkinsupdate`` — thread replies under a starter card (same as checkcredit).
+# ``/update`` / ``/jenkinsupdate`` — thread replies under the user's command message.
 UPDATE_THREAD_ROOT: dict[str, dict] = {}
 
 
@@ -1576,21 +1576,23 @@ def update_begin_thread(
     fallback_parent_id: Optional[str] = None,
     force_new: bool = False,
 ) -> Optional[str]:
-    """Post starter card to main chat; ``/update`` steps reply in thread only."""
+    """Bind ``/update`` replies to the user's command message (thread only, no starter card)."""
     sk = (session_key or "").strip()
     if not force_new:
         existing = _get_update_thread_root(sk)
         if existing:
             return existing
+    parent = (fallback_parent_id or "").strip() or None
+    if parent and sk:
+        _set_update_thread_root(sk, parent)
+        return parent
+    # No incoming message_id (e.g. tests) — post a starter card as last resort.
     card = _build_update_thread_starter_card(summary)
     resp = send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
-    parent: Optional[str] = None
     if isinstance(resp, dict) and resp.get("code") not in (None, 0):
         print(f"[update] starter card failed chat={chat_id}: {resp}", flush=True)
     else:
         parent = _extract_lark_message_id(resp) or None
-    if not parent:
-        parent = (fallback_parent_id or "").strip() or None
     if parent and sk:
         _set_update_thread_root(sk, parent)
     return parent
@@ -3525,6 +3527,14 @@ def lark_webhook():
     jenkins_sess_active = (
         ju.jenkins_update_has_active_lark_session(chat_id, sender_id) if ju else False
     )
+    update_thread_root = None
+    if data.get("header", {}).get("event_type") == "im.message.receive_v1":
+        msg_obj = (data.get("event") or {}).get("message") or {}
+        update_thread_root = _prod_batch_thread_root_from_incoming_message(
+            msg_obj, message_id=message_id
+        )
+    else:
+        update_thread_root = (message_id or "").strip() or None
     if ju and ju.handle_lark_jenkins_update_message(
         chat_id,
         sender_id,
@@ -3534,6 +3544,7 @@ def lark_webhook():
         allow_start=bot_mentioned,
         lark_sender_union_id=sender_union_id,
         lark_message_id=(message_id or "").strip() or None,
+        lark_thread_root_id=update_thread_root,
     ):
         return _lark_im_done()
 
