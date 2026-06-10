@@ -322,6 +322,40 @@ def _delete_offset_duty_mirror(token: str, src_record_id: str) -> bool:
     raise RuntimeError(f"duty offset delete failed: {res}")
 
 
+def _prune_duty_wiki_orphans(token: str, live_src_fingerprints: set[str]) -> int:
+    """
+    Delete wiki rows with no matching Base row (manual Base delete, or pre-sync wiki-only rows).
+    """
+    fps = {fp for fp in live_src_fingerprints if fp}
+    items = od._bitable_get_all_records(token, OFFSET_DUTY_BITABLE_BASE, OFFSET_DUTY_TABLE_ID)
+    pruned = 0
+    with _OFFSET_DUTY_SYNC_LOCK:
+        state = _load_offset_duty_sync_state_unlocked()
+        by_src = dict(state.get("by_src") or {})
+        src_fp = dict(state.get("src_fp") or {})
+    dest_to_src = {dest: src for src, dest in by_src.items()}
+    for it in items:
+        dest_id = str(it.get("record_id") or "").strip()
+        if not dest_id:
+            continue
+        fp = _offset_sync_fingerprint(it.get("fields") or {})
+        if fp in fps:
+            continue
+        res = _bitable_dest_request(token, "DELETE", record_id=dest_id)
+        code = int(res.get("code") or 0)
+        if code not in (0, 1254043, 1254044):
+            raise RuntimeError(f"duty offset orphan prune failed: {res}")
+        src_id = dest_to_src.get(dest_id)
+        if src_id:
+            by_src.pop(src_id, None)
+            src_fp.pop(src_id, None)
+        pruned += 1
+    if pruned:
+        with _OFFSET_DUTY_SYNC_LOCK:
+            _save_offset_duty_sync_state_unlocked({"by_src": by_src, "src_fp": src_fp})
+    return pruned
+
+
 def sync_offset_to_duty_wiki(*, record_id: str = "", delete: bool = False) -> dict[str, Any]:
     """
     Mirror one source offset row into the wiki Offset2026 bitable (best-effort, raises on API error).
@@ -349,11 +383,13 @@ def sync_all_offsets_to_duty_wiki() -> dict[str, Any]:
     deleted = 0
     errors: list[str] = []
     live_src: set[str] = set()
+    live_fps: set[str] = set()
     for it in src_items:
         src_id = str(it.get("record_id") or "").strip()
         if not src_id:
             continue
         live_src.add(src_id)
+        live_fps.add(_offset_sync_fingerprint(it.get("fields") or {}))
         try:
             _upsert_offset_duty_mirror(token, src_id, it.get("fields") or {})
             upserted += 1
@@ -369,6 +405,10 @@ def sync_all_offsets_to_duty_wiki() -> dict[str, Any]:
                 deleted += 1
         except Exception as exc:
             errors.append(f"delete {sid}: {exc}")
+    try:
+        deleted += _prune_duty_wiki_orphans(token, live_fps)
+    except Exception as exc:
+        errors.append(f"orphan prune: {exc}")
     return {
         "ok": not errors,
         "source_rows": len(live_src),
@@ -704,11 +744,7 @@ def _roster_name_picker_elements() -> list[dict[str, Any]]:
 def build_offset_form_card(
     *, owner_open_id: str, request_person: str, pick_roster_name: bool = False
 ) -> dict[str, Any]:
-    exchange_names = list(
-        od.ose_offset_form_exchange_names(
-            exclude_person="" if pick_roster_name else request_person
-        )
-    )
+    exchange_names = list(od.ose_offset_form_exchange_names())
     intro = (
         "Select your roster name, then fill the fields below and tap **Submit**."
         if pick_roster_name
@@ -1337,7 +1373,10 @@ def build_offset_edit_form_card(
 ) -> dict[str, Any]:
     rid = str(row.get("record_id") or "").strip()
     req_on_row = str(row.get("request_person") or request_person or "").strip()
-    exchange_names = list(od.ose_offset_form_exchange_names(exclude_person=req_on_row))
+    exchange_names = list(od.ose_offset_form_exchange_names())
+    exc_on_row = str(row.get("exchange_person") or "").strip()
+    if od._title_name(exc_on_row) and od._title_name(exc_on_row) == od._title_name(req_on_row):
+        exc_on_row = od.OFFSET_EXCHANGE_MYSELF_LABEL
     o_ini = _row_datepicker_initial(row.get("original_date"))
     x_ini = _row_datepicker_initial(row.get("exchange_date"))
     original_dp: dict[str, Any] = {
@@ -1393,6 +1432,7 @@ def build_offset_edit_form_card(
                             "placeholder": {"tag": "plain_text", "content": "Select exchange person"},
                             "options": _select_options(exchange_names),
                             "required": True,
+                            **({"initial_option": exc_on_row} if exc_on_row in exchange_names else {}),
                         },
                         {
                             "tag": "div",
@@ -2512,6 +2552,7 @@ def scan_bitable_offsets_for_duty_wiki_sync() -> dict[str, int]:
         by_src = dict(state.get("by_src") or {})
         src_fp = dict(state.get("src_fp") or {})
     live_src: set[str] = set()
+    live_fps: set[str] = set()
     synced = 0
     for it in items:
         src_id = str(it.get("record_id") or "").strip()
@@ -2520,6 +2561,7 @@ def scan_bitable_offsets_for_duty_wiki_sync() -> dict[str, int]:
         live_src.add(src_id)
         fields = it.get("fields") or {}
         fp = _offset_sync_fingerprint(fields)
+        live_fps.add(fp)
         if by_src.get(src_id) and src_fp.get(src_id) == fp:
             continue
         try:
@@ -2536,6 +2578,10 @@ def scan_bitable_offsets_for_duty_wiki_sync() -> dict[str, int]:
             deleted += 1
         except Exception as exc:
             print(f"[offsetleave] duty wiki poll delete failed for {src_id!r}: {exc!r}", flush=True)
+    try:
+        deleted += _prune_duty_wiki_orphans(token, live_fps)
+    except Exception as exc:
+        print(f"[offsetleave] duty wiki orphan prune failed: {exc!r}", flush=True)
     return {"scanned": len(items), "synced": synced, "deleted": deleted}
 
 

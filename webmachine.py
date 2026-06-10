@@ -2315,7 +2315,11 @@ _OSE_SUBMIT_OFFSET_PAGE = """<!DOCTYPE html>
     fetch(API_META).then(function (r) { return r.json(); }).then(function (meta) {
       if (!meta || !meta.ok) throw new Error((meta && meta.error) || "Failed to load options");
       fillSelectOptions(document.getElementById("ose-offset-req"), meta.offset_names || [], "Select request person");
-      fillSelectOptions(document.getElementById("ose-offset-exc"), meta.offset_names || [], "Select exchange person");
+      fillSelectOptions(
+        document.getElementById("ose-offset-exc"),
+        meta.offset_exchange_names || meta.offset_names || [],
+        "Select exchange person"
+      );
       fillSelectOptions(document.getElementById("ose-offset-shift"), meta.shift_types || [], "Select shift");
     }).catch(function (e) {
       var msg = document.getElementById("ose-offset-msg");
