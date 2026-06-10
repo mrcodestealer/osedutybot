@@ -2637,16 +2637,24 @@ def build_in_progress_card_elements(
     reason = _reason_display(info, email_body)
     email_ref = _email_ref_line(info, email_subject, email_body)
     return [
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"Hi {_at_cs_team()}"},
+        },
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": "**Kindly set maintenance.**",
+            },
+        },
         _card_studio_date_columns(studio, date),
         _card_labeled_field("Table", table),
         _card_labeled_field("Reason", reason),
         {"tag": "hr"},
         {
             "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": "⚠️ Maintenance in progress. Will notify when fixed.",
-            },
+            "text": {"tag": "lark_md", "content": f"**CC:** {_at_qa_support()}"},
         },
         {
             "tag": "div",
@@ -2671,21 +2679,25 @@ def build_in_progress_card_body(
     )
     reason = _reason_display(info, email_body)
     email_ref = _email_ref_line(info, email_subject, email_body)
-    body_lines: list[str] = []
+    lines = [
+        f"Hi {_at_cs_team()}",
+        "",
+        "**Kindly set maintenance.**",
+    ]
     studio_disp = _studio_for_display(studio)
     if studio_disp:
-        body_lines.append(f"**Studio:**\n{studio_disp}")
-    body_lines.extend(
+        lines.append(f"**Studio:**\n{studio_disp}")
+    lines.extend(
         [
             f"**Date:**\n{date}",
             f"**Table:**\n{table}",
             f"**Reason:**\n{reason}",
             "",
-            "⚠️ Maintenance in progress. Will notify when fixed.",
+            f"**CC:** {_at_qa_support()}",
             f"📧 Email: {email_ref}",
         ]
     )
-    return "\n".join(body_lines)
+    return "\n".join(lines)
 
 
 def _fixed_card_values(
