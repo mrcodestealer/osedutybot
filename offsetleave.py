@@ -263,6 +263,28 @@ def _fetch_source_offset_record(token: str, src_record_id: str) -> Optional[dict
     return rec if isinstance(rec, dict) else None
 
 
+def _fetch_source_offset_record_with_retry(
+    token: str,
+    src_record_id: str,
+    *,
+    attempts: int = 5,
+    delay_sec: float = 0.6,
+) -> Optional[dict[str, Any]]:
+    """Bitable create → GET can lag briefly; retry before treating the row as missing."""
+    rid = (src_record_id or "").strip()
+    if not rid:
+        return None
+    last: Optional[dict[str, Any]] = None
+    tries = max(1, int(attempts))
+    for i in range(tries):
+        last = _fetch_source_offset_record(token, rid)
+        if last is not None:
+            return last
+        if i + 1 < tries:
+            time.sleep(delay_sec)
+    return last
+
+
 def _find_dest_record_id_by_fingerprint(token: str, fingerprint: str) -> str:
     fp = (fingerprint or "").strip()
     if not fp:
@@ -367,10 +389,13 @@ def sync_offset_to_duty_wiki(*, record_id: str = "", delete: bool = False) -> di
     if delete:
         deleted = _delete_offset_duty_mirror(token, rid)
         return {"ok": True, "record_id": rid, "deleted": deleted}
-    src = _fetch_source_offset_record(token, rid)
+    had_mapping = bool(_offset_duty_sync_map_get(rid))
+    src = _fetch_source_offset_record_with_retry(token, rid)
     if src is None:
-        deleted = _delete_offset_duty_mirror(token, rid)
-        return {"ok": True, "record_id": rid, "deleted": deleted, "reason": "source_missing"}
+        if had_mapping:
+            deleted = _delete_offset_duty_mirror(token, rid)
+            return {"ok": True, "record_id": rid, "deleted": deleted, "reason": "source_missing"}
+        raise RuntimeError(f"source offset {rid!r} not readable yet (will retry on next poll)")
     dest_id = _upsert_offset_duty_mirror(token, rid, src.get("fields") or {})
     return {"ok": True, "record_id": rid, "dest_record_id": dest_id}
 
@@ -438,7 +463,12 @@ def schedule_offset_duty_wiki_sync(
                 if result.get("errors"):
                     print(f"[offsetleave] duty wiki offset sync errors: {result['errors']!r}", flush=True)
                 return
-            sync_offset_to_duty_wiki(record_id=record_id, delete=delete)
+            result = sync_offset_to_duty_wiki(record_id=record_id, delete=delete)
+            if result.get("dest_record_id"):
+                print(
+                    f"[offsetleave] duty wiki offset upserted {record_id!r} -> {result['dest_record_id']!r}",
+                    flush=True,
+                )
         except Exception as exc:
             action = "delete" if delete else "upsert"
             target = record_id or ("ALL" if full else "?")
