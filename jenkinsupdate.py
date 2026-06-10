@@ -5880,6 +5880,9 @@ def _fpms_lark_service_pick_tap_confirms(ranked: list[str], *, pick_n_total: int
     """True when tapping a number should submit immediately (no **Confirm** step)."""
     if len(ranked) <= 1:
         return True
+    # One service line in the config (all jobs/envs) — tap picks and continues to Jenkins fill.
+    if int(pick_n_total or 0) <= 1:
+        return True
     return int(pick_n_total) > 1
 
 
