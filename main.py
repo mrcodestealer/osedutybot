@@ -1416,49 +1416,12 @@ def _get_checkcredit_thread_root(chat_id: str, max_age_sec: float = 3600.0) -> O
     return str(ent.get("message_id") or "").strip() or None
 
 
-def _build_checkcredit_thread_starter_card(
-    machine: str,
-    date_iso: str,
-    *,
-    cmd: str = "checkcredit",
-) -> dict:
-    """Main-chat card that starts the checkcredit thread (like maintenance verify cards)."""
-    label = "machineerror" if str(cmd or "").strip().lower() == "machineerror" else "checkcredit"
-    title = f"🔍 {label} — {machine}"
-    body = f"Date: `{date_iso}`"
-    return {
-        "schema": "2.0",
-        "config": {"width_mode": "fill"},
-        "header": {
-            "template": "orange" if label == "machineerror" else "blue",
-            "title": {"tag": "plain_text", "content": title},
-        },
-        "body": {
-            "elements": [
-                {"tag": "div", "text": {"tag": "lark_md", "content": body}},
-            ]
-        },
-    }
-
-
 def _checkcredit_begin_thread(
     chat_id: str,
-    machine: str,
-    date_iso: str,
-    *,
-    cmd: str = "checkcredit",
-    fallback_parent_id: Optional[str] = None,
+    parent_message_id: Optional[str] = None,
 ) -> Optional[str]:
-    """Post starter card to main chat; thread replies attach here (not also to group stream)."""
-    card = _build_checkcredit_thread_starter_card(machine, date_iso, cmd=cmd)
-    resp = send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
-    parent: Optional[str] = None
-    if isinstance(resp, dict) and resp.get("code") not in (None, 0):
-        print(f"[checkcredit] starter card failed chat={chat_id}: {resp}", flush=True)
-    else:
-        parent = _extract_lark_message_id(resp) or None
-    if not parent:
-        parent = (fallback_parent_id or "").strip() or None
+    """Thread under the user's ``/checkcredit`` message (``reply_in_thread`` — not main chat)."""
+    parent = (parent_message_id or "").strip() or None
     if parent:
         _set_checkcredit_thread_root(chat_id, parent)
     return parent
@@ -4473,13 +4436,7 @@ def lark_webhook():
         import checkcredit
 
         use_oss_wait = checkcredit.checkcredit_use_oss_source()
-        thread_root = _checkcredit_begin_thread(
-            chat_id,
-            machine_q,
-            date_arg,
-            cmd=cmd_cc,
-            fallback_parent_id=(message_id or "").strip() or None,
-        )
+        thread_root = _checkcredit_begin_thread(chat_id, message_id)
         wait_msg = (
             "⏳ Running machineerror via OSS HTTP, please wait..."
             if cmd_cc == "machineerror" and use_oss_wait
