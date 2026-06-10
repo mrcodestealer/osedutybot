@@ -2,8 +2,8 @@
 """
 Find user log errors (--finderror).
 
-  LogNavigator (browser, headed): default — drives UI like manual flow.
-  OSS (HTTP): faster, no browser — GET plain log file from object storage.
+  OSS (HTTP): **default** for Duty Bot / ``run_finderror`` — GET plain log from object storage.
+  LogNavigator (browser): opt-in via ``CHECKCREDIT_USE_NAVIGATOR=1`` or ``CHECKCREDIT_USE_OSS=0``.
 
   python3 checkcredit.py --finderror 2074 --date 2026-04-27
   python3 checkcredit.py --finderror CP0231 --date 2026-02-05 --oss
@@ -17,7 +17,8 @@ Env (optional):
   OSM_LOG_OSS_TEMPLATE — default:
     https://oss-osm-log.osmplay.com/MINIPC/{machine}/logic/{date}.log
   OSS_MACHINE_FOLDER_TEMPLATE — when --finderror is digits-only (default NWR{n}, e.g. 2074 → NWR2074)
-  CHECKCREDIT_USE_OSS — set to 1/true so callers (e.g. main.py bot) use OSS without --oss
+  CHECKCREDIT_USE_OSS=0 — force LogNavigator instead of default OSS
+  CHECKCREDIT_USE_NAVIGATOR=1 — same (force LogNavigator browser mode)
   CHECKCREDIT_HEADLESS=1 — force headless Chromium (for Linux servers without X11)
   CHECKCREDIT_HEADED=1 — force headed window (needs DISPLAY; macOS/Windows OK)
   CHECKCREDIT_ERROR_CTX_DPR — error-log screenshot sharpness (default ``2``, max ``3``): Playwright
@@ -106,6 +107,19 @@ DEFAULT_OSS_TEMPLATE = os.environ.get(
 
 def _env_truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def checkcredit_use_oss_source() -> bool:
+    """
+    Log source for ``/checkcredit`` and ``run_finderror``: **OSS HTTP by default**.
+    Opt out (LogNavigator browser): ``CHECKCREDIT_USE_NAVIGATOR=1`` or ``CHECKCREDIT_USE_OSS=0``.
+    """
+    if _env_truthy("CHECKCREDIT_USE_NAVIGATOR"):
+        return False
+    off = os.getenv("CHECKCREDIT_USE_OSS", "").strip().lower()
+    if off in ("0", "false", "no", "off"):
+        return False
+    return True
 
 
 def _error_ctx_dpr() -> float:
@@ -337,14 +351,13 @@ def resolve_machine_display_for_egm_route(
     """
     Machine folder label + EGM Search token for the correct backend:
 
-    - ``CHECKCREDIT_USE_OSS=1``: :func:`resolve_oss_machine_folder` (no LogNavigator).
-    - Otherwise: :func:`resolve_machine_display_from_lognavigator` so **NCH** / **CP** / … match Select2.
+    - Default (**OSS**): :func:`resolve_oss_machine_folder` (no LogNavigator).
+    - ``CHECKCREDIT_USE_NAVIGATOR=1``: :func:`resolve_machine_display_from_lognavigator` for Select2 label.
     """
     mq = (machine_query or "").strip()
     if not mq:
         raise ValueError("empty machine query")
-    oss_on = os.getenv("CHECKCREDIT_USE_OSS", "").strip().lower() in ("1", "true", "yes", "on")
-    if oss_on:
+    if checkcredit_use_oss_source():
         md = resolve_oss_machine_folder(mq)
     else:
         md = resolve_machine_display_from_lognavigator(mq, timeout_ms=timeout_ms)
@@ -1108,8 +1121,8 @@ def resolve_player_log_credit_snapshot(
     timeout_sec: float = 120.0,
 ) -> tuple[str | None, dict[str, Any] | None, str]:
     """
-    Load logic log (**OSS HTTP** when ``CHECKCREDIT_USE_OSS`` is set; otherwise **LogNavigator / Playwright**
-    like ``/checkcreditdate`` without OSS), merge player blocks, return
+    Load logic log (**OSS HTTP** by default; **LogNavigator** when ``CHECKCREDIT_USE_NAVIGATOR=1``),
+    merge player blocks, return
     ``(machine_folder_display, latest_credit_dict_or_None, error_message)``.
     ``latest_credit`` matches rows from ``merge_players_full`` / ``parse_user_blocks_full``.
     """
@@ -1119,10 +1132,9 @@ def resolve_player_log_credit_snapshot(
     mq = str(machine_query or "").strip()
     if not mq:
         return None, None, "Machine type is empty."
-    oss_on = os.getenv("CHECKCREDIT_USE_OSS", "").strip().lower() in ("1", "true", "yes", "on")
     timeout_ms = max(15_000, int(timeout_sec * 1000))
     try:
-        if oss_on:
+        if checkcredit_use_oss_source():
             log_body, _meta = fetch_log_via_oss(mq, target_date, timeout_sec=timeout_sec)
             md = resolve_oss_machine_folder(mq)
         else:
@@ -1172,8 +1184,8 @@ def build_checkcredit_player_form_card() -> dict[str, Any]:
                             "**Machine type** (folder label, e.g. `NWR2074`, `DHS3189`) · "
                             "**Player ID** · **Log date**.\n"
                             "Opened by **`/checkcreditdate`** alone (with **`@Duty Bot`** in groups). "
-                            "Submit loads that day's logic log (**OSS** if `CHECKCREDIT_USE_OSS=1`, else "
-                            "**LogNavigator / Playwright**, same as `/checkcreditdate <machine>`) and runs "
+                            "Submit loads that day's logic log via **OSS HTTP** (default; "
+                            "`CHECKCREDIT_USE_NAVIGATOR=1` for LogNavigator) and runs "
                             "**Third Http → Detail** when a credit time is found."
                         ),
                     },
@@ -4450,7 +4462,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--oss",
         action="store_true",
-        help="Fetch log via OSS HTTP (OSM_LOG_OSS_TEMPLATE) instead of LogNavigator browser",
+        help="Fetch log via OSS HTTP (default; same as omitting this flag)",
+    )
+    ap.add_argument(
+        "--navigator",
+        action="store_true",
+        help="Force LogNavigator browser instead of default OSS HTTP log fetch",
     )
     ap.add_argument(
         "--debug",
@@ -4612,7 +4629,7 @@ def main(argv: list[str] | None = None) -> int:
             except ValueError:
                 print("❌ --date must be YYYY-MM-DD", file=sys.stderr)
                 return 2
-        use_oss = bool(args.oss) or _env_truthy("CHECKCREDIT_USE_OSS")
+        use_oss = checkcredit_use_oss_source() and not bool(getattr(args, "navigator", False))
         want_debug = bool(getattr(args, "debug", False))
         try:
             out = run_finderror(

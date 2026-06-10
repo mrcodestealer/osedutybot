@@ -403,7 +403,7 @@ def run_checkcredit_finderror(
     navigator_logic_log_basename: Optional[str] = None,
     thread_root_message_id: Optional[str] = None,
 ):
-    """Background: same as checkcredit + `--date`. Uses OSS HTTP if CHECKCREDIT_USE_OSS is set."""
+    """Background: same as checkcredit + `--date`. Uses OSS HTTP by default (see checkcredit_use_oss_source)."""
     thread_root = (thread_root_message_id or _get_checkcredit_thread_root(chat_id) or "").strip() or None
     if thread_root:
         _set_checkcredit_thread_root(chat_id, thread_root)
@@ -418,7 +418,7 @@ def run_checkcredit_finderror(
         return
     try:
         td = datetime.strptime(date_str.strip(), "%Y-%m-%d").date()
-        use_oss = os.getenv("CHECKCREDIT_USE_OSS", "").strip().lower() in ("1", "true", "yes", "on")
+        use_oss = checkcredit.checkcredit_use_oss_source()
         out = checkcredit.run_finderror(
             str(machine_query).strip(),
             target_date=td,
@@ -565,11 +565,12 @@ def run_checkcredit_finderror(
 
 def run_checkcredit_navigator_next_log(chat_id: str) -> None:
     """Open the next same-day logic log in LogNavigator (Duty Bot card **check another logs**)."""
-    use_oss = os.getenv("CHECKCREDIT_USE_OSS", "").strip().lower() in ("1", "true", "yes", "on")
-    if use_oss:
+    import checkcredit
+
+    if checkcredit.checkcredit_use_oss_source():
         _checkcredit_send(
             chat_id,
-            "❌ Alternate logic logs only apply when **CHECKCREDIT_USE_OSS** is off (LogNavigator browser mode).",
+            "❌ Alternate logic logs need LogNavigator — set `CHECKCREDIT_USE_NAVIGATOR=1` in `.env`.",
         )
         return
     pend = _get_checkcredit_np_pending(chat_id)
@@ -4477,7 +4478,9 @@ def lark_webhook():
                 "❌ Date must be `YYYY-MM-DD` (e.g. `2026-04-27`).",
             )
             return _lark_im_done()
-        use_oss_wait = os.getenv("CHECKCREDIT_USE_OSS", "").strip().lower() in ("1", "true", "yes", "on")
+        import checkcredit
+
+        use_oss_wait = checkcredit.checkcredit_use_oss_source()
         thread_root = _checkcredit_begin_thread(
             chat_id,
             machine_q,
