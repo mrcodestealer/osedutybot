@@ -58,6 +58,355 @@ OFFSETLEAVE_CARD_CALLBACK_KEYS = frozenset(
     | {_OFFSET_EDIT_PICK_KEY, _OFFSET_EDIT_SUBMIT_KEY, _OFFSET_DELETE_KEY}
 )
 
+# Mirror OSE offset rows from the bot Base table into the wiki duty-shift Offset2026 bitable.
+# Source: https://casinoplus.sg.larksuite.com/base/CpdEbEofwaYyyEsSjlElKNxzgec?table=tblC5T2MAydwT42j&view=vewHEvu7K8
+# Dest:   https://casinoplus.sg.larksuite.com/wiki/O4Dfw4DVTiPpFukn801l5z3WgMd?sheet=02eZI8&table=tblL4rrbJHJSosDX&view=vewFF82Q2p
+OFFSET_SOURCE_BASE_TOKEN = (
+    os.getenv("OFFSET_SOURCE_BASE_TOKEN") or os.getenv("OSE_BASE_TOKEN") or "CpdEbEofwaYyyEsSjlElKNxzgec"
+).strip()
+OFFSET_SOURCE_TABLE_ID = (os.getenv("OFFSET_SOURCE_TABLE_ID") or os.getenv("OSE_OFFSET_TABLE_ID") or "tblC5T2MAydwT42j").strip()
+OFFSET_DUTY_WIKI_SPREADSHEET_TOKEN = (
+    os.getenv("OFFSET_DUTY_WIKI_SPREADSHEET_TOKEN") or "UjF0saOVuhJSWLtBv9GlaQOkgbe"
+).strip()
+OFFSET_DUTY_SHEET_ID = (os.getenv("OFFSET_DUTY_SHEET_ID") or "02eZI8").strip()
+OFFSET_DUTY_TABLE_ID = (os.getenv("OFFSET_DUTY_TABLE_ID") or "tblL4rrbJHJSosDX").strip()
+OFFSET_DUTY_BITABLE_BASE = (os.getenv("OFFSET_DUTY_BITABLE_BASE") or "I97gbnViZaqSdNs8U8AliyWtgDz").strip()
+_OFFSET_DUTY_SYNC_STATE_PATH = os.path.join(
+    _CHBOX_DIR,
+    os.getenv("OFFSET_DUTY_SYNC_STATE", ".offset_duty_sync_state.json"),
+)
+_OFFSET_DUTY_SYNC_LOCK = threading.Lock()
+_OFFSET_DUTY_SYNC_THREAD_LOCK = threading.Lock()
+_OFFSET_DUTY_SYNC_FIELDS = (
+    "Request Date",
+    "Request Person",
+    "Exchange Person",
+    "Shift Type",
+    "Original Date",
+    "Exchange Date",
+    "Reason",
+    "Approval Status",
+    "Approver",
+    "Approval Date",
+    "Remarks",
+)
+
+
+def _load_offset_duty_sync_state_unlocked() -> dict[str, Any]:
+    try:
+        with open(_OFFSET_DUTY_SYNC_STATE_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return {"by_src": {}, "src_fp": {}}
+    except Exception:
+        return {"by_src": {}, "src_fp": {}}
+    if not isinstance(data, dict):
+        return {"by_src": {}, "src_fp": {}}
+    by_src = data.get("by_src")
+    if not isinstance(by_src, dict):
+        by_src = {}
+    src_fp = data.get("src_fp")
+    if not isinstance(src_fp, dict):
+        src_fp = {}
+    return {
+        "by_src": {str(k): str(v) for k, v in by_src.items() if k and v},
+        "src_fp": {str(k): str(v) for k, v in src_fp.items() if k and v},
+    }
+
+
+def _save_offset_duty_sync_state_unlocked(state: dict[str, Any]) -> None:
+    payload = {
+        "by_src": dict(state.get("by_src") or {}),
+        "src_fp": dict(state.get("src_fp") or {}),
+        "updated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+    }
+    tmp = _OFFSET_DUTY_SYNC_STATE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    os.replace(tmp, _OFFSET_DUTY_SYNC_STATE_PATH)
+
+
+def _offset_duty_sync_map_get(src_record_id: str) -> str:
+    rid = (src_record_id or "").strip()
+    if not rid:
+        return ""
+    with _OFFSET_DUTY_SYNC_LOCK:
+        return str(_load_offset_duty_sync_state_unlocked().get("by_src", {}).get(rid) or "").strip()
+
+
+def _offset_duty_sync_map_set(
+    src_record_id: str,
+    dest_record_id: str,
+    *,
+    fingerprint: str = "",
+) -> None:
+    src = (src_record_id or "").strip()
+    dest = (dest_record_id or "").strip()
+    if not src or not dest:
+        return
+    fp = (fingerprint or "").strip()
+    with _OFFSET_DUTY_SYNC_LOCK:
+        state = _load_offset_duty_sync_state_unlocked()
+        by_src = dict(state.get("by_src") or {})
+        src_fp = dict(state.get("src_fp") or {})
+        by_src[src] = dest
+        if fp:
+            src_fp[src] = fp
+        _save_offset_duty_sync_state_unlocked({"by_src": by_src, "src_fp": src_fp})
+
+
+def _offset_duty_sync_map_pop(src_record_id: str) -> str:
+    src = (src_record_id or "").strip()
+    if not src:
+        return ""
+    with _OFFSET_DUTY_SYNC_LOCK:
+        state = _load_offset_duty_sync_state_unlocked()
+        by_src = dict(state.get("by_src") or {})
+        src_fp = dict(state.get("src_fp") or {})
+        dest = str(by_src.pop(src, "") or "").strip()
+        src_fp.pop(src, None)
+        _save_offset_duty_sync_state_unlocked({"by_src": by_src, "src_fp": src_fp})
+        return dest
+
+
+def _offset_sync_field_key(v: Any) -> str:
+    if isinstance(v, (int, float)):
+        return str(int(v))
+    return str(od._field_text(v)).strip()
+
+
+def _offset_sync_fingerprint(fields: dict[str, Any]) -> str:
+    f = fields or {}
+    parts = [
+        _offset_sync_field_key(f.get("Request Date")),
+        od._title_name(od._field_text(f.get("Request Person"))),
+        od._title_name(od._field_text(f.get("Exchange Person"))),
+        od._field_text(f.get("Shift Type")).strip().upper(),
+        _offset_sync_field_key(f.get("Original Date")),
+        _offset_sync_field_key(f.get("Exchange Date")),
+        od._field_text(f.get("Reason")).strip().lower(),
+    ]
+    return "|".join(parts)
+
+
+def _offset_fields_for_duty_mirror(src_fields: dict[str, Any]) -> dict[str, Any]:
+    src = src_fields or {}
+    out: dict[str, Any] = {}
+    for name in _OFFSET_DUTY_SYNC_FIELDS:
+        if name not in src:
+            continue
+        val = src.get(name)
+        if val is None:
+            continue
+        if isinstance(val, str) and not val.strip():
+            continue
+        out[name] = val
+    return out
+
+
+def _bitable_dest_request(
+    token: str,
+    method: str,
+    *,
+    record_id: str = "",
+    fields: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    base = OFFSET_DUTY_BITABLE_BASE
+    table = OFFSET_DUTY_TABLE_ID
+    headers = {"Authorization": f"Bearer {token}"}
+    if fields is not None:
+        headers["Content-Type"] = "application/json"
+    rid = (record_id or "").strip()
+    if method.upper() == "GET" and rid:
+        url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{base}/tables/{table}/records/{rid}"
+        res = requests.get(url, headers=headers, params={"user_id_type": "open_id"}, timeout=30).json()
+    elif method.upper() == "POST":
+        url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{base}/tables/{table}/records"
+        res = requests.post(
+            url,
+            headers=headers,
+            params={"user_id_type": "open_id"},
+            json={"fields": fields or {}},
+            timeout=30,
+        ).json()
+    elif method.upper() == "PUT" and rid:
+        url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{base}/tables/{table}/records/{rid}"
+        res = requests.put(
+            url,
+            headers=headers,
+            params={"user_id_type": "open_id"},
+            json={"fields": fields or {}},
+            timeout=30,
+        ).json()
+    elif method.upper() == "DELETE" and rid:
+        url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{base}/tables/{table}/records/{rid}"
+        res = requests.delete(url, headers=headers, params={"user_id_type": "open_id"}, timeout=30).json()
+    else:
+        raise ValueError(f"unsupported bitable dest request {method!r}")
+    return res
+
+
+def _fetch_source_offset_record(token: str, src_record_id: str) -> Optional[dict[str, Any]]:
+    rid = (src_record_id or "").strip()
+    if not rid:
+        return None
+    url = (
+        f"https://open.larksuite.com/open-apis/bitable/v1/apps/"
+        f"{OFFSET_SOURCE_BASE_TOKEN}/tables/{OFFSET_SOURCE_TABLE_ID}/records/{rid}"
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    res = requests.get(url, headers=headers, params={"user_id_type": "open_id"}, timeout=30).json()
+    if res.get("code") != 0:
+        return None
+    rec = (res.get("data") or {}).get("record")
+    return rec if isinstance(rec, dict) else None
+
+
+def _find_dest_record_id_by_fingerprint(token: str, fingerprint: str) -> str:
+    fp = (fingerprint or "").strip()
+    if not fp:
+        return ""
+    items = od._bitable_get_all_records(token, OFFSET_DUTY_BITABLE_BASE, OFFSET_DUTY_TABLE_ID)
+    for it in items:
+        fields = it.get("fields") or {}
+        if _offset_sync_fingerprint(fields) == fp:
+            return str(it.get("record_id") or "").strip()
+    return ""
+
+
+def _upsert_offset_duty_mirror(token: str, src_record_id: str, src_fields: dict[str, Any]) -> str:
+    src = (src_record_id or "").strip()
+    if not src:
+        raise ValueError("src_record_id is required")
+    payload = _offset_fields_for_duty_mirror(src_fields)
+    if not payload:
+        raise ValueError("empty mirror payload")
+    dest_id = _offset_duty_sync_map_get(src)
+    if dest_id:
+        upd = _bitable_dest_request(token, "PUT", record_id=dest_id, fields=payload)
+        if upd.get("code") == 0:
+            return dest_id
+        if int(upd.get("code") or 0) not in (1254043, 1254044):
+            raise RuntimeError(f"duty offset update failed: {upd}")
+        dest_id = ""
+    if not dest_id:
+        fp = _offset_sync_fingerprint(src_fields)
+        dest_id = _find_dest_record_id_by_fingerprint(token, fp)
+    if dest_id:
+        upd = _bitable_dest_request(token, "PUT", record_id=dest_id, fields=payload)
+        if upd.get("code") != 0:
+            raise RuntimeError(f"duty offset update failed: {upd}")
+    else:
+        created = _bitable_dest_request(token, "POST", fields=payload)
+        if created.get("code") != 0:
+            raise RuntimeError(f"duty offset create failed: {created}")
+        dest_id = str(((created.get("data") or {}).get("record") or {}).get("record_id") or "").strip()
+        if not dest_id:
+            raise RuntimeError(f"duty offset create missing record_id: {created}")
+    _offset_duty_sync_map_set(src, dest_id, fingerprint=_offset_sync_fingerprint(src_fields))
+    return dest_id
+
+
+def _delete_offset_duty_mirror(token: str, src_record_id: str) -> bool:
+    src = (src_record_id or "").strip()
+    if not src:
+        return False
+    dest_id = _offset_duty_sync_map_pop(src)
+    if not dest_id:
+        return False
+    res = _bitable_dest_request(token, "DELETE", record_id=dest_id)
+    code = int(res.get("code") or 0)
+    if code == 0 or code in (1254043, 1254044):
+        return True
+    raise RuntimeError(f"duty offset delete failed: {res}")
+
+
+def sync_offset_to_duty_wiki(*, record_id: str = "", delete: bool = False) -> dict[str, Any]:
+    """
+    Mirror one source offset row into the wiki Offset2026 bitable (best-effort, raises on API error).
+    """
+    rid = (record_id or "").strip()
+    if not rid:
+        return {"ok": False, "error": "missing record_id"}
+    token = od.get_tenant_access_token()
+    if delete:
+        deleted = _delete_offset_duty_mirror(token, rid)
+        return {"ok": True, "record_id": rid, "deleted": deleted}
+    src = _fetch_source_offset_record(token, rid)
+    if src is None:
+        deleted = _delete_offset_duty_mirror(token, rid)
+        return {"ok": True, "record_id": rid, "deleted": deleted, "reason": "source_missing"}
+    dest_id = _upsert_offset_duty_mirror(token, rid, src.get("fields") or {})
+    return {"ok": True, "record_id": rid, "dest_record_id": dest_id}
+
+
+def sync_all_offsets_to_duty_wiki() -> dict[str, Any]:
+    """Full reconcile: every source offset row is upserted into wiki Offset2026."""
+    token = od.get_tenant_access_token()
+    src_items = od._bitable_get_all_records(token, OFFSET_SOURCE_BASE_TOKEN, OFFSET_SOURCE_TABLE_ID)
+    upserted = 0
+    deleted = 0
+    errors: list[str] = []
+    live_src: set[str] = set()
+    for it in src_items:
+        src_id = str(it.get("record_id") or "").strip()
+        if not src_id:
+            continue
+        live_src.add(src_id)
+        try:
+            _upsert_offset_duty_mirror(token, src_id, it.get("fields") or {})
+            upserted += 1
+        except Exception as exc:
+            errors.append(f"{src_id}: {exc}")
+    with _OFFSET_DUTY_SYNC_LOCK:
+        state = _load_offset_duty_sync_state_unlocked()
+        by_src = dict(state.get("by_src") or {})
+        stale_src = [sid for sid in by_src if sid not in live_src]
+    for sid in stale_src:
+        try:
+            if _delete_offset_duty_mirror(token, sid):
+                deleted += 1
+        except Exception as exc:
+            errors.append(f"delete {sid}: {exc}")
+    return {
+        "ok": not errors,
+        "source_rows": len(live_src),
+        "upserted": upserted,
+        "deleted": deleted,
+        "errors": errors,
+    }
+
+
+def schedule_offset_duty_wiki_sync(
+    *,
+    record_id: str = "",
+    delete: bool = False,
+    full: bool = False,
+) -> None:
+    """Background mirror to wiki Offset2026; never raises to callers."""
+
+    def _run() -> None:
+        try:
+            if full:
+                result = sync_all_offsets_to_duty_wiki()
+                print(
+                    f"[offsetleave] duty wiki offset sync: upserted={result.get('upserted')} "
+                    f"deleted={result.get('deleted')} errors={len(result.get('errors') or [])}",
+                    flush=True,
+                )
+                if result.get("errors"):
+                    print(f"[offsetleave] duty wiki offset sync errors: {result['errors']!r}", flush=True)
+                return
+            sync_offset_to_duty_wiki(record_id=record_id, delete=delete)
+        except Exception as exc:
+            action = "delete" if delete else "upsert"
+            target = record_id or ("ALL" if full else "?")
+            print(f"[offsetleave] duty wiki offset {action} failed for {target!r}: {exc!r}", flush=True)
+
+    with _OFFSET_DUTY_SYNC_THREAD_LOCK:
+        threading.Thread(target=_run, daemon=True, name="offset-duty-wiki-sync").start()
+
 
 def _wants_offset(text: str) -> bool:
     return bool(re.search(r"\boffset\b", text or "", re.I))
@@ -2147,6 +2496,47 @@ def scan_bitable_pending_offsets_for_approver_notify() -> dict[str, int]:
         except Exception as exc:
             print(f"[offsetleave] bitable scan notify failed for {rid!r}: {exc!r}", flush=True)
     return {"scanned": len(items), "notified": sent}
+
+
+def scan_bitable_offsets_for_duty_wiki_sync() -> dict[str, int]:
+    """
+    Mirror Base offset rows edited directly in Bitable (manual add/change/delete).
+
+    Bot submit/update/delete already schedule sync; this poll catches manual Base edits.
+    """
+    od.invalidate_ose_bitable_cache()
+    token = od.get_tenant_access_token()
+    items = od._bitable_get_all_records(token, OFFSET_SOURCE_BASE_TOKEN, OFFSET_SOURCE_TABLE_ID)
+    with _OFFSET_DUTY_SYNC_LOCK:
+        state = _load_offset_duty_sync_state_unlocked()
+        by_src = dict(state.get("by_src") or {})
+        src_fp = dict(state.get("src_fp") or {})
+    live_src: set[str] = set()
+    synced = 0
+    for it in items:
+        src_id = str(it.get("record_id") or "").strip()
+        if not src_id:
+            continue
+        live_src.add(src_id)
+        fields = it.get("fields") or {}
+        fp = _offset_sync_fingerprint(fields)
+        if by_src.get(src_id) and src_fp.get(src_id) == fp:
+            continue
+        try:
+            sync_offset_to_duty_wiki(record_id=src_id)
+            synced += 1
+        except Exception as exc:
+            print(f"[offsetleave] duty wiki poll sync failed for {src_id!r}: {exc!r}", flush=True)
+    deleted = 0
+    for src_id in list(by_src.keys()):
+        if src_id in live_src:
+            continue
+        try:
+            sync_offset_to_duty_wiki(record_id=src_id, delete=True)
+            deleted += 1
+        except Exception as exc:
+            print(f"[offsetleave] duty wiki poll delete failed for {src_id!r}: {exc!r}", flush=True)
+    return {"scanned": len(items), "synced": synced, "deleted": deleted}
 
 
 def _toast_approval_problem(send_message: Callable[..., Any], chat_id: str, text: str) -> None:

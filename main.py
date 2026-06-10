@@ -1769,7 +1769,7 @@ _leave_wfh_sync_lock = threading.Lock()
 
 
 def poll_offset_approver_notifications_from_bitable():
-    """Notify approvers for pending offsets created directly in Bitable (manual base rows)."""
+    """Notify approvers + mirror manual Base offset edits to wiki Offset2026."""
     try:
         import offsetleave as ol
 
@@ -1777,6 +1777,15 @@ def poll_offset_approver_notifications_from_bitable():
         n = int((stats or {}).get("notified") or 0)
         if n:
             print(f"[offsetleave] bitable poll: notified approvers for {n} pending offset(s)", flush=True)
+        wiki = ol.scan_bitable_offsets_for_duty_wiki_sync()
+        ws = int((wiki or {}).get("synced") or 0)
+        wd = int((wiki or {}).get("deleted") or 0)
+        if ws or wd:
+            print(
+                f"[offsetleave] duty wiki poll: synced {ws} row(s), deleted {wd} row(s) "
+                f"(scanned {(wiki or {}).get('scanned')})",
+                flush=True,
+            )
     except Exception as exc:
         print(f"[offsetleave] bitable approver poll failed: {exc!r}", flush=True)
 
@@ -1801,6 +1810,12 @@ def ose_leave_offset_daily_sync():
                 print(f"[OSE Bitable] stale offset purge errors: {pur['errors']!r}", flush=True)
         except Exception as exc:
             print(f"[OSE Bitable] stale offset purge failed: {exc!r}", flush=True)
+        try:
+            import offsetleave as ol
+
+            ol.schedule_offset_duty_wiki_sync(full=True)
+        except Exception as exc:
+            print(f"[OSE Bitable] duty wiki offset full sync schedule failed: {exc!r}", flush=True)
     finally:
         _ose_bitable_sync_lock.release()
 

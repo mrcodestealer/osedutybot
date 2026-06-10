@@ -1148,6 +1148,15 @@ def _bitable_date_ms(d: date) -> int:
     return int(datetime.combine(d, datetime.min.time()).timestamp() * 1000)
 
 
+def _schedule_offset_duty_wiki_sync(*, record_id: str = "", delete: bool = False, full: bool = False) -> None:
+    try:
+        import offsetleave as ol
+
+        ol.schedule_offset_duty_wiki_sync(record_id=record_id, delete=delete, full=full)
+    except Exception as exc:
+        print(f"[ose_Duty] duty wiki offset sync schedule failed: {exc!r}", flush=True)
+
+
 def _bitable_create_record(token: str, table_id: str, fields: dict[str, Any]) -> dict[str, Any]:
     url = (
         f"https://open.larksuite.com/open-apis/bitable/v1/apps/"
@@ -1706,6 +1715,7 @@ def update_ose_offset_approval(
     }
     _bitable_update_record(token, OSE_OFFSET_TABLE_ID, record_id, fields)
     invalidate_ose_bitable_cache()
+    _schedule_offset_duty_wiki_sync(record_id=record_id)
     return {"ok": True, "record_id": record_id, "status": st}
 
 
@@ -2057,6 +2067,7 @@ def submit_ose_offset(
     record_id = (res.get("data") or {}).get("record", {}).get("record_id")
     rid = str(record_id or "").strip()
     if rid:
+        _schedule_offset_duty_wiki_sync(record_id=rid)
         try:
             import offsetleave as ol
 
@@ -2112,6 +2123,7 @@ def delete_ose_offset_record(*, record_id: str, skip_cache_invalidate: bool = Fa
         raise RuntimeError(f"Bitable delete failed: {res}")
     if not skip_cache_invalidate:
         invalidate_ose_bitable_cache()
+    _schedule_offset_duty_wiki_sync(record_id=rid, delete=True)
     return {"ok": True, "record_id": rid}
 
 
@@ -2222,6 +2234,7 @@ def update_ose_offset_request(
     }
     _bitable_update_record(token, OSE_OFFSET_TABLE_ID, record_id, fields)
     invalidate_ose_bitable_cache()
+    _schedule_offset_duty_wiki_sync(record_id=record_id)
     return {"ok": True, "record_id": record_id}
 
 
@@ -2256,6 +2269,7 @@ def update_ose_offset_record_fields(
     }
     _bitable_update_record(token, OSE_OFFSET_TABLE_ID, rid, fields)
     invalidate_ose_bitable_cache()
+    _schedule_offset_duty_wiki_sync(record_id=rid)
     return {"ok": True, "record_id": rid}
 
 
