@@ -845,12 +845,18 @@ _PAGE = """<!DOCTYPE html>
         return String(s || "").replace(/\\s*\\(TEST\\)\\s*$/i, "").trim();
       }
 
+      function offlineMachineIdFromName(name) {
+        var n = stripTrailingTestMarker(String(name || "").trim());
+        if (!n) return "—";
+        var m = n.match(/(?:^|[-\s])(NWR|DHS|OSM|MDR|NCH|TBP|WF)(\d+)\s*$/i);
+        if (m) return m[1].toUpperCase() + m[2];
+        m = n.match(/(NWR|DHS|OSM|MDR|NCH|TBP|WF)(\d+)/i);
+        if (m) return m[1].toUpperCase() + m[2];
+        return n;
+      }
+
       function offlineLabelForRow(tr) {
-        var b = (tr.getAttribute("data-belongs") || "").trim() || "—";
-        var n = stripTrailingTestMarker((tr.getAttribute("data-name") || "").trim() || "—");
-        var prefix = b + "-";
-        var out = n.slice(0, prefix.length) === prefix ? n : prefix + n;
-        return stripTrailingTestMarker(out);
+        return offlineMachineIdFromName(tr.getAttribute("data-name") || "");
       }
 
       function updateOfflineSummary() {
