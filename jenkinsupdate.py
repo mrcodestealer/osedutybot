@@ -126,6 +126,9 @@ BI_API_UPDATE_BUILD_URL = (
 FPMS_NT_UAT_BO_UPDATE_URL = (
     "https://jenkins.client8.me/job/FPMS_NT/job/FPMS_NT_UAT_BO_UPDATE/build?delay=0sec"
 )
+PMS_UAT_UPDATE_URL = (
+    "https://jenkins.client8.me/job/PMS/job/UAT/job/PMS-UAT-UPDATE/build?delay=0sec"
+)
 
 # Jenkins REPOSITORY dropdown (BI-API-UPDATE) — keep in sync with the job parameter list.
 BI_API_UPDATE_DEFAULT_ENVIRONMENT = "prod"
@@ -230,17 +233,21 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
         "https://jenkins.client8.me/job/IGO/job/UAT/job/IGO-UAT-UPDATE/build?delay=0sec\n"
         "https://jenkins.client8.me/job/CPMS/job/UAT/job/CPMS-UAT-UPDATE/build?delay=0sec",
     ),
+    "pms": (
+        "PMS-UAT-UPDATE",
+        PMS_UAT_UPDATE_URL,
+    ),
     "pms uat update": (
         "PMS-UAT-UPDATE",
-        "https://jenkins.client8.me/job/PMS/job/UAT/job/PMS-UAT-UPDATE/build?delay=0sec",
+        PMS_UAT_UPDATE_URL,
     ),
     "pms ph cp production": (
         "PMS-UAT-UPDATE",
-        "https://jenkins.client8.me/job/PMS/job/UAT/job/PMS-UAT-UPDATE/build?delay=0sec",
+        PMS_UAT_UPDATE_URL,
     ),
     "update pms": (
         "PMS-UAT-UPDATE",
-        "https://jenkins.client8.me/job/PMS/job/UAT/job/PMS-UAT-UPDATE/build?delay=0sec",
+        PMS_UAT_UPDATE_URL,
     ),
     "igo uat script run": (
         "IGO UAT SCRIPT RUN",
@@ -4891,6 +4898,9 @@ def _jenkins_update_job_score(query_text: str, alias: str) -> float:
     q = JENKINS_UPDATE_CMD_RE.sub("", (query_text or ""), count=1).strip().casefold()
     a = (alias or "").strip().casefold()
     if not q or not a:
+        return 0.0
+    # ``/update pms`` → hint ``pms`` must not fuzzy-match ``fpms …`` (substring inside ``fpms``).
+    if q == "pms" and a.startswith("fpms"):
         return 0.0
     if a in q:
         return 2.0 + 10.0 / (1.0 + float(q.index(a)))
