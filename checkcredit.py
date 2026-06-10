@@ -14,8 +14,11 @@ Env (optional):
   A ``.env`` file next to ``checkcredit.py`` is auto-loaded (``pip install python-dotenv``).
   CHECKCREDIT_USER / CHECKCREDIT_PASSWORD — LogNavigator login
   LOG_NAVIGATOR_BASE — LogNavigator base URL
-  OSM_LOG_OSS_TEMPLATE — default:
+  OSM_LOG_OSS_TEMPLATE — default GET URL (legacy; same as primary ``{date}.log`` object):
     https://oss-osm-log.osmplay.com/MINIPC/{machine}/logic/{date}.log
+  OSM_LOG_OSS_OBJECT_TEMPLATE — per-file GET (``{basename}`` e.g. ``2026-06-05.log`` or rotated name)
+  OSM_LOG_OSS_LIST_URL — bucket list root (default ``https://oss-osm-log.osmplay.com/``)
+  OSM_LOG_OSS_LIST_PREFIX_TEMPLATE — ListObjects prefix (default ``MINIPC/{machine}/logic/{date}``)
   OSS_MACHINE_FOLDER_TEMPLATE — when --finderror is digits-only (default NWR{n}, e.g. 2074 → NWR2074)
   CHECKCREDIT_USE_OSS=0 — force LogNavigator instead of default OSS
   CHECKCREDIT_USE_NAVIGATOR=1 — same (force LogNavigator browser mode)
@@ -103,6 +106,18 @@ DEFAULT_OSS_TEMPLATE = os.environ.get(
     "OSM_LOG_OSS_TEMPLATE",
     "https://oss-osm-log.osmplay.com/MINIPC/{machine}/logic/{date}.log",
 )
+DEFAULT_OSS_OBJECT_TEMPLATE = os.environ.get(
+    "OSM_LOG_OSS_OBJECT_TEMPLATE",
+    "https://oss-osm-log.osmplay.com/MINIPC/{machine}/logic/{basename}",
+)
+DEFAULT_OSS_LIST_URL = os.environ.get(
+    "OSM_LOG_OSS_LIST_URL",
+    "https://oss-osm-log.osmplay.com/",
+).rstrip("/")
+DEFAULT_OSS_LIST_PREFIX_TEMPLATE = os.environ.get(
+    "OSM_LOG_OSS_LIST_PREFIX_TEMPLATE",
+    "MINIPC/{machine}/logic/{date}",
+)
 
 
 def _env_truthy(name: str) -> bool:
@@ -162,16 +177,84 @@ def resolve_oss_machine_folder(machine_query: str) -> str:
     return q.upper()
 
 
-def fetch_log_via_oss(machine_query: str, td: date, *, timeout_sec: float = 120.0) -> tuple[str, list[str]]:
-    """HTTP GET log text from OSS URL built from OSM_LOG_OSS_TEMPLATE."""
+def _filter_logic_basenames_for_date(candidates: list[str], date_str: str) -> list[str]:
+    """Primary ``YYYY-MM-DD.log`` plus rotated ``YYYY-MM-DD.*.log`` names, sorted."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for base in candidates:
+        bn = (base or "").strip()
+        if not bn:
+            continue
+        if bn == f"{date_str}.log" or bn.startswith(f"{date_str}."):
+            if bn not in seen:
+                seen.add(bn)
+                out.append(bn)
+
+    def _sort_key(fn: str) -> tuple[int, str]:
+        if fn == f"{date_str}.log":
+            return (0, fn)
+        return (1, fn)
+
+    out.sort(key=_sort_key)
+    return out
+
+
+def list_oss_logic_log_basenames_for_date(
+    machine_query: str,
+    target: date,
+    *,
+    timeout_sec: float = 30.0,
+) -> list[str]:
+    """
+    OSS ListObjects: same-day ``logic/*.log`` basenames (primary + rotated), like LogNavigator folder view.
+    """
+    try:
+        import requests
+    except ImportError as e:
+        raise RuntimeError("OSS list requires `requests` (pip install requests)") from e
+
+    folder = resolve_oss_machine_folder(machine_query)
+    date_str = target.strftime("%Y-%m-%d")
+    prefix = DEFAULT_OSS_LIST_PREFIX_TEMPLATE.format(machine=folder, date=date_str)
+    list_url = f"{DEFAULT_OSS_LIST_URL.rstrip('/')}/"
+    r = requests.get(
+        list_url,
+        params={"prefix": prefix, "max-keys": "100"},
+        timeout=timeout_sec,
+        headers={"User-Agent": "checkcredit/1.0 (OSS list)"},
+    )
+    r.raise_for_status()
+    keys = re.findall(r"<Key>([^<]+)</Key>", r.text or "")
+    basenames: list[str] = []
+    for key in keys:
+        base = key.rsplit("/", 1)[-1].strip()
+        if base.endswith(".log"):
+            basenames.append(base)
+    return _filter_logic_basenames_for_date(basenames, date_str)
+
+
+def fetch_log_via_oss(
+    machine_query: str,
+    td: date,
+    *,
+    timeout_sec: float = 120.0,
+    logic_log_basename: str | None = None,
+) -> tuple[str, list[str]]:
+    """HTTP GET log text from OSS (``OSM_LOG_OSS_OBJECT_TEMPLATE`` or legacy ``OSM_LOG_OSS_TEMPLATE``)."""
     try:
         import requests
     except ImportError as e:
         raise RuntimeError("OSS mode requires `requests` (pip install requests)") from e
 
     folder = resolve_oss_machine_folder(machine_query)
-    tpl = os.environ.get("OSM_LOG_OSS_TEMPLATE", DEFAULT_OSS_TEMPLATE)
-    url = tpl.format(machine=folder, date=td.isoformat())
+    date_str = td.isoformat()
+    basename = (logic_log_basename or "").strip() or f"{date_str}.log"
+    obj_tpl = (DEFAULT_OSS_OBJECT_TEMPLATE or "").strip()
+    if obj_tpl and "{basename}" in obj_tpl:
+        url = obj_tpl.format(machine=folder, date=date_str, basename=basename)
+    else:
+        tpl = os.environ.get("OSM_LOG_OSS_TEMPLATE", DEFAULT_OSS_TEMPLATE)
+        url = tpl.format(machine=folder, date=date_str)
     r = requests.get(
         url,
         timeout=timeout_sec,
@@ -187,7 +270,7 @@ def fetch_log_via_oss(machine_query: str, td: date, *, timeout_sec: float = 120.
         "→ Source: OSS (HTTP GET)",
         f"→ URL: {url}",
         f"→ Machine folder: {folder}",
-        f"→ Date file: {td.isoformat()}",
+        f"→ Logic log file: {basename}",
     ]
     return text, meta
 
@@ -621,20 +704,10 @@ def list_logic_log_basenames_for_date(page, target: date, *, timeout_ms: int) ->
     for i in range(n):
         href = links.nth(i).get_attribute("href") or ""
         base = _logic_basename_from_nav_href(href)
-        if not base:
-            continue
-        if base == f"{date_str}.log" or base.startswith(f"{date_str}."):
-            if base not in seen:
-                seen.add(base)
-                out.append(base)
-
-    def _sort_key(fn: str) -> tuple[int, str]:
-        if fn == f"{date_str}.log":
-            return (0, fn)
-        return (1, fn)
-
-    out.sort(key=_sort_key)
-    return out
+        if base and base not in seen:
+            seen.add(base)
+            out.append(base)
+    return _filter_logic_basenames_for_date(out, date_str)
 
 
 def click_logic_log_by_basename(page, basename: str, *, timeout_ms: int) -> None:
@@ -2277,8 +2350,8 @@ def run_finderror(
       - \"navigator\" — LogNavigator UI + tail (Chromium; headless on Linux without DISPLAY).
     ``debug_headed`` (CLI ``--debug``): force visible LogNavigator Chromium regardless of env / DISPLAY.
 
-    ``navigator_logic_log_basename``: LogNavigator only — open ``logic/<basename>`` for ``target_date``
-    (e.g. rotated ``YYYY-MM-DD.YYYY-MM-DD_00-00-00_….log``) instead of the default ``YYYY-MM-DD.log``.
+    ``navigator_logic_log_basename``: open ``logic/<basename>`` for ``target_date`` (OSS or LogNavigator).
+    OSS uses ListObjects under ``OSM_LOG_OSS_LIST_PREFIX_TEMPLATE``; LogNavigator uses the file browser.
     """
     td = target_date or date.today()
     parsed: list[dict[str, Any]] = []
@@ -2291,7 +2364,42 @@ def run_finderror(
     }
 
     if source == "oss":
-        log_body, text_parts = fetch_log_via_oss(machine_query, td, timeout_sec=max(30.0, timeout_ms / 1000.0))
+        date_str = td.isoformat()
+        timeout_sec = max(30.0, timeout_ms / 1000.0)
+        same_day = list_oss_logic_log_basenames_for_date(
+            machine_query, td, timeout_sec=min(30.0, timeout_sec)
+        )
+        nav_meta["logic_same_day_log_files"] = same_day
+        nav_meta["logic_same_day_multi"] = len(same_day) >= 2
+        want = (navigator_logic_log_basename or "").strip()
+        if want and same_day and want not in same_day:
+            text_parts.append(
+                f"⚠ Requested logic log `{want}` not listed for this day — using default selection."
+            )
+            want = ""
+        chosen = ""
+        if same_day:
+            if want:
+                chosen = want
+            elif f"{date_str}.log" in same_day:
+                chosen = f"{date_str}.log"
+            else:
+                chosen = same_day[0]
+        else:
+            chosen = f"{date_str}.log"
+            nav_meta["logic_same_day_log_files"] = [chosen]
+            nav_meta["logic_same_day_multi"] = False
+        nav_meta["opened_logic_log_basename"] = chosen
+        log_body, oss_parts = fetch_log_via_oss(
+            machine_query,
+            td,
+            timeout_sec=timeout_sec,
+            logic_log_basename=chosen,
+        )
+        text_parts.extend(oss_parts)
+        if nav_meta["logic_same_day_multi"]:
+            names = ", ".join(same_day)
+            text_parts.append(f"→ Same-day logic logs ({len(same_day)}): {names}")
         machine_display = resolve_oss_machine_folder(machine_query)
         parsed = parse_user_blocks_full(log_body)
     else:
@@ -2323,16 +2431,11 @@ def run_finderror(
     np_followup = build_np_followup_payload(
         top2_any, top2_err, machine_display, td, merged_players_ordered
     )
-    if source != "oss":
-        np_followup["navigator_same_day_multi_log"] = bool(nav_meta.get("logic_same_day_multi"))
-        np_followup["navigator_logic_log_files"] = list(nav_meta.get("logic_same_day_log_files") or [])
-        np_followup["navigator_opened_logic_log_basename"] = str(
-            nav_meta.get("opened_logic_log_basename") or ""
-        )
-    else:
-        np_followup["navigator_same_day_multi_log"] = False
-        np_followup["navigator_logic_log_files"] = []
-        np_followup["navigator_opened_logic_log_basename"] = ""
+    np_followup["navigator_same_day_multi_log"] = bool(nav_meta.get("logic_same_day_multi"))
+    np_followup["navigator_logic_log_files"] = list(nav_meta.get("logic_same_day_log_files") or [])
+    np_followup["navigator_opened_logic_log_basename"] = str(
+        nav_meta.get("opened_logic_log_basename") or ""
+    )
     if isinstance(np_followup, dict):
         _be = str(np_followup.get("third_http_backend") or "").strip().upper() or "NP"
         if not le_uid:

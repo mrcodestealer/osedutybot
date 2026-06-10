@@ -564,22 +564,14 @@ def run_checkcredit_finderror(
 
 
 def run_checkcredit_navigator_next_log(chat_id: str) -> None:
-    """Open the next same-day logic log in LogNavigator (Duty Bot card **check another logs**)."""
-    import checkcredit
-
-    if checkcredit.checkcredit_use_oss_source():
-        _checkcredit_send(
-            chat_id,
-            "❌ Alternate logic logs need LogNavigator — set `CHECKCREDIT_USE_NAVIGATOR=1` in `.env`.",
-        )
-        return
+    """Open the next same-day logic log (card **check another logs**) — OSS or LogNavigator."""
     pend = _get_checkcredit_np_pending(chat_id)
     files = (pend or {}).get("navigator_logic_log_files") or []
     opened = str((pend or {}).get("navigator_opened_logic_log_basename") or "").strip()
     if not pend or len(files) < 2:
         _checkcredit_send(
             chat_id,
-            "❌ No alternate LogNavigator files in context — run `/checkcreditdate …` again.",
+            "❌ No alternate logic logs in context — run `/checkcredit …` again.",
         )
         return
     try:
@@ -597,7 +589,7 @@ def run_checkcredit_navigator_next_log(chat_id: str) -> None:
         _checkcredit_send(chat_id, "❌ Pending machine/date missing — run `/checkcreditdate …` again.")
         return
     thread_root = _get_checkcredit_thread_root(chat_id)
-    _checkcredit_send(chat_id, f"⏳ LogNavigator: opening `{next_fn}` …", thread_root=thread_root)
+    _checkcredit_send(chat_id, f"⏳ Opening next logic log `{next_fn}` …", thread_root=thread_root)
     run_checkcredit_finderror(
         chat_id,
         mq,
