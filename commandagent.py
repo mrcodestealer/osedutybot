@@ -680,7 +680,7 @@ class CommandClassifier:
 
     def resolve(self, text: str, *, threshold: float = CONFIDENCE_THRESHOLD) -> Optional[str]:
         tag, conf, margin = self.predict(text)
-        if conf < threshold and margin < CONFIDENCE_MARGIN:
+        if conf < threshold or margin < CONFIDENCE_MARGIN:
             return None
         spec = self.intents_by_tag.get(tag)
         if not spec:

@@ -3625,15 +3625,26 @@ def lark_webhook():
         return _lark_im_done()
 
     # Natural English → slash command (optional; BOT_USE_AI=1). Failures keep hardcoded-only behavior.
+    # Skip command mapping for obvious casual chat — chatagent/chitchat handle those instead.
+    _skip_commandagent = False
     try:
-        import commandagent as _commandagent
+        import chitchat as _chitchat_gate
 
-        ai_command = _commandagent.translate_if_enabled(clean_text)
-        if ai_command:
-            print(f"🤖 Command agent map: {clean_text!r} → {ai_command!r}", flush=True)
-            clean_text = ai_command
-    except Exception as _commandagent_err:
-        print(f"⚠️ Command agent skipped (bot continues without AI): {_commandagent_err!r}", flush=True)
+        if _chitchat_gate.looks_like_chitchat(clean_text):
+            _skip_commandagent = True
+            print(f"💬 Chitchat gate: skip commandagent for {clean_text!r}", flush=True)
+    except Exception:
+        pass
+    if not _skip_commandagent:
+        try:
+            import commandagent as _commandagent
+
+            ai_command = _commandagent.translate_if_enabled(clean_text)
+            if ai_command:
+                print(f"🤖 Command agent map: {clean_text!r} → {ai_command!r}", flush=True)
+                clean_text = ai_command
+        except Exception as _commandagent_err:
+            print(f"⚠️ Command agent skipped (bot continues without AI): {_commandagent_err!r}", flush=True)
 
     # 命令处理
     if clean_text.lower() == "/test":
@@ -3660,6 +3671,13 @@ def lark_webhook():
         query = clean_text[3:].strip()
         print(f"🔍 Duty query extracted: '{query}'")
         reply = search_duty(query)
+        try:
+            import chitchat as _chitchat_s
+
+            if reply.startswith("No matching duty personnel found") and _chitchat_s.looks_like_chitchat(query):
+                reply = ""
+        except Exception:
+            pass
     elif clean_text.lower() == '/date':
         today = get_today_date()
         reply = f"Today's date is {today}."
@@ -4677,23 +4695,24 @@ def lark_webhook():
         print(f"✅ Replied to chat {chat_id}: {reply}")
     else:
         print(f"⚠️ No command matched and no reply generated for chat {chat_id}")
+        _chat_source = (original_text or clean_text or "").strip()
         if (
             bot_mentioned
-            and clean_text
-            and not clean_text.lstrip().startswith("/")
+            and _chat_source
+            and not _chat_source.lstrip().startswith("/")
         ):
             chat_reply = None
             try:
                 import chatagent as _chatagent
 
-                chat_reply = _chatagent.reply_if_enabled(clean_text)
+                chat_reply = _chatagent.reply_if_enabled(_chat_source)
             except Exception as _chatagent_err:
                 print(f"⚠️ Chat agent skipped: {_chatagent_err!r}", flush=True)
             if not chat_reply:
                 try:
                     import chitchat as _chitchat
 
-                    chat_reply = _chitchat.try_reply(clean_text)
+                    chat_reply = _chitchat.try_reply(_chat_source)
                 except Exception as _chat_err:
                     print(f"⚠️ Chitchat skipped: {_chat_err!r}", flush=True)
             if chat_reply:

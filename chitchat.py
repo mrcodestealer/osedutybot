@@ -47,7 +47,7 @@ _CHITCHAT_RULES: list[tuple[re.Pattern[str], list[str]]] = [
             r"what(?:'s|\s+is)\s+up|whats\s+up|sup|"
             r"wassup|you\s+good|"
             r"你好吗|怎么样|还好吗"
-            r")\s*[!.?~]*$",
+            r")(?:\s+\w+){0,4}\s*[!.?~]*$",
             re.I,
         ),
         [
@@ -116,6 +116,22 @@ _CHITCHAT_RULES: list[tuple[re.Pattern[str], list[str]]] = [
             "谢谢夸奖！有事再叫我。",
         ],
     ),
+    (
+        re.compile(
+            r"^(?:"
+            r"(?:hi+|hello+|hey+|hiya+|yo+|good\s+(?:morning|afternoon|evening))\s+)?"
+            r"(?:how\s+are\s+you|how\s+r\s+u|how\s+are\s+u|how\s+is\s+it\s+going|"
+            r"how\s+are\s+things|what(?:'s|\s+is)\s+up|whats\s+up|sup|wassup|you\s+good)"
+            r"(?:\s+\w+){0,4}\s*[!.?~]*$",
+            re.I,
+        ),
+        [
+            "I'm doing great, thanks for asking! 🤖 What can I help you with?",
+            "All good here — ready when you need duty info or machine lookup.",
+            "Pretty good! Ask me anything work-related or just say hi anytime.",
+            "还不错，谢谢关心！有需要查值班或机器可以跟我说。",
+        ],
+    ),
 ]
 
 
@@ -132,6 +148,21 @@ def _normalize(text: str) -> str:
     t = (text or "").strip()
     t = re.sub(r"\s+", " ", t)
     return t
+
+
+def looks_like_chitchat(text: str) -> bool:
+    """True when the message is casual chat, not a duty/command request."""
+    raw = _normalize(text)
+    if not raw or raw.startswith("/"):
+        return False
+    if _COMMANDISH_RE.search(raw):
+        return False
+    if len(raw.split()) > 12:
+        return False
+    for pattern, _replies in _CHITCHAT_RULES:
+        if pattern.search(raw):
+            return True
+    return False
 
 
 def try_reply(text: str) -> Optional[str]:
