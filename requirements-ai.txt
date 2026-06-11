@@ -1,7 +1,15 @@
-# Optional — only needed when BOT_USE_AI=1 (natural-language commands via commandagent.py).
+# Optional — commandagent (DistilBERT) + chatagent (LLM and/or local DistilBERT).
 # Install with the SAME Python that runs larkbot.service (fpmsbot env):
 #   /root/miniconda3/envs/fpmsbot/bin/python -m pip install -r requirements-ai.txt
-# Train: python commandagent.py train   → saves to commandagent_pt/
+#
+# commandagent: python commandagent.py train   → commandagent_pt/
+# chatagent LLM: set OPENAI_API_KEY (or BOT_CHAT_API_KEY) in .env
+#   BOT_CHATAGENT_BACKEND=auto   # auto | llm | local
+#   BOT_CHAT_MODEL=gpt-4o-mini
+#   BOT_CHAT_API_BASE=https://api.openai.com/v1   # Ollama: http://127.0.0.1:11434/v1
+# chatagent local generative (self-trained): python chatagent.py train-llm  → chatagent_llm_pt/
+#   BOT_CHATAGENT_BACKEND=local-llm   # or auto (uses generative before classifier)
+#   BOT_CHAT_GEN_BASE_MODEL=distilgpt2
 numpy
 torch
 safetensors

@@ -1,46 +1,70 @@
 """
-Deep-learning casual chat agent for Duty Bot (DistilBERT → friendly reply).
+Casual chat agent for Duty Bot — three backends:
 
-Runs **after** command handlers fail — only for non-command small talk.
-Does not replace commandagent (work commands stay separate).
+1. **API LLM** — OpenAI-compatible (GPT, Ollama, etc.), no local training
+2. **Local generative** — fine-tune DistilGPT-2 on your chat pairs (``train-llm``)
+3. **Local classifier** — DistilBERT intent + templates (``train``)
 
-**Toggle:** ``BOT_USE_CHATAGENT=1`` (default on). Set ``0`` to disable.
+**Backend** (``BOT_CHATAGENT_BACKEND``):
+    ``auto`` — API LLM if key set → else local generative if trained → else classifier
+    ``llm`` — API only
+    ``local-llm`` — self-trained generative model only (``chatagent_llm_pt/``)
+    ``local`` — classifier + templates only (``chatagent_pt/``)
 
-**Train / test**
+**Self-train generative (自己练 LLM):**
+    python chatagent.py train-llm [--epochs 5]
+    Saves to ``chatagent_llm_pt/`` (DistilGPT-2 fine-tuned on chat Q→A pairs).
+
+**Train classifier fallback:**
     python chatagent.py train [--epochs 10]
-    python chatagent.py test "hey how are you doing"
-    python chatagent.py eval
-    python chatagent.py patterns
-
-Model folder: ``chatagent_pt/`` (override: ``BOT_CHATAGENT_MODEL_DIR``).
-
-Note: This is intent classification + response templates (controlled replies), not a
-open-ended GPT chatbot — but it covers a wide range of everyday English chitchat.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import pickle
 import random
 import re
 import sys
 import traceback
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
 _CHBOX_DIR = Path(__file__).resolve().parent
 DEFAULT_MODEL_DIR = _CHBOX_DIR / "chatagent_pt"
+DEFAULT_GEN_MODEL_DIR = _CHBOX_DIR / "chatagent_llm_pt"
+GEN_BASE_MODEL = (os.getenv("BOT_CHAT_GEN_BASE_MODEL") or "distilgpt2").strip()
+GEN_MAX_SEQ_LEN = int(os.getenv("BOT_CHAT_GEN_MAX_SEQ_LEN", "256"))
+GEN_MAX_NEW_TOKENS = int(os.getenv("BOT_CHAT_GEN_MAX_NEW_TOKENS", "100"))
 CONFIDENCE_THRESHOLD = float(os.getenv("BOT_CHAT_CONFIDENCE", "0.10"))
 CONFIDENCE_MARGIN = float(os.getenv("BOT_CHAT_MARGIN", "0.02"))
 MAX_SEQ_LEN = 128
-MAX_CHAT_WORDS = int(os.getenv("BOT_CHAT_MAX_WORDS", "25"))
+MAX_CHAT_WORDS = int(os.getenv("BOT_CHAT_MAX_WORDS", "80"))
+LLM_TIMEOUT_SEC = float(os.getenv("BOT_CHAT_LLM_TIMEOUT", "30"))
+LLM_MAX_TOKENS = int(os.getenv("BOT_CHAT_LLM_MAX_TOKENS", "220"))
+DEFAULT_LLM_MODEL = (os.getenv("BOT_CHAT_MODEL") or "gpt-4o-mini").strip()
+DEFAULT_LLM_BASE = (os.getenv("BOT_CHAT_API_BASE") or "https://api.openai.com/v1").strip().rstrip("/")
+
+_SYSTEM_PROMPT = """You are Duty Bot, a friendly workplace assistant on Lark/Feishu for the OSE team.
+Users may casually chat or ask about duty rosters, leave/WFH, holidays, machines, and Jenkins helpers.
+
+For casual conversation: reply naturally, warm, and concise (1–3 short sentences). Light emoji is fine.
+Match the user's language (English or Chinese).
+If they ask for work data you cannot look up in chat, gently suggest `/help` or examples like "who is on fpms duty".
+Never invent duty names, phone numbers, machine IDs, or confidential information.
+Stay professional; avoid politics, religion, and inappropriate topics."""
 
 _torch = None
 _classifier_singleton: Optional["ChatClassifier"] = None
 _classifier_failed: bool = False
+_generative_singleton: Optional["LocalGenerativeChat"] = None
+_generative_failed: bool = False
+_llm_failed_logged: bool = False
 
 _COMMANDISH_RE = re.compile(
     r"(?i)\b("
@@ -74,6 +98,211 @@ def is_enabled() -> bool:
         "yes",
         "on",
     )
+
+
+def backend_mode() -> str:
+    mode = (os.getenv("BOT_CHATAGENT_BACKEND") or "auto").strip().lower()
+    if mode in ("llm", "local-llm", "local", "auto"):
+        return mode
+    return "auto"
+
+
+def _llm_api_key() -> str:
+    return (os.getenv("BOT_CHAT_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
+
+
+def _llm_model() -> str:
+    return (os.getenv("BOT_CHAT_MODEL") or DEFAULT_LLM_MODEL).strip()
+
+
+def _llm_base_url() -> str:
+    return (os.getenv("BOT_CHAT_API_BASE") or DEFAULT_LLM_BASE).strip().rstrip("/")
+
+
+def llm_available() -> bool:
+    return bool(_llm_api_key())
+
+
+def _sanitize_llm_reply(text: str) -> str:
+    out = (text or "").strip()
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    if len(out) > 1200:
+        out = out[:1197].rstrip() + "..."
+    return out
+
+
+def _llm_chat(user_text: str) -> Optional[str]:
+    """Call OpenAI-compatible chat/completions. Returns None on failure."""
+    global _llm_failed_logged
+    api_key = _llm_api_key()
+    if not api_key:
+        return None
+    url = f"{_llm_base_url()}/chat/completions"
+    payload = {
+        "model": _llm_model(),
+        "messages": [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": user_text},
+        ],
+        "max_tokens": LLM_MAX_TOKENS,
+        "temperature": float(os.getenv("BOT_CHAT_LLM_TEMPERATURE", "0.75")),
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=LLM_TIMEOUT_SEC) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        choices = body.get("choices") or []
+        if not choices:
+            return None
+        content = (choices[0].get("message") or {}).get("content")
+        reply = _sanitize_llm_reply(content or "")
+        return reply or None
+    except urllib.error.HTTPError as exc:
+        err_body = ""
+        try:
+            err_body = exc.read().decode("utf-8", errors="replace")[:400]
+        except Exception:
+            pass
+        if not _llm_failed_logged:
+            print(f"⚠️ Chat LLM HTTP {exc.code}: {err_body or exc.reason}", flush=True)
+            _llm_failed_logged = True
+        return None
+    except Exception as exc:
+        if not _llm_failed_logged:
+            print(f"⚠️ Chat LLM request failed: {exc!r}", flush=True)
+            _llm_failed_logged = True
+        return None
+
+
+def _local_reply(text: str) -> Optional[str]:
+    clf = _get_classifier()
+    if clf is None:
+        return None
+    try:
+        return clf.reply(text)
+    except Exception as exc:
+        print(f"⚠️ Chat local reply error: {exc!r}", flush=True)
+        return None
+
+
+def gen_model_dir() -> Path:
+    explicit = (os.getenv("BOT_CHATAGENT_LLM_DIR") or "").strip()
+    if explicit:
+        return Path(explicit)
+    return DEFAULT_GEN_MODEL_DIR
+
+
+def generative_model_ready() -> bool:
+    path = gen_model_dir()
+    return (path / "config.json").is_file()
+
+
+def _gen_training_prompt(user: str, bot: str) -> str:
+    return f"User: {user.strip()}\nBot: {bot.strip()}\n"
+
+
+def _gen_inference_prompt(user: str) -> str:
+    return f"User: {user.strip()}\nBot: "
+
+
+def build_generative_training_texts(intents: list[ChatIntentSpec]) -> list[str]:
+    texts: list[str] = []
+    seen: set[str] = set()
+    for spec in intents:
+        for pat in spec.patterns:
+            for resp in spec.responses:
+                for user in (pat, pat.lower()):
+                    line = _gen_training_prompt(user, resp)
+                    if line not in seen:
+                        seen.add(line)
+                        texts.append(line)
+    return texts
+
+
+class LocalGenerativeChat:
+    """Small locally fine-tuned causal LM (e.g. DistilGPT-2)."""
+
+    def __init__(self, model_path: Path):
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        torch = _lazy_torch()
+        path = str(model_path)
+        local = {"local_files_only": True}
+        self.tokenizer = AutoTokenizer.from_pretrained(path, **local)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.model = AutoModelForCausalLM.from_pretrained(path, **local)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model = self.model.to(self.device)
+        self.model.eval()
+
+    def reply(self, user_text: str) -> Optional[str]:
+        torch = _lazy_torch()
+        prompt = _gen_inference_prompt(user_text)
+        inputs = self.tokenizer(
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=GEN_MAX_SEQ_LEN,
+        )
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        with torch.no_grad():
+            out = self.model.generate(
+                **inputs,
+                max_new_tokens=GEN_MAX_NEW_TOKENS,
+                do_sample=True,
+                temperature=float(os.getenv("BOT_CHAT_GEN_TEMPERATURE", "0.85")),
+                top_p=float(os.getenv("BOT_CHAT_GEN_TOP_P", "0.92")),
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+            )
+        full = self.tokenizer.decode(out[0], skip_special_tokens=True)
+        if "Bot: " not in full:
+            return None
+        reply = full.split("Bot: ", 1)[1]
+        if "User:" in reply:
+            reply = reply.split("User:", 1)[0]
+        reply = _sanitize_llm_reply(reply.strip())
+        return reply or None
+
+
+def _get_generative() -> Optional[LocalGenerativeChat]:
+    global _generative_singleton, _generative_failed
+    if _generative_singleton is not None:
+        return _generative_singleton
+    if _generative_failed:
+        return None
+    path = gen_model_dir()
+    if not (path / "config.json").is_file():
+        return None
+    try:
+        _generative_singleton = LocalGenerativeChat(path)
+        print(f"✅ Local generative chat loaded from {path}", flush=True)
+        return _generative_singleton
+    except Exception as exc:
+        print(f"⚠️ Local generative chat load failed: {exc!r}", flush=True)
+        traceback.print_exc()
+        _generative_failed = True
+        return None
+
+
+def _local_generative_reply(text: str) -> Optional[str]:
+    gen = _get_generative()
+    if gen is None:
+        return None
+    try:
+        return gen.reply(text)
+    except Exception as exc:
+        print(f"⚠️ Local generative reply error: {exc!r}", flush=True)
+        return None
 
 
 def model_dir() -> Path:
@@ -353,24 +582,43 @@ def _looks_like_command(text: str) -> bool:
 
 def startup_status() -> None:
     enabled = is_enabled()
+    mode = backend_mode()
+    llm_ok = llm_available()
     path = model_dir()
-    has_model = (path / "config.json").is_file()
+    gen_path = gen_model_dir()
+    has_classifier = (path / "config.json").is_file()
+    has_generative = generative_model_ready()
     print(
         f"[chatagent] BOT_USE_CHATAGENT={os.getenv('BOT_USE_CHATAGENT')!r} enabled={enabled} "
-        f"model_dir={path} model_exists={has_model}",
+        f"backend={mode} api_key={'yes' if llm_ok else 'no'} api_model={_llm_model()!r} "
+        f"classifier_dir={path} classifier_exists={has_classifier} "
+        f"generative_dir={gen_path} generative_exists={has_generative}",
         flush=True,
     )
     if not enabled:
         print("[chatagent] Casual chat OFF.", flush=True)
         return
-    if not has_model:
-        print(f"[chatagent] ⚠️ Model missing — run: python chatagent.py train", flush=True)
-        return
-    clf = _get_classifier()
-    if clf is None:
-        print("[chatagent] ⚠️ Model present but failed to load.", flush=True)
-    else:
-        print(f"[chatagent] ✅ Ready — casual chat (threshold={CONFIDENCE_THRESHOLD}).", flush=True)
+    if mode in ("llm", "auto") and llm_ok:
+        print(f"[chatagent] ✅ API LLM ready ({_llm_model()} @ {_llm_base_url()})", flush=True)
+    elif mode == "llm" and not llm_ok:
+        print("[chatagent] ⚠️ backend=llm but no OPENAI_API_KEY / BOT_CHAT_API_KEY.", flush=True)
+    if mode in ("local-llm", "auto") and has_generative:
+        gen = _get_generative()
+        if gen is None:
+            print("[chatagent] ⚠️ Generative model present but failed to load.", flush=True)
+        else:
+            print(f"[chatagent] ✅ Self-trained generative chat ready ({gen_path})", flush=True)
+    elif mode == "local-llm" and not has_generative:
+        print("[chatagent] ⚠️ Run: python chatagent.py train-llm", flush=True)
+    if mode in ("local", "auto") and has_classifier:
+        if mode == "local" or (not llm_ok and not has_generative):
+            clf = _get_classifier()
+            if clf is None:
+                print("[chatagent] ⚠️ Classifier present but failed to load.", flush=True)
+            else:
+                print(f"[chatagent] ✅ Classifier chat ready (threshold={CONFIDENCE_THRESHOLD}).", flush=True)
+    elif mode == "local" and not has_classifier:
+        print("[chatagent] ⚠️ Run: python chatagent.py train", flush=True)
 
 
 class ChatClassifier:
@@ -455,7 +703,7 @@ def _get_classifier() -> Optional[ChatClassifier]:
 
 
 def reply_if_enabled(text: str) -> Optional[str]:
-    """Return a casual chat reply, or ``None`` if disabled / command-like / low confidence."""
+    """Return a casual chat reply: API LLM → local generative → classifier."""
     if not is_enabled():
         return None
     raw = (text or "").strip()
@@ -463,14 +711,27 @@ def reply_if_enabled(text: str) -> Optional[str]:
         return None
     if len(raw.split()) > MAX_CHAT_WORDS:
         return None
-    clf = _get_classifier()
-    if clf is None:
-        return None
-    try:
-        return clf.reply(raw)
-    except Exception as exc:
-        print(f"⚠️ Chat agent reply error: {exc!r}", flush=True)
-        return None
+
+    mode = backend_mode()
+    if mode in ("llm", "auto") and llm_available():
+        reply = _llm_chat(raw)
+        if reply:
+            print(f"[chatagent] API LLM reply ({len(reply)} chars)", flush=True)
+            return reply
+        if mode == "llm":
+            return None
+
+    if mode in ("local-llm", "auto"):
+        reply = _local_generative_reply(raw)
+        if reply:
+            print(f"[chatagent] Local generative reply ({len(reply)} chars)", flush=True)
+            return reply
+        if mode == "local-llm":
+            return None
+
+    if mode in ("local", "auto"):
+        return _local_reply(raw)
+    return None
 
 
 def prepare_training_examples(
@@ -616,6 +877,100 @@ def train_model(
     return {"val_accuracy": best_acc, "samples": len(texts), "intents": len(intents)}
 
 
+def train_generative_model(
+    output_dir: Path,
+    *,
+    epochs: int = 5,
+    batch_size: int = 4,
+    lr: float = 5e-5,
+) -> dict[str, Any]:
+    """Fine-tune a small causal LM (DistilGPT-2) on chat Q→A pairs — train your own LLM locally."""
+    from torch.utils.data import DataLoader, TensorDataset
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    torch = _lazy_torch()
+    intents = build_chat_catalog()
+    samples = build_generative_training_texts(intents)
+    random.seed(42)
+    random.shuffle(samples)
+    split = int(len(samples) * 0.9)
+    train_samples, val_samples = samples[:split], samples[split:]
+    print(
+        f"[chatagent] Generative train: {len(train_samples)} samples, "
+        f"val={len(val_samples)}, base={GEN_BASE_MODEL!r}"
+    )
+
+    tok = AutoTokenizer.from_pretrained(GEN_BASE_MODEL)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = AutoModelForCausalLM.from_pretrained(GEN_BASE_MODEL).to(device)
+
+    def _encode_batch(texts: list[str]):
+        enc = tok(
+            texts,
+            truncation=True,
+            padding="max_length",
+            max_length=GEN_MAX_SEQ_LEN,
+            return_tensors="pt",
+        )
+        return enc["input_ids"], enc["attention_mask"]
+
+    def _loader(items: list[str], shuffle: bool) -> DataLoader:
+        ids_list, mask_list = [], []
+        for text in items:
+            i, m = _encode_batch([text])
+            ids_list.append(i.squeeze(0))
+            mask_list.append(m.squeeze(0))
+        ds = TensorDataset(torch.stack(ids_list), torch.stack(mask_list))
+        return DataLoader(ds, batch_size=batch_size, shuffle=shuffle)
+
+    train_loader = _loader(train_samples, shuffle=True)
+    val_loader = _loader(val_samples, shuffle=False)
+    optim = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+
+    best_loss = float("inf")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for epoch in range(1, epochs + 1):
+        model.train()
+        train_loss = 0.0
+        for input_ids, attention_mask in train_loader:
+            input_ids = input_ids.to(device)
+            attention_mask = attention_mask.to(device)
+            optim.zero_grad()
+            out = model(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids)
+            out.loss.backward()
+            optim.step()
+            train_loss += float(out.loss.item())
+
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for input_ids, attention_mask in val_loader:
+                input_ids = input_ids.to(device)
+                attention_mask = attention_mask.to(device)
+                out = model(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids)
+                val_loss += float(out.loss.item())
+
+        avg_train = train_loss / max(len(train_loader), 1)
+        avg_val = val_loss / max(len(val_loader), 1)
+        print(f"Epoch {epoch}/{epochs}  train_loss={avg_train:.4f}  val_loss={avg_val:.4f}")
+        if avg_val <= best_loss:
+            best_loss = avg_val
+            model.save_pretrained(str(output_dir))
+            tok.save_pretrained(str(output_dir))
+
+    meta = {"base_model": GEN_BASE_MODEL, "samples": len(samples), "format": "User: ...\\nBot: ...\\n"}
+    with (output_dir / "metadata.pkl").open("wb") as f:
+        pickle.dump(meta, f)
+
+    print(f"✅ Generative chat model saved to {output_dir} best_val_loss={best_loss:.4f}")
+    print("   Set BOT_CHATAGENT_BACKEND=local-llm (or auto) and restart larkbot.")
+    return {"val_loss": best_loss, "samples": len(samples)}
+
+
 def evaluate_model(model_path: Path) -> None:
     intents = build_chat_catalog()
     texts, labels, _ = prepare_training_examples(intents)
@@ -630,35 +985,53 @@ def evaluate_model(model_path: Path) -> None:
 
 
 def _cli_test(phrase: str, model_path: Path) -> None:
+    print(f"Input:       {phrase!r}")
+    print(f"Backend:     {backend_mode()}  api_key={'yes' if llm_available() else 'no'}")
+    if backend_mode() in ("llm", "auto") and llm_available():
+        print(f"API reply:   {_llm_chat(phrase)!r}")
+        if backend_mode() == "llm":
+            return
+    gen_path = gen_model_dir()
+    if backend_mode() in ("local-llm", "auto") and (gen_path / "config.json").is_file():
+        global _generative_singleton, _generative_failed
+        _generative_singleton = None
+        _generative_failed = False
+        print(f"Gen reply:   {_local_generative_reply(phrase)!r}")
+        if backend_mode() == "local-llm":
+            return
     if not (model_path / "config.json").is_file():
-        print(f"Model not found at {model_path}. Run: python chatagent.py train")
-        sys.exit(1)
+        print(f"Classifier not found at {model_path}. Run: python chatagent.py train")
+        return
     clf = ChatClassifier(model_path)
     tag, conf, margin = clf.predict(phrase)
-    reply = clf.reply(phrase)
-    print(f"Input:    {phrase!r}")
-    print(f"Intent:   {tag} ({conf:.3f}, margin={margin:.3f})")
-    print(f"Reply:    {reply!r}")
+    print(f"Classifier:  {tag} ({conf:.3f}, margin={margin:.3f})")
+    print(f"Template:    {clf.reply(phrase)!r}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Duty Bot chat agent (casual conversation)")
     sub = parser.add_subparsers(dest="cmd")
 
-    p_train = sub.add_parser("train", help="Train DistilBERT chat intent classifier")
+    p_train = sub.add_parser("train", help="Train DistilBERT classifier + templates")
     p_train.add_argument("--epochs", type=int, default=10)
     p_train.add_argument("--output", type=str, default=str(DEFAULT_MODEL_DIR))
+
+    p_train_llm = sub.add_parser("train-llm", help="Fine-tune local generative LLM (DistilGPT-2)")
+    p_train_llm.add_argument("--epochs", type=int, default=5)
+    p_train_llm.add_argument("--output", type=str, default=str(DEFAULT_GEN_MODEL_DIR))
 
     p_test = sub.add_parser("test", help="Test a phrase")
     p_test.add_argument("phrase", type=str)
     p_test.add_argument("--model", type=str, default=str(DEFAULT_MODEL_DIR))
 
-    sub.add_parser("eval", help="Evaluate model on training patterns")
+    sub.add_parser("eval", help="Evaluate classifier on training patterns")
     sub.add_parser("patterns", help="Show pattern counts per intent")
 
     args = parser.parse_args()
     if args.cmd == "train":
         train_model(Path(args.output), epochs=args.epochs)
+    elif args.cmd == "train-llm":
+        train_generative_model(Path(args.output), epochs=args.epochs)
     elif args.cmd == "test":
         _cli_test(args.phrase, Path(args.model))
     elif args.cmd == "eval":
