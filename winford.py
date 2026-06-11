@@ -61,10 +61,10 @@ def extract_cell_value(cell):
     return str(cell).strip()
 
 def get_winford_info(query_str):
-    # Extract numbers (allow prefix "win", "winford", or just numbers)
-    numbers = re.findall(r'(?i)win(?:ford)?(\d+)', query_str)
+    # Extract numbers (allow prefix "win", "winford", "wf", or just numbers)
+    numbers = re.findall(r'(?i)(?:win(?:ford)?|wf)(\d+)', query_str)
     if not numbers:
-        numbers = re.findall(r'\b(\d{4,5})\b', query_str)
+        numbers = re.findall(r'\b(\d{3,5})\b', query_str)
     if not numbers:
         return "❌ No valid Winford Asset IDs found. Use e.g., `/winford 8092` or `/winford win8092 win8093`"
 

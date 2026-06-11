@@ -3626,14 +3626,14 @@ def lark_webhook():
 
     # Natural English → slash command (optional; BOT_USE_AI=1). Failures keep hardcoded-only behavior.
     try:
-        import ai as _bot_ai
+        import commandagent as _commandagent
 
-        ai_command = _bot_ai.translate_if_enabled(clean_text)
+        ai_command = _commandagent.translate_if_enabled(clean_text)
         if ai_command:
-            print(f"🤖 AI command map: {clean_text!r} → {ai_command!r}", flush=True)
+            print(f"🤖 Command agent map: {clean_text!r} → {ai_command!r}", flush=True)
             clean_text = ai_command
-    except Exception as _bot_ai_err:
-        print(f"⚠️ AI layer skipped (bot continues without AI): {_bot_ai_err!r}", flush=True)
+    except Exception as _commandagent_err:
+        print(f"⚠️ Command agent skipped (bot continues without AI): {_commandagent_err!r}", flush=True)
 
     # 命令处理
     if clean_text.lower() == "/test":
@@ -4682,33 +4682,44 @@ def lark_webhook():
             and clean_text
             and not clean_text.lstrip().startswith("/")
         ):
+            chat_reply = None
             try:
-                import ai as _bot_ai
+                import chitchat as _chitchat
 
-                if _bot_ai.is_enabled():
+                chat_reply = _chitchat.try_reply(clean_text)
+            except Exception as _chat_err:
+                print(f"⚠️ Chitchat skipped: {_chat_err!r}", flush=True)
+            if chat_reply:
+                send_message(chat_id, chat_reply)
+                print(f"💬 Chitchat reply to chat {chat_id}", flush=True)
+            else:
+                try:
+                    import commandagent as _commandagent
+
+                    if _commandagent.is_enabled():
+                        send_message(
+                            chat_id,
+                            "🤖 I got your message but command agent could not run or map it to a command.\n"
+                            "Try `@Duty Bot /fpms` for now.\n"
+                            "Admin: check `journalctl -u larkbot -n 50 | grep commandagent` for load errors.",
+                        )
+                    else:
+                        send_message(
+                            chat_id,
+                            "ℹ️ Natural language needs `BOT_USE_AI=1` in `.env` + trained model.\n"
+                            "For now use slash commands, e.g. `@Duty Bot /fpms`.",
+                        )
+                except ModuleNotFoundError as _nl_mod_err:
                     send_message(
                         chat_id,
-                        "🤖 I got your message but AI could not run or map it to a command.\n"
-                        "Try `@Duty Bot /fpms` for now.\n"
-                        "Admin: check `journalctl -u larkbot -n 50 | grep -i ai` for load errors.",
+                        "🤖 AI deps missing on this server (`"
+                        + str(_nl_mod_err)
+                        + "`).\n"
+                        "Admin: `python -m pip install -r requirements-ai.txt` then restart larkbot.\n"
+                        "For now: `@Duty Bot /fpms`",
                     )
-                else:
-                    send_message(
-                        chat_id,
-                        "ℹ️ Natural language needs `BOT_USE_AI=1` in `.env` + trained model.\n"
-                        "For now use slash commands, e.g. `@Duty Bot /fpms`.",
-                    )
-            except ModuleNotFoundError as _nl_mod_err:
-                send_message(
-                    chat_id,
-                    "🤖 AI deps missing on this server (`"
-                    + str(_nl_mod_err)
-                    + "`).\n"
-                    "Admin: `python -m pip install -r requirements-ai.txt` then restart larkbot.\n"
-                    "For now: `@Duty Bot /fpms`",
-                )
-            except Exception as _nl_hint_err:
-                print(f"⚠️ NL hint failed: {_nl_hint_err!r}", flush=True)
+                except Exception as _nl_hint_err:
+                    print(f"⚠️ NL hint failed: {_nl_hint_err!r}", flush=True)
 
     return _lark_im_done()
 
@@ -4904,11 +4915,11 @@ def _run_main_entry() -> int:
         port_str = os.getenv("PORT") or os.getenv("LARKBOT_PORT") or "5000"
         port = int(port_str)
         try:
-            import ai as _boot_ai
+            import commandagent as _boot_commandagent
 
-            _boot_ai.startup_status()
-        except Exception as _boot_ai_err:
-            print(f"[ai] startup check skipped: {_boot_ai_err!r}", flush=True)
+            _boot_commandagent.startup_status()
+        except Exception as _boot_commandagent_err:
+            print(f"[commandagent] startup check skipped: {_boot_commandagent_err!r}", flush=True)
         print(
             "[lark] Listening http://0.0.0.0:%d (threaded=True). "
             "Feishu Request URL must be HTTPS and reachable from the internet; reverse-proxy to this port."
