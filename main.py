@@ -4677,6 +4677,29 @@ def lark_webhook():
         print(f"✅ Replied to chat {chat_id}: {reply}")
     else:
         print(f"⚠️ No command matched and no reply generated for chat {chat_id}")
+        if (
+            bot_mentioned
+            and clean_text
+            and not clean_text.lstrip().startswith("/")
+        ):
+            try:
+                import ai as _bot_ai
+
+                if _bot_ai.is_enabled():
+                    send_message(
+                        chat_id,
+                        "🤖 I got your message but AI could not run or map it to a command.\n"
+                        "Try `@Duty Bot /fpms` for now.\n"
+                        "Admin: check `journalctl -u larkbot -n 50 | grep -i ai` for load errors.",
+                    )
+                else:
+                    send_message(
+                        chat_id,
+                        "ℹ️ Natural language needs `BOT_USE_AI=1` in `.env` + trained model.\n"
+                        "For now use slash commands, e.g. `@Duty Bot /fpms`.",
+                    )
+            except Exception as _nl_hint_err:
+                print(f"⚠️ NL hint failed: {_nl_hint_err!r}", flush=True)
 
     return _lark_im_done()
 
@@ -4871,6 +4894,12 @@ def _run_main_entry() -> int:
     try:
         port_str = os.getenv("PORT") or os.getenv("LARKBOT_PORT") or "5000"
         port = int(port_str)
+        try:
+            import ai as _boot_ai
+
+            _boot_ai.startup_status()
+        except Exception as _boot_ai_err:
+            print(f"[ai] startup check skipped: {_boot_ai_err!r}", flush=True)
         print(
             "[lark] Listening http://0.0.0.0:%d (threaded=True). "
             "Feishu Request URL must be HTTPS and reachable from the internet; reverse-proxy to this port."

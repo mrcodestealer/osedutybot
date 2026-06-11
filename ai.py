@@ -37,6 +37,30 @@ _torch = None
 _DistilBertTokenizer = None
 _DistilBertForSequenceClassification = None
 _classifier_singleton: Optional["CommandClassifier"] = None
+_classifier_failed: bool = False
+
+
+def startup_status() -> None:
+    """Log AI mode at bot boot (check ``journalctl -u larkbot`` after restart)."""
+    enabled = is_enabled()
+    path = model_dir()
+    has_model = (path / "config.json").is_file()
+    print(
+        f"[ai] BOT_USE_AI={os.getenv('BOT_USE_AI')!r} enabled={enabled} "
+        f"model_dir={path} model_exists={has_model}",
+        flush=True,
+    )
+    if not enabled:
+        print("[ai] Natural language OFF — only `/` commands work.", flush=True)
+        return
+    if not has_model:
+        print(f"[ai] ⚠️ Model missing at {path} — run: python ai.py train", flush=True)
+        return
+    clf = _get_classifier()
+    if clf is None:
+        print("[ai] ⚠️ Model present but failed to load — check torch/transformers in service Python.", flush=True)
+    else:
+        print(f"[ai] ✅ Ready — natural English → slash commands (threshold={CONFIDENCE_THRESHOLD}).", flush=True)
 
 
 def _lazy_torch():
@@ -89,6 +113,8 @@ _DEPTS = (
 _DEPT_DUTY_TEMPLATES = (
     "who is on {d} duty today",
     "who is on {d} duty",
+    "who is {d} today",
+    "i want {d} today",
     "show me {d} duty",
     "show {d} duty roster",
     "what is {d} duty today",
@@ -584,12 +610,15 @@ class CommandClassifier:
 
 
 def _get_classifier() -> Optional[CommandClassifier]:
-    global _classifier_singleton
+    global _classifier_singleton, _classifier_failed
     if _classifier_singleton is not None:
         return _classifier_singleton
+    if _classifier_failed:
+        return None
     path = model_dir()
     if not (path / "config.json").is_file():
         print(f"⚠️ AI model not found at {path} — natural-language routing disabled", flush=True)
+        _classifier_failed = True
         return None
     try:
         _classifier_singleton = CommandClassifier(path)
@@ -597,6 +626,7 @@ def _get_classifier() -> Optional[CommandClassifier]:
         return _classifier_singleton
     except Exception as exc:
         print(f"⚠️ AI classifier load failed: {exc!r}", flush=True)
+        _classifier_failed = True
         return None
 
 
@@ -612,6 +642,7 @@ def translate_if_enabled(text: str) -> Optional[str]:
         return None
     clf = _get_classifier()
     if clf is None:
+        print(f"⚠️ AI enabled but classifier unavailable for {raw!r}", flush=True)
         return None
     try:
         return clf.resolve(raw)
