@@ -3624,6 +3624,17 @@ def lark_webhook():
         send_message(chat_id, f"❌ Offset/leave form failed: {e}")
         return _lark_im_done()
 
+    # Natural English → slash command (optional; BOT_USE_AI=1). Failures keep hardcoded-only behavior.
+    try:
+        import ai as _bot_ai
+
+        ai_command = _bot_ai.translate_if_enabled(clean_text)
+        if ai_command:
+            print(f"🤖 AI command map: {clean_text!r} → {ai_command!r}", flush=True)
+            clean_text = ai_command
+    except Exception as _bot_ai_err:
+        print(f"⚠️ AI layer skipped (bot continues without AI): {_bot_ai_err!r}", flush=True)
+
     # 命令处理
     if clean_text.lower() == "/test":
         send_message(chat_id, _lark_test_card_json(), msg_type="interactive")
