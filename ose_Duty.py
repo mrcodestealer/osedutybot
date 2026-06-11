@@ -506,8 +506,9 @@ def _sheet_row_index_for_person(values: list[list[Any]], person: str) -> Optiona
     return None
 
 
-_OSE_SHIFT_SHEET_BG_SHIFT = "#000000"
+_OSE_SHIFT_SHEET_BG_DUTY = "#FFFFFF"
 _OSE_SHIFT_SHEET_BG_OFFSET = "#707A89"
+_OSE_SHIFT_SHEET_STYLED_VALUES = frozenset({"D", "N", "L"})
 
 
 def _shift_sheet_cell_range(row_idx: int, col_idx: int) -> str:
@@ -518,15 +519,15 @@ def _shift_sheet_cell_range(row_idx: int, col_idx: int) -> str:
 
 def _shift_sheet_back_color_for_value(val: str) -> Optional[str]:
     v = (val or "").strip().upper()
-    if v in OSE_SHIFT_TYPES:
-        return _OSE_SHIFT_SHEET_BG_SHIFT
+    if v in _OSE_SHIFT_SHEET_STYLED_VALUES:
+        return _OSE_SHIFT_SHEET_BG_DUTY
     if v == "*":
         return _OSE_SHIFT_SHEET_BG_OFFSET
     return None
 
 
 def _put_ose_shift_sheet_cell_styles(token: str, cell_updates: list[tuple[int, int, str]]) -> None:
-    """Set background on offset swap cells: D/N black, ``*`` grey."""
+    """Set background on offset swap cells: D/N/L white, ``*`` #707A89."""
     if not cell_updates:
         return
     if not SPREADSHEET_TOKEN or not SHEET_ID:
