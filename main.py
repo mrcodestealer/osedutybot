@@ -4703,18 +4703,18 @@ def lark_webhook():
         ):
             chat_reply = None
             try:
-                import chatagent as _chatagent
+                import chitchat as _chitchat
 
-                chat_reply = _chatagent.reply_if_enabled(_chat_source)
-            except Exception as _chatagent_err:
-                print(f"⚠️ Chat agent skipped: {_chatagent_err!r}", flush=True)
+                chat_reply = _chitchat.try_reply(_chat_source)
+            except Exception as _chat_err:
+                print(f"⚠️ Chitchat skipped: {_chat_err!r}", flush=True)
             if not chat_reply:
                 try:
-                    import chitchat as _chitchat
+                    import chatagent as _chatagent
 
-                    chat_reply = _chitchat.try_reply(_chat_source)
-                except Exception as _chat_err:
-                    print(f"⚠️ Chitchat skipped: {_chat_err!r}", flush=True)
+                    chat_reply = _chatagent.reply_if_enabled(_chat_source)
+                except Exception as _chatagent_err:
+                    print(f"⚠️ Chat agent skipped: {_chatagent_err!r}", flush=True)
             if chat_reply:
                 send_message(chat_id, chat_reply)
                 print(f"💬 Chat reply to chat {chat_id}", flush=True)

@@ -518,7 +518,8 @@ def build_chat_catalog() -> list[ChatIntentSpec]:
                 "Maybe check who's on duty? `/fpms` `/bi` `/sre` — or just chat, I'm listening 😄",
                 "Bored? I can't stream Netflix — but I can tell you today's holidays with `/holiday`.",
             ],
-            "i'm bored|so bored|nothing to do|kill time|boring|好无聊",
+            "i'm bored|so bored|nothing to do|kill time|boring|im bored|im boring|i am bored|"
+            "i am boring|feeling bored|好无聊",
         )
     )
 
@@ -666,18 +667,20 @@ class ChatClassifier:
         return self.id_to_tag[idx], float(topk.values[0].item()), margin
 
     def reply(self, text: str) -> Optional[str]:
+        from chitchat import pick_localized_reply
+
         tag, conf, margin = self.predict(text)
         threshold = CONFIDENCE_THRESHOLD
         margin_min = CONFIDENCE_MARGIN
         if tag == "chat_general":
-            threshold *= 0.6
-            margin_min *= 0.5
-        if conf < threshold and margin < margin_min:
+            threshold = max(threshold, 0.22)
+            margin_min = max(margin_min, 0.06)
+        if conf < threshold or margin < margin_min:
             return None
         spec = self.intents_by_tag.get(tag)
         if not spec or not spec.responses:
             return None
-        return random.choice(spec.responses)
+        return pick_localized_reply(spec.responses, text)
 
 
 def _get_classifier() -> Optional[ChatClassifier]:

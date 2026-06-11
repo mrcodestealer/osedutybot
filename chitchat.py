@@ -21,6 +21,8 @@ _COMMANDISH_RE = re.compile(
     r")\b|/"
 )
 
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+
 _CHITCHAT_RULES: list[tuple[re.Pattern[str], list[str]]] = [
     (
         re.compile(
@@ -132,6 +134,23 @@ _CHITCHAT_RULES: list[tuple[re.Pattern[str], list[str]]] = [
             "还不错，谢谢关心！有需要查值班或机器可以跟我说。",
         ],
     ),
+    (
+        re.compile(
+            r"^(?:"
+            r"i'?m\s+bored|im\s+bored|i'?m\s+boring|im\s+boring|"
+            r"so\s+bored|feel(?:ing)?\s+bored|bored(?:\s+today)?|"
+            r"nothing\s+to\s+do|kill\s+time|"
+            r"好无聊|无聊"
+            r")\s*[!.?~]*$",
+            re.I,
+        ),
+        [
+            "Bored? 😄 I can't stream Netflix — but try `/fpms` or ask who's on duty today.",
+            "Hang in there! Want a distraction? Ask me about holidays (`/holiday`) or who's on call.",
+            "I feel you — slow day? I'm here if you want to chat or need a quick duty lookup.",
+            "无聊啊～可以查 `/holiday` 或问我今天谁值班。",
+        ],
+    ),
 ]
 
 
@@ -148,6 +167,17 @@ def _normalize(text: str) -> str:
     t = (text or "").strip()
     t = re.sub(r"\s+", " ", t)
     return t
+
+
+def pick_localized_reply(replies: list[str], user_text: str) -> str:
+    """Pick a reply in the user's language (English vs Chinese)."""
+    prefers_zh = bool(_CJK_RE.search(user_text or ""))
+    if prefers_zh:
+        localized = [r for r in replies if _CJK_RE.search(r)]
+    else:
+        localized = [r for r in replies if not _CJK_RE.search(r)]
+    pool = localized or replies
+    return random.choice(pool)
 
 
 def looks_like_chitchat(text: str) -> bool:
@@ -181,5 +211,5 @@ def try_reply(text: str) -> Optional[str]:
         return None
     for pattern, replies in _CHITCHAT_RULES:
         if pattern.search(raw):
-            return random.choice(replies)
+            return pick_localized_reply(replies, raw)
     return None
