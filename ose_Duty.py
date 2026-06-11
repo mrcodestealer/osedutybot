@@ -1405,6 +1405,62 @@ OSE_LEAVE_TYPES: tuple[str, ...] = (
 OSE_SHIFT_TYPES: tuple[str, ...] = ("N", "D")
 
 
+def _person_shift_code_on_date(
+    values: list[list[Any]],
+    person: str,
+    target_date: date,
+) -> str:
+    """Return ``D`` / ``N`` / ``*`` / ``L`` / empty for one person on one calendar day."""
+    row_idx = _sheet_row_index_for_person(values, person)
+    if row_idx is None:
+        return ""
+    col = _date_column_for_matrix(values, target_date)
+    if col is None:
+        return ""
+    row = values[row_idx]
+    if col >= len(row):
+        return ""
+    return _field_text(row[col]).strip().upper()
+
+
+_OFFSET_DUTY_DATE_ERROR_FOOTER = (
+    "Kindly check again. If have any issue kindly let Jun Chen know. Thanks."
+)
+
+
+def validate_offset_swap_duty_dates(
+    *,
+    request_person: str,
+    exchange_person: str,
+    original_date: date,
+    exchange_date: date,
+) -> None:
+    """
+    Original Date must be a D/N duty day for the requester; Exchange Date for the exchange person.
+    Raises ``ValueError`` with a user-facing message when validation fails.
+    """
+    values, err = _get_cached_ose_sheet_values()
+    if not values:
+        raise RuntimeError(err or "Could not load OSE shift sheet")
+    req = _title_name(request_person)
+    if not req:
+        raise ValueError("Request person is required")
+    exc = resolve_offset_exchange_person(exchange_person, request_person=req)
+    orig_ok = _person_shift_code_on_date(values, req, original_date) in OSE_SHIFT_TYPES
+    exc_ok = _person_shift_code_on_date(values, exc, exchange_date) in OSE_SHIFT_TYPES
+    if orig_ok and exc_ok:
+        return
+    footer = _OFFSET_DUTY_DATE_ERROR_FOOTER
+    if not orig_ok and not exc_ok:
+        raise ValueError(
+            "As checked the requested date is not your duty date and exchange date is not exchange person duty date. "
+            f"{footer}"
+        )
+    if not orig_ok:
+        raise ValueError(f"As checked the requested date is not your duty date. {footer}")
+    raise ValueError(f"As checked the exchange date is not exchange person duty date. {footer}")
+
+
 def _bitable_date_ms(d: date) -> int:
     return int(datetime.combine(d, datetime.min.time()).timestamp() * 1000)
 
@@ -2320,6 +2376,12 @@ def submit_ose_offset(
     reason_s = (reason or "").strip()
     if not reason_s:
         raise ValueError("Reason is required")
+    validate_offset_swap_duty_dates(
+        request_person=req,
+        exchange_person=exc,
+        original_date=original_date,
+        exchange_date=exchange_date,
+    )
     token = get_tenant_access_token()
     today = date.today()
     fields: dict[str, Any] = {
@@ -2488,6 +2550,12 @@ def update_ose_offset_request(
     reason_s = (reason or "").strip()
     if not reason_s:
         raise ValueError("Reason is required")
+    validate_offset_swap_duty_dates(
+        request_person=req,
+        exchange_person=exc,
+        original_date=original_date,
+        exchange_date=exchange_date,
+    )
     token = get_tenant_access_token()
     row_refresh = get_ose_offset_record_admin_row(record_id)
     if not bool(row_refresh.get("pending")):
@@ -2529,6 +2597,12 @@ def update_ose_offset_record_fields(
     reason_s = (reason or "").strip()
     if not reason_s:
         raise ValueError("Reason is required")
+    validate_offset_swap_duty_dates(
+        request_person=req,
+        exchange_person=exc,
+        original_date=original_date,
+        exchange_date=exchange_date,
+    )
     token = get_tenant_access_token()
     fields: dict[str, Any] = {
         "Exchange Person": _offset_person_field_value(exc, token=token),
