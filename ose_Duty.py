@@ -506,6 +506,51 @@ def _sheet_row_index_for_person(values: list[list[Any]], person: str) -> Optiona
     return None
 
 
+_OSE_SHIFT_SHEET_BG_SHIFT = "#000000"
+_OSE_SHIFT_SHEET_BG_OFFSET = "#707A89"
+
+
+def _shift_sheet_cell_range(row_idx: int, col_idx: int) -> str:
+    """Lark range for one cell (e.g. ``3RIBRL!FG33:FG33``)."""
+    cell = f"{col_index_to_letter(col_idx + 1)}{row_idx + 1}"
+    return f"{SHEET_ID}!{cell}:{cell}"
+
+
+def _shift_sheet_back_color_for_value(val: str) -> Optional[str]:
+    v = (val or "").strip().upper()
+    if v in OSE_SHIFT_TYPES:
+        return _OSE_SHIFT_SHEET_BG_SHIFT
+    if v == "*":
+        return _OSE_SHIFT_SHEET_BG_OFFSET
+    return None
+
+
+def _put_ose_shift_sheet_cell_styles(token: str, cell_updates: list[tuple[int, int, str]]) -> None:
+    """Set background on offset swap cells: D/N black, ``*`` grey."""
+    if not cell_updates:
+        return
+    if not SPREADSHEET_TOKEN or not SHEET_ID:
+        raise RuntimeError("OSE shift sheet not configured (OSE_SPREADSHEET_TOKEN / OSE_SHEET_ID)")
+    data: list[dict[str, Any]] = []
+    for row_idx, col_idx, val in cell_updates:
+        if row_idx < 0 or col_idx < 0:
+            continue
+        back_color = _shift_sheet_back_color_for_value(val)
+        if not back_color:
+            continue
+        data.append({"ranges": [_shift_sheet_cell_range(row_idx, col_idx)], "style": {"backColor": back_color}})
+    if not data:
+        return
+    url = (
+        f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/"
+        f"{SPREADSHEET_TOKEN}/styles_batch_update"
+    )
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"}
+    res = requests.put(url, headers=headers, json={"data": data}, timeout=60).json()
+    if res.get("code") != 0:
+        raise RuntimeError(f"OSE shift sheet style write failed: {res}")
+
+
 def _put_ose_shift_sheet_cells(token: str, cell_updates: list[tuple[int, int, str]]) -> None:
     """Write duty cells: each item is (matrix_row_idx, col_idx, value) both 0-based."""
     if not cell_updates:
@@ -516,10 +561,7 @@ def _put_ose_shift_sheet_cells(token: str, cell_updates: list[tuple[int, int, st
     for row_idx, col_idx, val in cell_updates:
         if row_idx < 0 or col_idx < 0:
             continue
-        cell = f"{col_index_to_letter(col_idx + 1)}{row_idx + 1}"
-        # Lark values_batch_update requires an explicit range (e.g. FG33:FG33), not FG33 alone.
-        a1 = f"{SHEET_ID}!{cell}:{cell}"
-        value_ranges.append({"range": a1, "values": [[val]]})
+        value_ranges.append({"range": _shift_sheet_cell_range(row_idx, col_idx), "values": [[val]]})
     if not value_ranges:
         return
     url = (
@@ -530,6 +572,7 @@ def _put_ose_shift_sheet_cells(token: str, cell_updates: list[tuple[int, int, st
     res = requests.post(url, headers=headers, json={"valueRanges": value_ranges}, timeout=60).json()
     if res.get("code") != 0:
         raise RuntimeError(f"OSE shift sheet write failed: {res}")
+    _put_ose_shift_sheet_cell_styles(token, cell_updates)
     _invalidate_ose_sheet_cache()
 
 
