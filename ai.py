@@ -24,8 +24,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-import numpy as np
-
 _CHBOX_DIR = Path(__file__).resolve().parent
 DEFAULT_MODEL_DIR = _CHBOX_DIR / "command_intent_pt"
 CONFIDENCE_THRESHOLD = float(os.getenv("BOT_AI_CONFIDENCE", "0.12"))
@@ -591,12 +589,13 @@ class CommandClassifier:
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
         with torch.no_grad():
             logits = self.model(**inputs).logits
-        probs = torch.softmax(logits, dim=-1).cpu().numpy()[0]
-        top2 = np.argsort(probs)[-2:][::-1]
-        idx = int(top2[0])
-        second = float(probs[top2[1]]) if len(top2) > 1 else 0.0
-        margin = float(probs[idx] - second)
-        return self.id_to_tag[idx], float(probs[idx]), margin
+        probs = torch.softmax(logits, dim=-1).cpu()[0]
+        k = min(2, int(probs.numel()))
+        topk = torch.topk(probs, k=k)
+        idx = int(topk.indices[0].item())
+        second = float(topk.values[1].item()) if k > 1 else 0.0
+        margin = float(topk.values[0].item() - second)
+        return self.id_to_tag[idx], float(topk.values[0].item()), margin
 
     def resolve(self, text: str, *, threshold: float = CONFIDENCE_THRESHOLD) -> Optional[str]:
         tag, conf, margin = self.predict(text)

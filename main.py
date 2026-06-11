@@ -4698,6 +4698,15 @@ def lark_webhook():
                         "ℹ️ Natural language needs `BOT_USE_AI=1` in `.env` + trained model.\n"
                         "For now use slash commands, e.g. `@Duty Bot /fpms`.",
                     )
+            except ModuleNotFoundError as _nl_mod_err:
+                send_message(
+                    chat_id,
+                    "🤖 AI deps missing on this server (`"
+                    + str(_nl_mod_err)
+                    + "`).\n"
+                    "Admin: `python -m pip install -r requirements-ai.txt` then restart larkbot.\n"
+                    "For now: `@Duty Bot /fpms`",
+                )
             except Exception as _nl_hint_err:
                 print(f"⚠️ NL hint failed: {_nl_hint_err!r}", flush=True)
 

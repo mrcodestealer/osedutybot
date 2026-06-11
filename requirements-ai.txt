@@ -1,0 +1,6 @@
+# Optional — only needed when BOT_USE_AI=1 (natural-language commands).
+# Install with the SAME Python that runs larkbot.service:
+#   python -m pip install -r requirements-ai.txt
+numpy
+torch
+transformers
