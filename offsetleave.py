@@ -25,6 +25,11 @@ _OFFSET_REQUESTER_APPROVAL_NOTIFIED_PATH = os.path.join(
     "offset_requester_approval_notified.json",
 )
 _OFFSET_REQUESTER_APPROVAL_NOTIFIED_LOCK = threading.Lock()
+_OFFSET_PEER_APPROVER_APPROVAL_NOTIFIED_PATH = os.path.join(
+    _CHBOX_DIR,
+    "offset_peer_approver_approval_notified.json",
+)
+_OFFSET_PEER_APPROVER_APPROVAL_NOTIFIED_LOCK = threading.Lock()
 
 # Prevent opening multiple edit forms for the same pending record (double-tap Edit).
 _OFFSET_EDIT_OPEN_LOCK = threading.Lock()
@@ -2735,6 +2740,77 @@ def _mark_requester_approval_notified(record_id: str, decision: str) -> None:
         _save_requester_approval_notified_unlocked(by_record)
 
 
+def _load_peer_approver_approval_notified_unlocked() -> dict[str, str]:
+    try:
+        with open(_OFFSET_PEER_APPROVER_APPROVAL_NOTIFIED_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    by_record = data.get("by_record")
+    if not isinstance(by_record, dict):
+        by_record = data
+    return {str(k): str(v) for k, v in by_record.items() if k and v}
+
+
+def _save_peer_approver_approval_notified_unlocked(by_record: dict[str, str]) -> None:
+    tmp = _OFFSET_PEER_APPROVER_APPROVAL_NOTIFIED_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"by_record": dict(by_record)}, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    os.replace(tmp, _OFFSET_PEER_APPROVER_APPROVAL_NOTIFIED_PATH)
+
+
+def _peer_approver_approval_already_notified(record_id: str, decision: str) -> bool:
+    rid = (record_id or "").strip()
+    dec = (decision or "").strip().title()
+    if not rid or dec not in ("Approved", "Rejected"):
+        return False
+    with _OFFSET_PEER_APPROVER_APPROVAL_NOTIFIED_LOCK:
+        return _load_peer_approver_approval_notified_unlocked().get(rid) == dec
+
+
+def _mark_peer_approver_approval_notified(record_id: str, decision: str) -> None:
+    rid = (record_id or "").strip()
+    dec = (decision or "").strip().title()
+    if not rid or dec not in ("Approved", "Rejected"):
+        return
+    with _OFFSET_PEER_APPROVER_APPROVAL_NOTIFIED_LOCK:
+        by_record = _load_peer_approver_approval_notified_unlocked()
+        by_record[rid] = dec
+        _save_peer_approver_approval_notified_unlocked(by_record)
+
+
+def _acting_approver_open_id_from_name(approver_name: str) -> str:
+    """Best-effort open_id for the approver who acted (to skip their peer DM)."""
+    an = (approver_name or "").strip()
+    if not an:
+        return ""
+    token = od.get_tenant_access_token()
+    idx = od._get_ose_person_open_id_index(token)
+    oid = (od._lookup_person_open_id(an, idx) or "").strip()
+    if oid in OFFSET_APPROVER_OPEN_IDS:
+        return oid
+    titled = od._title_name(an)
+    for aid in OFFSET_APPROVER_OPEN_IDS:
+        candidate = (aid or "").strip()
+        if not candidate:
+            continue
+        roster = od.lookup_roster_name_for_open_id(candidate, token)
+        if roster and od._names_same_person(roster, an):
+            return candidate
+        display = _fetch_user_display_name(candidate, token)
+        if display and (
+            od._names_same_person(display, an)
+            or od._title_name(display) == titled
+        ):
+            return candidate
+    return ""
+
+
 def _notify_requester_offset_responded(
     send_message: Callable[..., Any],
     row: dict[str, Any],
@@ -2773,6 +2849,63 @@ def _notify_requester_offset_responded(
         _mark_requester_approval_notified(rid, dec)
 
 
+def notify_offset_approval_decision(
+    record_id: str,
+    *,
+    send_message: Optional[Callable[..., Any]] = None,
+    approver_name: str = "",
+    decision: str = "",
+    remarks: str = "",
+    acting_approver_open_id: str = "",
+) -> dict[str, bool]:
+    """
+    DM requester and other approvers when an offset is approved/rejected.
+    Idempotent per record_id + decision (bot card, web admin, or Base poll).
+    """
+    rid = (record_id or "").strip()
+    out = {"requester": False, "peer_approvers": False}
+    if not rid:
+        return out
+    send = send_message or _lark_im_send_message
+    try:
+        row = _offset_admin_row_by_id(rid)
+    except Exception as exc:
+        print(f"[offsetleave] approval notify: no row {rid!r}: {exc!r}", flush=True)
+        return out
+    dec = (decision or str(row.get("approval_status") or "")).strip().title()
+    if dec not in ("Approved", "Rejected"):
+        return out
+    an = (approver_name or str(row.get("approver") or "")).strip() or "Approver"
+    rr = remarks if remarks else str(row.get("remarks") or "")
+    actor = (acting_approver_open_id or "").strip() or _acting_approver_open_id_from_name(an)
+    if not _requester_approval_already_notified(rid, dec):
+        try:
+            _notify_requester_offset_responded(
+                send,
+                row,
+                approver_name=an,
+                decision=dec,
+                remarks=rr,
+            )
+        except Exception as exc:
+            print(f"[offsetleave] requester approval notify failed for {rid!r}: {exc!r}", flush=True)
+    out["requester"] = _requester_approval_already_notified(rid, dec)
+    if not _peer_approver_approval_already_notified(rid, dec):
+        try:
+            _notify_other_offset_approvers_responded(
+                send,
+                row,
+                acting_approver_open_id=actor,
+                approver_name=an,
+                decision=dec,
+                remarks=rr,
+            )
+        except Exception as exc:
+            print(f"[offsetleave] peer approver notify failed for {rid!r}: {exc!r}", flush=True)
+    out["peer_approvers"] = _peer_approver_approval_already_notified(rid, dec)
+    return out
+
+
 def notify_requester_offset_approval_result(
     record_id: str,
     *,
@@ -2781,42 +2914,23 @@ def notify_requester_offset_approval_result(
     decision: str = "",
     remarks: str = "",
 ) -> bool:
-    """
-    DM the requester that their offset was approved/rejected (card with full row details).
-    """
-    rid = (record_id or "").strip()
-    if not rid:
-        return False
-    send = send_message or _lark_im_send_message
-    try:
-        row = _offset_admin_row_by_id(rid)
-    except Exception as exc:
-        print(f"[offsetleave] requester approval notify: no row {rid!r}: {exc!r}", flush=True)
-        return False
-    dec = (decision or str(row.get("approval_status") or "")).strip().title()
-    if dec not in ("Approved", "Rejected"):
-        return False
-    an = (approver_name or str(row.get("approver") or "")).strip() or "Approver"
-    rr = remarks if remarks else str(row.get("remarks") or "")
-    try:
-        _notify_requester_offset_responded(
-            send,
-            row,
-            approver_name=an,
-            decision=dec,
-            remarks=rr,
-        )
-        return True
-    except Exception as exc:
-        print(f"[offsetleave] requester approval notify failed for {rid!r}: {exc!r}", flush=True)
-        return False
+    """DM the requester that their offset was approved/rejected (card with full row details)."""
+    result = notify_offset_approval_decision(
+        record_id,
+        send_message=send_message,
+        approver_name=approver_name,
+        decision=decision,
+        remarks=remarks,
+    )
+    return bool(result.get("requester"))
 
 
 def scan_bitable_offsets_for_requester_approval_notify() -> dict[str, int]:
-    """Notify requesters when rows were approved/rejected directly in Base."""
+    """Notify requesters and peer approvers when rows were approved/rejected in Base."""
     od.invalidate_ose_bitable_cache()
     items = (od.get_ose_offset_records_admin() or {}).get("items") or []
-    sent = 0
+    requester_sent = 0
+    peer_sent = 0
     for row in items:
         if not isinstance(row, dict):
             continue
@@ -2826,16 +2940,26 @@ def scan_bitable_offsets_for_requester_approval_notify() -> dict[str, int]:
         dec = str(row.get("approval_status") or "").strip().title()
         if dec not in ("Approved", "Rejected"):
             continue
-        if _requester_approval_already_notified(rid, dec):
+        need_requester = not _requester_approval_already_notified(rid, dec)
+        need_peer = not _peer_approver_approval_already_notified(rid, dec)
+        if not need_requester and not need_peer:
             continue
-        if notify_requester_offset_approval_result(
+        result = notify_offset_approval_decision(
             rid,
             approver_name=str(row.get("approver") or ""),
             decision=dec,
             remarks=str(row.get("remarks") or ""),
-        ):
-            sent += 1
-    return {"scanned": len(items), "notified": sent}
+            acting_approver_open_id=_acting_approver_open_id_from_name(str(row.get("approver") or "")),
+        )
+        if need_requester and result.get("requester"):
+            requester_sent += 1
+        if need_peer and result.get("peer_approvers"):
+            peer_sent += 1
+    return {
+        "scanned": len(items),
+        "notified": requester_sent,
+        "peer_notified": peer_sent,
+    }
 
 
 def _notify_offset_approvers_requester_edited(
@@ -2883,7 +3007,11 @@ def _notify_other_offset_approvers_responded(
     decision: str,
     remarks: str,
 ) -> None:
-    actor = (acting_approver_open_id or "").strip()
+    rid = str(row.get("record_id") or "").strip()
+    dec = (decision or "").strip().title()
+    if rid and _peer_approver_approval_already_notified(rid, dec):
+        return
+    actor = (acting_approver_open_id or "").strip() or _acting_approver_open_id_from_name(approver_name)
     card = build_offset_other_approver_responded_card(
         row,
         approver_name=approver_name,
@@ -2891,13 +3019,23 @@ def _notify_other_offset_approvers_responded(
         remarks=remarks,
     )
     body = json.dumps(card, ensure_ascii=False)
-    for oid in OFFSET_APPROVER_OPEN_IDS:
-        aid = (oid or "").strip()
-        if not aid or aid == actor:
-            continue
+    targets = [
+        (oid or "").strip()
+        for oid in OFFSET_APPROVER_OPEN_IDS
+        if (oid or "").strip() and (oid or "").strip() != actor
+    ]
+    if not targets:
+        if rid:
+            _mark_peer_approver_approval_notified(rid, dec)
+        return
+    all_ok = True
+    for aid in targets:
         r = send_message(aid, body, msg_type="interactive", receive_id_type="open_id")
         if isinstance(r, dict) and int(r.get("code", -1)) != 0:
+            all_ok = False
             print(f"[offsetleave] peer approver DM failed for {aid!r}: {r!r}", flush=True)
+    if rid and all_ok:
+        _mark_peer_approver_approval_notified(rid, dec)
 
 
 def _assert_offset_card_actor(
@@ -3368,26 +3506,16 @@ def _handle_offset_approval_callback(
             if mid:
                 _patch_interactive_card_message(mid, build_offset_approver_done_card(fresh, dec, remarks))
             try:
-                _notify_requester_offset_responded(
-                    send_message,
-                    fresh,
+                notify_offset_approval_decision(
+                    rid,
+                    send_message=send_message,
                     approver_name=approver_name,
                     decision=dec,
                     remarks=remarks,
-                )
-            except Exception as exc:
-                print(f"[offsetleave] requester notify failed: {exc!r}", flush=True)
-            try:
-                _notify_other_offset_approvers_responded(
-                    send_message,
-                    fresh,
                     acting_approver_open_id=operator,
-                    approver_name=approver_name,
-                    decision=dec,
-                    remarks=remarks,
                 )
             except Exception as exc:
-                print(f"[offsetleave] peer approver notify failed: {exc!r}", flush=True)
+                print(f"[offsetleave] approval notify failed: {exc!r}", flush=True)
             return True
     except Exception as exc:
         try:

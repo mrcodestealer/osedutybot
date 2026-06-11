@@ -5723,11 +5723,12 @@ def api_admin_offset_approve():
             remarks=remarks,
             approver_open_id=_admin_session_open_id(),
         )
-        ol.notify_requester_offset_approval_result(
+        ol.notify_offset_approval_decision(
             record_id,
             approver_name=who,
             decision=status,
             remarks=remarks,
+            acting_approver_open_id=_admin_session_open_id(),
         )
         return jsonify(out)
     except Exception as e:
