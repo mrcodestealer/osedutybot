@@ -5714,6 +5714,7 @@ def api_admin_offset_approve():
         return jsonify(ok=False, error="record_id is required"), 400
     try:
         import ose_Duty as od
+        import offsetleave as ol
 
         out = od.update_ose_offset_approval(
             record_id=record_id,
@@ -5721,6 +5722,12 @@ def api_admin_offset_approve():
             approver=who,
             remarks=remarks,
             approver_open_id=_admin_session_open_id(),
+        )
+        ol.notify_requester_offset_approval_result(
+            record_id,
+            approver_name=who,
+            decision=status,
+            remarks=remarks,
         )
         return jsonify(out)
     except Exception as e:

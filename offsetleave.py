@@ -18,6 +18,13 @@ import ose_Duty as od
 _CHBOX_DIR = os.path.dirname(os.path.abspath(__file__))
 _OFFSET_APPROVER_NOTIFIED_PATH = os.path.join(_CHBOX_DIR, "offset_approver_notified.json")
 _OFFSET_APPROVER_NOTIFIED_LOCK = threading.Lock()
+_OFFSET_REQUESTER_OPEN_ID_PATH = os.path.join(_CHBOX_DIR, "offset_requester_open_id.json")
+_OFFSET_REQUESTER_OPEN_ID_LOCK = threading.Lock()
+_OFFSET_REQUESTER_APPROVAL_NOTIFIED_PATH = os.path.join(
+    _CHBOX_DIR,
+    "offset_requester_approval_notified.json",
+)
+_OFFSET_REQUESTER_APPROVAL_NOTIFIED_LOCK = threading.Lock()
 
 # Prevent opening multiple edit forms for the same pending record (double-tap Edit).
 _OFFSET_EDIT_OPEN_LOCK = threading.Lock()
@@ -2626,13 +2633,106 @@ def _toast_approval_problem(send_message: Callable[..., Any], chat_id: str, text
         print(f"[offsetleave] approval: {text}", flush=True)
 
 
-def _requester_open_id_for_offset_row(request_person: str) -> str:
+def _requester_open_id_for_offset_row(request_person: str, record_id: str = "") -> str:
     nm = (request_person or "").strip()
+    rid = (record_id or "").strip()
+    if rid:
+        stored = _lookup_stored_offset_requester_open_id(rid)
+        if stored:
+            return stored
     if not nm:
         return ""
     token = od.get_tenant_access_token()
     idx = od._get_ose_person_open_id_index(token)
     return (od._lookup_person_open_id(nm, idx) or "").strip()
+
+
+def _load_offset_requester_open_id_map_unlocked() -> dict[str, str]:
+    try:
+        with open(_OFFSET_REQUESTER_OPEN_ID_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    by_record = data.get("by_record")
+    if not isinstance(by_record, dict):
+        by_record = data
+    return {str(k): str(v) for k, v in by_record.items() if k and v}
+
+
+def _save_offset_requester_open_id_map_unlocked(by_record: dict[str, str]) -> None:
+    tmp = _OFFSET_REQUESTER_OPEN_ID_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"by_record": dict(by_record)}, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    os.replace(tmp, _OFFSET_REQUESTER_OPEN_ID_PATH)
+
+
+def remember_offset_requester_open_id(record_id: str, requester_open_id: str) -> None:
+    """Remember who submitted an offset (bot/web) so approval DMs can find them later."""
+    rid = (record_id or "").strip()
+    oid = (requester_open_id or "").strip()
+    if not rid or not oid:
+        return
+    with _OFFSET_REQUESTER_OPEN_ID_LOCK:
+        by_record = _load_offset_requester_open_id_map_unlocked()
+        by_record[rid] = oid
+        _save_offset_requester_open_id_map_unlocked(by_record)
+
+
+def _lookup_stored_offset_requester_open_id(record_id: str) -> str:
+    rid = (record_id or "").strip()
+    if not rid:
+        return ""
+    with _OFFSET_REQUESTER_OPEN_ID_LOCK:
+        return str(_load_offset_requester_open_id_map_unlocked().get(rid) or "").strip()
+
+
+def _load_requester_approval_notified_unlocked() -> dict[str, str]:
+    try:
+        with open(_OFFSET_REQUESTER_APPROVAL_NOTIFIED_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    by_record = data.get("by_record")
+    if not isinstance(by_record, dict):
+        by_record = data
+    return {str(k): str(v) for k, v in by_record.items() if k and v}
+
+
+def _save_requester_approval_notified_unlocked(by_record: dict[str, str]) -> None:
+    tmp = _OFFSET_REQUESTER_APPROVAL_NOTIFIED_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"by_record": dict(by_record)}, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    os.replace(tmp, _OFFSET_REQUESTER_APPROVAL_NOTIFIED_PATH)
+
+
+def _requester_approval_already_notified(record_id: str, decision: str) -> bool:
+    rid = (record_id or "").strip()
+    dec = (decision or "").strip().title()
+    if not rid or dec not in ("Approved", "Rejected"):
+        return False
+    with _OFFSET_REQUESTER_APPROVAL_NOTIFIED_LOCK:
+        return _load_requester_approval_notified_unlocked().get(rid) == dec
+
+
+def _mark_requester_approval_notified(record_id: str, decision: str) -> None:
+    rid = (record_id or "").strip()
+    dec = (decision or "").strip().title()
+    if not rid or dec not in ("Approved", "Rejected"):
+        return
+    with _OFFSET_REQUESTER_APPROVAL_NOTIFIED_LOCK:
+        by_record = _load_requester_approval_notified_unlocked()
+        by_record[rid] = dec
+        _save_requester_approval_notified_unlocked(by_record)
 
 
 def _notify_requester_offset_responded(
@@ -2643,12 +2743,20 @@ def _notify_requester_offset_responded(
     decision: str,
     remarks: str,
 ) -> None:
+    rid = str(row.get("record_id") or "").strip()
+    dec = (decision or "").strip().title()
+    if rid and _requester_approval_already_notified(rid, dec):
+        return
     request_person = str(row.get("request_person") or "").strip()
     if not request_person:
         return
-    oid = _requester_open_id_for_offset_row(request_person)
+    oid = _requester_open_id_for_offset_row(request_person, record_id=rid)
     if not oid:
-        print(f"[offsetleave] could not resolve Lark open_id for requester {request_person!r}", flush=True)
+        print(
+            f"[offsetleave] could not resolve Lark open_id for requester {request_person!r} "
+            f"(record {rid or '?'})",
+            flush=True,
+        )
         return
     card = build_offset_requester_responded_card(
         row,
@@ -2660,6 +2768,74 @@ def _notify_requester_offset_responded(
     r = send_message(oid, body, msg_type="interactive", receive_id_type="open_id")
     if isinstance(r, dict) and int(r.get("code", -1)) != 0:
         print(f"[offsetleave] requester DM failed: {r!r}", flush=True)
+        return
+    if rid:
+        _mark_requester_approval_notified(rid, dec)
+
+
+def notify_requester_offset_approval_result(
+    record_id: str,
+    *,
+    send_message: Optional[Callable[..., Any]] = None,
+    approver_name: str = "",
+    decision: str = "",
+    remarks: str = "",
+) -> bool:
+    """
+    DM the requester that their offset was approved/rejected (card with full row details).
+    """
+    rid = (record_id or "").strip()
+    if not rid:
+        return False
+    send = send_message or _lark_im_send_message
+    try:
+        row = _offset_admin_row_by_id(rid)
+    except Exception as exc:
+        print(f"[offsetleave] requester approval notify: no row {rid!r}: {exc!r}", flush=True)
+        return False
+    dec = (decision or str(row.get("approval_status") or "")).strip().title()
+    if dec not in ("Approved", "Rejected"):
+        return False
+    an = (approver_name or str(row.get("approver") or "")).strip() or "Approver"
+    rr = remarks if remarks else str(row.get("remarks") or "")
+    try:
+        _notify_requester_offset_responded(
+            send,
+            row,
+            approver_name=an,
+            decision=dec,
+            remarks=rr,
+        )
+        return True
+    except Exception as exc:
+        print(f"[offsetleave] requester approval notify failed for {rid!r}: {exc!r}", flush=True)
+        return False
+
+
+def scan_bitable_offsets_for_requester_approval_notify() -> dict[str, int]:
+    """Notify requesters when rows were approved/rejected directly in Base."""
+    od.invalidate_ose_bitable_cache()
+    items = (od.get_ose_offset_records_admin() or {}).get("items") or []
+    sent = 0
+    for row in items:
+        if not isinstance(row, dict):
+            continue
+        rid = str(row.get("record_id") or "").strip()
+        if not rid or bool(row.get("pending")):
+            continue
+        dec = str(row.get("approval_status") or "").strip().title()
+        if dec not in ("Approved", "Rejected"):
+            continue
+        if _requester_approval_already_notified(rid, dec):
+            continue
+        if notify_requester_offset_approval_result(
+            rid,
+            approver_name=str(row.get("approver") or ""),
+            decision=dec,
+            remarks=str(row.get("remarks") or ""),
+        ):
+            sent += 1
+    return {"scanned": len(items), "notified": sent}
 
 
 def _notify_offset_approvers_requester_edited(
@@ -3324,6 +3500,8 @@ def handle_card_callback(
                     reason=reason,
                 )
                 rid = str((out or {}).get("record_id") or "").strip()
+                if rid:
+                    remember_offset_requester_open_id(rid, owner)
                 release_offset_submit(owner, fp, success=True)
                 done_msg = f"✅ Offset submitted for {request_person} (record {rid or 'saved'})."
                 done_card = build_offset_submit_done_card(

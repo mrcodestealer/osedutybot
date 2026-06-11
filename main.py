@@ -1786,6 +1786,16 @@ def poll_offset_approver_notifications_from_bitable():
                 f"(scanned {(wiki or {}).get('scanned')})",
                 flush=True,
             )
+        req = ol.scan_bitable_offsets_for_requester_approval_notify()
+        rn = int((req or {}).get("notified") or 0)
+        if rn:
+            print(f"[offsetleave] requester approval poll: notified {rn} requester(s)", flush=True)
+        import ose_Duty as od
+
+        sh = od.scan_bitable_approved_offsets_for_shift_sheet()
+        sa = int((sh or {}).get("applied") or 0)
+        if sa:
+            print(f"[ose_Duty] shift sheet poll: applied {sa} approved offset(s)", flush=True)
     except Exception as exc:
         print(f"[offsetleave] bitable approver poll failed: {exc!r}", flush=True)
 

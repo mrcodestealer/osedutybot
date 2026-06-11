@@ -12,6 +12,7 @@ OSE Duty + Leave + Offset
 from __future__ import annotations
 
 import calendar
+import json
 import os
 import re
 import sys
@@ -29,8 +30,8 @@ load_dotenv()
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
 
-SPREADSHEET_TOKEN = os.getenv("OSE_SPREADSHEET_TOKEN")
-SHEET_ID = os.getenv("OSE_SHEET_ID")
+SPREADSHEET_TOKEN = (os.getenv("OSE_SPREADSHEET_TOKEN") or "UjF0saOVuhJSWLtBv9GlaQOkgbe").strip()
+SHEET_ID = (os.getenv("OSE_SHEET_ID") or "3RIBRL").strip()
 
 # Leave / Offset Bitable (defaults from user-provided URLs).
 OSE_BASE_TOKEN = os.getenv("OSE_BASE_TOKEN", "CpdEbEofwaYyyEsSjlElKNxzgec")
@@ -115,6 +116,8 @@ DEBUG = False
 # In-memory OSE shift sheet (avoids one full-sheet fetch per day for calendar / repeated /ose).
 _OSE_SHEET_CACHE_TTL_SEC = int(os.getenv("OSE_SHEET_CACHE_SEC", "120"))
 _OSE_SHEET_CACHE: dict[str, Any] = {"mono": 0.0, "values": None}
+_OSE_DIR = os.path.dirname(os.path.abspath(__file__))
+_OFFSET_SHIFT_SHEET_APPLIED_PATH = os.path.join(_OSE_DIR, "offset_shift_sheet_applied.json")
 
 
 def debug_print(*args, **kwargs) -> None:
@@ -485,6 +488,196 @@ def _shift_names_from_matrix(values: list[list[Any]], target_date: date) -> tupl
     """Parse ``D`` / ``N`` for one calendar day from preloaded sheet ``values`` (same rules as legacy scan)."""
     morning, night, _ = _shift_codes_from_matrix(values, target_date)
     return morning, night
+
+
+def _invalidate_ose_sheet_cache() -> None:
+    _OSE_SHEET_CACHE["values"] = None
+    _OSE_SHEET_CACHE["mono"] = 0.0
+
+
+def _sheet_row_index_for_person(values: list[list[Any]], person: str) -> Optional[int]:
+    """0-based matrix row for a roster person on the OSE shift sheet."""
+    nm = _title_name(person)
+    if not nm:
+        return None
+    for target, row_idx in _target_name_rows_from_matrix(values).items():
+        if _names_same_person(target, nm):
+            return row_idx
+    return None
+
+
+def _put_ose_shift_sheet_cells(token: str, cell_updates: list[tuple[int, int, str]]) -> None:
+    """Write duty cells: each item is (matrix_row_idx, col_idx, value) both 0-based."""
+    if not cell_updates:
+        return
+    if not SPREADSHEET_TOKEN or not SHEET_ID:
+        raise RuntimeError("OSE shift sheet not configured (OSE_SPREADSHEET_TOKEN / OSE_SHEET_ID)")
+    value_ranges: list[dict[str, Any]] = []
+    for row_idx, col_idx, val in cell_updates:
+        if row_idx < 0 or col_idx < 0:
+            continue
+        a1 = f"{SHEET_ID}!{col_index_to_letter(col_idx + 1)}{row_idx + 1}"
+        value_ranges.append({"range": a1, "values": [[val]]})
+    if not value_ranges:
+        return
+    url = (
+        f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/"
+        f"{SPREADSHEET_TOKEN}/values_batch_update"
+    )
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"}
+    res = requests.post(url, headers=headers, json={"valueRanges": value_ranges}, timeout=60).json()
+    if res.get("code") != 0:
+        raise RuntimeError(f"OSE shift sheet write failed: {res}")
+    _invalidate_ose_sheet_cache()
+
+
+def _load_offset_shift_sheet_applied() -> set[str]:
+    try:
+        with open(_OFFSET_SHIFT_SHEET_APPLIED_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return set()
+    except Exception:
+        return set()
+    if isinstance(data, dict):
+        ids = data.get("record_ids")
+        if isinstance(ids, list):
+            return {str(x).strip() for x in ids if str(x).strip()}
+    if isinstance(data, list):
+        return {str(x).strip() for x in data if str(x).strip()}
+    return set()
+
+
+def _save_offset_shift_sheet_applied(record_ids: set[str]) -> None:
+    tmp = _OFFSET_SHIFT_SHEET_APPLIED_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"record_ids": sorted(record_ids)}, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    os.replace(tmp, _OFFSET_SHIFT_SHEET_APPLIED_PATH)
+
+
+def _mark_offset_shift_sheet_applied(record_id: str) -> None:
+    rid = (record_id or "").strip()
+    if not rid:
+        return
+    applied = _load_offset_shift_sheet_applied()
+    applied.add(rid)
+    _save_offset_shift_sheet_applied(applied)
+
+
+def offset_shift_sheet_already_applied(record_id: str) -> bool:
+    rid = (record_id or "").strip()
+    return bool(rid and rid in _load_offset_shift_sheet_applied())
+
+
+def apply_approved_offset_to_shift_sheet(
+    *,
+    request_person: str,
+    exchange_person: str,
+    original_date: date,
+    exchange_date: date,
+    shift_type: str,
+) -> dict[str, Any]:
+    """
+    Apply an approved offset swap to OSE2026 (``3RIBRL``): ``*`` on swapped-off days,
+    ``D``/``N`` on swapped-on days. Exchange with self only updates the requester's row.
+    """
+    st = (shift_type or "").strip().upper()
+    if st not in OSE_SHIFT_TYPES:
+        raise ValueError(f"Shift Type must be one of {OSE_SHIFT_TYPES}")
+    req = _title_name(request_person)
+    exc = _title_name(exchange_person)
+    if not req:
+        raise ValueError("request_person is required")
+    if not exc:
+        exc = req
+    values, err = _get_cached_ose_sheet_values()
+    if not values:
+        raise RuntimeError(err or "Could not load OSE shift sheet")
+    orig_col = _date_column_for_matrix(values, original_date)
+    exc_col = _date_column_for_matrix(values, exchange_date)
+    if orig_col is None:
+        raise ValueError(f"Could not find sheet column for original date {original_date.isoformat()}")
+    if exc_col is None:
+        raise ValueError(f"Could not find sheet column for exchange date {exchange_date.isoformat()}")
+    req_row = _sheet_row_index_for_person(values, req)
+    if req_row is None:
+        raise ValueError(f"Could not find shift sheet row for request person {req!r}")
+    same_person = _names_same_person(req, exc)
+    updates: list[tuple[int, int, str]] = [
+        (req_row, orig_col, "*"),
+        (req_row, exc_col, st),
+    ]
+    if not same_person:
+        exc_row = _sheet_row_index_for_person(values, exc)
+        if exc_row is None:
+            raise ValueError(f"Could not find shift sheet row for exchange person {exc!r}")
+        updates.extend([(exc_row, orig_col, st), (exc_row, exc_col, "*")])
+    token = get_tenant_access_token()
+    _put_ose_shift_sheet_cells(token, updates)
+    return {
+        "ok": True,
+        "request_person": req,
+        "exchange_person": exc,
+        "original_date": original_date.isoformat(),
+        "exchange_date": exchange_date.isoformat(),
+        "shift_type": st,
+        "cells_updated": len(updates),
+        "myself": same_person,
+    }
+
+
+def apply_approved_offset_shift_sheet_for_record(record_id: str) -> dict[str, Any]:
+    """Load an approved offset row and apply duty-sheet swap (idempotent per record_id)."""
+    rid = (record_id or "").strip()
+    if not rid:
+        raise ValueError("record_id is required")
+    if offset_shift_sheet_already_applied(rid):
+        return {"ok": True, "record_id": rid, "skipped": "already_applied"}
+    row = get_ose_offset_record_admin_row(rid)
+    if bool(row.get("pending")):
+        return {"ok": False, "record_id": rid, "skipped": "still_pending"}
+    status = str(row.get("approval_status") or "").strip().title()
+    if status != "Approved":
+        return {"ok": False, "record_id": rid, "skipped": f"status={status or 'unknown'}"}
+    od = _parse_date_value(row.get("original_date"))
+    xd = _parse_date_value(row.get("exchange_date"))
+    if not od or not xd:
+        raise ValueError("Original Date and Exchange Date are required on the offset row")
+    result = apply_approved_offset_to_shift_sheet(
+        request_person=str(row.get("request_person") or ""),
+        exchange_person=str(row.get("exchange_person") or ""),
+        original_date=od,
+        exchange_date=xd,
+        shift_type=str(row.get("shift_type") or ""),
+    )
+    _mark_offset_shift_sheet_applied(rid)
+    return {"record_id": rid, **result}
+
+
+def scan_bitable_approved_offsets_for_shift_sheet() -> dict[str, int]:
+    """Apply duty-sheet swaps for offsets approved directly in Base (not via bot card)."""
+    invalidate_ose_bitable_cache()
+    items = (get_ose_offset_records_admin() or {}).get("items") or []
+    applied = 0
+    errors = 0
+    for row in items:
+        if not isinstance(row, dict):
+            continue
+        rid = str(row.get("record_id") or "").strip()
+        if not rid or bool(row.get("pending")):
+            continue
+        if str(row.get("approval_status") or "").strip().title() != "Approved":
+            continue
+        if offset_shift_sheet_already_applied(rid):
+            continue
+        try:
+            apply_approved_offset_shift_sheet_for_record(rid)
+            applied += 1
+        except Exception as exc:
+            errors += 1
+            print(f"[ose_Duty] shift sheet apply failed for {rid!r}: {exc!r}", flush=True)
+    return {"scanned": len(items), "applied": applied, "errors": errors}
 
 
 def get_shift_names_for_date(target_date: date) -> tuple[list[str], list[str]]:
@@ -1739,7 +1932,14 @@ def update_ose_offset_approval(
     _bitable_update_record(token, OSE_OFFSET_TABLE_ID, record_id, fields)
     invalidate_ose_bitable_cache()
     _schedule_offset_duty_wiki_sync(record_id=record_id)
-    return {"ok": True, "record_id": record_id, "status": st}
+    sheet_out: dict[str, Any] = {}
+    if st == "Approved":
+        try:
+            sheet_out = apply_approved_offset_shift_sheet_for_record(record_id)
+        except Exception as exc:
+            sheet_out = {"ok": False, "error": str(exc)}
+            print(f"[ose_Duty] offset shift sheet apply failed for {record_id!r}: {exc!r}", flush=True)
+    return {"ok": True, "record_id": record_id, "status": st, "shift_sheet": sheet_out}
 
 
 def _admin_page_env() -> tuple[str, str]:
