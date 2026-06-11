@@ -475,7 +475,9 @@ def build_intent_catalog(*, jenkins_available: bool = True) -> list[IntentSpec]:
             _simple_intent(
                 "cmd_update",
                 "/update",
-                "run jenkins update|trigger jenkins job|start jenkins build|deploy via jenkins",
+                "run jenkins update|trigger jenkins job|start jenkins build|deploy via jenkins|"
+                "i want update jenkins|update jenkins pms|update jenkins fpms|"
+                "want to update pms|deploy pms uat|jenkins pms update",
             )
         )
 
@@ -721,6 +723,19 @@ def translate_if_enabled(text: str) -> Optional[str]:
     raw = (text or "").strip()
     if not raw or _looks_like_slash_command(raw):
         return None
+    try:
+        import jenkinsupdate as _jenkins_gate
+
+        if _jenkins_gate.looks_like_natural_jenkins_update(raw):
+            print(f"[commandagent] Skip NL map — Jenkins update request: {raw[:120]!r}", flush=True)
+            return None
+    except Exception:
+        if re.search(
+            r"(?i)(?:update|deploy|trigger|run).*(?:jenkins|\bfpms\b|\bpms\b|\bbi\b)"
+            r"|\bbranch\s*:.*\bservices?\s*:|\bservices?\s*:.*\bbranch\s*:",
+            raw,
+        ):
+            return None
     clf = _get_classifier()
     if clf is None:
         print(f"⚠️ AI enabled but classifier unavailable for {raw!r}", flush=True)

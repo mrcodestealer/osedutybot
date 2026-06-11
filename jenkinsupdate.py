@@ -311,6 +311,13 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
 JENKINS_UPDATE_CMD_RE = re.compile(
     r"/(?:update|jenkinsupdate|updatejenkins)(?!more)\b", re.I
 )
+_NL_JENKINS_UPDATE_RE = re.compile(
+    r"(?i)(?:"
+    r"(?:want|need|please|help(?:\s+me)?|can you)\s+(?:to\s+)?(?:update|deploy|trigger|run)\b"
+    r"|(?:update|deploy|trigger|run)\s+(?:jenkins\b|(?:fpms|pms|bi|cpms|sre|fe|nt|sms|fnt)\b)"
+    r"|jenkins\s+(?:update|deploy|build)"
+    r")"
+)
 FPMS_PROD_SCRIPT_FLAG_RE = re.compile(r"--fpmsprodscript\b", re.I)
 FPMS_PROD_SCRIPT_BUILD_URL = (
     "https://jenkins.client8.me/job/FPMS/job/FPMS_PROD_SCRIPT_RUN/build?delay=0sec"
@@ -7497,6 +7504,52 @@ def _fpms_lark_with_sender_union_scope(fn):
 
 
 @_fpms_lark_with_sender_union_scope
+def looks_like_natural_jenkins_update(text: str) -> bool:
+    """True when the user wants a Jenkins /update flow but omitted the ``/update`` prefix."""
+    raw = (text or "").replace("\r\n", "\n").strip()
+    if not raw or JENKINS_UPDATE_CMD_RE.search(raw):
+        return False
+    if _NL_JENKINS_UPDATE_RE.search(raw):
+        return True
+    has_branch = bool(re.search(r"\bbranch\s*:", raw, re.I))
+    has_svc = bool(re.search(r"\bservices?\s*:", raw, re.I))
+    has_update_hint = bool(
+        re.search(r"(?i)\bjenkins\b|\bupdate\s+(?:fpms|pms|bi|cpms|sre|fe|nt|sms|fnt)\b", raw)
+    )
+    return has_branch and has_svc and has_update_hint
+
+
+def normalize_natural_jenkins_body(text: str) -> str:
+    """Turn NL Jenkins requests into ``/update …`` + config block for existing dispatch."""
+    raw = (text or "").replace("\r\n", "\n").strip()
+    if JENKINS_UPDATE_CMD_RE.search(raw):
+        return raw
+    m = re.search(r"\b(branch|version|services?|environment)\s*:", raw, re.I)
+    if m and m.start() > 0:
+        head, tail = raw[: m.start()].strip(), raw[m.start():].strip()
+    else:
+        lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+        if len(lines) >= 2:
+            head, tail = lines[0], "\n".join(lines[1:])
+        else:
+            head, tail = raw, ""
+    head = re.sub(r"(?i)^(?:@\S+\s+)*", "", head)
+    head = re.sub(
+        r"(?i)^(?:i\s+)?(?:want|need|please)\s+(?:to\s+)?(?:update|deploy|trigger|run)\s+(?:jenkins\s+)?",
+        "",
+        head,
+    ).strip()
+    head = re.sub(r"(?i)^(?:update|deploy)\s+(?:jenkins\s+)?", "", head).strip()
+    head = re.sub(r"(?i)^jenkins\s+", "", head).strip()
+    if not head:
+        head = "update"
+    out = f"/update {head}"
+    if tail:
+        out += "\n" + tail
+    return out
+
+
+@_fpms_lark_with_sender_union_scope
 def _jenkins_message_has_config_block(text: str) -> bool:
     """True when the message looks like a full parameter paste (not only a job keyword)."""
     raw = (text or "").replace("\r\n", "\n")
@@ -8322,11 +8375,14 @@ def handle_lark_jenkins_update_message(
         return True
 
     if not JENKINS_UPDATE_CMD_RE.search(clean_text or ""):
-        return False
+        if not (allow_start and looks_like_natural_jenkins_update(original_text or clean_text or "")):
+            return False
+        body = normalize_natural_jenkins_body(original_text or clean_text or "")
+    else:
+        body = original_text or clean_text
     if not allow_start:
         return False
 
-    body = original_text or clean_text
     return _dispatch_lark_update_command_body(
         chat_id,
         key,
