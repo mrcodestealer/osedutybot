@@ -38,7 +38,6 @@ _CHITCHAT_RULES: list[tuple[re.Pattern[str], list[str]]] = [
             "Hi! 👋 How can I help? Try `/help` or ask in English like “who is on fpms duty today”.",
             "Hello! I'm Duty Bot — duty roster, leave, machines, and more. Say `/help` for commands.",
             "Hey there! 👋 Need duty info? e.g. `/fpms` or “show me bi duty”.",
-            "你好！我是 Duty Bot，可以查值班、请假、机器信息等。输入 `/help` 看命令列表。",
         ],
     ),
     (
@@ -56,7 +55,6 @@ _CHITCHAT_RULES: list[tuple[re.Pattern[str], list[str]]] = [
             "I'm good, thanks! Ready to help with duty / leave / machines. What do you need?",
             "All good here 🤖 Ask me anything work-related — or `/help` for the command list.",
             "Doing well! Tell me what you need: duty roster, holidays, machine lookup, etc.",
-            "还不错！有需要查值班、请假或机器信息可以跟我说。",
         ],
     ),
     (
@@ -71,7 +69,6 @@ _CHITCHAT_RULES: list[tuple[re.Pattern[str], list[str]]] = [
             "You're welcome! 😊",
             "Anytime — ping me again if you need anything.",
             "Happy to help!",
-            "不客气！",
         ],
     ),
     (
@@ -86,7 +83,6 @@ _CHITCHAT_RULES: list[tuple[re.Pattern[str], list[str]]] = [
             "Bye! 👋 Have a good one.",
             "See you later!",
             "Goodbye — I'll be here when you need duty info.",
-            "再见！有需要再 @我。",
         ],
     ),
     (
@@ -101,7 +97,6 @@ _CHITCHAT_RULES: list[tuple[re.Pattern[str], list[str]]] = [
         [
             "I'm **Duty Bot** — FPMS/BI/SRE duty, leave/WFH, holidays, machine lookup, Jenkins helpers, and more. Try `/help`.",
             "Duty Bot at your service 🤖 Slash commands like `/fpms`, `/bi`, or natural English when AI is on. `/help` lists everything.",
-            "我是 **Duty Bot**，帮你查各部门值班、请假、假期、机器信息等。发送 `/help` 查看全部命令。",
         ],
     ),
     (
@@ -115,7 +110,6 @@ _CHITCHAT_RULES: list[tuple[re.Pattern[str], list[str]]] = [
         [
             "Thanks! 😄 Let me know if you need anything else.",
             "Glad I could help!",
-            "谢谢夸奖！有事再叫我。",
         ],
     ),
     (
@@ -131,7 +125,6 @@ _CHITCHAT_RULES: list[tuple[re.Pattern[str], list[str]]] = [
             "I'm doing great, thanks for asking! 🤖 What can I help you with?",
             "All good here — ready when you need duty info or machine lookup.",
             "Pretty good! Ask me anything work-related or just say hi anytime.",
-            "还不错，谢谢关心！有需要查值班或机器可以跟我说。",
         ],
     ),
     (
@@ -148,7 +141,6 @@ _CHITCHAT_RULES: list[tuple[re.Pattern[str], list[str]]] = [
             "Bored? 😄 I can't stream Netflix — but try `/fpms` or ask who's on duty today.",
             "Hang in there! Want a distraction? Ask me about holidays (`/holiday`) or who's on call.",
             "I feel you — slow day? I'm here if you want to chat or need a quick duty lookup.",
-            "无聊啊～可以查 `/holiday` 或问我今天谁值班。",
         ],
     ),
 ]
@@ -170,13 +162,9 @@ def _normalize(text: str) -> str:
 
 
 def pick_localized_reply(replies: list[str], user_text: str) -> str:
-    """Pick a reply in the user's language (English vs Chinese)."""
-    prefers_zh = bool(_CJK_RE.search(user_text or ""))
-    if prefers_zh:
-        localized = [r for r in replies if _CJK_RE.search(r)]
-    else:
-        localized = [r for r in replies if not _CJK_RE.search(r)]
-    pool = localized or replies
+    """Pick an English-only reply (Duty Bot does not reply in Chinese)."""
+    english = [r for r in replies if not _CJK_RE.search(r)]
+    pool = english or replies
     return random.choice(pool)
 
 

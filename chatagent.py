@@ -54,7 +54,7 @@ _SYSTEM_PROMPT = """You are Duty Bot, a friendly workplace assistant on Lark/Fei
 Users may casually chat or ask about duty rosters, leave/WFH, holidays, machines, and Jenkins helpers.
 
 For casual conversation: reply naturally, warm, and concise (1–3 short sentences). Light emoji is fine.
-Match the user's language (English or Chinese).
+Always reply in English only, even if the user writes Chinese.
 If they ask for work data you cannot look up in chat, gently suggest `/help` or examples like "who is on fpms duty".
 Never invent duty names, phone numbers, machine IDs, or confidential information.
 Stay professional; avoid politics, religion, and inappropriate topics."""
@@ -73,6 +73,8 @@ _COMMANDISH_RE = re.compile(
     r"wholeave|cctv|sms|credit|deploy|build|ticket|incident|oncall|on-call"
     r")\b|/"
 )
+
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 
 
 @dataclass
@@ -128,6 +130,8 @@ def _sanitize_llm_reply(text: str) -> str:
     out = re.sub(r"\n{3,}", "\n\n", out)
     if len(out) > 1200:
         out = out[:1197].rstrip() + "..."
+    if _CJK_RE.search(out):
+        return ""
     return out
 
 
@@ -329,7 +333,6 @@ def build_chat_catalog() -> list[ChatIntentSpec]:
                 "Hi! 👋 I'm Duty Bot — ask me about duty, leave, machines, or say `/help`.",
                 "Hello! How can I help you today?",
                 "Hey there! 👋 Work questions welcome — e.g. “who is on fpms duty”.",
-                "你好！我是 Duty Bot，可以聊两句，也能帮你查值班信息。",
             ],
             "hi|hello|hey|hiya|yo|howdy|greetings|good day|"
             "你好|您好|嗨|哈喽|哈啰|早上好|下午好|晚上好",
@@ -343,7 +346,6 @@ def build_chat_catalog() -> list[ChatIntentSpec]:
                 "I'm doing great, thanks for asking! 🤖 What can I help you with?",
                 "All good here — ready when you need duty info or machine lookup.",
                 "Pretty good! Ask me anything work-related or just say hi anytime.",
-                "还不错，谢谢关心！有需要查值班或机器可以跟我说。",
             ],
             "how are you|how r u|how are u|how is it going|how are things|"
             "how you doing|how are you doing|how are you doing today|"
@@ -359,7 +361,6 @@ def build_chat_catalog() -> list[ChatIntentSpec]:
                 "You're welcome! 😊",
                 "Anytime — happy to help!",
                 "No problem at all!",
-                "不客气！",
             ],
             "thanks|thank you|thanks so much|thank you so much|thx|ty|cheers|"
             "much appreciated|appreciate it|"
@@ -374,7 +375,6 @@ def build_chat_catalog() -> list[ChatIntentSpec]:
                 "Bye! 👋 Ping me anytime you need duty info.",
                 "See you later!",
                 "Take care — I'll be here when you need me.",
-                "再见！有需要再 @我。",
             ],
             "bye|goodbye|see you|see ya|cya|later|talk later|catch you later|"
             "good night|gn|night night|再见|拜拜|晚安",
@@ -387,7 +387,6 @@ def build_chat_catalog() -> list[ChatIntentSpec]:
             [
                 "I'm **Duty Bot** 🤖 — department duty, leave/WFH, holidays, machines, Jenkins helpers. Try `/help`.",
                 "Duty Bot at your service! I understand English for both chat and work commands (with AI on).",
-                "我是值班机器人，能查各部门 duty、请假、机器信息，也能陪你简单聊几句。",
             ],
             "who are you|what are you|what can you do|are you a bot|are you real|"
             "tell me about yourself|introduce yourself|"
@@ -402,7 +401,6 @@ def build_chat_catalog() -> list[ChatIntentSpec]:
                 "Thanks! 😄 That's kind of you.",
                 "Aw, thank you — glad I could help!",
                 "You're too kind! Let me know if you need anything else.",
-                "谢谢夸奖！",
             ],
             "nice|cool|awesome|great job|well done|good bot|you rock|love you bot|"
             "you're the best|amazing|fantastic|厉害|不错|棒极了",
@@ -428,7 +426,6 @@ def build_chat_catalog() -> list[ChatIntentSpec]:
                 "No worries at all!",
                 "It's okay — how can I help?",
                 "All good! Don't worry about it.",
-                "没关系！",
             ],
             "sorry|my bad|apologies|didn't mean to|oops|excuse me|对不起|抱歉",
         )
@@ -442,7 +439,6 @@ def build_chat_catalog() -> list[ChatIntentSpec]:
                 "Okay!",
                 "Sure thing.",
                 "Alright — shout if you need me.",
-                "好的！",
             ],
             "ok|okay|k|sure|alright|all right|got it|understood|roger|noted|fine|"
             "好的|明白|收到|嗯|行",
@@ -466,7 +462,6 @@ def build_chat_catalog() -> list[ChatIntentSpec]:
             [
                 "Hang in there! 💪 Take a break if you can — I'll handle the bot stuff when you're back.",
                 "Long day? Rest up — I'm always here for quick duty lookups.",
-                "辛苦了，注意休息！",
             ],
             "i'm tired|so tired|exhausted|long day|need a break|burned out|burnout|"
             "好累|太累了|累死了",
@@ -491,7 +486,6 @@ def build_chat_catalog() -> list[ChatIntentSpec]:
             [
                 "Hope you get a good rest! 🎉 I'll be here Monday for duty questions.",
                 "Enjoy the weekend! Ping me anytime for on-call / duty info.",
-                "周末愉快！",
             ],
             "weekend|friday|happy friday|tgif|saturday plans|sunday|long weekend|"
             "周末|星期五",
@@ -504,7 +498,6 @@ def build_chat_catalog() -> list[ChatIntentSpec]:
             [
                 "No problem — try `/help` for commands, or ask in plain English like “show fpms duty”.",
                 "I'm not sure what you mean — duty question? Try `@Duty Bot /help`.",
-                "不太确定你的意思 — 可以说 `/help` 或直接用英文问值班信息。",
             ],
             "i don't understand|don't get it|what do you mean|confused|huh|"
             "听不懂|不明白|什么意思",
@@ -568,7 +561,6 @@ def build_chat_catalog() -> list[ChatIntentSpec]:
                 "Need anything? Try `/help` or ask naturally.",
                 "Got you 😊 I'm Duty Bot — casual chat is fine; for tasks say things like “who is on fpms duty”.",
                 "I hear you! For work I can help with rosters and lookups — otherwise I'm glad to keep you company.",
-                "明白～我是值班 bot，闲聊可以，查 duty/请假/机器直接跟我说就行。",
             ],
             "|".join(general_patterns),
         )
