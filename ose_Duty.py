@@ -516,7 +516,9 @@ def _put_ose_shift_sheet_cells(token: str, cell_updates: list[tuple[int, int, st
     for row_idx, col_idx, val in cell_updates:
         if row_idx < 0 or col_idx < 0:
             continue
-        a1 = f"{SHEET_ID}!{col_index_to_letter(col_idx + 1)}{row_idx + 1}"
+        cell = f"{col_index_to_letter(col_idx + 1)}{row_idx + 1}"
+        # Lark values_batch_update requires an explicit range (e.g. FG33:FG33), not FG33 alone.
+        a1 = f"{SHEET_ID}!{cell}:{cell}"
         value_ranges.append({"range": a1, "values": [[val]]})
     if not value_ranges:
         return
