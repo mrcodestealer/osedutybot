@@ -1800,6 +1800,10 @@ def poll_offset_approver_notifications_from_bitable():
         sa = int((sh or {}).get("applied") or 0)
         if sa:
             print(f"[ose_Duty] shift sheet poll: applied {sa} approved offset(s)", flush=True)
+        rv = od.scan_revert_deleted_offsets_from_shift_sheet()
+        sr = int((rv or {}).get("reverted") or 0)
+        if sr:
+            print(f"[ose_Duty] shift sheet poll: reverted {sr} deleted offset(s)", flush=True)
     except Exception as exc:
         print(f"[offsetleave] bitable approver poll failed: {exc!r}", flush=True)
 

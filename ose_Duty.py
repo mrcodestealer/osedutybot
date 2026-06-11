@@ -577,38 +577,82 @@ def _put_ose_shift_sheet_cells(token: str, cell_updates: list[tuple[int, int, st
     _invalidate_ose_sheet_cache()
 
 
-def _load_offset_shift_sheet_applied() -> set[str]:
+def _load_offset_shift_sheet_state() -> dict[str, Any]:
     try:
         with open(_OFFSET_SHIFT_SHEET_APPLIED_PATH, encoding="utf-8") as fh:
             data = json.load(fh)
     except FileNotFoundError:
-        return set()
+        return {"record_ids": [], "by_record": {}}
     except Exception:
-        return set()
-    if isinstance(data, dict):
-        ids = data.get("record_ids")
-        if isinstance(ids, list):
-            return {str(x).strip() for x in ids if str(x).strip()}
+        return {"record_ids": [], "by_record": {}}
     if isinstance(data, list):
-        return {str(x).strip() for x in data if str(x).strip()}
-    return set()
+        return {"record_ids": [str(x).strip() for x in data if str(x).strip()], "by_record": {}}
+    if not isinstance(data, dict):
+        return {"record_ids": [], "by_record": {}}
+    ids = [str(x).strip() for x in (data.get("record_ids") or []) if str(x).strip()]
+    raw_by = data.get("by_record") if isinstance(data.get("by_record"), dict) else {}
+    by_record = {str(k).strip(): dict(v) for k, v in raw_by.items() if str(k).strip() and isinstance(v, dict)}
+    return {"record_ids": ids, "by_record": by_record}
 
 
-def _save_offset_shift_sheet_applied(record_ids: set[str]) -> None:
+def _save_offset_shift_sheet_state(record_ids: set[str], by_record: dict[str, dict[str, str]]) -> None:
     tmp = _OFFSET_SHIFT_SHEET_APPLIED_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump({"record_ids": sorted(record_ids)}, fh, ensure_ascii=False, indent=2)
+        json.dump(
+            {
+                "record_ids": sorted(record_ids),
+                "by_record": {k: by_record[k] for k in sorted(by_record)},
+            },
+            fh,
+            ensure_ascii=False,
+            indent=2,
+        )
         fh.write("\n")
     os.replace(tmp, _OFFSET_SHIFT_SHEET_APPLIED_PATH)
 
 
-def _mark_offset_shift_sheet_applied(record_id: str) -> None:
+def _load_offset_shift_sheet_applied() -> set[str]:
+    state = _load_offset_shift_sheet_state()
+    return set(state.get("record_ids") or [])
+
+
+def _offset_shift_sheet_snapshot_for_row(row: dict[str, Any]) -> dict[str, str]:
+    od = _parse_date_value(row.get("original_date"))
+    xd = _parse_date_value(row.get("exchange_date"))
+    return {
+        "request_person": str(row.get("request_person") or ""),
+        "exchange_person": str(row.get("exchange_person") or ""),
+        "original_date": od.isoformat() if od else "",
+        "exchange_date": xd.isoformat() if xd else "",
+        "shift_type": str(row.get("shift_type") or "").strip().upper(),
+    }
+
+
+def _mark_offset_shift_sheet_applied(record_id: str, *, snapshot: Optional[dict[str, str]] = None) -> None:
     rid = (record_id or "").strip()
     if not rid:
         return
-    applied = _load_offset_shift_sheet_applied()
-    applied.add(rid)
-    _save_offset_shift_sheet_applied(applied)
+    state = _load_offset_shift_sheet_state()
+    ids = set(state.get("record_ids") or [])
+    by_record = dict(state.get("by_record") or {})
+    ids.add(rid)
+    if snapshot:
+        by_record[rid] = dict(snapshot)
+    _save_offset_shift_sheet_state(ids, by_record)
+
+
+def _unmark_offset_shift_sheet_applied(record_id: str) -> None:
+    rid = (record_id or "").strip()
+    if not rid:
+        return
+    state = _load_offset_shift_sheet_state()
+    ids = set(state.get("record_ids") or [])
+    by_record = dict(state.get("by_record") or {})
+    if rid not in ids and rid not in by_record:
+        return
+    ids.discard(rid)
+    by_record.pop(rid, None)
+    _save_offset_shift_sheet_state(ids, by_record)
 
 
 def offset_shift_sheet_already_applied(record_id: str) -> bool:
@@ -697,8 +741,135 @@ def apply_approved_offset_shift_sheet_for_record(record_id: str) -> dict[str, An
         exchange_date=xd,
         shift_type=str(row.get("shift_type") or ""),
     )
-    _mark_offset_shift_sheet_applied(rid)
+    _mark_offset_shift_sheet_applied(rid, snapshot=_offset_shift_sheet_snapshot_for_row(row))
     return {"record_id": rid, **result}
+
+
+def revert_approved_offset_from_shift_sheet(
+    *,
+    request_person: str,
+    exchange_person: str,
+    original_date: date,
+    exchange_date: date,
+    shift_type: str,
+) -> dict[str, Any]:
+    """
+    Undo an approved offset on OSE2026 (``3RIBRL``): inverse of
+    :func:`apply_approved_offset_to_shift_sheet`.
+    """
+    st = (shift_type or "").strip().upper()
+    if st not in OSE_SHIFT_TYPES:
+        raise ValueError(f"Shift Type must be one of {OSE_SHIFT_TYPES}")
+    req = _title_name(request_person)
+    exc = _title_name(exchange_person)
+    if not req:
+        raise ValueError("request_person is required")
+    if not exc:
+        exc = req
+    values, err = _get_cached_ose_sheet_values()
+    if not values:
+        raise RuntimeError(err or "Could not load OSE shift sheet")
+    orig_col = _date_column_for_matrix(values, original_date)
+    exc_col = _date_column_for_matrix(values, exchange_date)
+    if orig_col is None:
+        raise ValueError(f"Could not find sheet column for original date {original_date.isoformat()}")
+    if exc_col is None:
+        raise ValueError(f"Could not find sheet column for exchange date {exchange_date.isoformat()}")
+    req_row = _sheet_row_index_for_person(values, req)
+    if req_row is None:
+        raise ValueError(f"Could not find shift sheet row for request person {req!r}")
+    same_person = _names_same_person(req, exc)
+    updates: list[tuple[int, int, str]] = [
+        (req_row, orig_col, st),
+        (req_row, exc_col, "*"),
+    ]
+    if not same_person:
+        exc_row = _sheet_row_index_for_person(values, exc)
+        if exc_row is None:
+            raise ValueError(f"Could not find shift sheet row for exchange person {exc!r}")
+        updates.extend([(exc_row, orig_col, "*"), (exc_row, exc_col, st)])
+    token = get_tenant_access_token()
+    _put_ose_shift_sheet_cells(token, updates)
+    return {
+        "ok": True,
+        "request_person": req,
+        "exchange_person": exc,
+        "original_date": original_date.isoformat(),
+        "exchange_date": exchange_date.isoformat(),
+        "shift_type": st,
+        "cells_updated": len(updates),
+        "myself": same_person,
+        "reverted": True,
+    }
+
+
+def _revert_shift_sheet_from_snapshot(snapshot: dict[str, str]) -> dict[str, Any]:
+    od = _parse_date_value(snapshot.get("original_date"))
+    xd = _parse_date_value(snapshot.get("exchange_date"))
+    if not od or not xd:
+        raise ValueError("snapshot missing Original Date or Exchange Date")
+    return revert_approved_offset_from_shift_sheet(
+        request_person=str(snapshot.get("request_person") or ""),
+        exchange_person=str(snapshot.get("exchange_person") or ""),
+        original_date=od,
+        exchange_date=xd,
+        shift_type=str(snapshot.get("shift_type") or ""),
+    )
+
+
+def revert_approved_offset_shift_sheet_for_record(record_id: str) -> dict[str, Any]:
+    """Restore duty-sheet cells when an approved offset row (already applied) is deleted."""
+    rid = (record_id or "").strip()
+    if not rid:
+        raise ValueError("record_id is required")
+    if not offset_shift_sheet_already_applied(rid):
+        return {"ok": True, "record_id": rid, "skipped": "not_applied"}
+    state = _load_offset_shift_sheet_state()
+    snapshot = dict((state.get("by_record") or {}).get(rid) or {})
+    row: Optional[dict[str, Any]] = None
+    try:
+        row = get_ose_offset_record_admin_row(rid)
+    except KeyError:
+        row = None
+    if row is not None:
+        if bool(row.get("pending")):
+            return {"ok": False, "record_id": rid, "skipped": "still_pending"}
+        status = str(row.get("approval_status") or "").strip().title()
+        if status != "Approved":
+            return {"ok": False, "record_id": rid, "skipped": f"status={status or 'unknown'}"}
+        snapshot = _offset_shift_sheet_snapshot_for_row(row)
+    elif not snapshot.get("original_date") or not snapshot.get("exchange_date"):
+        return {"ok": False, "record_id": rid, "skipped": "missing_snapshot"}
+    result = _revert_shift_sheet_from_snapshot(snapshot)
+    _unmark_offset_shift_sheet_applied(rid)
+    return {"record_id": rid, **result}
+
+
+def scan_revert_deleted_offsets_from_shift_sheet() -> dict[str, int]:
+    """Revert ``3RIBRL`` when an applied offset row was removed directly in Base."""
+    state = _load_offset_shift_sheet_state()
+    applied_ids = set(state.get("record_ids") or [])
+    if not applied_ids:
+        return {"scanned": 0, "reverted": 0, "errors": 0}
+    invalidate_ose_bitable_cache()
+    live_ids = {
+        str(r.get("record_id") or "").strip()
+        for r in (get_ose_offset_records_admin() or {}).get("items") or []
+        if str(r.get("record_id") or "").strip()
+    }
+    reverted = 0
+    errors = 0
+    for rid in sorted(applied_ids):
+        if rid in live_ids:
+            continue
+        try:
+            out = revert_approved_offset_shift_sheet_for_record(rid)
+            if out.get("reverted") or out.get("cells_updated"):
+                reverted += 1
+        except Exception as exc:
+            errors += 1
+            print(f"[ose_Duty] shift sheet revert poll failed for {rid!r}: {exc!r}", flush=True)
+    return {"scanned": len(applied_ids), "reverted": reverted, "errors": errors}
 
 
 def scan_bitable_approved_offsets_for_shift_sheet() -> dict[str, int]:
@@ -2438,6 +2609,14 @@ def delete_ose_offset_record(*, record_id: str, skip_cache_invalidate: bool = Fa
     rid = (record_id or "").strip()
     if not rid:
         raise ValueError("record_id is required")
+    shift_revert: dict[str, Any] = {}
+    try:
+        shift_revert = revert_approved_offset_shift_sheet_for_record(rid)
+    except KeyError:
+        shift_revert = {"ok": False, "record_id": rid, "skipped": "row_not_found"}
+    except Exception as exc:
+        shift_revert = {"ok": False, "record_id": rid, "error": str(exc)}
+        print(f"[ose_Duty] shift sheet revert failed for {rid!r}: {exc!r}", flush=True)
     token = get_tenant_access_token()
     url = (
         f"https://open.larksuite.com/open-apis/bitable/v1/apps/"
@@ -2455,7 +2634,7 @@ def delete_ose_offset_record(*, record_id: str, skip_cache_invalidate: bool = Fa
     if not skip_cache_invalidate:
         invalidate_ose_bitable_cache()
     _schedule_offset_duty_wiki_sync(record_id=rid, delete=True)
-    return {"ok": True, "record_id": rid}
+    return {"ok": True, "record_id": rid, "shift_sheet_revert": shift_revert}
 
 
 def _calendar_months_after(d: date, ref: date) -> int:
