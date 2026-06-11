@@ -1,0 +1,679 @@
+"""
+Deep-learning casual chat agent for Duty Bot (DistilBERT → friendly reply).
+
+Runs **after** command handlers fail — only for non-command small talk.
+Does not replace commandagent (work commands stay separate).
+
+**Toggle:** ``BOT_USE_CHATAGENT=1`` (default on). Set ``0`` to disable.
+
+**Train / test**
+    python chatagent.py train [--epochs 10]
+    python chatagent.py test "hey how are you doing"
+    python chatagent.py eval
+    python chatagent.py patterns
+
+Model folder: ``chatagent_pt/`` (override: ``BOT_CHATAGENT_MODEL_DIR``).
+
+Note: This is intent classification + response templates (controlled replies), not a
+open-ended GPT chatbot — but it covers a wide range of everyday English chitchat.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import pickle
+import random
+import re
+import sys
+import traceback
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Optional
+
+_CHBOX_DIR = Path(__file__).resolve().parent
+DEFAULT_MODEL_DIR = _CHBOX_DIR / "chatagent_pt"
+CONFIDENCE_THRESHOLD = float(os.getenv("BOT_CHAT_CONFIDENCE", "0.10"))
+CONFIDENCE_MARGIN = float(os.getenv("BOT_CHAT_MARGIN", "0.02"))
+MAX_SEQ_LEN = 128
+MAX_CHAT_WORDS = int(os.getenv("BOT_CHAT_MAX_WORDS", "25"))
+
+_torch = None
+_classifier_singleton: Optional["ChatClassifier"] = None
+_classifier_failed: bool = False
+
+_COMMANDISH_RE = re.compile(
+    r"(?i)\b("
+    r"duty|fpms|bi|sre|db|fe|cpms|pms|ote|leave|wfh|holiday|jenkins|"
+    r"machine|asset|nch|nwr|winford|checkcredit|offset|reminder|"
+    r"wholeave|cctv|sms|credit|deploy|build|ticket|incident|oncall|on-call"
+    r")\b|/"
+)
+
+
+@dataclass
+class ChatIntentSpec:
+    tag: str
+    patterns: list[str] = field(default_factory=list)
+    responses: list[str] = field(default_factory=list)
+
+
+def _lazy_torch():
+    global _torch
+    if _torch is None:
+        import torch
+
+        _torch = torch
+    return _torch
+
+
+def is_enabled() -> bool:
+    return (os.getenv("BOT_USE_CHATAGENT") or "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def model_dir() -> Path:
+    explicit = (os.getenv("BOT_CHATAGENT_MODEL_DIR") or "").strip()
+    if explicit:
+        return Path(explicit)
+    return DEFAULT_MODEL_DIR
+
+
+def _chat_intent(tag: str, responses: list[str], *pattern_groups: str) -> ChatIntentSpec:
+    pats: list[str] = []
+    for g in pattern_groups:
+        pats.extend(s.strip() for s in g.split("|") if s.strip())
+    return ChatIntentSpec(tag=tag, patterns=list(dict.fromkeys(pats)), responses=responses)
+
+
+def build_chat_catalog() -> list[ChatIntentSpec]:
+    intents: list[ChatIntentSpec] = []
+
+    intents.append(
+        _chat_intent(
+            "chat_greeting",
+            [
+                "Hi! 👋 I'm Duty Bot — ask me about duty, leave, machines, or say `/help`.",
+                "Hello! How can I help you today?",
+                "Hey there! 👋 Work questions welcome — e.g. “who is on fpms duty”.",
+                "你好！我是 Duty Bot，可以聊两句，也能帮你查值班信息。",
+            ],
+            "hi|hello|hey|hiya|yo|howdy|greetings|good day|"
+            "你好|您好|嗨|哈喽|哈啰|早上好|下午好|晚上好",
+        )
+    )
+
+    intents.append(
+        _chat_intent(
+            "chat_how_are_you",
+            [
+                "I'm doing great, thanks for asking! 🤖 What can I help you with?",
+                "All good here — ready when you need duty info or machine lookup.",
+                "Pretty good! Ask me anything work-related or just say hi anytime.",
+                "还不错，谢谢关心！有需要查值班或机器可以跟我说。",
+            ],
+            "how are you|how r u|how are u|how is it going|how are things|"
+            "how you doing|how are you doing|how are you doing today|"
+            "hey how are you|hey how are you doing|what's up|whats up|sup|wassup|you good|"
+            "你好吗|怎么样|还好吗|最近怎样",
+        )
+    )
+
+    intents.append(
+        _chat_intent(
+            "chat_thanks",
+            [
+                "You're welcome! 😊",
+                "Anytime — happy to help!",
+                "No problem at all!",
+                "不客气！",
+            ],
+            "thanks|thank you|thanks so much|thank you so much|thx|ty|cheers|"
+            "much appreciated|appreciate it|"
+            "谢谢|多谢|感谢|辛苦了",
+        )
+    )
+
+    intents.append(
+        _chat_intent(
+            "chat_goodbye",
+            [
+                "Bye! 👋 Ping me anytime you need duty info.",
+                "See you later!",
+                "Take care — I'll be here when you need me.",
+                "再见！有需要再 @我。",
+            ],
+            "bye|goodbye|see you|see ya|cya|later|talk later|catch you later|"
+            "good night|gn|night night|再见|拜拜|晚安",
+        )
+    )
+
+    intents.append(
+        _chat_intent(
+            "chat_who_are_you",
+            [
+                "I'm **Duty Bot** 🤖 — department duty, leave/WFH, holidays, machines, Jenkins helpers. Try `/help`.",
+                "Duty Bot at your service! I understand English for both chat and work commands (with AI on).",
+                "我是值班机器人，能查各部门 duty、请假、机器信息，也能陪你简单聊几句。",
+            ],
+            "who are you|what are you|what can you do|are you a bot|are you real|"
+            "tell me about yourself|introduce yourself|"
+            "你是谁|你是什么|你能做什么",
+        )
+    )
+
+    intents.append(
+        _chat_intent(
+            "chat_compliment",
+            [
+                "Thanks! 😄 That's kind of you.",
+                "Aw, thank you — glad I could help!",
+                "You're too kind! Let me know if you need anything else.",
+                "谢谢夸奖！",
+            ],
+            "nice|cool|awesome|great job|well done|good bot|you rock|love you bot|"
+            "you're the best|amazing|fantastic|厉害|不错|棒极了",
+        )
+    )
+
+    intents.append(
+        _chat_intent(
+            "chat_laugh",
+            [
+                "😄 Glad something's funny!",
+                "Haha — need anything else?",
+                "LOL — I'm here if you need duty stuff too.",
+            ],
+            "haha|hahaha|lol|lmao|rofl|hehe|funny|that's funny|so funny",
+        )
+    )
+
+    intents.append(
+        _chat_intent(
+            "chat_sorry",
+            [
+                "No worries at all!",
+                "It's okay — how can I help?",
+                "All good! Don't worry about it.",
+                "没关系！",
+            ],
+            "sorry|my bad|apologies|didn't mean to|oops|excuse me|对不起|抱歉",
+        )
+    )
+
+    intents.append(
+        _chat_intent(
+            "chat_ack",
+            [
+                "Got it 👍",
+                "Okay!",
+                "Sure thing.",
+                "Alright — shout if you need me.",
+                "好的！",
+            ],
+            "ok|okay|k|sure|alright|all right|got it|understood|roger|noted|fine|"
+            "好的|明白|收到|嗯|行",
+        )
+    )
+
+    intents.append(
+        _chat_intent(
+            "chat_morning",
+            [
+                "Good morning! ☀️ Hope you have a smooth day — I'm here if you need duty info.",
+                "Morning! Coffee time? ☕ I'm ready when you need `/fpms` or anything else.",
+            ],
+            "good morning|morning|gm|top of the morning|早|早安",
+        )
+    )
+
+    intents.append(
+        _chat_intent(
+            "chat_tired",
+            [
+                "Hang in there! 💪 Take a break if you can — I'll handle the bot stuff when you're back.",
+                "Long day? Rest up — I'm always here for quick duty lookups.",
+                "辛苦了，注意休息！",
+            ],
+            "i'm tired|so tired|exhausted|long day|need a break|burned out|burnout|"
+            "好累|太累了|累死了",
+        )
+    )
+
+    intents.append(
+        _chat_intent(
+            "chat_weather",
+            [
+                "I don't have a window 🌤️ — but I can fetch duty rosters! Try `/fpms` or “who is on bi duty”.",
+                "No weather radar here — only spreadsheets and duty lists 😄",
+            ],
+            "weather|rain|sunny|hot today|cold today|going to rain|temperature|"
+            "天气|下雨|好热",
+        )
+    )
+
+    intents.append(
+        _chat_intent(
+            "chat_weekend",
+            [
+                "Hope you get a good rest! 🎉 I'll be here Monday for duty questions.",
+                "Enjoy the weekend! Ping me anytime for on-call / duty info.",
+                "周末愉快！",
+            ],
+            "weekend|friday|happy friday|tgif|saturday plans|sunday|long weekend|"
+            "周末|星期五",
+        )
+    )
+
+    intents.append(
+        _chat_intent(
+            "chat_confused",
+            [
+                "No problem — try `/help` for commands, or ask in plain English like “show fpms duty”.",
+                "I'm not sure what you mean — duty question? Try `@Duty Bot /help`.",
+                "不太确定你的意思 — 可以说 `/help` 或直接用英文问值班信息。",
+            ],
+            "i don't understand|don't get it|what do you mean|confused|huh|"
+            "听不懂|不明白|什么意思",
+        )
+    )
+
+    intents.append(
+        _chat_intent(
+            "chat_bored",
+            [
+                "Maybe check who's on duty? `/fpms` `/bi` `/sre` — or just chat, I'm listening 😄",
+                "Bored? I can't stream Netflix — but I can tell you today's holidays with `/holiday`.",
+            ],
+            "i'm bored|so bored|nothing to do|kill time|boring|好无聊",
+        )
+    )
+
+    # Catch-all casual English (trained heavily so most off-topic chat gets a friendly reply)
+    general_patterns = [
+        "just chatting",
+        "wanted to say hi",
+        "random thought",
+        "having a coffee",
+        "taking a break",
+        "chilling at desk",
+        "just chilling at my desk",
+        "slow day today",
+        "busy day today",
+        "almost lunch time",
+        "feeling good today",
+        "not bad today",
+        "you there",
+        "anyone there",
+        "talk to me",
+        "let's chat",
+        "nice to meet you",
+        "what a day",
+        "crazy day",
+        "stressed out",
+        "happy today",
+        "just saying",
+        "never mind",
+        "fair enough",
+        "makes sense",
+        "sounds good",
+        "interesting",
+        "tell me more",
+        "really",
+        "wow",
+        "oh nice",
+        "that's cool",
+        "good to know",
+    ]
+
+    intents.append(
+        _chat_intent(
+            "chat_general",
+            [
+                "I'm mostly built for work stuff (duty, leave, machines) — but happy to chat briefly! "
+                "Need anything? Try `/help` or ask naturally.",
+                "Got you 😊 I'm Duty Bot — casual chat is fine; for tasks say things like “who is on fpms duty”.",
+                "I hear you! For work I can help with rosters and lookups — otherwise I'm glad to keep you company.",
+                "明白～我是值班 bot，闲聊可以，查 duty/请假/机器直接跟我说就行。",
+            ],
+            "|".join(general_patterns),
+        )
+    )
+
+    return intents
+
+
+def _looks_like_command(text: str) -> bool:
+    return (text or "").lstrip().startswith("/") or bool(_COMMANDISH_RE.search(text or ""))
+
+
+def startup_status() -> None:
+    enabled = is_enabled()
+    path = model_dir()
+    has_model = (path / "config.json").is_file()
+    print(
+        f"[chatagent] BOT_USE_CHATAGENT={os.getenv('BOT_USE_CHATAGENT')!r} enabled={enabled} "
+        f"model_dir={path} model_exists={has_model}",
+        flush=True,
+    )
+    if not enabled:
+        print("[chatagent] Casual chat OFF.", flush=True)
+        return
+    if not has_model:
+        print(f"[chatagent] ⚠️ Model missing — run: python chatagent.py train", flush=True)
+        return
+    clf = _get_classifier()
+    if clf is None:
+        print("[chatagent] ⚠️ Model present but failed to load.", flush=True)
+    else:
+        print(f"[chatagent] ✅ Ready — casual chat (threshold={CONFIDENCE_THRESHOLD}).", flush=True)
+
+
+class ChatClassifier:
+    def __init__(self, model_path: Path):
+        from commandagent import _load_pretrained_compat
+
+        torch, self.tokenizer, self.model = _load_pretrained_compat(model_path)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model = self.model.to(self.device)
+        self.model.eval()
+        with (model_path / "metadata.pkl").open("rb") as f:
+            meta = pickle.load(f)
+        self.tag_to_id: dict[str, int] = meta["tag_to_id"]
+        self.id_to_tag: dict[int, str] = meta["id_to_tag"]
+        self.intents_by_tag: dict[str, ChatIntentSpec] = {}
+        for item in meta.get("intents", []):
+            if isinstance(item, ChatIntentSpec):
+                spec = item
+            else:
+                spec = ChatIntentSpec(
+                    tag=item["tag"],
+                    patterns=item.get("patterns", []),
+                    responses=item.get("responses", []),
+                )
+            self.intents_by_tag[spec.tag] = spec
+
+    def predict(self, text: str) -> tuple[str, float, float]:
+        torch = _lazy_torch()
+        inputs = self.tokenizer(
+            text,
+            return_tensors="pt",
+            truncation=True,
+            padding="max_length",
+            max_length=MAX_SEQ_LEN,
+        )
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        with torch.no_grad():
+            logits = self.model(**inputs).logits
+        probs = torch.softmax(logits, dim=-1).cpu()[0]
+        k = min(2, int(probs.numel()))
+        topk = torch.topk(probs, k=k)
+        idx = int(topk.indices[0].item())
+        second = float(topk.values[1].item()) if k > 1 else 0.0
+        margin = float(topk.values[0].item() - second)
+        return self.id_to_tag[idx], float(topk.values[0].item()), margin
+
+    def reply(self, text: str) -> Optional[str]:
+        tag, conf, margin = self.predict(text)
+        threshold = CONFIDENCE_THRESHOLD
+        margin_min = CONFIDENCE_MARGIN
+        if tag == "chat_general":
+            threshold *= 0.6
+            margin_min *= 0.5
+        if conf < threshold and margin < margin_min:
+            return None
+        spec = self.intents_by_tag.get(tag)
+        if not spec or not spec.responses:
+            return None
+        return random.choice(spec.responses)
+
+
+def _get_classifier() -> Optional[ChatClassifier]:
+    global _classifier_singleton, _classifier_failed
+    if _classifier_singleton is not None:
+        return _classifier_singleton
+    if _classifier_failed:
+        return None
+    path = model_dir()
+    if not (path / "config.json").is_file():
+        print(f"⚠️ Chat model not found at {path}", flush=True)
+        _classifier_failed = True
+        return None
+    try:
+        _classifier_singleton = ChatClassifier(path)
+        print(f"✅ Chat agent loaded from {path}", flush=True)
+        return _classifier_singleton
+    except Exception as exc:
+        print(f"⚠️ Chat agent load failed: {exc!r}", flush=True)
+        traceback.print_exc()
+        _classifier_failed = True
+        return None
+
+
+def reply_if_enabled(text: str) -> Optional[str]:
+    """Return a casual chat reply, or ``None`` if disabled / command-like / low confidence."""
+    if not is_enabled():
+        return None
+    raw = (text or "").strip()
+    if not raw or _looks_like_command(raw):
+        return None
+    if len(raw.split()) > MAX_CHAT_WORDS:
+        return None
+    clf = _get_classifier()
+    if clf is None:
+        return None
+    try:
+        return clf.reply(raw)
+    except Exception as exc:
+        print(f"⚠️ Chat agent reply error: {exc!r}", flush=True)
+        return None
+
+
+def prepare_training_examples(
+    intents: list[ChatIntentSpec],
+) -> tuple[list[str], list[int], dict[str, int]]:
+    texts: list[str] = []
+    labels: list[int] = []
+    tag_to_id: dict[str, int] = {}
+    for idx, spec in enumerate(intents):
+        tag_to_id[spec.tag] = idx
+        seen: set[str] = set()
+        for pat in spec.patterns:
+            for variant in (pat, pat.lower()):
+                if variant not in seen:
+                    seen.add(variant)
+                    texts.append(variant)
+                    labels.append(idx)
+    return texts, labels, tag_to_id
+
+
+def train_model(
+    output_dir: Path,
+    *,
+    epochs: int = 10,
+    batch_size: int = 32,
+    lr: float = 2e-5,
+) -> dict[str, Any]:
+    import random
+
+    from torch.utils.data import DataLoader, TensorDataset
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+    from commandagent import _save_model_compat
+
+    torch = _lazy_torch()
+    intents = build_chat_catalog()
+    texts, labels, tag_to_id = prepare_training_examples(intents)
+    print(f"[chatagent] Training samples: {len(texts)} intents: {len(intents)}")
+
+    base_pairs = list(zip(texts, labels))
+    random.seed(42)
+    random.shuffle(base_pairs)
+    split = int(len(base_pairs) * 0.85)
+    val_pairs = base_pairs[split:]
+    train_base = base_pairs[:split]
+
+    # Oversample minority intents on train only so chat_general does not dominate.
+    by_label: dict[int, list[tuple[str, int]]] = {}
+    for t, lb in train_base:
+        by_label.setdefault(lb, []).append((t, lb))
+    max_n = max(len(v) for v in by_label.values())
+    train_pairs: list[tuple[str, int]] = []
+    for lb, items in by_label.items():
+        reps = max(1, max_n // max(len(items), 1))
+        train_pairs.extend(items * reps)
+    random.shuffle(train_pairs)
+    print(f"[chatagent] Train pairs (balanced): {len(train_pairs)}  val: {len(val_pairs)}")
+
+    tok = AutoTokenizer.from_pretrained("distilbert-base-uncased", use_fast=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def _encode(batch_texts: list[str], batch_labels: list[int]):
+        enc = tok(
+            batch_texts,
+            truncation=True,
+            padding="max_length",
+            max_length=MAX_SEQ_LEN,
+            return_tensors="pt",
+        )
+        return enc["input_ids"], enc["attention_mask"], torch.tensor(batch_labels, dtype=torch.long)
+
+    def _make_loader(items: list[tuple[str, int]], shuffle: bool) -> DataLoader:
+        ids_list, mask_list, label_list = [], [], []
+        for t, lb in items:
+            i, m, y = _encode([t], [lb])
+            ids_list.append(i.squeeze(0))
+            mask_list.append(m.squeeze(0))
+            label_list.append(y.squeeze(0))
+        ds = TensorDataset(
+            torch.stack(ids_list),
+            torch.stack(mask_list),
+            torch.stack(label_list),
+        )
+        return DataLoader(ds, batch_size=batch_size, shuffle=shuffle)
+
+    train_loader = _make_loader(train_pairs, shuffle=True)
+    val_loader = _make_loader(val_pairs, shuffle=False)
+
+    model = AutoModelForSequenceClassification.from_pretrained(
+        "distilbert-base-uncased", num_labels=len(tag_to_id)
+    ).to(device)
+    optim = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+
+    best_acc = 0.0
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for epoch in range(1, epochs + 1):
+        model.train()
+        train_loss = 0.0
+        for input_ids, attention_mask, y in train_loader:
+            input_ids = input_ids.to(device)
+            attention_mask = attention_mask.to(device)
+            y = y.to(device)
+            optim.zero_grad()
+            out = model(input_ids=input_ids, attention_mask=attention_mask, labels=y)
+            out.loss.backward()
+            optim.step()
+            train_loss += float(out.loss.item())
+
+        model.eval()
+        correct = total = 0
+        with torch.no_grad():
+            for input_ids, attention_mask, y in val_loader:
+                input_ids = input_ids.to(device)
+                attention_mask = attention_mask.to(device)
+                y = y.to(device)
+                logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
+                pred = logits.argmax(dim=-1)
+                correct += int((pred == y).sum().item())
+                total += int(y.size(0))
+        val_acc = correct / max(total, 1)
+        print(
+            f"Epoch {epoch}/{epochs}  loss={train_loss / max(len(train_loader), 1):.4f}  "
+            f"val_acc={val_acc:.1%} ({correct}/{total})"
+        )
+        if val_acc >= best_acc:
+            best_acc = val_acc
+            _save_model_compat(model, tok, output_dir)
+
+    id_to_tag = {v: k for k, v in tag_to_id.items()}
+    meta = {
+        "tag_to_id": tag_to_id,
+        "id_to_tag": id_to_tag,
+        "intents": [
+            {"tag": i.tag, "patterns": i.patterns, "responses": i.responses}
+            for i in intents
+        ],
+    }
+    with (output_dir / "metadata.pkl").open("wb") as f:
+        pickle.dump(meta, f)
+
+    print(f"✅ Chat model saved to {output_dir} best_val_acc={best_acc:.1%}")
+    return {"val_accuracy": best_acc, "samples": len(texts), "intents": len(intents)}
+
+
+def evaluate_model(model_path: Path) -> None:
+    intents = build_chat_catalog()
+    texts, labels, _ = prepare_training_examples(intents)
+    clf = ChatClassifier(model_path)
+    correct = 0
+    for text, label in zip(texts, labels):
+        tag, _, _ = clf.predict(text)
+        if clf.tag_to_id.get(tag, -1) == label:
+            correct += 1
+    acc = correct / max(len(texts), 1)
+    print(f"Train-set accuracy (sanity): {acc:.1%} ({correct}/{len(texts)})")
+
+
+def _cli_test(phrase: str, model_path: Path) -> None:
+    if not (model_path / "config.json").is_file():
+        print(f"Model not found at {model_path}. Run: python chatagent.py train")
+        sys.exit(1)
+    clf = ChatClassifier(model_path)
+    tag, conf, margin = clf.predict(phrase)
+    reply = clf.reply(phrase)
+    print(f"Input:    {phrase!r}")
+    print(f"Intent:   {tag} ({conf:.3f}, margin={margin:.3f})")
+    print(f"Reply:    {reply!r}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Duty Bot chat agent (casual conversation)")
+    sub = parser.add_subparsers(dest="cmd")
+
+    p_train = sub.add_parser("train", help="Train DistilBERT chat intent classifier")
+    p_train.add_argument("--epochs", type=int, default=10)
+    p_train.add_argument("--output", type=str, default=str(DEFAULT_MODEL_DIR))
+
+    p_test = sub.add_parser("test", help="Test a phrase")
+    p_test.add_argument("phrase", type=str)
+    p_test.add_argument("--model", type=str, default=str(DEFAULT_MODEL_DIR))
+
+    sub.add_parser("eval", help="Evaluate model on training patterns")
+    sub.add_parser("patterns", help="Show pattern counts per intent")
+
+    args = parser.parse_args()
+    if args.cmd == "train":
+        train_model(Path(args.output), epochs=args.epochs)
+    elif args.cmd == "test":
+        _cli_test(args.phrase, Path(args.model))
+    elif args.cmd == "eval":
+        evaluate_model(model_dir())
+    elif args.cmd == "patterns":
+        intents = build_chat_catalog()
+        total = 0
+        for spec in intents:
+            n = len(spec.patterns)
+            total += n
+            print(f"{spec.tag:22} {n:4} patterns  {len(spec.responses)} responses")
+        print(f"Total patterns: {total}")
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

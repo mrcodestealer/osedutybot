@@ -7,10 +7,13 @@ Natural-language → slash-command router for the Duty Bot (DistilBERT intent cl
 - If the model is missing, confidence is low, or anything throws, the layer returns ``None`` and the bot continues unchanged.
 
 **Train / test**
-    python commandagent.py train [--epochs 8] [--output command_intent_pt]
+    python commandagent.py train [--epochs 8] [--output commandagent_pt]
     python commandagent.py test "who is on fpms duty today"
     python commandagent.py eval
     python commandagent.py patterns   # print training pattern counts
+
+Model folder default: ``commandagent_pt/`` (legacy ``command_intent_pt/`` still auto-detected).
+Env override: ``BOT_COMMANDAGENT_MODEL_DIR`` or ``BOT_AI_MODEL_DIR``.
 """
 
 from __future__ import annotations
@@ -26,7 +29,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 _CHBOX_DIR = Path(__file__).resolve().parent
-DEFAULT_MODEL_DIR = _CHBOX_DIR / "command_intent_pt"
+DEFAULT_MODEL_DIR = _CHBOX_DIR / "commandagent_pt"
+LEGACY_MODEL_DIR = _CHBOX_DIR / "command_intent_pt"
 CONFIDENCE_THRESHOLD = float(os.getenv("BOT_AI_CONFIDENCE", "0.12"))
 CONFIDENCE_MARGIN = float(os.getenv("BOT_AI_MARGIN", "0.03"))
 MAX_SEQ_LEN = 64
@@ -80,7 +84,23 @@ def is_enabled() -> bool:
 
 
 def model_dir() -> Path:
-    return Path(os.getenv("BOT_AI_MODEL_DIR") or DEFAULT_MODEL_DIR)
+    explicit = (
+        os.getenv("BOT_COMMANDAGENT_MODEL_DIR")
+        or os.getenv("BOT_AI_MODEL_DIR")
+        or ""
+    ).strip()
+    if explicit:
+        return Path(explicit)
+    if (DEFAULT_MODEL_DIR / "config.json").is_file():
+        return DEFAULT_MODEL_DIR
+    if (LEGACY_MODEL_DIR / "config.json").is_file():
+        print(
+            f"[commandagent] Using legacy model dir {LEGACY_MODEL_DIR} — "
+            f"run: mv command_intent_pt commandagent_pt",
+            flush=True,
+        )
+        return LEGACY_MODEL_DIR
+    return DEFAULT_MODEL_DIR
 
 
 @dataclass

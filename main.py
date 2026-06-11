@@ -4684,14 +4684,21 @@ def lark_webhook():
         ):
             chat_reply = None
             try:
-                import chitchat as _chitchat
+                import chatagent as _chatagent
 
-                chat_reply = _chitchat.try_reply(clean_text)
-            except Exception as _chat_err:
-                print(f"⚠️ Chitchat skipped: {_chat_err!r}", flush=True)
+                chat_reply = _chatagent.reply_if_enabled(clean_text)
+            except Exception as _chatagent_err:
+                print(f"⚠️ Chat agent skipped: {_chatagent_err!r}", flush=True)
+            if not chat_reply:
+                try:
+                    import chitchat as _chitchat
+
+                    chat_reply = _chitchat.try_reply(clean_text)
+                except Exception as _chat_err:
+                    print(f"⚠️ Chitchat skipped: {_chat_err!r}", flush=True)
             if chat_reply:
                 send_message(chat_id, chat_reply)
-                print(f"💬 Chitchat reply to chat {chat_id}", flush=True)
+                print(f"💬 Chat reply to chat {chat_id}", flush=True)
             else:
                 try:
                     import commandagent as _commandagent
@@ -4920,6 +4927,12 @@ def _run_main_entry() -> int:
             _boot_commandagent.startup_status()
         except Exception as _boot_commandagent_err:
             print(f"[commandagent] startup check skipped: {_boot_commandagent_err!r}", flush=True)
+        try:
+            import chatagent as _boot_chatagent
+
+            _boot_chatagent.startup_status()
+        except Exception as _boot_chatagent_err:
+            print(f"[chatagent] startup check skipped: {_boot_chatagent_err!r}", flush=True)
         print(
             "[lark] Listening http://0.0.0.0:%d (threaded=True). "
             "Feishu Request URL must be HTTPS and reachable from the internet; reverse-proxy to this port."
