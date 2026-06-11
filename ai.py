@@ -20,6 +20,7 @@ import os
 import pickle
 import re
 import sys
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -547,13 +548,60 @@ def build_slash_command(spec: IntentSpec, user_text: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
+def _sanitize_hf_env() -> None:
+    """Blank HF cache env vars break local model load with stat(None)."""
+    for key in ("HF_HOME", "HUGGINGFACE_HUB_CACHE", "TRANSFORMERS_CACHE", "HF_HUB_CACHE"):
+        val = os.environ.get(key)
+        if val is not None and str(val).strip().lower() in ("", "none", "null"):
+            os.environ.pop(key, None)
+
+
+def _save_model_compat(model, tokenizer, output_dir: Path) -> None:
+    """Save weights for both newer (safetensors) and older (pytorch_model.bin) transformers."""
+    out = str(output_dir)
+    try:
+        model.save_pretrained(out, safe_serialization=False)
+    except TypeError:
+        model.save_pretrained(out)
+    tokenizer.save_pretrained(out)
+
+
+def _load_pretrained_compat(model_path: Path):
+    """Load local DistilBERT classifier (fast tokenizer.json + safetensors or pytorch bin)."""
+    torch, _, _ = _lazy_torch()
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+    _sanitize_hf_env()
+    path = str(model_path)
+    local = {"local_files_only": True}
+    # transformers 4.x slow DistilBertTokenizer requires vocab.txt; our models only have tokenizer.json.
+    tokenizer = AutoTokenizer.from_pretrained(path, use_fast=True, **local)
+    bin_file = model_path / "pytorch_model.bin"
+    safe_file = model_path / "model.safetensors"
+    if bin_file.is_file():
+        model = AutoModelForSequenceClassification.from_pretrained(
+            path, use_safetensors=False, **local
+        )
+    elif safe_file.is_file():
+        try:
+            model = AutoModelForSequenceClassification.from_pretrained(path, **local)
+        except Exception:
+            model = AutoModelForSequenceClassification.from_pretrained(
+                path, use_safetensors=True, **local
+            )
+    else:
+        raise FileNotFoundError(
+            f"No model weights in {model_path} (need model.safetensors or pytorch_model.bin)"
+        )
+    return torch, tokenizer, model
+
+
 class CommandClassifier:
     def __init__(self, model_path: Path):
-        torch, DistilBertTokenizer, DistilBertForSequenceClassification = _lazy_torch()
+        torch, self.tokenizer, self.model = _load_pretrained_compat(model_path)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model_path = model_path
-        self.tokenizer = DistilBertTokenizer.from_pretrained(str(model_path))
-        self.model = DistilBertForSequenceClassification.from_pretrained(str(model_path)).to(self.device)
+        self.model = self.model.to(self.device)
         self.model.eval()
         meta_path = model_path / "metadata.pkl"
         if not meta_path.is_file():
@@ -625,6 +673,7 @@ def _get_classifier() -> Optional[CommandClassifier]:
         return _classifier_singleton
     except Exception as exc:
         print(f"⚠️ AI classifier load failed: {exc!r}", flush=True)
+        traceback.print_exc()
         _classifier_failed = True
         return None
 
@@ -765,8 +814,7 @@ def train_model(
         )
         if val_acc >= best_acc:
             best_acc = val_acc
-            model.save_pretrained(str(output_dir))
-            tok.save_pretrained(str(output_dir))
+            _save_model_compat(model, tok, output_dir)
 
     id_to_tag = {v: k for k, v in tag_to_id.items()}
     meta = {
