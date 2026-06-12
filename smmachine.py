@@ -1337,62 +1337,121 @@ def _scrape_concurrency(item_count: int) -> int:
     """
     Max concurrent EGM page scrapes (each runs its own headless Chromium).
 
-    Controlled by ``WEBMACHINE_SCRAPE_CONCURRENCY`` (default **4**). ``1`` keeps the old
-    sequential behaviour. Capped to the number of items so we never start idle workers.
+    Controlled by ``WEBMACHINE_SCRAPE_CONCURRENCY`` (default **8**):
+    * ``0`` (or negative) → **unlimited** = open *all* pages at the same time.
+    * ``1`` → old sequential behaviour.
+    Capped to the number of items so we never start idle workers.
     """
     try:
-        n = int((os.environ.get("WEBMACHINE_SCRAPE_CONCURRENCY") or "4").strip() or "4")
+        n = int((os.environ.get("WEBMACHINE_SCRAPE_CONCURRENCY") or "8").strip() or "8")
     except ValueError:
-        n = 4
-    n = max(1, n)
+        n = 8
+    if n <= 0:  # unlimited → one worker per page (all at once)
+        return max(1, item_count)
     return max(1, min(n, max(1, item_count)))
+
+
+# A scrape "unit": (label, callable) where the callable returns ``(rows, warning)``.
+ScrapeUnit = tuple[str, Callable[[], tuple[list[dict], str | None]]]
+
+
+def _collect_units(units: list[ScrapeUnit]) -> tuple[list[dict], dict[str, str]]:
+    """
+    Run every scrape unit in parallel (up to :func:`_scrape_concurrency`), so all EGM pages refresh
+    at once instead of one-by-one. ``units`` may span sites *and* deployments — the whole set shares
+    one thread pool, which is what lets PROD/QAT/UAT load simultaneously.
+    """
+    errs: dict[str, str] = {}
+    all_rows: list[dict] = []
+    workers = _scrape_concurrency(len(units))
+
+    if workers <= 1 or len(units) <= 1:
+        for label, fn in units:
+            try:
+                part, twarn = fn()
+                all_rows.extend(part)
+                if twarn:
+                    errs[label] = twarn
+            except Exception as e:  # noqa: BLE001
+                errs[label] = str(e)
+        return all_rows, errs
+
+    results: dict[str, tuple[tuple[list[dict], str | None] | None, Exception | None]] = {}
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="sm-scrape") as ex:
+        future_map = {ex.submit(fn): label for label, fn in units}
+        for fut in as_completed(future_map):
+            label = future_map[fut]
+            try:
+                results[label] = (fut.result(), None)
+            except Exception as e:  # noqa: BLE001
+                results[label] = (None, e)
+    for label, _fn in units:
+        res, err = results.get(label, (None, None))
+        if err is not None:
+            errs[label] = str(err)
+            continue
+        if res is None:
+            continue
+        part, twarn = res
+        all_rows.extend(part)
+        if twarn:
+            errs[label] = twarn
+    return all_rows, errs
 
 
 def _collect_concurrently(
     keys: list[str],
     worker: Callable[[str], tuple[list[dict], str | None]],
 ) -> tuple[list[dict], dict[str, str]]:
-    """
-    Run ``worker(key)`` for every key, in parallel up to ``_scrape_concurrency`` workers, so all
-    EGM pages refresh roughly at once instead of one-by-one (avoids long staleness windows).
+    """Backwards-compatible wrapper: run ``worker(key)`` for every key as scrape units."""
+    units: list[ScrapeUnit] = [(k, (lambda k=k: worker(k))) for k in keys]
+    return _collect_units(units)
 
-    Rows are concatenated in the original ``keys`` order; ``worker`` returns ``(rows, warning)``
-    and may raise — failures become ``errors[key]`` entries.
-    """
-    errs: dict[str, str] = {}
-    all_rows: list[dict] = []
-    workers = _scrape_concurrency(len(keys))
 
-    if workers <= 1 or len(keys) <= 1:
-        for k in keys:
-            try:
-                part, twarn = worker(k)
-                all_rows.extend(part)
-                if twarn:
-                    errs[k] = twarn
-            except Exception as e:  # noqa: BLE001
-                errs[k] = str(e)
-        return all_rows, errs
+def _prod_scrape_units(sites: Sequence[str] | None = None, **kwargs: Any) -> tuple[list[ScrapeUnit], dict[str, str]]:
+    """PROD scrape units (one per deduped backend site) + skipped-alias notes."""
+    raw_env = (os.environ.get("WEBMACHINE_SITES") or "").strip()
+    if sites is not None:
+        use = [s.strip().lower() for s in sites if (s or "").strip()]
+    elif raw_env:
+        use = [s.strip().lower() for s in raw_env.split(",") if s.strip()]
+    else:
+        use = list(DEFAULT_WEBMACHINE_SITES)
+    use, skipped = _dedupe_site_keys_by_resolved_backend(use)
+    units: list[ScrapeUnit] = [
+        (sk, (lambda sk=sk: smachine_collect_all_machine_rows(sk, **kwargs))) for sk in use
+    ]
+    return units, dict(skipped)
 
-    results: dict[str, tuple[list[dict], str | None, Exception | None]] = {}
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="sm-scrape") as ex:
-        future_map = {ex.submit(worker, k): k for k in keys}
-        for fut in as_completed(future_map):
-            k = future_map[fut]
-            try:
-                part, twarn = fut.result()
-                results[k] = (part, twarn, None)
-            except Exception as e:  # noqa: BLE001
-                results[k] = ([], None, e)
-    for k in keys:
-        part, twarn, err = results.get(k, ([], None, None))
-        if err is not None:
-            errs[k] = str(err)
-            continue
-        all_rows.extend(part)
-        if twarn:
-            errs[k] = twarn
-    return all_rows, errs
+
+def _nonprod_scrape_units(deployment: str, **kwargs: Any) -> tuple[list[ScrapeUnit], dict[str, str]]:
+    """QAT/UAT scrape units (one per ``*.osmslot.org`` backend)."""
+    dep = (deployment or "").strip().upper()
+    specs = _nonprod_backend_specs(dep)
+    if not specs:
+        return [], {dep: f"unsupported deployment {deployment!r}"}
+    units: list[ScrapeUnit] = []
+    for spec in specs:
+        key = f"{dep}:{spec['belongs']}"
+        units.append(
+            (
+                key,
+                (
+                    lambda spec=spec: smachine_collect_rows_at_backend(
+                        base_url=str(spec["base"]),
+                        username=str(spec["user"]),
+                        password=str(spec["password"]),
+                        belongs=str(spec["belongs"]),
+                        deployment=dep,
+                        list_path=str(spec["list_path"]),
+                        login_path=str(spec["login_path"]),
+                        dismiss_warning_dialog=bool(spec["dismiss_warning_dialog"]),
+                        **kwargs,
+                    )
+                ),
+            )
+        )
+    return units, {}
 
 
 def smachine_collect_machines_multi_sites(
@@ -1410,19 +1469,8 @@ def smachine_collect_machines_multi_sites(
     Default site list: ``DEFAULT_WEBMACHINE_SITES`` (every routed backend from ``checkcredit``) or
     env ``WEBMACHINE_SITES`` (comma-separated).
     """
-    raw_env = (os.environ.get("WEBMACHINE_SITES") or "").strip()
-    if sites is not None:
-        use = [s.strip().lower() for s in sites if (s or "").strip()]
-    elif raw_env:
-        use = [s.strip().lower() for s in raw_env.split(",") if s.strip()]
-    else:
-        use = list(DEFAULT_WEBMACHINE_SITES)
-
-    use, skipped = _dedupe_site_keys_by_resolved_backend(use)
-    rows, errs = _collect_concurrently(
-        use,
-        lambda sk: smachine_collect_all_machine_rows(sk, **kwargs),
-    )
+    units, skipped = _prod_scrape_units(sites, **kwargs)
+    rows, errs = _collect_units(units)
     # Keep skipped-alias notes alongside scrape errors.
     merged = dict(skipped)
     merged.update(errs)
@@ -1434,33 +1482,12 @@ def smachine_collect_nonprod_deployment(
     **kwargs: Any,
 ) -> tuple[list[dict], dict[str, str]]:
     """Scrape every QAT or UAT ``*.osmslot.org`` backend in :func:`_nonprod_backend_specs`."""
-    dep = (deployment or "").strip().upper()
-    specs = _nonprod_backend_specs(dep)
-    if not specs:
-        return [], {dep: f"unsupported deployment {deployment!r}"}
-
-    spec_by_key: dict[str, dict[str, str | bool]] = {}
-    keys: list[str] = []
-    for spec in specs:
-        key = f"{dep}:{spec['belongs']}"
-        spec_by_key[key] = spec
-        keys.append(key)
-
-    def _worker(key: str) -> tuple[list[dict], str | None]:
-        spec = spec_by_key[key]
-        return smachine_collect_rows_at_backend(
-            base_url=str(spec["base"]),
-            username=str(spec["user"]),
-            password=str(spec["password"]),
-            belongs=str(spec["belongs"]),
-            deployment=dep,
-            list_path=str(spec["list_path"]),
-            login_path=str(spec["login_path"]),
-            dismiss_warning_dialog=bool(spec["dismiss_warning_dialog"]),
-            **kwargs,
-        )
-
-    return _collect_concurrently(keys, _worker)
+    units, errs = _nonprod_scrape_units(deployment, **kwargs)
+    if not units:
+        return [], errs
+    rows, scrape_errs = _collect_units(units)
+    errs.update(scrape_errs)
+    return rows, errs
 
 
 def smachine_collect_machines_all_deployments(
@@ -1468,25 +1495,33 @@ def smachine_collect_machines_all_deployments(
 ) -> tuple[list[dict], dict[str, str]]:
     """
     Scrape configured deployments (``WEBMACHINE_DEPLOYMENTS``, default ``prod,qat,uat``).
-    PROD uses :func:`smachine_collect_machines_multi_sites`; QAT/UAT use explicit osmslot hosts.
+
+    All backends across **all** deployments are loaded in a **single shared thread pool**, so
+    PROD/QAT/UAT pages open at the same time (subject to ``WEBMACHINE_SCRAPE_CONCURRENCY``; set it
+    to ``0`` for truly unlimited / everything at once). This minimises the staleness window.
     """
     raw = (os.environ.get("WEBMACHINE_DEPLOYMENTS") or "prod,qat,uat").strip()
     deployments = [d.strip().upper() for d in raw.split(",") if d.strip()]
     if not deployments:
         deployments = ["PROD"]
-    all_rows: list[dict] = []
+
+    units: list[ScrapeUnit] = []
     errs: dict[str, str] = {}
     for dep in deployments:
         if dep == "PROD":
-            part, e = smachine_collect_machines_multi_sites(**kwargs)
+            dep_units, skipped = _prod_scrape_units(**kwargs)
+            units.extend(dep_units)
+            errs.update(skipped)
         elif dep in ("QAT", "UAT"):
-            part, e = smachine_collect_nonprod_deployment(dep, **kwargs)
+            dep_units, dep_err = _nonprod_scrape_units(dep, **kwargs)
+            units.extend(dep_units)
+            errs.update(dep_err)
         else:
             errs[dep] = f"unknown deployment {dep!r}"
-            continue
-        all_rows.extend(part)
-        errs.update(e)
-    return all_rows, errs
+
+    rows, scrape_errs = _collect_units(units)
+    errs.update(scrape_errs)
+    return rows, errs
 
 
 def main() -> None:
