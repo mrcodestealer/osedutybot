@@ -185,16 +185,21 @@ def _env_from_machine_name(machine_name: str) -> str | None:
 # ---------------------------------------------------------------------------
 # Parsers
 # ---------------------------------------------------------------------------
-# Verb synonyms — order/word-independent, matched anywhere in the message.
+# Verb synonyms — order/word-independent, matched anywhere in the message (EN + 中文).
 _UNSET_RE = re.compile(
     r"\b(unset|disable|deactivate|remove|clear|cancel|lift|unmark|"
-    r"turn\s*off|switch\s*off|take\s*off|out\s*of)\b",
+    r"turn\s*off|switch\s*off|take\s*off|out\s*of)\b"
+    r"|取消|解除|关闭|移除|停用|去掉|撤[销除下]?|下线|退出",
     re.I,
 )
 _SET_RE = re.compile(
-    r"\b(set|enable|activate|put|apply|mark|flag|turn\s*on|switch\s*on)\b",
+    r"\b(set|enable|activate|put|apply|mark|flag|turn\s*on|switch\s*on)\b"
+    r"|设置|设定|开启|启用|打开|上线|进入|加上",
     re.I,
 )
+# Maintenance / test keywords (EN + 中文).
+_MAINT_KW_RE = re.compile(r"mainten|maintain|维护|检修|保养", re.I)
+_TEST_KW_RE = re.compile(r"\btest\b|测试", re.I)
 
 
 def parse_action(text: str) -> str | None:
@@ -207,8 +212,8 @@ def parse_action(text: str) -> str | None:
     it defaults to ``set`` (matches the existing commandagent behaviour).
     """
     tl = (text or "").lower()
-    has_maint = bool(re.search(r"mainten|maintain", tl))
-    has_test = bool(re.search(r"\btest\b", tl))
+    has_maint = bool(_MAINT_KW_RE.search(tl))
+    has_test = bool(_TEST_KW_RE.search(tl))
     if not (has_maint or has_test):
         return None
     if _UNSET_RE.search(tl):
@@ -784,13 +789,13 @@ def _looks_like_maintenance_request(text: str) -> bool:
     if not t or t.lstrip().startswith("/"):
         return False
     tl = t.lower()
-    has_maint = bool(re.search(r"mainten|maintain", tl))
-    has_test = bool(re.search(r"\btest\b", tl))
+    has_maint = bool(_MAINT_KW_RE.search(tl))
+    has_test = bool(_TEST_KW_RE.search(tl))
     if not (has_maint or has_test):
         return False
     has_verb = bool(_SET_RE.search(tl) or _UNSET_RE.search(tl))
     has_scope = (
-        bool(re.search(r"\bmachines?\b|\ball\b|\bcabinets?\b|\begms?\b", tl))
+        bool(re.search(r"\bmachines?\b|\ball\b|\bcabinets?\b|\begms?\b|机台|机器|全部|所有", tl))
         or bool(_MACHINE_LINE_RE.search(t))
         or bool(_ENV_WORD_RE.search(t))
     )
