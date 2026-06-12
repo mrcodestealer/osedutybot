@@ -29,6 +29,19 @@ carries an "I have set maintenance" confirm button.
 The agent only *schedules a reminder*; it never sets maintenance automatically. At the action
 time the duty staff set maintenance manually (the existing ``@bot <env> set maintenance`` /
 ``/sm`` prod-batch flow), then confirm on the reminder card.
+
+**Understanding arbitrary phrasing (AI)**
+``parse_intent`` first tries an LLM (OpenAI-compatible, same config as ``chatagent``) to read *any*
+wording into a structured intent (op / what / env / venue / machine list / time). The machine
+resolution (from ``webmachine_data.json``) and the actual set/unset stay 100% deterministic — the
+LLM is only used to understand language, never to decide which machines to touch. If the LLM is
+unavailable, a deterministic keyword/regex parser is used as fallback.
+
+Relevant env vars:
+* ``BOT_CHAT_API_KEY`` / ``OPENAI_API_KEY`` — enables LLM intent parsing (reused from chatagent).
+* ``BOT_MAINT_AGENT_LLM`` — set ``0`` to force the regex fallback even when a key exists.
+* ``BOT_MAINT_AGENT_MODEL`` — model override (defaults to ``BOT_CHAT_MODEL`` / ``gpt-4o-mini``).
+* ``BOT_CHAT_API_BASE`` — OpenAI-compatible base URL.
 """
 
 from __future__ import annotations
@@ -36,9 +49,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 # Fire the reminder this many minutes before the announced action time.
 MAINT_LEAD_MINUTES = 10
@@ -368,45 +385,314 @@ def resolve_all_group(env_code: str, venue: str) -> tuple[list[str], str]:
 # ---------------------------------------------------------------------------
 # Announcement → reminder
 # ---------------------------------------------------------------------------
-def parse_announcement(text: str, *, now: datetime | None = None) -> dict[str, Any] | None:
-    """
-    Parse a scheduled maintenance announcement.
+# ---------------------------------------------------------------------------
+# AI intent extraction (LLM) — understands arbitrary phrasing, then machine
+# resolution + the actual set/unset stay 100% deterministic (never guessed).
+# Reuses the OpenAI-compatible config already used by ``chatagent``.
+# ---------------------------------------------------------------------------
+def _maint_llm_key() -> str:
+    return (os.getenv("BOT_CHAT_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
 
-    Returns ``None`` when the message is not a *scheduled* maintenance request (no action, or no
-    future date/time, or no resolvable machines). A return value means the message should be
-    handled as a maintenance schedule.
-    """
-    action = parse_action(text)
+
+def _maint_llm_enabled() -> bool:
+    """LLM intent parsing is on when an API key exists and ``BOT_MAINT_AGENT_LLM`` isn't disabled."""
+    if (os.getenv("BOT_MAINT_AGENT_LLM") or "").strip().lower() in ("0", "false", "no", "off"):
+        return False
+    return bool(_maint_llm_key())
+
+
+def _maint_llm_model() -> str:
+    return (os.getenv("BOT_MAINT_AGENT_MODEL") or os.getenv("BOT_CHAT_MODEL") or "gpt-4o-mini").strip()
+
+
+def _maint_llm_base() -> str:
+    return (os.getenv("BOT_CHAT_API_BASE") or "https://api.openai.com/v1").strip().rstrip("/")
+
+
+_MAINT_LLM_TIMEOUT = float(os.getenv("BOT_MAINT_AGENT_LLM_TIMEOUT", "20"))
+_maint_llm_failed_logged = False
+
+_MAINT_LLM_SYSTEM = (
+    "You extract a machine-maintenance command from a chat message for an EGM duty bot. "
+    "Reply with ONLY a compact JSON object, no prose, no code fences.\n"
+    "Schema:\n"
+    "{\n"
+    '  "is_maintenance_request": bool,   // true only if the user wants to set/unset maintenance and/or test on machines\n'
+    '  "op": "set" | "unset" | null,\n'
+    '  "what": "maintenance" | "test" | "both" | null,\n'
+    '  "env": "NWR"|"NCH"|"TBR"|"TBP"|"MDR"|"DHS"|"CP"|"WF"|null,  // venue/environment if stated\n'
+    '  "target_kind": "list" | "all_group" | null,  // list = explicit machine names given; all_group = "all <env> machines <venue>"\n'
+    '  "machines": [string],            // explicit machine display names exactly as written, else []\n'
+    '  "venue": string|null,            // e.g. "Good Fortune" for all_group, else null\n'
+    '  "action_datetime": string|null   // ISO-8601 local time of when to do it, e.g. "2026-06-09T21:45", else null\n'
+    "}\n"
+    "Rules: 'maintenance and test' => what='both'. If only a future time is mentioned it is action_datetime. "
+    "Do NOT invent machine names or a venue. If the message is not about machine maintenance/test, "
+    "set is_maintenance_request=false."
+)
+
+
+def _maint_llm_extract(text: str, *, now: datetime) -> Optional[dict[str, Any]]:
+    """Call the LLM to extract a structured maintenance intent. Returns a raw dict or ``None``."""
+    global _maint_llm_failed_logged
+    api_key = _maint_llm_key()
+    if not api_key:
+        return None
+    user = (
+        f"Current local datetime is {now.strftime('%Y-%m-%dT%H:%M')} ({now.strftime('%A')}). "
+        f"Resolve relative times against it.\n\nMessage:\n{text.strip()}"
+    )
+    payload = {
+        "model": _maint_llm_model(),
+        "messages": [
+            {"role": "system", "content": _MAINT_LLM_SYSTEM},
+            {"role": "user", "content": user},
+        ],
+        "max_tokens": 400,
+        "temperature": 0,
+    }
+    req = urllib.request.Request(
+        f"{_maint_llm_base()}/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_MAINT_LLM_TIMEOUT) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        content = ((body.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        return _maint_llm_parse_json(content)
+    except urllib.error.HTTPError as exc:
+        if not _maint_llm_failed_logged:
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")[:300]
+            except Exception:
+                detail = exc.reason
+            print(f"⚠️ maintenance LLM HTTP {exc.code}: {detail}", flush=True)
+            _maint_llm_failed_logged = True
+        return None
+    except Exception as exc:  # noqa: BLE001
+        if not _maint_llm_failed_logged:
+            print(f"⚠️ maintenance LLM request failed: {exc!r}", flush=True)
+            _maint_llm_failed_logged = True
+        return None
+
+
+def _maint_llm_parse_json(content: str) -> Optional[dict[str, Any]]:
+    s = (content or "").strip()
+    if not s:
+        return None
+    # Strip code fences / locate the JSON object.
+    s = re.sub(r"^```(?:json)?|```$", "", s.strip(), flags=re.I | re.M).strip()
+    a, b = s.find("{"), s.rfind("}")
+    if a == -1 or b == -1 or b < a:
+        return None
+    try:
+        obj = json.loads(s[a : b + 1])
+    except ValueError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _action_from_op_what(op: str, what: str) -> str | None:
+    op = (op or "").strip().lower()
+    what = (what or "").strip().lower()
+    if op not in ("set", "unset"):
+        return None
+    what_map = {"maintenance": "maint", "maint": "maint", "test": "test", "both": "both"}
+    w = what_map.get(what)
+    return f"{op}_{w}" if w else None
+
+
+def _normalize_llm_intent(raw: dict[str, Any], *, now: datetime) -> dict[str, Any] | None:
+    """Turn the LLM JSON into the normalized intent (resolving machines deterministically)."""
+    if not raw.get("is_maintenance_request"):
+        return None
+    action = _action_from_op_what(str(raw.get("op") or ""), str(raw.get("what") or ""))
     if not action:
         return None
-    action_dt = parse_action_datetime(text, now=now)
-    if not action_dt:
-        return None
 
-    machines = extract_machine_lines(text)
-    all_group = None
+    env_code = str(raw.get("env") or "").strip().upper()
+    if env_code == "WINFORD":
+        env_code = "WF"
+    if env_code == "OSM":
+        env_code = "CP"
+    venue = str(raw.get("venue") or "").strip()
+    target_kind = str(raw.get("target_kind") or "").strip().lower()
+
     note = ""
-    if not machines:
-        all_group = parse_all_group(text)
-        if all_group:
-            machines, note = resolve_all_group(all_group["env_code"], all_group["venue"])
+    machines = [str(m).strip() for m in (raw.get("machines") or []) if str(m).strip()]
+    if machines:
+        target_kind = "list"
+    elif target_kind == "all_group" or venue:
+        if not env_code:
+            return None
+        machines, note = resolve_all_group(env_code, venue)
+        target_kind = "all_group"
     if not machines:
         return None
 
-    env_codes = sorted({e for e in (_env_from_machine_name(m) for m in machines) if e})
-    env_summary = "/".join(env_codes) if env_codes else (all_group or {}).get("env_code", "") or "?"
+    action_dt = None
+    iso = str(raw.get("action_datetime") or "").strip()
+    if iso:
+        action_dt = _parse_iso_dt(iso)
 
+    return _build_intent(
+        action=action,
+        action_dt=action_dt,
+        machines=machines,
+        env_code=env_code,
+        target_kind=target_kind or "list",
+        venue=venue,
+        note=note,
+        reason=parse_reason(raw.get("_source_text") or ""),
+        source="llm",
+    )
+
+
+def _parse_iso_dt(s: str) -> datetime | None:
+    s = (s or "").strip().replace("Z", "")
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Unified intent parsing (LLM first, deterministic rules as fallback)
+# ---------------------------------------------------------------------------
+def _build_intent(
+    *,
+    action: str,
+    action_dt: datetime | None,
+    machines: list[str],
+    env_code: str,
+    target_kind: str,
+    venue: str,
+    note: str,
+    reason: str,
+    source: str,
+) -> dict[str, Any] | None:
+    if not action or not machines:
+        return None
+    env_codes = sorted({e for e in (_env_from_machine_name(m) for m in machines) if e})
+    env_summary = "/".join(env_codes) if env_codes else (env_code or "?")
+    if not env_code and len(env_codes) == 1:
+        env_code = env_codes[0]
     return {
         "action": action,
         "action_label": ACTION_LABELS.get(action, action),
         "action_dt": action_dt,
-        "reminder_dt": action_dt - timedelta(minutes=MAINT_LEAD_MINUTES),
-        "reason": parse_reason(text),
+        "reminder_dt": (action_dt - timedelta(minutes=MAINT_LEAD_MINUTES)) if action_dt else None,
+        "reason": reason or "Stress Test",
         "machines": machines,
+        "env_code": env_code,
         "env_summary": env_summary,
-        "all_group": all_group,
+        "target_kind": target_kind,
+        "venue": venue,
         "note": note,
+        "source": source,
     }
+
+
+def _looks_like_maintenance_request(text: str) -> bool:
+    """Cheap gate so we only call the LLM on plausible maintenance messages."""
+    t = (text or "").strip()
+    if not t or t.lstrip().startswith("/"):
+        return False
+    tl = t.lower()
+    if not re.search(r"mainten|\bmaint\b|\btest\b", tl):
+        return False
+    has_verb = bool(re.search(
+        r"\b(set|unset|enable|disable|activate|deactivate|turn|put|mark|flag|"
+        r"remove|clear|lift|cancel|take)\b", tl))
+    has_scope = bool(re.search(r"\bmachines?\b|\ball\b", tl)) or bool(_MACHINE_LINE_RE.search(t))
+    return has_verb or has_scope
+
+
+def _parse_intent_rules(text: str, *, now: datetime) -> dict[str, Any] | None:
+    """Deterministic fallback parser (no AI)."""
+    action = parse_action(text)
+    if not action:
+        return None
+    action_dt = parse_action_datetime(text, now=now)
+    machines = extract_machine_lines(text)
+    target_kind = "list"
+    env_code = ""
+    venue = ""
+    note = ""
+    if not machines:
+        all_group = parse_all_group(text)
+        if not all_group:
+            return None
+        env_code = all_group["env_code"]
+        venue = all_group["venue"]
+        machines, note = resolve_all_group(env_code, venue)
+        target_kind = "all_group"
+    if not machines:
+        return None
+    return _build_intent(
+        action=action,
+        action_dt=action_dt,
+        machines=machines,
+        env_code=env_code,
+        target_kind=target_kind,
+        venue=venue,
+        note=note,
+        reason=parse_reason(text),
+        source="rule",
+    )
+
+
+_INTENT_CACHE: dict[str, tuple[float, Optional[dict[str, Any]]]] = {}
+_INTENT_CACHE_LOCK = threading.Lock()
+_INTENT_CACHE_TTL = 180.0
+
+
+def parse_intent(text: str, *, now: datetime | None = None) -> dict[str, Any] | None:
+    """
+    Parse a maintenance request from arbitrary phrasing.
+
+    Order: cheap keyword gate → LLM extraction (if enabled) → deterministic rule fallback.
+    Machine resolution (``webmachine_data.json``) and the action stay deterministic regardless.
+    """
+    body = (text or "").strip()
+    if not _looks_like_maintenance_request(body):
+        return None
+
+    use_cache = now is None
+    real_now = now or datetime.now()
+    if use_cache:
+        with _INTENT_CACHE_LOCK:
+            hit = _INTENT_CACHE.get(body)
+            if hit and (time.time() - hit[0]) < _INTENT_CACHE_TTL:
+                return hit[1]
+
+    result: dict[str, Any] | None = None
+    if _maint_llm_enabled():
+        raw = _maint_llm_extract(body, now=real_now)
+        if isinstance(raw, dict):
+            raw["_source_text"] = body
+            result = _normalize_llm_intent(raw, now=real_now)
+    if result is None:
+        result = _parse_intent_rules(body, now=real_now)
+
+    if use_cache:
+        with _INTENT_CACHE_LOCK:
+            _INTENT_CACHE[body] = (time.time(), result)
+            if len(_INTENT_CACHE) > 256:
+                _INTENT_CACHE.clear()
+    return result
+
+
+def parse_announcement(text: str, *, now: datetime | None = None) -> dict[str, Any] | None:
+    """Scheduled maintenance request (has an action time). ``None`` otherwise."""
+    intent = parse_intent(text, now=now)
+    if not intent or not intent.get("action_dt"):
+        return None
+    return intent
 
 
 def is_maintenance_schedule_message(original_text: str, mention_keys: Sequence[str]) -> bool:
@@ -415,40 +701,29 @@ def is_maintenance_schedule_message(original_text: str, mention_keys: Sequence[s
     return parse_announcement(body) is not None
 
 
-def parse_now_request(text: str) -> dict[str, Any] | None:
+def parse_now_request(text: str, *, now: datetime | None = None) -> dict[str, Any] | None:
     """
-    Parse an *immediate* (no date/time) ``set/unset maintenance/test ALL <ENV> MACHINES <Venue>``
-    request. The group phrase is expanded to machine names from ``webmachine_data.json``.
+    Parse an *immediate* (no date/time) maintenance request, expanding
+    ``ALL <ENV> MACHINES <Venue>`` to machine names from ``webmachine_data.json``.
 
-    Returns ``None`` when: there is no action, a date/time is present (→ schedule instead),
-    an explicit machine list was pasted (→ existing prod-batch flow handles it), there is no
-    ``ALL <ENV> MACHINES <Venue>`` phrase, the env is unknown, or nothing resolved.
+    Returns ``None`` when: not a maintenance request, a date/time is present (→ schedule instead),
+    the env can't be mapped to a backend site, or nothing resolved.
     """
-    action = parse_action(text)
-    if not action:
-        return None
-    if parse_action_datetime(text) is not None:
-        return None  # has a time → it is a scheduled announcement, not "do it now"
-    if extract_machine_lines(text):
-        return None  # explicit list pasted → let the prod-batch flow handle it
-    all_group = parse_all_group(text)
-    if not all_group:
-        return None
-    env_code = (all_group.get("env_code") or "").strip().upper()
+    intent = parse_intent(text, now=now)
+    if not intent or intent.get("action_dt"):
+        return None  # has a time → schedule, not "do it now"
+    env_code = (intent.get("env_code") or "").strip().upper()
     site = _ENV_SITE_ALIAS.get(env_code)
     if not site:
-        return None
-    machines, note = resolve_all_group(env_code, all_group.get("venue") or "")
-    if not machines:
-        return None
+        return None  # ambiguous / multi-env list → leave to the prod-batch flow
     return {
-        "action": action,
-        "action_label": ACTION_LABELS.get(action, action),
+        "action": intent["action"],
+        "action_label": intent["action_label"],
         "env_code": env_code,
         "site": site,
-        "venue": all_group.get("venue") or "",
-        "machines": machines,
-        "note": note,
+        "venue": intent.get("venue") or "",
+        "machines": intent["machines"],
+        "note": intent.get("note") or "",
     }
 
 
