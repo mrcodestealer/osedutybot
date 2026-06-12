@@ -572,12 +572,56 @@ def build_intent_catalog(*, jenkins_available: bool = True) -> list[IntentSpec]:
             )
         )
 
+    # Timed/message reminder: "remind me in 30 minutes ...". Requires an argument
+    # (a time/duration + message); build_slash_command returns None without one.
     intents.append(
         IntentSpec(
             tag="cmd_reminder",
             command="/reminder",
-            patterns=["remind me in 30 minutes", "set a reminder", "schedule reminder"],
+            patterns=[
+                "remind me in 30 minutes",
+                "set a reminder",
+                "schedule reminder",
+                "remind me",
+                "set reminder",
+                "schedule a reminder",
+                "remind me to call the team",
+                "remind me to check the machines",
+                "remind me at 8pm",
+                "remind me in 1 hour",
+                "remind me in 15 minutes",
+                "set a reminder for 30 minutes",
+                "set a reminder to restart the server",
+                "ping me in 20 minutes",
+                "remind me tomorrow morning",
+            ],
             arg_kind="rest",
+        )
+    )
+
+    # Bare "add reminder" → opens the reminder form card (main.py /addreminder with
+    # no args). arg_kind=None so a plain "/addreminder" is produced (no argument).
+    intents.append(
+        _simple_intent(
+            "cmd_addreminder",
+            "/addreminder",
+            "add reminder|add a reminder|create reminder|create a reminder|new reminder|"
+            "make a reminder|i want to add a reminder|set up a reminder|add reminder for me|"
+            "open reminder form|add new reminder|i want to create a reminder|"
+            "can you add a reminder|add reminder please|reminder form",
+        )
+    )
+
+    # Bare "delete reminder" → opens the reminder list card (main.py /deletereminder
+    # with no args). arg_kind=None so a plain "/deletereminder" is produced.
+    intents.append(
+        _simple_intent(
+            "cmd_deletereminder",
+            "/deletereminder",
+            "delete reminder|remove reminder|delete a reminder|remove a reminder|"
+            "cancel reminder|delete reminders|remove reminders|list reminders to delete|"
+            "i want to delete a reminder|delete my reminder|remove my reminder|"
+            "show reminders to delete|clear reminder",
         )
     )
 
