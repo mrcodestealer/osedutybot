@@ -31,6 +31,19 @@ _OFFSET_PEER_APPROVER_APPROVAL_NOTIFIED_PATH = os.path.join(
 )
 _OFFSET_PEER_APPROVER_APPROVAL_NOTIFIED_LOCK = threading.Lock()
 
+# Snapshot of every known offset row (record_id -> row dict), refreshed each poll. Used to
+# detect deletions by ANY method (manual Base delete, bot delete, API) and notify approvers.
+_OFFSET_ROWS_SNAPSHOT_PATH = os.path.join(_CHBOX_DIR, "offset_rows_snapshot.json")
+_OFFSET_ROWS_SNAPSHOT_LOCK = threading.Lock()
+# Who deleted a row via the bot (record_id -> {open_id, name, ts}); best-effort attribution.
+_OFFSET_DELETE_ACTOR_PATH = os.path.join(_CHBOX_DIR, "offset_delete_actors.json")
+_OFFSET_DELETE_ACTOR_LOCK = threading.Lock()
+# Dedupe so the deletion poll DMs approvers only once per deleted row (record_id -> ts).
+_OFFSET_DELETION_NOTIFIED_PATH = os.path.join(_CHBOX_DIR, "offset_deletion_notified.json")
+_OFFSET_DELETION_NOTIFIED_LOCK = threading.Lock()
+# Drop attribution / dedupe entries older than this (seconds) to keep the files small.
+_OFFSET_DELETE_STATE_TTL_SEC = int(os.getenv("OSE_OFFSET_DELETE_STATE_TTL_SEC", str(30 * 24 * 3600)))
+
 # Prevent opening multiple edit forms for the same pending record (double-tap Edit).
 _OFFSET_EDIT_OPEN_LOCK = threading.Lock()
 _OFFSET_EDIT_OPEN: dict[str, str] = {}
@@ -137,6 +150,122 @@ def _save_offset_duty_sync_state_unlocked(state: dict[str, Any]) -> None:
         json.dump(payload, fh, ensure_ascii=False, indent=2)
         fh.write("\n")
     os.replace(tmp, _OFFSET_DUTY_SYNC_STATE_PATH)
+
+
+def _read_json_file(path: str) -> dict[str, Any]:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_json_file(path: str, payload: dict[str, Any]) -> None:
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+
+
+def _load_offset_rows_snapshot() -> dict[str, dict[str, Any]]:
+    with _OFFSET_ROWS_SNAPSHOT_LOCK:
+        data = _read_json_file(_OFFSET_ROWS_SNAPSHOT_PATH)
+    rows = data.get("rows") if isinstance(data.get("rows"), dict) else {}
+    return {str(k): dict(v) for k, v in rows.items() if k and isinstance(v, dict)}
+
+
+def _save_offset_rows_snapshot(rows: dict[str, dict[str, Any]]) -> None:
+    with _OFFSET_ROWS_SNAPSHOT_LOCK:
+        _write_json_file(
+            _OFFSET_ROWS_SNAPSHOT_PATH,
+            {
+                "rows": {str(k): dict(v) for k, v in rows.items() if k},
+                "updated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            },
+        )
+
+
+def _prune_ts_map(entries: dict[str, Any]) -> dict[str, Any]:
+    """Drop entries whose ``ts`` is older than the TTL (entries without ts are kept)."""
+    now = time.time()
+    out: dict[str, Any] = {}
+    for k, v in entries.items():
+        if not k:
+            continue
+        ts = 0.0
+        if isinstance(v, dict):
+            try:
+                ts = float(v.get("ts") or 0)
+            except Exception:
+                ts = 0.0
+        else:
+            try:
+                ts = float(v)
+            except Exception:
+                ts = 0.0
+        if ts and (now - ts) > _OFFSET_DELETE_STATE_TTL_SEC:
+            continue
+        out[str(k)] = v
+    return out
+
+
+def _record_offset_delete_actor(record_id: str, open_id: str, name: str) -> None:
+    """Remember who deleted ``record_id`` via the bot, so the poll can attribute the deleter."""
+    rid = (record_id or "").strip()
+    if not rid:
+        return
+    with _OFFSET_DELETE_ACTOR_LOCK:
+        data = _read_json_file(_OFFSET_DELETE_ACTOR_PATH)
+        actors = data.get("actors") if isinstance(data.get("actors"), dict) else {}
+        actors = _prune_ts_map({str(k): v for k, v in actors.items()})
+        actors[rid] = {
+            "open_id": (open_id or "").strip(),
+            "name": (name or "").strip(),
+            "ts": time.time(),
+        }
+        _write_json_file(_OFFSET_DELETE_ACTOR_PATH, {"actors": actors})
+
+
+def _pop_offset_delete_actor(record_id: str) -> dict[str, str]:
+    """Return + remove the recorded bot deleter for ``record_id`` (empty dict if none)."""
+    rid = (record_id or "").strip()
+    if not rid:
+        return {}
+    with _OFFSET_DELETE_ACTOR_LOCK:
+        data = _read_json_file(_OFFSET_DELETE_ACTOR_PATH)
+        actors = data.get("actors") if isinstance(data.get("actors"), dict) else {}
+        actors = _prune_ts_map({str(k): v for k, v in actors.items()})
+        entry = actors.pop(rid, None)
+        _write_json_file(_OFFSET_DELETE_ACTOR_PATH, {"actors": actors})
+    if isinstance(entry, dict):
+        return {"open_id": str(entry.get("open_id") or ""), "name": str(entry.get("name") or "")}
+    return {}
+
+
+def _offset_deletion_already_notified(record_id: str) -> bool:
+    rid = (record_id or "").strip()
+    if not rid:
+        return False
+    with _OFFSET_DELETION_NOTIFIED_LOCK:
+        data = _read_json_file(_OFFSET_DELETION_NOTIFIED_PATH)
+        notified = data.get("notified") if isinstance(data.get("notified"), dict) else {}
+        return rid in notified
+
+
+def _mark_offset_deletion_notified(record_id: str) -> None:
+    rid = (record_id or "").strip()
+    if not rid:
+        return
+    with _OFFSET_DELETION_NOTIFIED_LOCK:
+        data = _read_json_file(_OFFSET_DELETION_NOTIFIED_PATH)
+        notified = data.get("notified") if isinstance(data.get("notified"), dict) else {}
+        notified = _prune_ts_map({str(k): v for k, v in notified.items()})
+        notified[rid] = {"ts": time.time()}
+        _write_json_file(_OFFSET_DELETION_NOTIFIED_PATH, {"notified": notified})
 
 
 def _offset_duty_sync_map_get(src_record_id: str) -> str:
@@ -2295,6 +2424,44 @@ def build_offset_requester_deleted_notify_card(
     }
 
 
+def build_offset_deleted_notify_card(
+    row: dict[str, Any],
+    *,
+    deleter_label: str,
+    deleter_known: bool,
+) -> dict[str, Any]:
+    """
+    Read-only alert for approvers when an offset row is removed from the table by ANY
+    method (manual Base delete, bot delete, API). ``deleter_label`` names the operator
+    when known, otherwise explains it could not be determined.
+    """
+    status_was = str(row.get("approval_status") or "").strip().title()
+    if bool(row.get("pending")) and not status_was:
+        status_was = "Pending"
+    who = _lark_md_cell(deleter_label)
+    if deleter_known:
+        intro = (
+            f"⚠️ An offset record was **deleted** by **{who}**. "
+            "No approval action is needed — it has been removed from the table."
+        )
+    else:
+        intro = (
+            "⚠️ An offset record was **deleted directly in the Base table** "
+            f"({who}). No approval action is needed — it has been removed from the table."
+        )
+    status_cell = f"Deleted (was {status_was})" if status_was else "Deleted"
+    md = _offset_approval_table_md(row, status=status_cell, intro=intro)
+    return {
+        "schema": "2.0",
+        "config": {"width_mode": "fill"},
+        "header": {
+            "template": "red",
+            "title": {"tag": "plain_text", "content": "OSE offset — record deleted"},
+        },
+        "body": {"elements": [{"tag": "div", "text": {"tag": "lark_md", "content": md}}]},
+    }
+
+
 def build_offset_requester_edited_notify_card(
     row: dict[str, Any],
     *,
@@ -2625,6 +2792,67 @@ def scan_bitable_offsets_for_duty_wiki_sync() -> dict[str, int]:
     except Exception as exc:
         print(f"[offsetleave] duty wiki orphan prune failed: {exc!r}", flush=True)
     return {"scanned": len(items), "synced": synced, "deleted": deleted}
+
+
+def scan_bitable_offsets_for_deletion_notify() -> dict[str, int]:
+    """
+    Detect offset rows removed from the Base table by **any** method (manual Base delete,
+    bot delete, API) and DM all approvers exactly once per deleted row.
+
+    Compares a persisted snapshot of known rows against the live table. Bot deletes notify
+    immediately and are marked done, so this poll mainly catches manual/API deletions where
+    the Base API does not expose who deleted the row.
+    """
+    od.invalidate_ose_bitable_cache()
+    items = (od.get_ose_offset_records_admin() or {}).get("items") or []
+    live: dict[str, dict[str, Any]] = {}
+    for r in items:
+        if not isinstance(r, dict):
+            continue
+        rid = str(r.get("record_id") or "").strip()
+        if rid:
+            live[rid] = dict(r)
+
+    prev = _load_offset_rows_snapshot()
+    new_snapshot = dict(live)
+    notified = 0
+    for rid, row in prev.items():
+        if rid in live or _offset_deletion_already_notified(rid):
+            continue
+        if not str(row.get("request_person") or "").strip():
+            continue  # empty/junk row — nothing meaningful to report
+        actor = _pop_offset_delete_actor(rid)
+        actor_open = (actor.get("open_id") or "").strip()
+        actor_name = (actor.get("name") or "").strip()
+        if actor_open or actor_name:
+            deleter_known = True
+            deleter_label = actor_name or "a bot action"
+            exclude = actor_open
+        else:
+            deleter_known = False
+            deleter_label = "operator could not be determined from the Base API"
+            exclude = ""
+        try:
+            ok = _notify_offset_approvers_deleted(
+                row,
+                deleter_label=deleter_label,
+                deleter_known=deleter_known,
+                exclude_open_id=exclude,
+            )
+        except Exception as exc:
+            ok = False
+            print(f"[offsetleave] deletion notify error for {rid!r}: {exc!r}", flush=True)
+        if ok:
+            _mark_offset_deletion_notified(rid)
+            notified += 1
+        else:
+            # Keep the row in the snapshot and restore attribution so the next poll retries.
+            new_snapshot[rid] = row
+            if actor_open or actor_name:
+                _record_offset_delete_actor(rid, actor_open, actor_name)
+
+    _save_offset_rows_snapshot(new_snapshot)
+    return {"scanned": len(items), "notified": notified}
 
 
 def _toast_approval_problem(send_message: Callable[..., Any], chat_id: str, text: str) -> None:
@@ -2996,6 +3224,38 @@ def _notify_offset_approvers_requester_deleted(
         r = send_message(aid, body, msg_type="interactive", receive_id_type="open_id")
         if isinstance(r, dict) and int(r.get("code", -1)) != 0:
             print(f"[offsetleave] requester-delete notify failed for {aid!r}: {r!r}", flush=True)
+
+
+def _notify_offset_approvers_deleted(
+    row: dict[str, Any],
+    *,
+    deleter_label: str,
+    deleter_known: bool,
+    exclude_open_id: str = "",
+    send_message: Optional[Callable[..., Any]] = None,
+) -> bool:
+    """
+    DM every approver that an offset row was deleted (any method). Skips ``exclude_open_id``
+    (the approver who performed the delete themselves). Returns True if every DM succeeded.
+    """
+    if not OFFSET_APPROVER_OPEN_IDS:
+        return True
+    send = send_message or _lark_im_send_message
+    card = build_offset_deleted_notify_card(
+        row, deleter_label=deleter_label, deleter_known=deleter_known
+    )
+    body = json.dumps(card, ensure_ascii=False)
+    skip = (exclude_open_id or "").strip()
+    all_ok = True
+    for oid in OFFSET_APPROVER_OPEN_IDS:
+        aid = (oid or "").strip()
+        if not aid or aid == skip:
+            continue
+        r = send(aid, body, msg_type="interactive", receive_id_type="open_id")
+        if isinstance(r, dict) and int(r.get("code", -1)) != 0:
+            all_ok = False
+            print(f"[offsetleave] deletion notify failed for {aid!r}: {r!r}", flush=True)
+    return all_ok
 
 
 def _notify_other_offset_approvers_responded(
@@ -3393,6 +3653,17 @@ def _handle_offset_delete_row(
                 )
             if od._title_name(str(row_chk.get("request_person") or "")) != od._title_name(rp_live or ""):
                 raise ValueError("Not your request to delete.")
+        deleted_snapshot = dict(row_chk)
+        if is_admin:
+            try:
+                actor_name = _approver_display_for_bitable(owner)
+            except Exception:
+                actor_name = ""
+        else:
+            actor_name = rp_live or str(row_chk.get("request_person") or "")
+        # Remember who deleted it so the deletion poll can attribute the operator if the
+        # immediate approver DM below fails (best-effort; manual Base deletes stay unknown).
+        _record_offset_delete_actor(rid, owner, actor_name)
         try:
             od.delete_ose_offset_record(record_id=rid)
         except RuntimeError as exc:
@@ -3403,6 +3674,18 @@ def _handle_offset_delete_row(
                 raise
         od.invalidate_ose_bitable_cache()
         if is_admin:
+            # Approver deleted it themselves — alert the OTHER approvers (not the actor).
+            try:
+                _notify_offset_approvers_deleted(
+                    deleted_snapshot,
+                    deleter_label=actor_name or "an approver",
+                    deleter_known=True,
+                    exclude_open_id=owner,
+                    send_message=send_message,
+                )
+                _mark_offset_deletion_notified(rid)
+            except Exception as exc:
+                print(f"[offsetleave] approver-delete approver notify failed: {exc!r}", flush=True)
             rows = _non_pending_offsets_all()
             card = (
                 build_offset_delete_list_card(owner, "", rows, is_admin=True)
@@ -3412,7 +3695,6 @@ def _handle_offset_delete_row(
             fallback = "✅ Offset record deleted."
         else:
             rp = rp_live or str(row_chk.get("request_person") or "")
-            deleted_snapshot = dict(row_chk)
             try:
                 _notify_offset_approvers_requester_deleted(
                     send_message,
@@ -3420,6 +3702,7 @@ def _handle_offset_delete_row(
                     requester_name=rp,
                 )
                 _unmark_offset_record_notified(rid)
+                _mark_offset_deletion_notified(rid)
             except Exception as exc:
                 print(f"[offsetleave] requester-delete approver notify failed: {exc!r}", flush=True)
             rows = _pending_offsets_for_request_person(rp)

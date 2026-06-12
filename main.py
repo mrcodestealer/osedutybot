@@ -1787,6 +1787,13 @@ def poll_offset_approver_notifications_from_bitable():
                 f"(scanned {(wiki or {}).get('scanned')})",
                 flush=True,
             )
+        dele = ol.scan_bitable_offsets_for_deletion_notify()
+        dn = int((dele or {}).get("notified") or 0)
+        if dn:
+            print(
+                f"[offsetleave] deletion poll: notified approvers for {dn} deleted offset(s)",
+                flush=True,
+            )
         req = ol.scan_bitable_offsets_for_requester_approval_notify()
         rn = int((req or {}).get("notified") or 0)
         pn = int((req or {}).get("peer_notified") or 0)

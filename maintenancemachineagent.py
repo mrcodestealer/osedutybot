@@ -185,24 +185,38 @@ def _env_from_machine_name(machine_name: str) -> str | None:
 # ---------------------------------------------------------------------------
 # Parsers
 # ---------------------------------------------------------------------------
+# Verb synonyms — order/word-independent, matched anywhere in the message.
+_UNSET_RE = re.compile(
+    r"\b(unset|disable|deactivate|remove|clear|cancel|lift|unmark|"
+    r"turn\s*off|switch\s*off|take\s*off|out\s*of)\b",
+    re.I,
+)
+_SET_RE = re.compile(
+    r"\b(set|enable|activate|put|apply|mark|flag|turn\s*on|switch\s*on)\b",
+    re.I,
+)
+
+
 def parse_action(text: str) -> str | None:
-    """Return a prod-batch action code (``set_both`` …) from natural-language text, or ``None``."""
+    """
+    Return a prod-batch action code (``set_both`` …) from free-form text, or ``None``.
+
+    Verb is detected by synonym (set/enable/put/turn on … vs unset/disable/remove/out of …),
+    anywhere in the message — not a fixed phrase. ``maintenance`` and ``test`` may appear in any
+    order; both present → ``both``. If no explicit verb is found but maintenance/test is mentioned,
+    it defaults to ``set`` (matches the existing commandagent behaviour).
+    """
     tl = (text or "").lower()
-    m = re.search(r"\b(set|unset)\b", tl)
-    if not m:
-        return None
-    op = m.group(1)
-    # Action phrase = from the verb up to the target / reason boundary.
-    seg = tl[m.start():]
-    seg = re.split(
-        r"\bdue to\b|\blater\b|\btomorrow\b|\ball\b|\bfollowed by\b|\bon\b|\bat\b|\n",
-        seg,
-        maxsplit=1,
-    )[0]
-    has_maint = bool(re.search(r"maintenance|maintain", seg))
-    has_test = bool(re.search(r"\btest\b", seg))
+    has_maint = bool(re.search(r"mainten|maintain", tl))
+    has_test = bool(re.search(r"\btest\b", tl))
     if not (has_maint or has_test):
         return None
+    if _UNSET_RE.search(tl):
+        op = "unset"
+    elif _SET_RE.search(tl):
+        op = "set"
+    else:
+        op = "set"  # "X maintenance" with no explicit verb almost always means set
     if has_maint and has_test:
         what = "both"
     elif has_maint:
@@ -300,29 +314,61 @@ def parse_all_group(text: str) -> dict[str, str] | None:
 # ---------------------------------------------------------------------------
 # webmachine_data.json lookup (for "ALL <ENV> MACHINES <Venue>")
 # ---------------------------------------------------------------------------
-def _webmachine_data_path() -> Path:
+def _webmachine_data_candidates() -> list[Path]:
+    """All paths we will try for ``webmachine_data.json``, in priority order."""
+    cands: list[Path] = []
     custom = (os.environ.get("WEBMACHINE_DATA_PATH") or "").strip()
     if custom:
-        return Path(custom)
-    return Path(__file__).resolve().parent / "webmachine_data.json"
+        cands.append(Path(custom))
+    here = Path(__file__).resolve().parent
+    cands.append(here / "webmachine_data.json")
+    try:
+        cands.append(Path.cwd() / "webmachine_data.json")
+    except OSError:
+        pass
+    # The scraper (webmachine.py) writes next to itself — usually the same dir, but be safe.
+    cands.append(here.parent / "webmachine_data.json")
+    # De-dupe while preserving order.
+    seen: set[str] = set()
+    out: list[Path] = []
+    for c in cands:
+        key = str(c)
+        if key not in seen:
+            seen.add(key)
+            out.append(c)
+    return out
+
+
+# Last data path actually read (for diagnostics in error messages).
+_last_data_path: str = ""
 
 
 def load_webmachine_rows() -> list[dict]:
-    """Load + normalise rows from ``webmachine_data.json`` (empty list if missing/invalid)."""
-    p = _webmachine_data_path()
-    try:
-        raw = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    if isinstance(raw, dict):
-        raw = raw.get("machines") or raw.get("rows") or raw.get("data") or []
-    if not isinstance(raw, list):
-        return []
-    rows: list[dict] = []
-    for r in raw:
-        if isinstance(r, dict):
-            rows.append(r)
-    return rows
+    """Load + normalise rows from ``webmachine_data.json`` (tries several paths; [] if none work)."""
+    global _last_data_path
+    for p in _webmachine_data_candidates():
+        try:
+            raw = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(raw, dict):
+            raw = raw.get("machines") or raw.get("rows") or raw.get("data") or []
+        if not isinstance(raw, list):
+            continue
+        rows = [r for r in raw if isinstance(r, dict)]
+        if rows:
+            _last_data_path = str(p)
+            return rows
+    _last_data_path = ""
+    return []
+
+
+def _data_path_hint() -> str:
+    """Human-readable note about where we looked for the machine list (for error cards)."""
+    if _last_data_path:
+        return f"Loaded from `{_last_data_path}`."
+    tried = ", ".join(f"`{p}`" for p in _webmachine_data_candidates())
+    return f"Could not read webmachine_data.json. Looked at: {tried}."
 
 
 def _row_matches_env(row: dict, env_code: str) -> bool:
@@ -380,6 +426,136 @@ def resolve_all_group(env_code: str, venue: str) -> tuple[list[str], str]:
         f"used all {len(names)} {env_code} machine(s) instead."
     )
     return names, note
+
+
+# ---------------------------------------------------------------------------
+# Data-grounded entity detection (NOT a fixed sentence template).
+#
+# The set of environments + venue/game-type names is learned from
+# ``webmachine_data.json`` itself, so any phrasing/word-order works and it adapts
+# automatically when the machine data changes — no hardcoded "ALL <ENV> MACHINES
+# <venue>" sentence, no model retraining needed.
+# ---------------------------------------------------------------------------
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(s or "").lower())
+
+
+# Spoken env words → env code (word-level, matched anywhere in the message).
+_ENV_WORDS: dict[str, str] = {
+    "nwr": "NWR", "np": "NWR",
+    "nch": "NCH", "nc": "NCH",
+    "tbr": "TBR", "tbp": "TBP",
+    "mdr": "MDR", "dhs": "DHS",
+    "cp": "CP", "osm": "CP",
+    "wf": "WF", "winford": "WF",
+}
+_ENV_WORD_RE = re.compile(r"\b(" + "|".join(sorted(_ENV_WORDS, key=len, reverse=True)) + r")\b", re.I)
+
+_VENUE_VOCAB_CACHE: dict[str, Any] = {"sig": None, "by_norm": {}}
+_VENUE_VOCAB_LOCK = threading.Lock()
+
+
+def _data_signature() -> str:
+    """Cheap change signal so the venue vocab refreshes when the data file changes."""
+    for p in _webmachine_data_candidates():
+        try:
+            st = p.stat()
+            return f"{p}:{st.st_mtime_ns}:{st.st_size}"
+        except OSError:
+            continue
+    return ""
+
+
+def _venue_vocab() -> dict[str, str]:
+    """``{normalized_game_type: original_game_type}`` learned from the data file (cached)."""
+    sig = _data_signature()
+    with _VENUE_VOCAB_LOCK:
+        if _VENUE_VOCAB_CACHE["sig"] == sig and _VENUE_VOCAB_CACHE["by_norm"]:
+            return _VENUE_VOCAB_CACHE["by_norm"]
+    by_norm: dict[str, str] = {}
+    for r in load_webmachine_rows():
+        for key in ("game_type", "venue", "belongs"):
+            val = str(r.get(key) or "").strip()
+            n = _norm(val)
+            # Skip very short / pure-numeric tokens to avoid false matches.
+            if len(n) >= 4 and not n.isdigit():
+                by_norm.setdefault(n, val)
+    with _VENUE_VOCAB_LOCK:
+        _VENUE_VOCAB_CACHE["sig"] = sig
+        _VENUE_VOCAB_CACHE["by_norm"] = by_norm
+    return by_norm
+
+
+def detect_envs(text: str) -> list[str]:
+    """Env codes mentioned anywhere in the text (deduped, in order of appearance)."""
+    out: list[str] = []
+    for m in _ENV_WORD_RE.finditer(text or ""):
+        code = _ENV_WORDS.get(m.group(1).lower())
+        if code and code not in out:
+            out.append(code)
+    return out
+
+
+def detect_venue(text: str) -> str:
+    """
+    Longest known venue/game-type name (learned from the data file) that appears anywhere in the
+    message. Order-independent: "good fortune", "GoodFortune", "winford good fortune" all match.
+    """
+    nt = _norm(text)
+    if not nt:
+        return ""
+    best = ""
+    best_orig = ""
+    for n, orig in _venue_vocab().items():
+        if n in nt and len(n) > len(best):
+            best, best_orig = n, orig
+    return best_orig
+
+
+def _env_for_venue(venue: str, *, prefer: Sequence[str] = ()) -> str:
+    """Pick the single env whose machines actually have this venue/game-type, else ''."""
+    if not venue:
+        return ""
+    vkey = _norm(venue)
+    envs: list[str] = []
+    for r in load_webmachine_rows():
+        hay = _norm(f"{r.get('game_type','')} {r.get('venue','')} {r.get('belongs','')}")
+        if vkey and vkey in hay:
+            e = (str(r.get("belongs") or "").upper() or _env_from_machine_name(_row_display_name(r)) or "")
+            if e == "OSM":
+                e = "CP"
+            if e and e not in envs:
+                envs.append(e)
+    if prefer:
+        inter = [e for e in envs if e in set(prefer)]
+        if len(inter) == 1:
+            return inter[0]
+    return envs[0] if len(envs) == 1 else ""
+
+
+def detect_group_target(text: str) -> dict[str, str] | None:
+    """
+    Detect a machine *group* (env + optional venue/game-type) from free phrasing, grounded in the
+    data-file vocabulary. Falls back to the legacy ``ALL <ENV> MACHINES <Venue>`` template only if
+    grounding finds nothing. Returns ``{"env_code", "venue"}`` or ``None``.
+    """
+    envs = detect_envs(text)
+    venue = detect_venue(text)
+    if not envs and not venue:
+        legacy = parse_all_group(text)
+        if not legacy:
+            return None
+        return legacy
+    env_code = ""
+    if len(envs) == 1:
+        env_code = envs[0]
+    elif venue:
+        env_code = _env_for_venue(venue, prefer=envs)
+    elif envs:
+        env_code = envs[0]
+    if not env_code:
+        return None
+    return {"env_code": env_code, "venue": venue}
 
 
 # ---------------------------------------------------------------------------
@@ -598,18 +774,29 @@ def _build_intent(
 
 
 def _looks_like_maintenance_request(text: str) -> bool:
-    """Cheap gate so we only call the LLM on plausible maintenance messages."""
+    """
+    Cheap gate so heavier parsing only runs on plausible maintenance messages.
+
+    ``maintenance`` is a strong signal (needs only a verb or a scope word). A bare ``test`` is weak
+    (casual chat), so it needs both a verb and a scope to qualify.
+    """
     t = (text or "").strip()
     if not t or t.lstrip().startswith("/"):
         return False
     tl = t.lower()
-    if not re.search(r"mainten|\bmaint\b|\btest\b", tl):
+    has_maint = bool(re.search(r"mainten|maintain", tl))
+    has_test = bool(re.search(r"\btest\b", tl))
+    if not (has_maint or has_test):
         return False
-    has_verb = bool(re.search(
-        r"\b(set|unset|enable|disable|activate|deactivate|turn|put|mark|flag|"
-        r"remove|clear|lift|cancel|take)\b", tl))
-    has_scope = bool(re.search(r"\bmachines?\b|\ball\b", tl)) or bool(_MACHINE_LINE_RE.search(t))
-    return has_verb or has_scope
+    has_verb = bool(_SET_RE.search(tl) or _UNSET_RE.search(tl))
+    has_scope = (
+        bool(re.search(r"\bmachines?\b|\ball\b|\bcabinets?\b|\begms?\b", tl))
+        or bool(_MACHINE_LINE_RE.search(t))
+        or bool(_ENV_WORD_RE.search(t))
+    )
+    if has_maint:
+        return has_verb or has_scope
+    return has_verb and has_scope
 
 
 def _parse_intent_rules(text: str, *, now: datetime) -> dict[str, Any] | None:
@@ -624,11 +811,11 @@ def _parse_intent_rules(text: str, *, now: datetime) -> dict[str, Any] | None:
     venue = ""
     note = ""
     if not machines:
-        all_group = parse_all_group(text)
-        if not all_group:
+        group = detect_group_target(text)
+        if not group:
             return None
-        env_code = all_group["env_code"]
-        venue = all_group["venue"]
+        env_code = group["env_code"]
+        venue = group["venue"]
         machines, note = resolve_all_group(env_code, venue)
         target_kind = "all_group"
     if not machines:
@@ -687,6 +874,72 @@ def parse_intent(text: str, *, now: datetime | None = None) -> dict[str, Any] | 
     return result
 
 
+def _classify_rules(text: str, *, now: datetime) -> dict[str, Any] | None:
+    """
+    Lightweight **routing** classification (no machine resolution) so detection still works even
+    when ``webmachine_data.json`` can't be read. Returns action / time / target_kind / env / venue.
+    """
+    if not _looks_like_maintenance_request(text):
+        return None
+    action = parse_action(text)
+    if not action:
+        return None
+    action_dt = parse_action_datetime(text, now=now)
+    machines = extract_machine_lines(text)
+    if machines:
+        return {
+            "action": action,
+            "action_dt": action_dt,
+            "target_kind": "list",
+            "env_code": "",
+            "venue": "",
+            "machines": machines,
+            "source": "rule",
+        }
+    group = detect_group_target(text)
+    if not group:
+        return None
+    return {
+        "action": action,
+        "action_dt": action_dt,
+        "target_kind": "all_group",
+        "env_code": (group.get("env_code") or "").strip().upper(),
+        "venue": group.get("venue") or "",
+        "machines": [],
+        "source": "rule",
+    }
+
+
+def _classify(text: str, *, now: datetime | None = None) -> dict[str, Any] | None:
+    """Routing classification: deterministic rules first, LLM only as a fallback (if enabled)."""
+    real_now = now or datetime.now()
+    c = _classify_rules(text, now=real_now)
+    if c:
+        return c
+    if _maint_llm_enabled():
+        intent = parse_intent(text, now=real_now)
+        if intent:
+            return {
+                "action": intent["action"],
+                "action_dt": intent.get("action_dt"),
+                "target_kind": intent.get("target_kind") or "list",
+                "env_code": (intent.get("env_code") or "").strip().upper(),
+                "venue": intent.get("venue") or "",
+                "machines": intent["machines"] if intent.get("target_kind") == "list" else [],
+                "source": "llm",
+            }
+    return None
+
+
+def _resolve_machines_for(c: dict[str, Any]) -> tuple[list[str], str]:
+    """Machines + note for a classification (explicit list as-is, or expand the group)."""
+    if c.get("machines"):
+        return list(c["machines"]), ""
+    if c.get("target_kind") == "all_group":
+        return resolve_all_group(c.get("env_code") or "", c.get("venue") or "")
+    return [], ""
+
+
 def parse_announcement(text: str, *, now: datetime | None = None) -> dict[str, Any] | None:
     """Scheduled maintenance request (has an action time). ``None`` otherwise."""
     intent = parse_intent(text, now=now)
@@ -698,39 +951,28 @@ def parse_announcement(text: str, *, now: datetime | None = None) -> dict[str, A
 def is_maintenance_schedule_message(original_text: str, mention_keys: Sequence[str]) -> bool:
     """True when the (mention-stripped) message is a *scheduled* maintenance announcement."""
     body = _strip_mentions(original_text, mention_keys)
-    return parse_announcement(body) is not None
-
-
-def parse_now_request(text: str, *, now: datetime | None = None) -> dict[str, Any] | None:
-    """
-    Parse an *immediate* (no date/time) maintenance request, expanding
-    ``ALL <ENV> MACHINES <Venue>`` to machine names from ``webmachine_data.json``.
-
-    Returns ``None`` when: not a maintenance request, a date/time is present (→ schedule instead),
-    the env can't be mapped to a backend site, or nothing resolved.
-    """
-    intent = parse_intent(text, now=now)
-    if not intent or intent.get("action_dt"):
-        return None  # has a time → schedule, not "do it now"
-    env_code = (intent.get("env_code") or "").strip().upper()
-    site = _ENV_SITE_ALIAS.get(env_code)
-    if not site:
-        return None  # ambiguous / multi-env list → leave to the prod-batch flow
-    return {
-        "action": intent["action"],
-        "action_label": intent["action_label"],
-        "env_code": env_code,
-        "site": site,
-        "venue": intent.get("venue") or "",
-        "machines": intent["machines"],
-        "note": intent.get("note") or "",
-    }
+    c = _classify(body)
+    if not c or c.get("action_dt") is None:
+        return False
+    if c["target_kind"] == "list":
+        return bool(c["machines"])
+    return bool(_ENV_SITE_ALIAS.get(c.get("env_code") or ""))
 
 
 def is_maintenance_now_message(original_text: str, mention_keys: Sequence[str]) -> bool:
-    """True when the message is an immediate ``set/unset … ALL <ENV> MACHINES <Venue>`` request."""
+    """
+    True for an immediate (no time) ``set/unset … ALL <ENV> MACHINES <Venue>`` request.
+
+    Owns the request even if 0 machines resolve, so the user gets a clear error instead of the
+    confusing prod-batch usage card. Explicit pasted lists are left to the prod-batch flow.
+    """
     body = _strip_mentions(original_text, mention_keys)
-    return parse_now_request(body) is not None
+    c = _classify(body)
+    if not c or c.get("action_dt") is not None:
+        return False
+    if c["target_kind"] != "all_group":
+        return False
+    return bool(_ENV_SITE_ALIAS.get(c.get("env_code") or ""))
 
 
 def handle_maintenance_now_message(
@@ -750,25 +992,44 @@ def handle_maintenance_now_message(
     import smmachine
 
     body = _strip_mentions(original_text, mention_keys)
-    parsed = parse_now_request(body)
-    if not parsed:
+    c = _classify(body)
+    if not c or c.get("action_dt") is not None or c.get("target_kind") != "all_group":
+        return False, None
+    env_code = (c.get("env_code") or "").strip().upper()
+    site = _ENV_SITE_ALIAS.get(env_code)
+    if not site:
         return False, None
 
-    machines: list[str] = parsed["machines"]
-    suffix = _ACTION_CMD_SUFFIX.get(parsed["action"])
+    action = c["action"]
+    label = ACTION_LABELS.get(action, action)
+    suffix = _ACTION_CMD_SUFFIX.get(action)
     if not suffix:
-        return True, f"❌ Unsupported action: {parsed['action']}"
+        return True, f"❌ Unsupported action: {action}"
 
-    venue_txt = f" {parsed['venue']}" if parsed.get("venue") else ""
+    venue = c.get("venue") or ""
+    machines, note = resolve_all_group(env_code, venue)
+    venue_txt = f" “{venue}”" if venue else ""
+    print(
+        f"[maintenanceagent] now-request {action} env={env_code} venue={venue!r} "
+        f"resolved={len(machines)} src={c.get('source')} data={_last_data_path or 'NOT FOUND'}",
+        flush=True,
+    )
+    if not machines:
+        return True, (
+            f"⚠️ I understood **{label}** for all **{env_code}**{venue_txt} machines, "
+            f"but found **0** matching machines in the machine list.\n{_data_path_hint()}\n"
+            f"(If the file is fine, the venue name may differ — try the exact game type, "
+            f"or paste the machine names.)"
+        )
+
     send_message(
         chat_id,
-        f"🔎 Found **{len(machines)}** {parsed['env_code']}{venue_txt} machine(s) from the "
-        f"machine list — checking live status for **{parsed['action_label']}**…"
-        + (f"\n{parsed['note']}" if parsed.get("note") else ""),
+        f"🔎 Found **{len(machines)}** {env_code}{venue_txt} machine(s) from the machine list "
+        f"— checking live status for **{label}**…" + (f"\n{note}" if note else ""),
     )
 
     # Hand off to the existing prod-batch pipeline by building its slash-command form.
-    cmd_text = f"/{parsed['site']}{suffix}\n" + "\n".join(machines)
+    cmd_text = f"/{site}{suffix}\n" + "\n".join(machines)
     handled, reply = smmachine.handle_prod_batch_bot_command(
         cmd_text,
         [],
@@ -825,13 +1086,40 @@ def handle_maintenance_schedule_message(
     import reminder
 
     body = _strip_mentions(original_text, mention_keys)
-    parsed = parse_announcement(body)
-    if not parsed:
+    now = datetime.now()
+    c = _classify(body, now=now)
+    if not c or c.get("action_dt") is None:
         return False, None
 
+    env_code = (c.get("env_code") or "").strip().upper()
+    if c["target_kind"] == "all_group" and not _ENV_SITE_ALIAS.get(env_code):
+        return False, None
+    machines, note = _resolve_machines_for(c)
+    action = c["action"]
+    label = ACTION_LABELS.get(action, action)
+    action_dt: datetime = c["action_dt"]
+    when_str_full = action_dt.strftime("%b %d, %Y %I:%M %p")
+    if not machines:
+        venue_txt = f" “{c.get('venue')}”" if c.get("venue") else ""
+        return True, (
+            f"⚠️ Understood a scheduled **{label}** for all **{env_code}**{venue_txt} machines at "
+            f"**{when_str_full}**, but found **0** matching machines. {_data_path_hint()}\n"
+            f"Nothing scheduled."
+        )
+    env_codes = sorted({e for e in (_env_from_machine_name(m) for m in machines) if e})
+    env_summary = "/".join(env_codes) if env_codes else (env_code or "?")
+    parsed = {
+        "action": action,
+        "action_label": label,
+        "action_dt": action_dt,
+        "reminder_dt": action_dt - timedelta(minutes=MAINT_LEAD_MINUTES),
+        "reason": parse_reason(body),
+        "machines": machines,
+        "env_summary": env_summary,
+        "note": note,
+    }
+
     reminder_dt: datetime = parsed["reminder_dt"]
-    action_dt: datetime = parsed["action_dt"]
-    now = datetime.now()
     when_str = action_dt.strftime("%b %d, %Y %I:%M %p")
     if action_dt <= now:
         return True, (
