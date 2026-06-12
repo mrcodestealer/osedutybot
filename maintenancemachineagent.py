@@ -444,10 +444,17 @@ def handle_maintenance_schedule_message(
     reminder_dt: datetime = parsed["reminder_dt"]
     action_dt: datetime = parsed["action_dt"]
     now = datetime.now()
+    when_str = action_dt.strftime("%b %d, %Y %I:%M %p")
+    if action_dt <= now:
+        return True, (
+            f"⚠️ The action time **{when_str}** is already in the past "
+            f"(now is {now.strftime('%b %d, %Y %I:%M %p')}). Nothing scheduled — "
+            f"if this still needs doing, set maintenance now, or re-send with a future date/time."
+        )
     if reminder_dt <= now:
         return True, (
-            f"⚠️ The action time {action_dt.strftime('%b %d, %Y %I:%M %p')} is too soon "
-            f"(reminder would be {MAINT_LEAD_MINUTES} min before, in the past). "
+            f"⚠️ The action time **{when_str}** is less than {MAINT_LEAD_MINUTES} min away, "
+            f"so the {MAINT_LEAD_MINUTES}-min-early reminder would land in the past. "
             f"Nothing scheduled — please set maintenance now if needed."
         )
 
