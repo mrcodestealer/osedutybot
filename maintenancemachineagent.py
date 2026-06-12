@@ -53,6 +53,28 @@ ACTION_LABELS: dict[str, str] = {
     "unset_both": "Unset maintenance and test",
 }
 
+# Action code → prod-batch slash-command suffix (e.g. set_both → "setmaintenancetest").
+_ACTION_CMD_SUFFIX: dict[str, str] = {
+    "set_maint": "setmaintenance",
+    "set_test": "settest",
+    "set_both": "setmaintenancetest",
+    "unset_maint": "unsetmaintenance",
+    "unset_test": "unsettest",
+    "unset_both": "unsetmaintenancetest",
+}
+
+# env_code → prod-batch site alias accepted by ``smmachine`` command regex.
+_ENV_SITE_ALIAS: dict[str, str] = {
+    "NWR": "nwr",
+    "NCH": "nch",
+    "TBR": "tbr",
+    "TBP": "tbp",
+    "MDR": "mdr",
+    "DHS": "dhs",
+    "CP": "cp",
+    "WF": "wf",
+}
+
 _MONTHS: dict[str, int] = {
     "jan": 1, "january": 1,
     "feb": 2, "february": 2,
@@ -391,6 +413,97 @@ def is_maintenance_schedule_message(original_text: str, mention_keys: Sequence[s
     """True when the (mention-stripped) message is a *scheduled* maintenance announcement."""
     body = _strip_mentions(original_text, mention_keys)
     return parse_announcement(body) is not None
+
+
+def parse_now_request(text: str) -> dict[str, Any] | None:
+    """
+    Parse an *immediate* (no date/time) ``set/unset maintenance/test ALL <ENV> MACHINES <Venue>``
+    request. The group phrase is expanded to machine names from ``webmachine_data.json``.
+
+    Returns ``None`` when: there is no action, a date/time is present (→ schedule instead),
+    an explicit machine list was pasted (→ existing prod-batch flow handles it), there is no
+    ``ALL <ENV> MACHINES <Venue>`` phrase, the env is unknown, or nothing resolved.
+    """
+    action = parse_action(text)
+    if not action:
+        return None
+    if parse_action_datetime(text) is not None:
+        return None  # has a time → it is a scheduled announcement, not "do it now"
+    if extract_machine_lines(text):
+        return None  # explicit list pasted → let the prod-batch flow handle it
+    all_group = parse_all_group(text)
+    if not all_group:
+        return None
+    env_code = (all_group.get("env_code") or "").strip().upper()
+    site = _ENV_SITE_ALIAS.get(env_code)
+    if not site:
+        return None
+    machines, note = resolve_all_group(env_code, all_group.get("venue") or "")
+    if not machines:
+        return None
+    return {
+        "action": action,
+        "action_label": ACTION_LABELS.get(action, action),
+        "env_code": env_code,
+        "site": site,
+        "venue": all_group.get("venue") or "",
+        "machines": machines,
+        "note": note,
+    }
+
+
+def is_maintenance_now_message(original_text: str, mention_keys: Sequence[str]) -> bool:
+    """True when the message is an immediate ``set/unset … ALL <ENV> MACHINES <Venue>`` request."""
+    body = _strip_mentions(original_text, mention_keys)
+    return parse_now_request(body) is not None
+
+
+def handle_maintenance_now_message(
+    original_text: str,
+    mention_keys: Sequence[str],
+    *,
+    chat_id: str,
+    send_message: Callable[..., Any],
+    thread_root_message_id: str | None = None,
+) -> tuple[bool, str | None]:
+    """
+    Expand ``ALL <ENV> MACHINES <Venue>`` to machine names (from ``webmachine_data.json``) and run
+    the existing prod-batch flow (live status check → confirm card → execute).
+
+    Returns ``(handled, optional_reply_text)``.
+    """
+    import smmachine
+
+    body = _strip_mentions(original_text, mention_keys)
+    parsed = parse_now_request(body)
+    if not parsed:
+        return False, None
+
+    machines: list[str] = parsed["machines"]
+    suffix = _ACTION_CMD_SUFFIX.get(parsed["action"])
+    if not suffix:
+        return True, f"❌ Unsupported action: {parsed['action']}"
+
+    venue_txt = f" {parsed['venue']}" if parsed.get("venue") else ""
+    send_message(
+        chat_id,
+        f"🔎 Found **{len(machines)}** {parsed['env_code']}{venue_txt} machine(s) from the "
+        f"machine list — checking live status for **{parsed['action_label']}**…"
+        + (f"\n{parsed['note']}" if parsed.get("note") else ""),
+    )
+
+    # Hand off to the existing prod-batch pipeline by building its slash-command form.
+    cmd_text = f"/{parsed['site']}{suffix}\n" + "\n".join(machines)
+    handled, reply = smmachine.handle_prod_batch_bot_command(
+        cmd_text,
+        [],
+        chat_id=chat_id,
+        send_message=send_message,
+        thread_root_message_id=thread_root_message_id,
+    )
+    if not handled:
+        return True, "❌ Could not start the maintenance job for the resolved machines."
+    return True, reply
 
 
 def build_reminder_reason(parsed: dict[str, Any]) -> str:

@@ -4348,6 +4348,36 @@ def lark_webhook():
             if maint_reply:
                 send_message(chat_id, maint_reply)
             return _lark_im_done()
+    elif maintenancemachineagent.is_maintenance_now_message(original_text, mention_keys):
+        # Immediate (no time) "set/unset … ALL <ENV> MACHINES <Venue>" — expand the group from
+        # webmachine_data.json, then run the existing prod-batch confirm/execute flow.
+        if chat_type == "group" and not bot_mentioned:
+            print("⏭️ maintenance group command ignored (bot not @mentioned in group)", flush=True)
+            return _lark_im_done()
+        if data.get("header", {}).get("event_type") == "im.message.receive_v1":
+            msg_obj = (data.get("event") or {}).get("message") or {}
+            thread_root = _prod_batch_thread_root_from_incoming_message(
+                msg_obj, message_id=message_id
+            )
+        else:
+            thread_root = (message_id or "").strip() or None
+        if thread_root:
+            _set_prod_batch_thread_root(chat_id, thread_root)
+        pb_send = make_prod_batch_thread_send(chat_id, thread_root=thread_root)
+        try:
+            handled_now, now_reply = maintenancemachineagent.handle_maintenance_now_message(
+                original_text,
+                mention_keys,
+                chat_id=chat_id,
+                send_message=pb_send,
+                thread_root_message_id=thread_root,
+            )
+        except Exception as _maint_now_err:
+            handled_now, now_reply = True, f"❌ Maintenance group command failed: {_maint_now_err}"
+        if handled_now:
+            if now_reply:
+                pb_send(chat_id, now_reply)
+            return _lark_im_done()
     elif smmachine.is_prod_batch_sm_command(original_text, mention_keys):
         if chat_type == "group" and not bot_mentioned:
             print("⏭️ /sm command ignored (bot not @mentioned in group)", flush=True)

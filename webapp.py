@@ -2239,6 +2239,36 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
     .ose-extra-offset .ose-extra-title { color: var(--night); }
     .ose-extra-line { color: #9fb0c9; margin-bottom: 0.16rem; word-break: break-word; }
     .ose-extra-line:last-child { margin-bottom: 0; }
+    .ose-count {
+      display: inline-flex; align-items: center; justify-content: center; min-width: 1.05rem; height: 1.05rem;
+      margin-left: 0.3rem; padding: 0 0.28rem; border-radius: 999px; font-size: 0.6rem; font-weight: 700;
+      background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.14);
+    }
+    .ose-away { margin-top: 0.1rem; padding-top: 0.42rem; border-top: 1px dashed rgba(124, 58, 237, 0.28); }
+    .ose-away-tags { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+    .ose-tag {
+      font: inherit; font-size: 0.62rem; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase;
+      padding: 0.22rem 0.48rem; border-radius: 999px; cursor: pointer; line-height: 1;
+      display: inline-flex; align-items: center; gap: 0.3rem; transition: filter .15s, box-shadow .15s;
+    }
+    .ose-tag::before { content: ""; width: 0.45rem; height: 0.45rem; border-radius: 50%; background: currentColor; opacity: 0.9; }
+    .ose-tag:hover { filter: brightness(1.18); }
+    .ose-tag-leave { color: var(--morn); background: rgba(232, 196, 104, 0.12); border: 1px solid rgba(232, 196, 104, 0.32); }
+    .ose-tag-offset { color: var(--night); background: rgba(158, 197, 247, 0.12); border: 1px solid rgba(158, 197, 247, 0.32); }
+    .ose-away.open .ose-tag { box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.25); }
+    .ose-away-detail { margin-top: 0.42rem; display: flex; flex-direction: column; gap: 0.45rem; max-height: 9rem; overflow-y: auto; }
+    .ose-away-detail::-webkit-scrollbar { width: 4px; }
+    .ose-away-detail::-webkit-scrollbar-thumb { background: rgba(124, 58, 237, 0.35); border-radius: 4px; }
+    .ose-detail-sec { display: flex; flex-direction: column; gap: 0.26rem; }
+    .ose-detail-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.3rem; font-size: 0.7rem; line-height: 1.35; }
+    .ose-detail-name { font-weight: 650; color: #e2e8f0; }
+    .ose-detail-type {
+      font-size: 0.58rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+      padding: 0.06rem 0.32rem; border-radius: 5px; background: rgba(232, 196, 104, 0.14); color: var(--morn);
+    }
+    .ose-detail-date { color: var(--muted); font-size: 0.66rem; }
+    .ose-detail-offset .ose-detail-line { color: #9fb0c9; }
+    .ose-detail-offset-line { word-break: break-word; }
     .ose-loading { text-align: center; color: var(--muted); padding: 2rem; font-size: 0.95rem; }
     .ose-submit-bar {
       display: flex; flex-wrap: wrap; gap: 0.55rem; margin-bottom: 1rem;
@@ -2399,48 +2429,93 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
       }
     }
 
+    function setBlockLabel(el, text, count) {
+      el.textContent = text;
+      if (count) {
+        var c = document.createElement("span");
+        c.className = "ose-count";
+        c.textContent = String(count);
+        el.appendChild(c);
+      }
+    }
+
     function appendLeaveAndOffset(box, cell) {
       var leaves = cell.leave || [];
       var offs = cell.offset || [];
       if (!leaves.length && !offs.length) return;
-      var wrap = document.createElement("div");
-      wrap.className = "ose-extra-wrap";
+
+      var away = document.createElement("div");
+      away.className = "ose-away";
+      var tags = document.createElement("div");
+      tags.className = "ose-away-tags";
+      var detail = document.createElement("div");
+      detail.className = "ose-away-detail";
+      detail.hidden = true;
+
+      function toggleDetail() {
+        var open = detail.hidden;
+        detail.hidden = !open;
+        away.classList.toggle("open", open);
+        tags.querySelectorAll(".ose-tag").forEach(function (b) {
+          b.setAttribute("aria-expanded", open ? "true" : "false");
+        });
+      }
+
       if (leaves.length) {
-        var sec = document.createElement("div");
-        sec.className = "ose-extra ose-extra-leave";
-        var h = document.createElement("div");
-        h.className = "ose-extra-title";
-        h.textContent = "Leave";
-        sec.appendChild(h);
+        var tL = document.createElement("button");
+        tL.type = "button";
+        tL.className = "ose-tag ose-tag-leave";
+        tL.textContent = "Leave " + leaves.length;
+        tL.setAttribute("aria-expanded", "false");
+        tL.addEventListener("click", toggleDetail);
+        tags.appendChild(tL);
+
+        var secL = document.createElement("div");
+        secL.className = "ose-detail-sec ose-detail-leave";
         for (var i = 0; i < leaves.length; i++) {
           var r = leaves[i];
           var line = document.createElement("div");
-          line.className = "ose-extra-line";
-          if (r.start === r.end) {
-            line.textContent = r.name + " (" + r.leave_type + ") — " + r.start;
-          } else {
-            line.textContent = r.name + " (" + r.leave_type + ") — " + r.start + " → " + r.end;
-          }
-          sec.appendChild(line);
+          line.className = "ose-detail-line";
+          var nm = document.createElement("span");
+          nm.className = "ose-detail-name";
+          nm.textContent = r.name;
+          line.appendChild(nm);
+          var ty = document.createElement("span");
+          ty.className = "ose-detail-type";
+          ty.textContent = r.leave_type || "Leave";
+          line.appendChild(ty);
+          var dt = document.createElement("span");
+          dt.className = "ose-detail-date";
+          dt.textContent = (r.start === r.end) ? r.start : (r.start + " → " + r.end);
+          line.appendChild(dt);
+          secL.appendChild(line);
         }
-        wrap.appendChild(sec);
+        detail.appendChild(secL);
       }
+
       if (offs.length) {
-        var sec2 = document.createElement("div");
-        sec2.className = "ose-extra ose-extra-offset";
-        var h2 = document.createElement("div");
-        h2.className = "ose-extra-title";
-        h2.textContent = "Offset";
-        sec2.appendChild(h2);
+        var tO = document.createElement("button");
+        tO.type = "button";
+        tO.className = "ose-tag ose-tag-offset";
+        tO.textContent = "Offset " + offs.length;
+        tO.setAttribute("aria-expanded", "false");
+        tO.addEventListener("click", toggleDetail);
+        tags.appendChild(tO);
+
+        var secO = document.createElement("div");
+        secO.className = "ose-detail-sec ose-detail-offset";
         for (var j = 0; j < offs.length; j++) {
           var line2 = document.createElement("div");
-          line2.className = "ose-extra-line";
+          line2.className = "ose-detail-line ose-detail-offset-line";
           line2.textContent = offs[j];
-          sec2.appendChild(line2);
+          secO.appendChild(line2);
         }
-        wrap.appendChild(sec2);
+        detail.appendChild(secO);
       }
-      box.appendChild(wrap);
+
+      away.appendChild(tags);
+      away.appendChild(detail);
+      box.appendChild(away);
     }
 
     function appendOseShifts(box, cell) {
@@ -2450,7 +2525,7 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
       bm.className = "ose-block ose-block-m";
       var lm = document.createElement("div");
       lm.className = "ose-block-label";
-      lm.textContent = "Morning";
+      setBlockLabel(lm, "Morning", (cell.morning || []).length);
       bm.appendChild(lm);
       var wm = document.createElement("div");
       wm.className = "ose-chip-wrap";
@@ -2461,7 +2536,7 @@ _ALL_DUTY_PAGE = """<!DOCTYPE html>
       bn.className = "ose-block ose-block-n";
       var ln = document.createElement("div");
       ln.className = "ose-block-label";
-      ln.textContent = "Night";
+      setBlockLabel(ln, "Night", (cell.night || []).length);
       bn.appendChild(ln);
       var wn = document.createElement("div");
       wn.className = "ose-chip-wrap";
