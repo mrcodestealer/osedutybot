@@ -3625,23 +3625,53 @@ def lark_webhook():
         return _lark_im_done()
 
     # Natural English → slash command (optional; BOT_USE_AI=1). Failures keep hardcoded-only behavior.
-    # Skip command mapping for obvious casual chat — chatagent/chitchat handle those instead.
+    # The router (chathandleagent) decides COMMAND vs CHAT so a real work request is never
+    # silently answered as small talk (and vice versa). Everything is guarded — on any
+    # error we fall back to the previous chitchat-gate behaviour.
     _skip_commandagent = False
+    _router_decision = None
     try:
-        import chitchat as _chitchat_gate
+        import chathandleagent as _router
 
-        if _chitchat_gate.looks_like_chitchat(clean_text):
+        _router_decision = _router.route(clean_text, bot_mentioned=bot_mentioned)
+        print(
+            f"🧭 Router: {clean_text!r} → {_router_decision.kind} "
+            f"(reason={_router_decision.reason}, cmd_conf={_router_decision.command_conf:.2f}, "
+            f"chat_conf={_router_decision.chat_conf:.2f})",
+            flush=True,
+        )
+        if _router_decision.is_chat:
             _skip_commandagent = True
-            print(f"💬 Chitchat gate: skip commandagent for {clean_text!r}", flush=True)
-    except Exception:
-        pass
+    except Exception as _router_err:
+        print(f"⚠️ Router skipped (fallback to chitchat gate): {_router_err!r}", flush=True)
+        try:
+            import chitchat as _chitchat_gate
+
+            if _chitchat_gate.looks_like_chitchat(clean_text):
+                _skip_commandagent = True
+                print(f"💬 Chitchat gate: skip commandagent for {clean_text!r}", flush=True)
+        except Exception:
+            pass
+
     if not _skip_commandagent:
         try:
             import commandagent as _commandagent
 
-            ai_command = _commandagent.translate_if_enabled(clean_text)
+            ai_command = None
+            # Router may have already produced the mapped command (e.g. prod-batch).
+            # Only adopt it when AI is enabled and it differs from the original text.
+            if (
+                _commandagent.is_enabled()
+                and _router_decision is not None
+                and getattr(_router_decision, "command", None)
+            ):
+                cand = _router_decision.command
+                if cand and cand != clean_text:
+                    ai_command = cand
+            if not ai_command:
+                ai_command = _commandagent.translate_if_enabled(clean_text)
             if ai_command:
-                print(f"🤖 Command agent map: {clean_text!r} → {ai_command!r}", flush=True)
+                print(f"🤖 Command agent map: {clean_text!r} → {ai_command.splitlines()[0]!r}", flush=True)
                 clean_text = ai_command
         except Exception as _commandagent_err:
             print(f"⚠️ Command agent skipped (bot continues without AI): {_commandagent_err!r}", flush=True)
@@ -4295,7 +4325,14 @@ def lark_webhook():
             if sm_reply:
                 pb_send(chat_id, sm_reply)
             return _lark_im_done()
-    elif smmachine.is_prod_batch_bot_message(original_text, mention_keys):
+    elif smmachine.is_prod_batch_bot_message(original_text, mention_keys) or smmachine.is_prod_batch_bot_message(clean_text, []):
+        # ``clean_text`` may be the AI-mapped form (e.g. "i want nwr set maintenance …"
+        # → "/nwrsetmaintenance …"). Use whichever text actually parses, so natural
+        # language reaches the real prod-batch pipeline instead of falling to /s or /nwr.
+        if smmachine.is_prod_batch_bot_message(original_text, mention_keys):
+            _pb_text, _pb_mentions = original_text, mention_keys
+        else:
+            _pb_text, _pb_mentions = clean_text, []
         if chat_type == "group" and not bot_mentioned:
             print("⏭️ prod-batch command ignored (bot not @mentioned in group)", flush=True)
             return _lark_im_done()
@@ -4310,8 +4347,8 @@ def lark_webhook():
             _set_prod_batch_thread_root(chat_id, thread_root)
         pb_send = make_prod_batch_thread_send(chat_id, thread_root=thread_root)
         handled_pb, pb_reply = smmachine.handle_prod_batch_bot_command(
-            original_text,
-            mention_keys,
+            _pb_text,
+            _pb_mentions,
             chat_id=chat_id,
             send_message=pb_send,
             thread_root_message_id=thread_root,
@@ -4952,6 +4989,12 @@ def _run_main_entry() -> int:
             _boot_chatagent.startup_status()
         except Exception as _boot_chatagent_err:
             print(f"[chatagent] startup check skipped: {_boot_chatagent_err!r}", flush=True)
+        try:
+            import chathandleagent as _boot_router
+
+            _boot_router.startup_status()
+        except Exception as _boot_router_err:
+            print(f"[chathandleagent] startup check skipped: {_boot_router_err!r}", flush=True)
         print(
             "[lark] Listening http://0.0.0.0:%d (threaded=True). "
             "Feishu Request URL must be HTTPS and reachable from the internet; reverse-proxy to this port."

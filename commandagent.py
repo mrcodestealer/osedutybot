@@ -282,7 +282,7 @@ _NONE_PATTERNS = (
     "bye", "goodbye", "see you", "see ya", "good night", "talk later",
     "lol", "haha", "nice", "cool", "awesome", "great", "ok", "okay", "got it", "sure",
     "i'm bored", "i'm tired", "happy friday", "have a good weekend", "lunch time",
-    "who are you", "what can you do", "are you a bot", "tell me a joke",
+    "who are you", "are you a bot", "tell me a joke",
     "what's the weather", "is it going to rain", "i love you bot", "you're the best",
     "let's chat", "just saying hi", "random question", "nothing much",
     "what do you think", "do you sleep", "are you human", "good job",
@@ -616,9 +616,13 @@ def build_intent_catalog(*, jenkins_available: bool = True) -> list[IntentSpec]:
             "disable maintenance and test on {s}", "clear both {s}",
         ),
     }
+    # Only a few representative sites are needed for *pattern shape*: the actual
+    # site/op/what is re-derived from the message by detect_prod_batch_command,
+    # so we keep the dataset small (and CPU training fast).
+    _pb_pattern_sites = ("nwr", "nch", "winford")
     for _action, _tmpls in _PB_ACTION_TEMPLATES.items():
         pats: list[str] = []
-        for site in _PB_SITE_DISPLAY:
+        for site in _pb_pattern_sites:
             for t in _tmpls:
                 pats.append(t.format(s=site))
             pats.append(f"/{('wf' if site == 'winford' else site)}{_action}")
@@ -628,7 +632,7 @@ def build_intent_catalog(*, jenkins_available: bool = True) -> list[IntentSpec]:
             IntentSpec(
                 tag=f"cmd_pb_{_action}",
                 command="/SETMAINTENANCE",  # sentinel, replaced at resolve time
-                patterns=_augment_human(pats, max_prefixes=5, max_suffixes=2),
+                patterns=_augment_human(pats, max_prefixes=4, max_suffixes=1),
                 arg_kind="prod_batch",
             )
         )
