@@ -39,6 +39,7 @@ import os
 import re
 import sys
 import csv
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
@@ -669,6 +670,54 @@ def _primary_calendars_batch(token: str, open_ids: list[str]) -> dict[str, dict[
     return out
 
 
+class CalendarFetchError(Exception):
+    """
+    Raised when a Lark calendar API call **fails** (network error, non-zero API code,
+    bad token, rate limit) — as opposed to succeeding with zero events.
+
+    This distinction is critical for the sync: a genuine "0 events this month" is safe
+    to act on, but a failed fetch must NOT be treated as "everyone came back from leave"
+    (which would silently skip the sync, or worse, wipe the tracking table on a month
+    rollover). Sync callers catch this and abort cleanly so the next run can retry.
+    """
+
+
+# Retry transient calendar fetch failures before giving up (each interval run also retries).
+_CAL_FETCH_RETRIES = int(os.getenv("LEAVE_WFH_CAL_FETCH_RETRIES", "3"))
+_CAL_FETCH_RETRY_SLEEP = float(os.getenv("LEAVE_WFH_CAL_FETCH_RETRY_SLEEP", "2"))
+
+
+def _calendar_get_json(url: str, *, headers=None, params=None, json_body=None, method: str = "get") -> dict[str, Any]:
+    """
+    Single Lark calendar request with retries. Raises :class:`CalendarFetchError` when the
+    request keeps failing (network error or API ``code != 0``) so callers can tell a hard
+    failure apart from an empty-but-successful response.
+    """
+    last_err: Optional[str] = None
+    for attempt in range(1, _CAL_FETCH_RETRIES + 1):
+        try:
+            if method == "post":
+                resp = requests.post(url, headers=headers, params=params, json=json_body, timeout=90)
+            else:
+                resp = requests.get(url, headers=headers, params=params, timeout=90)
+            res = resp.json()
+        except Exception as exc:
+            last_err = f"network error: {exc!r}"
+            res = None
+        if res is not None:
+            code = res.get("code")
+            if code == 0:
+                return res
+            last_err = f"API code={code} msg={res.get('msg')!r}"
+            debug_print("calendar fetch error:", res)
+            # Permission / not-found style errors won't fix themselves on retry — fail fast.
+            if isinstance(code, int) and code not in (0,) and attempt >= 1 and code >= 190000:
+                pass  # still retry a couple times: rate limits live in this range too
+        if attempt < _CAL_FETCH_RETRIES:
+            time.sleep(_CAL_FETCH_RETRY_SLEEP * attempt)
+    raise CalendarFetchError(f"{url}: {last_err or 'unknown error'}")
+
+
 def _calendar_events_for_month(
     token: str,
     calendar_id: str,
@@ -677,6 +726,13 @@ def _calendar_events_for_month(
     *,
     page_size: int = 100,
 ) -> list[dict[str, Any]]:
+    """
+    All events for ``calendar_id`` in the given month.
+
+    Raises :class:`CalendarFetchError` on a hard API/network failure (so the sync can
+    abort instead of mistaking a failed fetch for "no one is on leave"). A successful
+    call with no events simply returns ``[]``.
+    """
     start_ts, end_ts = _month_unix_range(year, month)
     url = f"{_open_api_base()}/calendar/v4/calendars/{calendar_id}/events"
     items: list[dict[str, Any]] = []
@@ -689,15 +745,12 @@ def _calendar_events_for_month(
         }
         if page_token:
             params["page_token"] = page_token
-        res = requests.get(
+        res = _calendar_get_json(
             url,
             headers={"Authorization": f"Bearer {token}"},
             params=params,
-            timeout=90,
-        ).json()
-        if res.get("code") != 0:
-            debug_print("events list error:", res)
-            break
+            method="get",
+        )
         data = res.get("data") or {}
         items.extend(data.get("items") or [])
         if not data.get("has_more"):
@@ -724,14 +777,12 @@ def _resolve_company_leave_calendar_id(token: str) -> tuple[str, str]:
     if cid:
         return cid, title
     url = f"{_open_api_base()}/calendar/v4/calendars/search"
-    res = requests.post(
+    res = _calendar_get_json(
         url,
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        json={"query": title},
-        timeout=30,
-    ).json()
-    if res.get("code") != 0:
-        return "", title
+        json_body={"query": title},
+        method="post",
+    )
     for item in (res.get("data") or {}).get("items") or []:
         cal = item.get("calendar") or item
         summary = str(cal.get("summary") or "").strip()
@@ -824,14 +875,12 @@ def _resolve_wfh_calendar_id(token: str) -> tuple[str, str]:
     if cid:
         return cid, title
     url = f"{_open_api_base()}/calendar/v4/calendars/search"
-    res = requests.post(
+    res = _calendar_get_json(
         url,
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        json={"query": title},
-        timeout=30,
-    ).json()
-    if res.get("code") != 0:
-        return "", title
+        json_body={"query": title},
+        method="post",
+    )
     for item in (res.get("data") or {}).get("items") or []:
         cal = item.get("calendar") or item
         summary = str(cal.get("summary") or "").strip()
@@ -939,7 +988,19 @@ def get_wfh_calendar(year: int, month: int) -> dict[str, Any]:
     if month < 1 or month > 12:
         raise ValueError("month must be 1–12")
     token = get_tenant_access_token()
-    rows, warnings = fetch_wfh_from_company_calendar(token, year, month)
+    try:
+        rows, warnings = fetch_wfh_from_company_calendar(token, year, month)
+    except CalendarFetchError as exc:
+        return {
+            "ok": False,
+            "year": year,
+            "month": month,
+            "days": {},
+            "total_records": 0,
+            "wfh_rows": 0,
+            "warnings": [f"WFH calendar fetch failed: {exc}"],
+            "error": str(exc),
+        }
     days, _ = _rows_to_calendar_days(rows, year, month)
     return {
         "ok": True,
@@ -975,7 +1036,21 @@ def sync_wfh_calendar_to_bitable(
     state = _load_sync_state(WFH_SYNC_STATE_FILE)
     month_changed = state.get("year") != year or state.get("month") != month
 
-    source_rows, warnings = fetch_wfh_from_company_calendar(token, year, month)
+    try:
+        source_rows, warnings = fetch_wfh_from_company_calendar(token, year, month)
+    except CalendarFetchError as exc:
+        # Hard fetch failure — do NOT modify the table (a transient error must not look like
+        # "everyone returned from WFH", nor wipe the table on a month rollover). Retry next run.
+        return {
+            "ok": False,
+            "skipped": True,
+            "fetch_failed": True,
+            "year": year,
+            "month": month,
+            "month_changed": month_changed,
+            "message": f"WFH calendar fetch failed; table left unchanged: {exc}",
+            "warnings": [f"WFH calendar fetch failed: {exc}"],
+        }
     if not source_rows and not month_changed and not force_resync:
         return {
             "ok": False,
@@ -1099,7 +1174,12 @@ def fetch_leave_from_lark_calendar(
         roster_name = name_by_oid.get(oid) or od._title_name(meta.get("calendar_name", ""))
         if not roster_name:
             continue
-        for ev in _calendar_events_for_month(token, meta["calendar_id"], year, month):
+        try:
+            user_events = _calendar_events_for_month(token, meta["calendar_id"], year, month)
+        except CalendarFetchError as exc:
+            warnings.append(f"Skipped {roster_name}: calendar fetch failed ({exc}).")
+            continue
+        for ev in user_events:
             if not _is_lark_leave_event(ev):
                 continue
             start_d, end_d = _event_date_range(ev)
@@ -1617,9 +1697,29 @@ def sync_leave_calendar_to_bitable(
     month_changed = prev_year != year or prev_month != month
 
     open_map = resolve_roster_open_ids(token)
-    source_rows, meta = collect_leave_source_rows(
-        token, year, month, include_bitable=False
-    )
+    try:
+        source_rows, meta = collect_leave_source_rows(
+            token, year, month, include_bitable=False
+        )
+    except CalendarFetchError as exc:
+        # Hard fetch failure on the HRMS leave calendar — leave the table untouched and let
+        # the next scheduled run retry, rather than silently skipping or wiping the month.
+        target_label = "OSE leaveose" if ose_only else "leave (all staff)"
+        return {
+            "ok": False,
+            "skipped": True,
+            "fetch_failed": True,
+            "year": year,
+            "month": month,
+            "month_changed": month_changed,
+            "deleted": 0,
+            "created": 0,
+            "added": 0,
+            "annual_leave_rows": 0,
+            "source_rows": 0,
+            "warnings": [f"HRMS leave calendar fetch failed: {exc}"],
+            "message": f"HRMS leave calendar fetch failed; {target_label} table left unchanged: {exc}",
+        }
     company_hrms_rows = int(meta.get("company_leave_calendar_rows") or 0)
     if ose_only:
         import duty_list_match as dlm

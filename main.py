@@ -1872,6 +1872,14 @@ def ose_leave_wfh_calendar_sync():
             ("leave_all", leave_all_res),
             ("wfh", wfh_res),
         ):
+            if res.get("fetch_failed"):
+                print(
+                    f"[Leave/WFH sync] ⚠️ {label} FETCH FAILED — table left unchanged, "
+                    f"will retry next run: {res.get('message') or res.get('warnings')}",
+                    flush=True,
+                )
+            elif res.get("skipped"):
+                print(f"[Leave/WFH sync] {label} skipped: {res.get('message')}", flush=True)
             for w in res.get("warnings") or []:
                 print(f"[Leave/WFH sync] {label} warning: {w}", flush=True)
             for err in res.get("create_errors") or []:

@@ -59,6 +59,8 @@ class StrategyParams:
     atr_pct_lo: float = 0.25
     atr_pct_hi: float = 0.80
     long_only: bool = True
+    vote_k: int = 2  # ensemble: min number of agreeing base strategies
+    risk_frac: float = 0.0  # >0 => size each trade to risk this fraction of equity (vol parity)
 
 
 # Set after all-market OOS selection
@@ -434,6 +436,39 @@ STRATEGIES: dict[str, Callable[[pd.DataFrame, StrategyParams], tuple[pd.Series, 
     "mr_extreme": sig_mr_extreme,
 }
 
+# Base strategies that vote in the ensemble (everything except the ensemble itself).
+ENSEMBLE_BASE = tuple(STRATEGIES.keys())
+
+
+def sig_ensemble(df: pd.DataFrame, p: StrategyParams) -> tuple[pd.Series, pd.Series]:
+    """
+    Combine ALL base strategies via directional voting.
+
+    Each base strategy casts a long and/or short vote per bar. We enter long when
+    at least `vote_k` strategies vote long AND longs strictly outnumber shorts
+    (and vice-versa for shorts). Higher vote_k => fewer, higher-conviction trades
+    (higher Sharpe); lower vote_k => more trades. Only ~3 tuned params overall,
+    so overfitting risk stays low while combining every edge in the book.
+    """
+    n = len(df)
+    long_votes = np.zeros(n, dtype=np.int16)
+    short_votes = np.zeros(n, dtype=np.int16)
+    for name in ENSEMBLE_BASE:
+        ls, ss = STRATEGIES[name](df, p)
+        long_votes += ls.fillna(False).to_numpy().astype(np.int16)
+        short_votes += ss.fillna(False).to_numpy().astype(np.int16)
+
+    k = max(1, int(p.vote_k))
+    long_arr = (long_votes >= k) & (long_votes > short_votes)
+    short_arr = (short_votes >= k) & (short_votes > long_votes)
+    return (
+        pd.Series(long_arr, index=df.index),
+        pd.Series(short_arr, index=df.index),
+    )
+
+
+STRATEGIES["ensemble"] = sig_ensemble
+
 
 def build_signals(df: pd.DataFrame, p: StrategyParams) -> np.ndarray:
     fn = STRATEGIES[p.strategy]
@@ -580,7 +615,14 @@ def run_backtest(
             i += 1
             continue
 
-        lots = BASE_LOT
+        # Risk-based sizing: keep $ risk ≈ constant fraction of equity across all
+        # vol regimes (critical for Sharpe on a 20yr span where gold ATR grows ~20x).
+        if p.risk_frac and p.risk_frac > 0.0:
+            sl_dist = atr_v * p.atr_mult_sl
+            raw = (p.risk_frac * equity) / (sl_dist * CONTRACT_SIZE) if sl_dist > 0 else 0.0
+            lots = float(min(MAX_LOT, max(1e-4, raw)))
+        else:
+            lots = BASE_LOT
         dirc: Literal["long", "short"] = "long" if s > 0 else "short"
         entry = float(row["close"]) + (SPREAD / 2 if dirc == "long" else -SPREAD / 2)
         chunks, ei = simulate_trade(data, dirc, i, entry, lots, atr_v, p)
@@ -731,6 +773,12 @@ def param_combos(only: frozenset[str] | None = None) -> list[StrategyParams]:
             "vol_z": [1.0, 1.5, 2.0],
             "rsi_entry": [32, 38],
             "cooldown_bars": [2, 3, 4],
+            "long_only": [False],
+        },
+        "ensemble": {
+            "vote_k": [2, 3, 4, 5],
+            "atr_mult_sl": [1.5, 2.0, 2.5],
+            "cooldown_bars": [1, 2, 3],
             "long_only": [False],
         },
     }
@@ -901,6 +949,181 @@ def search_allmarket(bars: pd.DataFrame, folds: list[tuple], dev_end: pd.Timesta
             f"posYears={b.pct_positive_years*100:.0f}% OOS chained={b.chained_oos_return_pct:+.1f}%"
         )
     return results
+
+
+def evaluate_ensemble(
+    folds: list[tuple], bars: pd.DataFrame, p: StrategyParams, dev_end: pd.Timestamp, min_tpm: float
+) -> OOSMetrics | None:
+    """Score ensemble configs for high *robust* Sharpe with time-stability (anti-overfit)."""
+    m = evaluate_oos_loose(folds, bars, p)
+    if m is None or m.mean_tpm < min_tpm:
+        return None
+    ysh, yret = yearly_performance(bars, p, dev_end)
+    if len(ysh) < 8:
+        return None
+    min_ysh = float(np.min(ysh))
+    pct_pos_y = float(np.mean([x > 0 for x in yret]))
+    # Sharpe-first score; reward time stability, penalise frequency starvation lightly.
+    m.min_yearly_sharpe = min_ysh
+    m.pct_positive_years = pct_pos_y
+    m.allmarket_score = (
+        0.50 * m.robust_sharpe
+        + 0.25 * min_ysh
+        + 0.20 * pct_pos_y
+        + 0.05 * (1.0 if m.chained_oos_return_pct > 0 else -1.0)
+    )
+    return m
+
+
+def search_ensemble(
+    bars: pd.DataFrame, folds: list[tuple], dev_end: pd.Timestamp, min_tpm: float
+) -> list[OOSMetrics]:
+    combos = param_combos(only=frozenset({"ensemble"}))
+    log(f"Ensemble search: {len(combos)} vote/SL/cooldown configs combining {len(ENSEMBLE_BASE)} strategies")
+    log(f"  Filter: ≥{min_tpm:.0f} tpm | ≥8 evaluable years | maximise robust OOS Sharpe + time stability")
+    results: list[OOSMetrics] = []
+    for n, p in enumerate(combos, 1):
+        m = evaluate_ensemble(folds, bars, p, dev_end, min_tpm)
+        if m:
+            results.append(m)
+        log(
+            f"  [{n:>2}/{len(combos)}] vote_k={p.vote_k} sl={p.atr_mult_sl} cd={p.cooldown_bars} "
+            + (
+                f"-> robustSh={m.robust_sharpe:+.2f} tpm={m.mean_tpm:.1f} minYSh={m.min_yearly_sharpe:+.2f} "
+                f"posY={m.pct_positive_years*100:.0f}% score={m.allmarket_score:.3f}"
+                if m
+                else "-> rejected (tpm/years filter)"
+            )
+        )
+    results.sort(key=lambda x: x.allmarket_score, reverse=True)
+    log(f"Ensemble qualified: {len(results)}/{len(combos)}")
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Portfolio combine: run each strategy as a sleeve, equal-weight the return
+# streams. Diversification across low-correlation sleeves raises Sharpe and
+# smooths drawdown; equal weighting (no fitted weights) keeps it anti-overfit.
+# ---------------------------------------------------------------------------
+TRADING_DAYS = 252.0
+
+
+def _sharpe(rets: pd.Series) -> float:
+    if rets is None or len(rets) < 2 or rets.std() == 0:
+        return 0.0
+    return float(rets.mean() / rets.std() * np.sqrt(TRADING_DAYS))
+
+
+def sleeve_daily_returns(bars: pd.DataFrame, p: StrategyParams, start, end) -> pd.Series | None:
+    """Daily return series of a single strategy sleeve over [start, end]."""
+    r = run_backtest(bars, p, start, end)
+    if len(r.equity_curve) < 3 or len(r.trades) == 0:
+        return None
+    return r.equity_curve.pct_change().fillna(0.0)
+
+
+def portfolio_daily_returns(bars: pd.DataFrame, sleeves: list[StrategyParams], start, end) -> pd.Series | None:
+    """Equal-weight (daily-rebalanced) portfolio of sleeve return streams."""
+    cols = []
+    for p in sleeves:
+        dr = sleeve_daily_returns(bars, p, start, end)
+        if dr is not None:
+            cols.append(dr)
+    if not cols:
+        return None
+    mat = pd.concat(cols, axis=1).fillna(0.0)
+    return mat.mean(axis=1)
+
+
+def portfolio_metrics(bars: pd.DataFrame, sleeves: list[StrategyParams], start, end) -> dict:
+    rets = portfolio_daily_returns(bars, sleeves, start, end)
+    if rets is None or len(rets) < 2:
+        return {"sharpe": 0.0, "return_pct": 0.0, "max_dd_pct": 0.0, "trades": 0, "tpm": 0.0}
+    eq = (1 + rets).cumprod()
+    peak = eq.cummax()
+    max_dd = float(((eq - peak) / peak).min() * 100)
+    total_trades = 0
+    for p in sleeves:
+        r = run_backtest(bars, p, start, end)
+        total_trades += len(r.trades)
+    months = max((pd.Timestamp(end) - pd.Timestamp(start)).days / 30.44, 1e-9)
+    return {
+        "sharpe": _sharpe(rets),
+        "return_pct": float((eq.iloc[-1] - 1) * 100),
+        "max_dd_pct": max_dd,
+        "trades": total_trades,
+        "tpm": total_trades / months,
+    }
+
+
+@dataclass
+class SleeveOOS:
+    params: StrategyParams
+    fold_sharpes: list[float]
+    mean_sharpe: float
+    robust_sharpe: float
+    mean_tpm: float
+    pct_pos_years: float
+    min_year_sharpe: float
+
+
+def evaluate_sleeve_oos(folds: list[tuple], bars: pd.DataFrame, p: StrategyParams, dev_end: pd.Timestamp) -> SleeveOOS | None:
+    """Robustness of one sleeve across WF OOS folds + yearly stability (no unseen)."""
+    sig = build_signals(bars, p)
+    fold_sh, tpms = [], []
+    for _, _, _, te0, te1 in folds:
+        mask = (bars.index >= te0) & (bars.index <= te1)
+        r = run_backtest(bars, p, te0, te1, sigs=sig[mask])
+        fold_sh.append(r.sharpe)
+        tpms.append(r.trades_per_month)
+    if not fold_sh:
+        return None
+    ysh, yret = yearly_performance(bars, p, dev_end)
+    if len(ysh) < 6:
+        return None
+    return SleeveOOS(
+        params=p,
+        fold_sharpes=fold_sh,
+        mean_sharpe=float(np.mean(fold_sh)),
+        robust_sharpe=float(np.mean(fold_sh) - 0.5 * np.std(fold_sh)),
+        mean_tpm=float(np.mean(tpms)),
+        pct_pos_years=float(np.mean([x > 0 for x in yret])),
+        min_year_sharpe=float(np.min(ysh)),
+    )
+
+
+def best_config_per_strategy(
+    bars: pd.DataFrame, folds: list[tuple], dev_end: pd.Timestamp, risk_frac: float, tune: bool
+) -> dict[str, SleeveOOS]:
+    """For each base strategy, pick the most robust (WF-OOS) config as its sleeve."""
+    best: dict[str, SleeveOOS] = {}
+    if tune:
+        combos = [p for p in param_combos() if p.strategy != "ensemble"]
+        groups: dict[str, list[StrategyParams]] = {}
+        for p in combos:
+            groups.setdefault(p.strategy, []).append(p)
+    else:
+        groups = {
+            s: [StrategyParams(strategy=s, long_only=False)]
+            for s in STRATEGIES
+            if s != "ensemble"
+        }
+    for strat, plist in groups.items():
+        cand: SleeveOOS | None = None
+        for p in plist:
+            p = StrategyParams(**{**vars(p), "risk_frac": risk_frac})
+            m = evaluate_sleeve_oos(folds, bars, p, dev_end)
+            if m is None:
+                continue
+            if cand is None or m.robust_sharpe > cand.robust_sharpe:
+                cand = m
+        if cand is not None:
+            best[strat] = cand
+            log(
+                f"  sleeve {strat:16s} robustSh={cand.robust_sharpe:+.2f} meanSh={cand.mean_sharpe:+.2f} "
+                f"tpm={cand.mean_tpm:5.1f} posY={cand.pct_pos_years*100:3.0f}% minYSh={cand.min_year_sharpe:+.2f}"
+            )
+    return best
 
 
 def chain_oos_return(folds: list[tuple], bars: pd.DataFrame, p: StrategyParams) -> float:
@@ -1187,8 +1410,50 @@ def main() -> None:
         action="store_true",
         help="Search custom quant strategies for OOS stable profit (default if no other mode)",
     )
+    parser.add_argument(
+        "--ensemble",
+        action="store_true",
+        help="Combine ALL strategies via voting; tune vote_k/SL/cooldown for high robust Sharpe",
+    )
+    parser.add_argument(
+        "--portfolio",
+        action="store_true",
+        help="Combine strategies as an equal-weight PORTFOLIO of OOS-validated sleeves (recommended)",
+    )
+    parser.add_argument(
+        "--tune-sleeves",
+        action="store_true",
+        help="Portfolio: tune each sleeve's params on WF-OOS (slower) instead of defaults",
+    )
+    parser.add_argument(
+        "--risk-frac",
+        type=float,
+        default=0.01,
+        help="Per-trade risk as fraction of equity (volatility-parity sizing). Default 0.01",
+    )
+    parser.add_argument(
+        "--max-sleeves",
+        type=int,
+        default=8,
+        help="Portfolio: max number of sleeves to combine (more = more trades, less concentration)",
+    )
+    parser.add_argument(
+        "--min-pos-years",
+        type=float,
+        default=0.50,
+        help="Portfolio: min fraction of profitable calendar years to include a sleeve "
+             "(lower => more sleeves => more trades/week, slightly lower Sharpe). Default 0.50",
+    )
+    parser.add_argument(
+        "--min-tpm",
+        type=float,
+        default=float(MIN_TRADES_PER_MONTH),
+        help="Minimum trades/month target for ensemble selection (more trades/week)",
+    )
     args = parser.parse_args()
-    stable_mode = args.stable_search or (not args.legacy_winners and not args.full_report)
+    stable_mode = args.stable_search or (
+        not args.legacy_winners and not args.full_report and not args.ensemble and not args.portfolio
+    )
 
     csv_path = resolve_csv(args.csv)
     unseen_start = pd.Timestamp(args.unseen_start)
@@ -1210,6 +1475,161 @@ def main() -> None:
     log(f"\nDevelopment + WF: {bars.index[0].date()} → {dev_end.date()} ({len(folds)} OOS folds)")
     log(f"UNSEEN (eval once): {unseen_start.date()} → {unseen_end.date()}")
     log(f"Requirements: ≥{MIN_TRADES_PER_MONTH} tpm | trailing SL + 50% @ 2R | 0.002 lots | ${INITIAL_CAPITAL:.0f}")
+
+    if args.portfolio:
+        log("\n" + "#" * 76)
+        log("PORTFOLIO COMBINE — every strategy as a sleeve, equal-weight the survivors")
+        log("#" * 76)
+        log(f"  Risk sizing: {args.risk_frac:.1%}/trade (vol parity) | sleeve tuning: {args.tune_sleeves} | max sleeves: {args.max_sleeves}")
+        log("  Step 1 — score each sleeve on WF-OOS folds + yearly stability (no unseen used):")
+        sleeves = best_config_per_strategy(bars, folds, dev_end, args.risk_frac, args.tune_sleeves)
+        if not sleeves:
+            raise RuntimeError("No sleeves evaluable.")
+
+        # Selection (anti-overfit): positive MEAN OOS fold Sharpe + edge that holds
+        # across the majority of calendar YEARS (years are far less noisy than the
+        # 6-month WF folds). Rank by a stability-weighted score, equal-weight winners.
+        def sleeve_score(s: SleeveOOS) -> float:
+            return s.mean_sharpe + 0.6 * (s.pct_pos_years - 0.5)
+
+        qualified = [
+            s for s in sleeves.values()
+            if s.mean_sharpe > 0 and s.pct_pos_years >= args.min_pos_years and s.mean_tpm >= 1.0
+        ]
+        qualified.sort(key=sleeve_score, reverse=True)
+        if not qualified:
+            log("  ⚠ No sleeve passed mean-Sharpe+yearly filter; falling back to positive-mean-Sharpe sleeves.")
+            qualified = sorted(
+                [s for s in sleeves.values() if s.mean_sharpe > 0],
+                key=sleeve_score, reverse=True,
+            )
+        if not qualified:
+            raise RuntimeError("No sleeve had positive mean OOS Sharpe — no tradeable edge found.")
+
+        selected = qualified[: args.max_sleeves]
+        sel_params = [s.params for s in selected]
+        log(f"\n  Selected {len(selected)} sleeves (by mean OOS Sharpe + yearly stability):")
+        for s in selected:
+            log(f"    • {s.params.strategy:16s} meanOOSsh={s.mean_sharpe:+.2f} tpm={s.mean_tpm:.1f} "
+                f"posY={s.pct_pos_years*100:.0f}% sl/cd={s.params.atr_mult_sl}/{s.params.cooldown_bars}")
+
+        # Portfolio metrics: per-fold OOS (robust), dev (in-sample), unseen (true test).
+        log("\n  Step 2 — combined portfolio performance:")
+        fold_sh = []
+        for _, _, _, te0, te1 in folds:
+            rets = portfolio_daily_returns(bars, sel_params, te0, te1)
+            if rets is not None:
+                fold_sh.append(_sharpe(rets))
+        oos_mean = float(np.mean(fold_sh)) if fold_sh else 0.0
+        oos_robust = float(np.mean(fold_sh) - 0.5 * np.std(fold_sh)) if fold_sh else 0.0
+        oos_pos = float(np.mean([s > 0 for s in fold_sh])) if fold_sh else 0.0
+
+        dev_m = portfolio_metrics(bars, sel_params, bars.index[0], dev_end)
+        uns_m = portfolio_metrics(bars, sel_params, unseen_start, unseen_end)
+
+        log("\n" + "=" * 76)
+        log("PORTFOLIO RESULTS")
+        log("=" * 76)
+        log(f"WF-OOS folds   : mean Sharpe {oos_mean:+.2f} | robust {oos_robust:+.2f} | "
+            f"Sharpe>0 {sum(s>0 for s in fold_sh)}/{len(fold_sh)} folds")
+        log(f"Development    : Sharpe {dev_m['sharpe']:+.2f} | ret {dev_m['return_pct']:+.1f}% | "
+            f"DD {dev_m['max_dd_pct']:.1f}% | {dev_m['trades']} trades | tpm {dev_m['tpm']:.1f}")
+        log(f"UNSEEN 2025    : Sharpe {uns_m['sharpe']:+.2f} | ret {uns_m['return_pct']:+.1f}% | "
+            f"DD {uns_m['max_dd_pct']:.1f}% | {uns_m['trades']} trades | tpm {uns_m['tpm']:.1f}")
+        log(f"Trades/week    : dev {dev_m['tpm']/4.345:.1f} | unseen {uns_m['tpm']/4.345:.1f}")
+        log("\nAnti-overfit read:")
+        log(f"  • dev−OOS Sharpe gap = {dev_m['sharpe']-oos_mean:+.2f} (small = robust, not curve-fit)")
+        log(f"  • {oos_pos*100:.0f}% of OOS folds positive | sleeves equal-weighted (no fitted weights)")
+        log(f"  • unseen 2025 never touched during selection")
+        log("\nDial trades/week vs Sharpe:")
+        log("  • More trades  : --min-pos-years 0.45 --max-sleeves 10   (more sleeves)")
+        log("  • Higher Sharpe: --min-pos-years 0.55 --max-sleeves 4    (only the most stable)")
+        log("  • Lower drawdown: --risk-frac 0.005                       (smaller positions)")
+
+        out = Path(__file__).resolve().parent
+        pd.DataFrame([
+            {
+                "strategy": s.params.strategy,
+                "params": str(s.params),
+                "oos_robust_sharpe": s.robust_sharpe,
+                "oos_mean_sharpe": s.mean_sharpe,
+                "mean_tpm": s.mean_tpm,
+                "pct_pos_years": s.pct_pos_years,
+                "min_year_sharpe": s.min_year_sharpe,
+                "selected": s in selected,
+            }
+            for s in sorted(sleeves.values(), key=lambda x: x.robust_sharpe, reverse=True)
+        ]).to_csv(out / "portfolio_sleeves.csv", index=False)
+        pd.DataFrame([{
+            "n_sleeves": len(selected),
+            "sleeves": ",".join(s.params.strategy for s in selected),
+            "risk_frac": args.risk_frac,
+            "oos_mean_sharpe": oos_mean,
+            "oos_robust_sharpe": oos_robust,
+            "oos_pct_pos_folds": oos_pos,
+            "dev_sharpe": dev_m["sharpe"],
+            "dev_return_pct": dev_m["return_pct"],
+            "dev_max_dd_pct": dev_m["max_dd_pct"],
+            "dev_tpm": dev_m["tpm"],
+            "unseen_sharpe": uns_m["sharpe"],
+            "unseen_return_pct": uns_m["return_pct"],
+            "unseen_max_dd_pct": uns_m["max_dd_pct"],
+            "unseen_tpm": uns_m["tpm"],
+            "unseen_trades": uns_m["trades"],
+        }]).to_csv(out / "portfolio_summary.csv", index=False)
+        log("\nSaved: portfolio_sleeves.csv, portfolio_summary.csv")
+        return
+
+    if args.ensemble:
+        ranked = search_ensemble(bars, folds, dev_end, args.min_tpm)
+        if not ranked:
+            log(f"\n⚠ No ensemble config met ≥{args.min_tpm:.0f} tpm. Relaxing tpm to 5 and re-scoring...")
+            ranked = search_ensemble(bars, folds, dev_end, 5.0)
+        if not ranked:
+            raise RuntimeError("Ensemble produced no evaluable configs.")
+
+        winner = ranked[0]
+        p = winner.params
+        log("\n" + "#" * 76)
+        log(f"ENSEMBLE WINNER — {len(ENSEMBLE_BASE)} strategies combined by majority vote (OOS-selected)")
+        log("#" * 76)
+        log(f"  vote_k={p.vote_k} | atr_mult_sl={p.atr_mult_sl} | cooldown_bars={p.cooldown_bars} | long_only={p.long_only}")
+        log(f"  score={winner.allmarket_score:.3f} | robustSh={winner.robust_sharpe:+.2f} | "
+            f"minYearSh={winner.min_yearly_sharpe:+.2f} | posYears={winner.pct_positive_years*100:.0f}% | tpm={winner.mean_tpm:.1f}")
+        if len(ranked) > 1:
+            log("\nTop ensemble configs (OOS):")
+            for i, m in enumerate(ranked[:8], 1):
+                log(
+                    f"  {i}. vote_k={m.params.vote_k} sl={m.params.atr_mult_sl} cd={m.params.cooldown_bars} | "
+                    f"robustSh={m.robust_sharpe:+.2f} minYSh={m.min_yearly_sharpe:+.2f} "
+                    f"posY={m.pct_positive_years*100:.0f}% tpm={m.mean_tpm:.1f} chained={m.chained_oos_return_pct:+.1f}%"
+                )
+
+        dev = run_backtest(bars, p, bars.index[0], dev_end)
+        unseen = run_backtest(bars, p, unseen_start, unseen_end)
+        print_block("ENSEMBLE WINNER", dev, unseen, winner)
+
+        gap = dev.sharpe - winner.mean_sharpe
+        log("\nAnti-overfit checks (selection used OOS only; unseen untouched until now):")
+        log(f"  • OOS mean Sharpe (WF folds)     : {winner.mean_sharpe:+.2f}")
+        log(f"  • Dev (in-sample) Sharpe         : {dev.sharpe:+.2f}  (dev−OOS gap {gap:+.2f}; small gap = robust)")
+        log(f"  • UNSEEN 2025 Sharpe (true test) : {unseen.sharpe:+.2f} | ret {unseen.total_return_pct:+.1f}% | tpm {unseen.trades_per_month:.1f}")
+        log(f"  • Trades/week (unseen)           : {unseen.trades_per_month/4.345:.1f}")
+
+        out = Path(__file__).resolve().parent
+        row = _summary_row("ensemble", winner, dev, unseen)
+        row["ensemble_score"] = winner.allmarket_score
+        row["vote_k"] = p.vote_k
+        pd.DataFrame([row]).to_csv(out / "strategy_comparison.csv", index=False)
+        pd.DataFrame([
+            {**{"rank": i + 1, "params": str(m.params)}, **{k: getattr(m, k) for k in vars(m) if k != "params"}}
+            for i, m in enumerate(ranked[:30])
+        ]).to_csv(out / "oos_all_qualified.csv", index=False)
+        pd.DataFrame([vars(t) for t in unseen.trades]).to_csv(out / "backtest_trades.csv", index=False)
+        log("\nSaved: strategy_comparison.csv, oos_all_qualified.csv, backtest_trades.csv")
+        log(f"\nTo run a full per-year/fold report on this winner:")
+        log(f"  set DEFAULT_STRATEGY vote_k/sl/cooldown, then: python {Path(__file__).name} --full-report")
+        return
 
     if stable_mode and not args.legacy_winners:
         stable = search_stable_profit(bars, folds, dev_end)
