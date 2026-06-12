@@ -126,6 +126,13 @@ REMINDER_FIELD_WHEN_READ_KEYS = ("when", "When")
 _WHEN_LABEL_DEFAULT = "Every day"
 _SHEET_JOB_PREFIX = "sheet_daily_reminder::"
 
+# Maintenance / stress-test reminders (created by ``maintenancemachineagent``) start their
+# Reason text with this marker. ``sync_sheet_daily_reminders`` then fires a richer card with a
+# "I have set maintenance" confirm button instead of the plain reminder card.
+MAINT_REMINDER_MARKER = "🧪 Stress Test"
+# Card-callback key for the confirm button on a maintenance reminder card.
+MAINT_REMINDER_CONFIRM_KEY = "maint_done"
+
 # Canonical tokens for ``When`` matching (multi-select on Bitable + form).
 _WHEN_TOKEN_DAILY = "DAILY"
 _WHEN_TOKEN_MONTHLY = "MONTHLY"
@@ -691,6 +698,82 @@ def _send_daily_sheet_reminder(
     send_func(chat_id, json.dumps(card), msg_type="interactive")
 
 
+def _reason_is_maintenance(reason: str) -> bool:
+    """True when a reminder row was created by ``maintenancemachineagent`` (rich confirm card)."""
+    return str(reason or "").lstrip().startswith(MAINT_REMINDER_MARKER)
+
+
+def _send_maintenance_sheet_reminder(
+    send_func,
+    *,
+    chat_id: str,
+    target_user_id: str,
+    row: dict,
+) -> None:
+    """
+    Fire a stress-test maintenance reminder: shows the action + machine list (stored in
+    ``Reason``) and a confirm button so the duty staff can acknowledge once maintenance is set.
+
+    Date-gated exactly like :func:`_send_daily_sheet_reminder` (``One time`` → only on Start date).
+    """
+    today = date.today()
+    if not (row["start_date"] <= today <= row["end_date"]):
+        return
+    wt = row.get("when_tokens")
+    if not isinstance(wt, frozenset):
+        wt = frozenset({_WHEN_TOKEN_ONCE})
+    if not when_matches_schedule(wt, today, row_start_date=row["start_date"]):
+        return
+    mention_id = _resolve_sheet_reminder_mention_id(target_user_id)
+    at_line = (f"{lark_card_at_open_id(mention_id)}\n\n" if mention_id else "")
+    rid = str(row.get("id") or "").strip()
+    confirm_btn = _reminder_v2_callback_button(
+        "✅ I have set maintenance",
+        {"k": MAINT_REMINDER_CONFIRM_KEY, "id": rid},
+        btn_type="primary",
+        element_id=f"maintdone_{rid}"[:20],
+    )
+    card = {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "orange",
+            "title": {"tag": "plain_text", "content": "🧪 Stress Test — Set Maintenance Reminder"},
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": f"{at_line}{row['reason']}"},
+                },
+                {"tag": "hr"},
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": "After you have **set maintenance & test** on the EGM backend, tap to confirm:",
+                    },
+                },
+                {
+                    "tag": "column_set",
+                    "flex_mode": "flow",
+                    "horizontal_spacing": "8px",
+                    "columns": [
+                        {
+                            "tag": "column",
+                            "width": "auto",
+                            "weight": 1,
+                            "vertical_align": "top",
+                            "elements": [confirm_btn],
+                        }
+                    ],
+                },
+            ]
+        },
+    }
+    send_func(chat_id, json.dumps(card), msg_type="interactive")
+
+
 def sync_sheet_daily_reminders(
     *,
     scheduler,
@@ -715,8 +798,13 @@ def sync_sheet_daily_reminders(
     for row in rows:
         hh, mm = _time_to_hour_minute(row["time"])
         jid = f"{_SHEET_JOB_PREFIX}{row['record_id']}"
+        send_job = (
+            _send_maintenance_sheet_reminder
+            if _reason_is_maintenance(row.get("reason"))
+            else _send_daily_sheet_reminder
+        )
         scheduler.add_job(
-            func=_send_daily_sheet_reminder,
+            func=send_job,
             trigger="cron",
             hour=hh,
             minute=mm,

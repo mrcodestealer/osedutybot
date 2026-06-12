@@ -1,16 +1,35 @@
-import MetaTrader5 as mt5
-import pandas as pd
-from datetime import datetime
-import time
-import logging
-import json
+"""
+gold.py — LIVE / PAPER trading of the PORTFOLIO strategy (matches backtest.py).
+
+Combines 4 OOS-validated sleeves as independent positions, each gated by a daily
+SMA(50) trend filter and sized by volatility-parity risk (1% equity/trade):
+
+    consensus_trend, allweather, keltner_pullback, donchian_break
+
+Signals are imported directly from backtest.py (build_tf_bars + build_signals) so
+live behaviour is identical to the backtest. Each sleeve trades at most one position
+at a time, tagged with its own MT5 magic number. Exits: 50% partial @ 2R, trailing
+stop, and a 72-hour time stop — same as the backtest engine.
+
+Account is an OANDA DEMO (paper). Set ENABLE_TRADING=False for signal-only dry runs.
+"""
+
 import os
 import sys
+import json
+import time
+import logging
+from datetime import datetime
 
-STRATEGY_NAME = "allweather"
-STRATEGY_VERSION = "2.0"
+import pandas as pd
+import MetaTrader5 as mt5
 
-# ----------------------------- 配置 (allweather — 与 backtest.py 一致) -----------------------------
+import backtest as bt  # reuse the exact signal/feature code
+
+STRATEGY_NAME = "portfolio"
+STRATEGY_VERSION = "3.0"
+
+# ----------------------------- MT5 connection -----------------------------
 def _default_mt5_path() -> str | None:
     env = os.environ.get("MT5_TERMINAL_PATH")
     if env and os.path.isfile(env):
@@ -23,7 +42,7 @@ def _default_mt5_path() -> str | None:
         ):
             if os.path.isfile(p):
                 return p
-        return None  # Windows: auto-detect installed terminal
+        return None
     return (
         r"/Users/junchen/Library/Application Support/net.metaquotes.wine.metatrader5"
         r"/drive_c/Program Files/MetaTrader 5/terminal64.exe"
@@ -36,32 +55,52 @@ login = 1715532098
 password = "Jcsiah0318--=="
 
 SYMBOL = "XAUUSD.sml"
-VOLUME = 0.002
 
-# allweather 冠军参数
-ATR_PERIOD = 14
-ATR_MULTIPLIER_SL = 2.5
+# ----------------------------- Portfolio config (== backtest winner) -----------------------------
+RISK_FRAC = 0.01          # 1% equity risk per trade (vol parity)
+TREND_SMA = 50            # daily SMA trend gate (highest-Sharpe preset)
+CONTRACT_SIZE_FALLBACK = 100.0
+MAX_LOT_CAP = bt.MAX_LOT  # 0.05 hard cap (also clamped to broker max)
+
+# Shared exit params (all 4 sleeves use backtest defaults)
+ATR_MULTIPLIER_SL = 2.0
 PARTIAL_R = 2.0
 TRAIL_ATR_FRAC = 0.10
-COOLDOWN_BARS = 2          # 1H K 线根数
-DONCHIAN = 15
-RSI_ENTRY = 35
-ADX_THRESH = 18
-EMA_FAST = 20
-EMA_SLOW = 50
+TIME_STOP_BARS = 72       # close after 72 x 1H bars (== backtest)
 
-TRADE_START_HOUR = 7       # 与 backtest SESSION 一致
-TRADE_END_HOUR = 21
+# Session gate is applied inside build_signals (server-time bar hour 7..21).
+TRADE_START_HOUR = bt.SESSION_START_H
+TRADE_END_HOUR = bt.SESSION_END_H
 
-ORDER_DETAILS_FILE = "order_detailsGold.json"
-STATE_FILE = "allweather_state.json"
+BARS_5M = 30000           # ~104 calendar days of 5m (enough for SMA50 + atr_pct warmup)
 
-logging.basicConfig(filename='strategy_logGold.log', level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
+# The 4 selected sleeves (high-Sharpe preset). Defaults => atr_sl=2.0, cooldown=6, partial=2R.
+SLEEVE_NAMES = ["consensus_trend", "allweather", "keltner_pullback", "donchian_break"]
+SLEEVES: dict[str, bt.StrategyParams] = {
+    name: bt.StrategyParams(
+        strategy=name, long_only=False, risk_frac=RISK_FRAC, trend_sma_days=TREND_SMA,
+        atr_mult_sl=ATR_MULTIPLIER_SL, partial_r=PARTIAL_R, trail_atr_frac=TRAIL_ATR_FRAC,
+    )
+    for name in SLEEVE_NAMES
+}
+BASE_MAGIC = 540000
+MAGIC = {name: BASE_MAGIC + i for i, name in enumerate(SLEEVE_NAMES)}
+MAGIC_TO_SLEEVE = {v: k for k, v in MAGIC.items()}
+
+ENABLE_TRADING = True     # False => signal-only dry run (no orders sent)
+STATE_FILE = "portfolio_state.json"
+
+logging.basicConfig(filename="strategy_logGold.log", level=logging.INFO,
+                    format="%(asctime)s - %(levelname)s - %(message)s")
 
 
-# ----------------------------- MT5 基础 -----------------------------
-def initialize_mt5():
+def log(msg: str) -> None:
+    print(msg, flush=True)
+    logging.info(msg)
+
+
+# ----------------------------- MT5 helpers -----------------------------
+def initialize_mt5() -> bool:
     ok = mt5.initialize(MT5_TERMINAL_PATH) if MT5_TERMINAL_PATH else mt5.initialize()
     if not ok:
         print("Failed to initialize MetaTrader 5")
@@ -70,8 +109,7 @@ def initialize_mt5():
         print("  Set env MT5_TERMINAL_PATH to terminal64.exe or install MT5")
         mt5.shutdown()
         return False
-    authorized = mt5.login(login, password, server)
-    if not authorized:
+    if not mt5.login(login, password, server):
         print(f"Failed to login: {mt5.last_error()}")
         mt5.shutdown()
         return False
@@ -79,503 +117,306 @@ def initialize_mt5():
     return True
 
 
-def get_rates(symbol, timeframe, bars=300):
+def get_rates(symbol: str, timeframe, bars: int) -> pd.DataFrame | None:
     rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, bars)
     if rates is None or len(rates) == 0:
-        print(f"Failed to get rates for {symbol} {timeframe}")
+        print(f"Failed to get rates for {symbol}")
         return None
     df = pd.DataFrame(rates)
-    df['time'] = pd.to_datetime(df['time'], unit='s')
-    df.set_index('time', inplace=True)
+    df["time"] = pd.to_datetime(df["time"], unit="s")
+    df.set_index("time", inplace=True)
     return df
 
 
-# ----------------------------- 指标 -----------------------------
-def calculate_ema(series, period):
-    return series.ewm(span=period, adjust=False).mean()
+def contract_size() -> float:
+    info = mt5.symbol_info(SYMBOL)
+    cs = getattr(info, "trade_contract_size", None) if info else None
+    return float(cs) if cs else CONTRACT_SIZE_FALLBACK
 
 
-def calculate_atr(df, period=ATR_PERIOD):
-    high, low, close = df['high'], df['low'], df['close']
-    tr = pd.concat([
-        high - low,
-        (high - close.shift()).abs(),
-        (low - close.shift()).abs(),
-    ], axis=1).max(axis=1)
-    return tr.rolling(window=period).mean()
+def account_equity() -> float:
+    acct = mt5.account_info()
+    return float(acct.equity) if acct else bt.INITIAL_CAPITAL
 
 
-def calculate_rsi(close, period=14):
-    d = close.diff()
-    g = d.clip(lower=0).rolling(period).mean()
-    l = (-d.clip(upper=0)).rolling(period).mean()
-    return 100 - (100 / (1 + g / l.replace(0, pd.NA)))
+def compute_lots(sl_dist: float) -> float:
+    """Volatility-parity sizing clamped to the broker's lot limits."""
+    info = mt5.symbol_info(SYMBOL)
+    equity = account_equity()
+    cs = contract_size()
+    raw = (RISK_FRAC * equity) / (sl_dist * cs) if sl_dist > 0 else 0.0
+    vmin = getattr(info, "volume_min", 0.01) if info else 0.01
+    vmax = min(getattr(info, "volume_max", MAX_LOT_CAP) if info else MAX_LOT_CAP, MAX_LOT_CAP)
+    vstep = getattr(info, "volume_step", 0.01) if info else 0.01
+    lots = max(vmin, min(vmax, raw))
+    lots = round(round(lots / vstep) * vstep, 3)
+    implied_risk = lots * sl_dist * cs
+    if raw < vmin:
+        log(f"  ⚠ risk-target lots {raw:.5f} < broker min {vmin}. Using {lots} "
+            f"=> trade risks ~${implied_risk:.2f} ({implied_risk/equity*100:.1f}% of equity). "
+            f"Account too small for true 1% sizing.")
+    return lots
 
 
-def calculate_adx(df, period=14):
-    h, l = df['high'], df['low']
-    c_prev = df['close'].shift()
-    tr = pd.concat([(h - l), (h - c_prev).abs(), (l - c_prev).abs()], axis=1).max(axis=1)
-    up, dn = h - h.shift(), l.shift() - l
-    plus_dm = pd.Series(
-        [u if u > d and u > 0 else 0.0 for u, d in zip(up, dn)], index=df.index
-    )
-    minus_dm = pd.Series(
-        [d if d > u and d > 0 else 0.0 for u, d in zip(up, dn)], index=df.index
-    )
-    atr_v = tr.rolling(period).mean().replace(0, pd.NA)
-    plus_di = 100 * plus_dm.rolling(period).mean() / atr_v
-    minus_di = 100 * minus_dm.rolling(period).mean() / atr_v
-    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, pd.NA)
-    return dx.rolling(period).mean()
-
-
-def add_allweather_indicators(df):
-    out = df.copy()
-    out['atr'] = calculate_atr(out)
-    out['ema_f'] = calculate_ema(out['close'], EMA_FAST)
-    out['ema_s'] = calculate_ema(out['close'], EMA_SLOW)
-    out['rsi'] = calculate_rsi(out['close'])
-    out['adx'] = calculate_adx(out)
-    bb_m = out['close'].rolling(20).mean()
-    bb_s = out['close'].rolling(20).std()
-    out['bb_upper'] = bb_m + 2 * bb_s
-    out['bb_lower'] = bb_m - 2 * bb_s
-    out['don_hi'] = out['high'].rolling(DONCHIAN).max().shift(1)
-    out['don_lo'] = out['low'].rolling(DONCHIAN).min().shift(1)
-    return out
-
-
-def eval_allweather_signal(df_1h, df_4h):
-    """
-    在最后一根已收盘 1H K 线上评估 allweather 信号。
-    返回: 'buy' | 'sell' | None
-    """
-    h1 = df_1h.iloc[:-1].copy()
-    h4 = df_4h.iloc[:-1].copy()
-    if len(h1) < max(DONCHIAN + 5, 50) or len(h4) < EMA_SLOW + 5:
-        return None, {}
-
-    h1 = add_allweather_indicators(h1)
-    row = h1.iloc[-1]
-    prev = h1.iloc[-2]
-
-    ema_f_4h = calculate_ema(h4['close'], EMA_FAST).iloc[-1]
-    ema_s_4h = calculate_ema(h4['close'], EMA_SLOW).iloc[-1]
-    bull4 = ema_f_4h > ema_s_4h
-    bear4 = ema_f_4h < ema_s_4h
-
-    trending = row['adx'] >= ADX_THRESH
-    ranging = not trending
-
-    brk_up = row['close'] > row['don_hi']
-    brk_dn = row['close'] < row['don_lo']
-    long_trend = brk_up and (bull4 or trending)
-    short_trend = brk_dn and (bear4 or trending)
-
-    rsi_x_up = (prev['rsi'] < RSI_ENTRY) and (row['rsi'] > RSI_ENTRY)
-    rsi_x_dn = (prev['rsi'] > 100 - RSI_ENTRY) and (row['rsi'] < 100 - RSI_ENTRY)
-    long_range = ranging and (row['close'] <= row['bb_lower']) and rsi_x_up
-    short_range = ranging and (row['close'] >= row['bb_upper']) and rsi_x_dn
-
-    long_sig = bool(long_trend or long_range)
-    short_sig = bool(short_trend or short_range)
-
-    info = {
-        'bar_time': h1.index[-1],
-        'close': float(row['close']),
-        'adx': float(row['adx']),
-        'rsi': float(row['rsi']),
-        'mode': 'trend' if trending else 'range',
-        'long_trend': long_trend,
-        'short_trend': short_trend,
-        'long_range': long_range,
-        'short_range': short_range,
-        'bull4': bull4,
-        'bear4': bear4,
-    }
-
-    if long_sig and not short_sig:
-        return 'buy', info
-    if short_sig and not long_sig:
-        return 'sell', info
-    return None, info
-
-
-def check_trading_time():
-    hour = datetime.now().hour
-    return TRADE_START_HOUR <= hour < TRADE_END_HOUR
-
-
-# ----------------------------- 状态持久化 -----------------------------
-def load_order_details():
-    if not os.path.exists(ORDER_DETAILS_FILE):
+# ----------------------------- Signals (reuse backtest) -----------------------------
+def build_closed_bars() -> pd.DataFrame | None:
+    """5m -> 1H feature frame (identical to backtest), dropping the forming bar."""
+    df5 = get_rates(SYMBOL, mt5.TIMEFRAME_M5, BARS_5M)
+    if df5 is None or len(df5) < 5000:
         return None
-    try:
-        with open(ORDER_DETAILS_FILE, 'r') as f:
-            return json.load(f)
-    except Exception as e:
-        logging.error(f"Failed to load order details: {e}")
+    for c in ("open", "high", "low", "close", "tick_volume"):
+        if c not in df5.columns:
+            return None
+    bars = bt.build_tf_bars(df5)["1h"]
+    if len(bars) < 60:
         return None
+    return bars.iloc[:-1]  # drop the still-forming 1H bar
 
 
-def save_order_details(details):
-    try:
-        with open(ORDER_DETAILS_FILE, 'w') as f:
-            json.dump(details, f, indent=4)
-    except Exception as e:
-        logging.error(f"Failed to save order details: {e}")
+def eval_signal(bars_closed: pd.DataFrame, p: bt.StrategyParams) -> str | None:
+    sig = bt.build_signals(bars_closed, p)
+    s = int(sig[-1])
+    return "buy" if s > 0 else "sell" if s < 0 else None
 
 
-def remove_order_details():
-    try:
-        if os.path.exists(ORDER_DETAILS_FILE):
-            os.remove(ORDER_DETAILS_FILE)
-    except Exception as e:
-        logging.error(f"Failed to remove order details: {e}")
+def session_ok(bars_closed: pd.DataFrame) -> bool:
+    h = int(bars_closed.index[-1].hour)
+    return TRADE_START_HOUR <= h < TRADE_END_HOUR
 
 
-def load_state():
+# ----------------------------- State -----------------------------
+def load_state() -> dict:
     if not os.path.exists(STATE_FILE):
-        return {}
+        return {"orders": {}, "last_bar": {}}
     try:
-        with open(STATE_FILE, 'r') as f:
-            return json.load(f)
+        with open(STATE_FILE) as f:
+            st = json.load(f)
+            st.setdefault("orders", {})
+            st.setdefault("last_bar", {})
+            return st
     except Exception:
-        return {}
+        return {"orders": {}, "last_bar": {}}
 
 
-def save_state(state):
+def save_state(state: dict) -> None:
     try:
-        with open(STATE_FILE, 'w') as f:
-            json.dump(state, f, indent=4)
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2, default=str)
     except Exception as e:
-        logging.error(f"Failed to save state: {e}")
+        logging.error(f"save_state failed: {e}")
 
 
-def cooldown_ok(last_trade_bar_time, current_bar_time):
-    if not last_trade_bar_time:
-        return True
-    try:
-        last = pd.Timestamp(last_trade_bar_time)
-        cur = pd.Timestamp(current_bar_time)
-        hours = (cur - last).total_seconds() / 3600
-        return hours > COOLDOWN_BARS
-    except Exception:
-        return True
-
-
-# ----------------------------- 下单与风控 -----------------------------
-def place_order(direction, sl_price, tp_price):
+# ----------------------------- Orders -----------------------------
+def place_order(direction: str, lots: float, sl: float, tp: float, magic: int, comment: str):
     tick = mt5.symbol_info_tick(SYMBOL)
     if tick is None:
-        print("Failed to get tick")
         return None
-    order_type = mt5.ORDER_TYPE_BUY if direction == 'buy' else mt5.ORDER_TYPE_SELL
-    price = tick.ask if direction == 'buy' else tick.bid
+    price = tick.ask if direction == "buy" else tick.bid
     request = {
         "action": mt5.TRADE_ACTION_DEAL,
         "symbol": SYMBOL,
-        "volume": VOLUME,
-        "type": order_type,
+        "volume": lots,
+        "type": mt5.ORDER_TYPE_BUY if direction == "buy" else mt5.ORDER_TYPE_SELL,
         "price": price,
-        "sl": sl_price,
-        "tp": tp_price,
-        "deviation": 10,
-        "magic": 123456,
-        "comment": "AllWeather",
+        "sl": sl,
+        "tp": tp,
+        "deviation": 20,
+        "magic": magic,
+        "comment": comment,
         "type_time": mt5.ORDER_TIME_GTC,
         "type_filling": mt5.ORDER_FILLING_FOK,
     }
     result = mt5.order_send(request)
-    if result.retcode != mt5.TRADE_RETCODE_DONE:
-        print(f"Order failed: {result.comment}")
-        logging.error(f"Order failed: {result.comment}")
+    if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+        msg = result.comment if result else mt5.last_error()
+        log(f"  Order FAILED [{comment}]: {msg}")
         return None
-    print(f"Order placed: {direction} {VOLUME} at {price}, SL={sl_price}")
-    logging.info(f"Order placed: {direction} {VOLUME} at {price}, SL={sl_price}")
+    log(f"  ORDER {direction.upper()} {lots} {SYMBOL} @ {price:.2f} SL={sl:.2f} magic={magic} [{comment}]")
     return result.order
 
 
-def modify_order(ticket, new_sl):
-    position = mt5.positions_get(ticket=ticket)
-    if not position:
+def modify_sl(ticket: int, new_sl: float) -> bool:
+    pos = mt5.positions_get(ticket=ticket)
+    if not pos:
         return False
-    pos = position[0]
-    request = {
-        "action": mt5.TRADE_ACTION_SLTP,
-        "position": ticket,
-        "sl": new_sl,
-        "tp": pos.tp,
-        "symbol": pos.symbol,
-        "deviation": 10,
-        "magic": 123456,
-        "comment": "AllWeather trailing",
-    }
-    result = mt5.order_send(request)
-    if result.retcode != mt5.TRADE_RETCODE_DONE:
-        print(f"Failed to modify SL: {result.comment}")
-        return False
-    print(f"Trailing stop updated to {new_sl} for ticket {ticket}")
-    return True
+    p = pos[0]
+    result = mt5.order_send({
+        "action": mt5.TRADE_ACTION_SLTP, "position": ticket,
+        "sl": new_sl, "tp": p.tp, "symbol": p.symbol,
+        "deviation": 20, "magic": p.magic,
+    })
+    return result is not None and result.retcode == mt5.TRADE_RETCODE_DONE
 
 
-def close_partial_and_move_stop(ticket, entry_price, atr_fixed, initial_sl_points,
-                                partial_closed, direction, order_details_path):
-    if partial_closed:
-        return partial_closed, True
-
-    position = mt5.positions_get(ticket=ticket)
-    if not position:
-        return partial_closed, False
-    pos = position[0]
+def close_volume(pos, lots: float, comment: str) -> bool:
     tick = mt5.symbol_info_tick(pos.symbol)
     if tick is None:
-        return partial_closed, False
+        return False
+    is_buy = pos.type == mt5.ORDER_TYPE_BUY
+    result = mt5.order_send({
+        "action": mt5.TRADE_ACTION_DEAL, "symbol": pos.symbol, "volume": lots,
+        "type": mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
+        "position": pos.ticket, "price": tick.bid if is_buy else tick.ask,
+        "deviation": 20, "magic": pos.magic, "comment": comment,
+        "type_time": mt5.ORDER_TIME_GTC, "type_filling": mt5.ORDER_FILLING_FOK,
+    })
+    return result is not None and result.retcode == mt5.TRADE_RETCODE_DONE
 
-    is_buy = direction == 'buy'
-    current_price = tick.bid if is_buy else tick.ask
-    profit_points = (current_price - entry_price) if is_buy else (entry_price - current_price)
 
-    if profit_points < PARTIAL_R * initial_sl_points:
-        return partial_closed, False
+# ----------------------------- Position management (== backtest exits) -----------------------------
+def manage_position(name: str, od: dict, pos, df_5m: pd.DataFrame, bars_closed: pd.DataFrame) -> None:
+    tick = mt5.symbol_info_tick(SYMBOL)
+    if tick is None:
+        return
+    is_buy = od["direction"] == "buy"
+    entry = od["entry_price"]
+    atr_fixed = od["atr_fixed"]
+    sl_dist = od["initial_sl_points"]
+    cur = tick.bid if is_buy else tick.ask
+    profit = (cur - entry) if is_buy else (entry - cur)
+    r = profit / sl_dist if sl_dist else 0.0
 
-    half_vol = round(pos.volume / 2, 3)
-    if half_vol <= 0:
-        return partial_closed, False
-
-    order_type = mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY
-    close_price = tick.bid if is_buy else tick.ask
-    request = {
-        "action": mt5.TRADE_ACTION_DEAL,
-        "symbol": pos.symbol,
-        "volume": half_vol,
-        "type": order_type,
-        "position": ticket,
-        "price": close_price,
-        "deviation": 10,
-        "magic": 123456,
-        "comment": "AllWeather partial 2R",
-        "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_FOK,
-    }
-    result = mt5.order_send(request)
-    if result.retcode != mt5.TRADE_RETCODE_DONE:
-        print(f"Partial close failed: {result.comment}")
-        return partial_closed, False
-
-    print(f"Partially closed {half_vol} at {close_price}")
-    logging.info(f"Partially closed {half_vol} at {close_price} for ticket {ticket}")
-
+    # Time stop: 72 x 1H bars since entry.
     try:
-        with open(order_details_path, 'r') as f:
-            details = json.load(f)
-        details['partial_closed'] = True
-        with open(order_details_path, 'w') as f:
-            json.dump(details, f, indent=4)
-    except Exception as e:
-        print(f"Could not update order_details: {e}")
+        elapsed_h = (bars_closed.index[-1] - pd.Timestamp(od["entry_bar"])).total_seconds() / 3600
+        if elapsed_h >= TIME_STOP_BARS:
+            if close_volume(pos, pos.volume, f"{name} time_stop"):
+                log(f"  [{name}] TIME STOP after {elapsed_h:.0f}h -> closed")
+            return
+    except Exception:
+        pass
 
-    if is_buy:
-        new_sl = entry_price + TRAIL_ATR_FRAC * atr_fixed
+    # 50% partial @ 2R, then move stop to breakeven+trail.
+    if not od.get("partial_closed") and profit >= PARTIAL_R * sl_dist:
+        half = round(pos.volume / 2, 3)
+        if half > 0 and close_volume(pos, half, f"{name} partial_2R"):
+            od["partial_closed"] = True
+            be = entry + (TRAIL_ATR_FRAC * atr_fixed if is_buy else -TRAIL_ATR_FRAC * atr_fixed)
+            modify_sl(pos.ticket, be)
+            log(f"  [{name}] PARTIAL 50% @ 2R, SL -> {be:.2f}")
+            return
+
+    if od.get("partial_closed"):
+        # Post-partial: trail with recent 5m extremes once >= 3R.
+        if profit >= 3 * sl_dist:
+            if is_buy:
+                new_sl = float(df_5m["low"].iloc[-20:].min()) - 0.2 * atr_fixed
+                if new_sl > entry and new_sl > pos.sl:
+                    modify_sl(pos.ticket, new_sl)
+            else:
+                new_sl = float(df_5m["high"].iloc[-20:].max()) + 0.2 * atr_fixed
+                if new_sl < entry and new_sl < pos.sl:
+                    modify_sl(pos.ticket, new_sl)
     else:
-        new_sl = entry_price - TRAIL_ATR_FRAC * atr_fixed
-    modify_order(ticket, new_sl)
-    return True, True
+        # Pre-partial step trailing (== backtest).
+        new_sl = None
+        if r >= 4:
+            new_sl = entry + (2 * sl_dist if is_buy else -2 * sl_dist)
+        elif r >= 3:
+            new_sl = entry + (sl_dist if is_buy else -sl_dist)
+        elif r >= 2:
+            new_sl = entry + (TRAIL_ATR_FRAC * atr_fixed if is_buy else -TRAIL_ATR_FRAC * atr_fixed)
+        if new_sl is not None:
+            if (is_buy and new_sl > pos.sl) or (not is_buy and new_sl < pos.sl):
+                modify_sl(pos.ticket, new_sl)
 
 
-def update_trailing_stop(ticket, entry_price, current_price, atr_fixed, initial_sl_points, direction):
-    order = mt5.positions_get(ticket=ticket)
-    if not order:
-        return False
-    pos = order[0]
-    is_buy = direction == 'buy'
-    profit_points = (current_price - entry_price) if is_buy else (entry_price - current_price)
-    r = profit_points / initial_sl_points if initial_sl_points else 0
-
-    new_sl = None
-    if r >= 4:
-        new_sl = entry_price + (2 * initial_sl_points if is_buy else -2 * initial_sl_points)
-    elif r >= 3:
-        new_sl = entry_price + (initial_sl_points if is_buy else -initial_sl_points)
-    elif r >= 2:
-        new_sl = entry_price + (TRAIL_ATR_FRAC * atr_fixed if is_buy else -TRAIL_ATR_FRAC * atr_fixed)
-
-    if new_sl is None:
-        return False
-    if is_buy and new_sl > pos.sl:
-        return modify_order(ticket, new_sl)
-    if not is_buy and new_sl < pos.sl:
-        return modify_order(ticket, new_sl)
-    return False
-
-
-def update_stop_after_partial(ticket, entry_price, atr_fixed, initial_sl_points, current_price,
-                              direction, df_5m):
-    """部分平仓后：盈利 >= 3R 时用 5M 高低点移动止损（与 backtest 类似）。"""
-    order = mt5.positions_get(ticket=ticket)
-    if not order:
-        return False
-    pos = order[0]
-    is_buy = direction == 'buy'
-    profit_points = (current_price - entry_price) if is_buy else (entry_price - current_price)
-    if profit_points < 3 * initial_sl_points:
-        return False
-
-    if is_buy:
-        recent_low = df_5m['low'].iloc[-20:].min()
-        new_sl = recent_low - 0.2 * atr_fixed
-        if new_sl <= entry_price or new_sl <= pos.sl + 0.5 * atr_fixed:
-            return False
-        return modify_order(ticket, new_sl)
-    else:
-        recent_high = df_5m['high'].iloc[-20:].max()
-        new_sl = recent_high + 0.2 * atr_fixed
-        if new_sl >= entry_price or new_sl >= pos.sl - 0.5 * atr_fixed:
-            return False
-        return modify_order(ticket, new_sl)
-
-
-# ----------------------------- 主循环 -----------------------------
-def main():
+# ----------------------------- Main loop -----------------------------
+def main() -> None:
     if not initialize_mt5():
         return
-
     if mt5.symbol_info(SYMBOL) is None:
         print(f"Symbol {SYMBOL} not found")
         mt5.shutdown()
         return
+    mt5.symbol_select(SYMBOL, True)
 
-    persisted = load_order_details()
     state = load_state()
-    ticket = entry_price = entry_atr_fixed = initial_sl_points = direction = entry_time = None
-    partial_closed = False
-    last_signal_bar = state.get('last_signal_bar')
-    last_processed_bar = state.get('last_processed_bar')
 
-    if persisted:
-        ticket = persisted.get('ticket')
-        entry_price = persisted.get('entry_price')
-        entry_atr_fixed = persisted.get('atr_fixed')
-        initial_sl_points = persisted.get('initial_sl_points')
-        direction = persisted.get('direction')
-        partial_closed = persisted.get('partial_closed', False)
-        entry_time = persisted.get('entry_time')
-        pos = mt5.positions_get(ticket=ticket) if ticket else None
-        if not pos:
-            remove_order_details()
-            ticket = entry_price = entry_atr_fixed = initial_sl_points = direction = entry_time = None
-            partial_closed = False
-        else:
-            print(f"Restored active order: {ticket} {direction} @ {entry_price}")
-
-    print("=" * 70)
-    print(f"gold.py  {STRATEGY_NAME.upper()} ONLY  v{STRATEGY_VERSION}")
-    print("Expected log: 'AllWeather | bar=... ADX=... RSI=... signal=...'")
-    print("If you see GoldenCross / Market Structure → you are running OLD gold.py")
-    print("=" * 70)
-    print(f"Strategy: {STRATEGY_NAME} | 1H signals | long+short | {VOLUME} lots")
-    print(f"Params: donchian={DONCHIAN} adx={ADX_THRESH} rsi={RSI_ENTRY} "
-          f"atr_sl={ATR_MULTIPLIER_SL} cooldown={COOLDOWN_BARS}h")
+    print("=" * 72)
+    print(f"gold.py  PORTFOLIO  v{STRATEGY_VERSION}   (paper / demo)")
+    print(f"Sleeves : {', '.join(SLEEVE_NAMES)}")
+    print(f"Config  : risk={RISK_FRAC:.1%}/trade | trend_sma={TREND_SMA} | "
+          f"atr_sl={ATR_MULTIPLIER_SL} | partial={PARTIAL_R}R | timestop={TIME_STOP_BARS}h")
+    print(f"Trading : {'LIVE (demo)' if ENABLE_TRADING else 'DRY RUN (signals only)'} | session {TRADE_START_HOUR}-{TRADE_END_HOUR}h")
+    print("=" * 72)
 
     while True:
         try:
-            df_1h = get_rates(SYMBOL, mt5.TIMEFRAME_H1, 300)
-            df_4h = get_rates(SYMBOL, mt5.TIMEFRAME_H4, 200)
+            bars_closed = build_closed_bars()
             df_5m = get_rates(SYMBOL, mt5.TIMEFRAME_M5, 200)
-            if df_1h is None or df_4h is None or df_5m is None:
-                time.sleep(5)
+            if bars_closed is None or df_5m is None:
+                time.sleep(10)
                 continue
 
-            signal, info = eval_allweather_signal(df_1h, df_4h)
-            bar_time = str(info.get('bar_time', ''))
-            h1_closed = df_1h.iloc[:-1]
-            atr_1h = calculate_atr(h1_closed).iloc[-1]
-            tick = mt5.symbol_info_tick(SYMBOL)
-            current_price = tick.bid if tick else df_5m['close'].iloc[-1]
+            bar_time = str(bars_closed.index[-1])
+            equity = account_equity()
+            positions = mt5.positions_get(symbol=SYMBOL) or ()
+            open_by_magic = {p.magic: p for p in positions if p.magic in MAGIC_TO_SLEEVE}
 
-            print("\n" + "=" * 70)
-            print(f"AllWeather | bar={bar_time} | mode={info.get('mode')} | "
-                  f"ADX={info.get('adx', 0):.1f} RSI={info.get('rsi', 0):.1f}")
-            print(f"  trend L/S={info.get('long_trend')}/{info.get('short_trend')} | "
-                  f"range L/S={info.get('long_range')}/{info.get('short_range')}")
-            print(f"  signal={signal or 'none'} | 1H ATR={atr_1h:.2f} | price={current_price:.2f}")
-            print("=" * 70)
+            print("\n" + "=" * 72)
+            print(f"bar={bar_time} | equity=${equity:.2f} | open={len(open_by_magic)}/{len(SLEEVE_NAMES)}")
 
-            if not check_trading_time():
-                print("Outside session (7–21). Waiting...")
-                time.sleep(30)
-                continue
+            for name in SLEEVE_NAMES:
+                p = SLEEVES[name]
+                magic = MAGIC[name]
+                sig = eval_signal(bars_closed, p)
+                pos = open_by_magic.get(magic)
+                orders = state["orders"]
 
-            positions = mt5.positions_get(magic=123456)
+                # Reconcile: position closed externally / by SL.
+                if pos is None and name in orders:
+                    log(f"  [{name}] position closed -> clearing state")
+                    orders.pop(name, None)
+                    save_state(state)
 
-            if positions:
-                pos = positions[0]
-                if ticket and pos.ticket == ticket:
-                    is_buy = direction == 'buy'
-                    px = tick.bid if is_buy else tick.ask if tick else current_price
-                    new_partial, _ = close_partial_and_move_stop(
-                        ticket, entry_price, entry_atr_fixed, initial_sl_points,
-                        partial_closed, direction, ORDER_DETAILS_FILE,
-                    )
-                    if new_partial != partial_closed:
-                        partial_closed = new_partial
-                    elif partial_closed:
-                        update_stop_after_partial(
-                            ticket, entry_price, entry_atr_fixed, initial_sl_points,
-                            px, direction, df_5m,
-                        )
-                    else:
-                        update_trailing_stop(
-                            ticket, entry_price, px, entry_atr_fixed,
-                            initial_sl_points, direction,
-                        )
-            else:
-                if ticket is not None:
-                    remove_order_details()
-                    ticket = entry_price = entry_atr_fixed = initial_sl_points = direction = None
-                    partial_closed = False
-                    entry_time = None
-
-            # 每根新 1H K 线最多评估一次开仓
-            if not positions and signal and bar_time and bar_time != last_processed_bar:
-                last_processed_bar = bar_time
-                state['last_processed_bar'] = bar_time
-                save_state(state)
-
-                if cooldown_ok(last_signal_bar, bar_time):
-                    sl_dist = atr_1h * ATR_MULTIPLIER_SL
-                    if signal == 'buy':
-                        sl_price = current_price - sl_dist
-                        tp_price = current_price + sl_dist * 20
-                    else:
-                        sl_price = current_price + sl_dist
-                        tp_price = current_price - sl_dist * 20
-
-                    print(f"*** {signal.upper()} SIGNAL (allweather) ***")
-                    new_ticket = place_order(signal, sl_price, tp_price)
-                    if new_ticket:
-                        ticket = new_ticket
-                        entry_price = current_price
-                        entry_atr_fixed = atr_1h
-                        initial_sl_points = sl_dist
-                        direction = signal
-                        partial_closed = False
-                        entry_time = datetime.now().isoformat()
-                        last_signal_bar = bar_time
-                        state['last_signal_bar'] = bar_time
+                if pos is not None:
+                    od = orders.get(name)
+                    if od:
+                        manage_position(name, od, pos, df_5m, bars_closed)
                         save_state(state)
-                        save_order_details({
-                            'ticket': ticket,
-                            'direction': direction,
-                            'entry_price': entry_price,
-                            'atr_fixed': entry_atr_fixed,
-                            'initial_sl_points': initial_sl_points,
-                            'entry_time': entry_time,
-                            'partial_closed': False,
-                        })
-                else:
-                    print(f"Cooldown active ({COOLDOWN_BARS}h bars since last entry)")
+                    print(f"  [{name:16s}] OPEN {od['direction'] if od else '?'} "
+                          f"vol={pos.volume} entry={pos.price_open:.2f} sl={pos.sl:.2f} P/L={pos.profit:+.2f} | sig={sig or 'none'}")
+                    continue
+
+                # Flat: consider a new entry (once per closed bar).
+                last_bar = state["last_bar"].get(name)
+                print(f"  [{name:16s}] FLAT | sig={sig or 'none'}")
+                if not sig:
+                    continue
+                if not session_ok(bars_closed):
+                    print(f"      outside session -> skip")
+                    continue
+                if last_bar == bar_time:
+                    continue  # already acted on this bar
+
+                state["last_bar"][name] = bar_time
+                atr_v = float(bars_closed["atr"].iloc[-1])
+                if atr_v <= 0:
+                    save_state(state)
+                    continue
+                sl_dist = atr_v * ATR_MULTIPLIER_SL
+                tick = mt5.symbol_info_tick(SYMBOL)
+                px = (tick.ask if sig == "buy" else tick.bid) if tick else float(bars_closed["close"].iloc[-1])
+                sl_price = px - sl_dist if sig == "buy" else px + sl_dist
+                tp_price = px + sl_dist * 20 if sig == "buy" else px - sl_dist * 20
+                lots = compute_lots(sl_dist)
+
+                print(f"      *** {sig.upper()} SIGNAL *** atr={atr_v:.2f} sl_dist={sl_dist:.2f} lots={lots}")
+                if not ENABLE_TRADING:
+                    log(f"  [{name}] DRY RUN {sig} lots={lots} (no order sent)")
+                    save_state(state)
+                    continue
+
+                ticket = place_order(sig, lots, sl_price, tp_price, magic, name)
+                if ticket:
+                    orders[name] = {
+                        "ticket": ticket, "direction": sig, "entry_price": px,
+                        "atr_fixed": atr_v, "initial_sl_points": sl_dist,
+                        "entry_bar": bar_time, "entry_time": datetime.now().isoformat(),
+                        "partial_closed": False,
+                    }
+                save_state(state)
 
             time.sleep(30)
 

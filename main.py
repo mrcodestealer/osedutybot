@@ -58,6 +58,7 @@ import tbp
 import dhs
 import mdr
 import smmachine
+import maintenancemachineagent
 
 import p0
 import p1
@@ -3063,6 +3064,20 @@ def lark_webhook():
                     else:
                         print(f"❌ Offset/leave submit failed (no chat_id): {e!r}", flush=True)
                     return
+                if isinstance(parsed_ca, dict) and str(parsed_ca.get("k") or "").strip().lower() == reminder.MAINT_REMINDER_CONFIRM_KEY:
+                    rid_m = str(parsed_ca.get("id") or "").strip()
+                    at_id_m = (
+                        (op_ca.get("open_id") or "").strip()
+                        or (sender_id_ca or "").strip()
+                        or (op_ca.get("union_id") or "").strip()
+                    )
+                    at_prefix = f'<at user_id="{at_id_m}"></at> ' if at_id_m else ""
+                    send_message(
+                        chat_id_ca,
+                        f"{at_prefix}✅ Confirmed: maintenance & test have been set"
+                        + (f" (reminder ID `{rid_m}`)." if rid_m else "."),
+                    )
+                    return
                 if isinstance(parsed_ca, dict) and str(parsed_ca.get("k") or "").strip().lower() == "rem_del":
                     rid = str(parsed_ca.get("id") or "").strip()
                     if not rid:
@@ -4310,6 +4325,29 @@ def lark_webhook():
             msg_type="interactive",
         )
         return _lark_im_done()
+    elif maintenancemachineagent.is_maintenance_schedule_message(original_text, mention_keys):
+        # Scheduled stress-test announcement (has an action + a future date/time + machine list /
+        # "ALL <ENV> MACHINES <Venue>"). Schedule a one-time reminder 10 min before the action.
+        if chat_type == "group" and not bot_mentioned:
+            print("⏭️ maintenance schedule ignored (bot not @mentioned in group)", flush=True)
+            return _lark_im_done()
+        try:
+            handled_maint, maint_reply = maintenancemachineagent.handle_maintenance_schedule_message(
+                original_text,
+                mention_keys,
+                chat_id=chat_id,
+                send_message=send_message,
+                get_token_func=get_tenant_access_token,
+                scheduler=scheduler,
+                target_user_id=TARGET_USER_OPEN_ID,
+                schedule_chat_id=REMINDER_TARGET_CHAT_ID,
+            )
+        except Exception as _maint_err:
+            handled_maint, maint_reply = True, f"❌ Maintenance schedule failed: {_maint_err}"
+        if handled_maint:
+            if maint_reply:
+                send_message(chat_id, maint_reply)
+            return _lark_im_done()
     elif smmachine.is_prod_batch_sm_command(original_text, mention_keys):
         if chat_type == "group" and not bot_mentioned:
             print("⏭️ /sm command ignored (bot not @mentioned in group)", flush=True)

@@ -61,6 +61,7 @@ class StrategyParams:
     long_only: bool = True
     vote_k: int = 2  # ensemble: min number of agreeing base strategies
     risk_frac: float = 0.0  # >0 => size each trade to risk this fraction of equity (vol parity)
+    trend_sma_days: int = 0  # >0 => only trade in direction of the daily N-day SMA trend (regime gate)
 
 
 # Set after all-market OOS selection
@@ -473,6 +474,20 @@ STRATEGIES["ensemble"] = sig_ensemble
 def build_signals(df: pd.DataFrame, p: StrategyParams) -> np.ndarray:
     fn = STRATEGIES[p.strategy]
     long_s, short_s = fn(df, p)
+
+    # Daily-trend regime gate: only allow longs above / shorts below the daily
+    # N-day SMA. Uses yesterday's daily close (shift 1 day) => no look-ahead.
+    # Single robust parameter; kills counter-trend dip-buying in crashes (e.g. 2013).
+    if p.trend_sma_days and p.trend_sma_days > 0:
+        dc = df["close"].resample("1D").last().dropna()  # drop weekend/holiday gaps
+        sma = dc.rolling(p.trend_sma_days).mean()
+        up = (dc > sma).shift(1)
+        dn = (dc < sma).shift(1)
+        up_1h = up.reindex(df.index, method="ffill").fillna(False).to_numpy().astype(bool)
+        dn_1h = dn.reindex(df.index, method="ffill").fillna(False).to_numpy().astype(bool)
+        long_s = long_s & pd.Series(up_1h, index=df.index)
+        short_s = short_s & pd.Series(dn_1h, index=df.index)
+
     sess = _session_ok(df.index)
     long_s = long_s & sess
     short_s = short_s & sess
@@ -1093,7 +1108,8 @@ def evaluate_sleeve_oos(folds: list[tuple], bars: pd.DataFrame, p: StrategyParam
 
 
 def best_config_per_strategy(
-    bars: pd.DataFrame, folds: list[tuple], dev_end: pd.Timestamp, risk_frac: float, tune: bool
+    bars: pd.DataFrame, folds: list[tuple], dev_end: pd.Timestamp, risk_frac: float, tune: bool,
+    trend_sma: int = 0,
 ) -> dict[str, SleeveOOS]:
     """For each base strategy, pick the most robust (WF-OOS) config as its sleeve."""
     best: dict[str, SleeveOOS] = {}
@@ -1111,7 +1127,7 @@ def best_config_per_strategy(
     for strat, plist in groups.items():
         cand: SleeveOOS | None = None
         for p in plist:
-            p = StrategyParams(**{**vars(p), "risk_frac": risk_frac})
+            p = StrategyParams(**{**vars(p), "risk_frac": risk_frac, "trend_sma_days": trend_sma})
             m = evaluate_sleeve_oos(folds, bars, p, dev_end)
             if m is None:
                 continue
@@ -1445,6 +1461,13 @@ def main() -> None:
              "(lower => more sleeves => more trades/week, slightly lower Sharpe). Default 0.50",
     )
     parser.add_argument(
+        "--trend-sma",
+        type=int,
+        default=100,
+        help="Portfolio: daily N-day SMA regime gate (only trade with the trend). "
+             "0=off. ~50 = highest Sharpe, ~100 = lowest drawdown. Default 100",
+    )
+    parser.add_argument(
         "--min-tpm",
         type=float,
         default=float(MIN_TRADES_PER_MONTH),
@@ -1480,9 +1503,10 @@ def main() -> None:
         log("\n" + "#" * 76)
         log("PORTFOLIO COMBINE — every strategy as a sleeve, equal-weight the survivors")
         log("#" * 76)
-        log(f"  Risk sizing: {args.risk_frac:.1%}/trade (vol parity) | sleeve tuning: {args.tune_sleeves} | max sleeves: {args.max_sleeves}")
+        log(f"  Risk sizing: {args.risk_frac:.1%}/trade (vol parity) | sleeve tuning: {args.tune_sleeves} | "
+            f"max sleeves: {args.max_sleeves} | daily trend gate SMA: {args.trend_sma or 'off'}")
         log("  Step 1 — score each sleeve on WF-OOS folds + yearly stability (no unseen used):")
-        sleeves = best_config_per_strategy(bars, folds, dev_end, args.risk_frac, args.tune_sleeves)
+        sleeves = best_config_per_strategy(bars, folds, dev_end, args.risk_frac, args.tune_sleeves, args.trend_sma)
         if not sleeves:
             raise RuntimeError("No sleeves evaluable.")
 
@@ -1542,9 +1566,10 @@ def main() -> None:
         log(f"  • {oos_pos*100:.0f}% of OOS folds positive | sleeves equal-weighted (no fitted weights)")
         log(f"  • unseen 2025 never touched during selection")
         log("\nDial trades/week vs Sharpe:")
-        log("  • More trades  : --min-pos-years 0.45 --max-sleeves 10   (more sleeves)")
-        log("  • Higher Sharpe: --min-pos-years 0.55 --max-sleeves 4    (only the most stable)")
-        log("  • Lower drawdown: --risk-frac 0.005                       (smaller positions)")
+        log("  • More trades   : --min-pos-years 0.45 --max-sleeves 10  (more sleeves)")
+        log("  • Higher Sharpe : --min-pos-years 0.55 --max-sleeves 4 --trend-sma 50")
+        log("  • Lower drawdown: --risk-frac 0.005 --trend-sma 100      (smaller positions, trend gate)")
+        log("  • Trend gate off: --trend-sma 0                          (trade all regimes)")
 
         out = Path(__file__).resolve().parent
         pd.DataFrame([

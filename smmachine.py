@@ -77,6 +77,7 @@ import threading
 import time
 import uuid
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, Sequence
 from urllib.parse import quote
@@ -1332,13 +1333,76 @@ def _dedupe_site_keys_by_resolved_backend(site_keys: list[str]) -> tuple[list[st
 DEFAULT_WEBMACHINE_SITES: tuple[str, ...] = ("nwr", "nch", "tbr", "tbp", "mdr", "dhs", "cp", "osm", "wf")
 
 
+def _scrape_concurrency(item_count: int) -> int:
+    """
+    Max concurrent EGM page scrapes (each runs its own headless Chromium).
+
+    Controlled by ``WEBMACHINE_SCRAPE_CONCURRENCY`` (default **4**). ``1`` keeps the old
+    sequential behaviour. Capped to the number of items so we never start idle workers.
+    """
+    try:
+        n = int((os.environ.get("WEBMACHINE_SCRAPE_CONCURRENCY") or "4").strip() or "4")
+    except ValueError:
+        n = 4
+    n = max(1, n)
+    return max(1, min(n, max(1, item_count)))
+
+
+def _collect_concurrently(
+    keys: list[str],
+    worker: Callable[[str], tuple[list[dict], str | None]],
+) -> tuple[list[dict], dict[str, str]]:
+    """
+    Run ``worker(key)`` for every key, in parallel up to ``_scrape_concurrency`` workers, so all
+    EGM pages refresh roughly at once instead of one-by-one (avoids long staleness windows).
+
+    Rows are concatenated in the original ``keys`` order; ``worker`` returns ``(rows, warning)``
+    and may raise — failures become ``errors[key]`` entries.
+    """
+    errs: dict[str, str] = {}
+    all_rows: list[dict] = []
+    workers = _scrape_concurrency(len(keys))
+
+    if workers <= 1 or len(keys) <= 1:
+        for k in keys:
+            try:
+                part, twarn = worker(k)
+                all_rows.extend(part)
+                if twarn:
+                    errs[k] = twarn
+            except Exception as e:  # noqa: BLE001
+                errs[k] = str(e)
+        return all_rows, errs
+
+    results: dict[str, tuple[list[dict], str | None, Exception | None]] = {}
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="sm-scrape") as ex:
+        future_map = {ex.submit(worker, k): k for k in keys}
+        for fut in as_completed(future_map):
+            k = future_map[fut]
+            try:
+                part, twarn = fut.result()
+                results[k] = (part, twarn, None)
+            except Exception as e:  # noqa: BLE001
+                results[k] = ([], None, e)
+    for k in keys:
+        part, twarn, err = results.get(k, ([], None, None))
+        if err is not None:
+            errs[k] = str(err)
+            continue
+        all_rows.extend(part)
+        if twarn:
+            errs[k] = twarn
+    return all_rows, errs
+
+
 def smachine_collect_machines_multi_sites(
     sites: Sequence[str] | None = None,
     **kwargs: Any,
 ) -> tuple[list[dict], dict[str, str]]:
     """
-    Scrape several site aliases in sequence. ``kwargs`` are passed to ``smachine_collect_all_machine_rows``
-    (e.g. ``headless=``, ``max_pages=``, ``timeout_ms=``).
+    Scrape several site aliases **concurrently** (thread pool, see ``WEBMACHINE_SCRAPE_CONCURRENCY``).
+    ``kwargs`` are passed to ``smachine_collect_all_machine_rows`` (e.g. ``headless=``,
+    ``max_pages=``, ``timeout_ms=``).
 
     Returns ``(rows, errors_by_site_key)`` where ``errors_by_site_key`` holds per-site failure or
     truncation messages (and skipped-alias notes from :func:`_dedupe_site_keys_by_resolved_backend`).
@@ -1355,17 +1419,14 @@ def smachine_collect_machines_multi_sites(
         use = list(DEFAULT_WEBMACHINE_SITES)
 
     use, skipped = _dedupe_site_keys_by_resolved_backend(use)
-    errs: dict[str, str] = dict(skipped)
-    all_rows: list[dict] = []
-    for sk in use:
-        try:
-            part, twarn = smachine_collect_all_machine_rows(sk, **kwargs)
-            all_rows.extend(part)
-            if twarn:
-                errs[sk] = twarn
-        except Exception as e:
-            errs[sk] = str(e)
-    return all_rows, errs
+    rows, errs = _collect_concurrently(
+        use,
+        lambda sk: smachine_collect_all_machine_rows(sk, **kwargs),
+    )
+    # Keep skipped-alias notes alongside scrape errors.
+    merged = dict(skipped)
+    merged.update(errs)
+    return rows, merged
 
 
 def smachine_collect_nonprod_deployment(
@@ -1377,29 +1438,29 @@ def smachine_collect_nonprod_deployment(
     specs = _nonprod_backend_specs(dep)
     if not specs:
         return [], {dep: f"unsupported deployment {deployment!r}"}
-    errs: dict[str, str] = {}
-    all_rows: list[dict] = []
+
+    spec_by_key: dict[str, dict[str, str | bool]] = {}
+    keys: list[str] = []
     for spec in specs:
-        belongs = str(spec["belongs"])
-        key = f"{dep}:{belongs}"
-        try:
-            part, twarn = smachine_collect_rows_at_backend(
-                base_url=str(spec["base"]),
-                username=str(spec["user"]),
-                password=str(spec["password"]),
-                belongs=belongs,
-                deployment=dep,
-                list_path=str(spec["list_path"]),
-                login_path=str(spec["login_path"]),
-                dismiss_warning_dialog=bool(spec["dismiss_warning_dialog"]),
-                **kwargs,
-            )
-            all_rows.extend(part)
-            if twarn:
-                errs[key] = twarn
-        except Exception as e:
-            errs[key] = str(e)
-    return all_rows, errs
+        key = f"{dep}:{spec['belongs']}"
+        spec_by_key[key] = spec
+        keys.append(key)
+
+    def _worker(key: str) -> tuple[list[dict], str | None]:
+        spec = spec_by_key[key]
+        return smachine_collect_rows_at_backend(
+            base_url=str(spec["base"]),
+            username=str(spec["user"]),
+            password=str(spec["password"]),
+            belongs=str(spec["belongs"]),
+            deployment=dep,
+            list_path=str(spec["list_path"]),
+            login_path=str(spec["login_path"]),
+            dismiss_warning_dialog=bool(spec["dismiss_warning_dialog"]),
+            **kwargs,
+        )
+
+    return _collect_concurrently(keys, _worker)
 
 
 def smachine_collect_machines_all_deployments(
