@@ -31,8 +31,12 @@ from typing import Any, Optional
 _CHBOX_DIR = Path(__file__).resolve().parent
 DEFAULT_MODEL_DIR = _CHBOX_DIR / "commandagent_pt"
 LEGACY_MODEL_DIR = _CHBOX_DIR / "command_intent_pt"
-CONFIDENCE_THRESHOLD = float(os.getenv("BOT_AI_CONFIDENCE", "0.12"))
-CONFIDENCE_MARGIN = float(os.getenv("BOT_AI_MARGIN", "0.03"))
+# Raised from the old 0.12/0.03: with a trained ``cmd_none`` (out-of-scope) class the
+# model now *learns* to abstain, so we can demand real confidence before firing a command.
+CONFIDENCE_THRESHOLD = float(os.getenv("BOT_AI_CONFIDENCE", "0.35"))
+CONFIDENCE_MARGIN = float(os.getenv("BOT_AI_MARGIN", "0.08"))
+# Tag the model uses to say "this is not a command" (casual chat / unknown).
+NONE_TAG = "cmd_none"
 MAX_SEQ_LEN = 64
 
 # Lazy imports for inference (avoid heavy load when AI disabled)
@@ -200,6 +204,93 @@ _WFH_TEMPLATES = (
 
 _SAMPLE_NAMES = ("David", "Henry", "Ryan", "Monlong", "Adrian", "Darren", "Wennie", "BK")
 _SAMPLE_MACHINE_IDS = ("1422", "7183", "8092", "8900", "2133", "NCH1422", "NWR2140")
+
+# ---------------------------------------------------------------------------
+# Prod-batch maintenance (e.g. ``/nwrsetmaintenance``) — site + op + what
+# Mirrors smmachine._PROD_BATCH_BOT_CMD_RE so NL maps to a real command.
+# ---------------------------------------------------------------------------
+_PB_SITE_WORDS: dict[str, str] = {
+    # natural word -> canonical site token used in the slash command
+    "nwr": "nwr",
+    "np": "nwr",
+    "nch": "nch",
+    "nc": "nch",
+    "tbr": "tbr",
+    "tbp": "tbp",
+    "mdr": "mdr",
+    "dhs": "dhs",
+    "cp": "cp",
+    "osm": "cp",
+    "wf": "wf",
+    "winford": "wf",
+}
+_PB_SITE_DISPLAY = ("nwr", "nch", "winford", "mdr", "tbr", "tbp", "dhs", "cp")
+# Verbs that mean "turn on/apply" vs "turn off/remove"
+_PB_SET_WORDS = ("set", "enable", "activate", "turn on", "switch on", "put", "apply", "mark", "flag")
+_PB_UNSET_WORDS = ("unset", "disable", "deactivate", "turn off", "switch off", "remove", "clear", "cancel", "lift", "take off", "unmark")
+_PB_WHAT_BOTH = ("maintenance and test", "maintenance test", "maintenance+test", "test and maintenance", "both maintenance and test", "maintenancetest", "testmaintenance")
+_PB_WHAT_MAINT = ("maintenance", "maint", "mtn", "under maintenance", "in maintenance")
+_PB_WHAT_TEST = ("test mode", "test")
+
+# Casual human prefixes applied to base patterns so the model sees real phrasing,
+# not just clean templates. Keep this list modest — it multiplies dataset size.
+_HUMAN_PREFIXES = (
+    "",
+    "i want ",
+    "i wanna ",
+    "i need ",
+    "can you ",
+    "can u ",
+    "could you ",
+    "pls ",
+    "please ",
+    "help me ",
+    "hey ",
+    "hi ",
+    "bot ",
+    "hey bot ",
+    "ok now ",
+)
+_HUMAN_SUFFIXES = ("", " pls", " please", " thanks", " now", " today", " asap", "?")
+
+
+def _augment_human(patterns: list[str], *, max_prefixes: int = 6, max_suffixes: int = 3) -> list[str]:
+    """Expand clean templates with a few casual human prefixes/suffixes."""
+    out: list[str] = []
+    seen: set[str] = set()
+    prefixes = _HUMAN_PREFIXES[:max_prefixes]
+    suffixes = _HUMAN_SUFFIXES[:max_suffixes]
+    for pat in patterns:
+        base = pat.strip()
+        if not base:
+            continue
+        for pre in prefixes:
+            for suf in suffixes:
+                variant = f"{pre}{base}{suf}".strip()
+                if variant and variant not in seen:
+                    seen.add(variant)
+                    out.append(variant)
+    return out
+
+
+# Out-of-scope / casual-chat negatives. The model learns to map these to ``cmd_none``
+# so casual chat is NOT forced into a slash command (then chatagent handles it).
+_NONE_PATTERNS = (
+    "hi", "hello", "hey", "yo", "good morning", "good afternoon", "good evening",
+    "how are you", "how are you doing", "what's up", "hows it going", "you there",
+    "thanks", "thank you", "thx", "ty", "cheers", "appreciate it",
+    "bye", "goodbye", "see you", "see ya", "good night", "talk later",
+    "lol", "haha", "nice", "cool", "awesome", "great", "ok", "okay", "got it", "sure",
+    "i'm bored", "i'm tired", "happy friday", "have a good weekend", "lunch time",
+    "who are you", "what can you do", "are you a bot", "tell me a joke",
+    "what's the weather", "is it going to rain", "i love you bot", "you're the best",
+    "let's chat", "just saying hi", "random question", "nothing much",
+    "what do you think", "do you sleep", "are you human", "good job",
+    "i'm hungry", "coffee time", "long day today", "so sleepy", "morning everyone",
+    "happy new year", "merry christmas", "congrats", "well done team",
+    "what time is it", "where are you from", "do you like music", "sing me a song",
+    "tell me something funny", "play a game", "rock paper scissors", "flip a coin",
+)
 
 
 def _simple_intent(tag: str, command: str, *pattern_groups: str) -> IntentSpec:
@@ -490,12 +581,174 @@ def build_intent_catalog(*, jenkins_available: bool = True) -> list[IntentSpec]:
         )
     )
 
+    # -- Prod-batch maintenance (the /nwrsetmaintenance family) -------------
+    # One intent per (site, action) so the classifier can learn to recognise
+    # "nwr set maintenance" etc. The real command + machines are reconstructed
+    # deterministically by ``detect_prod_batch_command`` (more reliable than the
+    # classifier for structured input); these patterns are the safety net.
+    _PB_ACTION_TEMPLATES = {
+        "setmaintenance": (
+            "{s} set maintenance", "set maintenance for {s}", "set {s} to maintenance",
+            "put {s} in maintenance", "enable maintenance on {s}", "mark {s} maintenance",
+            "{s} machines set maintenance", "set maintenance mode {s}",
+            "turn on maintenance for {s}", "{s} under maintenance",
+        ),
+        "settest": (
+            "{s} set test", "set test for {s}", "set {s} to test",
+            "put {s} in test", "enable test on {s}", "{s} test mode",
+            "turn on test for {s}", "set test mode {s}",
+        ),
+        "setmaintenancetest": (
+            "{s} set maintenance and test", "set both maintenance and test for {s}",
+            "set {s} maintenance test", "{s} set both", "enable maintenance and test on {s}",
+        ),
+        "unsetmaintenance": (
+            "{s} unset maintenance", "remove maintenance from {s}", "disable maintenance on {s}",
+            "clear maintenance {s}", "lift maintenance for {s}", "turn off maintenance {s}",
+            "take {s} out of maintenance", "cancel maintenance {s}",
+        ),
+        "unsettest": (
+            "{s} unset test", "remove test from {s}", "disable test on {s}",
+            "clear test {s}", "turn off test {s}",
+        ),
+        "unsetmaintenancetest": (
+            "{s} unset both", "remove maintenance and test from {s}",
+            "disable maintenance and test on {s}", "clear both {s}",
+        ),
+    }
+    for _action, _tmpls in _PB_ACTION_TEMPLATES.items():
+        pats: list[str] = []
+        for site in _PB_SITE_DISPLAY:
+            for t in _tmpls:
+                pats.append(t.format(s=site))
+            pats.append(f"/{('wf' if site == 'winford' else site)}{_action}")
+        # canonical command stored on the spec is just a placeholder; the real
+        # slash text is rebuilt per-site by detect_prod_batch_command.
+        intents.append(
+            IntentSpec(
+                tag=f"cmd_pb_{_action}",
+                command="/SETMAINTENANCE",  # sentinel, replaced at resolve time
+                patterns=_augment_human(pats, max_prefixes=5, max_suffixes=2),
+                arg_kind="prod_batch",
+            )
+        )
+
+    # -- Out-of-scope / casual chat: teach the model to abstain --------------
+    intents.append(
+        IntentSpec(
+            tag=NONE_TAG,
+            command="",
+            patterns=_augment_human(list(_NONE_PATTERNS), max_prefixes=4, max_suffixes=2),
+            arg_kind=None,
+        )
+    )
+
     return intents
 
 
 def _looks_like_slash_command(text: str) -> bool:
     s = (text or "").lstrip()
     return s.startswith("/")
+
+
+# ---------------------------------------------------------------------------
+# Deterministic prod-batch (set/unset maintenance/test) reconstruction.
+# This is intentionally NOT left to the fuzzy classifier: the command is highly
+# structured (site + op + what + machine list) so a rule-based rebuild is far
+# more reliable. Returns canonical text the bot's prod-batch handler understands.
+# ---------------------------------------------------------------------------
+
+_PB_SITE_RE = re.compile(
+    r"(?i)\b(nwr|np|nch|nc|tbr|tbp|mdr|dhs|winford|wf|osm|cp)\b"
+)
+_PB_MAINT_RE = re.compile(r"(?i)\b(maintenance|maint|mtn)\b")
+_PB_TEST_RE = re.compile(r"(?i)\btest\b")
+_PB_UNSET_RE = re.compile(
+    r"(?i)\b(unset|disable|deactivate|remove|clear|cancel|lift|unmark|"
+    r"turn\s+off|switch\s+off|take\s+off|take\s+out)\b"
+)
+_PB_SET_RE = re.compile(
+    r"(?i)\b(set|enable|activate|put|apply|mark|flag|turn\s+on|switch\s+on)\b"
+)
+# A machine token: optional site prefix + 3+ digits, or a display name containing one.
+_PB_MACHINE_TOKEN_RE = re.compile(
+    r"(?i)\b(?:nwr|nch|mdr|tbr|tbp|dhs|cp|osm|wf|win|winford)\s*-?\s*\d{2,}\b|\b\d{3,}\b"
+)
+
+
+def _pb_extract_machines(text: str) -> list[str]:
+    """Pull machine names/ids from a free-form message.
+
+    Priority:
+      1. Text after a ``machines:`` / ``machine:`` / ``:`` marker (keeps full names).
+      2. Each non-empty line after the first (paste style).
+      3. Regex-matched machine tokens anywhere in the text.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return []
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    # 2) multi-line paste: lines after the command line that look like machines
+    if len(lines) > 1:
+        machines = [ln for ln in lines[1:] if _PB_MACHINE_TOKEN_RE.search(ln)]
+        if machines:
+            return machines
+    # 1) "... machines: A, B, C" / "... : A B C"
+    m = re.search(r"(?i)(?:machines?|assets?|egms?)\s*[:\-]\s*(.+)$", raw, re.S)
+    if not m:
+        m = re.search(r":\s*(.+)$", raw, re.S)
+    if m:
+        tail = m.group(1).strip()
+        if _PB_MACHINE_TOKEN_RE.search(tail):
+            parts = re.split(r"[,\n;]+", tail)
+            cleaned = [p.strip() for p in parts if p.strip() and _PB_MACHINE_TOKEN_RE.search(p)]
+            if cleaned:
+                return cleaned
+    # 3) any machine tokens found inline
+    found = _PB_MACHINE_TOKEN_RE.findall(raw)
+    return [re.sub(r"\s+", "", f) for f in found] if found else []
+
+
+def detect_prod_batch_command(text: str) -> Optional[str]:
+    """Map a natural-language maintenance request to canonical prod-batch text.
+
+    e.g. "i want nwr set maintenance, machines: NWR2113, NWR2114"
+         -> "/nwrsetmaintenance\nNWR2113\nNWR2114"
+
+    Returns ``None`` if the message is not a prod-batch maintenance request.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    site_m = _PB_SITE_RE.search(raw)
+    if not site_m:
+        return None
+    has_maint = bool(_PB_MAINT_RE.search(raw))
+    has_test = bool(_PB_TEST_RE.search(raw))
+    if not (has_maint or has_test):
+        return None
+
+    site = _PB_SITE_WORDS.get(site_m.group(1).lower())
+    if not site:
+        return None
+
+    op = "unset" if _PB_UNSET_RE.search(raw) else ("set" if _PB_SET_RE.search(raw) else None)
+    if op is None:
+        # No explicit verb but "X maintenance" almost always means set.
+        op = "set"
+
+    if has_maint and has_test:
+        what = "maintenancetest"
+    elif has_maint:
+        what = "maintenance"
+    else:
+        what = "test"
+
+    command = f"/{site}{op}{what}"
+    machines = _pb_extract_machines(raw)
+    if machines:
+        return command + "\n" + "\n".join(machines)
+    return command
 
 
 # ---------------------------------------------------------------------------
@@ -536,10 +789,23 @@ def extract_argument(arg_kind: Optional[str], user_text: str, spec: IntentSpec) 
     if arg_kind == "search_name":
         m = re.search(r"(?i)search duty for\s+(.+)$", text)
         if m:
-            return m.group(1).strip(" ?!.,")
-        q = _SEARCH_PREFIX_RE.sub("", text).strip(" ?!.,")
-        q = re.sub(r"(?i)\s+(?:in duty|on duty|duty info|phone|number)\s*$", "", q).strip()
+            q = m.group(1).strip(" ?!.,")
+        else:
+            q = _SEARCH_PREFIX_RE.sub("", text).strip(" ?!.,")
+            q = re.sub(r"(?i)\s+(?:in duty|on duty|duty info|phone|number)\s*$", "", q).strip()
+        if not q:
+            return None
+        # Don't treat a department/site word (or maintenance verbs) as a person name —
+        # this is what caused "nwr set maintenance" to fire `/s set maintenance`.
+        low = q.lower()
+        if _DEPT_IN_TEXT_RE.fullmatch(low) or _PB_SITE_RE.fullmatch(low):
+            return None
+        if _PB_MAINT_RE.search(low) or _PB_UNSET_RE.search(low) or low in ("set", "unset", "test"):
+            return None
         return q or None
+    if arg_kind == "prod_batch":
+        # Reconstruct the real maintenance command from the message.
+        return detect_prod_batch_command(text)
     if arg_kind == "machine_id":
         return _machine_digits(text)
     if arg_kind == "department":
@@ -566,6 +832,12 @@ def extract_argument(arg_kind: Optional[str], user_text: str, spec: IntentSpec) 
 
 def build_slash_command(spec: IntentSpec, user_text: str) -> Optional[str]:
     base = spec.command
+    # Out-of-scope class never maps to a command.
+    if spec.tag == NONE_TAG or not base:
+        return None
+    if spec.arg_kind == "prod_batch":
+        # The full canonical command (site+op+what + machines) is rebuilt here.
+        return detect_prod_batch_command(user_text)
     arg = extract_argument(spec.arg_kind, user_text, spec)
     if spec.arg_kind in ("search_name", "machine_id", "rest", "date_dmy") and not arg:
         return None
@@ -713,6 +985,44 @@ def _get_classifier() -> Optional[CommandClassifier]:
         return None
 
 
+def command_signal(text: str) -> dict[str, Any]:
+    """Diagnostic signal for the router (``chathandleagent``).
+
+    Returns ``{"tag", "confidence", "margin", "command", "deterministic"}``.
+    ``command`` is the mapped slash command (or ``None``). ``deterministic`` is
+    True when a hard rule (prod-batch) produced it. Never raises.
+    """
+    out: dict[str, Any] = {
+        "tag": None,
+        "confidence": 0.0,
+        "margin": 0.0,
+        "command": None,
+        "deterministic": False,
+    }
+    raw = (text or "").strip()
+    if not raw:
+        return out
+    pb = detect_prod_batch_command(raw)
+    if pb:
+        out.update(tag="cmd_pb", confidence=1.0, margin=1.0, command=pb, deterministic=True)
+        return out
+    clf = _get_classifier()
+    if clf is None:
+        return out
+    try:
+        tag, conf, margin = clf.predict(raw)
+        out["tag"] = tag
+        out["confidence"] = conf
+        out["margin"] = margin
+        if tag != NONE_TAG and conf >= CONFIDENCE_THRESHOLD and margin >= CONFIDENCE_MARGIN:
+            spec = clf.intents_by_tag.get(tag)
+            if spec:
+                out["command"] = build_slash_command(spec, raw)
+    except Exception as exc:
+        print(f"⚠️ command_signal error: {exc!r}", flush=True)
+    return out
+
+
 def translate_if_enabled(text: str) -> Optional[str]:
     """
     Map natural English to a slash command when AI is enabled.
@@ -723,6 +1033,12 @@ def translate_if_enabled(text: str) -> Optional[str]:
     raw = (text or "").strip()
     if not raw or _looks_like_slash_command(raw):
         return None
+    # Deterministic prod-batch maintenance mapping runs BEFORE the fuzzy model —
+    # "i want nwr set maintenance ..." -> "/nwrsetmaintenance ...".
+    pb = detect_prod_batch_command(raw)
+    if pb:
+        print(f"[commandagent] Prod-batch map: {raw[:80]!r} → {pb.splitlines()[0]!r}", flush=True)
+        return pb
     try:
         import jenkinsupdate as _jenkins_gate
 

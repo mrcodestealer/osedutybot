@@ -551,6 +551,42 @@ def build_chat_catalog() -> list[ChatIntentSpec]:
         "oh nice",
         "that's cool",
         "good to know",
+        "what's new",
+        "how's your day",
+        "you busy",
+        "are you free",
+        "just wondering",
+        "no reason",
+        "forget it",
+        "carry on",
+        "as you were",
+        "good talk",
+        "hmm",
+        "i see",
+        "right",
+        "yeah",
+        "yep",
+        "nope",
+        "maybe later",
+        "we'll see",
+        "let me think",
+        "one sec",
+        "hold on",
+        "brb",
+        "back now",
+        "still here",
+        "you awake",
+        "anybody home",
+        "knock knock",
+        "tell me something",
+        "surprise me",
+        "cheer me up",
+        "i need a break",
+        "monday again",
+        "almost friday",
+        "weekend soon",
+        "coffee break",
+        "lunch soon",
     ]
 
     intents.append(
@@ -673,6 +709,37 @@ class ChatClassifier:
         if not spec or not spec.responses:
             return None
         return pick_localized_reply(spec.responses, text)
+
+
+def chat_signal(text: str) -> dict:
+    """Diagnostic signal for the router (``chathandleagent``).
+
+    Returns ``{"tag", "confidence", "margin"}`` from the local chat classifier.
+    Falls back to a confident signal when the rule-based ``chitchat`` matches,
+    so the router can still detect small talk even before the model is trained.
+    Never raises.
+    """
+    out = {"tag": None, "confidence": 0.0, "margin": 0.0}
+    raw = (text or "").strip()
+    if not raw:
+        return out
+    try:
+        import chitchat
+
+        if chitchat.looks_like_chitchat(raw):
+            out.update(tag="chitchat", confidence=0.9, margin=0.9)
+            return out
+    except Exception:
+        pass
+    clf = _get_classifier()
+    if clf is None:
+        return out
+    try:
+        tag, conf, margin = clf.predict(raw)
+        out.update(tag=tag, confidence=float(conf), margin=float(margin))
+    except Exception as exc:
+        print(f"⚠️ chat_signal error: {exc!r}", flush=True)
+    return out
 
 
 def _get_classifier() -> Optional[ChatClassifier]:
