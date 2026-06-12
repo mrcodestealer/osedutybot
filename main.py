@@ -4732,7 +4732,20 @@ def lark_webhook():
         print(f"✅ Replied to chat {chat_id}: {reply}")
     else:
         print(f"⚠️ No command matched and no reply generated for chat {chat_id}")
-        _chat_source = (original_text or clean_text or "").strip()
+        # Use the mention-stripped text so chitchat's anchored ^…$ rules match
+        # (original_text still has "@_user_1 …" which broke greeting matching).
+        _chat_source = (clean_text or original_text or "").strip()
+        # Is this a casual/chat message (router said chat, or it looks like small talk)?
+        _is_chatty = False
+        try:
+            if _router_decision is not None and getattr(_router_decision, "is_chat", False):
+                _is_chatty = True
+            else:
+                import chitchat as _chitchat_probe
+
+                _is_chatty = _chitchat_probe.looks_like_chitchat(_chat_source)
+        except Exception:
+            pass
         if (
             bot_mentioned
             and _chat_source
@@ -4755,6 +4768,15 @@ def lark_webhook():
             if chat_reply:
                 send_message(chat_id, chat_reply)
                 print(f"💬 Chat reply to chat {chat_id}", flush=True)
+            elif _is_chatty:
+                # It's small talk we just don't have a canned line for — stay friendly,
+                # don't show the scary "command agent" error.
+                send_message(
+                    chat_id,
+                    "Hi! 👋 I'm Duty Bot. I'm here for duty/leave/machine stuff — "
+                    "ask me e.g. “who is on fpms duty” or say `/help`. 😊",
+                )
+                print(f"💬 Friendly chat fallback to chat {chat_id}", flush=True)
             else:
                 try:
                     import commandagent as _commandagent
