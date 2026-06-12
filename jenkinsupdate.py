@@ -7549,6 +7549,75 @@ def normalize_natural_jenkins_body(text: str) -> str:
     return out
 
 
+def _agent_normalize_enabled() -> bool:
+    """``jenkinsupdateagent`` normalization is on unless explicitly disabled."""
+    return (os.environ.get("BOT_JENKINS_AGENT_NORMALIZE", "1") or "").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _looks_like_freeform_update_request(text: str) -> bool:
+    """
+    Broader gate for the expert agent than :func:`looks_like_natural_jenkins_update`.
+
+    Also accepts pastes whose job keyword isn't in the built-in dept list (e.g. ``CCMS``,
+    ``telesales``) as long as they carry ``branch:`` + ``service(s):`` and an
+    ``update``/``deploy`` headline. Never matches an explicit ``/update`` message.
+    """
+    raw = (text or "").replace("\r\n", "\n").strip()
+    if not raw or JENKINS_UPDATE_CMD_RE.search(raw):
+        return False
+    if looks_like_natural_jenkins_update(raw):
+        return True
+    has_branch = bool(re.search(r"\bbranch\s*[:=]", raw, re.I))
+    has_svc = bool(re.search(r"\bservices?\s*[:=]", raw, re.I))
+    has_update_word = bool(
+        re.search(
+            r"(?im)^\s*(?:@\S+\s+)*(?:please\s+|kindly\s+|help\s+|can\s+help\s+|i\s+want\s+)*"
+            r"(?:update|deploy)\b",
+            raw,
+        )
+    )
+    return has_branch and has_svc and has_update_word
+
+
+def agent_route_free_form_body(raw_text: str) -> str | None:
+    """
+    Run the expert extraction agent (:mod:`jenkinsupdateagent`) on a free-form request and
+    return a clean canonical command body:
+
+      * ``/update …``      — one environment detected
+      * ``/updatemore …``  — multiple environments detected (auto multi-segment)
+
+    Returns ``None`` when the agent is disabled, unavailable, errors, or cannot extract a
+    dispatchable request — so the caller falls back to the existing ``/update`` /
+    ``/updatemore`` handling (never breaks the current flow).
+    """
+    if not _agent_normalize_enabled():
+        return None
+    try:
+        import jenkinsupdateagent as agent
+    except Exception as ex:
+        print(f"[jenkinsupdate] jenkinsupdateagent import failed: {ex!r}", flush=True)
+        return None
+    try:
+        body = agent.agent_route(raw_text)
+    except Exception as ex:
+        print(f"[jenkinsupdate] agent route error: {ex!r}", flush=True)
+        return None
+    if not body:
+        return None
+    print(
+        f"[jenkinsupdate] agent routed request -> first line "
+        f"{body.splitlines()[0]!r}",
+        flush=True,
+    )
+    return body
+
+
 @_fpms_lark_with_sender_union_scope
 def _jenkins_message_has_config_block(text: str) -> bool:
     """True when the message looks like a full parameter paste (not only a job keyword)."""
@@ -8013,6 +8082,26 @@ def handle_lark_jenkins_update_message(
         import updatemore as um
     except Exception:
         um = None
+
+    # Expert agent: a free-form request (no slash command) is normalized into a canonical
+    # ``/update`` (one environment) or ``/updatemore`` (several) body, so plain pastes like
+    # "help update jenkins …" auto-route by how many environments are found. Only runs for a
+    # fresh natural-language start (no active session); falls back silently when it can't
+    # decide, so explicit ``/update`` / ``/updatemore`` always keep working.
+    if (
+        allow_start
+        and not JENKINS_UPDATE_CMD_RE.search(clean_text or "")
+        and not (um and um.UPDATEMORE_CMD_RE.search(body_early or ""))
+        and _looks_like_freeform_update_request(body_early)
+    ):
+        with _fpms_lark_sessions_lock:
+            _existing_sess = _fpms_lark_sessions.get(key)
+        if not isinstance(_existing_sess, dict):
+            routed_body = agent_route_free_form_body(body_early)
+            if routed_body:
+                clean_text = routed_body
+                original_text = routed_body
+                body_early = routed_body
 
     if um and um.UPDATEMORE_CMD_RE.search(body_early or ""):
         if not allow_start:
