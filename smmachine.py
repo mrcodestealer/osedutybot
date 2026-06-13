@@ -1009,6 +1009,14 @@ def _find_all_rows_for_target_on_page(page, kind: str, key: str, *, timeout_ms: 
     return matched
 
 
+def _prod_batch_scan_retries() -> int:
+    """Extra full re-scans (from page 1) for machines missed on the first pass (transient re-render)."""
+    try:
+        return max(0, int((os.environ.get("PROD_BATCH_SCAN_RETRIES") or "2").strip() or "2"))
+    except ValueError:
+        return 2
+
+
 def _scan_targets_collect_rows(
     page,
     targets: list[tuple[str, str, str]],
@@ -1018,59 +1026,89 @@ def _scan_targets_collect_rows(
     timeout_ms: int,
     max_pages: int,
 ) -> tuple[list[dict], list[str]]:
-    """Paginate until target tokens are resolved; return normalized rows + not-found tokens."""
+    """
+    Paginate until target tokens are resolved; return normalized rows + not-found tokens.
+
+    A single pass can transiently miss exactly one row (Element-UI ``el-table`` re-renders a row
+    when its status flips, e.g. to/from ``occupy``, and its text reads empty for a moment). So if
+    any targets are still missing after a full pass, we go back to page 1 and re-scan **only** the
+    missing ones, up to ``PROD_BATCH_SCAN_RETRIES`` times (default 2).
+    """
     pending = targets.copy()
     collected: list[dict] = []
     seen_names: set[str] = set()
     dep_label = (deployment or "PROD").strip().upper() or "PROD"
     belong_label = (belongs or "—").strip() or "—"
-    next_clicks = 0
-    safety = 0
 
-    while pending:
-        safety += 1
-        if safety > max_pages * max(len(targets), 1) + 50:
-            break
+    def _one_pass() -> None:
+        next_clicks = 0
+        safety = 0
+        while pending:
+            safety += 1
+            if safety > max_pages * max(len(targets), 1) + 50:
+                break
 
-        resolved: list[tuple[str, str, str]] = []
-        for spec in list(pending):
-            line, kind, key = spec
-            if kind == "invalid":
-                continue
-            matched_here = False
-            for row in _find_all_rows_for_target_on_page(page, kind, key, timeout_ms=timeout_ms):
-                matched_here = True
-                mn, test, game_type, st, onl = _row_report_fields(row, timeout_ms=timeout_ms)
-                name_key = (mn or "").strip()
-                if not name_key or name_key in seen_names:
+            resolved: list[tuple[str, str, str]] = []
+            for spec in list(pending):
+                line, kind, key = spec
+                if kind == "invalid":
                     continue
-                seen_names.add(name_key)
-                collected.append(
-                    {
-                        "environment": dep_label,
-                        "belongs": belong_label,
-                        "name": mn,
-                        "game_type": game_type,
-                        "status": st,
-                        "online": onl,
-                        "is_test": test,
-                    }
-                )
-            if matched_here:
-                resolved.append(spec)
+                matched_here = False
+                for row in _find_all_rows_for_target_on_page(page, kind, key, timeout_ms=timeout_ms):
+                    matched_here = True
+                    mn, test, game_type, st, onl = _row_report_fields(row, timeout_ms=timeout_ms)
+                    name_key = (mn or "").strip()
+                    if not name_key or name_key in seen_names:
+                        continue
+                    seen_names.add(name_key)
+                    collected.append(
+                        {
+                            "environment": dep_label,
+                            "belongs": belong_label,
+                            "name": mn,
+                            "game_type": game_type,
+                            "status": st,
+                            "online": onl,
+                            "is_test": test,
+                        }
+                    )
+                if matched_here:
+                    resolved.append(spec)
 
-        for spec in resolved:
-            pending.remove(spec)
+            for spec in resolved:
+                pending.remove(spec)
 
-        if not pending:
+            if not pending:
+                break
+            if not _can_pagination_next(page):
+                break
+            if next_clicks >= max_pages:
+                break
+            _click_pagination_next(page, timeout_ms=timeout_ms)
+            next_clicks += 1
+            _wait_table_idle(page, timeout_ms)
+
+    _one_pass()
+    retries = _prod_batch_scan_retries()
+    attempt = 0
+    while pending and attempt < retries:
+        attempt += 1
+        # Re-scan from the first page for the few machines missed by a transient re-render.
+        non_invalid = [s for s in pending if s[1] != "invalid"]
+        if not non_invalid:
             break
-        if not _can_pagination_next(page):
-            break
-        if next_clicks >= max_pages:
-            break
-        _click_pagination_next(page, timeout_ms=timeout_ms)
-        next_clicks += 1
-        _wait_table_idle(page, timeout_ms)
+        print(
+            f"[prod-batch] scan retry {attempt}/{retries} for {len(non_invalid)} missed: "
+            f"{[s[0] for s in non_invalid]}",
+            flush=True,
+        )
+        try:
+            _go_first_page(page, timeout_ms=timeout_ms, max_steps=max_pages)
+            _wait_table_idle(page, timeout_ms)
+            page.wait_for_timeout(400)
+        except Exception:
+            pass
+        _one_pass()
 
     not_found = [line for line, kind, _key in pending if kind != "invalid"]
     not_found.extend(line for line, kind, _key in targets if kind == "invalid")
