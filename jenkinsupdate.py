@@ -130,6 +130,42 @@ PMS_UAT_UPDATE_URL = (
     "https://jenkins.client8.me/job/PMS/job/UAT/job/PMS-UAT-UPDATE/build?delay=0sec"
 )
 
+# VPN_CREATION — different Jenkins host (Aliyun) than the FPMS/PMS jobs above.
+# Job: DEVOPS_CP → VPN_CONFIGURATION → VPN_CREATION. Two parameters:
+#   VPN_USERS    — free-text box (the username)
+#   VPN_LOCATION — dropdown (values mirror the Jenkins job, see VPN_LOCATION_OPTIONS)
+VPN_CREATION_BUILD_URL = (
+    "https://ose-jenkinsaliyun.bewen.me/job/DEVOPS_CP/job/VPN_CONFIGURATION/job/VPN_CREATION/build?delay=0sec"
+)
+# Dropdown values for VPN_LOCATION (keep in sync with the Jenkins job parameter).
+VPN_LOCATION_OPTIONS: list[str] = [
+    "HK_235",
+    "PH_41",
+    "PH_185",
+    "PH_224",
+    "PH_134",
+    "PH_216",
+    "SG_16",
+    "SG_62",
+    "SG_SRE_75",
+    "BR_203",
+    "ALL",
+    "TEST_SERVER",
+]
+# Human guidance shown when someone starts a VPN creation (who can use which VPN).
+VPN_GUIDANCE_TEXT = (
+    "📌 **VPN reference (who can use which):**\n"
+    "1. PH - 237 - everyone\n"
+    "2. PH - 133 - only QA\n"
+    "3. PH - 113 - everyone (this VPN only has access to the **PC** version of the CP website)\n"
+    "4. PH - 253 / PH - 31 - everyone (these VPNs only access the **H5** version of the CP website). "
+    "If someone requests this, open the one with **fewer** users — e.g. if 253 already has more users, give them 31.\n"
+    "5. SG - DEV - 197 - **Closed** (only old users keep it). For any new SG VPN request, open **SG - 125** instead.\n"
+    "6. SG - 125 - everyone **except SRE** (for SRE just open VPN **191**).\n"
+    "7. HK - 149 - everyone\n"
+    "8. SG - SRE 191 - **only SRE**"
+)
+
 # Jenkins REPOSITORY dropdown (BI-API-UPDATE) — keep in sync with the job parameter list.
 BI_API_UPDATE_DEFAULT_ENVIRONMENT = "prod"
 BI_API_UPDATE_DEFAULT_SOURCE_BRANCH = "main"
@@ -318,6 +354,12 @@ _NL_JENKINS_UPDATE_RE = re.compile(
     r"|jenkins\s+(?:update|deploy|build)"
     r")"
 )
+# VPN creation triggers: slash command ``/createvpn`` and natural phrases like "create vpn".
+VPN_CREATE_CMD_RE = re.compile(r"/create\s*vpn\b", re.I)
+_NL_VPN_CREATE_RE = re.compile(
+    r"(?i)\b(?:create|make|generate|new|open|add)\s+(?:a\s+|an\s+|new\s+)?vpn\b"
+)
+
 FPMS_PROD_SCRIPT_FLAG_RE = re.compile(r"--fpmsprodscript\b", re.I)
 FPMS_PROD_SCRIPT_BUILD_URL = (
     "https://jenkins.client8.me/job/FPMS/job/FPMS_PROD_SCRIPT_RUN/build?delay=0sec"
@@ -1715,6 +1757,133 @@ def _bi_api_update_build_config_block(repository: str, environment: str, source_
         f"environment: {normalize_parameter_text(environment).casefold()}\n"
         f"source_branch: {normalize_parameter_text(source_branch)}\n"
     )
+
+
+# ===================== VPN_CREATION helpers =====================
+def _vpn_trailing_number(location: str) -> str:
+    """Trailing digits of a VPN_LOCATION value (``PH_41`` -> ``41``; ``ALL`` -> ``\"\"``)."""
+    m = re.search(r"(\d+)\s*$", (location or "").strip())
+    return m.group(1) if m else ""
+
+
+def vpn_conf_filename(vpn_users: str, vpn_location: str) -> str:
+    """Artifact name to look for: ``{username}{number}.conf`` (e.g. ``tom`` + ``PH_41`` -> ``tom41.conf``).
+
+    For locations without a number (``ALL`` / ``TEST_SERVER``) returns ``{username}.conf`` as a hint;
+    jenkinsbot still falls back to matching any ``{username}*.conf`` artifact.
+    """
+    user = (vpn_users or "").strip()
+    num = _vpn_trailing_number(vpn_location)
+    return f"{user}{num}.conf" if num else f"{user}.conf"
+
+
+def _vpn_clean_username(text: str) -> str:
+    """Extract a single username token from a Lark message (strips mentions / slash command)."""
+    raw = (text or "").replace("\r\n", "\n").strip()
+    raw = re.sub(r"@_user_\d+", "", raw)
+    raw = re.sub(r"<[^>]+>", "", raw)
+    raw = VPN_CREATE_CMD_RE.sub("", raw)
+    raw = raw.strip().strip(":").strip()
+    if not raw:
+        return ""
+    # Drop an optional leading label like "vpn_users:" / "user:".
+    m = re.match(r"(?i)^(?:vpn[_\s]*users?|user(?:name)?)\s*[:=]\s*(.+)$", raw)
+    if m:
+        raw = m.group(1).strip()
+    tokens = raw.split()
+    return tokens[0].strip() if tokens else ""
+
+
+def _vpn_resolve_location(text: str) -> str | None:
+    """Map a reply (number 1..N or a location name like ``PH 41`` / ``ph41``) to a VPN_LOCATION option."""
+    raw = (text or "").strip()
+    raw = re.sub(r"@_user_\d+", "", raw)
+    raw = re.sub(r"<[^>]+>", "", raw).strip()
+    if not raw:
+        return None
+    m = re.match(r"(?i)^(?:vpn[_\s]*location|location|loc)\s*[:=]\s*(.+)$", raw)
+    if m:
+        raw = m.group(1).strip()
+    # Numeric pick (1-based index into VPN_LOCATION_OPTIONS).
+    if re.fullmatch(r"\d{1,2}", raw):
+        idx = int(raw)
+        if 1 <= idx <= len(VPN_LOCATION_OPTIONS):
+            return VPN_LOCATION_OPTIONS[idx - 1]
+        return None
+    norm = re.sub(r"[\s_-]+", "", raw).casefold()
+    for opt in VPN_LOCATION_OPTIONS:
+        if re.sub(r"[\s_-]+", "", opt).casefold() == norm:
+            return opt
+    return None
+
+
+def _vpn_location_picker_text() -> str:
+    lines = ["🌐 **VPN_LOCATION** — reply with the number (or the name) of the location:"]
+    for i, opt in enumerate(VPN_LOCATION_OPTIONS, start=1):
+        lines.append(f"{i}. {opt}")
+    lines.append("\nExample: reply `2` for **PH_41**, or type `PH_41`.")
+    return "\n".join(lines)
+
+
+def parse_vpn_creation_config_block(text: str) -> tuple[str, str]:
+    """Parse a ``VPN_CREATION_V1`` config block into ``(vpn_users, vpn_location)``."""
+    body = (text or "").replace("\r\n", "\n").strip()
+    vpn_users = ""
+    vpn_location = ""
+    for line in body.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        m = re.match(r"(?i)^(?:vpn[_\s]*users?|user(?:name)?)\s*[:=]\s*(.+)$", s)
+        if m:
+            vpn_users = m.group(1).strip()
+            continue
+        m = re.match(r"(?i)^(?:vpn[_\s]*location|location|loc)\s*[:=]\s*(.+)$", s)
+        if m:
+            vpn_location = m.group(1).strip()
+            continue
+    return normalize_parameter_text(vpn_users), normalize_parameter_text(vpn_location)
+
+
+def _vpn_creation_bot_build_config_block(vpn_users: str, vpn_location: str) -> str:
+    return (
+        "VPN_CREATION_V1\n"
+        f"vpn_users: {normalize_parameter_text(vpn_users)}\n"
+        f"vpn_location: {normalize_parameter_text(vpn_location)}\n"
+    )
+
+
+def verify_vpn_creation_parameters_display(
+    page,
+    vpn_users_expected: str,
+    vpn_location_expected: str,
+) -> tuple[bool, list[str]]:
+    """Re-read VPN_USERS (text) + VPN_LOCATION (select) from the page vs intended values."""
+    want_user = normalize_parameter_text(vpn_users_expected)
+    want_loc = normalize_parameter_text(vpn_location_expected)
+    lines: list[str] = []
+    ok_all = True
+
+    try:
+        got_user = read_text_parameter_value(page, "VPN_USERS")
+    except Exception as ex:
+        got_user = f"(read failed: {ex})"
+        user_ok = False
+    else:
+        user_ok = got_user == want_user
+    ok_all = ok_all and user_ok
+    lines.append(_verify_page_expected_line(user_ok, "VPN_USERS", got_user, want_user))
+
+    try:
+        got_loc = read_choice_parameter_value(page, "VPN_LOCATION")
+    except Exception as ex:
+        got_loc = f"(read failed: {ex})"
+        loc_ok = False
+    else:
+        loc_ok = got_loc.casefold() == want_loc.casefold()
+    ok_all = ok_all and loc_ok
+    lines.append(_verify_page_expected_line(loc_ok, "VPN_LOCATION", got_loc, want_loc))
+    return ok_all, lines
 
 
 def read_multiline_config_paste() -> str:
@@ -6243,7 +6412,9 @@ def _fpms_lark_verification_card_json(
         f"{footer_ok if ok_all else footer_bad}"
     )
     jp = (job_profile or "fpms").strip()
-    if jp == "fnt_rc":
+    if jp == "vpn_creation":
+        title_text = "VPN CREATION — form filled & re-check"
+    elif jp == "fnt_rc":
         title_text = "FNT RC UAT — form filled & re-check"
     elif jp == "sms_uat":
         title_text = "SMS UAT UPDATE — form filled & re-check"
@@ -6302,7 +6473,9 @@ def _fpms_lark_verification_plain_fallback(
     next_build_number: int | None = None,
 ) -> str:
     jp = (job_profile or "fpms").strip()
-    if jp == "fnt_rc":
+    if jp == "vpn_creation":
+        head = "VPN CREATION — form filled & re-check"
+    elif jp == "fnt_rc":
         head = "FNT RC UAT — form filled & re-check"
     elif jp == "sms_uat":
         head = "SMS UAT UPDATE — form filled & re-check"
@@ -6370,6 +6543,8 @@ def _jenkins_bot_single_verify_enabled() -> bool:
 def _jenkins_parameter_labels_for_profile(job_profile: str) -> list[str]:
     """Form row labels to capture as close-up screenshots (all automated Jenkins update jobs)."""
     jp = (job_profile or "fpms").strip()
+    if jp == "vpn_creation":
+        return ["VPN_USERS", "VPN_LOCATION"]
     if jp == "fpms_prod_script":
         return ["Environment", "Command"]
     if jp == "bi_api_update":
@@ -6388,6 +6563,7 @@ def _jenkins_job_profile_display(job_profile: str) -> str:
         "sms_uat": "SMS UAT",
         "fpms_prod_script": "FPMS PROD SCRIPT",
         "bi_api_update": "BI API UPDATE",
+        "vpn_creation": "VPN CREATION",
     }.get(jp, jp.upper().replace("_", " "))
 
 
@@ -7812,6 +7988,236 @@ def _fpms_lark_notify_jenkins_after_build_click(
         )
 
 
+def _fpms_lark_notify_jenkinsbot_vpn(
+    send,
+    chat_id: str,
+    *,
+    folder_url: str,
+    build_number: int | None,
+    vpn_users: str,
+    vpn_location: str,
+) -> None:
+    """After **Build** for a VPN_CREATION job: ask jenkinsbot to watch the build and, on
+    ``Finished: SUCCESS``, download ``{username}{number}.conf`` from the build artifacts and
+    send it back into this chat."""
+    jenkins_oid = _fpms_lark_jenkins_bot_open_id()
+    if jenkins_oid.casefold() in ("0", "false", "no", "off"):
+        jenkins_oid = ""
+    bn = build_number if isinstance(build_number, int) and build_number > 0 else None
+    conf = vpn_conf_filename(vpn_users, vpn_location)
+
+    cmd = f"/SuccessSendVpnConf {folder_url}"
+    if bn:
+        cmd += f" {bn}"
+    cmd += f" | {vpn_users} | {vpn_location}"
+    at = f'<at user_id="{jenkins_oid}">jenkinsbot</at> ' if jenkins_oid else ""
+    try:
+        send(chat_id, f"{at}{cmd}".strip())
+    except Exception as ex:
+        print(f"⚠️ VPN jenkinsbot notify failed: {ex!r}", flush=True)
+
+    if bn:
+        console_url = f"{folder_url.rstrip('/')}/{bn}/console"
+        send(
+            chat_id,
+            "🔧 **VPN creation started.**\n"
+            f"- Build: #{bn}\n"
+            f"- Console: {console_url}\n"
+            f"- Expecting artifact: `{conf}`\n"
+            "Jenkinsbot 会监控到 **Finished: SUCCESS**，再下载该 .conf 发到群里。",
+        )
+    else:
+        send(
+            chat_id,
+            "🔧 **VPN creation started**, but the build number could not be resolved yet — "
+            f"jenkinsbot will still watch the job and send `{conf}` after success.",
+        )
+
+
+def _fpms_lark_begin_vpn_run(
+    chat_id: str,
+    session_key: str,
+    vpn_users: str,
+    vpn_location: str,
+    send,
+    *,
+    lark_message_id: str | None = None,
+    lark_thread_root_id: str | None = None,
+) -> None:
+    """Install the ``jenkins_wait_build`` gate and spawn the VPN_CREATION Playwright run."""
+    cfg = _vpn_creation_bot_build_config_block(vpn_users, vpn_location)
+    echo = (
+        "/createvpn\n"
+        f"VPN_USERS: {vpn_users}\n"
+        f"VPN_LOCATION: {vpn_location}"
+    )
+    ev = threading.Event()
+    trigger_mid = (lark_message_id or "").strip() or None
+    try:
+        import main as _main_mod
+
+        defer_fn = getattr(_main_mod, "defer_lark_done_reaction", None)
+        if callable(defer_fn):
+            defer_fn()
+    except Exception:
+        pass
+    wait_sess = {
+        "state": "jenkins_wait_build",
+        "build_gate_event": ev,
+        "approve_build": None,
+        "lark_cancel": False,
+        "lark_trigger_message_id": trigger_mid,
+    }
+    _fpms_lark_sessions_put_chat_key(session_key, wait_sess)
+    _fpms_lark_begin_update_thread(
+        chat_id,
+        session_key,
+        f"create vpn — {vpn_users} / {vpn_location}",
+        lark_message_id,
+        lark_thread_root_id=lark_thread_root_id,
+        force_new=True,
+    )
+    raw_headless = os.environ.get("JENKINSUPDATE_BOT_HEADLESS", "1").strip().lower()
+    bot_headless = raw_headless in ("1", "true", "yes", "on")
+    if (not bot_headless) and sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+        bot_headless = True
+    send(
+        chat_id,
+        f"▶️ Creating VPN for **{vpn_users}** at **{vpn_location}** — filling Jenkins "
+        "(a YES/NO confirmation card will follow)…",
+    )
+    _fpms_lark_spawn_run(
+        chat_id,
+        session_key,
+        cfg,
+        send,
+        raw_prompt_body=echo,
+        jenkins_build_url=VPN_CREATION_BUILD_URL,
+        job_profile="vpn_creation",
+        update_all_services=False,
+        headless=bot_headless,
+        lark_message_id=trigger_mid,
+    )
+
+
+def _fpms_lark_handle_vpn_flow(
+    chat_id: str,
+    sender_id: str,
+    session_key: str,
+    clean_text: str,
+    original_text: str,
+    send,
+    *,
+    allow_start: bool,
+    lark_message_id: str | None = None,
+    lark_thread_root_id: str | None = None,
+) -> bool:
+    """Multi-step VPN creation: prompt VPN_USERS (text) then VPN_LOCATION (pick), then run.
+
+    Returns ``True`` when the message was consumed.
+    """
+    body = (original_text or clean_text or "").replace("\r\n", "\n").strip()
+
+    with _fpms_lark_sessions_lock:
+        sess = _fpms_lark_sessions.get(session_key)
+    state = sess.get("state") if isinstance(sess, dict) else None
+
+    # ----- mid-flow: waiting for VPN_USERS -----
+    if state == "vpn_need_users":
+        username = _vpn_clean_username(clean_text)
+        if not username:
+            send(chat_id, "⚠️ Please reply with the **VPN_USERS** (username), e.g. `tom`.")
+            return True
+        with _fpms_lark_sessions_lock:
+            cur = _fpms_lark_sessions.get(session_key)
+            if isinstance(cur, dict):
+                cur["vpn_users"] = username
+                cur["state"] = "vpn_choose_location"
+        send(
+            chat_id,
+            f"✅ VPN_USERS = **{username}**\n\n{_vpn_location_picker_text()}",
+        )
+        return True
+
+    # ----- mid-flow: waiting for VPN_LOCATION -----
+    if state == "vpn_choose_location":
+        loc = _vpn_resolve_location(clean_text)
+        if loc is None:
+            send(
+                chat_id,
+                "⚠️ I didn't recognize that location.\n\n" + _vpn_location_picker_text(),
+            )
+            return True
+        username = str((sess or {}).get("vpn_users") or "").strip()
+        _fpms_lark_clear_session(chat_id, sender_id)
+        if not username:
+            send(chat_id, "Session error — start again with `/createvpn`.")
+            return True
+        _fpms_lark_begin_vpn_run(
+            chat_id,
+            session_key,
+            username,
+            loc,
+            send,
+            lark_message_id=lark_message_id,
+            lark_thread_root_id=lark_thread_root_id,
+        )
+        return True
+
+    # ----- start a new VPN flow -----
+    is_cmd = bool(VPN_CREATE_CMD_RE.search(body))
+    is_nl = bool(_NL_VPN_CREATE_RE.search(body))
+    if not (is_cmd or is_nl):
+        return False
+    if not allow_start:
+        # In groups the bot must be @mentioned to start.
+        return False
+
+    # Optional inline values (e.g. "create vpn user: tom location: PH_41").
+    inline_user = ""
+    inline_loc = None
+    mu = re.search(r"(?i)(?:vpn[_\s]*users?|user(?:name)?)\s*[:=]\s*(\S+)", body)
+    if mu:
+        inline_user = mu.group(1).strip()
+    ml = re.search(r"(?i)(?:vpn[_\s]*location|location|loc)\s*[:=]\s*([A-Za-z0-9_\- ]+)", body)
+    if ml:
+        inline_loc = _vpn_resolve_location(ml.group(1))
+
+    if inline_user and inline_loc:
+        _fpms_lark_clear_session(chat_id, sender_id)
+        send(chat_id, VPN_GUIDANCE_TEXT)
+        _fpms_lark_begin_vpn_run(
+            chat_id,
+            session_key,
+            inline_user,
+            inline_loc,
+            send,
+            lark_message_id=lark_message_id,
+            lark_thread_root_id=lark_thread_root_id,
+        )
+        return True
+
+    if inline_user:
+        new_sess = {"state": "vpn_choose_location", "vpn_users": inline_user}
+        _fpms_lark_sessions_put_chat_key(session_key, new_sess)
+        send(
+            chat_id,
+            VPN_GUIDANCE_TEXT
+            + f"\n\n✅ VPN_USERS = **{inline_user}**\n\n"
+            + _vpn_location_picker_text(),
+        )
+        return True
+
+    new_sess = {"state": "vpn_need_users"}
+    _fpms_lark_sessions_put_chat_key(session_key, new_sess)
+    send(
+        chat_id,
+        VPN_GUIDANCE_TEXT
+        + "\n\n📝 **VPN_USERS** — reply with the username to create the VPN for (e.g. `tom`).",
+    )
+    return True
+
+
 def _dispatch_lark_update_command_body(
     chat_id: str,
     session_key: str,
@@ -8063,6 +8469,20 @@ def handle_lark_jenkins_update_message(
             send(chat_id, "⏹️ **All `/update` steps cancelled.**")
         else:
             send(chat_id, "ℹ️ No active `/update` session to cancel.")
+        return True
+
+    # VPN creation — multi-step prompt flow (VPN_USERS text + VPN_LOCATION pick) then Jenkins run.
+    if _fpms_lark_handle_vpn_flow(
+        chat_id,
+        sender_id,
+        key,
+        clean_text,
+        original_text,
+        send,
+        allow_start=allow_start,
+        lark_message_id=lark_message_id,
+        lark_thread_root_id=lark_thread_root_id,
+    ):
         return True
 
     # New full config while YES/NO is pending → cancel old run and start over (no re-@mention).
@@ -8878,13 +9298,27 @@ def run(
     skip_env = jp in ("fnt_rc", "sms_uat")
     is_prod_script = jp == "fpms_prod_script"
     is_bi_api_update = jp == "bi_api_update"
+    is_vpn = jp == "vpn_creation"
 
     parsed_update_all = False
     command = ""
     repository = ""
+    vpn_users = ""
+    vpn_location = ""
     if config_block:
         cl = (config_block or "").lstrip()
-        if is_bi_api_update:
+        if is_vpn:
+            vpn_users, vpn_location = parse_vpn_creation_config_block(config_block)
+            environment = ""
+            services = []
+            branch = ""
+            version = ""
+            print(
+                "\n→ Parsed VPN_CREATION config block:\n"
+                f"    vpn_users:    {vpn_users!r}\n"
+                f"    vpn_location: {vpn_location!r}\n"
+            )
+        elif is_bi_api_update:
             if cl.upper().startswith("BI_API_UPDATE_V1"):
                 repository, environment, branch = parse_bi_api_update_config_block(config_block)
             else:
@@ -8956,7 +9390,14 @@ def run(
                 f"    services ({len(services) if not parsed_update_all else 'all'}): {svc_note}\n"
             )
     else:
-        if is_bi_api_update:
+        if is_vpn:
+            vpn_users = normalize_parameter_text(prompt_text("What VPN_USERS?"))
+            vpn_location = normalize_parameter_text(prompt_text("What VPN_LOCATION?"))
+            environment = ""
+            services = []
+            branch = ""
+            version = ""
+        elif is_bi_api_update:
             repository = normalize_parameter_text(prompt_text("What REPOSITORY?"))
             environment = normalize_parameter_text(prompt_text("What ENVIRONMENT?")).casefold()
             services = []
@@ -9085,7 +9526,10 @@ def run(
                     return
                 _apply_services_selection()
 
-            if is_bi_api_update:
+            if is_vpn:
+                fill_text_parameter(page, "VPN_USERS", vpn_users)
+                select_choice_parameter_by_value(page, "VPN_LOCATION", vpn_location)
+            elif is_bi_api_update:
                 repo_option_value = _choose_bi_repository_option_value(
                     repository, _read_select_options(page, "REPOSITORY")
                 )
@@ -9159,7 +9603,11 @@ def run(
 
             _safe_page_wait(page, max(0, _MS_POST_FILL_VERIFY))
             if bot_lark_gate is not None:
-                if is_bi_api_update:
+                if is_vpn:
+                    ok_first, lines_first = verify_vpn_creation_parameters_display(
+                        page, vpn_users, vpn_location
+                    )
+                elif is_bi_api_update:
                     ok_first, lines_first = verify_bi_api_update_parameters_display(
                         page, repository, environment, branch
                     )
@@ -9193,7 +9641,11 @@ def run(
                     print("→ Bot: single on-page re-check (skipping second pass for speed).")
                 else:
                     _safe_page_wait(page, max(250, min(800, _MS_POST_FILL_VERIFY)))
-                    if is_bi_api_update:
+                    if is_vpn:
+                        ok_second, verify_lines = verify_vpn_creation_parameters_display(
+                            page, vpn_users, vpn_location
+                        )
+                    elif is_bi_api_update:
                         ok_second, verify_lines = verify_bi_api_update_parameters_display(
                             page, repository, environment, branch
                         )
@@ -9224,7 +9676,11 @@ def run(
                     ok_all = ok_first and ok_second
                 print("→ =====================================================\n")
             else:
-                if is_bi_api_update:
+                if is_vpn:
+                    ok_all, verify_lines = verify_vpn_creation_parameters_display(
+                        page, vpn_users, vpn_location
+                    )
+                elif is_bi_api_update:
                     ok_all, verify_lines = verify_bi_api_update_parameters_display(
                         page, repository, environment, branch
                     )
@@ -9336,13 +9792,23 @@ def run(
                                 next_build_number,
                                 timeout_ms=max(0, wait_bn_ms),
                             )
-                            _fpms_lark_notify_jenkins_after_build_click(
-                                send,
-                                cid,
-                                sk,
-                                folder_url=folder_u,
-                                build_number=resolved_bn,
-                            )
+                            if is_vpn:
+                                _fpms_lark_notify_jenkinsbot_vpn(
+                                    send,
+                                    cid,
+                                    folder_url=folder_u,
+                                    build_number=resolved_bn,
+                                    vpn_users=vpn_users,
+                                    vpn_location=vpn_location,
+                                )
+                            else:
+                                _fpms_lark_notify_jenkins_after_build_click(
+                                    send,
+                                    cid,
+                                    sk,
+                                    folder_url=folder_u,
+                                    build_number=resolved_bn,
+                                )
                         else:
                             build_clicked = False
                             send(
