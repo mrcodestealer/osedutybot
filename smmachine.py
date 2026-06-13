@@ -79,7 +79,7 @@ import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Optional, Sequence
 from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
@@ -1390,7 +1390,7 @@ def _scrape_concurrency(item_count: int) -> int:
 
 
 # A scrape "unit": (label, callable) where the callable returns ``(rows, warning)``.
-ScrapeUnit = tuple[str, Callable[[], tuple[list[dict], str | None]]]
+ScrapeUnit = tuple[str, Callable[[], tuple[list[dict], Optional[str]]]]
 
 
 def _collect_units(units: list[ScrapeUnit]) -> tuple[list[dict], dict[str, str]]:
