@@ -2822,6 +2822,56 @@ def _lark_ack_only_event_type(het: str) -> bool:
     return False
 
 
+def _process_evo_sd_batch_paste(chat_id: str, email_text: str) -> None:
+    """Run the EVO Service Desk batch pipeline (same as ``/m``) and post the cards.
+
+    Shared by the explicit ``/m`` command and the no-command auto-detection so both
+    paths behave identically.
+    """
+    try:
+        token = get_tenant_access_token()
+        batch = maintenance.process_evo_sd_batch_maintenance(email_text, token)
+        import maintenance_mail as _maint_mail
+
+        if batch.get("email_sent"):
+            _maint_mail.send_evo_batch_maintenance_email(
+                subject=batch["email_subject"],
+                body=batch["email_body"],
+            )
+            fwd_chat = maintenance.evo_batch_forward_chat_id()
+            fwd_card = batch.get("forward_card")
+            if fwd_chat and fwd_card:
+                send_message(
+                    fwd_chat,
+                    json.dumps(fwd_card, ensure_ascii=False),
+                    msg_type="interactive",
+                )
+            _maint_mail.post_maintenance_confirm_to_chat(
+                send_message,
+                email_name=batch["email_subject"],
+                game_names=batch["valid_labels"],
+                in_cp=True,
+                email_replied=True,
+                get_token_func=get_tenant_access_token,
+            )
+        elif batch.get("filtered_labels"):
+            _maint_mail.post_maintenance_confirm_to_chat(
+                send_message,
+                email_name=batch.get("email_subject") or "EVO batch",
+                game_names=batch["filtered_labels"],
+                in_cp=False,
+                email_replied=False,
+                get_token_func=get_tenant_access_token,
+            )
+        send_message(
+            chat_id,
+            json.dumps(batch["result_card"], ensure_ascii=False),
+            msg_type="interactive",
+        )
+    except Exception as ex:
+        send_message(chat_id, f"❌ EVO 批量 `/m` 处理失败: `{ex}`")
+
+
 @app.route("/webhook/event", methods=["POST", "GET", "OPTIONS"])
 def lark_webhook():
     # Some proxies send OPTIONS; **405** breaks Feishu card interaction (expects HTTP 200 family on callback URL).
@@ -3654,6 +3704,29 @@ def lark_webhook():
         send_message(chat_id, f"❌ Offset/leave form failed: {e}")
         return _lark_im_done()
 
+    # Auto-detect EVO Service Desk batch paste even WITHOUT the `/m` command.
+    # Only fires on the distinctive ``※SD-xxxxx※`` multi-block format, so normal
+    # messages and other commands are never intercepted. We rebuild the source from
+    # ``original_text`` (preserving newlines, which ``clean_text`` collapses) and strip
+    # an optional leading ``/m`` so an explicit command still works here too.
+    try:
+        _evo_src = original_text or ""
+        for _mk in mention_keys:
+            _evo_src = _evo_src.replace(_mk, "")
+        _evo_src = re.sub(r"@_user_\d+", "", _evo_src)
+        _evo_src = re.sub(r"<[^>]+>", "", _evo_src)
+        _evo_cmd = re.search(r"(?:^|\s)/m\s+", _evo_src, re.IGNORECASE)
+        if _evo_cmd:
+            _evo_src = _evo_src[_evo_cmd.end():]
+        _evo_src = _evo_src.strip()
+        if _evo_src.startswith('"') and _evo_src.endswith('"'):
+            _evo_src = _evo_src[1:-1].strip()
+        if _evo_src and maintenance.is_evo_sd_batch_paste(_evo_src):
+            _process_evo_sd_batch_paste(chat_id, _evo_src)
+            return _lark_im_done()
+    except Exception as _evo_auto_err:
+        print(f"⚠️ EVO batch auto-detect skipped: {_evo_auto_err!r}", flush=True)
+
     # Natural English → slash command (optional; BOT_USE_AI=1). Failures keep hardcoded-only behavior.
     # The router (chathandleagent) decides COMMAND vs CHAT so a real work request is never
     # silently answered as small talk (and vice versa). Everything is guarded — on any
@@ -4117,48 +4190,7 @@ def lark_webhook():
                 "或使用 `/ms` 解析单封 Service Desk 邮件。",
             )
             return _lark_im_done()
-        try:
-            token = get_tenant_access_token()
-            batch = maintenance.process_evo_sd_batch_maintenance(email_text, token)
-            import maintenance_mail as _maint_mail
-
-            if batch.get("email_sent"):
-                _maint_mail.send_evo_batch_maintenance_email(
-                    subject=batch["email_subject"],
-                    body=batch["email_body"],
-                )
-                fwd_chat = maintenance.evo_batch_forward_chat_id()
-                fwd_card = batch.get("forward_card")
-                if fwd_chat and fwd_card:
-                    send_message(
-                        fwd_chat,
-                        json.dumps(fwd_card, ensure_ascii=False),
-                        msg_type="interactive",
-                    )
-                _maint_mail.post_maintenance_confirm_to_chat(
-                    send_message,
-                    email_name=batch["email_subject"],
-                    game_names=batch["valid_labels"],
-                    in_cp=True,
-                    email_replied=True,
-                    get_token_func=get_tenant_access_token,
-                )
-            elif batch.get("filtered_labels"):
-                _maint_mail.post_maintenance_confirm_to_chat(
-                    send_message,
-                    email_name=batch.get("email_subject") or "EVO batch",
-                    game_names=batch["filtered_labels"],
-                    in_cp=False,
-                    email_replied=False,
-                    get_token_func=get_tenant_access_token,
-                )
-            send_message(
-                chat_id,
-                json.dumps(batch["result_card"], ensure_ascii=False),
-                msg_type="interactive",
-            )
-        except Exception as ex:
-            send_message(chat_id, f"❌ EVO 批量 `/m` 处理失败: `{ex}`")
+        _process_evo_sd_batch_paste(chat_id, email_text)
         return _lark_im_done()
     elif re.search(
         r"(?:^|\s)/(maintenance|maintenanceshort|ms)\s+",
