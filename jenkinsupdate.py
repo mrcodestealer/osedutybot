@@ -8100,6 +8100,104 @@ def _fpms_lark_begin_vpn_run(
     )
 
 
+def _fpms_lark_vpn_form_card_json() -> str:
+    """Lark card 2.0 form: VPN_USERS text input + VPN_LOCATION dropdown + submit button.
+
+    Submit fires ``card.action.trigger`` with ``value={"k":"vpn_create_submit"}`` and
+    ``form_value={"vpn_users":..., "vpn_location":...}`` (handled in main.py card worker).
+    """
+    options = [
+        {"text": {"tag": "plain_text", "content": opt}, "value": opt}
+        for opt in VPN_LOCATION_OPTIONS
+    ]
+    card = {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": "Create VPN"},
+        },
+        "body": {
+            "elements": [
+                {"tag": "div", "text": {"tag": "lark_md", "content": VPN_GUIDANCE_TEXT}},
+                {"tag": "hr"},
+                {
+                    "tag": "form",
+                    "name": "vpn_create_form",
+                    "elements": [
+                        {"tag": "div", "text": {"tag": "plain_text", "content": "VPN_USERS"}},
+                        {
+                            "tag": "input",
+                            "name": "vpn_users",
+                            "placeholder": {
+                                "tag": "plain_text",
+                                "content": "username, e.g. tom",
+                            },
+                            "required": True,
+                        },
+                        {"tag": "div", "text": {"tag": "plain_text", "content": "VPN_LOCATION"}},
+                        {
+                            "tag": "select_static",
+                            "name": "vpn_location",
+                            "placeholder": {
+                                "tag": "plain_text",
+                                "content": "Select VPN_LOCATION",
+                            },
+                            "options": options,
+                            "required": True,
+                        },
+                        {
+                            "tag": "button",
+                            "name": "submit_vpn_create",
+                            "text": {
+                                "tag": "plain_text",
+                                "content": "Create VPN — Fill Jenkins",
+                            },
+                            "type": "primary",
+                            "form_action_type": "submit",
+                            "behaviors": [
+                                {"type": "callback", "value": {"k": "vpn_create_submit"}}
+                            ],
+                        },
+                    ],
+                },
+            ]
+        },
+    }
+    return json.dumps(card, ensure_ascii=False)
+
+
+def begin_vpn_run_from_card(
+    chat_id: str,
+    sender_id: str,
+    vpn_users: str,
+    vpn_location: str,
+    send,
+    *,
+    lark_message_id: str | None = None,
+) -> bool:
+    """Entry from the VPN form-card submit (called by main.py). Validates fields then runs."""
+    key = _fpms_lark_session_key(chat_id, sender_id)
+    send = _fpms_lark_wrap_thread_send(chat_id, key, send)
+    user = _vpn_clean_username(vpn_users)
+    loc = _vpn_resolve_location(vpn_location) or normalize_parameter_text(vpn_location)
+    if not user:
+        send(chat_id, "⚠️ VPN_USERS is empty — tap **create vpn** again and fill the username.")
+        return False
+    if loc not in VPN_LOCATION_OPTIONS:
+        send(
+            chat_id,
+            "⚠️ VPN_LOCATION is invalid — tap **create vpn** again and pick from the dropdown.",
+        )
+        return False
+    _fpms_lark_clear_session(chat_id, sender_id)
+    send(chat_id, f"✅ VPN_USERS = **{user}**  |  VPN_LOCATION = **{loc}**")
+    _fpms_lark_begin_vpn_run(
+        chat_id, key, user, loc, send, lark_message_id=lark_message_id
+    )
+    return True
+
+
 def _fpms_lark_handle_vpn_flow(
     chat_id: str,
     sender_id: str,
@@ -8197,6 +8295,17 @@ def _fpms_lark_handle_vpn_flow(
         )
         return True
 
+    # Preferred UX: one interactive card with a VPN_USERS text box + VPN_LOCATION dropdown + submit.
+    _fpms_lark_clear_session(chat_id, sender_id)
+    try:
+        send(chat_id, _fpms_lark_vpn_form_card_json(), msg_type="interactive")
+        return True
+    except TypeError:
+        pass
+    except Exception as ex:
+        print(f"[jenkinsupdate] VPN form card send failed, falling back to text: {ex!r}", flush=True)
+
+    # Fallback (client can't render cards): step-by-step text replies.
     if inline_user:
         new_sess = {"state": "vpn_choose_location", "vpn_users": inline_user}
         _fpms_lark_sessions_put_chat_key(session_key, new_sess)

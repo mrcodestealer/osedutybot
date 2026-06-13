@@ -50,6 +50,13 @@ _QA_SUPPORT_OPEN_ID = "ou_0342007237c6c1aa262acae839acb7c6"
 # Substrings in email subject/title → skip (no card, no pipeline).
 _SUBJECT_IGNORE_MARKERS = ("c88live_ow.ph",)
 
+# Service Desk stream/issue alerts — not scheduled maintenance (e.g. Custom Roulette Stream Issues).
+# Titles like ``[Service Desk] IMPORTANT! …`` or ``[Service Desk] IMPORTANT! IMPORTANT! …``.
+_SERVICE_DESK_IMPORTANT_RE = re.compile(
+    r"^\[Service Desk\]\s+(?:IMPORTANT!\s*)+",
+    re.IGNORECASE,
+)
+
 
 def _parse_from_email_address(from_addr: str | None) -> str:
     """Email address from ``Name <user@host>`` or bare ``user@host``."""
@@ -161,11 +168,19 @@ def is_original_maintenance_email(
     return from_is_evolution_maintenance_sender(from_addr)
 
 
+def is_service_desk_important_alert(subject: str | None) -> bool:
+    """True for Service Desk stream/issue alerts (``[Service Desk] IMPORTANT! …``), not maintenance."""
+    disp = normalize_display_subject(subject or "")
+    return bool(_SERVICE_DESK_IMPORTANT_RE.match(disp))
+
+
 def subject_should_ignore(subject: str | None) -> bool:
     """True when this maintenance email should be skipped (e.g. C88live_ow.ph tickets)."""
     s = (subject or "").lower()
     if not s:
         return False
+    if is_service_desk_important_alert(subject):
+        return True
     for marker in _SUBJECT_IGNORE_MARKERS:
         if marker in s:
             return True

@@ -3302,6 +3302,40 @@ def lark_webhook():
                         daemon=True,
                     ).start()
                     return
+                if (
+                    isinstance(parsed_ca, dict)
+                    and str(parsed_ca.get("k") or "").strip().lower() == "vpn_create_submit"
+                ):
+                    act_ca = ev_ca.get("action") if isinstance(ev_ca.get("action"), dict) else {}
+                    vpn_users_raw = _lark_get_card_form_field(act_ca, "vpn_users")
+                    vpn_location_raw = _lark_get_card_form_field(act_ca, "vpn_location")
+                    fv_vpn = parsed_ca.get("form_value")
+                    if isinstance(fv_vpn, dict):
+                        vpn_users_raw = vpn_users_raw or _lark_form_field_text(fv_vpn.get("vpn_users"))
+                        vpn_location_raw = vpn_location_raw or _lark_form_field_text(
+                            fv_vpn.get("vpn_location")
+                        )
+                    vpn_users_raw = vpn_users_raw or _lark_form_field_text(parsed_ca.get("vpn_users"))
+                    vpn_location_raw = vpn_location_raw or _lark_form_field_text(
+                        parsed_ca.get("vpn_location")
+                    )
+                    vpn_users_raw = vpn_users_raw or _lark_find_field_deep(ev_ca, "vpn_users")
+                    vpn_location_raw = vpn_location_raw or _lark_find_field_deep(ev_ca, "vpn_location")
+                    ju = _get_jenkinsupdate()
+                    if not ju:
+                        send_message(chat_id_ca, "❌ jenkinsupdate unavailable.")
+                        return
+                    sender_use = ju.resolve_lark_jenkins_card_sender(
+                        chat_id_ca, sender_id_ca or "", op_ca
+                    )
+                    ju.begin_vpn_run_from_card(
+                        chat_id_ca,
+                        sender_use or sender_id_ca or "",
+                        vpn_users_raw,
+                        vpn_location_raw,
+                        send_message,
+                    )
+                    return
                 ju = _get_jenkinsupdate()
                 if not ju:
                     print(
@@ -4214,9 +4248,14 @@ def lark_webhook():
             subj = maintenance.parse_subject_from_pasted_email(email_text) or "Maintenance (/ms)"
             resolved_subj = maintenance.resolve_maintenance_subject(subj, email_text)
             if maintenance.subject_should_ignore(resolved_subj):
+                skip_reason = (
+                    "Service Desk `IMPORTANT!` stream/issue alert (not scheduled maintenance)"
+                    if maintenance.is_service_desk_important_alert(resolved_subj)
+                    else "subject contains ignored marker (e.g. `C88live_ow.ph`)"
+                )
                 send_message(
                     chat_id,
-                    f"⏭️ Skipped — subject contains ignored marker (e.g. `C88live_ow.ph`).\n\n`{resolved_subj}`",
+                    f"⏭️ Skipped — {skip_reason}.\n\n`{resolved_subj}`",
                 )
                 return _lark_im_done()
             from_line = ""
