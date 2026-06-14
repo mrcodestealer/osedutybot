@@ -1770,6 +1770,26 @@ _REPLY_HEADER_FETCH_SPEC = (
     "(BODY.PEEK[HEADER.FIELDS (DATE SUBJECT FROM TO CC AUTO-SUBMITTED)])"
 )
 
+# --- Jenkins reply robustness (all opt-in via env; safe defaults) ---
+# #1 Bounded retry when the original mail isn't found yet (IMAP sync lag / transient error).
+_JENKINS_REPLY_FIND_RETRIES = max(
+    1, int(os.getenv("JENKINS_REPLY_FIND_RETRIES", "").strip() or "3")
+)
+_JENKINS_REPLY_FIND_RETRY_DELAY = max(
+    0.0, float(os.getenv("JENKINS_REPLY_FIND_RETRY_DELAY", "").strip() or "8")
+)
+# #2 Large folders (>500 msgs) with no server subject-hit: tail-scan newest N instead of bailing.
+_JENKINS_REPLY_LARGE_FOLDER_TAILSCAN = (
+    os.getenv("JENKINS_REPLY_LARGE_FOLDER_TAILSCAN", "").strip() or "1"
+) not in ("0", "false", "no", "off")
+_JENKINS_REPLY_LARGE_FOLDER_TAILSCAN_MAX = min(
+    2000, max(50, int(os.getenv("JENKINS_REPLY_LARGE_FOLDER_TAILSCAN_MAX", "").strip() or "200"))
+)
+# #4 Reconnect once if the IMAP socket drops mid-scan.
+_JENKINS_REPLY_RECONNECT_ONCE = (
+    os.getenv("JENKINS_REPLY_RECONNECT_ONCE", "").strip() or "1"
+) not in ("0", "false", "no", "off")
+
 
 def _uid_as_bytes(uid: bytes | str) -> bytes:
     return uid if isinstance(uid, bytes) else str(uid).encode()
@@ -2192,18 +2212,35 @@ def _find_matching_uid_in_folder(
                 msg_count = int(m.group(1))
     except Exception:
         pass
-    if msg_count > 500:
+    large_folder = msg_count > 500
+    if large_folder and not _JENKINS_REPLY_LARGE_FOLDER_TAILSCAN:
         print(
             f"[maint-mail] jenkins reply: {resolved!r} has {msg_count} msgs, "
-            f"no SINCE/subject hits for {needle!r} (skipped UID SEARCH ALL)",
+            f"no SINCE/subject hits for {needle!r} (skipped UID SEARCH ALL; "
+            f"set JENKINS_REPLY_LARGE_FOLDER_TAILSCAN=1 to scan newest msgs)",
             flush=True,
         )
         return None, had_match
     all_uids = _uid_search(mail, "ALL")
     if not all_uids:
-        print(f"[maint-mail] jenkins reply: {resolved!r} is empty", flush=True)
+        if large_folder:
+            print(
+                f"[maint-mail] jenkins reply: {resolved!r} large folder ({msg_count} msgs) — "
+                f"UID SEARCH ALL too large / empty; cannot tail-scan for {needle!r}",
+                flush=True,
+            )
+        else:
+            print(f"[maint-mail] jenkins reply: {resolved!r} is empty", flush=True)
         return None, had_match
-    if len(all_uids) <= 300:
+    if large_folder:
+        tail_n = min(len(all_uids), _JENKINS_REPLY_LARGE_FOLDER_TAILSCAN_MAX)
+        tail_newest = [_uid_as_bytes(u) for u in reversed(all_uids[-tail_n:])]
+        print(
+            f"[maint-mail] jenkins reply: {resolved!r} large folder ({msg_count} msgs) — "
+            f"tail-scanning newest {tail_n} for {needle!r}",
+            flush=True,
+        )
+    elif len(all_uids) <= 300:
         tail_newest = [_uid_as_bytes(u) for u in reversed(all_uids)]
         tail_n = len(all_uids)
     else:
@@ -3920,9 +3957,26 @@ def find_message_by_subject_title(
     saw_subject_hits_only_bounces = False
     folders_checked: list[str] = []
     t0 = time.monotonic()
+    reconnected = False
     try:
         for folder in scan:
-            uid, had_match = _find_matching_uid_in_folder(mail, folder, needle)
+            try:
+                uid, had_match = _find_matching_uid_in_folder(mail, folder, needle)
+            except (imaplib.IMAP4.abort, imaplib.IMAP4.error, OSError) as ex:
+                if not _JENKINS_REPLY_RECONNECT_ONCE or reconnected:
+                    raise
+                reconnected = True
+                print(
+                    f"[maint-mail] jenkins reply: IMAP error on {folder!r} ({ex!r}); "
+                    "reconnecting once and retrying this folder",
+                    flush=True,
+                )
+                try:
+                    mail.logout()
+                except Exception:
+                    pass
+                mail = _connect_imap_simple(timeout=_JENKINS_REPLY_IMAP_TIMEOUT)
+                uid, had_match = _find_matching_uid_in_folder(mail, folder, needle)
             if had_match:
                 saw_subject_hits_only_bounces = True
                 folders_checked.append(folder)
@@ -4004,7 +4058,21 @@ def reply_jenkins_update_done_email(
         + "\n\nBest Regards,\n"
         "JC\n"
     )
-    orig_found = find_jenkins_reply_message_by_subject_title(title)
+    orig_found = None
+    _attempts = _JENKINS_REPLY_FIND_RETRIES
+    for _attempt in range(1, _attempts + 1):
+        # JenkinsReplyOnlyBouncesError propagates (retrying a bounce-only match won't help).
+        orig_found = find_jenkins_reply_message_by_subject_title(title)
+        if orig_found is not None:
+            break
+        if _attempt < _attempts:
+            print(
+                f"[maint-mail] jenkins reply: {title!r} not found "
+                f"(attempt {_attempt}/{_attempts}); retrying in "
+                f"{_JENKINS_REPLY_FIND_RETRY_DELAY:.0f}s (IMAP sync lag / just-arrived mail?)",
+                flush=True,
+            )
+            time.sleep(_JENKINS_REPLY_FIND_RETRY_DELAY)
     if orig_found is None:
         folders = ", ".join(JENKINS_REPLY_IMAP_FOLDERS)
         hint = ""
@@ -4176,73 +4244,9 @@ def post_maintenance_confirm_to_chat(
     email_replied: bool = True,
     get_token_func: Callable[[], str | None] | None = None,
 ) -> bool:
-    """Confirm group: verify card + thread reply (@tag + game name, not in main stream)."""
-    summary_games = (
-        _maint_mod.english_game_names_only(game_names)
-        if not in_cp
-        else list(game_names or [])
-    )
-    followup_games = _maint_mod.english_game_names_only(game_names)
-    chat_id = _maint_mod.maintenance_confirm_chat_id()
-    if not chat_id:
-        print("[maint-mail] confirm notify skipped — no MAINTENANCE_CONFIRM_CHAT_ID", flush=True)
-        return False
-    card = _maint_mod.build_maintenance_confirm_card(
-        email_name=email_name,
-        game_names=summary_games,
-        in_cp=in_cp,
-    )
-    card_json = json.dumps(card, ensure_ascii=False)
-    try:
-        try:
-            resp = send_message_func(chat_id, card_json, msg_type="interactive")
-        except TypeError:
-            resp = send_message_func(chat_id, card_json)
-        if isinstance(resp, dict) and resp.get("code") not in (None, 0):
-            print(f"[maint-mail] confirm card failed chat={chat_id}: {resp}", flush=True)
-            return False
-        parent_id = _extract_lark_message_id(resp)
-        print(
-            f"[maint-mail] confirm card sent chat={chat_id} in_cp={in_cp} "
-            f"title={_maint_mod.confirm_verify_card_title(email_name)!r} "
-            f"games={summary_games!r} message_id={parent_id!r}",
-            flush=True,
-        )
-    except Exception as ex:
-        print(f"[maint-mail] confirm notify error chat={chat_id}: {ex!r}", flush=True)
-        return False
-    if not parent_id:
-        print("[maint-mail] confirm thread skipped — no message_id from card send", flush=True)
-        return False
-    if not get_token_func:
-        print("[maint-mail] confirm thread skipped — no get_token_func", flush=True)
-        return False
-    tag_text = _maint_mod.build_maintenance_confirm_followup_text(followup_games)
-    try:
-        thread_resp = reply_lark_message_in_thread(
-            message_id=parent_id,
-            text=tag_text,
-            get_token_func=get_token_func,
-        )
-        if isinstance(thread_resp, dict) and thread_resp.get("code") not in (None, 0):
-            print(
-                f"[maint-mail] confirm thread reply failed parent={parent_id!r}: "
-                f"{thread_resp}",
-                flush=True,
-            )
-            return False
-        print(
-            f"[maint-mail] confirm thread reply sent parent={parent_id!r} "
-            f"tag={_maint_mod.maintenance_not_cp_tag_open_id()!r} games={followup_games!r}",
-            flush=True,
-        )
-    except Exception as ex:
-        print(
-            f"[maint-mail] confirm thread reply error parent={parent_id!r}: {ex!r}",
-            flush=True,
-        )
-        return False
-    return True
+    """Verify cards (``🔍 Verify TINC-…``) disabled — ops no longer need confirm group notify."""
+    _ = (send_message_func, email_name, game_names, in_cp, email_replied, get_token_func)
+    return False
 
 
 def _record_processed(
@@ -5131,7 +5135,6 @@ class MaintenanceMailWatcher:
             _record_processed(entries, **record_kw)
 
         email_action_ok = retry_confirm_only
-        confirm_ok = False
 
         if FORWARD_ENABLED and not retry_confirm_only:
             email_action_ok = False
@@ -5188,54 +5191,11 @@ class MaintenanceMailWatcher:
         if not to_cp and email_action_ok:
             _mark_uid_handled(state, store_key)
 
-        should_confirm = bool(email_action_ok or retry_confirm_only)
-        if not should_confirm and not to_cp:
-            should_confirm = True
-            print(
-                f"[maint-mail] NOT IN CP: sending confirm group notify even though "
-                f"SMTP reply failed uid={uid_s} ticket={ticket_id!r}",
-                flush=True,
-            )
-
-        if should_confirm:
-            if to_cp:
-                confirm_games = list(
-                    launched_prior
-                    if (is_cancel or is_uncancel or is_prolong)
-                    else launched_names
-                )
-            else:
-                confirm_games = list(candidate_names)
-                if not confirm_games and prior:
-                    confirm_games = maintenance.table_names_from_prior_entry(
-                        prior
-                    )
-            confirm_ok = post_maintenance_confirm_to_chat(
-                self._send,
-                email_name=display_subj,
-                game_names=confirm_games,
-                in_cp=to_cp,
-                email_replied=bool(email_action_ok and not retry_confirm_only),
-                get_token_func=self._get_token,
-            )
-            if not confirm_ok:
-                print(
-                    f"[maint-mail] confirm group notify FAILED chat="
-                    f"{maintenance.maintenance_confirm_chat_id()!r} "
-                    f"uid={uid_s} ticket={ticket_id!r} in_cp={to_cp}",
-                    flush=True,
-                )
-
-        if email_action_ok or confirm_ok:
+        if email_action_ok:
             _mark_handled_mail_content(
                 state, message_id=message_id, content_key=content_key
             )
         mail.uid("store", uid, "+FLAGS", "(\\Seen)")
-
-        if confirm_ok:
-            _mark_confirm_notified(
-                state, store_key=store_key, content_key=content_key
-            )
 
         kind = (
             "cancelled"

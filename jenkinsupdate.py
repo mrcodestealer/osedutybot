@@ -135,7 +135,7 @@ PMS_UAT_UPDATE_URL = (
 #   VPN_USERS    — free-text box (the username)
 #   VPN_LOCATION — dropdown (values mirror the Jenkins job, see VPN_LOCATION_OPTIONS)
 VPN_CREATION_BUILD_URL = (
-    "https://ose-jenkinsaliyun.bewen.me/job/DEVOPS_CP/job/VPN_CONFIGURATION/job/VPN_CREATION/build?delay=0sec"
+    "https://ose-jenkins.bewen.me/job/DEVOPS_CP/job/VPN_CONFIGURATION/job/VPN_CREATION/build?delay=0sec"
 )
 # Dropdown values for VPN_LOCATION (keep in sync with the Jenkins job parameter).
 VPN_LOCATION_OPTIONS: list[str] = [
@@ -9260,6 +9260,33 @@ fpms_uat_has_active_lark_session = jenkins_update_has_active_lark_session
 parse_fpms_uat_bot_block = parse_jenkins_update_fpms_bot_block
 
 
+def _playwright_proxy_from_env() -> dict | None:
+    """Opt-in Playwright proxy (off unless set). Useful when a Jenkins host (e.g. the Aliyun
+    ``ose-jenkins.bewen.me`` VPN job) is only reachable via a proxy from this server.
+
+    Env:
+      ``FPMS_PLAYWRIGHT_PROXY``       — proxy server, e.g. ``http://10.0.0.1:7890`` or ``socks5://...``
+      ``FPMS_PLAYWRIGHT_PROXY_USER``  — optional username
+      ``FPMS_PLAYWRIGHT_PROXY_PASS``  — optional password
+      ``FPMS_PLAYWRIGHT_PROXY_BYPASS``— optional comma list of hosts to skip
+    """
+    server = (os.environ.get("FPMS_PLAYWRIGHT_PROXY") or "").strip()
+    if not server:
+        return None
+    proxy: dict = {"server": server}
+    user = (os.environ.get("FPMS_PLAYWRIGHT_PROXY_USER") or "").strip()
+    pw = (os.environ.get("FPMS_PLAYWRIGHT_PROXY_PASS") or "").strip()
+    bypass = (os.environ.get("FPMS_PLAYWRIGHT_PROXY_BYPASS") or "").strip()
+    if user:
+        proxy["username"] = user
+    if pw:
+        proxy["password"] = pw
+    if bypass:
+        proxy["bypass"] = bypass
+    print(f"→ Playwright proxy enabled: {server}", flush=True)
+    return proxy
+
+
 def _playwright_browser_context_and_page(
     p,
     *,
@@ -9275,6 +9302,7 @@ def _playwright_browser_context_and_page(
     (closer to a normal non-private window than a fresh incognito-like context).
     """
     viewport = {"width": 1400, "height": 900}
+    proxy = _playwright_proxy_from_env()
     udir = (user_data_dir or "").strip()
     if udir:
         profile = Path(udir).expanduser()
@@ -9293,6 +9321,8 @@ def _playwright_browser_context_and_page(
         }
         if slow_mo:
             pc_kw["slow_mo"] = slow_mo
+        if proxy:
+            pc_kw["proxy"] = proxy
         if browser_name == "firefox":
             context = p.firefox.launch_persistent_context(**pc_kw)
         else:
@@ -9300,10 +9330,13 @@ def _playwright_browser_context_and_page(
         page = context.pages[0] if context.pages else context.new_page()
         return None, context, page
 
+    launch_kw: dict = {"headless": headless, "slow_mo": slow_mo}
+    if proxy:
+        launch_kw["proxy"] = proxy
     if browser_name == "firefox":
-        browser_obj = p.firefox.launch(headless=headless, slow_mo=slow_mo)
+        browser_obj = p.firefox.launch(**launch_kw)
     else:
-        browser_obj = p.chromium.launch(headless=headless, slow_mo=slow_mo)
+        browser_obj = p.chromium.launch(**launch_kw)
     context = browser_obj.new_context(viewport=viewport, ignore_https_errors=True)
     page = context.new_page()
     return browser_obj, context, page
@@ -9563,6 +9596,14 @@ def run(
         )
 
     user, pw = _credentials()
+
+    if is_vpn:
+        vpn_id = (os.environ.get("createvpnid") or "").strip()
+        vpn_pw = (os.environ.get("createvpnpass") or "").strip()
+        if vpn_id:
+            user = vpn_id
+        if vpn_pw:
+            pw = vpn_pw
 
     raw_slow = (os.environ.get("FPMS_PLAYWRIGHT_SLOW_MO_MS") or "").strip()
     if raw_slow.isdigit():

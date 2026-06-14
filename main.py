@@ -2846,23 +2846,6 @@ def _process_evo_sd_batch_paste(chat_id: str, email_text: str) -> None:
                     json.dumps(fwd_card, ensure_ascii=False),
                     msg_type="interactive",
                 )
-            _maint_mail.post_maintenance_confirm_to_chat(
-                send_message,
-                email_name=batch["email_subject"],
-                game_names=batch["valid_labels"],
-                in_cp=True,
-                email_replied=True,
-                get_token_func=get_tenant_access_token,
-            )
-        elif batch.get("filtered_labels"):
-            _maint_mail.post_maintenance_confirm_to_chat(
-                send_message,
-                email_name=batch.get("email_subject") or "EVO batch",
-                game_names=batch["filtered_labels"],
-                in_cp=False,
-                email_replied=False,
-                get_token_func=get_tenant_access_token,
-            )
         send_message(
             chat_id,
             json.dumps(batch["result_card"], ensure_ascii=False),
