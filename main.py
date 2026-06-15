@@ -4410,8 +4410,10 @@ def lark_webhook():
                 send_message(chat_id, maint_reply)
             return _lark_im_done()
     elif maintenancemachineagent.is_maintenance_now_message(original_text, mention_keys):
-        # Immediate (no time) "set/unset … ALL <ENV> MACHINES <Venue>" — expand the group from
-        # webmachine_data.json, then run the existing prod-batch confirm/execute flow.
+        # Immediate (no time) set/unset maintenance/test — either "ALL <ENV> MACHINES <Venue>"
+        # (expanded from webmachine_data.json, PROD only) or an explicit machine list where the env
+        # is inferred from the names (e.g. "unset maintenance TBP8609" — no site word needed).
+        # Then run the existing prod-batch confirm/execute flow.
         if chat_type == "group" and not bot_mentioned:
             print("⏭️ maintenance group command ignored (bot not @mentioned in group)", flush=True)
             return _lark_im_done()

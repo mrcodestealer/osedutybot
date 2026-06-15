@@ -200,6 +200,9 @@ _SET_RE = re.compile(
 # Maintenance / test keywords (EN + 中文).
 _MAINT_KW_RE = re.compile(r"mainten|maintain|维护|检修|保养", re.I)
 _TEST_KW_RE = re.compile(r"\btest\b|测试", re.I)
+# A "stress test" announcement means: set maintenance AND test (per the duty workflow), even when
+# the words "set" / "maintenance" never appear (e.g. "machines subject for Stress Test on …").
+_STRESS_TEST_RE = re.compile(r"stress\s*-?\s*test|压测|压力测试", re.I)
 
 
 def parse_action(text: str) -> str | None:
@@ -208,12 +211,13 @@ def parse_action(text: str) -> str | None:
 
     Verb is detected by synonym (set/enable/put/turn on … vs unset/disable/remove/out of …),
     anywhere in the message — not a fixed phrase. ``maintenance`` and ``test`` may appear in any
-    order; both present → ``both``. If no explicit verb is found but maintenance/test is mentioned,
-    it defaults to ``set`` (matches the existing commandagent behaviour).
+    order; both present → ``both``. A **stress test** implies *both* maintenance and test. If no
+    explicit verb is found, it defaults to ``set`` (matches the existing commandagent behaviour).
     """
     tl = (text or "").lower()
-    has_maint = bool(_MAINT_KW_RE.search(tl))
-    has_test = bool(_TEST_KW_RE.search(tl))
+    has_stress = bool(_STRESS_TEST_RE.search(tl))
+    has_maint = bool(_MAINT_KW_RE.search(tl)) or has_stress
+    has_test = bool(_TEST_KW_RE.search(tl)) or has_stress
     if not (has_maint or has_test):
         return None
     if _UNSET_RE.search(tl):
@@ -278,26 +282,55 @@ def parse_reason(text: str) -> str:
     return "Stress Test"
 
 
+# Asset token: env prefix + digits, e.g. ``TBP8609``, ``WF 8145``, ``WF-8147``.
+_MACHINE_TOKEN_RE = re.compile(
+    r"(?:" + "|".join(_ENV_PREFIXES) + r")\s*-?\s*\d+",
+    re.I,
+)
+
+
 def extract_machine_lines(text: str) -> list[str]:
-    """Pasted machine display names, one per line (``5 Dragons-WF8145`` …)."""
+    """
+    Machine references from the message — two styles supported:
+
+    * **Pasted full display names**, one per line (``5 Dragons-WF8145``) → kept whole.
+    * **Inline asset tokens** after the command (``unset maintenance TBP8609 TBP8610``) → only the
+      ``TBP8609``-style tokens are extracted, so the command words don't pollute the machine list.
+    """
     out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(x: str) -> None:
+        x = x.strip()
+        if x and x.lower() not in seen:
+            seen.add(x.lower())
+            out.append(x)
+
     for raw in (text or "").splitlines():
         line = raw.strip()
         if not line:
             continue
-        # Skip the imperative / reason line even if it mentions an env keyword.
-        if re.search(r"\b(set|unset)\b", line, re.I) and not _MACHINE_LINE_RE.search(line):
+        # Drop list bullets so "- Dancing Drums-WF8092" → "Dancing Drums-WF8092".
+        line = re.sub(r"^[-*•·]+\s*", "", line).strip()
+        if not line:
             continue
-        if _MACHINE_LINE_RE.search(line):
-            out.append(line)
-    # De-dupe, keep order.
-    seen: set[str] = set()
-    uniq: list[str] = []
-    for x in out:
-        if x.lower() not in seen:
-            seen.add(x.lower())
-            uniq.append(x)
-    return uniq
+        is_action_line = bool(
+            _SET_RE.search(line) or _UNSET_RE.search(line)
+            or _MAINT_KW_RE.search(line) or _TEST_KW_RE.search(line)
+            or _STRESS_TEST_RE.search(line)
+        )
+        tokens = [re.sub(r"[\s-]", "", t) for t in _MACHINE_TOKEN_RE.findall(line)]
+        if is_action_line:
+            # Imperative line — take only the asset tokens, never the whole sentence.
+            for t in tokens:
+                _add(t)
+        elif _MACHINE_LINE_RE.search(line):
+            # Clean pasted machine line — keep the full display name.
+            _add(line)
+        else:
+            for t in tokens:
+                _add(t)
+    return out
 
 
 def parse_all_group(text: str) -> dict[str, str] | None:
@@ -407,9 +440,11 @@ def resolve_all_group(env_code: str, venue: str) -> tuple[list[str], str]:
     if not rows:
         return [], "⚠️ webmachine_data.json is empty or missing — could not resolve the machine list."
 
+    # Maintenance set/unset only targets PROD machines.
+    rows = [r for r in rows if str(r.get("environment") or "PROD").strip().upper() == "PROD"]
     env_rows = [r for r in rows if _row_matches_env(r, env_code)]
     if not env_rows:
-        return [], f"⚠️ No {env_code or 'matching'} machines found in webmachine_data.json."
+        return [], f"⚠️ No PROD {env_code or 'matching'} machines found in webmachine_data.json."
 
     venue_key = re.sub(r"[^a-z0-9]", "", (venue or "").lower())
     if not venue_key:
@@ -789,7 +824,8 @@ def _looks_like_maintenance_request(text: str) -> bool:
     if not t or t.lstrip().startswith("/"):
         return False
     tl = t.lower()
-    has_maint = bool(_MAINT_KW_RE.search(tl))
+    has_stress = bool(_STRESS_TEST_RE.search(tl))
+    has_maint = bool(_MAINT_KW_RE.search(tl)) or has_stress
     has_test = bool(_TEST_KW_RE.search(tl))
     if not (has_maint or has_test):
         return False
@@ -892,11 +928,13 @@ def _classify_rules(text: str, *, now: datetime) -> dict[str, Any] | None:
     action_dt = parse_action_datetime(text, now=now)
     machines = extract_machine_lines(text)
     if machines:
+        # Infer env from the pasted machine names (TBP8609 → TBP), so no site word is needed.
+        envs = sorted({e for e in (_env_from_machine_name(m) for m in machines) if e})
         return {
             "action": action,
             "action_dt": action_dt,
             "target_kind": "list",
-            "env_code": "",
+            "env_code": envs[0] if len(envs) == 1 else "",
             "venue": "",
             "machines": machines,
             "source": "rule",
@@ -924,13 +962,20 @@ def _classify(text: str, *, now: datetime | None = None) -> dict[str, Any] | Non
     if _maint_llm_enabled():
         intent = parse_intent(text, now=real_now)
         if intent:
+            target_kind = intent.get("target_kind") or "list"
+            machines = intent["machines"] if target_kind == "list" else []
+            env_code = (intent.get("env_code") or "").strip().upper()
+            if not env_code and machines:
+                envs = sorted({e for e in (_env_from_machine_name(m) for m in machines) if e})
+                if len(envs) == 1:
+                    env_code = envs[0]
             return {
                 "action": intent["action"],
                 "action_dt": intent.get("action_dt"),
-                "target_kind": intent.get("target_kind") or "list",
-                "env_code": (intent.get("env_code") or "").strip().upper(),
+                "target_kind": target_kind,
+                "env_code": env_code,
                 "venue": intent.get("venue") or "",
-                "machines": intent["machines"] if intent.get("target_kind") == "list" else [],
+                "machines": machines,
                 "source": "llm",
             }
     return None
@@ -966,16 +1011,16 @@ def is_maintenance_schedule_message(original_text: str, mention_keys: Sequence[s
 
 def is_maintenance_now_message(original_text: str, mention_keys: Sequence[str]) -> bool:
     """
-    True for an immediate (no time) ``set/unset … ALL <ENV> MACHINES <Venue>`` request.
+    True for an immediate (no time) ``set/unset maintenance/test`` request — either an
+    ``ALL <ENV> MACHINES <Venue>`` group, **or** an explicit machine list where the env can be
+    inferred from the names (e.g. ``unset maintenance TBP8609`` → TBP, no site word needed).
 
-    Owns the request even if 0 machines resolve, so the user gets a clear error instead of the
-    confusing prod-batch usage card. Explicit pasted lists are left to the prod-batch flow.
+    Requires a single resolvable env (so we know which backend). Multi-env lists are left to the
+    prod-batch flow.
     """
     body = _strip_mentions(original_text, mention_keys)
     c = _classify(body)
     if not c or c.get("action_dt") is not None:
-        return False
-    if c["target_kind"] != "all_group":
         return False
     return bool(_ENV_SITE_ALIAS.get(c.get("env_code") or ""))
 
@@ -998,7 +1043,7 @@ def handle_maintenance_now_message(
 
     body = _strip_mentions(original_text, mention_keys)
     c = _classify(body)
-    if not c or c.get("action_dt") is not None or c.get("target_kind") != "all_group":
+    if not c or c.get("action_dt") is not None:
         return False, None
     env_code = (c.get("env_code") or "").strip().upper()
     site = _ENV_SITE_ALIAS.get(env_code)
@@ -1011,27 +1056,37 @@ def handle_maintenance_now_message(
     if not suffix:
         return True, f"❌ Unsupported action: {action}"
 
-    venue = c.get("venue") or ""
-    machines, note = resolve_all_group(env_code, venue)
-    venue_txt = f" “{venue}”" if venue else ""
-    print(
-        f"[maintenanceagent] now-request {action} env={env_code} venue={venue!r} "
-        f"resolved={len(machines)} src={c.get('source')} data={_last_data_path or 'NOT FOUND'}",
-        flush=True,
-    )
-    if not machines:
-        return True, (
-            f"⚠️ I understood **{label}** for all **{env_code}**{venue_txt} machines, "
-            f"but found **0** matching machines in the machine list.\n{_data_path_hint()}\n"
-            f"(If the file is fine, the venue name may differ — try the exact game type, "
-            f"or paste the machine names.)"
+    if c.get("target_kind") == "all_group":
+        venue = c.get("venue") or ""
+        machines, note = resolve_all_group(env_code, venue)
+        venue_txt = f" “{venue}”" if venue else ""
+        print(
+            f"[maintenanceagent] now-request {action} env={env_code} venue={venue!r} "
+            f"resolved={len(machines)} src={c.get('source')} data={_last_data_path or 'NOT FOUND'}",
+            flush=True,
         )
-
-    send_message(
-        chat_id,
-        f"🔎 Found **{len(machines)}** {env_code}{venue_txt} machine(s) from the machine list "
-        f"— checking live status for **{label}**…" + (f"\n{note}" if note else ""),
-    )
+        if not machines:
+            return True, (
+                f"⚠️ I understood **{label}** for all **{env_code}**{venue_txt} machines, "
+                f"but found **0** matching machines in the machine list.\n{_data_path_hint()}\n"
+                f"(If the file is fine, the venue name may differ — try the exact game type, "
+                f"or paste the machine names.)"
+            )
+        send_message(
+            chat_id,
+            f"🔎 Found **{len(machines)}** {env_code}{venue_txt} machine(s) from the machine list "
+            f"— checking live status for **{label}**…" + (f"\n{note}" if note else ""),
+        )
+    else:
+        # Explicit machine list — env inferred from names; no site word needed.
+        machines = c.get("machines") or []
+        if not machines:
+            return False, None
+        print(
+            f"[maintenanceagent] now-request {action} env={env_code} (explicit list, "
+            f"{len(machines)} machine(s)) src={c.get('source')}",
+            flush=True,
+        )
 
     # Hand off to the existing prod-batch pipeline by building its slash-command form.
     cmd_text = f"/{site}{suffix}\n" + "\n".join(machines)
