@@ -140,6 +140,19 @@ _DATE_RE = re.compile(
     re.I,
 )
 
+# Max chars between a date and a time when pairing them loosely (e.g. "June 17, 2026, Set … at 6:50am").
+_MAX_DATE_TIME_GAP = 220
+
+# Time tokens anywhere in the message (for loose date+time pairing).
+_TIME_IN_TEXT_RE = re.compile(
+    r"(?:\bat\s+|@\s*|around\s+)?"
+    r"(?:"
+    r"(?P<hh>\d{1,2}):(?P<mm>\d{2})\s*(?P<ap>am|pm)?"
+    r"|(?P<h2>\d{1,2})\s*(?P<ap2>am|pm)"
+    r"|(?P<mil>\d{3,4})\s*(?:h|hrs?|hours)\b"
+    r")",
+    re.I,
+)
 # Time right after a date — supports 9:45pm, 9pm, 21:45, and military "2145H" / "930 hrs".
 _TIME_RE = re.compile(
     r"^\s*(?:at\s+|@\s*|,\s*|-\s*)?"
@@ -309,20 +322,49 @@ def _build_dt(mon: int, day: int, year_raw: str | None, hh: int, mm: int, *, now
 def _all_datetime_candidates(text: str, *, now: datetime) -> list[tuple[int, datetime]]:
     """All ``Month DD[, YYYY] <time>`` datetimes with their start positions."""
     out: list[tuple[int, datetime]] = []
+    seen_dt: set[datetime] = set()
     body = text or ""
-    for dm in _DATE_RE.finditer(body):
+    dates: list[tuple[int, re.Match[str]]] = [(m.start(), m) for m in _DATE_RE.finditer(body)]
+
+    def _add(pos: int, dt: datetime | None) -> None:
+        if dt and dt not in seen_dt:
+            seen_dt.add(dt)
+            out.append((pos, dt))
+
+    # Tight: time within ~120 chars right after the date ("June 17, 2026 at 6:50am").
+    for pos, dm in dates:
         mon = _MONTHS.get(dm.group("mon").lower())
         if not mon:
             continue
         day = int(dm.group("day"))
         if not (1 <= day <= 31):
             continue
-        t = _time_from_slice(body[dm.end(): dm.end() + 30])
+        t = _time_from_slice(body[dm.end(): dm.end() + 120])
         if not t:
             continue
-        dt = _build_dt(mon, day, dm.group("year"), t[0], t[1], now=now)
-        if dt:
-            out.append((dm.start(), dt))
+        _add(pos, _build_dt(mon, day, dm.group("year"), t[0], t[1], now=now))
+
+    # Loose: standalone times paired with the nearest preceding date ("June 17, 2026, Set … at 6:50am").
+    for tm in _TIME_IN_TEXT_RE.finditer(body):
+        t = _time_from_slice(tm.group(0))
+        if not t:
+            continue
+        prev: re.Match[str] | None = None
+        prev_pos = -1
+        for dpos, dm in dates:
+            if dpos <= tm.start() and tm.start() - dpos <= _MAX_DATE_TIME_GAP:
+                prev, prev_pos = dm, dpos
+        if not prev:
+            continue
+        mon = _MONTHS.get(prev.group("mon").lower())
+        if not mon:
+            continue
+        day = int(prev.group("day"))
+        if not (1 <= day <= 31):
+            continue
+        _add(tm.start(), _build_dt(mon, day, prev.group("year"), t[0], t[1], now=now))
+
+    out.sort(key=lambda x: x[0])
     return out
 
 
@@ -342,6 +384,9 @@ def parse_action_datetime(text: str, *, now: datetime | None = None) -> datetime
     if am:
         after = [(p, dt) for p, dt in cands if p >= am.start()]
         if after:
+            # Prefer the time closest to the action instruction (not a later bullet schedule).
+            ap_end = am.end()
+            after.sort(key=lambda x: (x[0] - ap_end, x[0]))
             return after[0][1]
     return cands[0][1]
 
@@ -664,6 +709,14 @@ def _env_for_venue(venue: str, *, prefer: Sequence[str] = ()) -> str:
     return envs[0] if len(envs) == 1 else ""
 
 
+def _venue_from_all_machines_scope(text: str) -> str:
+    """Venue/game-type from the ``all … machines`` scope phrase (ignores incidental bullet items)."""
+    m = _ALL_MACHINES_SCOPE_RE.search(text or "")
+    if not m:
+        return ""
+    return detect_venue(m.group(0))
+
+
 def detect_group_target(text: str) -> dict[str, str] | None:
     """
     Detect a machine *group* (env + optional venue/game-type) from free phrasing, grounded in the
@@ -671,7 +724,7 @@ def detect_group_target(text: str) -> dict[str, str] | None:
     grounding finds nothing. Returns ``{"env_code", "venue"}`` or ``None``.
     """
     envs = detect_envs(text)
-    venue = detect_venue(text)
+    venue = _venue_from_all_machines_scope(text) or detect_venue(text)
     if not envs and not venue:
         legacy = parse_all_group(text)
         if not legacy:
@@ -1128,6 +1181,9 @@ def is_maintenance_now_message(original_text: str, mention_keys: Sequence[str]) 
     body = _strip_mentions(original_text, mention_keys)
     c = _classify(body)
     if not c or c.get("action_dt") is not None:
+        return False
+    # A date + time in the message is a schedule announcement — never run live set/unset.
+    if _DATE_RE.search(body) and _TIME_IN_TEXT_RE.search(body):
         return False
     return bool(_ENV_SITE_ALIAS.get(c.get("env_code") or ""))
 
