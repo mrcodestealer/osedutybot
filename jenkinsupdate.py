@@ -8296,6 +8296,83 @@ def _fpms_lark_vpn_form_card_json() -> str:
     return json.dumps(card, ensure_ascii=False)
 
 
+def _fpms_lark_vpn_location_card_json(username: str) -> str:
+    """Lark card 2.0: one tappable button per VPN_LOCATION (button-based — works where form
+    input components are unsupported, e.g. LarkSuite international). Username is carried in each
+    button's callback value so no session lookup is needed on tap."""
+    u = (username or "").strip()
+    buttons: list[dict[str, object]] = []
+    for i, opt in enumerate(VPN_LOCATION_OPTIONS, start=1):
+        buttons.append(
+            _fpms_lark_v2_callback_button(
+                opt,
+                "primary" if i == 1 else "default",
+                {"k": "vpn_loc", "loc": opt, "u": u},
+                element_id=f"vpnloc{i}"[:20],
+            )
+        )
+    body_elements: list[dict[str, object]] = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"🌐 **VPN_LOCATION** — tap the location for **{u}**:",
+            },
+        }
+    ]
+    for off in range(0, len(buttons), 5):
+        body_elements.append(_fpms_lark_v2_column_set_button_row(buttons[off : off + 5]))
+    body_elements.append({"tag": "hr"})
+    body_elements.append(
+        _fpms_lark_v2_callback_button(
+            "Cancel", "default", {"k": "ju_cancel"}, element_id="vpn_cancel"
+        )
+    )
+    card = {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": f"Create VPN — {u}"},
+        },
+        "body": {"elements": body_elements},
+    }
+    return json.dumps(card, ensure_ascii=False)
+
+
+def _fpms_lark_raw_send():
+    """Main-chat ``send_message`` (not thread-wrapped) so prompts/cards are always visible."""
+    try:
+        import main as _main_mod
+
+        rs = getattr(_main_mod, "send_message", None)
+        if callable(rs):
+            return rs
+    except Exception:
+        pass
+    return None
+
+
+def _fpms_lark_send_vpn_location_picker(chat_id: str, username: str, send) -> None:
+    """Send the VPN_LOCATION button card; fall back to a numbered text list if it's rejected."""
+    raw_send = _fpms_lark_raw_send() or send
+    try:
+        res = raw_send(
+            chat_id, _fpms_lark_vpn_location_card_json(username), msg_type="interactive"
+        )
+        if isinstance(res, dict) and int(res.get("code", -1)) == 0:
+            return
+        print(f"[jenkinsupdate] VPN location card rejected by Lark: {res!r}", flush=True)
+    except TypeError:
+        pass
+    except Exception as ex:
+        print(f"[jenkinsupdate] VPN location card send error: {ex!r}", flush=True)
+    raw_send(
+        chat_id,
+        f"✅ VPN_USERS = **{username}**\n\n{_vpn_location_picker_text()}",
+    )
+
+
 def begin_vpn_run_from_card(
     chat_id: str,
     sender_id: str,
@@ -8360,10 +8437,7 @@ def _fpms_lark_handle_vpn_flow(
             if isinstance(cur, dict):
                 cur["vpn_users"] = username
                 cur["state"] = "vpn_choose_location"
-        send(
-            chat_id,
-            f"✅ VPN_USERS = **{username}**\n\n{_vpn_location_picker_text()}",
-        )
+        _fpms_lark_send_vpn_location_picker(chat_id, username, send)
         return True
 
     # ----- mid-flow: waiting for VPN_LOCATION -----
@@ -8424,45 +8498,16 @@ def _fpms_lark_handle_vpn_flow(
         )
         return True
 
-    # Preferred UX: one interactive card with a VPN_USERS text box + VPN_LOCATION dropdown + submit.
-    # Send via the **main chat** (not the thread-wrapped send) so it's always visible, and verify the
-    # Lark response code — if the card is rejected (code != 0), fall back to the proven text prompt
-    # instead of leaving the user with only the "Got It" reaction.
+    # Flow: type VPN_USERS (one reply) → tap a VPN_LOCATION button. Form/input cards are not
+    # supported on this Lark tenant (they get rejected), so the location step is a button card.
     _fpms_lark_clear_session(chat_id, sender_id)
-    raw_send = send
-    try:
-        import main as _main_mod
+    raw_send = _fpms_lark_raw_send() or send
 
-        _rs = getattr(_main_mod, "send_message", None)
-        if callable(_rs):
-            raw_send = _rs
-    except Exception:
-        pass
-
-    card_ok = False
-    try:
-        res = raw_send(chat_id, _fpms_lark_vpn_form_card_json(), msg_type="interactive")
-        card_ok = isinstance(res, dict) and int(res.get("code", -1)) == 0
-        if not card_ok:
-            print(f"[jenkinsupdate] VPN form card rejected by Lark: {res!r}", flush=True)
-    except TypeError:
-        card_ok = False
-    except Exception as ex:
-        print(f"[jenkinsupdate] VPN form card send error: {ex!r}", flush=True)
-        card_ok = False
-    if card_ok:
-        return True
-
-    # Fallback (client/tenant can't render form cards): step-by-step text replies.
     if inline_user:
         new_sess = {"state": "vpn_choose_location", "vpn_users": inline_user}
         _fpms_lark_sessions_put_chat_key(session_key, new_sess)
-        raw_send(
-            chat_id,
-            VPN_GUIDANCE_TEXT
-            + f"\n\n✅ VPN_USERS = **{inline_user}**\n\n"
-            + _vpn_location_picker_text(),
-        )
+        raw_send(chat_id, VPN_GUIDANCE_TEXT)
+        _fpms_lark_send_vpn_location_picker(chat_id, inline_user, send)
         return True
 
     new_sess = {"state": "vpn_need_users"}
@@ -9369,6 +9414,19 @@ def handle_lark_jenkins_card_action(
             send,
             allow_start=True,
         )
+    if k == "vpn_loc":
+        loc = _vpn_resolve_location(str(parsed.get("loc") or "")) or str(
+            parsed.get("loc") or ""
+        ).strip()
+        username = str(parsed.get("u") or "").strip()
+        if not username:
+            with _fpms_lark_sessions_lock:
+                _s = _fpms_lark_sessions.get(sk)
+            username = str((_s or {}).get("vpn_users") or "").strip()
+        if not username or loc not in VPN_LOCATION_OPTIONS:
+            send(chat_id, "⚠️ VPN selection expired — `@Duty Bot create vpn` again.")
+            return True
+        return begin_vpn_run_from_card(chat_id, sender_id, username, loc, send)
     if k == "wb":
         v = str(parsed.get("v") or "").strip().lower()
         if v == "y":

@@ -469,16 +469,47 @@ def build_intent_catalog(*, jenkins_available: bool = True) -> list[IntentSpec]:
         )
     )
 
+    # Credit check — many human phrasings. The actual command + machine are rebuilt
+    # deterministically by detect_checkcredit_command (preserves site prefix); these
+    # patterns are the fuzzy safety net so the intent classifies with high confidence.
+    _cc_machines = ("NWR2065", "NCH1422", "WF8092", "2074", "nwr2113", "DHS3178")
+    _cc_pats: list[str] = [
+        "check credit", "checkcredit", "credit check", "check the credit",
+        "check credit for machine", "credit log check", "credit log",
+        "player credit on machine", "player credit", "check player credit",
+        "check credit by date", "credit history", "check credit balance",
+        "look up credit", "show credit", "view credit log",
+    ]
+    for _m in _cc_machines:
+        _cc_pats.extend([
+            f"check credit {_m}", f"check credit machine {_m}",
+            f"check credit for machine {_m}", f"credit check {_m}",
+            f"check the credit of {_m}", f"player credit on {_m}",
+            f"credit log {_m}", f"checkcredit {_m}", f"show credit {_m}",
+            f"check credit {_m} 2026-04-27",
+        ])
     intents.append(
         IntentSpec(
             tag="cmd_checkcredit",
             command="/checkcredit",
-            patterns=[
-                "check credit for machine",
-                "credit log check",
-                "player credit on machine",
-                "check credit NCH1422",
-            ],
+            patterns=_augment_human(_cc_pats, max_prefixes=4, max_suffixes=2),
+            arg_kind="machine_id",
+        )
+    )
+
+    # Machine error — latest two players with error only (/machineerror).
+    _me_pats: list[str] = ["machine error", "machineerror", "error only", "machine error log"]
+    for _m in _cc_machines:
+        _me_pats.extend([
+            f"machine error {_m}", f"machineerror {_m}",
+            f"machine error for {_m}", f"check machine error {_m}",
+            f"error only {_m}", f"machine error {_m} 2026-04-27",
+        ])
+    intents.append(
+        IntentSpec(
+            tag="cmd_machineerror",
+            command="/machineerror",
+            patterns=_augment_human(_me_pats, max_prefixes=4, max_suffixes=1),
             arg_kind="machine_id",
         )
     )
@@ -800,6 +831,86 @@ def detect_prod_batch_command(text: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Deterministic check-credit / machine-error reconstruction.
+# Like prod-batch, a credit check is structured (intent + machine [+ date]) so a
+# rule-based rebuild is far more reliable than the fuzzy classifier — and it works
+# even when the model fails to load. CRUCIALLY this preserves the *site prefix*
+# (NWR2065, NCH1422, WF8092 …) instead of bare digits: checkcredit.resolve_oss_
+# machine_folder() defaults bare digits to NWR{n}, so "check credit NCH1422" must
+# keep "NCH1422" or it would wrongly hit NWR1422.
+# ---------------------------------------------------------------------------
+
+# Site prefixes accepted in a machine token (mirrors main.py machine handlers).
+_CC_SITE_ALT = r"nch|nwr|wf|winford|win|tbp|tbr|cp|osm|dhs|mdr"
+# Explicit credit-check / machine-error intent phrases (high precision; avoids
+# false positives like "my credit is 500").
+_CC_INTENT_RE = re.compile(
+    r"(?i)\b(?:"
+    r"check\s*credit|credit\s*check|checkcredit|"
+    r"credit\s*log|player\s*credit|credit\s*for\s*machine|credit\s*on\s*machine|"
+    r"machine\s*error|machineerror|error\s*log"
+    r")\b"
+)
+_CC_CREDIT_RE = re.compile(r"(?i)\bcredit\b")
+# "machine error" / "machineerror" / "error only" -> /machineerror (latest 2 error players)
+_CC_ERROR_ONLY_RE = re.compile(r"(?i)\bmachine\s*error\b|\bmachineerror\b|\berror\s*only\b")
+_CC_DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
+# A machine token WITH a site prefix (kept verbatim, spaces/dashes removed).
+_CC_PREFIXED_MACHINE_RE = re.compile(
+    rf"(?i)\b((?:{_CC_SITE_ALT})\s*-?\s*\d{{2,}})\b"
+)
+# Bare numeric asset (3+ digits) — only used when no prefixed token is present.
+_CC_BARE_MACHINE_RE = re.compile(r"\b(\d{3,})\b")
+
+
+def _cc_extract_machine(text: str) -> Optional[str]:
+    """Return the machine label for a credit check, preserving any site prefix.
+
+    Priority: prefixed token (``NWR2065``) > bare digits (``2065``). Dates are
+    stripped first so ``2026-04-27`` is never mistaken for an asset id.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    m = _CC_PREFIXED_MACHINE_RE.search(raw)
+    if m:
+        return re.sub(r"[\s-]+", "", m.group(1)).upper()
+    no_date = _CC_DATE_RE.sub(" ", raw)
+    m2 = _CC_BARE_MACHINE_RE.search(no_date)
+    return m2.group(1) if m2 else None
+
+
+def detect_checkcredit_command(text: str) -> Optional[str]:
+    """Map a natural-language credit/error request to canonical bot text.
+
+    e.g. "check credit machine NWR2065"           -> "/checkcredit NWR2065"
+         "credit check nch1422 2026-04-27"          -> "/checkcredit NCH1422 2026-04-27"
+         "machine error for WF8092"                 -> "/machineerror WF8092"
+
+    Returns ``None`` when the message is not a credit/machine-error request.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    is_error = bool(_CC_ERROR_ONLY_RE.search(raw))
+    has_intent = bool(_CC_INTENT_RE.search(raw))
+    has_credit = bool(_CC_CREDIT_RE.search(raw))
+    if not (is_error or has_intent or has_credit):
+        return None
+    machine = _cc_extract_machine(raw)
+    prefixed = bool(_CC_PREFIXED_MACHINE_RE.search(raw))
+    # Require a clear credit/error intent phrase, OR a prefixed machine token so a
+    # bare "credit 500" never fires. (machineerror already implies intent.)
+    if not (is_error or has_intent or prefixed):
+        return None
+    if not machine:
+        return None
+    base = "/machineerror" if is_error else "/checkcredit"
+    dm = _CC_DATE_RE.search(raw)
+    return f"{base} {machine} {dm.group(1)}" if dm else f"{base} {machine}"
+
+
+# ---------------------------------------------------------------------------
 # Argument extraction
 # ---------------------------------------------------------------------------
 
@@ -886,6 +997,14 @@ def build_slash_command(spec: IntentSpec, user_text: str) -> Optional[str]:
     if spec.arg_kind == "prod_batch":
         # The full canonical command (site+op+what + machines) is rebuilt here.
         return detect_prod_batch_command(user_text)
+    # Credit check / machine error: rebuild deterministically so the site prefix
+    # (NWR/NCH/WF…) is preserved rather than reduced to bare digits.
+    if spec.tag in ("cmd_checkcredit", "cmd_machineerror"):
+        cc = detect_checkcredit_command(user_text)
+        if cc:
+            return cc
+        machine = _cc_extract_machine(user_text)
+        return f"{base} {machine}" if machine else None
     arg = extract_argument(spec.arg_kind, user_text, spec)
     if spec.arg_kind in ("search_name", "machine_id", "rest", "date_dmy") and not arg:
         return None
@@ -1054,6 +1173,11 @@ def command_signal(text: str) -> dict[str, Any]:
     if pb:
         out.update(tag="cmd_pb", confidence=1.0, margin=1.0, command=pb, deterministic=True)
         return out
+    cc = detect_checkcredit_command(raw)
+    if cc:
+        tag = "cmd_machineerror" if cc.startswith("/machineerror") else "cmd_checkcredit"
+        out.update(tag=tag, confidence=1.0, margin=1.0, command=cc, deterministic=True)
+        return out
     clf = _get_classifier()
     if clf is None:
         return out
@@ -1087,6 +1211,12 @@ def translate_if_enabled(text: str) -> Optional[str]:
     if pb:
         print(f"[commandagent] Prod-batch map: {raw[:80]!r} → {pb.splitlines()[0]!r}", flush=True)
         return pb
+    # Deterministic credit-check / machine-error mapping (also runs BEFORE the
+    # fuzzy model, and works even if the model failed to load).
+    cc = detect_checkcredit_command(raw)
+    if cc:
+        print(f"[commandagent] Check-credit map: {raw[:80]!r} → {cc!r}", flush=True)
+        return cc
     try:
         import jenkinsupdate as _jenkins_gate
 
