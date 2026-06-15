@@ -8425,20 +8425,39 @@ def _fpms_lark_handle_vpn_flow(
         return True
 
     # Preferred UX: one interactive card with a VPN_USERS text box + VPN_LOCATION dropdown + submit.
+    # Send via the **main chat** (not the thread-wrapped send) so it's always visible, and verify the
+    # Lark response code — if the card is rejected (code != 0), fall back to the proven text prompt
+    # instead of leaving the user with only the "Got It" reaction.
     _fpms_lark_clear_session(chat_id, sender_id)
+    raw_send = send
     try:
-        send(chat_id, _fpms_lark_vpn_form_card_json(), msg_type="interactive")
-        return True
-    except TypeError:
-        pass
-    except Exception as ex:
-        print(f"[jenkinsupdate] VPN form card send failed, falling back to text: {ex!r}", flush=True)
+        import main as _main_mod
 
-    # Fallback (client can't render cards): step-by-step text replies.
+        _rs = getattr(_main_mod, "send_message", None)
+        if callable(_rs):
+            raw_send = _rs
+    except Exception:
+        pass
+
+    card_ok = False
+    try:
+        res = raw_send(chat_id, _fpms_lark_vpn_form_card_json(), msg_type="interactive")
+        card_ok = isinstance(res, dict) and int(res.get("code", -1)) == 0
+        if not card_ok:
+            print(f"[jenkinsupdate] VPN form card rejected by Lark: {res!r}", flush=True)
+    except TypeError:
+        card_ok = False
+    except Exception as ex:
+        print(f"[jenkinsupdate] VPN form card send error: {ex!r}", flush=True)
+        card_ok = False
+    if card_ok:
+        return True
+
+    # Fallback (client/tenant can't render form cards): step-by-step text replies.
     if inline_user:
         new_sess = {"state": "vpn_choose_location", "vpn_users": inline_user}
         _fpms_lark_sessions_put_chat_key(session_key, new_sess)
-        send(
+        raw_send(
             chat_id,
             VPN_GUIDANCE_TEXT
             + f"\n\n✅ VPN_USERS = **{inline_user}**\n\n"
@@ -8448,7 +8467,7 @@ def _fpms_lark_handle_vpn_flow(
 
     new_sess = {"state": "vpn_need_users"}
     _fpms_lark_sessions_put_chat_key(session_key, new_sess)
-    send(
+    raw_send(
         chat_id,
         VPN_GUIDANCE_TEXT
         + "\n\n📝 **VPN_USERS** — reply with the username to create the VPN for (e.g. `tom`).",
