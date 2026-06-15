@@ -8354,8 +8354,13 @@ def _fpms_lark_raw_send():
 
 
 def _fpms_lark_send_vpn_location_picker(chat_id: str, username: str, send) -> None:
-    """Send the VPN_LOCATION button card; fall back to a numbered text list if it's rejected."""
+    """Send the VPN_LOCATION button card; fall back to a numbered text list if it's rejected.
+
+    On rejection the Lark error code/msg is surfaced in chat (diagnostic) so we can see why
+    interactive cards fail in this tenant without server log access.
+    """
     raw_send = _fpms_lark_raw_send() or send
+    err_note = ""
     try:
         res = raw_send(
             chat_id, _fpms_lark_vpn_location_card_json(username), msg_type="interactive"
@@ -8363,13 +8368,19 @@ def _fpms_lark_send_vpn_location_picker(chat_id: str, username: str, send) -> No
         if isinstance(res, dict) and int(res.get("code", -1)) == 0:
             return
         print(f"[jenkinsupdate] VPN location card rejected by Lark: {res!r}", flush=True)
+        if isinstance(res, dict):
+            err_note = (
+                f"\n\n⚠️ _card not shown — Lark error code=`{res.get('code')}` "
+                f"msg=`{str(res.get('msg'))[:160]}`_"
+            )
     except TypeError:
         pass
     except Exception as ex:
         print(f"[jenkinsupdate] VPN location card send error: {ex!r}", flush=True)
+        err_note = f"\n\n⚠️ _card send error: `{str(ex)[:160]}`_"
     raw_send(
         chat_id,
-        f"✅ VPN_USERS = **{username}**\n\n{_vpn_location_picker_text()}",
+        f"✅ VPN_USERS = **{username}**\n\n{_vpn_location_picker_text()}{err_note}",
     )
 
 
