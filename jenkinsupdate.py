@@ -8509,8 +8509,6 @@ def _fpms_lark_handle_vpn_flow(
         )
         return True
 
-    # Flow: type VPN_USERS (one reply) → tap a VPN_LOCATION button. Form/input cards are not
-    # supported on this Lark tenant (they get rejected), so the location step is a button card.
     _fpms_lark_clear_session(chat_id, sender_id)
     raw_send = _fpms_lark_raw_send() or send
 
@@ -8521,12 +8519,33 @@ def _fpms_lark_handle_vpn_flow(
         _fpms_lark_send_vpn_location_picker(chat_id, inline_user, send)
         return True
 
+    # Try the one-card form (VPN_USERS box + VPN_LOCATION dropdown + submit) right here.
+    # If Lark rejects it, surface the exact error code inline and fall back to the text flow.
+    card_err = ""
+    try:
+        res = raw_send(chat_id, _fpms_lark_vpn_form_card_json(), msg_type="interactive")
+        if isinstance(res, dict) and int(res.get("code", -1)) == 0:
+            _fpms_lark_sessions_put_chat_key(session_key, {"state": "vpn_need_users"})
+            return True
+        print(f"[jenkinsupdate] VPN form card rejected by Lark: {res!r}", flush=True)
+        if isinstance(res, dict):
+            card_err = (
+                f"\n\n⚠️ _form card not shown — Lark error code=`{res.get('code')}` "
+                f"msg=`{str(res.get('msg'))[:160]}`_"
+            )
+    except TypeError:
+        pass
+    except Exception as ex:
+        print(f"[jenkinsupdate] VPN form card send error: {ex!r}", flush=True)
+        card_err = f"\n\n⚠️ _form card send error: `{str(ex)[:160]}`_"
+
     new_sess = {"state": "vpn_need_users"}
     _fpms_lark_sessions_put_chat_key(session_key, new_sess)
     raw_send(
         chat_id,
         VPN_GUIDANCE_TEXT
-        + "\n\n📝 **VPN_USERS** — reply with the username to create the VPN for (e.g. `tom`).",
+        + "\n\n📝 **VPN_USERS** — reply with the username to create the VPN for (e.g. `tom`)."
+        + card_err,
     )
     return True
 
