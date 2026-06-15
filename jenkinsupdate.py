@@ -189,6 +189,8 @@ BI_API_UPDATE_REPOSITORY_OPTIONS: list[tuple[str, str]] = [
     ("bi-librechat", "bi-librechat"),
     ("bi-pms-player-tag", "bi-pms-player-tag"),
     ("bi-tag-management", "bi-tag-management"),
+    ("bi-risk-detection", "bi-risk-detection"),
+    ("bi-ad-asset-review", "bi-ad-asset-review"),
 ]
 
 _BI_UPDATE_NOISE_TOKENS = frozenset(
