@@ -135,7 +135,7 @@ PMS_UAT_UPDATE_URL = (
 #   VPN_USERS    — free-text box (the username)
 #   VPN_LOCATION — dropdown (values mirror the Jenkins job, see VPN_LOCATION_OPTIONS)
 VPN_CREATION_BUILD_URL = (
-    "https://ose-jenkins.bewen.me/job/DEVOPS_CP/job/VPN_CONFIGURATION/job/VPN_CREATION/build?delay=0sec"
+    "https://ose-jenkinsaliyun.bewen.me/job/DEVOPS_CP/job/VPN_CONFIGURATION/job/VPN_CREATION/build?delay=0sec"
 )
 # Dropdown values for VPN_LOCATION (keep in sync with the Jenkins job parameter).
 VPN_LOCATION_OPTIONS: list[str] = [
@@ -9262,7 +9262,7 @@ parse_fpms_uat_bot_block = parse_jenkins_update_fpms_bot_block
 
 def _playwright_proxy_from_env() -> dict | None:
     """Opt-in Playwright proxy (off unless set). Useful when a Jenkins host (e.g. the Aliyun
-    ``ose-jenkins.bewen.me`` VPN job) is only reachable via a proxy from this server.
+    ``ose-jenkinsaliyun.bewen.me`` VPN job) is only reachable via a proxy from this server.
 
     Env:
       ``FPMS_PLAYWRIGHT_PROXY``       — proxy server, e.g. ``http://10.0.0.1:7890`` or ``socks5://...``
