@@ -124,12 +124,31 @@ _ALL_GROUP_RE = re.compile(
     re.I,
 )
 
-# Month DD[,] [YYYY] [at] HH[:MM][am/pm]   (date then time, as in the examples)
-_DATETIME_RE = re.compile(
+# Date: "Month DD[,] [YYYY]"  (year optional)
+_DATE_RE = re.compile(
     r"\b(?P<mon>" + "|".join(_MONTHS.keys()) + r")\.?\s+"
     r"(?P<day>\d{1,2})(?:st|nd|rd|th)?\s*,?\s*"
-    r"(?P<year>\d{4})?\s*,?\s*(?:at\s+)?"
-    r"(?P<hh>\d{1,2})(?::(?P<mm>\d{2}))?\s*(?P<ap>am|pm)?",
+    r"(?P<year>\d{4})?",
+    re.I,
+)
+
+# Time right after a date — supports 9:45pm, 9pm, 21:45, and military "2145H" / "930 hrs".
+_TIME_RE = re.compile(
+    r"^\s*(?:at\s+|@\s*|,\s*|-\s*)?"
+    r"(?:"
+    r"(?P<hh>\d{1,2}):(?P<mm>\d{2})\s*(?P<ap>am|pm)?"      # 9:45pm / 21:45
+    r"|(?P<h2>\d{1,2})\s*(?P<ap2>am|pm)"                    # 9pm
+    r"|(?P<mil>\d{3,4})\s*(?:h|hrs?|hours)\b"               # 2145H / 930hrs
+    r"|(?:(?<=at )|(?<=at  )|(?<=@)|(?<=@ ))(?P<mil2>\d{4})\b"  # "at 2145" bare 24h
+    r")",
+    re.I,
+)
+
+# Action instruction anchor: "set/unset … maintenance|test|mode" — the datetime that follows it is
+# the *action* time (vs the stress-test/event time, which we must ignore).
+_ACTION_PHRASE_RE = re.compile(
+    r"(?:\b(?:set|unset|enable|disable|put|perform|execute)\b|启用|设置|取消|执行|进行)"
+    r"[^.\n]{0,40}?(?:maintenance|maintain|test|mode|维护|测试)",
     re.I,
 )
 
@@ -235,41 +254,88 @@ def parse_action(text: str) -> str | None:
     return f"{op}_{what}"
 
 
-def parse_action_datetime(text: str, *, now: datetime | None = None) -> datetime | None:
-    """Parse the first ``Month DD[, YYYY] HH:MM[am/pm]`` occurrence into a datetime."""
-    now = now or datetime.now()
-    m = _DATETIME_RE.search(text or "")
+def _time_from_slice(slice_text: str) -> tuple[int, int] | None:
+    """Parse a time (9:45pm / 9pm / 21:45 / 2145H / 930hrs) at the start of ``slice_text``."""
+    m = _TIME_RE.search(slice_text or "")
     if not m:
         return None
-    mon = _MONTHS.get(m.group("mon").lower())
-    if not mon:
-        return None
-    day = int(m.group("day"))
-    hh = int(m.group("hh"))
-    ap = (m.group("ap") or "").lower()
-    # Hour-only is only a valid time when am/pm is present (avoids matching a stray number).
-    if m.group("mm") is None and not ap:
-        return None
-    mm = int(m.group("mm")) if m.group("mm") is not None else 0
+    ap = ""
+    if m.group("hh") is not None:
+        hh, mm, ap = int(m.group("hh")), int(m.group("mm")), (m.group("ap") or "").lower()
+    elif m.group("h2") is not None:
+        hh, mm, ap = int(m.group("h2")), 0, (m.group("ap2") or "").lower()
+    else:
+        raw = m.group("mil") or m.group("mil2")
+        if raw is None:
+            return None
+        if len(raw) <= 2:
+            hh, mm = int(raw), 0
+        elif len(raw) == 3:
+            hh, mm = int(raw[0]), int(raw[1:])
+        else:
+            hh, mm = int(raw[:2]), int(raw[2:])
     if ap == "pm" and hh != 12:
         hh += 12
     elif ap == "am" and hh == 12:
         hh = 0
-    if not (0 <= hh <= 23 and 0 <= mm <= 59 and 1 <= day <= 31):
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
         return None
-    year_raw = m.group("year")
+    return hh, mm
+
+
+def _build_dt(mon: int, day: int, year_raw: str | None, hh: int, mm: int, *, now: datetime) -> datetime | None:
     year = int(year_raw) if year_raw else now.year
     try:
         dt = datetime(year, mon, day, hh, mm)
     except ValueError:
         return None
-    # No explicit year and the date already passed → assume next year.
+    # No explicit year and already passed → assume next year.
     if not year_raw and dt < now - timedelta(minutes=1):
         try:
             dt = dt.replace(year=year + 1)
         except ValueError:
             return None
     return dt
+
+
+def _all_datetime_candidates(text: str, *, now: datetime) -> list[tuple[int, datetime]]:
+    """All ``Month DD[, YYYY] <time>`` datetimes with their start positions."""
+    out: list[tuple[int, datetime]] = []
+    body = text or ""
+    for dm in _DATE_RE.finditer(body):
+        mon = _MONTHS.get(dm.group("mon").lower())
+        if not mon:
+            continue
+        day = int(dm.group("day"))
+        if not (1 <= day <= 31):
+            continue
+        t = _time_from_slice(body[dm.end(): dm.end() + 30])
+        if not t:
+            continue
+        dt = _build_dt(mon, day, dm.group("year"), t[0], t[1], now=now)
+        if dt:
+            out.append((dm.start(), dt))
+    return out
+
+
+def parse_action_datetime(text: str, *, now: datetime | None = None) -> datetime | None:
+    """
+    Parse the **action** datetime — when to actually set/unset maintenance.
+
+    When several times appear (e.g. the stress-test event time *and* a separate
+    "Set Maintenance … at <time>" instruction), prefer the datetime that follows the action
+    instruction; otherwise fall back to the first datetime found.
+    """
+    now = now or datetime.now()
+    cands = _all_datetime_candidates(text, now=now)
+    if not cands:
+        return None
+    am = _ACTION_PHRASE_RE.search(text or "")
+    if am:
+        after = [(p, dt) for p, dt in cands if p >= am.start()]
+        if after:
+            return after[0][1]
+    return cands[0][1]
 
 
 def parse_reason(text: str) -> str:
