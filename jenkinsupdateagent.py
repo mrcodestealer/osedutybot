@@ -975,7 +975,15 @@ def agent_route(text: str, *, use_llm: bool = True) -> Optional[str]:
     This lets a plain "help update jenkins …" paste auto-pick ``/update`` vs ``/updatemore``
     based on how many environments the agent finds — while the explicit ``/update`` /
     ``/updatemore`` commands keep working untouched as fallbacks.
+
+  BI API UPDATE pastes (``repository:`` + ``env``/``branch``) are **not** handled here —
+  return ``None`` so :mod:`jenkinsupdate` keeps the full BI block intact.
     """
+    raw = (text or "").replace("\r\n", "\n")
+    if re.search(r"\b(?:repository|repo)\s*[:=]", raw, re.I) and re.search(
+        r"\b(?:branch|env|environment)\s*[:=]", raw, re.I
+    ):
+        return None
     try:
         plan = extract_segments(text, use_llm=use_llm)
     except Exception as exc:  # pragma: no cover - defensive

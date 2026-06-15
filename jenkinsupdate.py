@@ -203,6 +203,21 @@ _BI_UPDATE_NOISE_TOKENS = frozenset(
         "api",
         "go",
         "build",
+        "this",
+        "that",
+        "the",
+        "an",
+        "a",
+        "can",
+        "help",
+        "you",
+        "thank",
+        "thanks",
+        "hello",
+        "hi",
+        "hey",
+        "bot",
+        "duty",
     }
 )
 
@@ -1136,6 +1151,67 @@ def _catalog_exact_service_id(tok: str, catalog: Sequence[str]) -> str | None:
     return None
 
 
+def _catalog_substring_superset_ids(tok: str, catalog: Sequence[str]) -> list[str]:
+    """
+    Catalog entries that **contain** ``tok`` as a sub-name but are not an exact match.
+
+    Used to detect ambiguous prefixes, e.g. ``bi-risk-detection`` is contained in
+    ``bi-risk-detection-2`` / ``bi-risk-detection2``; ``schedule-server`` in
+    ``schedule-server2`` / ``schedule-serverviber``.
+    """
+    k = _normalize_service_query_key(tok)
+    if not k:
+        return []
+    out: list[str] = []
+    for s in catalog:
+        sk = _normalize_service_query_key(s)
+        if sk != k and k in sk:
+            out.append(s)
+    return out
+
+
+def _resolve_catalog_token_or_menu(tok: str, catalog: Sequence[str]) -> tuple[str | None, bool]:
+    """
+    Decide whether ``tok`` can be auto-selected from ``catalog`` or needs a pick menu.
+
+    Returns ``(exact_id, need_menu)``:
+      * ``need_menu`` is **False** only when there is exactly one exact match **and**
+        ``tok`` is not contained in any other catalog entry (unambiguous).
+      * Otherwise ``need_menu`` is **True** (ambiguous prefix/substring, or no exact match).
+        ``exact_id`` is the exact match if one exists, else ``None``.
+
+    This is the shared rule for **every** Jenkins job/environment: a service/repository
+    is only filled directly when it uniquely identifies one option.
+    """
+    exact = _catalog_exact_service_id(tok, catalog)
+    if exact is None:
+        return None, True
+    if _catalog_substring_superset_ids(tok, catalog):
+        return exact, True
+    return exact, False
+
+
+def _split_unambiguous_service_tokens(
+    tokens: Sequence[str], catalog: Sequence[str]
+) -> tuple[list[str], list[str]]:
+    """
+    Split service tokens into ``(resolved_ids, tokens_needing_menu)``.
+
+    A token is auto-resolved only when it uniquely matches one catalog entry and is not a
+    sub-name of any other entry (see :func:`_resolve_catalog_token_or_menu`).
+    """
+    resolved: list[str] = []
+    to_pick: list[str] = []
+    for tok in tokens:
+        exact_id, need_menu = _resolve_catalog_token_or_menu(tok, catalog)
+        if exact_id is not None and not need_menu:
+            if exact_id not in resolved:
+                resolved.append(exact_id)
+        else:
+            to_pick.append(tok)
+    return resolved, to_pick
+
+
 def _service_ids_from_service_block_lines(
     lines: list[str],
     *,
@@ -1606,13 +1682,10 @@ def _normalize_bi_repository_hint(token: str) -> str:
 
 
 def _extract_bi_repo_hint_from_body(body: str) -> str:
-    """Repo hint from ``/update ds superjackpot`` / ``ds-superjackpot-api`` / inline keys."""
-    tok = _find_ds_or_bi_repo_token(body)
-    if tok:
-        return tok
+    """Repo hint from ``repository:`` / ``ds-…`` / ``/update ds superjackpot`` lines."""
     repo = _extract_keyed_value(
         body,
-        ("repository", "repo", "service", "services"),
+        ("repository", "repo"),
         stop_keys=(
             "repository",
             "repo",
@@ -1627,6 +1700,9 @@ def _extract_bi_repo_hint_from_body(body: str) -> str:
     )
     if repo:
         return _normalize_bi_repository_hint(repo)
+    tok = _find_ds_or_bi_repo_token(body)
+    if tok:
+        return tok
     rest = JENKINS_UPDATE_CMD_RE.sub("", body, count=1)
     rest = _jenkins_update_strip_job_aliases(rest)
     parts: list[str] = []
@@ -1665,6 +1741,29 @@ def _resolve_bi_repository_jenkins_value(
     ranked = _rank_bi_repository_options(want, opts)
     if not ranked:
         return "", [], True
+
+    # Ambiguity rule (same as service catalogs): only auto-pick when the typed repo
+    # uniquely matches one option AND is not a sub-name of another option. So
+    # ``bi-risk-detection`` auto-picks when it is the only match, but needs a menu if
+    # ``bi-risk-detection-2`` / ``bi-risk-detection2`` also exist.
+    want_key = _normalize_service_query_key(want)
+    option_values = [ov for ov, _ot in opts]
+    exact_value_matches = [
+        ov for ov in option_values if _normalize_service_query_key(ov) == want_key
+    ]
+    superset_values = _catalog_substring_superset_ids(want, option_values)
+    if len(exact_value_matches) == 1 and not superset_values:
+        return exact_value_matches[0], ranked[:8], False
+    if exact_value_matches or superset_values:
+        # Exact-but-also-prefix, or no exact yet contained in others → user must choose.
+        # Surface the exact + superset options first in the menu.
+        ambiguous_first = exact_value_matches + [
+            v for v in superset_values if v not in exact_value_matches
+        ]
+        reordered = [r for r in ranked if r[0] in ambiguous_first]
+        reordered += [r for r in ranked if r[0] not in ambiguous_first]
+        return reordered[0][0], reordered[:8], True
+
     top_v, _top_t, top_sc = ranked[0]
     if top_sc >= 10.0:
         return top_v, ranked[:8], False
@@ -7450,8 +7549,9 @@ def _fpms_lark_dispatch_fnt_rc_parameter_flow(
             lark_message_id=lark_message_id,
         )
         return True
-    resolved_ids: list[str] = []
-    tokens_to_pick: list[str] = list(tokens)
+    resolved_ids, tokens_to_pick = _split_unambiguous_service_tokens(
+        tokens, FNT_RC_UAT_MASTER_SERVICES
+    )
     if not tokens_to_pick:
         if not resolved_ids:
             send(chat_id, "❌ No RC services parsed.")
@@ -7533,8 +7633,9 @@ def _fpms_lark_dispatch_sms_uat_parameter_flow(
             lark_message_id=lark_message_id,
         )
         return True
-    resolved_ids: list[str] = []
-    tokens_to_pick: list[str] = list(tokens)
+    resolved_ids, tokens_to_pick = _split_unambiguous_service_tokens(
+        tokens, SMS_UAT_UPDATE_SERVICES
+    )
     if not tokens_to_pick:
         if not resolved_ids:
             send(chat_id, "❌ No SMS UAT services parsed.")
@@ -7635,6 +7736,7 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
             lark_message_id=lark_message_id,
         )
         return True
+    catalog = PMS_UAT_UPDATE_SERVICES if jp == "pms_uat" else FPMS_UAT_BRANCH_SERVICES
     resolved_ids: list[str] = []
     tokens_to_pick: list[str] = []
     for tok in tokens:
@@ -7649,6 +7751,13 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
                     if sid not in resolved_ids:
                         resolved_ids.append(sid)
                 continue
+        # Auto-resolve a service only when it uniquely matches one catalog id and is not a
+        # sub-name of another (e.g. ``schedule-server`` vs ``schedule-server2`` stays a menu).
+        exact_id, need_menu = _resolve_catalog_token_or_menu(tok, catalog)
+        if exact_id is not None and not need_menu:
+            if exact_id not in resolved_ids:
+                resolved_ids.append(exact_id)
+            continue
         tokens_to_pick.append(tok)
     if not tokens_to_pick:
         if not resolved_ids:
@@ -7810,12 +7919,45 @@ def _fpms_lark_with_sender_union_scope(fn):
     return wrapped
 
 
+def _looks_like_bi_api_update_paste(text: str) -> bool:
+    """True for chat pastes like ``repository: bi-…`` + ``env:`` / ``branch:`` (no ``/update``)."""
+    raw = (text or "").replace("\r\n", "\n")
+    if not re.search(r"\b(?:repository|repo)\s*[:=]", raw, re.I):
+        return False
+    return bool(
+        re.search(r"\b(?:branch|env|environment)\s*[:=]", raw, re.I)
+        or _find_ds_or_bi_repo_token(raw)
+    )
+
+
+def _normalize_bi_api_update_freeform_body(text: str) -> str:
+    """
+    Turn a BI API UPDATE paste (no ``/update`` prefix) into a canonical block the
+    dispatcher understands — preserves ``repository`` / ``env`` / ``branch`` lines.
+    """
+    raw = (text or "").replace("\r\n", "\n").strip()
+    for pat in (r"@_user_\d+", r"<[^>]+>"):
+        raw = re.sub(pat, "", raw)
+    raw = re.sub(r"[ \t]+", " ", raw)
+    repo, env, branch = parse_bi_api_update_message_block(raw)
+    lines = ["/update ds"]
+    if repo:
+        lines.append(f"repository: {repo}")
+    if env:
+        lines.append(f"env: {env}")
+    if branch:
+        lines.append(f"branch: {branch}")
+    return "\n".join(lines)
+
+
 @_fpms_lark_with_sender_union_scope
 def looks_like_natural_jenkins_update(text: str) -> bool:
     """True when the user wants a Jenkins /update flow but omitted the ``/update`` prefix."""
     raw = (text or "").replace("\r\n", "\n").strip()
     if not raw or JENKINS_UPDATE_CMD_RE.search(raw):
         return False
+    if _looks_like_bi_api_update_paste(raw):
+        return True
     if _NL_JENKINS_UPDATE_RE.search(raw):
         return True
     has_branch = bool(re.search(r"\bbranch\s*:", raw, re.I))
@@ -7831,6 +7973,8 @@ def normalize_natural_jenkins_body(text: str) -> str:
     raw = (text or "").replace("\r\n", "\n").strip()
     if JENKINS_UPDATE_CMD_RE.search(raw):
         return raw
+    if _looks_like_bi_api_update_paste(raw):
+        return _normalize_bi_api_update_freeform_body(raw)
     m = re.search(r"\b(branch|version|services?|environment)\s*:", raw, re.I)
     if m and m.start() > 0:
         head, tail = raw[: m.start()].strip(), raw[m.start():].strip()
@@ -7879,6 +8023,8 @@ def _looks_like_freeform_update_request(text: str) -> bool:
         return False
     if looks_like_natural_jenkins_update(raw):
         return True
+    if _looks_like_bi_api_update_paste(raw):
+        return True
     has_branch = bool(re.search(r"\bbranch\s*[:=]", raw, re.I))
     has_svc = bool(re.search(r"\bservices?\s*[:=]", raw, re.I))
     has_update_word = bool(
@@ -7904,6 +8050,9 @@ def agent_route_free_form_body(raw_text: str) -> str | None:
     ``/updatemore`` handling (never breaks the current flow).
     """
     if not _agent_normalize_enabled():
+        return None
+    if _looks_like_bi_api_update_paste(raw_text):
+        # FPMS-oriented agent strips ``repository:`` / ``env:`` and mis-reads "update this api".
         return None
     try:
         import jenkinsupdateagent as agent
