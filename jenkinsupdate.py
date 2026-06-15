@@ -5925,6 +5925,61 @@ def parse_fpms_prod_script_run_config_block(text: str) -> tuple[str, str]:
     return env, cmd
 
 
+_FPMS_PROD_SCRIPT_NODE_LINE_RE = re.compile(r"^\s*node\b", re.I)
+_FPMS_PROD_SCRIPT_CMD_LABEL_RE = re.compile(
+    r"^(?:[>\-\*\u2022]\s*)*(?:`+|\*{1,2})?command(?:`+|\*{1,2})?\s*[:\-–—]\s*(?P<rest>.*)$",
+    re.I,
+)
+_FPMS_PROD_SCRIPT_SKIP_LABEL_RE = re.compile(r"^\s*(?:email|cc)\b", re.I)
+
+
+def _split_fpms_prod_script_commands(body: str) -> list[str]:
+    """Split a FPMS PROD SCRIPT message into separate ``node …`` commands (one Jenkins run each).
+
+    Each line that starts with ``node`` begins a new command; non-node lines that follow are
+    treated as continuation of the current command. The job headline (``update fpms prod script`` /
+    ``/jenkinsupdate --fpmsprodscript``), ``Command:`` labels, and ``Email:`` / ``Cc:`` lines are
+    ignored. Returns canonicalized commands (outer quotes stripped, single-spaced).
+    """
+    cmds: list[str] = []
+    cur: list[str] = []
+
+    def _flush() -> None:
+        if cur:
+            joined = _fpms_prod_script_join_command_lines(cur)
+            if joined:
+                cmds.append(joined)
+            cur.clear()
+
+    for raw in (body or "").replace("\r\n", "\n").split("\n"):
+        line = raw.strip()
+        if not line or _FPMS_PROD_SCRIPT_SKIP_LABEL_RE.match(line):
+            continue
+        mk = _FPMS_PROD_SCRIPT_CMD_LABEL_RE.match(line)
+        if mk:
+            line = (mk.group("rest") or "").strip()
+            if not line:
+                continue
+        if not _FPMS_PROD_SCRIPT_NODE_LINE_RE.match(line):
+            # Headline / job-alias line: keep only an inline ``node …`` tail, else skip it.
+            is_headline = bool(JENKINS_UPDATE_CMD_RE.search(line)) or (
+                "prod script" in line.casefold()
+            )
+            if is_headline:
+                mnode = re.search(r"(?i)\bnode\b.*$", line)
+                line = mnode.group(0).strip() if mnode else ""
+                if not line:
+                    continue
+        if _FPMS_PROD_SCRIPT_NODE_LINE_RE.match(line):
+            _flush()
+            cur.append(line)
+        elif cur:
+            cur.append(line)
+        # else: stray non-node line before any command → ignore
+    _flush()
+    return [normalize_fpms_prod_script_command(c) for c in cmds if c.strip()]
+
+
 def parse_sms_uat_run_config_block(text: str) -> tuple[list[str], str, str, bool]:
     """Parse internal ``SMS_UAT_UPDATE_V1`` block passed to ``run()``.
 
@@ -7227,6 +7282,66 @@ def _fpms_lark_dispatch_job_row(
     )
 
 
+def _fpms_lark_start_prod_script_sequence(
+    chat_id: str,
+    session_key: str,
+    commands: list[str],
+    jenkins_build_url: str,
+    send,
+    *,
+    lark_message_id: str | None = None,
+) -> bool:
+    """Run multiple PROD SCRIPT ``node …`` commands **one at a time** (wait for each Jenkins
+    build to finish before the next) by building a same-environment ``/updatemore`` queue."""
+    import updatemore as um
+
+    sender_id = session_key.split(":", 1)[1] if ":" in session_key else session_key
+    # ``--fpmsprodscript`` in the headline makes each segment route deterministically to the
+    # PROD SCRIPT flow (no job-picker), and the identical env line keeps them sequential.
+    segments: list[dict] = []
+    for i, cmd in enumerate(commands):
+        segments.append(
+            {
+                "env_line": "update fpms prod script --fpmsprodscript",
+                "lines": [f"Command: {cmd}"],
+                "email_subject": None,
+                "same_as_prev": i > 0,
+            }
+        )
+    um.assign_email_batches(segments)
+    q = um.init_queue(
+        segments, chat_id=chat_id, sender_id=sender_id, skip_build=False
+    )
+    with _fpms_lark_sessions_lock:
+        prev = _fpms_lark_sessions.get(session_key)
+        if isinstance(prev, dict):
+            _fpms_lark_unregister_picker_sid_from_sess(prev)
+    _fpms_lark_sessions_put_chat_key(session_key, {"updatemore_queue": q})
+    _fpms_lark_begin_update_thread(
+        chat_id,
+        session_key,
+        f"fpms prod script — {len(commands)} scripts",
+        lark_message_id,
+        force_new=True,
+    )
+    lines = [
+        f"📋 **FPMS PROD SCRIPT** — detected **{len(commands)}** scripts. Running **one at a "
+        "time** (each its own build; waits for **Finished: SUCCESS** before the next):",
+    ]
+    for i, cmd in enumerate(commands, 1):
+        lines.append(f"{i}. `{cmd}`")
+    lines.append("\nEach script will still show its own **YES/NO** confirm card before Build.")
+    send(chat_id, "\n".join(lines))
+    return _dispatch_lark_update_command_body(
+        chat_id,
+        session_key,
+        um.segment_to_update_body(segments[0]),
+        send,
+        from_updatemore=True,
+        lark_message_id=lark_message_id,
+    )
+
+
 def _fpms_lark_dispatch_fpms_prod_script_parameter_flow(
     chat_id: str,
     session_key: str,
@@ -7236,7 +7351,21 @@ def _fpms_lark_dispatch_fpms_prod_script_parameter_flow(
     *,
     lark_message_id: str | None = None,
 ) -> bool:
-    """Parse FPMS PROD SCRIPT block; ask follow-up command block if missing; then headless run."""
+    """Parse FPMS PROD SCRIPT block; ask follow-up command block if missing; then headless run.
+
+    Multiple ``node …`` commands in one message are auto-split into a sequential queue
+    (one build each, waiting for the previous to finish).
+    """
+    multi_cmds = _split_fpms_prod_script_commands(body)
+    if len(multi_cmds) >= 2:
+        return _fpms_lark_start_prod_script_sequence(
+            chat_id,
+            session_key,
+            multi_cmds,
+            jenkins_build_url,
+            send,
+            lark_message_id=lark_message_id,
+        )
     try:
         data = parse_fpms_prod_script_bot_block(body)
     except Exception as ex:
