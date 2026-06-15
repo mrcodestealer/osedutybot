@@ -124,6 +124,14 @@ _ALL_GROUP_RE = re.compile(
     re.I,
 )
 
+# "All Rising Rockets Link machines", "all WF machines Good Fortune" (venue before the word machines).
+_ALL_MACHINES_SCOPE_RE = re.compile(
+    r"\ball\b\s+(?:the\s+)?(?:[\w][\w\s'&./-]{0,72}?\s+)?machines?\b",
+    re.I,
+)
+
+_URL_RE = re.compile(r"https?://[^\s<>\"')\]]+", re.I)
+
 # Date: "Month DD[,] [YYYY]"  (year optional)
 _DATE_RE = re.compile(
     r"\b(?P<mon>" + "|".join(_MONTHS.keys()) + r")\.?\s+"
@@ -346,6 +354,23 @@ def parse_reason(text: str) -> str:
     if m:
         return m.group(1).strip()
     return "Stress Test"
+
+
+def extract_links(text: str) -> list[str]:
+    """HTTP(S) URLs from the announcement (e.g. Lark applink), deduped in order."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for url in _URL_RE.findall(text or ""):
+        url = url.rstrip(".,;)")
+        if url not in seen:
+            seen.add(url)
+            out.append(url)
+    return out
+
+
+def _has_all_machines_scope(text: str) -> bool:
+    """True when the message scopes the action to *all* machines of a venue/game-type."""
+    return bool(_ALL_MACHINES_SCOPE_RE.search(text or ""))
 
 
 # Asset token: env prefix + digits, e.g. ``TBP8609``, ``WF 8145``, ``WF-8147``.
@@ -917,8 +942,13 @@ def _parse_intent_rules(text: str, *, now: datetime) -> dict[str, Any] | None:
     env_code = ""
     venue = ""
     note = ""
-    if not machines:
-        group = detect_group_target(text)
+    group = detect_group_target(text)
+    if group and _has_all_machines_scope(text):
+        env_code = group["env_code"]
+        venue = group["venue"]
+        machines, note = resolve_all_group(env_code, venue)
+        target_kind = "all_group"
+    elif not machines:
         if not group:
             return None
         env_code = group["env_code"]
@@ -993,6 +1023,18 @@ def _classify_rules(text: str, *, now: datetime) -> dict[str, Any] | None:
         return None
     action_dt = parse_action_datetime(text, now=now)
     machines = extract_machine_lines(text)
+    group = detect_group_target(text)
+    # "All Rising Rockets Link machines" must win over incidental OSM253 tokens in bullet remarks.
+    if group and _has_all_machines_scope(text):
+        return {
+            "action": action,
+            "action_dt": action_dt,
+            "target_kind": "all_group",
+            "env_code": (group.get("env_code") or "").strip().upper(),
+            "venue": group.get("venue") or "",
+            "machines": [],
+            "source": "rule",
+        }
     if machines:
         # Infer env from the pasted machine names (TBP8609 → TBP), so no site word is needed.
         envs = sorted({e for e in (_env_from_machine_name(m) for m in machines) if e})
@@ -1005,7 +1047,6 @@ def _classify_rules(text: str, *, now: datetime) -> dict[str, Any] | None:
             "machines": machines,
             "source": "rule",
         }
-    group = detect_group_target(text)
     if not group:
         return None
     return {
@@ -1187,6 +1228,8 @@ def build_reminder_reason(parsed: dict[str, Any]) -> str:
         f"**Machines ({len(machines)}):**",
     ]
     lines.extend(f"• {m}" for m in machines)
+    for url in parsed.get("links") or ():
+        lines.append(f"Link: {url}")
     note = parsed.get("note")
     if note:
         lines.append("")
@@ -1240,6 +1283,7 @@ def handle_maintenance_schedule_message(
         "action_dt": action_dt,
         "reminder_dt": action_dt - timedelta(minutes=MAINT_LEAD_MINUTES),
         "reason": parse_reason(body),
+        "links": extract_links(body),
         "machines": machines,
         "env_summary": env_summary,
         "note": note,
