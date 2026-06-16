@@ -755,9 +755,14 @@ def bump_tail_and_execute(page, *, timeout_ms: int) -> None:
     page.wait_for_selector("section[role='results'] pre, pre.nofloat", timeout=min(timeout_ms, 120_000))
 
 
-# New player segment: extra1 / extra2 / extra3 + userid (lines below belong to that player until the next marker).
+# New player segment marker (lines below belong to that player until the next marker):
+#   - extra1 / extra2 / extra3 + userid (settle/bet flow), e.g. `extra1:userid:111`
+#   - httpaft enter-game flow, e.g. `httpaft:enter_game userid:111`
+# The AFT enter-game flow does NOT emit an `extra:userid:` marker, so without the
+# `enter_game userid:` branch its lines (target/add_num + `enter game time out`) would
+# be wrongly merged into the previous player's block.
 _USERID_START = re.compile(
-    r'extra[123]\s*:\s*["\']?userid\s*:\s*(\d+)',
+    r'(?:extra[123]\s*:\s*["\']?userid|enter_game\s+userid)\s*:\s*(\d+)',
     re.I,
 )
 _ERR_ZERO = re.compile(r"""['\"]error['\"]\s*:\s*0\b""")
