@@ -193,6 +193,81 @@ BI_API_UPDATE_REPOSITORY_OPTIONS: list[tuple[str, str]] = [
     ("bi-ad-asset-review", "bi-ad-asset-review"),
 ]
 
+# BI-SCRIPT-UPDATE — separate Jenkins job from BI-API-UPDATE. Parameters:
+#   DEPLOYMENT_FILE_NAME — multi-select checkboxes (Extended Choice), the script/api list below
+#   ENVIRONMENT          — dropdown (same as BI-API-UPDATE)
+#   SOURCE_BRANCH        — free text (same as BI-API-UPDATE)
+BI_SCRIPT_UPDATE_BUILD_URL = (
+    "https://jenkins.client8.me/job/BI-GO/job/BI-SCRIPT-UPDATE/build?delay=0sec"
+)
+# Checkbox values for DEPLOYMENT_FILE_NAME (keep in sync with the Jenkins job; order = job UI).
+BI_SCRIPT_UPDATE_DEPLOYMENT_FILES: list[str] = [
+    "bi-script",
+    "bi-compare-ua-cost",
+    "bi-compare-channel-cost",
+    "bi-compare-influencer-cost",
+    "bi-compare-playerinfo",
+    "bi-compare-proposal",
+    "bi-compare-sales-cost",
+    "bi-compare-spinlog",
+    "bi-dim-game-checking",
+    "bi-dws-avg-betamount-by-game-postgres-scheduler",
+    "bi-dws-topup-withdrawal-postgres-scheduler",
+    "bi-jackpot-payout-history",
+    "bi-jackpot-draw-history",
+    "bi-jackpot-draw-payout-history-clean",
+    "bi-lark-channel-marketcost",
+    "bi-lark-influencer-marketcost",
+    "bi-lark-sales-marketcost",
+    "bi-lark-sjp-luckyspins",
+    "bi-lark-ua-marketcost",
+    "bi-proposal-merchants-usable",
+    "bi-redis-ab-pcr",
+    "bi-user-lock-machines-aliyun",
+    "bi-player-first-verified-email",
+    "bi-live-chat-conversation",
+    "bi-msg-table-chat",
+    "bi-check-catgame",
+    "bi-lark-gameprovider-category",
+    "bi-holo-to-mongo",
+    "bi-redis-luckyspinsv7",
+    "bi-playerluckycoincredit",
+    "bi-playervalidcredit",
+    "bi-player-disbursement",
+    "bi-osm-machines-status",
+    "bi-lark-uasz-marketcost",
+    "bi-insert-pap-baccarat",
+    "bi-insert-pap-colorgame",
+    "bi-insert-pap-dragontiger",
+    "bi-insert-pap-blackjack",
+    "bi-insert-pap-paigow",
+    "bi-insert-pap-pulaputi",
+    "bi-insert-pap-roulette",
+    "bi-insert-pap-sicbo",
+    "bi-insert-pap",
+    "bi-platform-active",
+    "bi-live-chat-de",
+    "bi-csv-convert-json-upload-oss",
+    "bi-lark-sports-marketcost",
+    "bi-lark-sports-prtncat",
+    "bi-lark-uasz-event",
+    "bi-dim-provider2-game-checking",
+    "bi-llm-speed-test",
+    "bi-insert-pap-dropball",
+    "bi-chatbi-automessage-weeklyreport",
+    "bi-update-h5pc-gameid",
+    "bi-compare-cmsgames",
+    "bi-milyonaryo-jackpot",
+    "bi-player-game-affinity",
+    "bi-game-popularity",
+]
+
+# Catalog entries are already lowercase-with-hyphens, so casefold == _normalize_service_query_key here.
+# (Defined before _normalize_service_query_key, so avoid calling it at module load.)
+_BI_SCRIPT_FILE_IDS_CASEFOLD = frozenset(
+    s.casefold() for s in BI_SCRIPT_UPDATE_DEPLOYMENT_FILES
+)
+
 _BI_UPDATE_NOISE_TOKENS = frozenset(
     {
         "update",
@@ -359,6 +434,8 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
     "ds update": ("BI API UPDATE", BI_API_UPDATE_BUILD_URL),
     "bi api update": ("BI API UPDATE", BI_API_UPDATE_BUILD_URL),
     "bi-api-update": ("BI API UPDATE", BI_API_UPDATE_BUILD_URL),
+    "bi script update": ("BI SCRIPT UPDATE", BI_SCRIPT_UPDATE_BUILD_URL),
+    "bi-script-update": ("BI SCRIPT UPDATE", BI_SCRIPT_UPDATE_BUILD_URL),
 }
 
 JENKINS_UPDATE_CMD_RE = re.compile(
@@ -1006,6 +1083,15 @@ def _rank_pms_uat_services_by_query(
 ) -> list[str]:
     """Like ``_rank_services_by_query`` but against ``PMS_UAT_UPDATE_SERVICES``."""
     return _rank_catalog_services_by_query(PMS_UAT_UPDATE_SERVICES, query, limit, for_menu=for_menu)
+
+
+def _rank_bi_script_files_by_query(
+    query: str, limit: int = 12, *, for_menu: bool = False
+) -> list[str]:
+    """Like ``_rank_services_by_query`` but against ``BI_SCRIPT_UPDATE_DEPLOYMENT_FILES``."""
+    return _rank_catalog_services_by_query(
+        BI_SCRIPT_UPDATE_DEPLOYMENT_FILES, query, limit, for_menu=for_menu
+    )
 
 
 # Deploy / listener port → Jenkins Services checkbox ``value`` (same strings as ``FPMS_UAT_BRANCH_SERVICES``).
@@ -1855,6 +1941,154 @@ def _bi_api_update_build_config_block(repository: str, environment: str, source_
     return (
         "BI_API_UPDATE_V1\n"
         f"repository: {normalize_parameter_text(repository)}\n"
+        f"environment: {normalize_parameter_text(environment).casefold()}\n"
+        f"source_branch: {normalize_parameter_text(source_branch)}\n"
+    )
+
+
+# ===================== BI-SCRIPT-UPDATE helpers =====================
+# Same input shape as BI-API-UPDATE (API/ENV/Branch), but the API names map to the
+# DEPLOYMENT_FILE_NAME multi-select checkbox list (BI_SCRIPT_UPDATE_DEPLOYMENT_FILES),
+# while ENVIRONMENT (dropdown) + SOURCE_BRANCH (text) are identical to BI-API-UPDATE.
+
+_BI_SCRIPT_KEY_RE = re.compile(
+    r"(?im)^\s*(?:`+|\*{1,2})?"
+    r"(?:api|apis|deployment[_\s]*file(?:[_\s]*name)?s?|file|files|script|scripts|"
+    r"service|services|repository|repo)"
+    r"(?:`+|\*{1,2})?\s*[:=]\s*(?P<v>.+?)\s*$"
+)
+
+
+def _bi_script_extract_file_tokens(text: str) -> list[str]:
+    """
+    Pull DEPLOYMENT_FILE_NAME tokens from a chat paste. Reads ``API:`` / ``service:`` /
+    ``deployment_file:`` / ``script:`` lines (comma/space separated) plus any inline
+    ``bi-…`` tokens, de-duplicated in order.
+    """
+    raw = (text or "").replace("\r\n", "\n")
+    tokens: list[str] = []
+    seen: set[str] = set()
+
+    def _add(tok: str) -> None:
+        t = (tok or "").strip().strip("`*").strip()
+        if not t:
+            return
+        k = _normalize_service_query_key(t)
+        if k and k not in seen:
+            seen.add(k)
+            tokens.append(t)
+
+    for m in _BI_SCRIPT_KEY_RE.finditer(raw):
+        val = _clean_key_rest(m.group("v"))
+        # Stop at a following key on the same line (``API: x env: prod``).
+        val = re.split(
+            r"\s+\b(?:env|environment|branch|source[_\s]*branch)\b\s*[:=]", val, maxsplit=1, flags=re.I
+        )[0]
+        for part in re.split(r"[,，;]+|\s{2,}", val):
+            _add(part)
+    if not tokens:
+        for m in re.finditer(r"\bbi-[a-z0-9][a-z0-9._-]*\b", raw, re.I):
+            _add(m.group(0))
+    return tokens
+
+
+def _body_requests_bi_script_update(body: str) -> bool:
+    """True when a BI request names at least one DEPLOYMENT_FILE_NAME (BI-SCRIPT-UPDATE job)."""
+    raw = (body or "").strip()
+    if not raw:
+        return False
+    for tok in _bi_script_extract_file_tokens(raw):
+        if _normalize_service_query_key(tok) in _BI_SCRIPT_FILE_IDS_CASEFOLD:
+            return True
+    return False
+
+
+def parse_bi_script_update_message_block(
+    text: str, *, allow_missing_files: bool = False
+) -> tuple[list[str], str, str]:
+    """
+    Parse free text (chat paste / one-line command) for BI-SCRIPT-UPDATE fields:
+    ``API``/``deployment_file``/``service`` (one or more), ``env``/``environment``,
+    ``branch``/``source_branch``. Returns ``(files, environment, source_branch)``.
+    """
+    body = (text or "").strip()
+    if not body:
+        raise ConfigBlockError("BI-SCRIPT-UPDATE text is empty.")
+    keys_all = (
+        "environment",
+        "env",
+        "source_branch",
+        "source branch",
+        "branch",
+    )
+    files = _bi_script_extract_file_tokens(body)
+    env = _extract_keyed_value(body, ("environment", "env"), stop_keys=keys_all)
+    branch = _extract_keyed_value(
+        body, ("source_branch", "source branch", "branch"), stop_keys=keys_all
+    )
+    if not files and not allow_missing_files:
+        raise ConfigBlockError(
+            "Missing API/deployment file for BI-SCRIPT-UPDATE (e.g. `API: bi-dim-game-checking`)."
+        )
+    if not env:
+        env = BI_API_UPDATE_DEFAULT_ENVIRONMENT
+    if not branch:
+        branch = BI_API_UPDATE_DEFAULT_SOURCE_BRANCH
+    env_norm = normalize_parameter_text(env).casefold()
+    branch_norm = normalize_parameter_text(branch)
+    if not env_norm:
+        raise ConfigBlockError("environment value is empty.")
+    if not branch_norm:
+        raise ConfigBlockError("source branch value is empty.")
+    return files, env_norm, branch_norm
+
+
+def parse_bi_script_update_config_block(text: str) -> tuple[list[str], str, str]:
+    """Parse internal ``BI_SCRIPT_UPDATE_V1`` block passed to ``run()``."""
+    body = (text or "").strip()
+    if not body:
+        raise ConfigBlockError("BI_SCRIPT_UPDATE_V1 config is empty.")
+    lines = body.splitlines()
+    if not lines or lines[0].strip().upper() != "BI_SCRIPT_UPDATE_V1":
+        raise ConfigBlockError("Missing BI_SCRIPT_UPDATE_V1 header.")
+    files: list[str] = []
+    environment = ""
+    source_branch = ""
+    for raw in lines[1:]:
+        s = _normalize_config_colons(raw).strip()
+        if not s:
+            continue
+        m = re.match(r"(?i)^(?:deployment_files?|files?|api|services?)\s*[:=]\s*(.+)$", s)
+        if m:
+            for part in re.split(r"[,，;]+", m.group(1)):
+                t = part.strip()
+                if t and t not in files:
+                    files.append(t)
+            continue
+        m = re.match(r"(?i)^(?:environment|env)\s*[:=]\s*(.+)$", s)
+        if m:
+            environment = m.group(1).strip()
+            continue
+        m = re.match(r"(?i)^(?:source_branch|source branch|branch)\s*[:=]\s*(.+)$", s)
+        if m:
+            source_branch = m.group(1).strip()
+            continue
+    if not files:
+        raise ConfigBlockError("BI_SCRIPT_UPDATE_V1: no deployment files parsed.")
+    return (
+        files,
+        normalize_parameter_text(environment).casefold() or BI_API_UPDATE_DEFAULT_ENVIRONMENT,
+        normalize_parameter_text(source_branch) or BI_API_UPDATE_DEFAULT_SOURCE_BRANCH,
+    )
+
+
+def _bi_script_update_build_config_block(
+    deployment_files: list[str], environment: str, source_branch: str
+) -> str:
+    files = ", ".join(normalize_parameter_text(f) for f in deployment_files if f)
+    return (
+        "BI_SCRIPT_UPDATE_V1\n"
+        f"deployment_files: {files}\n"
         f"environment: {normalize_parameter_text(environment).casefold()}\n"
         f"source_branch: {normalize_parameter_text(source_branch)}\n"
     )
@@ -4337,16 +4571,21 @@ def read_services_checked_values(page) -> list[str]:
     return [normalize_parameter_text(str(x)) for x in out if str(x).strip()]
 
 
-def read_fnt_rc_services_checked_values(page) -> list[str]:
-    """Checked service ids under **Services** for FNT ECP extended-choice (``tbl_ecp_choice-parameter-*``)."""
+def read_ecp_checked_values(page, label: str = "Services") -> list[str]:
+    """
+    Checked checkbox ids under a Jenkins **Extended Choice (ECP)** parameter
+    (``tbl_ecp_choice-parameter-*``), matched by its form ``label`` (e.g. ``Services``,
+    ``DEPLOYMENT_FILE_NAME``).
+    """
     out = page.evaluate(
-        r"""() => {
+        r"""(label) => {
+            const want = (label || "").replace(/\s+/g, " ").trim().toLowerCase();
             const items = document.querySelectorAll("div.jenkins-form-item");
             for (const item of items) {
                 const lab = item.querySelector(".jenkins-form-label");
                 if (!lab) continue;
                 const t = (lab.textContent || "").replace(/\s+/g, " ").trim();
-                if (!/^Services$/i.test(t)) continue;
+                if (t.toLowerCase() !== want) continue;
                 const acc = [];
                 for (const el of item.querySelectorAll(
                     'div[id^="tbl_ecp_choice-parameter"] input[type="checkbox"]'
@@ -4358,31 +4597,40 @@ def read_fnt_rc_services_checked_values(page) -> list[str]:
                 return acc;
             }
             return [];
-        }"""
+        }""",
+        label,
     )
     if not isinstance(out, list):
         return []
     return [normalize_parameter_text(str(x)) for x in out if str(x).strip()]
 
 
-def select_fnt_rc_services(page, service_names: list[str]) -> None:
+def read_fnt_rc_services_checked_values(page) -> list[str]:
+    """Checked service ids under **Services** for FNT ECP extended-choice."""
+    return read_ecp_checked_values(page, "Services")
+
+
+def select_ecp_multi_checkboxes(page, label: str, names: list[str]) -> None:
     """
-    Tick **Services** for FNT RC jobs (``RC-UAT-UPDATE`` / ``FNT_UAT_SCRIPT_RUN``) — ECP extended-choice, not FPMS UnoChoice.
+    Tick checkboxes under a Jenkins **Extended Choice (ECP)** parameter by its form ``label``.
+
+    Shared by FNT RC / SMS **Services** and BI-SCRIPT-UPDATE **DEPLOYMENT_FILE_NAME**
+    (ECP extended-choice, not FPMS UnoChoice).
     """
     cleaned: list[str] = []
-    for name in service_names:
+    for name in names:
         n = (name or "").strip()
         if not re.match(r"^[\w.-]+$", n):
-            raise ValueError(f"Invalid service name: {n!r}")
+            raise ValueError(f"Invalid checkbox value: {n!r}")
         cleaned.append(n)
-    row = _form_row(page, "Services")
+    row = _form_row(page, label)
     row.wait_for(state="visible", timeout=30_000)
     root = row.locator('div[id^="tbl_ecp_choice-parameter"]')
     try:
         root.first.wait_for(state="visible", timeout=45_000)
     except PlaywrightTimeout as ex:
         raise ServicesListGoneError(
-            "FNT RC Services (ECP table) not visible — wrong job page or Jenkins UI changed."
+            f"{label} (ECP table) not visible — wrong job page or Jenkins UI changed."
         ) from ex
     gap = min(120, _MS_BETWEEN_SERVICES) if _FPMS_FAST_FILL_ACTIVE else _MS_BETWEEN_SERVICES
     for n in cleaned:
@@ -4393,7 +4641,7 @@ def select_fnt_rc_services(page, service_names: list[str]) -> None:
             cb.wait_for(state="attached", timeout=25_000)
         except PlaywrightTimeout as ex:
             raise ServiceNotDetectedError(
-                f"FNT RC: no Services checkbox for {n!r} (value/json must match Jenkins)."
+                f"{label}: no checkbox for {n!r} (value/json must match Jenkins)."
             ) from ex
         try:
             if not cb.is_checked():
@@ -4401,9 +4649,16 @@ def select_fnt_rc_services(page, service_names: list[str]) -> None:
                 _safe_page_wait(page, 80)
                 cb.click(timeout=15_000)
         except Exception as ex:
-            raise ServiceNotDetectedError(f"FNT RC: could not tick {n!r}: {ex!r}") from ex
-        print(f"→ FNT RC service ticked: {n!r}")
+            raise ServiceNotDetectedError(f"{label}: could not tick {n!r}: {ex!r}") from ex
+        print(f"→ {label} ticked: {n!r}")
         _safe_page_wait(page, gap)
+
+
+def select_fnt_rc_services(page, service_names: list[str]) -> None:
+    """
+    Tick **Services** for FNT RC jobs (``RC-UAT-UPDATE`` / ``FNT_UAT_SCRIPT_RUN``) — ECP extended-choice.
+    """
+    select_ecp_multi_checkboxes(page, "Services", service_names)
 
 
 def _read_services_checked_values_wide(page) -> list[str]:
@@ -5103,6 +5358,8 @@ def _jenkins_update_job_automation_profile(raw_urls: str) -> str | None:
         return "fpms_prod_script"
     if "/job/bi-go/job/bi-api-update/" in ul:
         return "bi_api_update"
+    if "/job/bi-go/job/bi-script-update/" in ul:
+        return "bi_script_update"
     return None
 
 
@@ -5839,6 +6096,39 @@ def parse_bi_api_update_bot_block(text: str) -> dict:
 def _bi_api_update_bot_build_config_block(data: dict) -> str:
     return _bi_api_update_build_config_block(
         str(data.get("repository") or ""),
+        str(data.get("environment") or ""),
+        str(data.get("source_branch") or ""),
+    )
+
+
+def parse_bi_script_update_bot_block(text: str) -> dict:
+    """
+    Parse Lark block for BI-SCRIPT-UPDATE:
+      /update bi ...
+      API/deployment_file/service: bi-...
+      env/environment: ...
+      branch/source_branch: ...
+    """
+    raw = _normalize_config_colons((text or "").replace("\r\n", "\n")).strip()
+    if not raw:
+        raise ValueError("Empty message.")
+    lines = [L.strip() for L in raw.splitlines() if L.strip()]
+    if not lines or not JENKINS_UPDATE_CMD_RE.search(lines[0]):
+        raise ValueError("First line must include `/update` or `/jenkinsupdate`.")
+    files, env, branch = parse_bi_script_update_message_block(
+        raw, allow_missing_files=True
+    )
+    return {
+        "_job_kind": "bi_script_update",
+        "service_tokens": files,
+        "environment": env,
+        "source_branch": branch,
+    }
+
+
+def _bi_script_update_bot_build_config_block(data: dict, resolved_ids: list[str]) -> str:
+    return _bi_script_update_build_config_block(
+        resolved_ids,
         str(data.get("environment") or ""),
         str(data.get("source_branch") or ""),
     )
@@ -7193,6 +7483,8 @@ def _fpms_lark_begin_jenkins_run(
         cfg = _fpms_prod_script_bot_build_config_block(data)
     elif jp == "bi_api_update":
         cfg = _bi_api_update_bot_build_config_block(data)
+    elif jp == "bi_script_update":
+        cfg = _bi_script_update_bot_build_config_block(data, resolved)
     else:
         cfg = _fpms_bot_build_config_block(data, resolved)
     ev = threading.Event()
@@ -7904,6 +8196,85 @@ def _fpms_lark_dispatch_bi_api_update_parameter_flow(
     return True
 
 
+def _fpms_lark_dispatch_bi_script_update_parameter_flow(
+    chat_id: str,
+    session_key: str,
+    body: str,
+    jenkins_build_url: str,
+    send,
+    *,
+    lark_message_id: str | None = None,
+) -> bool:
+    """
+    Parse BI-SCRIPT-UPDATE block, resolve DEPLOYMENT_FILE_NAME tokens against the catalog
+    (same ambiguity rule as services), then headless run or a pick session for ambiguous ones.
+    """
+    try:
+        data = parse_bi_script_update_bot_block(body)
+    except Exception as ex:
+        send(
+            chat_id,
+            "❌ Could not parse BI SCRIPT UPDATE block. Example:\n"
+            "• `/update bi`\n  `API: bi-dim-game-checking`\n  `env: prod`\n  `branch: main`\n"
+            f"```\n{ex}\n```",
+        )
+        return True
+    with _fpms_lark_sessions_lock:
+        prev = _fpms_lark_sessions.get(session_key)
+        if isinstance(prev, dict) and prev.get("state") == "jenkins_wait_build":
+            send(
+                chat_id,
+                "⏳ A Jenkins **Build** confirmation is already waiting for you in this chat. "
+                "**Tap YES/NO** on that card (or type **yes** / **no**), or say **cancel** before starting a new run.",
+            )
+            return True
+    tokens: list[str] = list(data.get("service_tokens") or [])
+    if not tokens:
+        send(
+            chat_id,
+            "❌ No API/deployment file in your BI SCRIPT UPDATE message "
+            "(e.g. `API: bi-dim-game-checking`).",
+        )
+        return True
+    resolved_ids, tokens_to_pick = _split_unambiguous_service_tokens(
+        tokens, BI_SCRIPT_UPDATE_DEPLOYMENT_FILES
+    )
+    if not tokens_to_pick:
+        _fpms_lark_begin_jenkins_run(
+            chat_id,
+            session_key,
+            data,
+            resolved_ids,
+            send,
+            raw_prompt_body=body,
+            jenkins_build_url=jenkins_build_url,
+            job_profile="bi_script_update",
+            lark_message_id=lark_message_id,
+        )
+        return True
+    first = tokens_to_pick[0]
+    q0 = first.replace("_", "-")
+    ranked0 = _rank_bi_script_files_by_query(q0, limit=12, for_menu=True)
+    if not ranked0:
+        send(chat_id, f"❌ No BI SCRIPT deployment file matches `{first}`.")
+        return True
+    sess_new = {
+        "state": "pick",
+        "job_profile": "bi_script_update",
+        "data": data,
+        "service_tokens": tokens_to_pick,
+        "pick_index": 0,
+        "resolved_ids": resolved_ids,
+        "current_ranked": ranked0,
+        "raw_prompt_body": body,
+        "jenkins_job_url": jenkins_build_url,
+    }
+    with _fpms_lark_sessions_lock:
+        _fpms_lark_sessions[session_key] = sess_new
+    _fpms_lark_send_service_pick_card(chat_id, session_key, first, ranked0, send)
+    return True
+
+
 def _fpms_lark_with_sender_union_scope(fn):
     """Bind ``lark_sender_union_id`` into :data:`_fpms_lark_sender_union_id` for session aliasing."""
 
@@ -7950,12 +8321,34 @@ def _normalize_bi_api_update_freeform_body(text: str) -> str:
     return "\n".join(lines)
 
 
+def _normalize_bi_script_update_freeform_body(text: str) -> str:
+    """
+    Turn a BI-SCRIPT-UPDATE paste (no ``/update`` prefix) into a canonical block —
+    preserves the ``API`` / ``env`` / ``branch`` lines.
+    """
+    raw = (text or "").replace("\r\n", "\n").strip()
+    for pat in (r"@_user_\d+", r"<[^>]+>"):
+        raw = re.sub(pat, "", raw)
+    raw = re.sub(r"[ \t]+", " ", raw)
+    files, env, branch = parse_bi_script_update_message_block(raw, allow_missing_files=True)
+    lines = ["/update bi"]
+    if files:
+        lines.append("API: " + ", ".join(files))
+    if env:
+        lines.append(f"env: {env}")
+    if branch:
+        lines.append(f"branch: {branch}")
+    return "\n".join(lines)
+
+
 @_fpms_lark_with_sender_union_scope
 def looks_like_natural_jenkins_update(text: str) -> bool:
     """True when the user wants a Jenkins /update flow but omitted the ``/update`` prefix."""
     raw = (text or "").replace("\r\n", "\n").strip()
     if not raw or JENKINS_UPDATE_CMD_RE.search(raw):
         return False
+    if _body_requests_bi_script_update(raw):
+        return True
     if _looks_like_bi_api_update_paste(raw):
         return True
     if _NL_JENKINS_UPDATE_RE.search(raw):
@@ -7973,6 +8366,8 @@ def normalize_natural_jenkins_body(text: str) -> str:
     raw = (text or "").replace("\r\n", "\n").strip()
     if JENKINS_UPDATE_CMD_RE.search(raw):
         return raw
+    if _body_requests_bi_script_update(raw):
+        return _normalize_bi_script_update_freeform_body(raw)
     if _looks_like_bi_api_update_paste(raw):
         return _normalize_bi_api_update_freeform_body(raw)
     m = re.search(r"\b(branch|version|services?|environment)\s*:", raw, re.I)
@@ -8023,7 +8418,7 @@ def _looks_like_freeform_update_request(text: str) -> bool:
         return False
     if looks_like_natural_jenkins_update(raw):
         return True
-    if _looks_like_bi_api_update_paste(raw):
+    if _looks_like_bi_api_update_paste(raw) or _body_requests_bi_script_update(raw):
         return True
     has_branch = bool(re.search(r"\bbranch\s*[:=]", raw, re.I))
     has_svc = bool(re.search(r"\bservices?\s*[:=]", raw, re.I))
@@ -8051,8 +8446,8 @@ def agent_route_free_form_body(raw_text: str) -> str | None:
     """
     if not _agent_normalize_enabled():
         return None
-    if _looks_like_bi_api_update_paste(raw_text):
-        # FPMS-oriented agent strips ``repository:`` / ``env:`` and mis-reads "update this api".
+    if _looks_like_bi_api_update_paste(raw_text) or _body_requests_bi_script_update(raw_text):
+        # FPMS-oriented agent strips ``repository:`` / ``API:`` / ``env:`` and mis-reads "update this api".
         return None
     try:
         import jenkinsupdateagent as agent
@@ -8771,6 +9166,17 @@ def _dispatch_lark_update_command_body(
             lark_message_id=lark_message_id,
         )
 
+    # BI-SCRIPT-UPDATE wins over BI-API-UPDATE when the named API is a DEPLOYMENT_FILE_NAME.
+    if _body_requests_bi_script_update(body):
+        return _fpms_lark_dispatch_bi_script_update_parameter_flow(
+            chat_id,
+            key,
+            body,
+            BI_SCRIPT_UPDATE_BUILD_URL,
+            send,
+            lark_message_id=lark_message_id,
+        )
+
     if _body_requests_bi_api_update(body):
         return _fpms_lark_dispatch_bi_api_update_parameter_flow(
             chat_id,
@@ -9338,6 +9744,8 @@ def handle_lark_jenkins_update_message(
                     nranked = _rank_sms_uat_services_by_query(q, limit=12, for_menu=True)
                 elif jp_sess == "pms_uat":
                     nranked = _rank_pms_uat_services_by_query(q, limit=12, for_menu=True)
+                elif jp_sess == "bi_script_update":
+                    nranked = _rank_bi_script_files_by_query(q, limit=12, for_menu=True)
                 else:
                     nranked = _rank_services_by_query(q, limit=12, for_menu=True)
                 if not nranked:
@@ -9827,6 +10235,7 @@ def run(
     skip_env = jp in ("fnt_rc", "sms_uat")
     is_prod_script = jp == "fpms_prod_script"
     is_bi_api_update = jp == "bi_api_update"
+    is_bi_script_update = jp == "bi_script_update"
     is_vpn = jp == "vpn_creation"
 
     parsed_update_all = False
@@ -9857,6 +10266,18 @@ def run(
             print(
                 "\n→ Parsed BI-API-UPDATE config block:\n"
                 f"    repository:  {repository!r}\n"
+                f"    environment: {environment!r}\n"
+                f"    source_branch: {branch!r}\n"
+            )
+        elif is_bi_script_update:
+            if cl.upper().startswith("BI_SCRIPT_UPDATE_V1"):
+                services, environment, branch = parse_bi_script_update_config_block(config_block)
+            else:
+                services, environment, branch = parse_bi_script_update_message_block(config_block)
+            version = ""
+            print(
+                "\n→ Parsed BI-SCRIPT-UPDATE config block:\n"
+                f"    deployment_files ({len(services)}): {', '.join(services)}\n"
                 f"    environment: {environment!r}\n"
                 f"    source_branch: {branch!r}\n"
             )
@@ -9930,6 +10351,12 @@ def run(
             repository = normalize_parameter_text(prompt_text("What REPOSITORY?"))
             environment = normalize_parameter_text(prompt_text("What ENVIRONMENT?")).casefold()
             services = []
+            branch = normalize_parameter_text(prompt_text("What SOURCE_BRANCH?"))
+            version = ""
+        elif is_bi_script_update:
+            files_raw = normalize_parameter_text(prompt_text("What DEPLOYMENT_FILE_NAME(s)? (comma-separated)"))
+            services = [t.strip() for t in re.split(r"[,，;]+", files_raw) if t.strip()]
+            environment = normalize_parameter_text(prompt_text("What ENVIRONMENT?")).casefold()
             branch = normalize_parameter_text(prompt_text("What SOURCE_BRANCH?"))
             version = ""
         elif is_prod_script:
@@ -10076,6 +10503,12 @@ def run(
                     repo_option_value,
                 )
                 repository = repo_option_value
+                select_choice_parameter_by_value(page, "ENVIRONMENT", environment)
+                fill_text_parameter(page, "SOURCE_BRANCH", branch)
+            elif is_bi_script_update:
+                # DEPLOYMENT_FILE_NAME multi-select checkboxes + ENVIRONMENT dropdown + SOURCE_BRANCH text.
+                if services:
+                    select_ecp_multi_checkboxes(page, "DEPLOYMENT_FILE_NAME", services)
                 select_choice_parameter_by_value(page, "ENVIRONMENT", environment)
                 fill_text_parameter(page, "SOURCE_BRANCH", branch)
             elif is_prod_script:
