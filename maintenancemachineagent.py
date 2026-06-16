@@ -60,6 +60,9 @@ from typing import Any, Callable, Optional, Sequence
 # Fire the reminder this many minutes before the announced action time.
 MAINT_LEAD_MINUTES = 10
 
+# Prefer an explicit pasted machine list over "all machines" when at least this many are named.
+_EXPLICIT_LIST_MIN = 3
+
 # Map (set/unset) + (maintenance/test/both) → prod-batch action code + human label.
 ACTION_LABELS: dict[str, str] = {
     "set_maint": "Set maintenance",
@@ -83,6 +86,7 @@ _ACTION_CMD_SUFFIX: dict[str, str] = {
 # env_code → prod-batch site alias accepted by ``smmachine`` command regex.
 _ENV_SITE_ALIAS: dict[str, str] = {
     "NWR": "nwr",
+    "NP": "nwr",
     "NCH": "nch",
     "TBR": "tbr",
     "TBP": "tbp",
@@ -169,7 +173,7 @@ _TIME_RE = re.compile(
 # the *action* time (vs the stress-test/event time, which we must ignore).
 _ACTION_PHRASE_RE = re.compile(
     r"(?:\b(?:set|unset|enable|disable|put|perform|execute)\b|启用|设置|取消|执行|进行)"
-    r"[^.\n]{0,40}?(?:maintenance|maintain|test|mode|维护|测试)",
+    r"[^.\n]{0,120}?(?:maintenance|maintain|test|mode|维护|测试)",
     re.I,
 )
 
@@ -244,6 +248,26 @@ _TEST_KW_RE = re.compile(r"\btest\b|测试", re.I)
 # the words "set" / "maintenance" never appear (e.g. "machines subject for Stress Test on …").
 _STRESS_TEST_RE = re.compile(r"stress\s*-?\s*test|压测|压力测试", re.I)
 
+# Operational steps that contain "clear" but are not unset-maintenance commands.
+_RAM_CLEAR_RE = re.compile(r"\bram\s+clear\b", re.I)
+
+
+def _scrub_unset_false_positives(text: str) -> str:
+    """Remove phrases like ``RAM Clear`` so they are not read as ``unset`` verbs."""
+    t = _RAM_CLEAR_RE.sub("", text or "")
+    return re.sub(r"\bparameter\s+settings?\s+update\b", "", t, flags=re.I)
+
+
+def _normalize_env_code(env: str) -> str:
+    e = (env or "").strip().upper()
+    if e == "OSM":
+        return "CP"
+    if e == "NP":
+        return "NWR"
+    if e == "WINFORD":
+        return "WF"
+    return e
+
 
 def parse_action(text: str) -> str | None:
     """
@@ -260,7 +284,8 @@ def parse_action(text: str) -> str | None:
     has_test = bool(_TEST_KW_RE.search(tl)) or has_stress
     if not (has_maint or has_test):
         return None
-    if _UNSET_RE.search(tl):
+    tl_scrub = _scrub_unset_false_positives(tl)
+    if _UNSET_RE.search(tl_scrub):
         op = "unset"
     elif _SET_RE.search(tl):
         op = "set"
@@ -377,22 +402,39 @@ def parse_action_datetime(text: str, *, now: datetime | None = None) -> datetime
     instruction; otherwise fall back to the first datetime found.
     """
     now = now or datetime.now()
-    cands = _all_datetime_candidates(text, now=now)
+    body = text or ""
+    cands = _all_datetime_candidates(body, now=now)
     if not cands:
         return None
-    am = _ACTION_PHRASE_RE.search(text or "")
-    if am:
-        after = [(p, dt) for p, dt in cands if p >= am.start()]
-        if after:
-            # Prefer the time closest to the action instruction (not a later bullet schedule).
-            ap_end = am.end()
-            after.sort(key=lambda x: (x[0] - ap_end, x[0]))
-            return after[0][1]
+    am = next(_ACTION_PHRASE_RE.finditer(body), None)
+    if not am:
+        return cands[0][1]
+    ap_end = am.end()
+    line_start = body.rfind("\n", 0, am.start()) + 1
+    line_end = body.find("\n", am.end())
+    if line_end < 0:
+        line_end = len(body)
+    # e.g. "10:30 PM – Set all machines to Maintenance" (time just before the phrase on one line).
+    same_line = [(p, dt) for p, dt in cands if line_start <= p <= line_end]
+    after = [(p, dt) for p, dt in cands if p >= am.start()]
+    pool = same_line or after
+    if pool:
+        pool.sort(key=lambda x: (abs(x[0] - ap_end), x[0]))
+        return pool[0][1]
     return cands[0][1]
 
 
 def parse_reason(text: str) -> str:
     """Collapse the announcement reason to a short label (defaults to *Stress Test*)."""
+    m = re.search(
+        r"\breason\s*:?\s*\n?\s*(.+?)(?=\n\s*\n|\nSchedule|\nList of|$)",
+        text or "",
+        re.I | re.S,
+    )
+    if m:
+        reason = re.sub(r"\s+", " ", m.group(1).strip())
+        if reason:
+            return reason[:200]
     if re.search(r"stress\s*test", text or "", re.I):
         return "Stress Test"
     m = re.search(r"\bdue to\s+(.+?)(?=[,.\n]|$)", text or "", re.I)
@@ -553,6 +595,8 @@ def _row_matches_env(row: dict, env_code: str) -> bool:
     name = str(row.get("name") or row.get("machine") or "")
     if env == "CP":
         return belongs in ("CP", "OSM") or _env_from_machine_name(name) == "CP"
+    if env in ("NWR", "NP"):
+        return belongs in ("NWR", "NP") or _env_from_machine_name(name) in ("NWR", "NP")
     return belongs == env or _env_from_machine_name(name) == env
 
 
@@ -619,6 +663,7 @@ def _norm(s: str) -> str:
 # Spoken env words → env code (word-level, matched anywhere in the message).
 _ENV_WORDS: dict[str, str] = {
     "nwr": "NWR", "np": "NWR",
+    "newport": "NWR",
     "nch": "NCH", "nc": "NCH",
     "tbr": "TBR", "tbp": "TBP",
     "mdr": "MDR", "dhs": "DHS",
@@ -996,8 +1041,8 @@ def _parse_intent_rules(text: str, *, now: datetime) -> dict[str, Any] | None:
     venue = ""
     note = ""
     group = detect_group_target(text)
-    if group and _has_all_machines_scope(text):
-        env_code = group["env_code"]
+    if group and _has_all_machines_scope(text) and len(machines) < _EXPLICIT_LIST_MIN:
+        env_code = _normalize_env_code(group["env_code"])
         venue = group["venue"]
         machines, note = resolve_all_group(env_code, venue)
         target_kind = "all_group"
@@ -1077,20 +1122,21 @@ def _classify_rules(text: str, *, now: datetime) -> dict[str, Any] | None:
     action_dt = parse_action_datetime(text, now=now)
     machines = extract_machine_lines(text)
     group = detect_group_target(text)
-    # "All Rising Rockets Link machines" must win over incidental OSM253 tokens in bullet remarks.
-    if group and _has_all_machines_scope(text):
+    # "All Rising Rockets Link machines" must win over incidental OSM253 tokens in bullet remarks,
+    # but a substantial pasted list (e.g. 20 named machines) always wins over schedule "all machines".
+    if group and _has_all_machines_scope(text) and len(machines) < _EXPLICIT_LIST_MIN:
         return {
             "action": action,
             "action_dt": action_dt,
             "target_kind": "all_group",
-            "env_code": (group.get("env_code") or "").strip().upper(),
+            "env_code": _normalize_env_code(group.get("env_code") or ""),
             "venue": group.get("venue") or "",
             "machines": [],
             "source": "rule",
         }
     if machines:
         # Infer env from the pasted machine names (TBP8609 → TBP), so no site word is needed.
-        envs = sorted({e for e in (_env_from_machine_name(m) for m in machines) if e})
+        envs = sorted({_normalize_env_code(e) for e in (_env_from_machine_name(m) for m in machines) if e})
         return {
             "action": action,
             "action_dt": action_dt,
@@ -1106,7 +1152,7 @@ def _classify_rules(text: str, *, now: datetime) -> dict[str, Any] | None:
         "action": action,
         "action_dt": action_dt,
         "target_kind": "all_group",
-        "env_code": (group.get("env_code") or "").strip().upper(),
+        "env_code": _normalize_env_code(group.get("env_code") or ""),
         "venue": group.get("venue") or "",
         "machines": [],
         "source": "rule",
