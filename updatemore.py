@@ -741,6 +741,22 @@ def find_waiting_queue_for_chat(
     return None, None, None
 
 
+def _chat_has_open_build_gate(
+    chat_id: str,
+    sessions: dict,
+    sessions_lock: threading.Lock,
+) -> bool:
+    """True when a Jenkins run in this chat is still waiting for its **Build** YES/NO."""
+    prefix = f"{(chat_id or '').strip()}:"
+    with sessions_lock:
+        for sk, sess in list(sessions.items()):
+            if not str(sk).startswith(prefix) or not isinstance(sess, dict):
+                continue
+            if sess.get("state") == "jenkins_wait_build":
+                return True
+    return False
+
+
 def find_active_queue_for_chat(
     chat_id: str,
     sessions: dict,
@@ -1199,7 +1215,14 @@ def handle_jenkinsbot_callback(
         return True
 
     if is_success_proceed_message(body):
+        # Prefer a queue explicitly waiting for Jenkins; otherwise fall back to any active
+        # queue in this chat so a ``/SuccessProceedNext`` is never silently ignored when the
+        # ``waiting_jenkins`` flag was missed. The fallback is skipped while a run is still
+        # awaiting its **Build** confirmation (a YES/NO gate is open) so a stray/duplicate
+        # proceed cannot skip the segment that is still being confirmed.
         key, q, sess = find_waiting_queue_for_chat(chat_id, sessions, sessions_lock)
+        if (not q or q.get("stopped")) and not _chat_has_open_build_gate(chat_id, sessions, sessions_lock):
+            key, q, sess = find_active_queue_for_chat(chat_id, sessions, sessions_lock)
         if not q or q.get("stopped"):
             return False
         with sessions_lock:
@@ -1218,13 +1241,24 @@ def handle_jenkinsbot_callback(
         dispatch_sk = key or attach_queue_to_session(q, sessions, sessions_lock)
         if not dispatch_sk:
             dispatch_sk = session_key_fn(chat_id, sender_id)
-        dispatch_update_body(
-            chat_id,
-            dispatch_sk,
-            next_body,
-            send,
-            from_updatemore=True,
-        )
+        try:
+            dispatch_update_body(
+                chat_id,
+                dispatch_sk,
+                next_body,
+                send,
+                from_updatemore=True,
+            )
+        except Exception as ex:
+            # Surface the failure instead of leaving the user with a silent "did nothing".
+            send(
+                chat_id,
+                "❌ Could not start the next segment automatically:\n"
+                f"```\n{ex}\n```\n"
+                f"Segment {idx + 1}:\n```\n{next_body}\n```\n"
+                "You can resend that block manually to continue.",
+            )
+            print(f"[updatemore] proceed dispatch failed: {ex!r}", flush=True)
         return True
 
     return False
