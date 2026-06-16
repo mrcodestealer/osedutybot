@@ -2321,13 +2321,25 @@ def get_ose_offset_records_list() -> dict[str, Any]:
 
 
 def parse_showoffset_command(text: str) -> Optional[tuple[int, int]]:
-    """Return ``(year, month)`` for ``showoffset`` / ``showoffset may`` / ``showoffset 5``."""
+    """Return ``(year, month)`` for natural phrasing or the glued command.
+
+    Accepts ``showoffset`` plus human talk like ``show offset``, ``show my offset``,
+    ``view offset``, ``check offset``, optionally followed by a month
+    (``show offset may`` / ``show offset 5``) and trailing words like
+    ``calendar``/``schedule`` (``show offset calendar``).
+    """
     s = (text or "").strip()
-    m = re.match(r"^showoffset(?:\s+(.+))?\s*$", s, re.I)
+    m = re.match(
+        r"^(?:show|showoffset|view|check|see|display)\s*(?:me\s+)?(?:my\s+|the\s+|our\s+)?offsets?(?:\s+(.+?))?\s*$",
+        s,
+        re.I,
+    )
     if not m:
         return None
     today = date.today()
     arg = (m.group(1) or "").strip()
+    # Drop trailing decorations like "calendar"/"schedule"/"list".
+    arg = re.sub(r"\b(?:calendar|schedule|list|summary|sheet|table)\b", "", arg, flags=re.I).strip()
     if not arg:
         return today.year, today.month
     if re.fullmatch(r"\d{1,2}", arg):

@@ -701,7 +701,15 @@ def try_resolve_request_person(open_id: str, token: str) -> Optional[str]:
 
 
 def wants_editoffset(text: str) -> bool:
-    return bool(re.match(r"^\s*editoffset\s*$", (text or "").strip(), re.I))
+    """``editoffset`` plus human talk: ``edit offset``, ``change/update my offset``."""
+    s = (text or "").strip()
+    return bool(
+        re.match(
+            r"^(?:edit|editoffset|change|update|modify|amend)\s*(?:my\s+|the\s+|our\s+)?offsets?\s*$",
+            s,
+            re.I,
+        )
+    )
 
 
 def _edit_form_session_key(owner_open_id: str, record_id: str) -> str:
@@ -807,11 +815,27 @@ def _deliver_requester_offset_edit_menu(
 
 
 def wants_deleteoffset(text: str) -> bool:
-    return bool(re.match(r"^\s*deleteoffset\s*$", (text or "").strip(), re.I))
+    """``deleteoffset`` plus human talk: ``delete offset``, ``remove my offset``, ``cancel offset``."""
+    s = (text or "").strip()
+    return bool(
+        re.match(
+            r"^(?:delete|deleteoffset|remove|cancel|drop)\s*(?:my\s+|the\s+|our\s+)?offsets?\s*$",
+            s,
+            re.I,
+        )
+    )
 
 
 def wants_pendingoffset(text: str) -> bool:
-    return bool(re.match(r"^\s*pendingoffset\s*$", (text or "").strip(), re.I))
+    """``pendingoffset`` plus human talk: ``pending offset``, ``pending offsets``."""
+    s = (text or "").strip()
+    return bool(
+        re.match(
+            r"^(?:pending|pendingoffset)\s*(?:offsets?)?\s*$",
+            s,
+            re.I,
+        )
+    )
 
 
 def _pending_offsets_for_request_person(request_person: str) -> list[dict[str, Any]]:
