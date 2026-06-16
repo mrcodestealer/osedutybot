@@ -345,30 +345,58 @@ def fetch_log_via_navigator(
                     f"⚠ Requested logic log `{want}` not listed for this day — using default selection."
                 )
                 want = ""
+
+            def _open_tail_read(basename: str | None) -> str:
+                """Open a logic file (or the primary date file), bump tail, return its body."""
+                if basename:
+                    click_logic_log_by_basename(page, basename, timeout_ms=timeout_ms)
+                else:
+                    click_log_file_for_date(page, td, timeout_ms=timeout_ms)
+                bump_tail_and_execute(page, timeout_ms=timeout_ms)
+                pre = page.locator("section[role='results'] pre, pre.nofloat").first
+                pre.wait_for(state="attached", timeout=timeout_ms)
+                return pre.inner_text() or ""
+
             chosen = ""
+            log_body = ""
             if same_day:
                 if want:
                     chosen = want
-                elif date_primary in same_day:
-                    chosen = date_primary
+                    log_body = _open_tail_read(chosen)
+                elif len(same_day) >= 2:
+                    # Multiple same-day logic files: open each and keep the one whose
+                    # content has the newest activity, so the latest player is the default
+                    # (no need to tap "check another logs").
+                    best_fn, best_body, best_ts = "", "", ""
+                    for fn in same_day:
+                        try:
+                            body = _open_tail_read(fn)
+                        except Exception as e:  # noqa: BLE001 - one bad file shouldn't abort
+                            text_parts.append(f"⚠ Could not open logic log {fn}: {e}")
+                            continue
+                        ts = _latest_log_ts_in_body(body)
+                        text_parts.append(f"→ scanned {fn}: last activity {ts or 'n/a'}")
+                        if best_fn == "" or ts > best_ts:
+                            best_fn, best_body, best_ts = fn, body, ts
+                    if best_fn:
+                        chosen, log_body = best_fn, best_body
+                    else:
+                        chosen = date_primary if date_primary in same_day else same_day[0]
+                        log_body = _open_tail_read(chosen)
                 else:
-                    chosen = same_day[0]
-                click_logic_log_by_basename(page, chosen, timeout_ms=timeout_ms)
+                    chosen = date_primary if date_primary in same_day else same_day[0]
+                    log_body = _open_tail_read(chosen)
             else:
-                click_log_file_for_date(page, td, timeout_ms=timeout_ms)
                 chosen = date_primary
                 nav_meta["logic_same_day_log_files"] = [date_primary]
                 nav_meta["logic_same_day_multi"] = False
+                log_body = _open_tail_read(None)
+
             nav_meta["opened_logic_log_basename"] = chosen
             text_parts.append(f"→ Logic log file: {chosen}")
             if nav_meta["logic_same_day_multi"]:
                 names = ", ".join(same_day)
                 text_parts.append(f"→ Same-day logic logs ({len(same_day)}): {names}")
-            bump_tail_and_execute(page, timeout_ms=timeout_ms)
-
-            pre = page.locator("section[role='results'] pre, pre.nofloat").first
-            pre.wait_for(state="attached", timeout=timeout_ms)
-            log_body = pre.inner_text() or ""
 
             text_parts.append(f"→ Date (NP window): {td.isoformat()}")
         finally:
@@ -775,6 +803,21 @@ _LINE_TIME_PREFIX = re.compile(r"^(\d{2}:\d{2}:\d{2}(?:\.\d{3})?)")
 def _line_time_prefix(line: str) -> str:
     m = _LINE_TIME_PREFIX.match(line.strip())
     return m.group(1) if m else ""
+
+
+def _latest_log_ts_in_body(body: str) -> str:
+    """Largest ``HH:MM:SS.mmm`` line-time prefix in a log body (``""`` when none).
+
+    Used to pick which same-day logic file is newest by actual activity, rather than
+    trusting the rotated file name (e.g. a restart can put the newest session in a
+    rotated ``YYYY-MM-DD.<ts>_<seq>.log`` while the plain ``YYYY-MM-DD.log`` is older).
+    """
+    best = ""
+    for line in (body or "").splitlines():
+        tp = _line_time_prefix(line)
+        if tp and tp > best:
+            best = tp
+    return best
 
 
 def _parse_success_cur_coin(line: str) -> tuple[float, str] | None:
@@ -2382,26 +2425,51 @@ def run_finderror(
                 f"⚠ Requested logic log `{want}` not listed for this day — using default selection."
             )
             want = ""
+
+        def _oss_fetch(basename: str) -> str:
+            body, oss_parts = fetch_log_via_oss(
+                machine_query,
+                td,
+                timeout_sec=timeout_sec,
+                logic_log_basename=basename,
+            )
+            text_parts.extend(oss_parts)
+            return body
+
         chosen = ""
+        log_body = ""
         if same_day:
             if want:
                 chosen = want
-            elif f"{date_str}.log" in same_day:
-                chosen = f"{date_str}.log"
+                log_body = _oss_fetch(chosen)
+            elif len(same_day) >= 2:
+                # Multiple same-day logic files: fetch each and keep the one whose content
+                # has the newest activity, so the latest player is the default.
+                best_fn, best_body, best_ts = "", "", ""
+                for fn in same_day:
+                    try:
+                        body = _oss_fetch(fn)
+                    except Exception as e:  # noqa: BLE001 - one bad file shouldn't abort
+                        text_parts.append(f"⚠ Could not fetch logic log {fn}: {e}")
+                        continue
+                    ts = _latest_log_ts_in_body(body)
+                    text_parts.append(f"→ scanned {fn}: last activity {ts or 'n/a'}")
+                    if best_fn == "" or ts > best_ts:
+                        best_fn, best_body, best_ts = fn, body, ts
+                if best_fn:
+                    chosen, log_body = best_fn, best_body
+                else:
+                    chosen = f"{date_str}.log" if f"{date_str}.log" in same_day else same_day[0]
+                    log_body = _oss_fetch(chosen)
             else:
-                chosen = same_day[0]
+                chosen = f"{date_str}.log" if f"{date_str}.log" in same_day else same_day[0]
+                log_body = _oss_fetch(chosen)
         else:
             chosen = f"{date_str}.log"
             nav_meta["logic_same_day_log_files"] = [chosen]
             nav_meta["logic_same_day_multi"] = False
+            log_body = _oss_fetch(chosen)
         nav_meta["opened_logic_log_basename"] = chosen
-        log_body, oss_parts = fetch_log_via_oss(
-            machine_query,
-            td,
-            timeout_sec=timeout_sec,
-            logic_log_basename=chosen,
-        )
-        text_parts.extend(oss_parts)
         if nav_meta["logic_same_day_multi"]:
             names = ", ".join(same_day)
             text_parts.append(f"→ Same-day logic logs ({len(same_day)}): {names}")
