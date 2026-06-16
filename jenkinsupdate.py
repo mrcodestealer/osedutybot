@@ -4588,7 +4588,7 @@ def read_ecp_checked_values(page, label: str = "Services") -> list[str]:
                 if (t.toLowerCase() !== want) continue;
                 const acc = [];
                 for (const el of item.querySelectorAll(
-                    'div[id^="tbl_ecp_choice-parameter"] input[type="checkbox"]'
+                    '[id^="tbl_ecp_"] input[type="checkbox"]'
                 )) {
                     if (!el.checked) continue;
                     const v = (el.getAttribute("value") || el.getAttribute("json") || "").trim();
@@ -4625,7 +4625,9 @@ def select_ecp_multi_checkboxes(page, label: str, names: list[str]) -> None:
         cleaned.append(n)
     row = _form_row(page, label)
     row.wait_for(state="visible", timeout=30_000)
-    root = row.locator('div[id^="tbl_ecp_choice-parameter"]')
+    # ECP id varies by job: FNT/SMS use ``tbl_ecp_choice-parameter-*`` (div);
+    # BI-SCRIPT-UPDATE uses ``tbl_ecp_DEPLOYMENT_FILE_NAME`` (table). Match any ``tbl_ecp_*``.
+    root = row.locator('[id^="tbl_ecp_"]')
     try:
         root.first.wait_for(state="visible", timeout=45_000)
     except PlaywrightTimeout as ex:
@@ -4967,6 +4969,69 @@ def verify_bi_api_update_parameters_display(
         repo_ok = _bi_repo_canonical(got_repo) == _bi_repo_canonical(want_repo)
     ok_all = ok_all and repo_ok
     lines.append(_verify_page_expected_line(repo_ok, "Repository", got_repo, want_repo))
+
+    try:
+        got_env = read_choice_parameter_value(page, "ENVIRONMENT")
+    except Exception as ex:
+        got_env = f"(read failed: {ex})"
+        env_ok = False
+    else:
+        env_ok = got_env.casefold() == want_env
+    ok_all = ok_all and env_ok
+    lines.append(_verify_page_expected_line(env_ok, "Environment", got_env, want_env))
+
+    try:
+        got_branch = read_text_parameter_value(page, "SOURCE_BRANCH")
+    except Exception as ex:
+        got_branch = f"(read failed: {ex})"
+        branch_ok = False
+    else:
+        branch_ok = got_branch.casefold() == want_branch.casefold()
+    ok_all = ok_all and branch_ok
+    lines.append(
+        _verify_page_expected_line(branch_ok, "Source Branch", got_branch, want_branch)
+    )
+    return ok_all, lines
+
+
+def verify_bi_script_update_parameters_display(
+    page,
+    deployment_files_expected: list[str],
+    environment_expected: str,
+    source_branch_expected: str,
+) -> tuple[bool, list[str]]:
+    """Re-read BI-SCRIPT-UPDATE fields (DEPLOYMENT_FILE_NAME checkboxes / ENVIRONMENT / SOURCE_BRANCH)."""
+    want_files = sorted({normalize_parameter_text(f) for f in deployment_files_expected if f})
+    want_env = normalize_parameter_text(environment_expected).casefold()
+    want_branch = normalize_parameter_text(source_branch_expected)
+    lines: list[str] = []
+    ok_all = True
+
+    try:
+        got_files = sorted(set(read_ecp_checked_values(page, "DEPLOYMENT_FILE_NAME")))
+    except Exception as ex:
+        got_files = []
+        lines.append(f"❌ DEPLOYMENT_FILE_NAME — read failed: {ex}")
+        ok_all = False
+    else:
+        files_ok = got_files == want_files
+        ok_all = ok_all and files_ok
+        em = "✅" if files_ok else "❌"
+        if files_ok:
+            lines.append(
+                f"{em} DEPLOYMENT_FILE_NAME — {len(want_files)} checked, matches: {', '.join(want_files)}"
+            )
+        else:
+            missing = [x for x in want_files if x not in got_files]
+            extra = [x for x in got_files if x not in want_files]
+            lines.append(
+                f"{em} DEPLOYMENT_FILE_NAME — page checked ({len(got_files)}): "
+                f"{', '.join(got_files) or '(none)'} | expected: {', '.join(want_files)}"
+            )
+            if missing:
+                lines.append(f"   … missing on page: {', '.join(missing)}")
+            if extra:
+                lines.append(f"   … extra on page: {', '.join(extra)}")
 
     try:
         got_env = read_choice_parameter_value(page, "ENVIRONMENT")
@@ -6814,6 +6879,16 @@ def _fpms_format_config_preview(data: dict, resolved: list[str]) -> str:
                 f"- **Source Branch:** `{data['source_branch']}`",
             ]
         )
+    if jk == "bi_script_update":
+        lines = [
+            "**Configuration (BI SCRIPT UPDATE — from your message)**",
+            f"- **Environment:** `{data.get('environment')}`",
+            f"- **Source Branch:** `{data.get('source_branch')}`",
+            "- **DEPLOYMENT_FILE_NAME (Jenkins checkbox ids):**",
+        ]
+        for i, sid in enumerate(resolved, start=1):
+            lines.append(f"  {i}. `{sid}`")
+        return "\n".join(lines)
     lines = [
         "**Configuration (from your message)**",
         f"- **Environment:** `{data['environment']}`",
@@ -6868,6 +6943,8 @@ def _fpms_lark_verification_card_json(
         title_text = "FPMS PROD SCRIPT RUN — form filled & re-check"
     elif jp == "bi_api_update":
         title_text = "BI API UPDATE — form filled & re-check"
+    elif jp == "bi_script_update":
+        title_text = "BI SCRIPT UPDATE — form filled & re-check"
     else:
         title_text = "FPMS UAT — form filled & re-check"
     if isinstance(next_build_number, int) and next_build_number > 0:
@@ -6995,6 +7072,8 @@ def _jenkins_parameter_labels_for_profile(job_profile: str) -> list[str]:
         return ["Environment", "Command"]
     if jp == "bi_api_update":
         return ["REPOSITORY", "ENVIRONMENT", "SOURCE_BRANCH"]
+    if jp == "bi_script_update":
+        return ["DEPLOYMENT_FILE_NAME", "ENVIRONMENT", "SOURCE_BRANCH"]
     if jp in ("fnt_rc", "sms_uat"):
         return ["Branch", "Version", "Services"]
     return ["Environment", "Services", "Branch", "Version"]
@@ -7009,6 +7088,7 @@ def _jenkins_job_profile_display(job_profile: str) -> str:
         "sms_uat": "SMS UAT",
         "fpms_prod_script": "FPMS PROD SCRIPT",
         "bi_api_update": "BI API UPDATE",
+        "bi_script_update": "BI SCRIPT UPDATE",
         "vpn_creation": "VPN CREATION",
     }.get(jp, jp.upper().replace("_", " "))
 
@@ -10581,6 +10661,10 @@ def run(
                     ok_first, lines_first = verify_bi_api_update_parameters_display(
                         page, repository, environment, branch
                     )
+                elif is_bi_script_update:
+                    ok_first, lines_first = verify_bi_script_update_parameters_display(
+                        page, services, environment, branch
+                    )
                 elif is_prod_script:
                     ok_first, lines_first = verify_fpms_prod_script_parameters_display(
                         page, environment, command
@@ -10619,6 +10703,10 @@ def run(
                         ok_second, verify_lines = verify_bi_api_update_parameters_display(
                             page, repository, environment, branch
                         )
+                    elif is_bi_script_update:
+                        ok_second, verify_lines = verify_bi_script_update_parameters_display(
+                            page, services, environment, branch
+                        )
                     elif is_prod_script:
                         ok_second, verify_lines = verify_fpms_prod_script_parameters_display(
                             page, environment, command
@@ -10653,6 +10741,10 @@ def run(
                 elif is_bi_api_update:
                     ok_all, verify_lines = verify_bi_api_update_parameters_display(
                         page, repository, environment, branch
+                    )
+                elif is_bi_script_update:
+                    ok_all, verify_lines = verify_bi_script_update_parameters_display(
+                        page, services, environment, branch
                     )
                 elif is_prod_script:
                     ok_all, verify_lines = verify_fpms_prod_script_parameters_display(
@@ -10807,6 +10899,20 @@ def run(
                 )
             elif is_bi_api_update:
                 if prompt_yes_to_click_build_bi_api_update(page, repository, environment, branch):
+                    _click_jenkins_build_button(page)
+                    build_clicked = True
+                    print("→ **Build** clicked (parameters submitted to Jenkins).")
+                else:
+                    print("→ **Build** skipped (you answered **no**).")
+            elif is_bi_script_update:
+                print(
+                    "\n→ BI-SCRIPT-UPDATE planned:\n"
+                    f"    DEPLOYMENT_FILE_NAME: {', '.join(services)}\n"
+                    f"    ENVIRONMENT: {environment}\n"
+                    f"    SOURCE_BRANCH: {branch}"
+                )
+                ans = prompt_text("Click Build now? (yes/no)").strip().casefold()
+                if ans in ("y", "yes", "ok", "go"):
                     _click_jenkins_build_button(page)
                     build_clicked = True
                     print("→ **Build** clicked (parameters submitted to Jenkins).")
