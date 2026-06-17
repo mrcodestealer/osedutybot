@@ -1765,6 +1765,21 @@ def evening_reminder():
     print(f"⏰ OSE evening card sent to {DUTY_CHAT_ID}")
 
 
+def reminder_sheet_daily_sync():
+    """Purge expired reminder rows and reload cron jobs from Bitable."""
+    try:
+        cnt, total = reminder.sync_sheet_daily_reminders(
+            scheduler=scheduler,
+            send_func=send_message,
+            get_token_func=get_tenant_access_token,
+            chat_id=REMINDER_TARGET_CHAT_ID,
+            target_user_id=TARGET_USER_OPEN_ID,
+        )
+        print(f"[Reminder sheet] daily sync: {cnt}/{total} job(s)", flush=True)
+    except Exception as exc:
+        print(f"[Reminder sheet] daily sync failed: {exc!r}", flush=True)
+
+
 _ose_bitable_sync_lock = threading.Lock()
 _leave_wfh_sync_lock = threading.Lock()
 
@@ -1971,6 +1986,7 @@ _add_scheduler_job("ose_leave_offset_daily_sync", ose_leave_offset_daily_sync, "
 _register_leave_wfh_sync_jobs()
 _add_scheduler_job("morning_reminder", morning_reminder, "cron", hour=7, minute=0)
 _add_scheduler_job("evening_reminder", evening_reminder, "cron", hour=19, minute=0)
+_add_scheduler_job("reminder_sheet_daily_sync", reminder_sheet_daily_sync, "cron", hour=0, minute=5)
 _offset_approver_poll_min = int(os.getenv("OSE_OFFSET_APPROVER_POLL_MIN", "3"))
 _add_scheduler_job(
     "poll_offset_approver_notifications",
@@ -3512,27 +3528,22 @@ def lark_webhook():
             bot_mentioned = True
             print("✅ Bot mentioned (old schema via is_mention flag)")
 
-    # Duty commands from any sender (human or bot) — e.g. ``/SuccessProceedNext`` /
-    # ``/FailedStop`` / ``/replyupdateemail`` — work **without** an @mention. jenkinsbot
-    # sometimes posts these without tagging duty bot, so scan every available text field
-    # (not only ``duty_blob``) regardless of sender.
+    # Duty commands from any sender (human or bot) — e.g. ``/replyupdateemail`` without strict @ parsing.
     if chat_type == "group" and not bot_mentioned:
         try:
             import updatemore as _updatemore
 
-            _jb_scan_texts = (duty_blob, clean_text, original_text, message_content_raw)
-            if any(
-                _updatemore.is_jenkinsbot_duty_command(t or "")
-                or _updatemore.is_reply_update_email_text(t or "")
-                for t in _jb_scan_texts
+            if _updatemore.is_jenkinsbot_duty_command(duty_blob):
+                bot_mentioned = True
+                print("✅ Jenkins/duty email command — treat as mentioned (any sender)")
+            elif is_jenkins_bot_sender and (
+                _updatemore.is_reply_update_email_text(message_content_raw or "")
+                or _updatemore.is_jenkinsbot_duty_command(message_content_raw or "")
             ):
                 bot_mentioned = True
-                print("✅ Jenkins/duty command — treat as mentioned (any sender, no @ required)")
+                print("✅ Jenkinsbot sender duty command — treat as mentioned")
         except Exception:
-            if any(
-                re.search(r"/?(?:replyupdateemail|SuccessProceedNext|FailedStop)\b", t or "", re.I)
-                for t in (duty_blob, clean_text, original_text, message_content_raw)
-            ):
+            if re.search(r"/?replyupdateemail\b", duty_blob or "", re.I):
                 bot_mentioned = True
 
     lark_reactions_enabled = bool(message_id) and (
@@ -3576,14 +3587,16 @@ def lark_webhook():
     try:
         import updatemore as _updatemore
 
-        # Recognize jenkinsbot → duty commands (``/SuccessProceedNext``, ``/FailedStop``,
-        # ``/replyupdateemail``) from ANY text field and ANY sender, even when duty bot is
-        # not @mentioned (jenkinsbot may proceed the queue without tagging duty bot).
-        _jb_duty_cmd = any(
-            _updatemore.is_jenkinsbot_duty_command(t or "")
-            or _updatemore.is_reply_update_email_text(t or "")
-            for t in (duty_blob, clean_text, original_text, message_content_raw)
-        )
+        _jb_duty_cmd = _updatemore.is_jenkinsbot_duty_command(duty_blob)
+        if not _jb_duty_cmd:
+            _jb_duty_cmd = _updatemore.is_reply_update_email_text(duty_blob or "")
+        if not _jb_duty_cmd and is_jenkins_bot_sender:
+            _jb_duty_cmd = (
+                _updatemore.is_jenkinsbot_duty_command(message_content_raw or "")
+                or _updatemore.is_reply_update_email_text(message_content_raw or "")
+            )
+        if not _jb_duty_cmd and is_jenkins_bot_sender and _mention_includes_duty_bot(mentions):
+            _jb_duty_cmd = _updatemore.is_reply_update_email_text(message_content_raw or "")
     except Exception:
         _jb_duty_cmd = bool(re.search(r"/?replyupdateemail\b", duty_blob or "", re.I))
 
