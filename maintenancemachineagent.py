@@ -648,6 +648,97 @@ def resolve_all_group(env_code: str, venue: str) -> tuple[list[str], str]:
     return names, note
 
 
+def _row_asset_id(row: dict) -> str:
+    """Trailing numeric asset id of a row name (``Rising Rockets Emperor-0253(TEST)`` → ``0253``)."""
+    nums = re.findall(r"\d{2,}", _row_display_name(row))
+    return nums[-1] if nums else ""
+
+
+# Explicit machine reference inside a command: a full display name ending in ``-1234`` /
+# ``WF8145``, or a bare asset id (``0253``). Used to honour "cp set test 0253,0254".
+_EXPLICIT_REF_SPLIT_RE = re.compile(r"[,\n;]+")
+_TRAILING_ID_RE = re.compile(r"(\d{2,6})\s*(?:\([^)]*\))?\s*$")
+
+
+def resolve_env_asset_refs(env_code: str, text: str) -> list[str]:
+    """
+    Resolve explicit machine references in a command to full display names within ``env_code``.
+
+    Handles bare asset ids (``0253``), comma/space lists (``0253,0254``) and pasted display names
+    without an env prefix (``Rising Rockets Emperor-0253``). Returns ``[]`` when nothing resolves,
+    so the caller can fall back to the group/all behaviour.
+    """
+    env = _normalize_env_code(env_code)
+    if not env:
+        return []
+    rows = [r for r in load_webmachine_rows() if str(r.get("environment") or "PROD").strip().upper() == "PROD"]
+    env_rows = [r for r in rows if _row_matches_env(r, env)]
+    if not env_rows:
+        return []
+
+    by_id: dict[str, str] = {}
+    by_norm: dict[str, str] = {}
+    for r in env_rows:
+        name = _row_display_name(r)
+        if not name:
+            continue
+        aid = _row_asset_id(r)
+        if aid:
+            by_id.setdefault(aid.lstrip("0") or aid, name)
+        by_norm.setdefault(_norm(name), name)
+
+    # Strip the command preamble (env word + verb + maintenance/test/mode words) so only the
+    # machine references remain to be tokenised.
+    refs = _strip_command_words(text)
+
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(name: str) -> None:
+        if name and name not in seen:
+            seen.add(name)
+            out.append(name)
+
+    for seg in _EXPLICIT_REF_SPLIT_RE.split(refs):
+        seg = seg.strip()
+        if not seg:
+            continue
+        # Whole-name match first (e.g. "Rising Rockets Emperor-0253").
+        nm = by_norm.get(_norm(seg))
+        if nm:
+            _add(nm)
+            continue
+        m = _TRAILING_ID_RE.search(seg)
+        if m:
+            key = m.group(1).lstrip("0") or m.group(1)
+            nm = by_id.get(key)
+            if nm:
+                _add(nm)
+                continue
+        # Bare space-separated ids inside the segment ("0253 0254").
+        for tok in re.findall(r"\b\d{2,6}\b", seg):
+            nm = by_id.get(tok.lstrip("0") or tok)
+            if nm:
+                _add(nm)
+    return out
+
+
+# Command keywords to drop before reading explicit machine references.
+_COMMAND_WORD_RE = re.compile(
+    r"\b(?:set|unset|enable|disable|put|apply|mark|turn\s*on|turn\s*off|switch\s*on|switch\s*off|"
+    r"maintenance|maintain|test|mode|and|to|the|all|machines?|cabinets?|egms?|please|kindly)\b",
+    re.I,
+)
+
+
+def _strip_command_words(text: str) -> str:
+    """Remove the env word + verb + maintenance/test/mode keywords, leaving machine refs."""
+    t = text or ""
+    t = _ENV_WORD_RE.sub(" ", t)
+    t = _COMMAND_WORD_RE.sub(" ", t)
+    return t
+
+
 # ---------------------------------------------------------------------------
 # Data-grounded entity detection (NOT a fixed sentence template).
 #
@@ -1041,18 +1132,32 @@ def _parse_intent_rules(text: str, *, now: datetime) -> dict[str, Any] | None:
     venue = ""
     note = ""
     group = detect_group_target(text)
+    has_date = bool(_DATE_RE.search(text))
+    if (
+        not machines
+        and group
+        and not has_date
+        and not _has_all_machines_scope(text)
+    ):
+        refs = resolve_env_asset_refs(group.get("env_code") or "", text)
+        if refs:
+            machines = refs
+            env_code = _normalize_env_code(group.get("env_code") or "")
+            target_kind = "list"
     if group and _has_all_machines_scope(text) and len(machines) < _EXPLICIT_LIST_MIN:
         env_code = _normalize_env_code(group["env_code"])
         venue = group["venue"]
         machines, note = resolve_all_group(env_code, venue)
         target_kind = "all_group"
-    elif not machines:
-        if not group:
-            return None
-        env_code = group["env_code"]
+    elif machines:
+        target_kind = "list"
+    elif group:
+        env_code = _normalize_env_code(group["env_code"])
         venue = group["venue"]
         machines, note = resolve_all_group(env_code, venue)
         target_kind = "all_group"
+    else:
+        return None
     if not machines:
         return None
     return _build_intent(
@@ -1122,6 +1227,27 @@ def _classify_rules(text: str, *, now: datetime) -> dict[str, Any] | None:
     action_dt = parse_action_datetime(text, now=now)
     machines = extract_machine_lines(text)
     group = detect_group_target(text)
+    has_date = bool(_DATE_RE.search(text))
+    # Explicit asset refs ("cp set test 0253,0254" / "...Rising Rockets Emperor-0253") must beat the
+    # group/all behaviour — resolve them within the named env. Skip when a schedule lists "all
+    # machines" or carries a date (those are handled by the branches below).
+    if (
+        not machines
+        and group
+        and not has_date
+        and not _has_all_machines_scope(text)
+    ):
+        refs = resolve_env_asset_refs(group.get("env_code") or "", text)
+        if refs:
+            return {
+                "action": action,
+                "action_dt": action_dt,
+                "target_kind": "list",
+                "env_code": _normalize_env_code(group.get("env_code") or ""),
+                "venue": "",
+                "machines": refs,
+                "source": "rule",
+            }
     # "All Rising Rockets Link machines" must win over incidental OSM253 tokens in bullet remarks,
     # but a substantial pasted list (e.g. 20 named machines) always wins over schedule "all machines".
     if group and _has_all_machines_scope(text) and len(machines) < _EXPLICIT_LIST_MIN:
