@@ -470,10 +470,18 @@ def _batch_select_machines_on_live_page(
     *,
     timeout_ms: int,
     max_pages: int,
-) -> tuple[list[dict], list[dict]]:
+    read_states: bool = False,
+) -> tuple[list[dict], list[dict], dict[str, dict[str, Any] | None]]:
+    """
+    Tick the checkbox for each target machine, paginating only as needed.
+
+    When ``read_states`` is set, each found row's live state (status / test) is read in the **same
+    pagination pass** so callers can skip a second full table scan. Returns
+    ``(selected, fail_list, states)`` where ``states`` is empty unless ``read_states`` is set.
+    """
     specs = _machine_lookup_specs(machines)
     if not specs:
-        return [], []
+        return [], [], {}
 
     pending = list(specs)
     limit = _resolve_collect_page_limit(max_pages)
@@ -482,6 +490,7 @@ def _batch_select_machines_on_live_page(
 
     selected: list[dict] = []
     fail_list: list[dict] = []
+    states: dict[str, dict[str, Any] | None] = {}
     seen: set[tuple[str, str]] = set()
     steps = 0
     safety = 0
@@ -500,6 +509,19 @@ def _batch_select_machines_on_live_page(
             dedupe = (str(m.get("belongs") or "").upper(), name)
             if dedupe not in seen:
                 try:
+                    if read_states:
+                        try:
+                            mn, is_test, _gt, status, online = _row_report_fields(
+                                rows[0], timeout_ms=timeout_ms
+                            )
+                            states[name] = {
+                                "name": mn,
+                                "test": bool(is_test),
+                                "status": (status or "").strip(),
+                                "online": (online or "").strip(),
+                            }
+                        except Exception:
+                            states[name] = None
                     _ensure_row_checkbox_checked(page, rows[0], timeout_ms=timeout_ms)
                     seen.add(dedupe)
                     selected.append(m)
@@ -531,7 +553,7 @@ def _batch_select_machines_on_live_page(
                 "error": "machine not found on EGM page",
             }
         )
-    return selected, fail_list
+    return selected, fail_list, states
 
 
 def _batch_read_live_states(
@@ -1300,8 +1322,10 @@ def _process_env_batch(
         return ok_list, fail_list
 
     try:
-        selected, select_fail = _batch_select_machines_on_live_page(
-            page, machines, timeout_ms=timeout_ms, max_pages=max_pages
+        # Read each row's live state in the same pagination pass that ticks its checkbox, so we
+        # avoid a second full table scan before clicking (big speed-up for large machine lists).
+        selected, select_fail, live_states = _batch_select_machines_on_live_page(
+            page, machines, timeout_ms=timeout_ms, max_pages=max_pages, read_states=True
         )
         fail_list.extend(select_fail)
     except Exception as exc:
@@ -1318,23 +1342,9 @@ def _process_env_batch(
     if cancel_check() or manual_stop_check() or not selected:
         return ok_list, fail_list
 
-    # Retry path: if live EGM already matches this phase, skip batch clicks.
+    # Skip machines already in the desired state (e.g. on a retry); a failed state read is treated
+    # as "needs action" since the row was found and selected — the post-click verify decides.
     still_need: list[dict] = []
-    try:
-        live_states = _batch_read_live_states(
-            page, selected, timeout_ms=timeout_ms, max_pages=max_pages
-        )
-    except Exception as exc:
-        for m in selected:
-            fail_list.append(
-                {
-                    "belongs": m.get("belongs", belongs),
-                    "machine": _machine_display_name(m),
-                    "error": str(exc),
-                }
-            )
-        return ok_list, fail_list
-
     for m in selected:
         if cancel_check() or manual_stop_check():
             break
@@ -1344,40 +1354,37 @@ def _process_env_batch(
         live = live_states.get(name)
         if live and _verify_live_state(live, verify_action):
             ok_list.append({"belongs": m.get("belongs", belongs), "machine": name})
-        elif live is None:
-            fail_list.append(
-                {
-                    "belongs": m.get("belongs", belongs),
-                    "machine": name,
-                    "error": "machine not found on EGM page",
-                }
-            )
         else:
             still_need.append(m)
 
     if cancel_check() or manual_stop_check() or not still_need:
         return ok_list, fail_list
 
-    _clear_table_row_selection(page, timeout_ms=timeout_ms)
-    try:
-        reselected, reselect_fail = _batch_select_machines_on_live_page(
-            page, still_need, timeout_ms=timeout_ms, max_pages=max_pages
-        )
-        fail_list.extend(reselect_fail)
-    except Exception as exc:
-        for m in still_need:
-            fail_list.append(
-                {
-                    "belongs": m.get("belongs", belongs),
-                    "machine": _machine_display_name(m),
-                    "error": str(exc),
-                }
+    # Only re-select when some machines were already correct (selection set changed). When every
+    # selected machine still needs the action, the checkboxes from the pass above are still valid.
+    if len(still_need) != len(selected):
+        _clear_table_row_selection(page, timeout_ms=timeout_ms)
+        try:
+            reselected, reselect_fail, _ = _batch_select_machines_on_live_page(
+                page, still_need, timeout_ms=timeout_ms, max_pages=max_pages
             )
-        return ok_list, fail_list
+            fail_list.extend(reselect_fail)
+        except Exception as exc:
+            for m in still_need:
+                fail_list.append(
+                    {
+                        "belongs": m.get("belongs", belongs),
+                        "machine": _machine_display_name(m),
+                        "error": str(exc),
+                    }
+                )
+            return ok_list, fail_list
 
-    if cancel_check() or manual_stop_check() or not reselected:
-        return ok_list, fail_list
-    selected = reselected
+        if cancel_check() or manual_stop_check() or not reselected:
+            return ok_list, fail_list
+        selected = reselected
+    else:
+        selected = still_need
 
     for btn in buttons:
         _wait_batch_toolbar_ready(page, btn, timeout_ms=timeout_ms)
