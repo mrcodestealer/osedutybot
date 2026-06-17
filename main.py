@@ -3512,22 +3512,27 @@ def lark_webhook():
             bot_mentioned = True
             print("✅ Bot mentioned (old schema via is_mention flag)")
 
-    # Duty commands from any sender (human or bot) — e.g. ``/replyupdateemail`` without strict @ parsing.
+    # Duty commands from any sender (human or bot) — e.g. ``/SuccessProceedNext`` /
+    # ``/FailedStop`` / ``/replyupdateemail`` — work **without** an @mention. jenkinsbot
+    # sometimes posts these without tagging duty bot, so scan every available text field
+    # (not only ``duty_blob``) regardless of sender.
     if chat_type == "group" and not bot_mentioned:
         try:
             import updatemore as _updatemore
 
-            if _updatemore.is_jenkinsbot_duty_command(duty_blob):
-                bot_mentioned = True
-                print("✅ Jenkins/duty email command — treat as mentioned (any sender)")
-            elif is_jenkins_bot_sender and (
-                _updatemore.is_reply_update_email_text(message_content_raw or "")
-                or _updatemore.is_jenkinsbot_duty_command(message_content_raw or "")
+            _jb_scan_texts = (duty_blob, clean_text, original_text, message_content_raw)
+            if any(
+                _updatemore.is_jenkinsbot_duty_command(t or "")
+                or _updatemore.is_reply_update_email_text(t or "")
+                for t in _jb_scan_texts
             ):
                 bot_mentioned = True
-                print("✅ Jenkinsbot sender duty command — treat as mentioned")
+                print("✅ Jenkins/duty command — treat as mentioned (any sender, no @ required)")
         except Exception:
-            if re.search(r"/?replyupdateemail\b", duty_blob or "", re.I):
+            if any(
+                re.search(r"/?(?:replyupdateemail|SuccessProceedNext|FailedStop)\b", t or "", re.I)
+                for t in (duty_blob, clean_text, original_text, message_content_raw)
+            ):
                 bot_mentioned = True
 
     lark_reactions_enabled = bool(message_id) and (
@@ -3571,16 +3576,14 @@ def lark_webhook():
     try:
         import updatemore as _updatemore
 
-        _jb_duty_cmd = _updatemore.is_jenkinsbot_duty_command(duty_blob)
-        if not _jb_duty_cmd:
-            _jb_duty_cmd = _updatemore.is_reply_update_email_text(duty_blob or "")
-        if not _jb_duty_cmd and is_jenkins_bot_sender:
-            _jb_duty_cmd = (
-                _updatemore.is_jenkinsbot_duty_command(message_content_raw or "")
-                or _updatemore.is_reply_update_email_text(message_content_raw or "")
-            )
-        if not _jb_duty_cmd and is_jenkins_bot_sender and _mention_includes_duty_bot(mentions):
-            _jb_duty_cmd = _updatemore.is_reply_update_email_text(message_content_raw or "")
+        # Recognize jenkinsbot → duty commands (``/SuccessProceedNext``, ``/FailedStop``,
+        # ``/replyupdateemail``) from ANY text field and ANY sender, even when duty bot is
+        # not @mentioned (jenkinsbot may proceed the queue without tagging duty bot).
+        _jb_duty_cmd = any(
+            _updatemore.is_jenkinsbot_duty_command(t or "")
+            or _updatemore.is_reply_update_email_text(t or "")
+            for t in (duty_blob, clean_text, original_text, message_content_raw)
+        )
     except Exception:
         _jb_duty_cmd = bool(re.search(r"/?replyupdateemail\b", duty_blob or "", re.I))
 
