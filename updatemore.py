@@ -122,6 +122,12 @@ def _is_update_env_line(line: str) -> bool:
         return False
     if _CONFIG_KEY_LINE_RE.match(s):
         return False
+    # BRAZIL/NEWPORT UAT headlines (e.g. ``Brazil UAT PMS`` / ``PMS Newport UAT``) do not start
+    # with ``update`` but are valid Jenkins job headlines for /updatemore segment splitting.
+    if re.match(r"^\s*(?:brazil|newport)\s+uat\b", s, re.I):
+        return True
+    if re.match(r"^\s*[A-Za-z0-9\-]+\s+(?:brazil|newport)\s+uat\b", s, re.I):
+        return True
     return bool(re.match(r"^\s*update\b", s, re.I))
 
 

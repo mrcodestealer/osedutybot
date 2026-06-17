@@ -130,6 +130,33 @@ PMS_UAT_UPDATE_URL = (
     "https://jenkins.client8.me/job/PMS/job/UAT/job/PMS-UAT-UPDATE/build?delay=0sec"
 )
 
+# BRAZIL / NEWPORT UAT update — structurally identical to the FPMS UAT branch job
+# (Environment <select> → Active-Choices Services checkboxes → Branch text; Version OPTIONAL).
+# Newport's form mirrors Brazil's; they differ only by build URL.
+BRAZIL_UAT_BUILD_URL = (
+    "https://jenkins.client8.me/job/BRAZIL/job/BRAZIL-UAT-UPDATE/build?delay=0sec"
+)
+NEWPORT_UAT_BUILD_URL = (
+    "https://jenkins.client8.me/job/NEWPORT/job/UAT/job/NEWPORT-UAT-UPDATE/build?delay=0sec"
+)
+# Environment <select> option *values* shared by both BRAZIL and NEWPORT UAT update jobs
+# (keep in sync with the Jenkins job parameter list).
+VENUE_UAT_ENVIRONMENTS = [
+    "bi-uat",
+    "dos",
+    "dos-web",
+    "fgs",
+    "fpms",
+    "fpms-nt",
+    "fpms-nt-bo",
+    "igo",
+    "pms",
+    "sms",
+    "rc",
+    "telesales",
+    "temporal",
+]
+
 # VPN_CREATION — different Jenkins host (Aliyun) than the FPMS/PMS jobs above.
 # Job: DEVOPS_CP → VPN_CONFIGURATION → VPN_CREATION. Two parameters:
 #   VPN_USERS    — free-text box (the username)
@@ -430,6 +457,8 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
         "FPMS PROD SCRIPT RUN",
         "https://jenkins.client8.me/job/FPMS/job/FPMS_PROD_SCRIPT_RUN/build?delay=0sec",
     ),
+    "brazil uat": ("BRAZIL UAT UPDATE", BRAZIL_UAT_BUILD_URL),
+    "newport uat": ("NEWPORT UAT UPDATE", NEWPORT_UAT_BUILD_URL),
     "ds": ("BI API UPDATE", BI_API_UPDATE_BUILD_URL),
     "ds update": ("BI API UPDATE", BI_API_UPDATE_BUILD_URL),
     "bi api update": ("BI API UPDATE", BI_API_UPDATE_BUILD_URL),
@@ -4739,6 +4768,7 @@ def verify_fpms_parameters_display(
     version_expected: str,
     *,
     update_all_services: bool = False,
+    optional_version: bool = False,
 ) -> tuple[bool, list[str]]:
     """
     Re-read Environment, Services, Branch, Version from the page and compare to intended values.
@@ -4746,6 +4776,9 @@ def verify_fpms_parameters_display(
 
     When ``update_all_services`` is True, the Services line checks **Update_All_Services** only
     (the per-service checkbox list is not compared to ``services_expected``).
+
+    When ``optional_version`` is True (e.g. BRAZIL/NEWPORT UAT jobs), a blank expected Version —
+    or a Version field that is not present on the page — is treated as ✅ rather than ❌.
     """
     want_env = normalize_parameter_text(environment)
     want_br = normalize_parameter_text(branch_expected)
@@ -4814,15 +4847,25 @@ def verify_fpms_parameters_display(
     ok_all = ok_all and br_ok
     lines.append(_verify_page_expected_line(br_ok, "Branch", got_br, want_br))
 
-    try:
-        got_ver = read_text_parameter_value(page, "Version")
-    except Exception as ex:
-        got_ver = f"(read failed: {ex})"
-        ver_ok = False
+    if optional_version and not want_ver:
+        lines.append("✅ Version — optional / blank (skipped)")
     else:
-        ver_ok = got_ver == want_ver
-    ok_all = ok_all and ver_ok
-    lines.append(_verify_page_expected_line(ver_ok, "Version", got_ver, want_ver))
+        try:
+            got_ver = read_text_parameter_value(page, "Version")
+        except Exception as ex:
+            if optional_version:
+                lines.append("✅ Version — optional (field not present)")
+            else:
+                ok_all = False
+                lines.append(
+                    _verify_page_expected_line(
+                        False, "Version", f"(read failed: {ex})", want_ver
+                    )
+                )
+        else:
+            ver_ok = got_ver == want_ver
+            ok_all = ok_all and ver_ok
+            lines.append(_verify_page_expected_line(ver_ok, "Version", got_ver, want_ver))
 
     return ok_all, lines
 
@@ -5401,7 +5444,7 @@ def _jenkins_update_job_automation_profile(raw_urls: str) -> str | None:
     Which automated fill path applies to this Jenkins URL (first line if several).
 
     Returns ``\"fpms\"`` | ``\"pms_uat\"`` | ``\"fnt_rc\"`` | ``\"sms_uat\"`` | ``\"fpms_prod_script\"`` |
-    ``\"bi_api_update\"`` or ``None``.
+    ``\"bi_api_update\"`` | ``\"venue_uat\"`` (BRAZIL/NEWPORT UAT update) or ``None``.
     """
     u = _jenkins_update_primary_url(raw_urls).replace("\\", "/")
     ul = u.casefold()
@@ -5425,7 +5468,263 @@ def _jenkins_update_job_automation_profile(raw_urls: str) -> str | None:
         return "bi_api_update"
     if "/job/bi-go/job/bi-script-update/" in ul:
         return "bi_script_update"
+    if "/job/brazil/job/brazil-uat-update/" in ul:
+        return "venue_uat"
+    if "/job/newport/job/uat/job/newport-uat-update/" in ul:
+        return "venue_uat"
     return None
+
+
+_VENUE_UAT_VENUES: tuple[tuple[str, str], ...] = (
+    ("brazil", BRAZIL_UAT_BUILD_URL),
+    ("newport", NEWPORT_UAT_BUILD_URL),
+)
+
+
+def _venue_uat_headline_detect(text: str) -> tuple[str, str, str] | None:
+    """
+    Detect a BRAZIL/NEWPORT UAT headline on the first non-empty line.
+
+    Accepts ``<venue> uat {env}`` and ``{env} <venue> uat`` (``env`` optional, e.g. ``pms``),
+    ignoring a leading ``/update`` / ``/jenkinsupdate`` and markdown wrappers.
+
+    Returns ``(venue, env_keyword, build_url)`` or ``None``.
+    """
+    first = ""
+    for line in (text or "").replace("\r\n", "\n").splitlines():
+        t = line.strip()
+        if t:
+            first = t
+            break
+    if not first:
+        return None
+    s = JENKINS_UPDATE_CMD_RE.sub("", first, count=1).strip()
+    s_low = re.sub(r"[`*_]", " ", s).casefold()
+    s_low = re.sub(r"\s+", " ", s_low).strip()
+    for venue, url in _VENUE_UAT_VENUES:
+        m = re.match(rf"^{venue}\s+uat(?:\s+(?P<env>[a-z0-9\-]+))?$", s_low)
+        if m:
+            return (venue, (m.group("env") or "").strip(), url)
+        m = re.match(rf"^(?P<env>[a-z0-9\-]+)\s+{venue}\s+uat$", s_low)
+        if m:
+            return (venue, m.group("env").strip(), url)
+    return None
+
+
+def _venue_resolve_environment(
+    keyword: str, options: Sequence[str]
+) -> tuple[str, list[str]]:
+    """
+    Resolve a venue Environment keyword against the dropdown ``options``.
+
+    * ``(\"ok\", value)``        — exactly one exact (casefold) match and nothing else
+      whose value *starts with* the keyword → run directly, no confirmation.
+    * ``(\"ambiguous\", cands)`` — several candidates (exact + prefix + substring) → must confirm.
+    * ``(\"none\", [])``         — nothing matched.
+    """
+    kw = (keyword or "").strip().casefold()
+    if not kw:
+        return ("none", [])
+    opts = [str(o) for o in (options or [])]
+    exact = [o for o in opts if o.casefold() == kw]
+    prefix_others = [
+        o for o in opts if o.casefold() != kw and o.casefold().startswith(kw)
+    ]
+    if len(exact) == 1 and not prefix_others:
+        return ("ok", exact[0])
+    substr_others = [
+        o
+        for o in opts
+        if o.casefold() != kw and kw in o.casefold() and o not in prefix_others
+    ]
+    candidates: list[str] = []
+    for o in exact + prefix_others + substr_others:
+        if o not in candidates:
+            candidates.append(o)
+    if candidates:
+        return ("ambiguous", candidates)
+    return ("none", [])
+
+
+def parse_venue_uat_bot_block(body: str, jenkins_build_url: str = "") -> dict:
+    """
+    Parse a BRAZIL/NEWPORT UAT request from chat into a ``data`` dict.
+
+    Headline carries the venue + Environment keyword (``Brazil UAT PMS`` / ``PMS Newport UAT``).
+    Then ``branch:`` (required), optional ``version:``, and Services as either ``all services``
+    (→ update-all) or specific service ids (under ``services:`` or listed lines).
+
+    Returns ``{_job_kind, venue, env_keyword, environment, branch, version,
+    service_tokens, update_all_services, build_url}``.
+    """
+    det = _venue_uat_headline_detect(body)
+    venue = det[0] if det else ""
+    env_keyword = det[1] if det else ""
+    ju = (jenkins_build_url or "").strip()
+    if not ju and det:
+        ju = det[2]
+    if not venue and ju:
+        prof_url = ju.replace("\\", "/").casefold()
+        if "/job/brazil/" in prof_url:
+            venue = "brazil"
+        elif "/job/newport/" in prof_url:
+            venue = "newport"
+
+    raw_lines = [_normalize_config_colons(L) for L in (body or "").splitlines()]
+    lines = [L.strip() for L in raw_lines if L.strip() != ""]
+    branch: str | None = None
+    version: str = ""
+    service_lines: list[str] = []
+    last_key: str | None = None
+    port_head = re.compile(r"^\d{3,5}\b")
+
+    for line in lines:
+        m = _match_key_line_fuzzy(line)
+        if m:
+            key = m.group("key").lower()
+            if key == "service":
+                key = "services"
+            rest = _clean_key_rest(m.group("rest") or "")
+            last_key = key
+            if key == "environment":
+                if rest and not env_keyword:
+                    env_keyword = rest.strip()
+            elif key == "branch":
+                branch = _branch_from_config_block(rest, preserve_case=True)
+                if not branch:
+                    raise ValueError("branch: is empty.")
+            elif key == "version":
+                version = _version_from_config_block(rest)
+            elif key == "services":
+                if rest:
+                    service_lines.append(rest)
+            continue
+        if last_key == "services":
+            if _looks_like_chat_trailing_line_under_services(line):
+                continue
+            if port_head.match(line):
+                service_lines.append(line)
+            elif (
+                re.search(r"[a-zA-Z_]", line)
+                and len(line) < 200
+                and not re.match(r"^\s*update\b", line, re.I)
+            ):
+                service_lines.append(line)
+            continue
+        # Headline / preamble line — also catch a bare "all services" line (no ``services:`` key).
+        if _service_lines_mean_update_all([line]):
+            service_lines.append(line)
+            last_key = "services"
+        continue
+
+    if branch is None:
+        raise ValueError("Missing branch: line for venue UAT update.")
+
+    update_all = bool(service_lines) and _service_lines_mean_update_all(service_lines)
+    tokens: list[str] = []
+    if not update_all:
+        for raw in service_lines:
+            for part in re.split(r"[,，;]+", raw):
+                t = part.strip()
+                if t:
+                    tokens.append(t)
+        if not tokens:
+            raise ValueError(
+                "No services parsed (use 'all services' or list service ids)."
+            )
+    return {
+        "_job_kind": "venue_uat",
+        "venue": venue,
+        "env_keyword": env_keyword,
+        "environment": "",
+        "branch": branch,
+        "version": version,
+        "service_tokens": tokens,
+        "update_all_services": update_all,
+        "build_url": ju,
+    }
+
+
+def _venue_uat_bot_build_config_block(data: dict, resolved_ids: list[str]) -> str:
+    """Internal ``VENUE_UAT_RUN_V1`` block passed to :func:`run`. Version may be blank."""
+    if data.get("update_all_services"):
+        svc_lines = "all"
+    else:
+        svc_lines = "\n".join(resolved_ids)
+    ver = (str(data.get("version") or "")).strip()
+    return (
+        "VENUE_UAT_RUN_V1\n"
+        f"venue: {data.get('venue') or ''}\n"
+        f"environment: {data.get('environment') or ''}\n"
+        f"branch: {data['branch']}\n"
+        f"version: {ver}\n"
+        f"services:\n{svc_lines}\n"
+    )
+
+
+def parse_venue_uat_run_config_block(
+    text: str,
+) -> tuple[str, list[str], str, str, bool]:
+    """
+    Parse internal ``VENUE_UAT_RUN_V1`` block.
+
+    Returns ``(environment, services, branch, version, update_all_services)``. ``version`` may be
+    an empty string (OPTIONAL for venue jobs). ``services:`` of only ``all`` → update-all.
+    """
+    raw_lines = [_normalize_config_colons(L) for L in (text or "").splitlines()]
+    lines = [L.strip() for L in raw_lines if L.strip() != ""]
+    if not lines or not lines[0].upper().startswith("VENUE_UAT_RUN_V1"):
+        raise ConfigBlockError("Internal venue config must start with VENUE_UAT_RUN_V1.")
+    env = ""
+    branch: str | None = None
+    version = ""
+    service_lines: list[str] = []
+    last_key: str | None = None
+    port_head = re.compile(r"^\d{3,5}\b")
+    for line in lines[1:]:
+        m = _match_key_line_fuzzy(line)
+        if m is None and re.match(r"^venue\s*[:=]", line, re.I):
+            last_key = "venue"
+            continue
+        if m:
+            key = m.group("key").lower()
+            if key == "service":
+                key = "services"
+            rest = _clean_key_rest(m.group("rest") or "")
+            last_key = key
+            if key == "environment":
+                env = normalize_parameter_text(rest)
+            elif key == "branch":
+                branch = _branch_from_config_block(rest, preserve_case=True)
+            elif key == "version":
+                version = _version_from_config_block(rest)
+            elif key == "services":
+                if rest:
+                    service_lines.append(rest)
+            continue
+        if last_key == "services":
+            if _looks_like_chat_trailing_line_under_services(line):
+                continue
+            if port_head.match(line):
+                service_lines.append(line)
+            elif re.search(r"[a-zA-Z_]", line) and len(line) < 200:
+                service_lines.append(line)
+            continue
+    if branch is None:
+        raise ConfigBlockError("venue config: missing branch:.")
+    if not service_lines:
+        raise ConfigBlockError("venue config: missing services: lines.")
+    if _service_lines_mean_update_all(service_lines):
+        return env, [], branch, version, True
+    out: list[str] = []
+    for raw in service_lines:
+        for part in re.split(r"[,，;]+", raw):
+            t = part.strip()
+            if t:
+                out.append(t)
+    if not out:
+        raise ConfigBlockError("venue config: no service ids parsed.")
+    return env, out, branch, version, False
 
 
 def _environment_for_fpms_jenkins_job_url(raw_url: str) -> str | None:
@@ -6945,6 +7244,8 @@ def _fpms_lark_verification_card_json(
         title_text = "BI API UPDATE — form filled & re-check"
     elif jp == "bi_script_update":
         title_text = "BI SCRIPT UPDATE — form filled & re-check"
+    elif jp == "venue_uat":
+        title_text = "VENUE UAT — form filled & re-check"
     else:
         title_text = "FPMS UAT — form filled & re-check"
     if isinstance(next_build_number, int) and next_build_number > 0:
@@ -7006,6 +7307,8 @@ def _fpms_lark_verification_plain_fallback(
         head = "FPMS PROD SCRIPT RUN — form filled & re-check"
     elif jp == "bi_api_update":
         head = "BI API UPDATE — form filled & re-check"
+    elif jp == "venue_uat":
+        head = "VENUE UAT — form filled & re-check"
     else:
         head = "FPMS UAT — form filled & re-check"
     if isinstance(next_build_number, int) and next_build_number > 0:
@@ -7076,6 +7379,8 @@ def _jenkins_parameter_labels_for_profile(job_profile: str) -> list[str]:
         return ["DEPLOYMENT_FILE_NAME", "ENVIRONMENT", "SOURCE_BRANCH"]
     if jp in ("fnt_rc", "sms_uat"):
         return ["Branch", "Version", "Services"]
+    if jp == "venue_uat":
+        return ["Environment", "Services", "Branch"]
     return ["Environment", "Services", "Branch", "Version"]
 
 
@@ -7090,6 +7395,7 @@ def _jenkins_job_profile_display(job_profile: str) -> str:
         "bi_api_update": "BI API UPDATE",
         "bi_script_update": "BI SCRIPT UPDATE",
         "vpn_creation": "VPN CREATION",
+        "venue_uat": "VENUE UAT",
     }.get(jp, jp.upper().replace("_", " "))
 
 
@@ -7565,6 +7871,8 @@ def _fpms_lark_begin_jenkins_run(
         cfg = _bi_api_update_bot_build_config_block(data)
     elif jp == "bi_script_update":
         cfg = _bi_script_update_bot_build_config_block(data, resolved)
+    elif jp == "venue_uat":
+        cfg = _venue_uat_bot_build_config_block(data, resolved)
     else:
         cfg = _fpms_bot_build_config_block(data, resolved)
     ev = threading.Event()
@@ -7645,6 +7953,15 @@ def _fpms_lark_spawn_run(
     jp = (job_profile or "fpms").strip() or "fpms"
     trigger_mid = (lark_message_id or "").strip() or None
 
+    # Tag this run so its cleanup only ever touches its OWN session. Prevents a finishing/cancelled
+    # run from clearing a NEWER run that has since taken over the same session_key (which left new
+    # runs "just reacting" until a duty-bot restart).
+    run_token = secrets.token_hex(8)
+    with _fpms_lark_sessions_lock:
+        _s0 = _fpms_lark_sessions.get(session_key)
+        if isinstance(_s0, dict):
+            _s0["_run_token"] = run_token
+
     upload_image_fn = None
     send_image_fn = None
     try:
@@ -7691,7 +8008,9 @@ def _fpms_lark_spawn_run(
             print(f"[jenkinsupdate bot] run failed: {ex!r}", flush=True)
         finally:
             _fpms_lark_mark_trigger_message_done(trigger_mid)
-            _fpms_lark_finish_jenkins_run_session(session_key, chat_id)
+            _fpms_lark_finish_jenkins_run_session(
+                session_key, chat_id, run_token=run_token
+            )
 
     threading.Thread(target=_job, name="fpms-uat-jenkins", daemon=True).start()
 
@@ -7738,6 +8057,10 @@ def _fpms_lark_dispatch_job_row(
         )
     if prof == "bi_api_update":
         return _fpms_lark_dispatch_bi_api_update_parameter_flow(
+            chat_id, session_key, body, ju, send, lark_message_id=lark_message_id
+        )
+    if prof == "venue_uat":
+        return _fpms_lark_dispatch_venue_uat_parameter_flow(
             chat_id, session_key, body, ju, send, lark_message_id=lark_message_id
         )
     if prof == "pms_uat":
@@ -8044,6 +8367,207 @@ def _fpms_lark_dispatch_sms_uat_parameter_flow(
     with _fpms_lark_sessions_lock:
         _fpms_lark_sessions[session_key] = sess_new
     _fpms_lark_send_service_pick_card(chat_id, session_key, first, ranked0, send)
+    return True
+
+
+def _fpms_lark_begin_venue_uat_run(
+    chat_id: str,
+    session_key: str,
+    data: dict,
+    body: str,
+    jenkins_build_url: str,
+    send,
+    *,
+    lark_message_id: str | None = None,
+) -> None:
+    """Thin wrapper: start a BRAZIL/NEWPORT UAT run once the Environment is resolved."""
+    ju = (jenkins_build_url or data.get("build_url") or "").strip()
+    resolved = (
+        [] if data.get("update_all_services") else list(data.get("service_tokens") or [])
+    )
+    _fpms_lark_begin_jenkins_run(
+        chat_id,
+        session_key,
+        data,
+        resolved,
+        send,
+        raw_prompt_body=body,
+        jenkins_build_url=ju,
+        job_profile="venue_uat",
+        lark_message_id=lark_message_id,
+    )
+
+
+def _fpms_lark_send_venue_env_pick_card(
+    chat_id: str,
+    session_key: str,
+    keyword: str,
+    candidates: list[str],
+    picker_sid: str,
+    send,
+) -> None:
+    """Button card to confirm the venue Environment when the keyword is ambiguous."""
+    raw_send = _fpms_lark_raw_send() or send
+    buttons: list[dict[str, object]] = []
+    for i, env in enumerate(candidates[:13], start=1):
+        buttons.append(
+            _fpms_lark_v2_callback_button(
+                env,
+                "primary" if i == 1 else "default",
+                {"k": "venue_env", "env": env, "sid": picker_sid},
+                element_id=f"venv{i}"[:20],
+            )
+        )
+    body_elements: list[dict[str, object]] = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": (
+                    f"🌐 **Environment** — `{keyword or '(none)'}` matches several options. "
+                    "Tap the one you mean:"
+                ),
+            },
+        }
+    ]
+    for off in range(0, len(buttons), 5):
+        body_elements.append(_fpms_lark_v2_column_set_button_row(buttons[off : off + 5]))
+    body_elements.append({"tag": "hr"})
+    body_elements.append(
+        _fpms_lark_v2_callback_button(
+            "Cancel", "default", {"k": "ju_cancel"}, element_id="venv_cancel"
+        )
+    )
+    card = {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": "Venue UAT — pick Environment"},
+        },
+        "body": {"elements": body_elements},
+    }
+    try:
+        res = raw_send(
+            chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive"
+        )
+        if isinstance(res, dict) and int(res.get("code", -1)) == 0:
+            return
+    except Exception:
+        pass
+    send(
+        chat_id,
+        f"Pick the Environment for `{keyword}`: " + ", ".join(candidates),
+    )
+
+
+def _fpms_lark_dispatch_venue_uat_parameter_flow(
+    chat_id: str,
+    session_key: str,
+    body: str,
+    jenkins_build_url: str,
+    send,
+    *,
+    lark_message_id: str | None = None,
+) -> bool:
+    """Parse a BRAZIL/NEWPORT UAT block; resolve Environment (direct or confirm), then run."""
+    try:
+        data = parse_venue_uat_bot_block(body, jenkins_build_url)
+    except Exception as ex:
+        send(
+            chat_id,
+            "❌ Could not parse BRAZIL/NEWPORT UAT block. Need a headline like "
+            "`Brazil UAT PMS` / `Newport UAT PMS`, then `branch:` and `all services` "
+            f"(or list service ids). `version:` is optional.\n```\n{ex}\n```",
+        )
+        return True
+    with _fpms_lark_sessions_lock:
+        prev = _fpms_lark_sessions.get(session_key)
+        if isinstance(prev, dict) and prev.get("state") == "jenkins_wait_build":
+            send(
+                chat_id,
+                "⏳ A Jenkins **Build** confirmation is already waiting for you in this chat. "
+                "**Tap YES/NO** on that card (or type **yes** / **no**), or say **cancel** before starting a new run.",
+            )
+            return True
+    status, payload = _venue_resolve_environment(
+        str(data.get("env_keyword") or ""), VENUE_UAT_ENVIRONMENTS
+    )
+    if status == "ok":
+        data["environment"] = payload[0] if isinstance(payload, list) else str(payload)
+        _fpms_lark_begin_venue_uat_run(
+            chat_id,
+            session_key,
+            data,
+            body,
+            jenkins_build_url,
+            send,
+            lark_message_id=lark_message_id,
+        )
+        return True
+    if status == "ambiguous":
+        candidates = list(payload)
+        picker_sid = secrets.token_hex(16)
+        if ":" in session_key:
+            chat_id_part, sender_part = session_key.split(":", 1)
+        else:
+            chat_id_part, sender_part = chat_id, session_key
+        sess_new = {
+            "state": "venue_env_pick",
+            "job_profile": "venue_uat",
+            "venue_data": data,
+            "venue_candidates": candidates,
+            "raw_prompt_body": body,
+            "jenkins_job_url": (jenkins_build_url or data.get("build_url") or "").strip(),
+            "picker_sid": picker_sid,
+        }
+        _fpms_lark_register_picker_sid(
+            picker_sid, _fpms_lark_session_key(chat_id_part, sender_part)
+        )
+        _fpms_lark_sessions_put(chat_id_part, sender_part, sess_new)
+        _fpms_lark_send_venue_env_pick_card(
+            chat_id,
+            session_key,
+            str(data.get("env_keyword") or ""),
+            candidates,
+            picker_sid,
+            send,
+        )
+        return True
+    send(
+        chat_id,
+        f"❌ Environment `{data.get('env_keyword') or '(none)'}` is not a valid option for this "
+        f"job. Options: {', '.join(VENUE_UAT_ENVIRONMENTS)}.",
+    )
+    return True
+
+
+def _fpms_lark_handle_venue_env_pick(
+    chat_id: str,
+    sender_id: str,
+    parsed: dict[str, object],
+    send,
+) -> bool:
+    """Interactive venue **Environment** card tap (``k=venue_env``)."""
+    sk = _fpms_lark_session_key(chat_id, sender_id)
+    env = str(parsed.get("env") or "").strip()
+    with _fpms_lark_sessions_lock:
+        sess = _fpms_lark_sessions.get(sk)
+        if not isinstance(sess, dict) or sess.get("state") != "venue_env_pick":
+            return False
+        data = dict(sess.get("venue_data") or {})
+        cands = list(sess.get("venue_candidates") or [])
+        raw_pb = str(sess.get("raw_prompt_body") or "")
+        ju = str(sess.get("jenkins_job_url") or data.get("build_url") or "")
+    if env not in VENUE_UAT_ENVIRONMENTS or env not in cands:
+        send(
+            chat_id,
+            "⚠️ Environment selection expired — send the **BRAZIL/NEWPORT UAT** request again.",
+        )
+        return True
+    _fpms_lark_clear_session(chat_id, sender_id)
+    data["environment"] = env
+    _fpms_lark_begin_venue_uat_run(chat_id, sk, data, raw_pb, ju, send)
     return True
 
 
@@ -8427,6 +8951,8 @@ def looks_like_natural_jenkins_update(text: str) -> bool:
     raw = (text or "").replace("\r\n", "\n").strip()
     if not raw or JENKINS_UPDATE_CMD_RE.search(raw):
         return False
+    if _venue_uat_headline_detect(raw):
+        return True
     if _body_requests_bi_script_update(raw):
         return True
     if _looks_like_bi_api_update_paste(raw):
@@ -8526,6 +9052,10 @@ def agent_route_free_form_body(raw_text: str) -> str | None:
     """
     if not _agent_normalize_enabled():
         return None
+    if _venue_uat_headline_detect(raw_text):
+        # BRAZIL/NEWPORT UAT headlines route via the registry; the FPMS-oriented agent would
+        # strip the venue headline. Fall back to ``normalize_natural_jenkins_body``.
+        return None
     if _looks_like_bi_api_update_paste(raw_text) or _body_requests_bi_script_update(raw_text):
         # FPMS-oriented agent strips ``repository:`` / ``API:`` / ``env:`` and mis-reads "update this api".
         return None
@@ -8579,11 +9109,17 @@ def _fpms_lark_preserve_updatemore_queue(prev: dict | None, sess: dict) -> dict:
     return sess
 
 
-def _fpms_lark_finish_jenkins_run_session(session_key: str, chat_id: str) -> None:
+def _fpms_lark_finish_jenkins_run_session(
+    session_key: str, chat_id: str, *, run_token: str | None = None
+) -> None:
     """
     End a Playwright Jenkins run without destroying an active ``/updatemore`` queue.
 
     Segment 1's browser thread must not wipe segment 2's in-flight pick / Jenkins session.
+
+    ``run_token`` identifies THIS run. If a NEWER run has taken over ``session_key`` (different
+    token — e.g. user cancelled then immediately started a new run), do nothing so we never clear
+    or clobber the newer run's session.
     """
     try:
         import updatemore as um
@@ -8593,6 +9129,10 @@ def _fpms_lark_finish_jenkins_run_session(session_key: str, chat_id: str) -> Non
     keep_q = None
     with _fpms_lark_sessions_lock:
         sess = _fpms_lark_sessions.get(session_key)
+        if run_token and isinstance(sess, dict):
+            cur_tok = str(sess.get("_run_token") or "")
+            if cur_tok and cur_tok != run_token:
+                return  # a newer run owns this session — leave it alone
         q = um.get_queue(sess if isinstance(sess, dict) else None)
         if isinstance(q, dict) and not q.get("stopped"):
             # Keep the queue for the next segment. Also drop the ``jenkins_wait_build`` state so a
@@ -9311,6 +9851,20 @@ def _dispatch_lark_update_command_body(
             lark_message_id=lark_message_id,
         )
 
+    # BRAZIL/NEWPORT UAT: route directly off the headline (``Brazil UAT PMS`` / ``PMS Newport UAT``).
+    # The registry ranker would otherwise let an env keyword like ``PMS`` outscore ``brazil uat`` when
+    # the env word leads the headline.
+    venue_det = _venue_uat_headline_detect(body)
+    if venue_det:
+        return _fpms_lark_dispatch_venue_uat_parameter_flow(
+            chat_id,
+            key,
+            body,
+            venue_det[2],
+            send,
+            lark_message_id=lark_message_id,
+        )
+
     head_line = _jenkins_update_first_non_empty_line(body)
     ties_h: list[tuple[str, float, str, str]] = []
     if not _jenkins_update_headline_is_config_like(head_line):
@@ -9479,13 +10033,22 @@ def handle_lark_jenkins_update_message(
         return True
 
     if low == "cancel":
-        if _fpms_lark_release_build_wait_session(key):
-            return True
+        released = _fpms_lark_release_build_wait_session(key)
         with _fpms_lark_sessions_lock:
             had_other = key in _fpms_lark_sessions
-            if had_other:
-                _fpms_lark_sessions.pop(key, None)
-        if had_other:
+        # Full cleanup so the NEXT run starts clean: clear this user's session (+ open_id/union_id
+        # aliases) AND any leftover /updatemore queue mirrored by chat. Otherwise stale state could
+        # make a new run "just react" until a duty-bot restart.
+        _fpms_lark_clear_session(chat_id, sender_id)
+        try:
+            import updatemore as _um_cancel
+
+            _um_cancel.cancel_active_updatemore_in_chat(
+                chat_id, _fpms_lark_sessions, _fpms_lark_sessions_lock
+            )
+        except Exception:
+            pass
+        if released or had_other:
             send(chat_id, "⏹️ **All `/update` steps cancelled.**")
         else:
             send(chat_id, "ℹ️ No active `/update` session to cancel.")
@@ -10147,6 +10710,9 @@ def handle_lark_jenkins_card_action(
             send(chat_id, "⚠️ VPN selection expired — `@Duty Bot create vpn` again.")
             return True
         return begin_vpn_run_from_card(chat_id, sender_id, username, loc, send)
+    if k == "venue_env":
+        if _fpms_lark_handle_venue_env_pick(chat_id, sender_id, parsed, send):
+            return True
     if k == "wb":
         v = str(parsed.get("v") or "").strip().lower()
         if v == "y":
@@ -10368,6 +10934,7 @@ def run(
     is_bi_api_update = jp == "bi_api_update"
     is_bi_script_update = jp == "bi_script_update"
     is_vpn = jp == "vpn_creation"
+    is_venue = jp == "venue_uat"
 
     parsed_update_all = False
     command = ""
@@ -10449,6 +11016,22 @@ def run(
                 "\n→ Parsed FPMS PROD SCRIPT config block:\n"
                 f"    environment: {environment!r}\n"
                 f"    command:     {command!r}\n"
+            )
+        elif cl.upper().startswith("VENUE_UAT_RUN_V1"):
+            environment, services, branch, version, parsed_update_all = (
+                parse_venue_uat_run_config_block(config_block)
+            )
+            svc_note = (
+                f"update-all ({_jenkins_update_all_stapler_name()})"
+                if parsed_update_all
+                else ", ".join(services)
+            )
+            print(
+                "\n→ Parsed VENUE UAT config block:\n"
+                f"    environment: {environment!r}\n"
+                f"    branch:      {branch!r}\n"
+                f"    version:     {version!r} (optional)\n"
+                f"    services ({len(services) if not parsed_update_all else 'all'}): {svc_note}\n"
             )
         else:
             _pms = jp == "pms_uat"
@@ -10700,7 +11283,19 @@ def run(
                         raise RuntimeError(msg) from e2
 
                 fill_text_parameter(page, "Branch", branch)
-                fill_text_parameter(page, "Version", version)
+                if is_venue:
+                    # Version is OPTIONAL for BRAZIL/NEWPORT UAT: only fill when provided, and
+                    # never fail the run if the field is missing or the value is blank.
+                    if version:
+                        try:
+                            fill_text_parameter(page, "Version", version)
+                        except Exception as _ver_ex:
+                            print(
+                                f"→ VENUE UAT: optional Version fill skipped ({_ver_ex!r}).",
+                                flush=True,
+                            )
+                else:
+                    fill_text_parameter(page, "Version", version)
 
             _safe_page_wait(page, max(0, _MS_POST_FILL_VERIFY))
             if bot_lark_gate is not None:
@@ -10736,6 +11331,7 @@ def run(
                         branch,
                         version,
                         update_all_services=update_all_services,
+                        optional_version=is_venue,
                     )
                 print("\n→ ===== First parameter re-check (page vs your choices) =====")
                 for ln in lines_first:
@@ -10778,6 +11374,7 @@ def run(
                             branch,
                             version,
                             update_all_services=update_all_services,
+                            optional_version=is_venue,
                         )
                     print("\n→ ===== Second parameter re-check (page vs your choices) =====")
                     for ln in verify_lines:
@@ -10817,6 +11414,7 @@ def run(
                         branch,
                         version,
                         update_all_services=update_all_services,
+                        optional_version=is_venue,
                     )
                 lines_first = verify_lines
                 print("\n→ ===== Parameter re-check (page vs your choices) =====")
