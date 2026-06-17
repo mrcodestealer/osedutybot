@@ -208,14 +208,17 @@ def _capture_prod_batch_screenshots_on_page(
         by_env.setdefault(b, []).append(m)
 
     for belongs, env_machines in by_env.items():
-        if not _ensure_env_egm_page(page, belongs, timeout_ms=timeout_ms, max_pages=max_pages):
+        ok_login, login_err = _ensure_env_egm_page(
+            page, belongs, timeout_ms=timeout_ms, max_pages=max_pages
+        )
+        if not ok_login:
             for m in env_machines:
                 name = _machine_display_name(m)
                 errors.append(
                     {
                         "belongs": m.get("belongs", belongs),
                         "machine": name,
-                        "error": "login failed",
+                        "error": login_err or "login failed",
                     }
                 )
             continue
@@ -396,43 +399,87 @@ def _login_egm_backend(page, base: str, user: str, pw: str, *, timeout_ms: int) 
     else:
         page.locator('button[type="submit"], button.el-button--primary').first.click()
 
-    page.wait_for_timeout(_fast_ms(1800))
+    # Wait for the login POST to actually establish the session (URL leaves /login) before we try
+    # to load the list — navigating too early lands back on the login page and looks like a
+    # "table did not load" failure. Poll up to ~12s instead of a fixed short pause.
+    deadline = time.monotonic() + min(12.0, max(4.0, timeout_ms / 1000.0))
+    while time.monotonic() < deadline:
+        cur = page.url or ""
+        if login not in cur or path in cur:
+            break
+        page.wait_for_timeout(300)
+    page.wait_for_timeout(_fast_ms(900))
     if path not in (page.url or ""):
         page.goto(list_url, wait_until="domcontentloaded")
     if not _egm_table_ready(page, timeout_ms):
-        raise RuntimeError("EGM status table did not load after login")
+        # One more reload — the backend sometimes serves a blank table on the first navigation.
+        page.goto(list_url, wait_until="domcontentloaded")
+        if not _egm_table_ready(page, timeout_ms):
+            raise RuntimeError("EGM status table did not load after login")
 
 
-def _ensure_env_egm_page(page, belongs: str, *, timeout_ms: int, max_pages: int) -> bool:
-    """Open the correct PROD backend EGM list once per environment (reuse same page)."""
+def _login_retries() -> int:
+    """How many times to retry a flaky EGM login/table-load before giving up (default 3)."""
+    try:
+        return max(1, int((os.environ.get("PROD_SET_LOGIN_RETRIES") or "3").strip()))
+    except ValueError:
+        return 3
+
+
+def _ensure_env_egm_page(page, belongs: str, *, timeout_ms: int, max_pages: int) -> tuple[bool, str]:
+    """
+    Open the correct PROD backend EGM list once per environment (reuse same page).
+
+    Returns ``(ok, error)``. A transient login / table-load failure is retried a few times since
+    the EGM backend occasionally drops the first attempt (this used to fail a whole batch as
+    "login failed"). ``error`` carries the real reason for the failure summary.
+    """
     from checkcredit import _np_resolve_backend  # noqa: WPS433
 
     norm = _belongs_for_machine(belongs)
     if getattr(page, "_prod_set_belongs", None) == norm and _egm_table_ready(page, timeout_ms):
-        return True
+        return True, ""
 
     site = _belongs_site_key(norm)
     try:
         synth = _site_synthetic_machine(site)
     except (SystemExit, ValueError) as e:
         logger.warning("prod-set: unknown site for belongs %r: %s", belongs, e)
-        return False
+        return False, f"unknown site for {belongs!r}: {e}"
 
     base, user, pw = _np_resolve_backend(synth)
     if not (base and user and pw):
         logger.warning("prod-set: missing credentials for belongs %r (site %r)", belongs, site)
-        return False
+        return False, f"missing backend credentials for {belongs!r} (site {site!r})"
 
-    try:
-        _login_egm_backend(page, base, user, pw, timeout_ms=timeout_ms)
-        limit = _resolve_collect_page_limit(max_pages)
-        _go_first_page(page, timeout_ms=timeout_ms, max_steps=limit)
-        _wait_table_idle(page, timeout_ms)
-        page._prod_set_belongs = norm  # type: ignore[attr-defined]
-        return True
-    except Exception as e:
-        logger.warning("prod-set: login/navigation failed for %r: %s", belongs, e)
-        return False
+    attempts = _login_retries()
+    last_err = ""
+    for attempt in range(1, attempts + 1):
+        try:
+            _login_egm_backend(page, base, user, pw, timeout_ms=timeout_ms)
+            limit = _resolve_collect_page_limit(max_pages)
+            _go_first_page(page, timeout_ms=timeout_ms, max_steps=limit)
+            _wait_table_idle(page, timeout_ms)
+            page._prod_set_belongs = norm  # type: ignore[attr-defined]
+            if attempt > 1:
+                logger.info("prod-set: login for %r recovered on attempt %d", belongs, attempt)
+            return True, ""
+        except Exception as e:  # noqa: BLE001
+            last_err = str(e) or e.__class__.__name__
+            logger.warning(
+                "prod-set: login/navigation failed for %r (attempt %d/%d): %s",
+                belongs, attempt, attempts, last_err,
+            )
+            try:
+                page._prod_set_belongs = None  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            if attempt < attempts:
+                try:
+                    page.wait_for_timeout(1500)
+                except Exception:
+                    pass
+    return False, f"login/table load failed after {attempts} attempt(s): {last_err}"
 
 
 def _find_all_rows_for_target(page, kind: str, key: str, *, timeout_ms: int):
@@ -1038,8 +1085,11 @@ def probe_egm_batch_toolbar_buttons(
         "error": None,
     }
 
-    if not _ensure_env_egm_page(page, belongs, timeout_ms=timeout_ms, max_pages=max_pages):
-        result["error"] = "login failed"
+    ok_login, login_err = _ensure_env_egm_page(
+        page, belongs, timeout_ms=timeout_ms, max_pages=max_pages
+    )
+    if not ok_login:
+        result["error"] = login_err or "login failed"
         return result
 
     rows = _table_body_rows(page)
@@ -1216,13 +1266,16 @@ def _process_env(
     if cancel_check():
         return ok_list, fail_list
 
-    if not _ensure_env_egm_page(page, belongs, timeout_ms=timeout_ms, max_pages=max_pages):
+    ok_login, login_err = _ensure_env_egm_page(
+        page, belongs, timeout_ms=timeout_ms, max_pages=max_pages
+    )
+    if not ok_login:
         for m in machines:
             fail_list.append(
                 {
                     "belongs": m.get("belongs", belongs),
                     "machine": _machine_display_name(m),
-                    "error": "login failed",
+                    "error": login_err or "login failed",
                 }
             )
         return ok_list, fail_list
@@ -1476,12 +1529,15 @@ def _run_step_with_retries(
     pending = list(targets)
     max_r = _max_phase_retries()
 
-    if not _ensure_env_egm_page(page, belongs, timeout_ms=timeout_ms, max_pages=max_pages):
+    ok_login, login_err = _ensure_env_egm_page(
+        page, belongs, timeout_ms=timeout_ms, max_pages=max_pages
+    )
+    if not ok_login:
         return False, [
             {
                 "belongs": m.get("belongs", belongs),
                 "machine": _machine_display_name(m),
-                "error": "login failed",
+                "error": login_err or "login failed",
             }
             for m in pending
         ]
@@ -1809,15 +1865,16 @@ def live_verify_prod_machines(
         page.set_default_timeout(timeout_ms)
         try:
             for belongs, env_machines in by_env.items():
-                if not _ensure_env_egm_page(
+                ok_login, login_err = _ensure_env_egm_page(
                     page, belongs, timeout_ms=timeout_ms, max_pages=max_pages
-                ):
+                )
+                if not ok_login:
                     for m in env_machines:
                         failed.append(
                             {
                                 "belongs": m.get("belongs", belongs),
                                 "machine": _machine_display_name(m),
-                                "error": "login failed",
+                                "error": login_err or "login failed",
                             }
                         )
                     continue
