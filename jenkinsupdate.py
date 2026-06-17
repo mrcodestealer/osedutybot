@@ -8590,11 +8590,32 @@ def _fpms_lark_finish_jenkins_run_session(session_key: str, chat_id: str) -> Non
     except Exception:
         _fpms_lark_clear_session_key(session_key)
         return
+    keep_q = None
     with _fpms_lark_sessions_lock:
         sess = _fpms_lark_sessions.get(session_key)
-    q = um.get_queue(sess if isinstance(sess, dict) else None)
-    if isinstance(q, dict) and not q.get("stopped"):
-        um.persist_queue(q)
+        q = um.get_queue(sess if isinstance(sess, dict) else None)
+        if isinstance(q, dict) and not q.get("stopped"):
+            # Keep the queue for the next segment. Also drop the ``jenkins_wait_build`` state so a
+            # FINISHED run no longer counts as an open Build gate (a lingering gate blocks the
+            # ``/SuccessProceedNext`` active-queue fallback). BUT only when THIS run's gate is
+            # already resolved (event set). If a NEWER run (e.g. a different-environment next
+            # segment dispatched immediately) has taken over this session_key and is still
+            # awaiting its YES/NO (event unset), leave it untouched so we don't clobber its gate.
+            ev = sess.get("build_gate_event") if isinstance(sess, dict) else None
+            gate_resolved = (not isinstance(ev, threading.Event)) or ev.is_set()
+            if (
+                gate_resolved
+                and isinstance(sess, dict)
+                and sess.get("state") == "jenkins_wait_build"
+            ):
+                stub: dict = {"updatemore_queue": q}
+                em = (sess.get("email_reply_subject") or "").strip()
+                if em:
+                    stub["email_reply_subject"] = em
+                _fpms_lark_sessions[session_key] = stub
+            keep_q = q
+    if keep_q is not None:
+        um.persist_queue(keep_q)
         return
     _fpms_lark_clear_session_key(session_key)
 
@@ -8650,6 +8671,12 @@ def _fpms_lark_notify_jenkins_after_build_click(
             q = None
 
     if not q or q.get("stopped"):
+        print(
+            f"[jenkinsupdate] notify after build: NO updatemore queue in session "
+            f"(key={session_key!r}, stopped={bool(q and q.get('stopped'))}) — "
+            "single/legacy path (no next-segment dispatch).",
+            flush=True,
+        )
         email = _fpms_lark_session_email_subject(session_key)
         jenkins_oid = _fpms_lark_jenkins_bot_open_id()
         if jenkins_oid.casefold() in ("0", "false", "no", "off"):
@@ -8675,6 +8702,12 @@ def _fpms_lark_notify_jenkins_after_build_click(
     seg_idx = int(q.get("index") or 0)
     next_same = um.next_segment_same_env(q)
     has_next = um.has_next_segment(q)
+    print(
+        f"[jenkinsupdate] notify after build (updatemore): segs="
+        f"{len(q.get('segments') or [])} index={q.get('index')} next_same={next_same} "
+        f"has_next={has_next} email={bool(email)}",
+        flush=True,
+    )
     jenkins_oid = _fpms_lark_jenkins_bot_open_id()
     if jenkins_oid.casefold() in ("0", "false", "no", "off"):
         jenkins_oid = ""
@@ -8724,13 +8757,24 @@ def _fpms_lark_notify_jenkins_after_build_click(
                         q3["index"] = idx
                         um.persist_queue(q3)
             send(chat_id, f"▶️ Different environment — starting segment {idx + 1}…")
-            _dispatch_lark_update_command_body(
-                chat_id,
-                session_key,
-                um.segment_to_update_body(segs[idx]),
-                send,
-                from_updatemore=True,
-            )
+            try:
+                _dispatch_lark_update_command_body(
+                    chat_id,
+                    session_key,
+                    um.segment_to_update_body(segs[idx]),
+                    send,
+                    from_updatemore=True,
+                )
+            except Exception as ex:
+                print(
+                    f"[jenkinsupdate] next-segment dispatch failed (idx={idx}): {ex!r}",
+                    flush=True,
+                )
+                send(
+                    chat_id,
+                    f"❌ Could not start segment {idx + 1} automatically: {ex}\n"
+                    "Please resend that segment manually.",
+                )
         return
 
     if not email and not jenkins_oid:
@@ -9288,7 +9332,14 @@ def _dispatch_lark_update_command_body(
         )
         return True
     prof0 = _jenkins_update_job_automation_profile(ties[0][3])
-    need_menu = (len(ties) > 1) or (len(ties) == 1 and prof0 in ("fnt_rc", "sms_uat"))
+    # FNT RC / SMS share an ECP services widget and have sibling jobs (RC vs FNT script vs
+    # telesales), so a *fuzzy* single hit still asks the user to confirm the job. But when the
+    # alias is literally present in the message (substring-boost score ≥ 2.0, e.g.
+    # "RC UAT MASTER" → ``rc uat master``) it is unambiguous — skip the extra menu and go
+    # straight to filling the form + the YES/NO Build confirm.
+    need_menu = len(ties) > 1
+    if not need_menu and len(ties) == 1 and prof0 in ("fnt_rc", "sms_uat"):
+        need_menu = ties[0][1] < 2.0
     if need_menu:
         picker_sid = secrets.token_hex(16)
         with _fpms_lark_sessions_lock:

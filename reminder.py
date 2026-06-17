@@ -282,6 +282,60 @@ def _bitable_records_url() -> str:
     return f"https://open.larksuite.com/open-apis/bitable/v1/apps/{REMINDER_BASE_TOKEN}/tables/{REMINDER_TABLE_ID}/records"
 
 
+def _bitable_delete_record(token: str, record_id: str) -> tuple[bool, str]:
+    """Delete one Bitable row. Returns (success, error_detail)."""
+    base_url = _bitable_records_url().rstrip("/")
+    resp = requests.delete(
+        f"{base_url}/{record_id}",
+        headers=_bitable_headers(token),
+        timeout=30,
+    )
+    out = resp.json()
+    if out.get("code") == 0:
+        return True, ""
+    return False, str(out)
+
+
+def _sheet_row_is_expired(row: dict, *, ref_date: date | None = None) -> bool:
+    """True when the row's End Time calendar day is before ``ref_date`` (default: today)."""
+    today = ref_date or date.today()
+    end_d = row.get("end_date")
+    return isinstance(end_d, date) and end_d < today
+
+
+def purge_expired_sheet_reminders(
+    *,
+    get_token_func,
+    ref_date: date | None = None,
+) -> dict:
+    """
+    Delete reminder Bitable rows past their End Time (``end_date < ref_date``).
+    Returns ``{deleted, deleted_ids, errors}``.
+    """
+    if not _reminder_sheet_enabled():
+        return {"deleted": 0, "deleted_ids": [], "errors": []}
+
+    today = ref_date or date.today()
+    rows = _normalize_sheet_rows(_bitable_get_all_records(get_token_func))
+    expired = [r for r in rows if _sheet_row_is_expired(r, ref_date=today)]
+    if not expired:
+        return {"deleted": 0, "deleted_ids": [], "errors": []}
+
+    token = get_token_func()
+    if not token:
+        return {"deleted": 0, "deleted_ids": [], "errors": ["Failed to get tenant access token."]}
+
+    deleted_ids: list[str] = []
+    errors: list[str] = []
+    for row in expired:
+        ok, err = _bitable_delete_record(token, row["record_id"])
+        if ok:
+            deleted_ids.append(str(row["id"]))
+        else:
+            errors.append(f"ID {row['id']}: {err}")
+    return {"deleted": len(deleted_ids), "deleted_ids": deleted_ids, "errors": errors}
+
+
 def _bitable_get_all_records(get_token_func) -> list[dict]:
     if not _reminder_sheet_enabled():
         raise RuntimeError("REMINDERSHEETTOKEN / REMINDERSHEETID is not set in environment.")
@@ -793,7 +847,18 @@ def sync_sheet_daily_reminders(
         if str(j.id).startswith(_SHEET_JOB_PREFIX):
             scheduler.remove_job(j.id)
 
+    purge = purge_expired_sheet_reminders(get_token_func=get_token_func)
+    if purge.get("deleted"):
+        print(
+            f"[Reminder sheet] purged {purge['deleted']} expired row(s): "
+            f"{', '.join(purge['deleted_ids'])}",
+            flush=True,
+        )
+    if purge.get("errors"):
+        print(f"[Reminder sheet] purge errors: {purge['errors']!r}", flush=True)
+
     rows = _normalize_sheet_rows(_bitable_get_all_records(get_token_func))
+    rows = [r for r in rows if not _sheet_row_is_expired(r)]
     scheduled = 0
     for row in rows:
         hh, mm = _time_to_hour_minute(row["time"])
@@ -945,17 +1010,10 @@ def delete_sheet_reminders(
     token = get_token_func()
     if not token:
         return "❌ Failed to get tenant access token."
-    base_url = _bitable_records_url().rstrip("/")
     deleted_ids: list[str] = []
     for row in to_del:
-        rid = row["record_id"]
-        resp = requests.delete(
-            f"{base_url}/{rid}",
-            headers=_bitable_headers(token),
-            timeout=30,
-        )
-        out = resp.json()
-        if out.get("code") == 0:
+        ok, _ = _bitable_delete_record(token, row["record_id"])
+        if ok:
             deleted_ids.append(str(row["id"]))
 
     sync_sheet_daily_reminders(

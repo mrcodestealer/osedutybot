@@ -3094,15 +3094,27 @@ def _game_name_key(s: Any) -> str:
     )
 
 
+_SQUEEZE_BACCARAT_NAME_KEYS = frozenset({"squeezebaccarat", "baccaratsqueeze"})
+
+
+def _canonical_game_name_key(s: Any) -> str:
+    """Gamelist match key; only alias: ``Squeeze Baccarat`` ↔ ``Baccarat Squeeze``."""
+    k = _game_name_key(s)
+    if k in _SQUEEZE_BACCARAT_NAME_KEYS:
+        return "squeezebaccarat"
+    return k
+
+
 def _names_match_gamelist(a: Any, b: Any) -> bool:
     """
     Exact game name match against gamelist **游戏名称**.
 
     Only ignores case, accent marks, and whitespace — no substring / alias matching
-    (``Lightning Roulette`` must match ``Lightning Roulette``, not ``Lightning Roulette Live``).
+    (``Lightning Roulette`` must match ``Lightning Roulette``, not ``Lightning Roulette Live``),
+    except ``Squeeze Baccarat`` / ``Baccarat Squeeze`` (word order only).
     """
-    na = _game_name_key(a)
-    nb = _game_name_key(b)
+    na = _canonical_game_name_key(a)
+    nb = _canonical_game_name_key(b)
     if not na or not nb:
         return False
     return na == nb
@@ -3865,7 +3877,7 @@ def extract_candidate_game_names(text: str) -> list[str]:
         t = (raw or "").strip()
         if not _is_plausible_game_name(t):
             return
-        key = _cell_norm(t).replace(" ", "")
+        key = _canonical_game_name_key(t)
         if not key or key in seen:
             return
         seen.add(key)
@@ -4748,7 +4760,7 @@ def _evo_cp_launched_set(
     if not names:
         return set()
     _ok, launched = gamelist_launched_for_candidates(names, tok)
-    return {_cell_norm(x).replace(" ", "") for x in launched}
+    return {_canonical_game_name_key(x) for x in launched}
 
 
 def _format_evo_outbound_block(
@@ -5231,7 +5243,7 @@ def process_evo_sd_batch_maintenance(
         pairs_launched: list[tuple[str, str]] = []
         for i, en in enumerate(pb["en"]):
             zh = pb["zh"][i] if i < len(pb["zh"]) else ""
-            key = _cell_norm(en).replace(" ", "")
+            key = _canonical_game_name_key(en)
             label = _evo_game_display_label(en, zh)
             if key in launched_keys:
                 if label not in seen_valid:
