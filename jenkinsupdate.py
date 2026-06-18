@@ -9981,6 +9981,32 @@ def _fpms_lark_release_build_wait_session(
     return released
 
 
+def _fpms_lark_release_all_build_waits_in_chat(chat_id: str) -> int:
+    """Set EVERY pending build-gate event in this chat and remove those sessions.
+
+    Guarantees a cancelled run's Playwright thread always unblocks (and closes its browser) even if
+    the Cancel button's sender resolved to a different session key than the run started under — a
+    stuck blocked thread keeps a headless browser alive and can block new runs until a restart.
+    """
+    prefix = f"{(chat_id or '').strip()}:"
+    released = 0
+    with _fpms_lark_sessions_lock:
+        for sk in list(_fpms_lark_sessions.keys()):
+            if not str(sk).startswith(prefix):
+                continue
+            s = _fpms_lark_sessions.get(sk)
+            if isinstance(s, dict) and s.get("state") == "jenkins_wait_build":
+                ev = s.get("build_gate_event")
+                s["state"] = "jenkins_cancelled"
+                s["lark_cancel"] = True
+                s["approve_build"] = False
+                if isinstance(ev, threading.Event):
+                    ev.set()
+                _fpms_lark_sessions.pop(sk, None)
+                released += 1
+    return released
+
+
 def handle_lark_jenkins_update_message(
     chat_id: str,
     sender_id: str,
@@ -10011,6 +10037,21 @@ def handle_lark_jenkins_update_message(
     low = (clean_text or "").strip().casefold()
     body_early = (original_text or clean_text or "").replace("\r\n", "\n").strip()
 
+    # Diagnostic: session state on every jenkins-related message (helps debug "cancel then new run
+    # just reacts"). Shows leftover state/queue that would swallow or block a fresh run.
+    try:
+        with _fpms_lark_sessions_lock:
+            _dbg = _fpms_lark_sessions.get(key)
+        print(
+            f"[jenkinsupdate] msg key={key!r} state="
+            f"{(_dbg.get('state') if isinstance(_dbg, dict) else None)!r} "
+            f"has_queue={bool(isinstance(_dbg, dict) and _dbg.get('updatemore_queue'))} "
+            f"allow_start={allow_start} text={(clean_text or '')[:60]!r}",
+            flush=True,
+        )
+    except Exception:
+        pass
+
     if handle_lark_jenkins_bot_callback(
         chat_id, sender_id, clean_text, original_text, send
     ):
@@ -10037,8 +10078,10 @@ def handle_lark_jenkins_update_message(
         with _fpms_lark_sessions_lock:
             had_other = key in _fpms_lark_sessions
         # Full cleanup so the NEXT run starts clean: clear this user's session (+ open_id/union_id
-        # aliases) AND any leftover /updatemore queue mirrored by chat. Otherwise stale state could
-        # make a new run "just react" until a duty-bot restart.
+        # aliases), release EVERY pending build gate in the chat (so the cancelled run's Playwright
+        # thread always unblocks and closes its browser — a stuck blocked thread/browser is what
+        # makes a new run "just react" until a duty-bot restart), AND drop any /updatemore mirror.
+        released_all = _fpms_lark_release_all_build_waits_in_chat(chat_id)
         _fpms_lark_clear_session(chat_id, sender_id)
         try:
             import updatemore as _um_cancel
@@ -10048,7 +10091,7 @@ def handle_lark_jenkins_update_message(
             )
         except Exception:
             pass
-        if released or had_other:
+        if released or released_all or had_other:
             send(chat_id, "⏹️ **All `/update` steps cancelled.**")
         else:
             send(chat_id, "ℹ️ No active `/update` session to cancel.")
