@@ -126,6 +126,8 @@ BI_API_UPDATE_BUILD_URL = (
 QRQM_UPDATE_BUILD_URL = (
     "https://jenkins.client8.me/job/BI-GO/job/QRQM-UPDATE/build?delay=0sec"
 )
+# QRQM-UPDATE parameters: ENVIRONMENT + SOURCE_BRANCH are both **dropdowns** (not free text).
+# SOURCE_BRANCH options on Jenkins: main, qat, uat.
 FPMS_NT_UAT_BO_UPDATE_URL = (
     "https://jenkins.client8.me/job/FPMS_NT/job/FPMS_NT_UAT_BO_UPDATE/build?delay=0sec"
 )
@@ -220,6 +222,7 @@ BI_API_UPDATE_REPOSITORY_OPTIONS: list[tuple[str, str]] = [
     ("bi-pms-player-tag", "bi-pms-player-tag"),
     ("bi-tag-management", "bi-tag-management"),
     ("bi-risk-detection", "bi-risk-detection"),
+    ("bi-risk-detection-web", "bi-risk-detection-web"),
     ("bi-ad-asset-review", "bi-ad-asset-review"),
 ]
 
@@ -1290,6 +1293,24 @@ def _catalog_substring_superset_ids(tok: str, catalog: Sequence[str]) -> list[st
     return out
 
 
+def _catalog_substring_subset_ids(tok: str, catalog: Sequence[str]) -> list[str]:
+    """
+    Catalog entries that are a **proper substring** of ``tok`` (user typed a longer name).
+
+    E.g. ``bi-risk-detection`` is a subset of ``bi-risk-detection-web`` — auto-picking
+    the shorter entry when the user asked for the longer one is wrong.
+    """
+    k = _normalize_service_query_key(tok)
+    if not k:
+        return []
+    out: list[str] = []
+    for s in catalog:
+        sk = _normalize_service_query_key(s)
+        if sk != k and sk in k:
+            out.append(s)
+    return out
+
+
 def _resolve_catalog_token_or_menu(tok: str, catalog: Sequence[str]) -> tuple[str | None, bool]:
     """
     Decide whether ``tok`` can be auto-selected from ``catalog`` or needs a pick menu.
@@ -1900,6 +1921,9 @@ def _resolve_bi_repository_jenkins_value(
         return reordered[0][0], reordered[:8], True
 
     top_v, _top_t, top_sc = ranked[0]
+    subset_values = _catalog_substring_subset_ids(want, option_values)
+    if subset_values and top_v in subset_values:
+        return top_v, ranked[:8], True
     if top_sc >= 10.0:
         return top_v, ranked[:8], False
     if top_sc >= 8.0:
@@ -4533,7 +4557,16 @@ def _choose_bi_repository_option_value(
         raise ValueError("REPOSITORY: no options available on Jenkins page.")
     top = ranked[: min(8, len(ranked))]
     if not _stdin_stdout_interactive():
+        for ov, ot, _sc in ranked:
+            if ov.casefold() == want.casefold() or ot.casefold() == want.casefold():
+                return ov
         pick = top[0][0]
+        option_values = [ov for ov, _ot in options]
+        if pick in _catalog_substring_subset_ids(want, option_values):
+            raise ValueError(
+                f"REPOSITORY {want!r} is more specific than auto-picked {pick!r}; "
+                "add the exact Jenkins option or pick from the menu."
+            )
         print(
             "⚠️ REPOSITORY is not an exact match; non-interactive mode auto-picked nearest "
             f"{pick!r} for input {want!r}."
@@ -5089,9 +5122,9 @@ def verify_qrqm_update_parameters_display(
     environment_expected: str,
     source_branch_expected: str,
 ) -> tuple[bool, list[str]]:
-    """Re-read QRQM-UPDATE fields (ENVIRONMENT / SOURCE_BRANCH)."""
+    """Re-read QRQM-UPDATE fields (ENVIRONMENT dropdown / SOURCE_BRANCH dropdown)."""
     want_env = normalize_parameter_text(environment_expected).casefold()
-    want_branch = normalize_parameter_text(source_branch_expected)
+    want_branch = normalize_parameter_text(source_branch_expected).casefold()
     lines: list[str] = []
     ok_all = True
 
@@ -5106,12 +5139,12 @@ def verify_qrqm_update_parameters_display(
     lines.append(_verify_page_expected_line(env_ok, "Environment", got_env, want_env))
 
     try:
-        got_branch = read_text_parameter_value(page, "SOURCE_BRANCH")
+        got_branch = read_choice_parameter_value(page, "SOURCE_BRANCH")
     except Exception as ex:
         got_branch = f"(read failed: {ex})"
         branch_ok = False
     else:
-        branch_ok = got_branch.casefold() == want_branch.casefold()
+        branch_ok = got_branch.casefold() == want_branch
     ok_all = ok_all and branch_ok
     lines.append(
         _verify_page_expected_line(branch_ok, "Source Branch", got_branch, want_branch)
@@ -11504,7 +11537,7 @@ def run(
                 fill_text_parameter(page, "SOURCE_BRANCH", branch)
             elif is_qrqm_update:
                 select_choice_parameter_by_value(page, "ENVIRONMENT", environment)
-                fill_text_parameter(page, "SOURCE_BRANCH", branch)
+                select_choice_parameter_by_value(page, "SOURCE_BRANCH", branch)
             elif is_bi_script_update:
                 # DEPLOYMENT_FILE_NAME multi-select checkboxes + ENVIRONMENT dropdown + SOURCE_BRANCH text.
                 if services:
