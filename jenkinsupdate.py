@@ -33,7 +33,8 @@ Job URL: https://jenkins.client8.me/job/FPMS/job/FPMS_UAT_BRANCH_UPDATE/build?de
 
 Credentials: ``JENKINS_USERNAME`` / ``JENKINS_PASSWORD`` (recommended), else defaults below.
 
-**Lark bot screenshots** (all automated ``/jenkinsupdate`` jobs): YES/NO card first; **one** whole-form PNG
+**Lark bot screenshots** (all automated ``/jenkinsupdate`` jobs): YES/NO card shows **Link / Env / Branch** and one
+embedded form screenshot; separate 📸 screenshot messages are not sent.
 uploads in the background. ``JENKINSUPDATE_FORM_SCREENSHOT=0`` disables. ``JENKINSUPDATE_FORM_SCREENSHOT_ROWS=1``
 adds per-parameter row images. By default, when you list services (e.g. ``auth-rollout, player-rollout``), the bot
 also sends a **Services row** PNG plus **one close-up per service** (``JENKINSUPDATE_SERVICES_DETAIL_SCREENSHOT=0``
@@ -7371,52 +7372,73 @@ def _fpms_lark_safe_code_fence(s: str) -> str:
     return (s or "").replace("```", "'''").strip()
 
 
+def _jenkins_filled_env_branch_for_display(
+    job_profile: str,
+    *,
+    environment: str = "",
+    branch: str = "",
+    command: str = "",
+    vpn_users: str = "",
+    vpn_location: str = "",
+) -> tuple[str, str]:
+    """Env / Branch lines for the Lark YES/NO card (values the bot filled on Jenkins)."""
+    jp = (job_profile or "fpms").strip()
+    dash = "—"
+    if jp == "vpn_creation":
+        return (
+            normalize_parameter_text(vpn_location) or dash,
+            normalize_parameter_text(vpn_users) or dash,
+        )
+    if jp == "fpms_prod_script":
+        return (
+            normalize_parameter_text(environment) or dash,
+            normalize_parameter_text(command) or dash,
+        )
+    if jp in ("fnt_rc", "sms_uat"):
+        return dash, normalize_parameter_text(branch) or dash
+    env_out = normalize_parameter_text(environment) or dash
+    branch_out = normalize_parameter_text(branch) or dash
+    return env_out, branch_out
+
+
 def _fpms_lark_verification_card_json(
     *,
-    prompt_echo: str,
-    verify_lines: list[str],
+    filled_env: str,
+    filled_branch: str,
     ok_all: bool,
     build_url: str,
     job_profile: str = "fpms",
     next_build_number: int | None = None,
+    screenshot_img_key: str = "",
 ) -> str:
-    """Lark ``msg_type=interactive`` payload: JSON string of the card."""
-    safe = _fpms_lark_safe_code_fence(prompt_echo) or "(empty)"
-    md_checks = "\n".join(verify_lines)
-    footer_ok = (
-        "✅ All checks **OK** — tap **YES** or **NO** below (or type **yes** / **no**). "
-        "Form + Services close-up screenshot(s) may arrive in chat right after this card."
-    )
-    footer_bad = (
-        "⚠️ At least one line shows **❌**. **Build** stays disabled until every line is ✅. "
-        "Fix Jenkins or your config, then run `/jenkinsupdate` again. Tap **NO** (or type **no**) to "
-        "close without **Build**."
-    )
-    block_a = f"📋 **Your message**\n```\n{safe}\n```"
-    block_b = (
-        f"🔗 **Jenkins**\n[{build_url}]({build_url})\n\n"
-        f"🧪 **Form filled and re-check**\n{md_checks}\n\n"
-        f"{footer_ok if ok_all else footer_bad}"
+    """Lark ``msg_type=interactive`` payload: Link / Env / Branch + optional screenshot."""
+    link = (build_url or "").strip()
+    env = (filled_env or "—").strip() or "—"
+    branch = (filled_branch or "—").strip() or "—"
+    block = (
+        f"**Link:** [{link}]({link})\n"
+        f"**Env:** `{env}`\n"
+        f"**Branch:** `{branch}`"
     )
     jp = (job_profile or "fpms").strip()
     if jp == "vpn_creation":
-        title_text = "VPN CREATION — form filled & re-check"
+        title_text = "VPN CREATION"
     elif jp == "fnt_rc":
-        title_text = "FNT RC UAT — form filled & re-check"
+        title_text = "FNT RC UAT"
     elif jp == "sms_uat":
-        title_text = "SMS UAT UPDATE — form filled & re-check"
+        title_text = "SMS UAT UPDATE"
     elif jp == "fpms_prod_script":
-        title_text = "FPMS PROD SCRIPT RUN — form filled & re-check"
+        title_text = "FPMS PROD SCRIPT RUN"
     elif jp == "bi_api_update":
-        title_text = "BI API UPDATE — form filled & re-check"
+        title_text = "BI API UPDATE"
     elif jp == "qrqm_update":
-        title_text = "QRQM UPDATE — form filled & re-check"
+        title_text = "QRQM UPDATE"
     elif jp == "bi_script_update":
-        title_text = "BI SCRIPT UPDATE — form filled & re-check"
+        title_text = "BI SCRIPT UPDATE"
     elif jp == "venue_uat":
-        title_text = "VENUE UAT — form filled & re-check"
+        title_text = "VENUE UAT"
     else:
-        title_text = "FPMS UAT — form filled & re-check"
+        title_text = "FPMS UAT"
     if isinstance(next_build_number, int) and next_build_number > 0:
         title_text = f"{title_text} #{next_build_number}"
 
@@ -7432,6 +7454,19 @@ def _fpms_lark_verification_card_json(
         {"k": "wb", "v": "n"},
         element_id="ju_wb_n",
     )
+    body_elements: list[dict] = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": block}},
+    ]
+    ik = (screenshot_img_key or "").strip()
+    if ik:
+        body_elements.append(
+            {
+                "tag": "img",
+                "img_key": ik,
+                "alt": {"tag": "plain_text", "content": "Jenkins form"},
+            }
+        )
+    body_elements.extend([yes_btn, no_btn])
     card: dict = {
         "schema": "2.0",
         "config": {"update_multi": True, "width_mode": "fill"},
@@ -7443,14 +7478,7 @@ def _fpms_lark_verification_card_json(
             },
         },
         "body": {
-            "elements": [
-                {"tag": "div", "text": {"tag": "lark_md", "content": block_a}},
-                {"tag": "hr"},
-                {"tag": "div", "text": {"tag": "lark_md", "content": block_b}},
-                # Stacked buttons (avoids some clients failing on column_set in narrow layouts)
-                yes_btn,
-                no_btn,
-            ],
+            "elements": body_elements,
         },
     }
     return json.dumps(card, ensure_ascii=False)
@@ -7458,8 +7486,8 @@ def _fpms_lark_verification_card_json(
 
 def _fpms_lark_verification_plain_fallback(
     *,
-    prompt_echo: str,
-    verify_lines: list[str],
+    filled_env: str,
+    filled_branch: str,
     ok_all: bool,
     build_url: str,
     job_profile: str = "fpms",
@@ -7467,46 +7495,41 @@ def _fpms_lark_verification_plain_fallback(
 ) -> str:
     jp = (job_profile or "fpms").strip()
     if jp == "vpn_creation":
-        head = "VPN CREATION — form filled & re-check"
+        head = "VPN CREATION"
     elif jp == "fnt_rc":
-        head = "FNT RC UAT — form filled & re-check"
+        head = "FNT RC UAT"
     elif jp == "sms_uat":
-        head = "SMS UAT UPDATE — form filled & re-check"
+        head = "SMS UAT UPDATE"
     elif jp == "fpms_prod_script":
-        head = "FPMS PROD SCRIPT RUN — form filled & re-check"
+        head = "FPMS PROD SCRIPT RUN"
     elif jp == "bi_api_update":
-        head = "BI API UPDATE — form filled & re-check"
+        head = "BI API UPDATE"
+    elif jp == "qrqm_update":
+        head = "QRQM UPDATE"
+    elif jp == "bi_script_update":
+        head = "BI SCRIPT UPDATE"
     elif jp == "venue_uat":
-        head = "VENUE UAT — form filled & re-check"
+        head = "VENUE UAT"
     else:
-        head = "FPMS UAT — form filled & re-check"
+        head = "FPMS UAT"
     if isinstance(next_build_number, int) and next_build_number > 0:
         head = f"{head} #{next_build_number}"
-    safe = _fpms_lark_safe_code_fence(prompt_echo) or "(empty)"
+    link = (build_url or "").strip()
+    env = (filled_env or "—").strip() or "—"
+    branch = (filled_branch or "—").strip() or "—"
     lines = [
         f"🧾 **{head}**",
         "",
-        "📋 **Your message**",
-        "```",
-        safe,
-        "```",
-        "",
-        f"🔗 **Jenkins (build page):** {build_url}",
-        "",
-        "🧪 **Form filled and re-check**",
-        *verify_lines,
+        f"**Link:** {link}",
+        f"**Env:** `{env}`",
+        f"**Branch:** `{branch}`",
         "",
     ]
     if ok_all:
-        lines.append(
-            "✅ All lines above are **OK**. Reply **yes** in this chat to click **Build** in Jenkins, "
-            "or **no** to skip **Build**."
-        )
+        lines.append("Reply **yes** to click **Build**, or **no** to skip.")
     else:
         lines.append(
-            "⚠️ At least one line shows **❌**. **Build** stays disabled until every line is ✅. "
-            "Fix Jenkins or your config, then run `/jenkinsupdate` again. Reply **no** here to close "
-            "without clicking **Build**."
+            "⚠️ Form check failed — fix Jenkins and run `/update` again. Reply **no** to close."
         )
     return "\n".join(lines)
 
@@ -7847,20 +7870,22 @@ def _fpms_lark_send_verification_summary(
     send,
     chat_id: str,
     *,
-    prompt_echo: str,
-    verify_lines: list[str],
+    filled_env: str,
+    filled_branch: str,
     ok_all: bool,
     build_url: str,
     job_profile: str = "fpms",
     next_build_number: int | None = None,
+    screenshot_img_key: str = "",
 ) -> None:
     card = _fpms_lark_verification_card_json(
-        prompt_echo=prompt_echo,
-        verify_lines=verify_lines,
+        filled_env=filled_env,
+        filled_branch=filled_branch,
         ok_all=ok_all,
         build_url=build_url,
         job_profile=job_profile,
         next_build_number=next_build_number,
+        screenshot_img_key=screenshot_img_key,
     )
     try:
         send(chat_id, card, msg_type="interactive")
@@ -7868,8 +7893,8 @@ def _fpms_lark_send_verification_summary(
         send(
             chat_id,
             _fpms_lark_verification_plain_fallback(
-                prompt_echo=prompt_echo,
-                verify_lines=verify_lines,
+                filled_env=filled_env,
+                filled_branch=filled_branch,
                 ok_all=ok_all,
                 build_url=build_url,
                 job_profile=job_profile,
@@ -11760,10 +11785,18 @@ def run(
                 send = bot_lark_gate["send"]
                 to = float(bot_lark_gate.get("timeout_sec", 7200))
                 build_url = str(bot_lark_gate.get("build_url") or BUILD_URL)
-                prompt_echo = str(bot_lark_gate.get("prompt_echo") or "")
                 next_build_number = _predict_next_build_number_from_history(page)
+                filled_env, filled_branch = _jenkins_filled_env_branch_for_display(
+                    jp,
+                    environment=environment,
+                    branch=branch,
+                    command=command,
+                    vpn_users=vpn_users,
+                    vpn_location=vpn_location,
+                )
                 shot_paths: list[str] = []
                 shot_dir = ""
+                screenshot_img_key = ""
                 if _jenkins_form_screenshot_enabled(bot_lark_gate):
                     try:
                         shot_paths, shot_dir = capture_jenkins_build_parameters_screenshots(
@@ -11787,25 +11820,25 @@ def run(
                         shot_paths = []
                         _fpms_lark_cleanup_screenshot_dir(shot_dir)
                         shot_dir = ""
+                if shot_paths:
+                    upload_fn, _send_img_fn = _fpms_lark_resolve_image_upload_helpers(
+                        bot_lark_gate
+                    )
+                    if callable(upload_fn):
+                        screenshot_img_key = upload_fn(shot_paths[0]) or ""
                 _fpms_lark_send_verification_summary(
                     send,
                     cid,
-                    prompt_echo=prompt_echo,
-                    verify_lines=verify_lines,
+                    filled_env=filled_env,
+                    filled_branch=filled_branch,
                     ok_all=ok_all,
                     build_url=build_url,
                     job_profile=jp,
                     next_build_number=next_build_number,
+                    screenshot_img_key=screenshot_img_key,
                 )
-                if shot_paths and shot_dir:
-                    _fpms_lark_upload_screenshots_background(
-                        cid,
-                        send,
-                        shot_paths,
-                        shot_dir,
-                        job_profile=jp,
-                        bot_lark_gate=bot_lark_gate,
-                    )
+                if shot_dir:
+                    _fpms_lark_cleanup_screenshot_dir(shot_dir)
                 with _fpms_lark_sessions_lock:
                     gate = _fpms_lark_sessions.get(sk)
                     ev = gate.get("build_gate_event") if isinstance(gate, dict) else None
