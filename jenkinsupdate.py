@@ -10521,6 +10521,39 @@ def handle_lark_jenkins_update_message(
                 _fpms_lark_send_service_pick_card(chat_id, key, next_tok, nranked, send)
                 return True
 
+        # /updatemore segment finished: session is a queue-only stub (no ``state``) while
+        # jenkinsbot sends email / ``/SuccessProceedNext``. Unrelated commands (/help, /fpms, …)
+        # must pass through without wiping the queue.
+        if st is None:
+            q_stub = um.get_queue(sess) if um else None
+            if isinstance(q_stub, dict) and not q_stub.get("stopped"):
+                body_chk = body_early or clean_text or original_text or ""
+                jenkins_start = bool(
+                    JENKINS_UPDATE_CMD_RE.search(body_chk)
+                    or (um and um.UPDATEMORE_CMD_RE.search(body_chk))
+                    or (
+                        allow_start
+                        and looks_like_natural_jenkins_update(body_chk)
+                    )
+                )
+                if not jenkins_start:
+                    return False
+                with _fpms_lark_sessions_lock:
+                    prev = _fpms_lark_sessions.pop(key, None)
+                    if isinstance(prev, dict):
+                        _fpms_lark_unregister_picker_sid_from_sess(prev)
+                return handle_lark_jenkins_update_message(
+                    chat_id,
+                    sender_id,
+                    clean_text,
+                    original_text,
+                    send,
+                    allow_start=allow_start,
+                    lark_sender_union_id=lark_sender_union_id,
+                    lark_message_id=lark_message_id,
+                    lark_thread_root_id=lark_thread_root_id,
+                )
+
         _fpms_lark_clear_session(chat_id, sender_id)
         had_um = bool(sess.get("updatemore_queue"))
         if had_um:

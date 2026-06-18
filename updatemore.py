@@ -1148,6 +1148,37 @@ def process_reply_update_email(
     )
 
 
+def process_updatemore_jenkins_command(
+    chat_id: str,
+    command: str,
+    send: Callable[..., Any],
+    *,
+    sessions: dict,
+    sessions_lock: threading.Lock,
+    session_key_fn: Callable[[str, str], str],
+    dispatch_update_body: Callable[..., bool],
+) -> bool:
+    """Direct entry (HTTP from jenkinsbot) — same outcome as Lark ``/FailedStop`` / ``/SuccessProceedNext``."""
+    cmd = (command or "").strip()
+    if is_failed_stop_message(cmd):
+        body = "/FailedStop"
+    elif is_success_proceed_message(cmd):
+        body = "/SuccessProceedNext"
+    else:
+        return False
+    return handle_jenkinsbot_callback(
+        chat_id,
+        "jenkinsbot",
+        body,
+        body,
+        send,
+        sessions=sessions,
+        sessions_lock=sessions_lock,
+        session_key_fn=session_key_fn,
+        dispatch_update_body=dispatch_update_body,
+    )
+
+
 def handle_jenkinsbot_callback(
     chat_id: str,
     sender_id: str,
@@ -1170,11 +1201,20 @@ def handle_jenkinsbot_callback(
     )
 
     if is_failed_stop_message(body):
+        print(
+            f"[updatemore] /FailedStop chat={chat_id!r} body={(body or '')[:80]!r}",
+            flush=True,
+        )
         key, q, sess = find_waiting_queue_for_chat(chat_id, sessions, sessions_lock)
         if not q:
             key, q, sess = find_active_queue_for_chat(chat_id, sessions, sessions_lock)
         if not q:
-            return False
+            send(
+                chat_id,
+                "⚠️ **`/FailedStop`** from jenkinsbot — no active **`/updatemore`** queue "
+                "in this chat (already finished, cancelled, or queue was cleared).",
+            )
+            return True
         with sessions_lock:
             q["stopped"] = True
             q["waiting_jenkins"] = False
@@ -1221,6 +1261,10 @@ def handle_jenkinsbot_callback(
         return True
 
     if is_success_proceed_message(body):
+        print(
+            f"[updatemore] /SuccessProceedNext chat={chat_id!r} body={(body or '')[:80]!r}",
+            flush=True,
+        )
         # Prefer a queue explicitly waiting for Jenkins; otherwise fall back to any active
         # queue in this chat so a ``/SuccessProceedNext`` is never silently ignored when the
         # ``waiting_jenkins`` flag was missed. The fallback is skipped while a run is still
@@ -1230,7 +1274,12 @@ def handle_jenkinsbot_callback(
         if (not q or q.get("stopped")) and not _chat_has_open_build_gate(chat_id, sessions, sessions_lock):
             key, q, sess = find_active_queue_for_chat(chat_id, sessions, sessions_lock)
         if not q or q.get("stopped"):
-            return False
+            send(
+                chat_id,
+                "⚠️ **`/SuccessProceedNext`** from jenkinsbot — no active **`/updatemore`** "
+                "queue in this chat (already finished, cancelled, or queue was cleared).",
+            )
+            return True
         with sessions_lock:
             q["waiting_jenkins"] = False
             idx = int(q.get("index") or 0) + 1

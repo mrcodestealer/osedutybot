@@ -3590,6 +3590,14 @@ def lark_webhook():
         _jb_duty_cmd = _updatemore.is_jenkinsbot_duty_command(duty_blob)
         if not _jb_duty_cmd:
             _jb_duty_cmd = _updatemore.is_reply_update_email_text(duty_blob or "")
+        if not _jb_duty_cmd:
+            for _scan in (clean_text, original_text, message_content_raw):
+                if _scan and (
+                    _updatemore.is_jenkinsbot_duty_command(_scan)
+                    or _updatemore.is_reply_update_email_text(_scan)
+                ):
+                    _jb_duty_cmd = True
+                    break
         if not _jb_duty_cmd and is_jenkins_bot_sender:
             _jb_duty_cmd = (
                 _updatemore.is_jenkinsbot_duty_command(message_content_raw or "")
@@ -5049,6 +5057,92 @@ def internal_reply_update_email():
         return jsonify({"ok": False, "error": f"updatemore import failed: {ex}"}), 503
     threading.Thread(
         target=_run_reply_update_email_background,
+        args=(payload,),
+        daemon=True,
+    ).start()
+    return jsonify({"ok": True, "message": "accepted", "accepted": True}), 202
+
+
+def _handle_updatemore_jenkins_callback_internal(payload: dict) -> tuple[bool, str, int]:
+    """Shared handler for ``POST /internal/updatemore-jenkins-callback``."""
+    chat_id = (payload.get("chat_id") or DUTY_CHAT_ID or "").strip()
+    command = (payload.get("command") or "").strip()
+    if not chat_id:
+        return False, "missing chat_id", 400
+    if not command:
+        return False, "missing command", 400
+    ju = _get_jenkinsupdate()
+    if ju is None:
+        return False, "jenkinsupdate module unavailable", 503
+    try:
+        import updatemore as um
+    except Exception as ex:
+        return False, f"updatemore import failed: {ex}", 503
+    if not (
+        um.is_failed_stop_message(command) or um.is_success_proceed_message(command)
+    ):
+        return False, "command must be /FailedStop or /SuccessProceedNext", 400
+    um.process_updatemore_jenkins_command(
+        chat_id,
+        command,
+        send_message,
+        sessions=ju._fpms_lark_sessions,
+        sessions_lock=ju._fpms_lark_sessions_lock,
+        session_key_fn=ju._fpms_lark_session_key,
+        dispatch_update_body=lambda cid, sk, body, snd, **kw: ju._dispatch_lark_update_command_body(
+            cid, sk, body, snd, **kw
+        ),
+    )
+    return True, "processed", 200
+
+
+def _run_updatemore_jenkins_callback_background(payload: dict) -> None:
+    try:
+        ok, msg, code = _handle_updatemore_jenkins_callback_internal(payload)
+        if not ok:
+            chat_id = (payload.get("chat_id") or DUTY_CHAT_ID or "").strip()
+            if chat_id:
+                send_message(
+                    chat_id,
+                    f"❌ Jenkins updatemore callback failed ({code}): {msg}",
+                )
+    except Exception as ex:
+        chat_id = (payload.get("chat_id") or DUTY_CHAT_ID or "").strip()
+        print(f"❌ updatemore-jenkins-callback background error: {ex}")
+        if chat_id:
+            send_message(chat_id, f"❌ Jenkins updatemore callback error: {ex}")
+
+
+@app.route("/internal/updatemore-jenkins-callback", methods=["POST"])
+def internal_updatemore_jenkins_callback():
+    """
+    jenkinsbot calls this when Lark bot→bot delivery for ``/FailedStop`` or
+    ``/SuccessProceedNext`` is unreliable (same pattern as ``/internal/reply-update-email``).
+    """
+    token_need = (os.getenv("DUTY_INTERNAL_TOKEN") or "").strip()
+    if token_need:
+        got = (
+            (request.headers.get("X-Duty-Internal-Token") or "").strip()
+            or (request.headers.get("Authorization") or "").replace("Bearer", "").strip()
+        )
+        if got != token_need:
+            return jsonify({"ok": False, "error": "unauthorized"}), 403
+    payload = request.get_json(silent=True) or {}
+    chat_id = (payload.get("chat_id") or DUTY_CHAT_ID or "").strip()
+    command = (payload.get("command") or "").strip()
+    if not chat_id:
+        return jsonify({"ok": False, "error": "missing chat_id"}), 400
+    if not command:
+        return jsonify({"ok": False, "error": "missing command"}), 400
+    ju = _get_jenkinsupdate()
+    if ju is None:
+        return jsonify({"ok": False, "error": "jenkinsupdate module unavailable"}), 503
+    try:
+        import updatemore  # noqa: F401
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"updatemore import failed: {ex}"}), 503
+    threading.Thread(
+        target=_run_updatemore_jenkins_callback_background,
         args=(payload,),
         daemon=True,
     ).start()
