@@ -9134,26 +9134,29 @@ def _fpms_lark_finish_jenkins_run_session(
             if cur_tok and cur_tok != run_token:
                 return  # a newer run owns this session — leave it alone
         q = um.get_queue(sess if isinstance(sess, dict) else None)
-        if isinstance(q, dict) and not q.get("stopped"):
-            # Keep the queue for the next segment. Also drop the ``jenkins_wait_build`` state so a
-            # FINISHED run no longer counts as an open Build gate (a lingering gate blocks the
-            # ``/SuccessProceedNext`` active-queue fallback). BUT only when THIS run's gate is
-            # already resolved (event set). If a NEWER run (e.g. a different-environment next
-            # segment dispatched immediately) has taken over this session_key and is still
-            # awaiting its YES/NO (event unset), leave it untouched so we don't clobber its gate.
-            ev = sess.get("build_gate_event") if isinstance(sess, dict) else None
-            gate_resolved = (not isinstance(ev, threading.Event)) or ev.is_set()
-            if (
-                gate_resolved
-                and isinstance(sess, dict)
-                and sess.get("state") == "jenkins_wait_build"
-            ):
-                stub: dict = {"updatemore_queue": q}
+        # ``approve_build is False`` => the user clicked **NO** (declined/skip). On decline we must
+        # NOT keep the queue (and never leave a gate/terminal state behind, which would block the
+        # next run with "just reacts").
+        declined = isinstance(sess, dict) and sess.get("approve_build") is False
+        if isinstance(q, dict) and not q.get("stopped") and not declined:
+            # Built/continuing — keep the queue for the next segment but replace the session with a
+            # CLEAN stub that drops ANY gate/terminal state (jenkins_wait_build / jenkins_post_gate
+            # / jenkins_cancelled). A lingering state makes the handler return False and silently
+            # swallow a new /update.
+            stub: dict = {"updatemore_queue": q}
+            if isinstance(sess, dict):
                 em = (sess.get("email_reply_subject") or "").strip()
                 if em:
                     stub["email_reply_subject"] = em
-                _fpms_lark_sessions[session_key] = stub
+            _fpms_lark_sessions[session_key] = stub
             keep_q = q
+        elif declined and isinstance(q, dict):
+            # Stop the declined sequence so a new run doesn't inherit it.
+            q["stopped"] = True
+            try:
+                um.sync_chat_updatemore_queue(str(q.get("chat_id") or ""), None)
+            except Exception:
+                pass
     if keep_q is not None:
         um.persist_queue(keep_q)
         return
@@ -10365,8 +10368,30 @@ def handle_lark_jenkins_update_message(
             # /fpms, /date, etc. — do not consume; YES/NO card already shown above.
             return False
         if st in ("jenkins_post_gate", "jenkins_cancelled"):
-            # Browser thread finishing — do not block /fpms and other commands.
-            return False
+            # Terminal state from a finished/declined/cancelled run. If the run's browser thread
+            # hung (leaked Chromium), its cleanup never ran and this stale session would otherwise
+            # silently swallow a NEW run ("just reacts" until restart). Drop the stale session and
+            # re-process this message as a fresh command.
+            _fpms_lark_clear_session(chat_id, sender_id)
+            try:
+                import updatemore as _um_pg
+
+                _um_pg.cancel_active_updatemore_in_chat(
+                    chat_id, _fpms_lark_sessions, _fpms_lark_sessions_lock
+                )
+            except Exception:
+                pass
+            return handle_lark_jenkins_update_message(
+                chat_id,
+                sender_id,
+                clean_text,
+                original_text,
+                send,
+                allow_start=allow_start,
+                lark_sender_union_id=lark_sender_union_id,
+                lark_message_id=lark_message_id,
+                lark_thread_root_id=lark_thread_root_id,
+            )
 
         if st == "pick":
             ranked: list[str] = sess["current_ranked"]
