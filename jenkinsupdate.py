@@ -423,6 +423,10 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
         "FPMS FNT(RC)",
         "https://jenkins.client8.me/job/FNT/job/RC-UAT-UPDATE/build?delay=0sec",
     ),
+    "rc uat": (
+        "FPMS FNT(RC)",
+        "https://jenkins.client8.me/job/FNT/job/RC-UAT-UPDATE/build?delay=0sec",
+    ),
     "fnt uat script run": (
         "FNT UAT SCRIPT RUN",
         "https://jenkins.client8.me/job/FNT/job/FNT_UAT_SCRIPT_RUN/build?delay=0sec",
@@ -482,7 +486,8 @@ JENKINS_UPDATE_CMD_RE = re.compile(
 _NL_JENKINS_UPDATE_RE = re.compile(
     r"(?i)(?:"
     r"(?:want|need|please|help(?:\s+me)?|can you)\s+(?:to\s+)?(?:update|deploy|trigger|run)\b"
-    r"|(?:update|deploy|trigger|run)\s+(?:jenkins\b|(?:fpms|pms|bi|cpms|sre|fe|nt|sms|fnt)\b)"
+    r"|(?:update|deploy|trigger|run)\s+(?:jenkins\b|(?:fpms|pms|bi|cpms|sre|fe|nt|sms|fnt|rc)\b|rc[\s-]*uat\b)"
+    r"|\brc[\s-]*uat(?:[\s-]*master)?\b"
     r"|jenkins\s+(?:update|deploy|build)"
     r")"
 )
@@ -5525,6 +5530,61 @@ def _fpms_lark_sessions_put_chat_key(session_key: str, sess: dict) -> None:
     _fpms_lark_sessions_put(chat_id, open_id, sess)
 
 
+def _fpms_lark_find_choose_job_session_unlocked(
+    sessions: dict[str, dict],
+    chat_id: str,
+    sender_open_id: str = "",
+    sender_union_id: str | None = None,
+) -> tuple[str, dict] | tuple[None, None]:
+    """Like :func:`_fpms_lark_find_choose_job_session` but caller holds ``_fpms_lark_sessions_lock``."""
+    chat = (chat_id or "").strip()
+    if not chat:
+        return None, None
+    ids = [
+        (sender_open_id or "").strip(),
+        (sender_union_id or "").strip() if sender_union_id else "",
+    ]
+    ids = [i for i in ids if i]
+    prefix = f"{chat}:"
+    for i in ids:
+        sk = _fpms_lark_session_key(chat, i)
+        sess = sessions.get(sk)
+        if isinstance(sess, dict) and sess.get("state") == "choose_job":
+            return sk, sess
+    matched: list[tuple[str, dict]] = []
+    lone: list[tuple[str, dict]] = []
+    for sk, sess in sessions.items():
+        if not sk.startswith(prefix) or not isinstance(sess, dict):
+            continue
+        if sess.get("state") != "choose_job":
+            continue
+        lone.append((sk, sess))
+        ou = str(sess.get("_lark_open_id") or "").strip()
+        uid = str(sess.get("_lark_union_id") or "").strip()
+        if ids and any(i in (ou, uid) for i in ids):
+            matched.append((sk, sess))
+    if len(matched) == 1:
+        return matched[0]
+    if len(lone) == 1:
+        return lone[0]
+    return None, None
+
+
+def _fpms_lark_find_choose_job_session(
+    chat_id: str,
+    sender_open_id: str = "",
+    sender_union_id: str | None = None,
+) -> tuple[str, dict] | tuple[None, None]:
+    """
+    Locate a ``choose_job`` session when card ``operator`` ids differ from ``im.message`` keys
+    (open_id vs union_id) or the card **sid** was dropped on callback.
+    """
+    with _fpms_lark_sessions_lock:
+        return _fpms_lark_find_choose_job_session_unlocked(
+            _fpms_lark_sessions, chat_id, sender_open_id, sender_union_id
+        )
+
+
 def resolve_lark_jenkins_card_sender(
     chat_id: str,
     extracted_sender_id: str,
@@ -5546,6 +5606,14 @@ def resolve_lark_jenkins_card_sender(
         for c in cand:
             if _fpms_lark_session_key(chat_id, c) in _fpms_lark_sessions:
                 return c
+        sk_cj, _sess_cj = _fpms_lark_find_choose_job_session_unlocked(
+            _fpms_lark_sessions,
+            chat_id,
+            (op.get("open_id") or extracted_sender_id or "").strip(),
+            (op.get("union_id") or "").strip() or None,
+        )
+        if sk_cj and ":" in sk_cj:
+            return sk_cj.split(":", 1)[1]
     return cand[0] if cand else ""
 
 
@@ -5631,6 +5699,24 @@ _VENUE_UAT_VENUES: tuple[tuple[str, str], ...] = (
     ("brazil", BRAZIL_UAT_BUILD_URL),
     ("newport", NEWPORT_UAT_BUILD_URL),
 )
+
+
+def _fnt_rc_headline_detect(body: str) -> str | None:
+    """
+    Headline clearly means **FNT RC-UAT-UPDATE** (``rc uat`` / ``rc uat master``), not
+    **FNT_UAT_SCRIPT_RUN** or telesales.
+    """
+    first = _jenkins_update_first_non_empty_line(body)
+    s = JENKINS_UPDATE_CMD_RE.sub("", first, count=1).strip()
+    s_low = re.sub(r"[`*_]", " ", s).casefold()
+    s_low = re.sub(r"\s+", " ", s_low).strip()
+    if re.search(r"\bfnt[\s-]*uat[\s-]*script\b", s_low):
+        return None
+    if re.search(r"\btelesales\b", s_low):
+        return None
+    if re.search(r"\brc[\s-]*uat(?:[\s-]*master)?\b", s_low):
+        return JENKINS_UPDATE_JOB_REGISTRY["rc uat master"][1]
+    return None
 
 
 def _venue_uat_headline_detect(text: str) -> tuple[str, str, str] | None:
@@ -9178,7 +9264,10 @@ def looks_like_natural_jenkins_update(text: str) -> bool:
     has_branch = bool(re.search(r"\bbranch\s*:", raw, re.I))
     has_svc = bool(re.search(r"\bservices?\s*:", raw, re.I))
     has_update_hint = bool(
-        re.search(r"(?i)\bjenkins\b|\bupdate\s+(?:fpms|pms|bi|cpms|sre|fe|nt|sms|fnt)\b", raw)
+        re.search(
+            r"(?i)\bjenkins\b|\bupdate\s+(?:fpms|pms|bi|cpms|sre|fe|nt|sms|fnt|rc)\b|\brc[\s-]*uat\b",
+            raw,
+        )
     )
     return has_branch and has_svc and has_update_hint
 
@@ -9246,7 +9335,7 @@ def _looks_like_freeform_update_request(text: str) -> bool:
     has_svc = bool(re.search(r"\bservices?\s*[:=]", raw, re.I))
     has_update_word = bool(
         re.search(
-            r"(?im)^\s*(?:@\S+\s+)*(?:please\s+|kindly\s+|help\s+|can\s+help\s+|i\s+want\s+)*"
+            r"(?i)(?:please\s+|kindly\s+|help(?:\s+me)?\s+|can you help\s+|i\s+want\s+(?:to\s+)?)?"
             r"(?:update|deploy)\b",
             raw,
         )
@@ -10084,6 +10173,18 @@ def _dispatch_lark_update_command_body(
             lark_message_id=lark_message_id,
         )
 
+    rc_url = _fnt_rc_headline_detect(body)
+    if rc_url:
+        label_rc = JENKINS_UPDATE_JOB_REGISTRY["rc uat master"][0]
+        return _fpms_lark_dispatch_job_row(
+            chat_id,
+            key,
+            body,
+            ("rc uat master", 2.0, label_rc, rc_url),
+            send,
+            lark_message_id=lark_message_id,
+        )
+
     head_line = _jenkins_update_first_non_empty_line(body)
     ties_h: list[tuple[str, float, str, str]] = []
     if not _jenkins_update_headline_is_config_like(head_line):
@@ -10226,6 +10327,7 @@ def _fpms_lark_release_all_build_waits_in_chat(chat_id: str) -> int:
     return released
 
 
+@_fpms_lark_with_sender_union_scope
 def handle_lark_jenkins_update_message(
     chat_id: str,
     sender_id: str,
@@ -10418,6 +10520,13 @@ def handle_lark_jenkins_update_message(
 
     with _fpms_lark_sessions_lock:
         sess = _fpms_lark_sessions.get(key)
+
+    if _parse_single_menu_index((clean_text or "").strip(), 9) is not None:
+        alt_key, alt_sess = _fpms_lark_find_choose_job_session(
+            chat_id, sender_id, lark_sender_union_id
+        )
+        if isinstance(alt_sess, dict) and alt_sess.get("state") == "choose_job":
+            key, sess = alt_key, alt_sess
 
     if sess is not None:
         st = sess.get("state")
@@ -10979,6 +11088,8 @@ def handle_lark_jenkins_card_action(
     sender_id: str,
     value: object,
     send,
+    *,
+    operator: object = None,
 ) -> bool:
     """
     Feishu ``card.action.trigger``: YES/NO (**k** ``wb``), job index (**k** ``job``), service pick
@@ -10991,6 +11102,8 @@ def handle_lark_jenkins_card_action(
     parsed = _fpms_lark_normalize_card_action_value(value)
     if not parsed:
         return False
+    op = operator if isinstance(operator, dict) else {}
+    card_union = (op.get("union_id") or "").strip() or None
     sid = str(parsed.get("sid") or "").strip()
     if sid:
         resolved = resolve_jenkins_job_card_session(chat_id, sid)
@@ -11013,6 +11126,7 @@ def handle_lark_jenkins_card_action(
             "cancel",
             send,
             allow_start=True,
+            lark_sender_union_id=card_union,
         )
     if k == "vpn_loc":
         loc = _vpn_resolve_location(str(parsed.get("loc") or "")) or str(
@@ -11045,6 +11159,7 @@ def handle_lark_jenkins_card_action(
             token,
             send,
             allow_start=True,
+            lark_sender_union_id=card_union,
         )
     if k == "job":
         try:
@@ -11059,6 +11174,7 @@ def handle_lark_jenkins_card_action(
             token,
             send,
             allow_start=True,
+            lark_sender_union_id=card_union,
         )
     return False
 

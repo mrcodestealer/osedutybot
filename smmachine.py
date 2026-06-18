@@ -2963,7 +2963,7 @@ def resolve_prod_batch_bot_targets(
 
 
 def _prod_batch_format_matched_line(m: dict) -> str:
-    """One confirm-card bullet — name from live EGM row + status / online."""
+    """One confirm-card bullet — name from live EGM row + status | online."""
     head = f"{m.get('belongs', '')} — {m.get('machine', '')}"
     bits: list[str] = []
     st = (m.get("status") or "").strip()
@@ -2975,7 +2975,7 @@ def _prod_batch_format_matched_line(m: dict) -> str:
     if m.get("is_test"):
         bits.append("TEST")
     if bits:
-        return f"• {head} — {' / '.join(bits)}"
+        return f"• {head} — {' | '.join(bits)}"
     return f"• {head}"
 
 
@@ -3005,10 +3005,9 @@ def _prod_batch_confirm_card(
     intro = LARK_INTRO.get(action, action)
     label = ACTION_LABELS.get(action, action)
     lines = [
-        f"**{label}** ({env_code})",
         intro,
         "",
-        f"**Matched ({len(matched)})** — names from live EGM (not copied from your message):",
+        "Found Machines -",
     ]
     for m in matched[:80]:
         lines.append(_prod_batch_format_matched_line(m))
@@ -3016,14 +3015,11 @@ def _prod_batch_confirm_card(
         lines.append(f"... and {len(matched) - 80} more")
     if not_found:
         lines.append("")
-        lines.append(f"**Not found ({len(not_found)}):**")
+        lines.append("Not Found Machines -")
         for nf in not_found[:40]:
             lines.append(f"• {nf}")
         if len(not_found) > 40:
             lines.append(f"... and {len(not_found) - 40} more")
-    if data_src:
-        lines.append("")
-        lines.append(f"_Source: {data_src}_")
     body_md = "\n".join(lines)
     return {
         "schema": "2.0",

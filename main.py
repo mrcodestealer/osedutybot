@@ -3353,7 +3353,9 @@ def lark_webhook():
                         flush=True,
                     )
                     return
-                ju.handle_lark_jenkins_card_action(chat_id_ca, sender_use, val_ca, send_message)
+                ju.handle_lark_jenkins_card_action(
+                    chat_id_ca, sender_use, val_ca, send_message, operator=op_ca
+                )
             except Exception as ex:
                 print(f"❌ card callback worker: {ex!r}", flush=True)
                 try:
