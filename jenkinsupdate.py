@@ -123,6 +123,9 @@ BUILD_URL = (
 BI_API_UPDATE_BUILD_URL = (
     "https://jenkins.client8.me/job/BI-GO/job/BI-API-UPDATE/build?delay=0sec"
 )
+QRQM_UPDATE_BUILD_URL = (
+    "https://jenkins.client8.me/job/BI-GO/job/QRQM-UPDATE/build?delay=0sec"
+)
 FPMS_NT_UAT_BO_UPDATE_URL = (
     "https://jenkins.client8.me/job/FPMS_NT/job/FPMS_NT_UAT_BO_UPDATE/build?delay=0sec"
 )
@@ -463,6 +466,8 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
     "ds update": ("BI API UPDATE", BI_API_UPDATE_BUILD_URL),
     "bi api update": ("BI API UPDATE", BI_API_UPDATE_BUILD_URL),
     "bi-api-update": ("BI API UPDATE", BI_API_UPDATE_BUILD_URL),
+    "qrqm": ("QRQM UPDATE", QRQM_UPDATE_BUILD_URL),
+    "qrqm update": ("QRQM UPDATE", QRQM_UPDATE_BUILD_URL),
     "bi script update": ("BI SCRIPT UPDATE", BI_SCRIPT_UPDATE_BUILD_URL),
     "bi-script-update": ("BI SCRIPT UPDATE", BI_SCRIPT_UPDATE_BUILD_URL),
 }
@@ -1746,6 +1751,15 @@ def _find_ds_or_bi_repo_token(text: str) -> str | None:
     return tok or None
 
 
+def _is_qrqm_repository(name: str) -> bool:
+    """True when the user means the dedicated **QRQM-UPDATE** Jenkins job."""
+    t = normalize_parameter_text(name).casefold()
+    if not t:
+        return False
+    slug = re.sub(r"[^a-z0-9]+", "-", t).strip("-")
+    return slug == "qrqm" or slug.startswith("qrqm-")
+
+
 def _body_requests_bi_api_update(body: str) -> bool:
     """True when the message should use BI-API-UPDATE (``/update ds``, ``ds-…``, etc.)."""
     raw = (body or "").strip()
@@ -1759,6 +1773,8 @@ def _body_requests_bi_api_update(body: str) -> bool:
     ):
         return False
     if _find_ds_or_bi_repo_token(raw):
+        return True
+    if re.search(r"\bqrqm\b", raw, re.I):
         return True
     if re.search(r"\b(?:repository|repo)\s*:", raw, re.I):
         return True
@@ -1785,6 +1801,8 @@ def _normalize_bi_repository_hint(token: str) -> str:
     t = normalize_parameter_text(token)
     if not t:
         return ""
+    if _is_qrqm_repository(t):
+        return "qrqm"
     tl = t.casefold()
     if tl.startswith("ds-") or tl.startswith("bi-"):
         return t
@@ -1815,6 +1833,8 @@ def _extract_bi_repo_hint_from_body(body: str) -> str:
     )
     if repo:
         return _normalize_bi_repository_hint(repo)
+    if re.search(r"\bqrqm\b", body, re.I):
+        return "qrqm"
     tok = _find_ds_or_bi_repo_token(body)
     if tok:
         return tok
@@ -1942,9 +1962,14 @@ def parse_bi_api_update_message_block(
         branch = BI_API_UPDATE_DEFAULT_SOURCE_BRANCH
     repo_norm = normalize_parameter_text(repo) if repo else ""
     repo_low = repo_norm.casefold()
-    if repo_norm and not (repo_low.startswith("ds-") or repo_low.startswith("bi-")):
+    if repo_norm and not (
+        _is_qrqm_repository(repo_norm)
+        or repo_low.startswith("ds-")
+        or repo_low.startswith("bi-")
+    ):
         raise ConfigBlockError(
-            f"Repository/service {repo_norm!r} must start with ds- or bi- for BI-API-UPDATE shortcut."
+            f"Repository/service {repo_norm!r} must start with ds- or bi- for BI-API-UPDATE shortcut "
+            "(or use `qrqm` for QRQM-UPDATE)."
         )
     env_norm = normalize_parameter_text(env).casefold()
     branch_norm = normalize_parameter_text(branch)
@@ -1970,6 +1995,28 @@ def _bi_api_update_build_config_block(repository: str, environment: str, source_
     return (
         "BI_API_UPDATE_V1\n"
         f"repository: {normalize_parameter_text(repository)}\n"
+        f"environment: {normalize_parameter_text(environment).casefold()}\n"
+        f"source_branch: {normalize_parameter_text(source_branch)}\n"
+    )
+
+
+def parse_qrqm_update_config_block(text: str) -> tuple[str, str]:
+    """Parse internal ``QRQM_UPDATE_V1`` block passed to ``run()``."""
+    body = (text or "").strip()
+    if not body:
+        raise ConfigBlockError("QRQM_UPDATE_V1 config is empty.")
+    lines = body.splitlines()
+    if not lines or lines[0].strip().upper() != "QRQM_UPDATE_V1":
+        raise ConfigBlockError("Missing QRQM_UPDATE_V1 header.")
+    _repo, env, branch = parse_bi_api_update_message_block(
+        "\n".join(lines[1:]), allow_missing_repository=True
+    )
+    return env, branch
+
+
+def _qrqm_update_build_config_block(environment: str, source_branch: str) -> str:
+    return (
+        "QRQM_UPDATE_V1\n"
         f"environment: {normalize_parameter_text(environment).casefold()}\n"
         f"source_branch: {normalize_parameter_text(source_branch)}\n"
     )
@@ -5037,6 +5084,41 @@ def verify_bi_api_update_parameters_display(
     return ok_all, lines
 
 
+def verify_qrqm_update_parameters_display(
+    page,
+    environment_expected: str,
+    source_branch_expected: str,
+) -> tuple[bool, list[str]]:
+    """Re-read QRQM-UPDATE fields (ENVIRONMENT / SOURCE_BRANCH)."""
+    want_env = normalize_parameter_text(environment_expected).casefold()
+    want_branch = normalize_parameter_text(source_branch_expected)
+    lines: list[str] = []
+    ok_all = True
+
+    try:
+        got_env = read_choice_parameter_value(page, "ENVIRONMENT")
+    except Exception as ex:
+        got_env = f"(read failed: {ex})"
+        env_ok = False
+    else:
+        env_ok = got_env.casefold() == want_env
+    ok_all = ok_all and env_ok
+    lines.append(_verify_page_expected_line(env_ok, "Environment", got_env, want_env))
+
+    try:
+        got_branch = read_text_parameter_value(page, "SOURCE_BRANCH")
+    except Exception as ex:
+        got_branch = f"(read failed: {ex})"
+        branch_ok = False
+    else:
+        branch_ok = got_branch.casefold() == want_branch.casefold()
+    ok_all = ok_all and branch_ok
+    lines.append(
+        _verify_page_expected_line(branch_ok, "Source Branch", got_branch, want_branch)
+    )
+    return ok_all, lines
+
+
 def verify_bi_script_update_parameters_display(
     page,
     deployment_files_expected: list[str],
@@ -5121,6 +5203,40 @@ def prompt_yes_to_click_build_bi_api_update(
         if raw in ("yes", "y"):
             ok, lines = verify_bi_api_update_parameters_display(
                 page, repository, environment, source_branch
+            )
+            print("\n→ Re-check before Build:")
+            for ln in lines:
+                print("  ", ln)
+            if not ok:
+                print(
+                    "  ⚠️ 仍有 ❌，未点击 Build。请修正浏览器中的参数后再输入 yes，或输入 no。\n"
+                    "  EN: Still ❌ — Build not clicked. Fix the form, then **yes** again, or **no**."
+                )
+                continue
+            return True
+        print("  Please type **yes** or **no**.")
+
+
+def prompt_yes_to_click_build_qrqm_update(
+    page,
+    environment: str,
+    source_branch: str,
+) -> bool:
+    """Terminal yes/no gate for QRQM-UPDATE."""
+    print(
+        "\n—— 终端核对 / Terminal ——\n"
+        "若上面全部为 ✅，输入 **yes** 后脚本会点击 Jenkins **Build**。\n"
+        "若有 ❌，请先在浏览器里改对参数，再在此输入 **yes**（会重新读页面）；输入 **no** 不点 Build。\n"
+        "EN: Type **yes** to click **Build** once every line is ✅ (re-reads the page each time). "
+        "**no** skips Build."
+    )
+    while True:
+        raw = input("> yes / no: ").strip().casefold()
+        if raw in ("no", "n"):
+            return False
+        if raw in ("yes", "y"):
+            ok, lines = verify_qrqm_update_parameters_display(
+                page, environment, source_branch
             )
             print("\n→ Re-check before Build:")
             for ln in lines:
@@ -5466,6 +5582,8 @@ def _jenkins_update_job_automation_profile(raw_urls: str) -> str | None:
         return "fpms_prod_script"
     if "/job/bi-go/job/bi-api-update/" in ul:
         return "bi_api_update"
+    if "/job/bi-go/job/qrqm-update/" in ul:
+        return "qrqm_update"
     if "/job/bi-go/job/bi-script-update/" in ul:
         return "bi_script_update"
     if "/job/brazil/job/brazil-uat-update/" in ul:
@@ -6449,9 +6567,10 @@ def parse_bi_api_update_bot_block(text: str) -> dict:
     repo, env, branch = parse_bi_api_update_message_block(
         raw, allow_missing_repository=True
     )
+    kind = "qrqm_update" if _is_qrqm_repository(repo) else "bi_api_update"
     return {
-        "_job_kind": "bi_api_update",
-        "repository": repo,
+        "_job_kind": kind,
+        "repository": "qrqm" if kind == "qrqm_update" else repo,
         "environment": env,
         "source_branch": branch,
     }
@@ -6462,6 +6581,13 @@ def _bi_api_update_bot_build_config_block(data: dict) -> str:
         str(data.get("repository") or ""),
         str(data.get("environment") or ""),
         str(data.get("source_branch") or ""),
+    )
+
+
+def _qrqm_update_bot_build_config_block(data: dict) -> str:
+    return _qrqm_update_build_config_block(
+        str(data.get("environment") or BI_API_UPDATE_DEFAULT_ENVIRONMENT),
+        str(data.get("source_branch") or BI_API_UPDATE_DEFAULT_SOURCE_BRANCH),
     )
 
 
@@ -7178,6 +7304,14 @@ def _fpms_format_config_preview(data: dict, resolved: list[str]) -> str:
                 f"- **Source Branch:** `{data['source_branch']}`",
             ]
         )
+    if jk == "qrqm_update":
+        return "\n".join(
+            [
+                "**Configuration (QRQM UPDATE — from your message)**",
+                f"- **Environment:** `{data['environment']}`",
+                f"- **Source Branch:** `{data['source_branch']}`",
+            ]
+        )
     if jk == "bi_script_update":
         lines = [
             "**Configuration (BI SCRIPT UPDATE — from your message)**",
@@ -7242,6 +7376,8 @@ def _fpms_lark_verification_card_json(
         title_text = "FPMS PROD SCRIPT RUN — form filled & re-check"
     elif jp == "bi_api_update":
         title_text = "BI API UPDATE — form filled & re-check"
+    elif jp == "qrqm_update":
+        title_text = "QRQM UPDATE — form filled & re-check"
     elif jp == "bi_script_update":
         title_text = "BI SCRIPT UPDATE — form filled & re-check"
     elif jp == "venue_uat":
@@ -7393,6 +7529,7 @@ def _jenkins_job_profile_display(job_profile: str) -> str:
         "sms_uat": "SMS UAT",
         "fpms_prod_script": "FPMS PROD SCRIPT",
         "bi_api_update": "BI API UPDATE",
+        "qrqm_update": "QRQM UPDATE",
         "bi_script_update": "BI SCRIPT UPDATE",
         "vpn_creation": "VPN CREATION",
         "venue_uat": "VENUE UAT",
@@ -7541,7 +7678,7 @@ def capture_jenkins_build_parameters_screenshots(
     if (
         services_expected
         and _jenkins_services_detail_screenshot_enabled()
-        and (job_profile or "fpms").strip() not in ("bi_api_update", "fpms_prod_script")
+        and (job_profile or "fpms").strip() not in ("bi_api_update", "qrqm_update", "fpms_prod_script")
     ):
         paths.extend(
             capture_jenkins_services_detail_screenshots(
@@ -7869,6 +8006,8 @@ def _fpms_lark_begin_jenkins_run(
         cfg = _fpms_prod_script_bot_build_config_block(data)
     elif jp == "bi_api_update":
         cfg = _bi_api_update_bot_build_config_block(data)
+    elif jp == "qrqm_update":
+        cfg = _qrqm_update_bot_build_config_block(data)
     elif jp == "bi_script_update":
         cfg = _bi_script_update_bot_build_config_block(data, resolved)
     elif jp == "venue_uat":
@@ -8056,6 +8195,10 @@ def _fpms_lark_dispatch_job_row(
             chat_id, session_key, body, ju, send, lark_message_id=lark_message_id
         )
     if prof == "bi_api_update":
+        return _fpms_lark_dispatch_bi_api_update_parameter_flow(
+            chat_id, session_key, body, ju, send, lark_message_id=lark_message_id
+        )
+    if prof == "qrqm_update":
         return _fpms_lark_dispatch_bi_api_update_parameter_flow(
             chat_id, session_key, body, ju, send, lark_message_id=lark_message_id
         )
@@ -8750,6 +8893,7 @@ def _fpms_lark_dispatch_bi_api_update_parameter_flow(
             "• `/update ds superjackpot` (defaults: **prod** / **main**)\n"
             "• `/update ds` then pick REPOSITORY from the card\n"
             "• `/update repository: ds-superjackpot-api env: prod branch: main`\n"
+            "• `/update repository: qrqm env: prod branch: main` → **QRQM-UPDATE**\n"
             f"```\n{ex}\n```",
         )
         return True
@@ -8762,6 +8906,19 @@ def _fpms_lark_dispatch_bi_api_update_parameter_flow(
                 "**Tap YES/NO** on that card (or type **yes** / **no**), or say **cancel** before starting a new run.",
             )
             return True
+    if str(data.get("_job_kind") or "").strip() == "qrqm_update":
+        _fpms_lark_begin_jenkins_run(
+            chat_id,
+            session_key,
+            data,
+            [],
+            send,
+            raw_prompt_body=body,
+            jenkins_build_url=QRQM_UPDATE_BUILD_URL,
+            job_profile="qrqm_update",
+            lark_message_id=lark_message_id,
+        )
+        return True
     repo_hint = str(data.get("repository") or "").strip()
     picked, ranked, need_pick = _resolve_bi_repository_jenkins_value(repo_hint)
     if need_pick:
@@ -8915,7 +9072,8 @@ def _normalize_bi_api_update_freeform_body(text: str) -> str:
         raw = re.sub(pat, "", raw)
     raw = re.sub(r"[ \t]+", " ", raw)
     repo, env, branch = parse_bi_api_update_message_block(raw)
-    lines = ["/update ds"]
+    head = "/update qrqm" if _is_qrqm_repository(repo) else "/update ds"
+    lines = [head]
     if repo:
         lines.append(f"repository: {repo}")
     if env:
@@ -11033,6 +11191,7 @@ def run(
     skip_env = jp in ("fnt_rc", "sms_uat")
     is_prod_script = jp == "fpms_prod_script"
     is_bi_api_update = jp == "bi_api_update"
+    is_qrqm_update = jp == "qrqm_update"
     is_bi_script_update = jp == "bi_script_update"
     is_vpn = jp == "vpn_creation"
     is_venue = jp == "venue_uat"
@@ -11065,6 +11224,21 @@ def run(
             print(
                 "\n→ Parsed BI-API-UPDATE config block:\n"
                 f"    repository:  {repository!r}\n"
+                f"    environment: {environment!r}\n"
+                f"    source_branch: {branch!r}\n"
+            )
+        elif is_qrqm_update:
+            if cl.upper().startswith("QRQM_UPDATE_V1"):
+                environment, branch = parse_qrqm_update_config_block(config_block)
+            else:
+                _repo, environment, branch = parse_bi_api_update_message_block(
+                    config_block, allow_missing_repository=True
+                )
+            repository = "qrqm"
+            services = []
+            version = ""
+            print(
+                "\n→ Parsed QRQM-UPDATE config block:\n"
                 f"    environment: {environment!r}\n"
                 f"    source_branch: {branch!r}\n"
             )
@@ -11168,6 +11342,12 @@ def run(
             services = []
             branch = normalize_parameter_text(prompt_text("What SOURCE_BRANCH?"))
             version = ""
+        elif is_qrqm_update:
+            repository = "qrqm"
+            environment = normalize_parameter_text(prompt_text("What ENVIRONMENT?")).casefold()
+            services = []
+            branch = normalize_parameter_text(prompt_text("What SOURCE_BRANCH?"))
+            version = ""
         elif is_bi_script_update:
             files_raw = normalize_parameter_text(prompt_text("What DEPLOYMENT_FILE_NAME(s)? (comma-separated)"))
             services = [t.strip() for t in re.split(r"[,，;]+", files_raw) if t.strip()]
@@ -11206,7 +11386,7 @@ def run(
         ju_for_env = str(bot_lark_gate.get("build_url") or "").strip()
     if not ju_for_env:
         ju_for_env = BUILD_URL
-    if jp == "fpms" and not is_bi_api_update and not is_prod_script and not skip_env:
+    if jp == "fpms" and not is_bi_api_update and not is_qrqm_update and not is_prod_script and not skip_env:
         forced_env = _environment_for_fpms_jenkins_job_url(ju_for_env)
         if forced_env is not None:
             if normalize_parameter_text(environment).casefold() != forced_env.casefold():
@@ -11274,6 +11454,8 @@ def run(
                 + (
                     "REPOSITORY / ENVIRONMENT / SOURCE_BRANCH…"
                     if is_bi_api_update
+                    else "ENVIRONMENT / SOURCE_BRANCH…"
+                    if is_qrqm_update
                     else "Services / Branch / Version…"
                     if skip_env
                     else "Environment / Services / Branch…"
@@ -11318,6 +11500,9 @@ def run(
                     repo_option_value,
                 )
                 repository = repo_option_value
+                select_choice_parameter_by_value(page, "ENVIRONMENT", environment)
+                fill_text_parameter(page, "SOURCE_BRANCH", branch)
+            elif is_qrqm_update:
                 select_choice_parameter_by_value(page, "ENVIRONMENT", environment)
                 fill_text_parameter(page, "SOURCE_BRANCH", branch)
             elif is_bi_script_update:
@@ -11408,6 +11593,10 @@ def run(
                     ok_first, lines_first = verify_bi_api_update_parameters_display(
                         page, repository, environment, branch
                     )
+                elif is_qrqm_update:
+                    ok_first, lines_first = verify_qrqm_update_parameters_display(
+                        page, environment, branch
+                    )
                 elif is_bi_script_update:
                     ok_first, lines_first = verify_bi_script_update_parameters_display(
                         page, services, environment, branch
@@ -11451,6 +11640,10 @@ def run(
                         ok_second, verify_lines = verify_bi_api_update_parameters_display(
                             page, repository, environment, branch
                         )
+                    elif is_qrqm_update:
+                        ok_second, verify_lines = verify_qrqm_update_parameters_display(
+                            page, environment, branch
+                        )
                     elif is_bi_script_update:
                         ok_second, verify_lines = verify_bi_script_update_parameters_display(
                             page, services, environment, branch
@@ -11490,6 +11683,10 @@ def run(
                 elif is_bi_api_update:
                     ok_all, verify_lines = verify_bi_api_update_parameters_display(
                         page, repository, environment, branch
+                    )
+                elif is_qrqm_update:
+                    ok_all, verify_lines = verify_qrqm_update_parameters_display(
+                        page, environment, branch
                     )
                 elif is_bi_script_update:
                     ok_all, verify_lines = verify_bi_script_update_parameters_display(
@@ -11649,6 +11846,13 @@ def run(
                 )
             elif is_bi_api_update:
                 if prompt_yes_to_click_build_bi_api_update(page, repository, environment, branch):
+                    _click_jenkins_build_button(page)
+                    build_clicked = True
+                    print("→ **Build** clicked (parameters submitted to Jenkins).")
+                else:
+                    print("→ **Build** skipped (you answered **no**).")
+            elif is_qrqm_update:
+                if prompt_yes_to_click_build_qrqm_update(page, environment, branch):
                     _click_jenkins_build_button(page)
                     build_clicked = True
                     print("→ **Build** clicked (parameters submitted to Jenkins).")
