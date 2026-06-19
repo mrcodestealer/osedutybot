@@ -552,7 +552,7 @@ def _shift_sheet_back_color_for_value(val: str, *, is_holiday: bool = False) -> 
     v = (val or "").strip().upper()
     if v not in _OSE_SHIFT_SHEET_STYLED_VALUES and v != "*":
         return None
-    if is_holiday and v in {"D", "N", "*"}:
+    if is_holiday:
         return _OSE_SHIFT_SHEET_BG_HOLIDAY
     if v in _OSE_SHIFT_SHEET_STYLED_VALUES:
         return _OSE_SHIFT_SHEET_BG_DUTY
@@ -800,7 +800,7 @@ def _put_ose_shift_sheet_cell_styles(
     *,
     values: Optional[list[list[Any]]] = None,
 ) -> None:
-    """Set background on offset swap cells: D/N/L white, ``*`` #8F959E, holiday #8EE085."""
+    """Set background on offset swap cells: D/N/L white, ``*`` #8F959E; holiday #8EE085 for D/N/L/*."""
     if not cell_updates:
         return
     if not SPREADSHEET_TOKEN or not SHEET_ID:

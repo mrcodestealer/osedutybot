@@ -1782,6 +1782,7 @@ def reminder_sheet_daily_sync():
 
 _ose_bitable_sync_lock = threading.Lock()
 _leave_wfh_sync_lock = threading.Lock()
+_holiday_sync_lock = threading.Lock()
 
 
 def poll_offset_approver_notifications_from_bitable():
@@ -1913,6 +1914,29 @@ def ose_leave_wfh_calendar_sync():
         _leave_wfh_sync_lock.release()
 
 
+def public_holiday_csv_sync():
+    """Sync SNSoft Public Holiday Listing (Lark calendar) → ``holiday.csv``."""
+    if not _holiday_sync_lock.acquire(blocking=False):
+        print("[Holiday sync] skipped (already running)", flush=True)
+        return
+    try:
+        from holiday_sync import sync_public_holidays_from_calendar
+
+        result = sync_public_holidays_from_calendar()
+        if result.get("ok"):
+            print(
+                f"[Holiday sync] {result['count']} row(s) from {result.get('calendar_title')!r} "
+                f"({result['year']}) → {result.get('csv_path')}",
+                flush=True,
+            )
+        else:
+            print(f"[Holiday sync] failed: {result.get('error')}", flush=True)
+    except Exception as exc:
+        print(f"[Holiday sync] error: {exc!r}", flush=True)
+    finally:
+        _holiday_sync_lock.release()
+
+
 # def amountloss():
 #     mention_line = f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>'
 #     msg = mention_line + "\n" + "Hi Morning Shift kindly reminder to do Amount Loss~"
@@ -1981,9 +2005,28 @@ def _register_leave_wfh_sync_jobs() -> None:
     )
 
 
+def _register_holiday_sync_jobs() -> None:
+    _add_scheduler_job(
+        "public_holiday_csv_sync_daily",
+        public_holiday_csv_sync,
+        "cron",
+        hour=6,
+        minute=35,
+    )
+    _add_scheduler_job(
+        "public_holiday_csv_sync_startup",
+        public_holiday_csv_sync,
+        "interval",
+        hours=24,
+        next_run_time=datetime.now(),
+    )
+    print("[Holiday sync] daily 06:35 + every 24h (first run on startup)", flush=True)
+
+
 # Lark leave/offset: clear in-process cache + prefetch before morning OSE card (same TZ as hour=7 job).
 _add_scheduler_job("ose_leave_offset_daily_sync", ose_leave_offset_daily_sync, "cron", hour=6, minute=50)
 _register_leave_wfh_sync_jobs()
+_register_holiday_sync_jobs()
 _add_scheduler_job("morning_reminder", morning_reminder, "cron", hour=7, minute=0)
 _add_scheduler_job("evening_reminder", evening_reminder, "cron", hour=19, minute=0)
 _add_scheduler_job("reminder_sheet_daily_sync", reminder_sheet_daily_sync, "cron", hour=0, minute=5)

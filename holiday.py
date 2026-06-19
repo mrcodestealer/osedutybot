@@ -43,6 +43,12 @@ def get_holidays():
         _holidays = _load_holidays()
     return _holidays
 
+def reload_holidays(csv_path: str = "holiday.csv") -> list[dict]:
+    """Reload holidays from disk (after calendar sync writes ``holiday.csv``)."""
+    global _holidays
+    _holidays = _load_holidays(csv_path)
+    return _holidays
+
 def get_holiday_date_set() -> frozenset[date]:
     """Return all public-holiday calendar dates from ``holiday.csv`` (for sheet styling)."""
     out: set[date] = set()
