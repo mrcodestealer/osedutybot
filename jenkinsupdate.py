@@ -5804,6 +5804,7 @@ def _cpms_igo_uat_headline_detect(body: str) -> str | None:
     """
     for line in (body or "").replace("\r\n", "\n").splitlines():
         s = JENKINS_UPDATE_CMD_RE.sub("", line, count=1).strip()
+        s = _normalize_config_colons(s)
         s_low = re.sub(r"[`*_]", " ", s).casefold()
         s_low = re.sub(r"\s+", " ", s_low).strip()
         if re.search(r"\b(?:cpms|igo)[\s-]*uat\b", s_low) and not re.search(
@@ -5811,6 +5812,27 @@ def _cpms_igo_uat_headline_detect(body: str) -> str | None:
         ):
             return line.strip()
     return None
+
+
+def _looks_like_cpms_igo_uat_paste(body: str) -> bool:
+    """
+    Broader CPMS / IGO UAT paste detector when the headline line is missing from plain text
+    (common in Lark rich-text posts) but ``service:`` / ``branch:`` blocks are present.
+    """
+    if _cpms_igo_uat_headline_detect(body):
+        return True
+    raw = _normalize_config_colons((body or "").replace("\r\n", "\n"))
+    has_svc = bool(re.search(r"(?im)^\s*services?\s*:", raw))
+    has_branch = bool(re.search(r"(?im)^\s*branch\s*:", raw))
+    if not (has_svc and has_branch):
+        return False
+    if re.search(r"(?im)\bcpms\d*-\s*[\d.]+", raw):
+        return True
+    if re.search(r"(?im)\b(?:help\s+)?update\s+uat\b", raw):
+        return True
+    if re.search(r"(?im)^\s*(?:igo|cpms|reward|dynamic)[-\w]", raw):
+        return True
+    return False
 
 
 def _cpms_igo_uat_version_from_headline(headline: str) -> str:
@@ -9131,6 +9153,14 @@ def _parse_cpms_igo_uat_request(body: str) -> tuple[list[str], str, str, bool, s
     if not version:
         headline = _cpms_igo_uat_headline_detect(body) or ""
         version = _cpms_igo_uat_version_from_headline(headline)
+    if not version:
+        # Headline may be absent from plain text; pick ``CPMS2-1.0.80`` anywhere in the paste.
+        m_ver = re.search(
+            r"(?im)\b(cpms\d*-\s*[\d.]+)\b",
+            _normalize_config_colons(body or ""),
+        )
+        if m_ver:
+            version = re.sub(r"\s*-\s*", "-", m_ver.group(1)).strip()
     if not branch:
         branch = "master"
     update_all = bool(service_lines) and _service_lines_mean_update_all(service_lines)
@@ -9265,6 +9295,11 @@ def _fpms_lark_dispatch_cpms_igo_uat_parameter_flow(
     wait for jenkinsbot to finish/monitor, then proceed to the next environment's services.
     """
     tokens, branch, version, update_all, explicit_env = _parse_cpms_igo_uat_request(body)
+    send(
+        chat_id,
+        f"▶️ **CPMS / IGO UAT** — routing **{len(tokens)}** service(s) "
+        f"(branch `{branch or 'master'}`, version `{version or '?'}`)…",
+    )
     if update_all or not tokens:
         send(
             chat_id,
@@ -10038,6 +10073,8 @@ def looks_like_natural_jenkins_update(text: str) -> bool:
         return True
     if _cpms_igo_uat_headline_detect(raw):
         return True
+    if _looks_like_cpms_igo_uat_paste(raw):
+        return True
     if _igo_prod_script_phrase_env(raw):
         return True
     if _body_requests_bi_script_update(raw):
@@ -10046,8 +10083,9 @@ def looks_like_natural_jenkins_update(text: str) -> bool:
         return True
     if _NL_JENKINS_UPDATE_RE.search(raw):
         return True
-    has_branch = bool(re.search(r"\bbranch\s*:", raw, re.I))
-    has_svc = bool(re.search(r"\bservices?\s*:", raw, re.I))
+    norm = _normalize_config_colons(raw)
+    has_branch = bool(re.search(r"(?im)^\s*branch\s*:", norm))
+    has_svc = bool(re.search(r"(?im)^\s*services?\s*:", norm))
     has_update_hint = bool(
         re.search(
             r"(?i)\bjenkins\b|\bupdate\s+(?:fpms|pms|bi|cpms|igo|sre|fe|nt|sms|fnt|rc)\b"
@@ -10931,7 +10969,7 @@ def _dispatch_lark_update_command_body(
         )
 
     # CPMS / IGO UAT — route the requested service to the correct job + environment.
-    if _cpms_igo_uat_headline_detect(body):
+    if _cpms_igo_uat_headline_detect(body) or _looks_like_cpms_igo_uat_paste(body):
         return _fpms_lark_dispatch_cpms_igo_uat_parameter_flow(
             chat_id, key, body, send, lark_message_id=lark_message_id
         )
@@ -11268,7 +11306,7 @@ def handle_lark_jenkins_update_message(
                 send,
                 lark_message_id=lark_message_id,
             )
-        if _cpms_igo_uat_headline_detect(body_early):
+        if _cpms_igo_uat_headline_detect(body_early) or _looks_like_cpms_igo_uat_paste(body_early):
             _fpms_lark_clear_session(chat_id, sender_id)
             return _fpms_lark_dispatch_cpms_igo_uat_parameter_flow(
                 chat_id,
@@ -11287,6 +11325,7 @@ def handle_lark_jenkins_update_message(
         allow_start
         and not JENKINS_UPDATE_CMD_RE.search(clean_text or "")
         and not (um and um.UPDATEMORE_CMD_RE.search(body_early or ""))
+        and not _looks_like_cpms_igo_uat_paste(body_early)
         and _looks_like_freeform_update_request(body_early)
     ):
         with _fpms_lark_sessions_lock:
