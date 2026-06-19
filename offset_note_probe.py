@@ -1,10 +1,11 @@
-"""One-off diagnostic: run on the SERVER to see why offset cell notes are/aren't added.
+"""Find the working Lark sheet-cell-comment request shape, on the SERVER.
 
 Usage:
-    python offset_note_probe.py            # dump state + run re-ensure + test a safe cell
-    python offset_note_probe.py 10 5       # also POST a probe note at row=10 col=5 (0-based)
+    python offset_note_probe.py <row> <col>      # 0-based matrix indices of a cell
 
-Delete this file after debugging.
+Pick a cell you don't mind annotating (e.g. one of the failing offset cells from the
+log, like row=34 col=172). It tries several request variants and prints code/msg for
+each so we can see which one the API accepts. Delete this file after debugging.
 """
 import json
 import sys
@@ -14,56 +15,84 @@ import requests
 import ose_Duty as od
 
 
-def _dump_state() -> None:
-    print("=== offset_shift_sheet_applied.json ===")
+def _try(name, method, url, params, body, headers):
     try:
-        with open(od._OFFSET_SHIFT_SHEET_APPLIED_PATH, encoding="utf-8") as fh:
-            data = json.load(fh)
-        print(json.dumps(data, ensure_ascii=False, indent=2)[:4000])
-    except FileNotFoundError:
-        print("(no state file yet — nothing has been applied on this host)")
+        resp = requests.request(method, url, headers=headers, params=params, json=body, timeout=60)
+        data = resp.json()
     except Exception as exc:
-        print(f"(could not read state: {exc!r})")
+        print(f"[{name}] EXCEPTION {exc!r}")
+        return None
+    code = data.get("code")
+    ok = "  <<< OK" if code == 0 else ""
+    print(f"[{name}] HTTP {resp.status_code} code={code} msg={data.get('msg')!r}{ok}")
+    if code == 0:
+        print(f"        data={json.dumps(data.get('data'), ensure_ascii=False)}")
+    return data
 
 
-def _probe_cell(token: str, row_idx: int, col_idx: int) -> None:
-    base = f"https://open.larksuite.com/open-apis/drive/v1/files/{od.SPREADSHEET_TOKEN}"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"}
-    print(f"\n=== POST new_comments  r{row_idx}c{col_idx} ===")
-    body_v2 = {
-        "file_type": "sheet",
-        "reply_elements": [{"type": "text", "text": "PROBE note v2"}],
-        "anchor": {"block_id": od.SHEET_ID, "sheet_col": col_idx, "sheet_row": row_idx},
-    }
-    r = requests.post(f"{base}/new_comments", headers=headers, params={"file_type": "sheet"}, json=body_v2, timeout=60)
-    print("HTTP", r.status_code, "->", json.dumps(r.json(), ensure_ascii=False))
-
-    print(f"\n=== POST comments (v1)  r{row_idx}c{col_idx} ===")
-    body_v1 = {
-        "anchor": {"sheet_id": od.SHEET_ID, "sheet_col": col_idx, "sheet_row": row_idx},
-        "reply_list": {"replies": [{"content": {"elements": [{"type": "text_run", "text_run": {"text": "PROBE note v1"}}]}}]},
-    }
-    r = requests.post(f"{base}/comments", headers=headers, params={"file_type": "sheet"}, json=body_v1, timeout=60)
-    print("HTTP", r.status_code, "->", json.dumps(r.json(), ensure_ascii=False))
-
-
-def main() -> None:
-    print("SPREADSHEET_TOKEN:", od.SPREADSHEET_TOKEN)
-    print("SHEET_ID:", od.SHEET_ID)
+def main():
+    if len(sys.argv) < 3:
+        print("usage: python offset_note_probe.py <row> <col>   (0-based)")
+        return
+    row = int(sys.argv[1])
+    col = int(sys.argv[2])
+    tok = od.SPREADSHEET_TOKEN
+    sid = od.SHEET_ID
+    text = "PROBE offset note"
     token = od.get_tenant_access_token()
-    print("token ok:", bool(token))
+    print(f"token ok={bool(token)} spreadsheet={tok} sheet={sid} cell row={row} col={col}\n")
 
-    _dump_state()
+    base = f"https://open.larksuite.com/open-apis/drive/v1/files/{tok}"
+    H = {"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"}
+    a1 = f"{od.col_index_to_letter(col + 1)}{row + 1}"
 
-    print("\n=== running reensure_applied_offset_shift_sheet_styles_and_notes() ===")
-    try:
-        stats = od.reensure_applied_offset_shift_sheet_styles_and_notes()
-        print("re-ensure stats:", stats)
-    except Exception as exc:
-        print("re-ensure raised:", repr(exc))
+    re_elems = [{"type": "text", "text": text}]
+    reply_list = {"replies": [{"content": {"elements": [{"type": "text_run", "text_run": {"text": text}}]}}]}
 
-    if len(sys.argv) >= 3:
-        _probe_cell(token, int(sys.argv[1]), int(sys.argv[2]))
+    # (name, method, url, params, body)
+    variants = [
+        ("v1 new_comments q+body block_id",
+         "POST", f"{base}/new_comments", {"file_type": "sheet"},
+         {"file_type": "sheet", "reply_elements": re_elems,
+          "anchor": {"block_id": sid, "sheet_col": col, "sheet_row": row}}),
+
+        ("v2 new_comments body-only block_id",
+         "POST", f"{base}/new_comments", None,
+         {"file_type": "sheet", "reply_elements": re_elems,
+          "anchor": {"block_id": sid, "sheet_col": col, "sheet_row": row}}),
+
+        ("v3 new_comments sheet_id anchor",
+         "POST", f"{base}/new_comments", None,
+         {"file_type": "sheet", "reply_elements": re_elems,
+          "anchor": {"sheet_id": sid, "sheet_col": col, "sheet_row": row}}),
+
+        ("v4 new_comments reply_list+anchor",
+         "POST", f"{base}/new_comments", None,
+         {"file_type": "sheet", "anchor": {"block_id": sid, "sheet_col": col, "sheet_row": row},
+          "reply_list": reply_list}),
+
+        ("v5 new_comments file_type query only",
+         "POST", f"{base}/new_comments", {"file_type": "sheet"},
+         {"reply_elements": re_elems,
+          "anchor": {"block_id": sid, "sheet_col": col, "sheet_row": row}}),
+
+        ("v6 new_comments block_id A1",
+         "POST", f"{base}/new_comments", None,
+         {"file_type": "sheet", "reply_elements": re_elems,
+          "anchor": {"block_id": f"{sid}!{a1}"}}),
+
+        ("v7 comments(v1) reply_list sheet anchor",
+         "POST", f"{base}/comments", {"file_type": "sheet"},
+         {"anchor": {"sheet_id": sid, "sheet_col": col, "sheet_row": row}, "reply_list": reply_list}),
+
+        ("v8 new_comments str col/row",
+         "POST", f"{base}/new_comments", None,
+         {"file_type": "sheet", "reply_elements": re_elems,
+          "anchor": {"block_id": sid, "sheet_col": str(col), "sheet_row": str(row)}}),
+    ]
+
+    for v in variants:
+        _try(v[0], v[1], v[2], v[3], v[4], H)
 
 
 if __name__ == "__main__":
