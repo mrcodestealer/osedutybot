@@ -64,6 +64,7 @@ _HOLIDAY_CSV_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 _WEEKDAY_NAMES = tuple(calendar.day_name)
+_SKIP_HOLIDAY_NAMES = frozenset({"hrms", "leave", "meeting", "office"})
 
 
 def _open_api_base() -> str:
@@ -230,7 +231,46 @@ def _parse_holiday_text_line(text: str) -> Optional[dict[str, str]]:
     return None
 
 
-def _row_from_event_day(code: str, name: str, on_date: date) -> dict[str, str]:
+def _is_valid_holiday_name(name: str) -> bool:
+    n = (name or "").strip()
+    if len(n) < 3:
+        return False
+    if n.lower() in _SKIP_HOLIDAY_NAMES:
+        return False
+    if re.fullmatch(r"N\d+|R\d+", n, re.I):
+        return False
+    return True
+
+
+def _extract_code_and_name(summary: str, description: str) -> tuple[str, str]:
+    """Pull Code + Name from event title/description; ignore embedded CSV dates."""
+    for blob in (summary, description):
+        for line in re.split(r"[\r\n]+", blob or ""):
+            parsed = _parse_holiday_text_line(line)
+            if parsed and parsed.get("name"):
+                return parsed["code"], parsed["name"]
+    if summary:
+        prefix = _parse_holiday_text_line(summary)
+        if prefix and prefix.get("name"):
+            return prefix["code"], prefix["name"]
+        return _infer_holiday_code(summary), summary.strip()
+    return "N01", ""
+
+
+def _dedupe_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for ev in events:
+        eid = str(ev.get("event_id") or "").strip()
+        key = eid or repr((ev.get("summary"), ev.get("start_time")))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(ev)
+    return out
+
+
+def _row_from_event_day(code: str, name: str, on_date: date) -> dict[str, Any]:
     return {
         "code": code.upper(),
         "name": name.strip(),
@@ -241,44 +281,18 @@ def _row_from_event_day(code: str, name: str, on_date: date) -> dict[str, str]:
 
 
 def _parse_holiday_event(event: dict[str, Any]) -> list[dict[str, Any]]:
-    """Convert one Lark calendar event into zero or more holiday CSV rows."""
+    """Convert one Lark calendar event into CSV row(s). Date comes from the calendar event, not description text."""
     summary = _plain_text(str(event.get("summary") or ""))
     description = _plain_text(str(event.get("description") or ""))
-    rows: list[dict[str, Any]] = []
-
-    for blob in (summary, description):
-        for line in re.split(r"[\r\n]+", blob):
-            parsed = _parse_holiday_text_line(line)
-            if parsed and parsed.get("date"):
-                try:
-                    sort_date = datetime.strptime(parsed["date"], "%d/%m/%Y").date()
-                except ValueError:
-                    continue
-                day = parsed.get("day") or _WEEKDAY_NAMES[sort_date.weekday()]
-                rows.append(
-                    {
-                        "code": parsed["code"],
-                        "name": parsed["name"],
-                        "date": parsed["date"],
-                        "day": day,
-                        "sort_date": sort_date,
-                    }
-                )
-        if rows:
-            return rows
-
-    code = _infer_holiday_code(summary)
-    name = summary
-    prefix = _parse_holiday_text_line(summary)
-    if prefix:
-        code = prefix["code"]
-        name = prefix["name"]
-    elif not name:
-        return []
-
     start_d, end_d = _event_date_range(event)
     if not start_d:
         return []
+
+    code, name = _extract_code_and_name(summary, description)
+    if not _is_valid_holiday_name(name):
+        return []
+
+    rows: list[dict[str, Any]] = []
     cur = start_d
     while cur <= end_d:
         rows.append(_row_from_event_day(code, name, cur))
@@ -289,7 +303,7 @@ def _parse_holiday_event(event: dict[str, Any]) -> list[dict[str, Any]]:
 def events_to_holiday_rows(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Merge parsed events, dedupe by date+name, sort by date."""
     by_key: dict[tuple[str, str], dict[str, Any]] = {}
-    for ev in events:
+    for ev in _dedupe_events(events):
         for row in _parse_holiday_event(ev):
             key = (row["date"], row["name"].lower())
             by_key[key] = row
@@ -390,12 +404,15 @@ def probe_public_holiday_calendar(*, year: Optional[int] = None, limit: int = 10
 
 
 def _sync_years(explicit_year: Optional[int] = None) -> list[int]:
+    """Years to fetch from the calendar API (always a multi-year window for a full CSV)."""
     if explicit_year is not None:
-        return [explicit_year]
-    raw = (os.getenv("PUBLIC_HOLIDAY_SYNC_YEARS") or "").strip()
-    if raw:
+        y = explicit_year
+    else:
+        y = date.today().year
+    env_raw = (os.getenv("PUBLIC_HOLIDAY_SYNC_YEARS") or "").strip()
+    if env_raw and explicit_year is None:
         out: list[int] = []
-        for part in re.split(r"[,;\s]+", raw):
+        for part in re.split(r"[,;\s]+", env_raw):
             part = part.strip()
             if not part:
                 continue
@@ -405,7 +422,6 @@ def _sync_years(explicit_year: Optional[int] = None) -> list[int]:
                 continue
         if out:
             return sorted(set(out))
-    y = date.today().year
     return [y - 1, y, y + 1]
 
 
@@ -442,6 +458,7 @@ def sync_public_holidays_from_calendar(
         except CalendarFetchError as exc:
             fetch_errors.append(f"{ref_year}: {exc}")
 
+    all_events = _dedupe_events(all_events)
     if fetch_errors and not all_events:
         return {
             "ok": False,
@@ -498,7 +515,7 @@ def sync_public_holidays_from_calendar(
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Sync SNSoft Public Holiday Listing → holiday.csv")
-    parser.add_argument("--year", type=int, default=None, help="Calendar year (default: current year)")
+    parser.add_argument("--year", type=int, default=None, help="Anchor year (fetches anchor-1, anchor, anchor+1)")
     parser.add_argument("--dry-run", action="store_true", help="Fetch and parse only; do not write CSV")
     parser.add_argument("--probe", action="store_true", help="Print sample raw calendar events")
     parser.add_argument("--list-calendars", action="store_true", help="List calendar search hits")
