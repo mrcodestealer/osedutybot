@@ -269,6 +269,26 @@ def probe_public_holiday_calendar(*, year: Optional[int] = None, limit: int = 10
     }
 
 
+def _sync_years(explicit_year: Optional[int] = None) -> list[int]:
+    if explicit_year is not None:
+        return [explicit_year]
+    raw = (os.getenv("PUBLIC_HOLIDAY_SYNC_YEARS") or "").strip()
+    if raw:
+        out: list[int] = []
+        for part in re.split(r"[,;\s]+", raw):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                out.append(int(part))
+            except ValueError:
+                continue
+        if out:
+            return sorted(set(out))
+    y = date.today().year
+    return [y - 1, y, y + 1]
+
+
 def sync_public_holidays_from_calendar(
     *,
     year: Optional[int] = None,
@@ -278,9 +298,9 @@ def sync_public_holidays_from_calendar(
     """
     Fetch SNSoft Public Holiday Listing and write ``holiday.csv``.
 
-    Returns a result dict with ``ok``, ``count``, ``calendar_title``, ``year``, etc.
+    Returns a result dict with ``ok``, ``count``, ``calendar_title``, ``years``, etc.
     """
-    ref_year = year or date.today().year
+    years = _sync_years(year)
     token = od.get_tenant_access_token()
     cal_id, cal_title = resolve_public_holiday_calendar_id(token)
     if not cal_id:
@@ -290,22 +310,35 @@ def sync_public_holidays_from_calendar(
                 f"Public holiday calendar not found (search: {_PUBLIC_HOLIDAY_CALENDAR_QUERY!r}). "
                 "Set PUBLIC_HOLIDAY_CALENDAR_ID in .env."
             ),
-            "year": ref_year,
+            "years": years,
         }
-    try:
-        events = fetch_public_holiday_events(token, cal_id, ref_year)
-    except CalendarFetchError as exc:
-        return {"ok": False, "error": str(exc), "year": ref_year, "calendar_id": cal_id}
 
-    rows = events_to_holiday_rows(events)
+    all_events: list[dict[str, Any]] = []
+    fetch_errors: list[str] = []
+    for ref_year in years:
+        try:
+            all_events.extend(fetch_public_holiday_events(token, cal_id, ref_year))
+        except CalendarFetchError as exc:
+            fetch_errors.append(f"{ref_year}: {exc}")
+
+    if fetch_errors and not all_events:
+        return {
+            "ok": False,
+            "error": "; ".join(fetch_errors),
+            "years": years,
+            "calendar_id": cal_id,
+        }
+
+    rows = events_to_holiday_rows(all_events)
     if not rows:
         return {
             "ok": False,
-            "error": f"No holiday events parsed for {ref_year} from {cal_title!r}.",
-            "year": ref_year,
+            "error": f"No holiday events parsed for {years} from {cal_title!r}.",
+            "years": years,
             "calendar_id": cal_id,
             "calendar_title": cal_title,
-            "raw_events": len(events),
+            "raw_events": len(all_events),
+            "warnings": fetch_errors,
         }
 
     if not dry_run:
@@ -319,13 +352,14 @@ def sync_public_holidays_from_calendar(
 
     return {
         "ok": True,
-        "year": ref_year,
+        "years": years,
         "count": len(rows),
         "calendar_id": cal_id,
         "calendar_title": cal_title,
-        "raw_events": len(events),
+        "raw_events": len(all_events),
         "csv_path": str(csv_path),
         "dry_run": dry_run,
+        "warnings": fetch_errors,
     }
 
 
@@ -357,7 +391,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     print(
         f"Holiday sync OK: {result['count']} row(s) from {result.get('calendar_title')!r} "
-        f"({result['year']})"
+        f"({', '.join(str(y) for y in result.get('years') or [])})"
         + (" (dry-run)" if result.get("dry_run") else f" → {result['csv_path']}")
     )
     return 0

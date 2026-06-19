@@ -1926,7 +1926,7 @@ def public_holiday_csv_sync():
         if result.get("ok"):
             print(
                 f"[Holiday sync] {result['count']} row(s) from {result.get('calendar_title')!r} "
-                f"({result['year']}) → {result.get('csv_path')}",
+                f"({', '.join(str(y) for y in result.get('years') or [])}) → {result.get('csv_path')}",
                 flush=True,
             )
         else:

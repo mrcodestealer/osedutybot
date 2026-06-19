@@ -542,9 +542,11 @@ def _date_for_matrix_column(values: list[list[Any]], col_idx: int) -> Optional[d
         if day_num < 1 or day_num > 31:
             continue
         try:
-            return date(year, mon_num, day_num)
+            candidate = date(year, mon_num, day_num)
         except ValueError:
             continue
+        if _date_column_for_matrix(values, candidate) == col_idx:
+            return candidate
     return None
 
 
@@ -571,8 +573,18 @@ def _shift_sheet_holiday_dates() -> frozenset[date]:
         return frozenset()
 
 
-def _cell_is_holiday(col_idx: int, values: Optional[list[list[Any]]], holidays: frozenset[date]) -> bool:
-    if not holidays or values is None:
+def _cell_is_holiday(
+    col_idx: int,
+    holidays: frozenset[date],
+    *,
+    values: Optional[list[list[Any]]] = None,
+    col_dates: Optional[dict[int, date]] = None,
+) -> bool:
+    if not holidays:
+        return False
+    if col_dates and col_idx in col_dates:
+        return col_dates[col_idx] in holidays
+    if values is None:
         return False
     d = _date_for_matrix_column(values, col_idx)
     return bool(d and d in holidays)
@@ -799,19 +811,21 @@ def _put_ose_shift_sheet_cell_styles(
     cell_updates: list[tuple[int, int, str]],
     *,
     values: Optional[list[list[Any]]] = None,
+    col_dates: Optional[dict[int, date]] = None,
 ) -> None:
     """Set background on offset swap cells: D/N/L white, ``*`` #8F959E; holiday #8EE085 for D/N/L/*."""
     if not cell_updates:
         return
     if not SPREADSHEET_TOKEN or not SHEET_ID:
         raise RuntimeError("OSE shift sheet not configured (OSE_SPREADSHEET_TOKEN / OSE_SHEET_ID)")
-    holidays = _shift_sheet_holiday_dates() if values is not None else frozenset()
+    holidays = _shift_sheet_holiday_dates()
     data: list[dict[str, Any]] = []
     for row_idx, col_idx, val in cell_updates:
         if row_idx < 0 or col_idx < 0:
             continue
         back_color = _shift_sheet_back_color_for_value(
-            val, is_holiday=_cell_is_holiday(col_idx, values, holidays)
+            val,
+            is_holiday=_cell_is_holiday(col_idx, holidays, values=values, col_dates=col_dates),
         )
         if not back_color:
             continue
@@ -833,6 +847,7 @@ def _put_ose_shift_sheet_cells(
     cell_updates: list[tuple[int, int, str]],
     *,
     values: Optional[list[list[Any]]] = None,
+    col_dates: Optional[dict[int, date]] = None,
 ) -> None:
     """Write duty cells: each item is (matrix_row_idx, col_idx, value) both 0-based."""
     if not cell_updates:
@@ -854,7 +869,7 @@ def _put_ose_shift_sheet_cells(
     res = requests.post(url, headers=headers, json={"valueRanges": value_ranges}, timeout=60).json()
     if res.get("code") != 0:
         raise RuntimeError(f"OSE shift sheet write failed: {res}")
-    _put_ose_shift_sheet_cell_styles(token, cell_updates, values=values)
+    _put_ose_shift_sheet_cell_styles(token, cell_updates, values=values, col_dates=col_dates)
     _invalidate_ose_sheet_cache()
 
 
@@ -1011,6 +1026,7 @@ def _compute_offset_shift_sheet_plan(
         "same_person": same_person,
         "updates": updates,
         "note_specs": note_specs,
+        "col_dates": {orig_col: original_date, exc_col: exchange_date},
     }
 
 
@@ -1040,7 +1056,7 @@ def apply_approved_offset_to_shift_sheet(
     )
     updates = plan["updates"]
     token = get_tenant_access_token()
-    _put_ose_shift_sheet_cells(token, updates, values=values)
+    _put_ose_shift_sheet_cells(token, updates, values=values, col_dates=plan["col_dates"])
     notes = _apply_offset_shift_sheet_notes(plan["note_specs"])
     return {
         "ok": True,
@@ -1130,7 +1146,8 @@ def revert_approved_offset_from_shift_sheet(
             raise ValueError(f"Could not find shift sheet row for exchange person {exc!r}")
         updates.extend([(exc_row, orig_col, "*"), (exc_row, exc_col, st)])
     token = get_tenant_access_token()
-    _put_ose_shift_sheet_cells(token, updates, values=values)
+    col_dates = {orig_col: original_date, exc_col: exchange_date}
+    _put_ose_shift_sheet_cells(token, updates, values=values, col_dates=col_dates)
     return {
         "ok": True,
         "request_person": req,
@@ -1269,7 +1286,9 @@ def reensure_applied_offset_shift_sheet_styles_and_notes() -> dict[str, int]:
                 shift_type=str(row.get("shift_type") or ""),
                 values=values,
             )
-            _put_ose_shift_sheet_cell_styles(token, plan["updates"], values=values)
+            _put_ose_shift_sheet_cell_styles(
+                token, plan["updates"], values=values, col_dates=plan.get("col_dates")
+            )
             styled += 1
             snap = dict(by_record.get(rid) or {})
             if not snap.get("notes"):
