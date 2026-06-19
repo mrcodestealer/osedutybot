@@ -546,16 +546,110 @@ def _extract_note_ids(data: dict[str, Any]) -> tuple[str, str]:
     return comment_id, reply_id
 
 
+def _escape_comment_text(text: str) -> str:
+    """Lark comment renderer treats ``<``/``>`` as markup; escape like the official CLI."""
+    return (text or "").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _sheet_matrix_cell_a1(row_idx: int, col_idx: int) -> str:
+    """A1-style cell ref for matrix indices (0-based row/col → 1-based sheet notation)."""
+    return f"{col_index_to_letter(col_idx + 1)}{row_idx + 1}"
+
+
+def _iter_sheet_cell_note_bodies(row_idx: int, col_idx: int, text: str) -> list[tuple[str, dict[str, Any]]]:
+    """Candidate ``new_comments`` bodies; Lark tenants differ on 0- vs 1-based sheet anchors."""
+    safe = _escape_comment_text(text)
+    reply = [{"type": "text", "text": safe}]
+    cell = _sheet_matrix_cell_a1(row_idx, col_idx)
+    sid = SHEET_ID
+    return [
+        (
+            "anchor 0-based col/row",
+            {
+                "file_type": "sheet",
+                "reply_elements": reply,
+                "anchor": {"block_id": sid, "sheet_col": int(col_idx), "sheet_row": int(row_idx)},
+            },
+        ),
+        (
+            "anchor 1-based col/row",
+            {
+                "file_type": "sheet",
+                "reply_elements": reply,
+                "anchor": {"block_id": sid, "sheet_col": int(col_idx) + 1, "sheet_row": int(row_idx) + 1},
+            },
+        ),
+        (
+            "anchor block_id sheetId!cell",
+            {
+                "file_type": "sheet",
+                "reply_elements": reply,
+                "anchor": {"block_id": f"{sid}!{cell}"},
+            },
+        ),
+        (
+            "anchor block_id+0-based",
+            {
+                "file_type": "sheet",
+                "reply_elements": reply,
+                "anchor": {
+                    "block_id": f"{sid}!{cell}",
+                    "sheet_col": int(col_idx),
+                    "sheet_row": int(row_idx),
+                },
+            },
+        ),
+        (
+            "anchor block_id+1-based",
+            {
+                "file_type": "sheet",
+                "reply_elements": reply,
+                "anchor": {
+                    "block_id": f"{sid}!{cell}",
+                    "sheet_col": int(col_idx) + 1,
+                    "sheet_row": int(row_idx) + 1,
+                },
+            },
+        ),
+    ]
+
+
+def probe_sheet_cell_note_variants(
+    token: str, row_idx: int, col_idx: int, text: str = "PROBE offset note"
+) -> list[dict[str, Any]]:
+    """Try every known ``new_comments`` body shape; for diagnostics (``user_token_setup.py probe``)."""
+    if not SPREADSHEET_TOKEN or not SHEET_ID:
+        raise RuntimeError("OSE shift sheet not configured")
+    url = f"https://open.larksuite.com/open-apis/drive/v1/files/{SPREADSHEET_TOKEN}/new_comments"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"}
+    out: list[dict[str, Any]] = []
+    for name, body in _iter_sheet_cell_note_bodies(row_idx, col_idx, text):
+        try:
+            res = requests.post(url, headers=headers, json=body, timeout=60).json()
+        except Exception as exc:
+            out.append({"variant": name, "ok": False, "error": repr(exc)})
+            continue
+        ok = res.get("code") == 0
+        entry: dict[str, Any] = {
+            "variant": name,
+            "ok": ok,
+            "code": res.get("code"),
+            "msg": res.get("msg"),
+        }
+        if ok:
+            entry["data"] = res.get("data")
+        else:
+            entry["response"] = res
+        out.append(entry)
+        if ok:
+            break
+    return out
+
+
 def _post_ose_shift_sheet_cell_note(
     token: str, row_idx: int, col_idx: int, text: str
 ) -> dict[str, Any]:
-    """Add a cell comment (note) on the OSE shift sheet; returns its comment/reply ids.
-
-    Lark has no open API for true cell ``备注`` notes, so we use the drive cell-comment
-    endpoint (``new_comments`` with a sheet ``anchor``) which renders as a cell note. This
-    endpoint requires a *user* identity, so ``token`` must be a ``user_access_token``
-    (see :mod:`user_token`); the app ``tenant_access_token`` is rejected with ``1069302``.
-    """
+    """Add a cell comment on the OSE shift sheet (requires ``user_access_token``)."""
     if row_idx < 0 or col_idx < 0 or not (text or "").strip():
         return {}
     if not token:
@@ -563,23 +657,23 @@ def _post_ose_shift_sheet_cell_note(
     if not SPREADSHEET_TOKEN or not SHEET_ID:
         raise RuntimeError("OSE shift sheet not configured (OSE_SPREADSHEET_TOKEN / OSE_SHEET_ID)")
     url = f"https://open.larksuite.com/open-apis/drive/v1/files/{SPREADSHEET_TOKEN}/new_comments"
-    body = {
-        "file_type": "sheet",
-        "reply_elements": [{"type": "text", "text": text}],
-        "anchor": {"block_id": SHEET_ID, "sheet_col": int(col_idx), "sheet_row": int(row_idx)},
-    }
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"}
-    res = requests.post(url, headers=headers, json=body, timeout=60).json()
-    if res.get("code") != 0:
-        raise RuntimeError(f"OSE shift sheet note write failed: {res}")
-    comment_id, reply_id = _extract_note_ids(res.get("data") or {})
-    return {
-        "comment_id": comment_id,
-        "reply_id": reply_id,
-        "row": int(row_idx),
-        "col": int(col_idx),
-        "text": text,
-    }
+    errors: list[str] = []
+    for name, body in _iter_sheet_cell_note_bodies(row_idx, col_idx, text):
+        res = requests.post(url, headers=headers, json=body, timeout=60).json()
+        if res.get("code") == 0:
+            comment_id, reply_id = _extract_note_ids(res.get("data") or {})
+            print(f"[ose_Duty] offset cell note variant OK: {name!r}", flush=True)
+            return {
+                "comment_id": comment_id,
+                "reply_id": reply_id,
+                "row": int(row_idx),
+                "col": int(col_idx),
+                "text": text,
+                "variant": name,
+            }
+        errors.append(f"{name}: {res}")
+    raise RuntimeError("OSE shift sheet note write failed: " + " | ".join(errors))
 
 
 def _delete_ose_shift_sheet_cell_note(comment_id: str, reply_id: str) -> bool:

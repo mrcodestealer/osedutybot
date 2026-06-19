@@ -43,7 +43,7 @@ AUTHORIZE_URL = "https://accounts.larksuite.com/open-apis/authen/v1/authorize"
 # docs:document.comment:write_only — add cell comments (required by new_comments API).
 DEFAULT_SCOPES = os.getenv(
     "LARK_OAUTH_SCOPES",
-    "drive:drive offline_access docs:document.comment:write_only",
+    "drive:drive sheets:spreadsheet offline_access docs:document.comment:write_only",
 )
 DEFAULT_REDIRECT_URI = os.getenv(
     "LARK_OAUTH_REDIRECT_URI", "https://example.com/api/oauth/callback"

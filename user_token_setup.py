@@ -6,6 +6,7 @@ Run on the SERVER (where APP_ID/APP_SECRET are set):
     python user_token_setup.py code <CODE>         # exchange the code -> store tokens
     python user_token_setup.py code "<FULL_URL>"   # or paste the whole redirect URL (Windows: use quotes)
     python user_token_setup.py status              # show token validity / scope
+    python user_token_setup.py probe <row> <col>  # try all API body variants (diagnostics)
     python user_token_setup.py test <row> <col>    # post a test note with the user token
 
 Before this, in the Lark developer console:
@@ -54,6 +55,22 @@ def main() -> None:
 
     elif cmd == "status":
         print(json.dumps(ut.status(), ensure_ascii=False, indent=2))
+
+    elif cmd == "probe":
+        if len(sys.argv) < 4:
+            print("usage: python user_token_setup.py probe <row> <col>   (0-based matrix indices)")
+            return
+        import ose_Duty as od
+
+        row, col = int(sys.argv[2]), int(sys.argv[3])
+        token = ut.get_user_access_token() or ""
+        if not token:
+            print("❌ no user_access_token — run url + code first")
+            return
+        cell = od._sheet_matrix_cell_a1(row, col)
+        print(f"spreadsheet={od.SPREADSHEET_TOKEN} sheet={od.SHEET_ID} matrix r{row}c{col} → {cell}")
+        results = od.probe_sheet_cell_note_variants(token, row, col)
+        print(json.dumps(results, ensure_ascii=False, indent=2))
 
     elif cmd == "test":
         if len(sys.argv) < 4:
