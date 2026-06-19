@@ -39,6 +39,7 @@ offset_requester_approval_notified.json
 offset_requester_open_id.json
 offset_rows_snapshot.json
 offset_shift_sheet_applied.json
+user_token.json
 # ---- Screenshots / scraped HTML ----
 *.png
 index.html

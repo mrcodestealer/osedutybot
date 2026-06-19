@@ -552,64 +552,49 @@ def _post_ose_shift_sheet_cell_note(
     """Add a cell comment (note) on the OSE shift sheet; returns its comment/reply ids.
 
     Lark has no open API for true cell ``备注`` notes, so we use the drive cell-comment
-    endpoint with a sheet ``anchor`` which renders as a cell note. We try the v2
-    ``new_comments`` endpoint first, then fall back to the v1 ``comments`` endpoint so a
-    single gateway difference does not silently drop every note.
+    endpoint (``new_comments`` with a sheet ``anchor``) which renders as a cell note. This
+    endpoint requires a *user* identity, so ``token`` must be a ``user_access_token``
+    (see :mod:`user_token`); the app ``tenant_access_token`` is rejected with ``1069302``.
     """
     if row_idx < 0 or col_idx < 0 or not (text or "").strip():
         return {}
+    if not token:
+        raise RuntimeError("missing user_access_token for cell note")
     if not SPREADSHEET_TOKEN or not SHEET_ID:
         raise RuntimeError("OSE shift sheet not configured (OSE_SPREADSHEET_TOKEN / OSE_SHEET_ID)")
+    url = f"https://open.larksuite.com/open-apis/drive/v1/files/{SPREADSHEET_TOKEN}/new_comments"
+    body = {
+        "file_type": "sheet",
+        "reply_elements": [{"type": "text", "text": text}],
+        "anchor": {"block_id": SHEET_ID, "sheet_col": int(col_idx), "sheet_row": int(row_idx)},
+    }
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"}
-    base = f"https://open.larksuite.com/open-apis/drive/v1/files/{SPREADSHEET_TOKEN}"
-    attempts = (
-        (
-            f"{base}/new_comments",
-            {
-                "file_type": "sheet",
-                "reply_elements": [{"type": "text", "text": text}],
-                "anchor": {"block_id": SHEET_ID, "sheet_col": int(col_idx), "sheet_row": int(row_idx)},
-            },
-        ),
-        (
-            f"{base}/comments",
-            {
-                "anchor": {"sheet_id": SHEET_ID, "sheet_col": int(col_idx), "sheet_row": int(row_idx)},
-                "reply_list": {
-                    "replies": [
-                        {"content": {"elements": [{"type": "text_run", "text_run": {"text": text}}]}}
-                    ]
-                },
-            },
-        ),
-    )
-    errors: list[str] = []
-    for url, body in attempts:
-        try:
-            res = requests.post(
-                url, headers=headers, params={"file_type": "sheet"}, json=body, timeout=60
-            ).json()
-        except Exception as exc:
-            errors.append(f"{url.rsplit('/', 1)[-1]}: {exc!r}")
-            continue
-        if res.get("code") == 0:
-            comment_id, reply_id = _extract_note_ids(res.get("data") or {})
-            return {
-                "comment_id": comment_id,
-                "reply_id": reply_id,
-                "row": int(row_idx),
-                "col": int(col_idx),
-                "text": text,
-            }
-        errors.append(f"{url.rsplit('/', 1)[-1]}: {res}")
-    raise RuntimeError("OSE shift sheet note write failed: " + " | ".join(errors))
+    res = requests.post(url, headers=headers, json=body, timeout=60).json()
+    if res.get("code") != 0:
+        raise RuntimeError(f"OSE shift sheet note write failed: {res}")
+    comment_id, reply_id = _extract_note_ids(res.get("data") or {})
+    return {
+        "comment_id": comment_id,
+        "reply_id": reply_id,
+        "row": int(row_idx),
+        "col": int(col_idx),
+        "text": text,
+    }
 
 
-def _delete_ose_shift_sheet_cell_note(token: str, comment_id: str, reply_id: str) -> bool:
+def _delete_ose_shift_sheet_cell_note(comment_id: str, reply_id: str) -> bool:
     """Best-effort removal of an offset cell note (deletes the comment's only reply)."""
     cid = (comment_id or "").strip()
     rid = (reply_id or "").strip()
     if not cid or not rid or not SPREADSHEET_TOKEN:
+        return False
+    try:
+        import user_token as _ut
+
+        token = _ut.get_user_access_token()
+    except Exception:
+        token = None
+    if not token:
         return False
     url = (
         f"https://open.larksuite.com/open-apis/drive/v1/files/{SPREADSHEET_TOKEN}"
@@ -620,14 +605,34 @@ def _delete_ose_shift_sheet_cell_note(token: str, comment_id: str, reply_id: str
     return res.get("code") == 0
 
 
+def _get_user_token_for_notes() -> Optional[str]:
+    try:
+        import user_token as _ut
+
+        return _ut.get_user_access_token()
+    except Exception as exc:
+        print(f"[ose_Duty] user_token unavailable for notes: {exc!r}", flush=True)
+        return None
+
+
 def _apply_offset_shift_sheet_notes(
-    token: str, note_specs: list[tuple[int, int, str]]
+    note_specs: list[tuple[int, int, str]]
 ) -> list[dict[str, Any]]:
-    """Add each (row, col, text) note; best-effort so a note failure never blocks the swap."""
+    """Add each (row, col, text) note with the user token; best-effort (never blocks swap)."""
+    if not note_specs:
+        return []
+    user_token = _get_user_token_for_notes()
+    if not user_token:
+        print(
+            "[ose_Duty] offset cell notes skipped: no user_access_token configured "
+            "(run `python user_token_setup.py url`)",
+            flush=True,
+        )
+        return []
     out: list[dict[str, Any]] = []
     for row_idx, col_idx, text in note_specs:
         try:
-            info = _post_ose_shift_sheet_cell_note(token, row_idx, col_idx, text)
+            info = _post_ose_shift_sheet_cell_note(user_token, row_idx, col_idx, text)
             if info:
                 out.append(info)
                 print(
@@ -877,7 +882,7 @@ def apply_approved_offset_to_shift_sheet(
     updates = plan["updates"]
     token = get_tenant_access_token()
     _put_ose_shift_sheet_cells(token, updates)
-    notes = _apply_offset_shift_sheet_notes(token, plan["note_specs"])
+    notes = _apply_offset_shift_sheet_notes(plan["note_specs"])
     return {
         "ok": True,
         "request_person": plan["req"],
@@ -1021,17 +1026,13 @@ def revert_approved_offset_shift_sheet_for_record(record_id: str) -> dict[str, A
         return {"ok": False, "record_id": rid, "skipped": "missing_snapshot"}
     result = _revert_shift_sheet_from_snapshot(snapshot)
     if note_list:
-        try:
-            token = get_tenant_access_token()
-            for note in note_list:
-                try:
-                    _delete_ose_shift_sheet_cell_note(
-                        token, str(note.get("comment_id") or ""), str(note.get("reply_id") or "")
-                    )
-                except Exception:
-                    pass
-        except Exception as exc:
-            print(f"[ose_Duty] offset note cleanup failed for {rid!r}: {exc!r}", flush=True)
+        for note in note_list:
+            try:
+                _delete_ose_shift_sheet_cell_note(
+                    str(note.get("comment_id") or ""), str(note.get("reply_id") or "")
+                )
+            except Exception as exc:
+                print(f"[ose_Duty] offset note cleanup failed for {rid!r}: {exc!r}", flush=True)
     _unmark_offset_shift_sheet_applied(rid)
     return {"record_id": rid, **result}
 
@@ -1113,7 +1114,7 @@ def reensure_applied_offset_shift_sheet_styles_and_notes() -> dict[str, int]:
             styled += 1
             snap = dict(by_record.get(rid) or {})
             if not snap.get("notes"):
-                notes = _apply_offset_shift_sheet_notes(token, plan["note_specs"])
+                notes = _apply_offset_shift_sheet_notes(plan["note_specs"])
                 if notes:
                     snap.update(_offset_shift_sheet_snapshot_for_row(row))
                     snap["notes"] = notes
