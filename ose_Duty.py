@@ -507,7 +507,7 @@ def _sheet_row_index_for_person(values: list[list[Any]], person: str) -> Optiona
 
 
 _OSE_SHIFT_SHEET_BG_DUTY = "#FFFFFF"
-_OSE_SHIFT_SHEET_BG_OFFSET = "#707A89"
+_OSE_SHIFT_SHEET_BG_OFFSET = "#8F959E"
 _OSE_SHIFT_SHEET_STYLED_VALUES = frozenset({"D", "N", "L"})
 
 
@@ -524,6 +524,89 @@ def _shift_sheet_back_color_for_value(val: str) -> Optional[str]:
     if v == "*":
         return _OSE_SHIFT_SHEET_BG_OFFSET
     return None
+
+
+def _offset_note_text(counterparty: str, this_day: int, other_day: int, *, same_person: bool) -> str:
+    """Cell-note text for an approved offset swap (e.g. ``Offset with Louie 8 --> 6``)."""
+    cp = (counterparty or "").strip()
+    if same_person or not cp:
+        return f"Offset {this_day} --> {other_day}"
+    return f"Offset with {cp} {this_day} --> {other_day}"
+
+
+def _post_ose_shift_sheet_cell_note(
+    token: str, row_idx: int, col_idx: int, text: str
+) -> dict[str, Any]:
+    """Add a cell comment (note) on the OSE shift sheet; returns its comment/reply ids.
+
+    Lark has no open API for true cell ``备注`` notes, so we use the drive cell-comment
+    endpoint (``new_comments`` with a sheet ``anchor``) which renders as a cell note.
+    """
+    if row_idx < 0 or col_idx < 0 or not (text or "").strip():
+        return {}
+    if not SPREADSHEET_TOKEN or not SHEET_ID:
+        raise RuntimeError("OSE shift sheet not configured (OSE_SPREADSHEET_TOKEN / OSE_SHEET_ID)")
+    url = (
+        f"https://open.larksuite.com/open-apis/drive/v1/files/{SPREADSHEET_TOKEN}/new_comments"
+    )
+    params = {"file_type": "sheet"}
+    body = {
+        "file_type": "sheet",
+        "reply_elements": [{"type": "text", "text": text}],
+        "anchor": {"block_id": SHEET_ID, "sheet_col": int(col_idx), "sheet_row": int(row_idx)},
+    }
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"}
+    res = requests.post(url, headers=headers, params=params, json=body, timeout=60).json()
+    if res.get("code") != 0:
+        raise RuntimeError(f"OSE shift sheet note write failed: {res}")
+    data = res.get("data") or {}
+    reply_id = ""
+    try:
+        replies = ((data.get("reply_list") or {}).get("replies")) or []
+        if replies:
+            reply_id = str(replies[0].get("reply_id") or "")
+    except Exception:
+        reply_id = ""
+    return {
+        "comment_id": str(data.get("comment_id") or ""),
+        "reply_id": reply_id,
+        "row": int(row_idx),
+        "col": int(col_idx),
+        "text": text,
+    }
+
+
+def _delete_ose_shift_sheet_cell_note(token: str, comment_id: str, reply_id: str) -> bool:
+    """Best-effort removal of an offset cell note (deletes the comment's only reply)."""
+    cid = (comment_id or "").strip()
+    rid = (reply_id or "").strip()
+    if not cid or not rid or not SPREADSHEET_TOKEN:
+        return False
+    url = (
+        f"https://open.larksuite.com/open-apis/drive/v1/files/{SPREADSHEET_TOKEN}"
+        f"/comments/{cid}/replies/{rid}"
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    res = requests.delete(url, headers=headers, params={"file_type": "sheet"}, timeout=60).json()
+    return res.get("code") == 0
+
+
+def _apply_offset_shift_sheet_notes(
+    token: str, note_specs: list[tuple[int, int, str]]
+) -> list[dict[str, Any]]:
+    """Add each (row, col, text) note; best-effort so a note failure never blocks the swap."""
+    out: list[dict[str, Any]] = []
+    for row_idx, col_idx, text in note_specs:
+        try:
+            info = _post_ose_shift_sheet_cell_note(token, row_idx, col_idx, text)
+            if info:
+                out.append(info)
+        except Exception as exc:
+            print(
+                f"[ose_Duty] offset cell note add failed for r{row_idx}c{col_idx}: {exc!r}",
+                flush=True,
+            )
+    return out
 
 
 def _put_ose_shift_sheet_cell_styles(token: str, cell_updates: list[tuple[int, int, str]]) -> None:
@@ -660,17 +743,19 @@ def offset_shift_sheet_already_applied(record_id: str) -> bool:
     return bool(rid and rid in _load_offset_shift_sheet_applied())
 
 
-def apply_approved_offset_to_shift_sheet(
+def _compute_offset_shift_sheet_plan(
     *,
     request_person: str,
     exchange_person: str,
     original_date: date,
     exchange_date: date,
     shift_type: str,
+    values: list[list[Any]],
 ) -> dict[str, Any]:
-    """
-    Apply an approved offset swap to OSE2026 (``3RIBRL``): ``*`` on swapped-off days,
-    ``D``/``N`` on swapped-on days. Exchange with self only updates the requester's row.
+    """Resolve the cell value updates + note specs for one approved offset swap.
+
+    Cells that gain a duty (``D``/``N``) also get a note describing the swap, e.g. the
+    requester's exchange-day cell reads ``Offset with <exchange person> <new day> --> <old day>``.
     """
     st = (shift_type or "").strip().upper()
     if st not in OSE_SHIFT_TYPES:
@@ -681,9 +766,6 @@ def apply_approved_offset_to_shift_sheet(
         raise ValueError("request_person is required")
     if not exc:
         exc = req
-    values, err = _get_cached_ose_sheet_values()
-    if not values:
-        raise RuntimeError(err or "Could not load OSE shift sheet")
     orig_col = _date_column_for_matrix(values, original_date)
     exc_col = _date_column_for_matrix(values, exchange_date)
     if orig_col is None:
@@ -698,22 +780,80 @@ def apply_approved_offset_to_shift_sheet(
         (req_row, orig_col, "*"),
         (req_row, exc_col, st),
     ]
+    # Requester now works the exchange day (the cell turning into D/N).
+    note_specs: list[tuple[int, int, str]] = [
+        (
+            req_row,
+            exc_col,
+            _offset_note_text(
+                "" if same_person else exc,
+                exchange_date.day,
+                original_date.day,
+                same_person=same_person,
+            ),
+        )
+    ]
     if not same_person:
         exc_row = _sheet_row_index_for_person(values, exc)
         if exc_row is None:
             raise ValueError(f"Could not find shift sheet row for exchange person {exc!r}")
         updates.extend([(exc_row, orig_col, st), (exc_row, exc_col, "*")])
+        # Exchange person now works the requester's original day.
+        note_specs.append(
+            (
+                exc_row,
+                orig_col,
+                _offset_note_text(req, original_date.day, exchange_date.day, same_person=False),
+            )
+        )
+    return {
+        "req": req,
+        "exc": exc,
+        "st": st,
+        "same_person": same_person,
+        "updates": updates,
+        "note_specs": note_specs,
+    }
+
+
+def apply_approved_offset_to_shift_sheet(
+    *,
+    request_person: str,
+    exchange_person: str,
+    original_date: date,
+    exchange_date: date,
+    shift_type: str,
+) -> dict[str, Any]:
+    """
+    Apply an approved offset swap to OSE2026 (``3RIBRL``): ``*`` on swapped-off days,
+    ``D``/``N`` on swapped-on days. Exchange with self only updates the requester's row.
+    Each swapped-on (duty) cell also gets a note describing the swap.
+    """
+    values, err = _get_cached_ose_sheet_values()
+    if not values:
+        raise RuntimeError(err or "Could not load OSE shift sheet")
+    plan = _compute_offset_shift_sheet_plan(
+        request_person=request_person,
+        exchange_person=exchange_person,
+        original_date=original_date,
+        exchange_date=exchange_date,
+        shift_type=shift_type,
+        values=values,
+    )
+    updates = plan["updates"]
     token = get_tenant_access_token()
     _put_ose_shift_sheet_cells(token, updates)
+    notes = _apply_offset_shift_sheet_notes(token, plan["note_specs"])
     return {
         "ok": True,
-        "request_person": req,
-        "exchange_person": exc,
+        "request_person": plan["req"],
+        "exchange_person": plan["exc"],
         "original_date": original_date.isoformat(),
         "exchange_date": exchange_date.isoformat(),
-        "shift_type": st,
+        "shift_type": plan["st"],
         "cells_updated": len(updates),
-        "myself": same_person,
+        "myself": plan["same_person"],
+        "notes": notes,
     }
 
 
@@ -741,7 +881,10 @@ def apply_approved_offset_shift_sheet_for_record(record_id: str) -> dict[str, An
         exchange_date=xd,
         shift_type=str(row.get("shift_type") or ""),
     )
-    _mark_offset_shift_sheet_applied(rid, snapshot=_offset_shift_sheet_snapshot_for_row(row))
+    snapshot = _offset_shift_sheet_snapshot_for_row(row)
+    snapshot["notes"] = result.get("notes") or []
+    snapshot["notes_applied"] = bool(result.get("notes"))
+    _mark_offset_shift_sheet_applied(rid, snapshot=snapshot)
     return {"record_id": rid, **result}
 
 
@@ -825,7 +968,9 @@ def revert_approved_offset_shift_sheet_for_record(record_id: str) -> dict[str, A
     if not offset_shift_sheet_already_applied(rid):
         return {"ok": True, "record_id": rid, "skipped": "not_applied"}
     state = _load_offset_shift_sheet_state()
-    snapshot = dict((state.get("by_record") or {}).get(rid) or {})
+    stored = dict((state.get("by_record") or {}).get(rid) or {})
+    note_list = list(stored.get("notes") or [])
+    snapshot: dict[str, Any] = stored
     row: Optional[dict[str, Any]] = None
     try:
         row = get_ose_offset_record_admin_row(rid)
@@ -841,6 +986,18 @@ def revert_approved_offset_shift_sheet_for_record(record_id: str) -> dict[str, A
     elif not snapshot.get("original_date") or not snapshot.get("exchange_date"):
         return {"ok": False, "record_id": rid, "skipped": "missing_snapshot"}
     result = _revert_shift_sheet_from_snapshot(snapshot)
+    if note_list:
+        try:
+            token = get_tenant_access_token()
+            for note in note_list:
+                try:
+                    _delete_ose_shift_sheet_cell_note(
+                        token, str(note.get("comment_id") or ""), str(note.get("reply_id") or "")
+                    )
+                except Exception:
+                    pass
+        except Exception as exc:
+            print(f"[ose_Duty] offset note cleanup failed for {rid!r}: {exc!r}", flush=True)
     _unmark_offset_shift_sheet_applied(rid)
     return {"record_id": rid, **result}
 
@@ -872,9 +1029,85 @@ def scan_revert_deleted_offsets_from_shift_sheet() -> dict[str, int]:
     return {"scanned": len(applied_ids), "reverted": reverted, "errors": errors}
 
 
+_OFFSET_SHIFT_SHEET_REENSURE_DONE = False
+
+
+def reensure_applied_offset_shift_sheet_styles_and_notes() -> dict[str, int]:
+    """Re-apply offset cell background + notes for already-applied approved rows.
+
+    Cell values survive a restart, but the ``*`` background and the swap notes may not be
+    re-sent because the record is marked applied. This re-asserts the styling (idempotent)
+    and back-fills any missing notes (records applied before notes existed) without creating
+    duplicate notes for rows that already have them.
+    """
+    state = _load_offset_shift_sheet_state()
+    applied_ids = list(state.get("record_ids") or [])
+    by_record = dict(state.get("by_record") or {})
+    if not applied_ids:
+        return {"scanned": 0, "styled": 0, "noted": 0, "errors": 0}
+    values, err = _get_cached_ose_sheet_values()
+    if not values:
+        print(f"[ose_Duty] offset re-ensure skipped (no sheet): {err!r}", flush=True)
+        return {"scanned": len(applied_ids), "styled": 0, "noted": 0, "errors": 1}
+    token = get_tenant_access_token()
+    styled = 0
+    noted = 0
+    errors = 0
+    for rid in applied_ids:
+        try:
+            try:
+                row = get_ose_offset_record_admin_row(rid)
+            except KeyError:
+                continue
+            if bool(row.get("pending")):
+                continue
+            if str(row.get("approval_status") or "").strip().title() != "Approved":
+                continue
+            od = _parse_date_value(row.get("original_date"))
+            xd = _parse_date_value(row.get("exchange_date"))
+            if not od or not xd:
+                continue
+            plan = _compute_offset_shift_sheet_plan(
+                request_person=str(row.get("request_person") or ""),
+                exchange_person=str(row.get("exchange_person") or ""),
+                original_date=od,
+                exchange_date=xd,
+                shift_type=str(row.get("shift_type") or ""),
+                values=values,
+            )
+            _put_ose_shift_sheet_cell_styles(token, plan["updates"])
+            styled += 1
+            snap = dict(by_record.get(rid) or {})
+            if not snap.get("notes"):
+                notes = _apply_offset_shift_sheet_notes(token, plan["note_specs"])
+                if notes:
+                    snap.update(_offset_shift_sheet_snapshot_for_row(row))
+                    snap["notes"] = notes
+                    snap["notes_applied"] = True
+                    _mark_offset_shift_sheet_applied(rid, snapshot=snap)
+                    noted += 1
+        except Exception as exc:
+            errors += 1
+            print(f"[ose_Duty] offset re-ensure failed for {rid!r}: {exc!r}", flush=True)
+    return {"scanned": len(applied_ids), "styled": styled, "noted": noted, "errors": errors}
+
+
 def scan_bitable_approved_offsets_for_shift_sheet() -> dict[str, int]:
     """Apply duty-sheet swaps for offsets approved directly in Base (not via bot card)."""
+    global _OFFSET_SHIFT_SHEET_REENSURE_DONE
     invalidate_ose_bitable_cache()
+    if not _OFFSET_SHIFT_SHEET_REENSURE_DONE:
+        _OFFSET_SHIFT_SHEET_REENSURE_DONE = True
+        try:
+            stats = reensure_applied_offset_shift_sheet_styles_and_notes()
+            if stats.get("styled") or stats.get("noted"):
+                print(
+                    f"[ose_Duty] offset re-ensure after restart: styled={stats.get('styled')} "
+                    f"noted={stats.get('noted')} errors={stats.get('errors')}",
+                    flush=True,
+                )
+        except Exception as exc:
+            print(f"[ose_Duty] offset re-ensure pass failed: {exc!r}", flush=True)
     items = (get_ose_offset_records_admin() or {}).get("items") or []
     applied = 0
     errors = 0
