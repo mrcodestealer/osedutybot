@@ -13,6 +13,7 @@ Before this, in the Lark developer console:
       the `code` query param from the redirected URL.
     - Permissions: enable required scopes (e.g. ``drive:drive``, ``offline_access``,
       ``calendar:calendar:readonly`` for holiday sync), then publish.
+    - After adding scopes you must re-authorize (``url`` + ``code``); refresh alone is not enough.
 """
 import json
 import sys

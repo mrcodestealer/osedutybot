@@ -6,12 +6,14 @@ authorization-code exchange and then keeps a valid ``user_access_token`` availab
 refreshing it with the stored ``refresh_token`` (single-use, rotated on every refresh).
 
 One-time setup (see ``user_token_setup.py``):
-    1. In the Lark developer console add the redirect URL and enable the scopes
-       (``drive:drive`` + ``offline_access`` + ``docs:document.comment:write_only``),
-       then publish the app.
+    1. In the Lark developer console enable scopes (at minimum ``drive:drive``,
+       ``offline_access``, ``calendar:calendar:readonly``), then **publish** the app.
     2. ``python user_token_setup.py url``  -> open the printed link, authorize.
     3. Copy the ``code`` from the redirected URL.
     4. ``python user_token_setup.py code <CODE>``  -> stores the tokens.
+
+    After adding new scopes in the developer console you **must re-run steps 2–4**.
+    Refreshing an old token does not grant new scopes (``99991679``).
 
 Runtime: ``get_user_access_token()`` returns a valid token (refreshing as needed) or
 ``None`` when no/expired authorization exists, so callers can degrade gracefully.
@@ -40,10 +42,11 @@ OAUTH_TOKEN_URL = "https://open.larksuite.com/open-apis/authen/v2/oauth/token"
 AUTHORIZE_URL = "https://accounts.larksuite.com/open-apis/authen/v1/authorize"
 
 # drive:drive — sheet access; offline_access — refresh_token;
-# docs:document.comment:write_only — add cell comments (required by new_comments API).
+# calendar:calendar:readonly — read shared/subscribed calendars (holiday sync, leave calendar);
+# docs:document.comment:write_only — cell comments (optional; not supported on all tenants).
 DEFAULT_SCOPES = os.getenv(
     "LARK_OAUTH_SCOPES",
-    "drive:drive sheets:spreadsheet offline_access docs:document.comment:write_only",
+    "drive:drive sheets:spreadsheet offline_access calendar:calendar:readonly",
 )
 DEFAULT_REDIRECT_URI = os.getenv(
     "LARK_OAUTH_REDIRECT_URI", "https://example.com/api/oauth/callback"
@@ -195,11 +198,16 @@ def get_user_access_token() -> Optional[str]:
 def status() -> dict[str, Any]:
     data = _load()
     now = int(time.time())
+    scope = str(data.get("scope") or "")
+    scope_parts = {s.strip() for s in scope.replace(",", " ").split() if s.strip()}
     return {
         "has_token_file": bool(data),
         "has_refresh_token": bool(data.get("refresh_token")),
         "access_valid": bool(data.get("access_token")) and now < int(data.get("access_expires_at") or 0),
         "access_expires_in": max(0, int(data.get("access_expires_at") or 0) - now),
         "refresh_expires_in": max(0, int(data.get("refresh_expires_at") or 0) - now),
-        "scope": data.get("scope") or "",
+        "scope": scope,
+        "has_calendar_readonly": "calendar:calendar:readonly" in scope_parts
+        or "calendar:calendar" in scope_parts
+        or "calendar:calendar:read" in scope_parts,
     }

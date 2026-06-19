@@ -99,8 +99,8 @@ def _calendar_auth_tokens() -> list[tuple[str, str]]:
     return out
 
 
-def search_calendars(token: str, query: str) -> list[dict[str, str]]:
-    """Return ``[{calendar_id, summary}]`` from Lark calendar search."""
+def search_calendars(token: str, query: str) -> tuple[list[dict[str, str]], Optional[str]]:
+    """Return ``([{calendar_id, summary}, ...], error_or_None)`` from Lark calendar search."""
     url = f"{_open_api_base()}/calendar/v4/calendars/search"
     try:
         res = _calendar_get_json(
@@ -110,8 +110,7 @@ def search_calendars(token: str, query: str) -> list[dict[str, str]]:
             method="post",
         )
     except CalendarFetchError as exc:
-        print(f"[holiday_sync] calendar search {query!r} failed: {exc}", flush=True)
-        return []
+        return [], str(exc)
     out: list[dict[str, str]] = []
     for item in (res.get("data") or {}).get("items") or []:
         cal = item.get("calendar") or item
@@ -119,7 +118,7 @@ def search_calendars(token: str, query: str) -> list[dict[str, str]]:
         summary = str(cal.get("summary") or "").strip()
         if cal_id:
             out.append({"calendar_id": cal_id, "summary": summary})
-    return out
+    return out, None
 
 
 def _pick_holiday_calendar(candidates: list[dict[str, str]]) -> tuple[str, str]:
@@ -162,9 +161,13 @@ def resolve_public_holiday_calendar(token: Optional[str] = None) -> tuple[str, s
     merged: list[dict[str, str]] = []
     used_kind = ""
     used_token = ""
+    search_errors: list[str] = []
     for auth_kind, auth_token in _calendar_auth_tokens():
         for query in _CALENDAR_SEARCH_QUERIES:
-            for cal in search_calendars(auth_token, query):
+            found, err = search_calendars(auth_token, query)
+            if err:
+                search_errors.append(f"{auth_kind} search {query!r}: {err}")
+            for cal in found:
                 cid = cal["calendar_id"]
                 if cid in seen:
                     continue
@@ -339,9 +342,20 @@ def write_holiday_csv(rows: list[dict[str, Any]], csv_path: Path | str = _HOLIDA
 def list_public_holiday_calendars() -> dict[str, Any]:
     """Search Lark for calendars matching public-holiday queries (debug helper)."""
     hits: list[dict[str, str]] = []
+    search_errors: list[str] = []
+    user_auth: dict[str, Any] = {}
+    try:
+        import user_token as ut
+
+        user_auth = ut.status()
+    except Exception:
+        pass
     for auth_kind, auth_token in _calendar_auth_tokens():
         for query in _CALENDAR_SEARCH_QUERIES:
-            for cal in search_calendars(auth_token, query):
+            found, err = search_calendars(auth_token, query)
+            if err:
+                search_errors.append(f"{auth_kind} search {query!r}: {err}")
+            for cal in found:
                 hits.append(
                     {
                         "auth": auth_kind,
@@ -357,7 +371,13 @@ def list_public_holiday_calendars() -> dict[str, Any]:
         "selected_calendar_title": cal_title,
         "selected_auth": used_kind,
         "search_hits": hits,
+        "search_errors": search_errors,
+        "user_oauth": user_auth,
         "env_calendar_id": _PUBLIC_HOLIDAY_CALENDAR_ID or None,
+        "hint": (
+            "If user_oauth.has_calendar_readonly is false, re-run: "
+            "python user_token_setup.py url → authorize → python user_token_setup.py code <CODE>"
+        ),
     }
 
 
