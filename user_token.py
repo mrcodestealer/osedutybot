@@ -7,7 +7,8 @@ refreshing it with the stored ``refresh_token`` (single-use, rotated on every re
 
 One-time setup (see ``user_token_setup.py``):
     1. In the Lark developer console add the redirect URL and enable the scopes
-       (``drive:drive`` + ``offline_access``), then publish the app.
+       (``drive:drive`` + ``offline_access`` + ``docs:document.comment:write_only``),
+       then publish the app.
     2. ``python user_token_setup.py url``  -> open the printed link, authorize.
     3. Copy the ``code`` from the redirected URL.
     4. ``python user_token_setup.py code <CODE>``  -> stores the tokens.
@@ -38,8 +39,12 @@ TOKEN_PATH = os.path.join(_DIR, "user_token.json")
 OAUTH_TOKEN_URL = "https://open.larksuite.com/open-apis/authen/v2/oauth/token"
 AUTHORIZE_URL = "https://accounts.larksuite.com/open-apis/authen/v1/authorize"
 
-# Comment write needs drive:drive; offline_access is required to receive a refresh_token.
-DEFAULT_SCOPES = os.getenv("LARK_OAUTH_SCOPES", "drive:drive offline_access")
+# drive:drive — sheet access; offline_access — refresh_token;
+# docs:document.comment:write_only — add cell comments (required by new_comments API).
+DEFAULT_SCOPES = os.getenv(
+    "LARK_OAUTH_SCOPES",
+    "drive:drive offline_access docs:document.comment:write_only",
+)
 DEFAULT_REDIRECT_URI = os.getenv(
     "LARK_OAUTH_REDIRECT_URI", "https://example.com/api/oauth/callback"
 )
@@ -99,15 +104,34 @@ def _store_token_response(resp: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+def parse_authorization_code(raw: str) -> str:
+    """Accept a bare ``code`` or a full redirect URL and return the code value."""
+    s = (raw or "").strip().strip('"').strip("'")
+    if not s:
+        raise ValueError("authorization code is empty")
+    if "://" in s or s.startswith("?"):
+        parsed = urllib.parse.urlparse(s if "://" in s else f"https://x.invalid/{s.lstrip('?')}")
+        qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=False)
+        codes = qs.get("code") or []
+        if not codes or not str(codes[0]).strip():
+            raise ValueError(
+                "could not find ?code= in the pasted URL — copy only the code value, "
+                "or paste the full redirect URL inside double quotes"
+            )
+        return str(codes[0]).strip()
+    return s
+
+
 def exchange_code(code: str, redirect_uri: Optional[str] = None) -> dict[str, Any]:
     """Exchange an authorization ``code`` for tokens and persist them."""
     if not APP_ID or not APP_SECRET:
         raise RuntimeError("APP_ID / APP_SECRET not set in environment")
+    auth_code = parse_authorization_code(code)
     body = {
         "grant_type": "authorization_code",
         "client_id": APP_ID,
         "client_secret": APP_SECRET,
-        "code": (code or "").strip(),
+        "code": auth_code,
         "redirect_uri": redirect_uri or DEFAULT_REDIRECT_URI,
     }
     res = requests.post(OAUTH_TOKEN_URL, json=body, timeout=30).json()
