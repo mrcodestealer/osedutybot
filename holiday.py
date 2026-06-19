@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date
 import csv
 from dotenv import load_dotenv
 load_dotenv()
@@ -42,6 +42,15 @@ def get_holidays():
     if _holidays is None:
         _holidays = _load_holidays()
     return _holidays
+
+def get_holiday_date_set() -> frozenset[date]:
+    """Return all public-holiday calendar dates from ``holiday.csv`` (for sheet styling)."""
+    out: set[date] = set()
+    for h in get_holidays():
+        sd = h.get("sort_date")
+        if isinstance(sd, datetime):
+            out.add(sd.date())
+    return frozenset(out)
 
 def format_holidays():
     """Return a formatted string of all holidays (sorted by date)."""
