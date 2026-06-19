@@ -9471,29 +9471,66 @@ def _fpms_lark_cpms_igo_typo_pick_card_json(
     return json.dumps(card, ensure_ascii=False)
 
 
+def _fpms_lark_session_owner_ids(sess: dict) -> set[str]:
+    """``open_id`` / ``union_id`` values stored when the session was created."""
+    out: set[str] = set()
+    if not isinstance(sess, dict):
+        return out
+    for k in ("_lark_open_id", "_lark_union_id"):
+        v = str(sess.get(k) or "").strip()
+        if v:
+            out.add(v)
+    return out
+
+
+def _fpms_lark_sender_matches_session_owner(
+    sess: dict,
+    sender_open_id: str = "",
+    sender_union_id: str | None = None,
+) -> bool:
+    owners = _fpms_lark_session_owner_ids(sess)
+    if not owners:
+        return True
+    cand = {(sender_open_id or "").strip()}
+    uid = (sender_union_id or "").strip() if sender_union_id else ""
+    if uid:
+        cand.add(uid)
+    cand.discard("")
+    return bool(owners & cand)
+
+
 def _fpms_lark_find_cpms_igo_typo_pick_session(
     chat_id: str,
     sender_id: str,
     lark_sender_union_id: str | None = None,
     clean_text: str = "",
 ) -> tuple[str, dict] | tuple[None, None]:
-    """Locate an active ``cpms_igo_typo_pick`` session for this chat + sender."""
-    if _parse_single_menu_index((clean_text or "").strip(), 9) is not None:
-        alt_key, alt_sess = _fpms_lark_find_cpms_igo_typo_session(
-            chat_id, sender_id, lark_sender_union_id
-        )
-        if isinstance(alt_sess, dict) and alt_sess.get("state") == "cpms_igo_typo_pick":
-            return alt_key, alt_sess
-    key = _fpms_lark_session_key(chat_id, sender_id)
+    """Locate this sender's active ``cpms_igo_typo_pick`` session (never another user's)."""
+    chat = (chat_id or "").strip()
+    if not chat:
+        return None, None
+    ids = [
+        (sender_id or "").strip(),
+        (lark_sender_union_id or "").strip() if lark_sender_union_id else "",
+    ]
+    ids = [i for i in ids if i]
+    prefix = f"{chat}:"
+    for i in ids:
+        sk = _fpms_lark_session_key(chat, i)
+        with _fpms_lark_sessions_lock:
+            sess = _fpms_lark_sessions.get(sk)
+        if isinstance(sess, dict) and sess.get("state") == "cpms_igo_typo_pick":
+            return sk, sess
     with _fpms_lark_sessions_lock:
-        sess = _fpms_lark_sessions.get(key)
-    if isinstance(sess, dict) and sess.get("state") == "cpms_igo_typo_pick":
-        return key, sess
-    alt_key, alt_sess = _fpms_lark_find_cpms_igo_typo_session(
-        chat_id, sender_id, lark_sender_union_id
-    )
-    if isinstance(alt_sess, dict) and alt_sess.get("state") == "cpms_igo_typo_pick":
-        return alt_key, alt_sess
+        for sk, sess in _fpms_lark_sessions.items():
+            if not str(sk).startswith(prefix) or not isinstance(sess, dict):
+                continue
+            if sess.get("state") != "cpms_igo_typo_pick":
+                continue
+            if ids and _fpms_lark_sender_matches_session_owner(
+                sess, sender_id, lark_sender_union_id
+            ):
+                return sk, sess
     return None, None
 
 
@@ -9532,12 +9569,7 @@ def _fpms_lark_handle_cpms_igo_typo_pick_text(
             send,
             lark_message_id=lark_message_id,
         )
-    typo_tok = str(sess.get("typo_token") or "?")
-    send(
-        chat_id,
-        f"⏳ Pick **`{typo_tok}`** — tap **1**–**{len(ranked)}** on the card above "
-        f"or type the number.",
-    )
+    # Card is already visible — swallow thread noise / quoted paste without spamming hints.
     return True
 
 
@@ -11929,8 +11961,8 @@ def handle_lark_jenkins_update_message(
         if isinstance(alt_sess, dict) and alt_sess.get("state") == "choose_job":
             key, sess = alt_key, alt_sess
         else:
-            alt_key2, alt_sess2 = _fpms_lark_find_cpms_igo_typo_session(
-                chat_id, sender_id, lark_sender_union_id
+            alt_key2, alt_sess2 = _fpms_lark_find_cpms_igo_typo_pick_session(
+                chat_id, sender_id, lark_sender_union_id, clean_text
             )
             if isinstance(alt_sess2, dict) and alt_sess2.get("state") == "cpms_igo_typo_pick":
                 key, sess = alt_key2, alt_sess2
