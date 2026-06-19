@@ -5476,6 +5476,19 @@ def _fpms_lark_session_key(chat_id: str, sender_id: str) -> str:
     return f"{chat_id}:{sender_id}"
 
 
+def _fpms_lark_get_update_thread_root(session_key: str) -> str | None:
+    """Bound ``/update`` thread root for this session (user's command message id)."""
+    try:
+        import main as _main_mod
+
+        fn = getattr(_main_mod, "_get_update_thread_root", None)
+        if callable(fn):
+            return (fn((session_key or "").strip()) or "").strip() or None
+    except Exception:
+        pass
+    return None
+
+
 def _fpms_lark_wrap_thread_send(chat_id: str, session_key: str, send):
     """Route ``send`` through main.update thread helpers when a thread root exists."""
     try:
@@ -5508,6 +5521,8 @@ def _fpms_lark_begin_update_thread(
         raw = (body_or_summary or "").strip()
         summary = summ_fn(raw) if callable(summ_fn) else raw[:200]
         thread_root = (lark_thread_root_id or lark_message_id or "").strip() or None
+        if force_new and not thread_root:
+            force_new = False
         return begin(
             chat_id,
             session_key,
@@ -9714,6 +9729,8 @@ def _cpms_igo_continue_routing_after_typo_pick(
     *,
     lark_message_id: str | None = None,
 ) -> bool:
+    if not (lark_message_id or "").strip():
+        lark_message_id = _fpms_lark_get_update_thread_root(session_key)
     with _fpms_lark_sessions_lock:
         sess = _fpms_lark_sessions.get(session_key)
         if not isinstance(sess, dict) or sess.get("state") != "cpms_igo_typo_pick":
@@ -10023,6 +10040,9 @@ def _fpms_lark_start_cpms_igo_sequence(
     """
     import updatemore as um
 
+    if not (lark_message_id or "").strip():
+        lark_message_id = _fpms_lark_get_update_thread_root(session_key)
+
     sender_id = session_key.split(":", 1)[1] if ":" in session_key else session_key
     segments: list[dict] = []
     for i, (kind, env, svc_ids) in enumerate(groups):
@@ -10054,7 +10074,7 @@ def _fpms_lark_start_cpms_igo_sequence(
         session_key,
         f"cpms/igo uat — {len(groups)} environments",
         lark_message_id,
-        force_new=True,
+        force_new=bool((lark_message_id or "").strip()),
     )
     summary = [
         f"🔀 **Detected — need to separate update into {len(groups)} different environments.**",

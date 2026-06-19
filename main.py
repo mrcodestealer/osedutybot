@@ -1543,6 +1543,11 @@ def update_begin_thread(
     if parent and sk:
         _set_update_thread_root(sk, parent)
         return parent
+    # Already bound on an earlier step (e.g. CPMS pick → multi-env split) — never replace
+    # with a main-chat ``🔧 /update`` starter card when ``message_id`` was missing later.
+    existing = _get_update_thread_root(sk)
+    if existing:
+        return existing
     # No incoming message_id (e.g. tests) — post a starter card as last resort.
     card = _build_update_thread_starter_card(summary)
     resp = send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
