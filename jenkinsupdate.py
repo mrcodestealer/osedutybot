@@ -5601,15 +5601,17 @@ def _fpms_lark_sessions_put_chat_key(session_key: str, sess: dict) -> None:
     _fpms_lark_sessions_put(chat_id, open_id, sess)
 
 
-def _fpms_lark_find_choose_job_session_unlocked(
+def _fpms_lark_find_menu_session_unlocked(
     sessions: dict[str, dict],
     chat_id: str,
+    state: str,
     sender_open_id: str = "",
     sender_union_id: str | None = None,
 ) -> tuple[str, dict] | tuple[None, None]:
-    """Like :func:`_fpms_lark_find_choose_job_session` but caller holds ``_fpms_lark_sessions_lock``."""
+    """Locate a numbered-menu session (``choose_job``, ``cpms_igo_typo_pick``, …) by chat + sender ids."""
     chat = (chat_id or "").strip()
-    if not chat:
+    want = (state or "").strip()
+    if not chat or not want:
         return None, None
     ids = [
         (sender_open_id or "").strip(),
@@ -5620,14 +5622,14 @@ def _fpms_lark_find_choose_job_session_unlocked(
     for i in ids:
         sk = _fpms_lark_session_key(chat, i)
         sess = sessions.get(sk)
-        if isinstance(sess, dict) and sess.get("state") == "choose_job":
+        if isinstance(sess, dict) and sess.get("state") == want:
             return sk, sess
     matched: list[tuple[str, dict]] = []
     lone: list[tuple[str, dict]] = []
     for sk, sess in sessions.items():
         if not sk.startswith(prefix) or not isinstance(sess, dict):
             continue
-        if sess.get("state") != "choose_job":
+        if sess.get("state") != want:
             continue
         lone.append((sk, sess))
         ou = str(sess.get("_lark_open_id") or "").strip()
@@ -5639,6 +5641,18 @@ def _fpms_lark_find_choose_job_session_unlocked(
     if len(lone) == 1:
         return lone[0]
     return None, None
+
+
+def _fpms_lark_find_choose_job_session_unlocked(
+    sessions: dict[str, dict],
+    chat_id: str,
+    sender_open_id: str = "",
+    sender_union_id: str | None = None,
+) -> tuple[str, dict] | tuple[None, None]:
+    """Like :func:`_fpms_lark_find_choose_job_session` but caller holds ``_fpms_lark_sessions_lock``."""
+    return _fpms_lark_find_menu_session_unlocked(
+        sessions, chat_id, "choose_job", sender_open_id, sender_union_id
+    )
 
 
 def _fpms_lark_find_choose_job_session(
@@ -5653,6 +5667,22 @@ def _fpms_lark_find_choose_job_session(
     with _fpms_lark_sessions_lock:
         return _fpms_lark_find_choose_job_session_unlocked(
             _fpms_lark_sessions, chat_id, sender_open_id, sender_union_id
+        )
+
+
+def _fpms_lark_find_cpms_igo_typo_session(
+    chat_id: str,
+    sender_open_id: str = "",
+    sender_union_id: str | None = None,
+) -> tuple[str, dict] | tuple[None, None]:
+    """Locate an active ``cpms_igo_typo_pick`` session (typo nearest-service menu)."""
+    with _fpms_lark_sessions_lock:
+        return _fpms_lark_find_menu_session_unlocked(
+            _fpms_lark_sessions,
+            chat_id,
+            "cpms_igo_typo_pick",
+            sender_open_id,
+            sender_union_id,
         )
 
 
@@ -5685,6 +5715,15 @@ def resolve_lark_jenkins_card_sender(
         )
         if sk_cj and ":" in sk_cj:
             return sk_cj.split(":", 1)[1]
+        sk_tp, _sess_tp = _fpms_lark_find_menu_session_unlocked(
+            _fpms_lark_sessions,
+            chat_id,
+            "cpms_igo_typo_pick",
+            (op.get("open_id") or extracted_sender_id or "").strip(),
+            (op.get("union_id") or "").strip() or None,
+        )
+        if sk_tp and ":" in sk_tp:
+            return sk_tp.split(":", 1)[1]
     return cand[0] if cand else ""
 
 
@@ -6005,6 +6044,68 @@ def _cpms_igo_find_kind_for_env(env: str, cache: dict) -> str | None:
     return None
 
 
+def _cpms_igo_targets_for_service_id(
+    service_id: str, cache: dict
+) -> list[tuple[str, str, str]]:
+    """All ``(kind, env, service_id)`` rows for one canonical service id."""
+    nk = _normalize_service_query_key(service_id)
+    out: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for kind, envs in (cache or {}).items():
+        if not isinstance(envs, dict):
+            continue
+        for env, svcs in envs.items():
+            for s in svcs:
+                if _normalize_service_query_key(s) == nk:
+                    row = (kind, env, s)
+                    if row not in seen:
+                        seen.add(row)
+                        out.append(row)
+    return out
+
+
+def _cpms_igo_rank_token(
+    token: str, cache: dict, *, limit: int = 8
+) -> list[tuple[float, str, str, str]]:
+    """Best fuzzy matches: ``(score, kind, env, service_id)``, one row per service id."""
+    rows = _cpms_igo_all_entries(cache)
+    scored = sorted(
+        ((_service_search_score(token, sid), kind, env, sid) for kind, env, sid in rows),
+        key=lambda x: (-x[0], x[3]),
+    )
+    best_by_sid: dict[str, tuple[float, str, str, str]] = {}
+    for sc, kind, env, sid in scored:
+        sk = _normalize_service_query_key(sid)
+        prev = best_by_sid.get(sk)
+        if prev is None or sc > prev[0]:
+            best_by_sid[sk] = (sc, kind, env, sid)
+    return sorted(best_by_sid.values(), key=lambda x: (-x[0], x[3]))[:limit]
+
+
+def _cpms_igo_typo_should_auto_pick(
+    token: str, ranked: list[tuple[float, str, str, str]]
+) -> tuple[str, str, str] | None:
+    """
+    When a typo clearly matches one service (e.g. ``igo-sw-cluster-roue`` → ``igo-sw-cluster-route``),
+    return ``(kind, env, service_id)`` for the best row without asking.
+    """
+    if not ranked:
+        return None
+    best_sc, kind, env, sid = ranked[0]
+    if best_sc < 0.58:
+        return None
+    if len(ranked) == 1:
+        return (kind, env, sid)
+    second_sc = ranked[1][0]
+    if best_sc >= 1.35:
+        return (kind, env, sid)
+    if best_sc >= 0.72 and best_sc >= second_sc + 0.08:
+        return (kind, env, sid)
+    if best_sc >= 0.65 and second_sc > 0 and best_sc >= second_sc * 1.18:
+        return (kind, env, sid)
+    return None
+
+
 def _cpms_igo_route_service(token: str, cache: dict) -> dict:
     """
     Resolve a requested service to its target environment(s).
@@ -6044,13 +6145,24 @@ def _cpms_igo_route_service(token: str, cache: dict) -> dict:
             return {"status": "targets", "targets": superset}
         return {"status": "menu", "candidates": superset}
 
-    # Not found anywhere → likely a typo: suggest the nearest service names.
-    scored = sorted(
-        ((_service_search_score(token, r[2]), r) for r in rows),
-        key=lambda x: -x[0],
-    )
-    suggestions = [r for sc, r in scored[:6] if sc > 0]
-    return {"status": "none", "suggestions": suggestions}
+    # Typo — fuzzy rank; auto-pick when clearly closest, else offer a numbered pick menu.
+    ranked = _cpms_igo_rank_token(token, cache)
+    auto = _cpms_igo_typo_should_auto_pick(token, ranked)
+    if auto is not None:
+        _k, _e, sid = auto
+        return {
+            "status": "targets",
+            "targets": _cpms_igo_targets_for_service_id(sid, cache),
+            "typo_from": token,
+            "typo_to": sid,
+        }
+    if ranked:
+        return {
+            "status": "typo_menu",
+            "token": token,
+            "candidates": [(k, e, s) for _sc, k, e, s in ranked],
+        }
+    return {"status": "none", "suggestions": []}
 
 
 def _venue_uat_headline_detect(text: str) -> tuple[str, str, str] | None:
@@ -9280,6 +9392,313 @@ def _cpms_igo_uat_bot_build_config_block(data: dict, resolved_ids: list[str]) ->
     )
 
 
+def _cpms_igo_merge_targets_into_groups(
+    groups: dict[tuple[str, str], list[str]],
+    order: list[tuple[str, str]],
+    targets: list[tuple[str, str, str]],
+) -> None:
+    for kind, env, sid in targets:
+        key_ke = (kind, env)
+        if key_ke not in groups:
+            groups[key_ke] = []
+            order.append(key_ke)
+        if sid not in groups[key_ke]:
+            groups[key_ke].append(sid)
+
+
+def _fpms_lark_cpms_igo_typo_pick_card_json(
+    token: str,
+    candidates: list[tuple[str, str, str]],
+    *,
+    picker_sid: str | None = None,
+) -> str:
+    """Numbered pick card for a CPMS/IGO typo — tap **1** … **N** or type the number."""
+    ps = (picker_sid or "").strip()
+    lines_md = [
+        f"Service `{token}` not found exactly. **Pick the nearest** (or type **1**–**{len(candidates)}**):",
+        "",
+    ]
+    buttons: list[dict] = []
+    for i, (kind, env, sid) in enumerate(candidates, start=1):
+        lines_md.append(f"**{i}.** `{sid}` — {kind.upper()} / `{env}`")
+        payload: dict[str, object] = {"k": "cpms_svc", "i": i}
+        if ps:
+            payload["sid"] = ps
+        buttons.append(
+            _fpms_lark_v2_callback_button(
+                str(i),
+                "primary" if i == 1 else "default",
+                payload,
+                element_id=f"cpms_svc_{i}"[:20],
+            )
+        )
+    body_elements: list[dict] = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines_md)}},
+    ]
+    for off in range(0, len(buttons), 5):
+        body_elements.append(_fpms_lark_v2_column_set_button_row(buttons[off : off + 5]))
+    cancel_pl: dict[str, object] = {"k": "ju_cancel"}
+    if ps:
+        cancel_pl["sid"] = ps
+    body_elements.extend(
+        [
+            {"tag": "hr"},
+            _fpms_lark_v2_callback_button(
+                "Cancel", "default", cancel_pl, element_id="ju_cancel"
+            ),
+        ]
+    )
+    card: dict[str, object] = {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": "CPMS / IGO — pick service"},
+        },
+        "body": {"elements": body_elements},
+    }
+    return json.dumps(card, ensure_ascii=False)
+
+
+def _fpms_lark_start_cpms_igo_typo_pick(
+    chat_id: str,
+    session_key: str,
+    *,
+    typo_token: str,
+    candidates: list[tuple[str, str, str]],
+    tokens: list[str],
+    token_index: int,
+    groups: dict[tuple[str, str], list[str]],
+    order: list[tuple[str, str]],
+    branch: str,
+    version: str,
+    body: str,
+    typo_notes: list[str],
+    send,
+    lark_message_id: str | None = None,
+) -> bool:
+    picker_sid = secrets.token_hex(16)
+    sess_new = {
+        "state": "cpms_igo_typo_pick",
+        "typo_token": typo_token,
+        "branch": branch,
+        "version": version,
+        "raw_prompt_body": body,
+        "service_tokens": tokens,
+        "token_index": token_index,
+        "cpms_groups": {f"{k}:{e}": list(svcs) for (k, e), svcs in groups.items()},
+        "cpms_order": [f"{k}:{e}" for k, e in order],
+        "typo_notes": list(typo_notes),
+        "ranked_cpms": [{"kind": k, "env": e, "sid": s} for k, e, s in candidates],
+        "picker_sid": picker_sid,
+    }
+    _fpms_lark_register_picker_sid(picker_sid, session_key)
+    chat_id_part, sender_part = (
+        session_key.split(":", 1) if ":" in session_key else (chat_id, session_key)
+    )
+    _fpms_lark_sessions_put(chat_id_part, sender_part, sess_new)
+    card_js = _fpms_lark_cpms_igo_typo_pick_card_json(
+        typo_token, candidates, picker_sid=picker_sid
+    )
+    try:
+        send(chat_id, card_js, msg_type="interactive")
+    except TypeError:
+        lines = [f"Pick service for typo `{typo_token}`:"]
+        for i, (kind, env, sid) in enumerate(candidates, start=1):
+            lines.append(f"  {i}. `{sid}` — {kind.upper()} / {env}")
+        send(chat_id, "\n".join(lines))
+    return True
+
+
+def _cpms_igo_restore_groups_from_sess(sess: dict) -> tuple[dict[tuple[str, str], list[str]], list[tuple[str, str]]]:
+    groups: dict[tuple[str, str], list[str]] = {}
+    order: list[tuple[str, str]] = []
+    raw_g = sess.get("cpms_groups") if isinstance(sess.get("cpms_groups"), dict) else {}
+    raw_o = sess.get("cpms_order") if isinstance(sess.get("cpms_order"), list) else []
+    for key in raw_o:
+        ks = str(key)
+        if ":" not in ks:
+            continue
+        kind, env = ks.split(":", 1)
+        svcs = list(raw_g.get(ks) or [])
+        groups[(kind, env)] = svcs
+        order.append((kind, env))
+    return groups, order
+
+
+def _cpms_igo_finish_routing_from_groups(
+    chat_id: str,
+    session_key: str,
+    groups: dict[tuple[str, str], list[str]],
+    order: list[tuple[str, str]],
+    branch: str,
+    version: str,
+    body: str,
+    typo_notes: list[str],
+    send,
+    *,
+    lark_message_id: str | None = None,
+) -> bool:
+    if typo_notes:
+        send(chat_id, "\n".join(f"ℹ️ {n}" for n in typo_notes))
+    if len(order) >= 2:
+        return _fpms_lark_start_cpms_igo_sequence(
+            chat_id,
+            session_key,
+            [(k, e, groups[(k, e)]) for k, e in order],
+            branch,
+            version,
+            send,
+            lark_message_id=lark_message_id,
+        )
+    if not order:
+        send(chat_id, "❌ No CPMS/IGO services resolved.")
+        return True
+    kind, env = order[0]
+    url = CPMS_IGO_UAT_URL_BY_KIND.get(kind, "")
+    resolved_ids = groups[(kind, env)]
+    data = {
+        "environment": env,
+        "branch": branch,
+        "version": version,
+        "service_tokens": resolved_ids,
+        "update_all_services": False,
+    }
+    _fpms_lark_begin_jenkins_run(
+        chat_id,
+        session_key,
+        data,
+        resolved_ids,
+        send,
+        raw_prompt_body=body,
+        jenkins_build_url=url,
+        job_profile="cpms_igo_uat",
+        lark_message_id=lark_message_id,
+    )
+    return True
+
+
+def _cpms_igo_continue_routing_after_typo_pick(
+    chat_id: str,
+    session_key: str,
+    picked_kind: str,
+    picked_env: str,
+    picked_sid: str,
+    send,
+    *,
+    lark_message_id: str | None = None,
+) -> bool:
+    with _fpms_lark_sessions_lock:
+        sess = _fpms_lark_sessions.get(session_key)
+        if not isinstance(sess, dict) or sess.get("state") != "cpms_igo_typo_pick":
+            return False
+        tokens = list(sess.get("service_tokens") or [])
+        token_index = int(sess.get("token_index") or 0)
+        branch = str(sess.get("branch") or "master")
+        version = str(sess.get("version") or "")
+        body = str(sess.get("raw_prompt_body") or "")
+        typo_notes = list(sess.get("typo_notes") or [])
+        typo_token = str(sess.get("typo_token") or "")
+    if ":" in session_key:
+        cchat, sender = session_key.split(":", 1)
+        _fpms_lark_clear_session(cchat, sender)
+    if typo_token and picked_sid:
+        typo_notes.append(
+            f"Picked `{picked_sid}` for typo `{typo_token}` ({picked_kind.upper()} / `{picked_env}`)."
+        )
+    groups, order = _cpms_igo_restore_groups_from_sess(sess)
+    cache = _load_cpms_igo_cache()
+    _cpms_igo_merge_targets_into_groups(
+        groups,
+        order,
+        _cpms_igo_targets_for_service_id(picked_sid, cache),
+    )
+    for ti in range(token_index + 1, len(tokens)):
+        tok = tokens[ti]
+        route = _cpms_igo_route_service(tok, cache)
+        if route["status"] == "none":
+            send(chat_id, f"❌ Service `{tok}` not found in CPMS/IGO UAT.")
+            return True
+        if route["status"] == "menu":
+            cands = route.get("candidates") or []
+            lines = [f"Several services match `{tok}` — re-send the exact service id:"]
+            for kind, env, sid in cands:
+                lines.append(f"• `{sid}`  ({kind.upper()} / {env})")
+            send(chat_id, "\n".join(lines))
+            return True
+        if route["status"] == "typo_menu":
+            return _fpms_lark_start_cpms_igo_typo_pick(
+                chat_id,
+                session_key,
+                typo_token=tok,
+                candidates=route.get("candidates") or [],
+                tokens=tokens,
+                token_index=ti,
+                groups=groups,
+                order=order,
+                branch=branch,
+                version=version,
+                body=body,
+                typo_notes=typo_notes,
+                send=send,
+                lark_message_id=lark_message_id,
+            )
+        if route.get("typo_from") and route.get("typo_to"):
+            typo_notes.append(
+                f"Using `{route['typo_to']}` for typo `{route['typo_from']}`."
+            )
+        for kind, env, sid in route.get("targets") or []:
+            _cpms_igo_merge_targets_into_groups(groups, order, [(kind, env, sid)])
+    return _cpms_igo_finish_routing_from_groups(
+        chat_id,
+        session_key,
+        groups,
+        order,
+        branch,
+        version,
+        body,
+        typo_notes,
+        send,
+        lark_message_id=lark_message_id,
+    )
+
+
+def _fpms_lark_handle_cpms_igo_typo_pick(
+    chat_id: str,
+    sender_id: str,
+    parsed: dict[str, object],
+    send,
+    *,
+    lark_message_id: str | None = None,
+) -> bool:
+    """Interactive CPMS/IGO typo pick: ``k=cpms_svc``."""
+    sk = _fpms_lark_session_key(chat_id, sender_id)
+    try:
+        idx = int(str(parsed.get("i")).strip())
+    except (TypeError, ValueError):
+        return False
+    with _fpms_lark_sessions_lock:
+        sess = _fpms_lark_sessions.get(sk)
+        if not isinstance(sess, dict) or sess.get("state") != "cpms_igo_typo_pick":
+            return False
+        ranked = list(sess.get("ranked_cpms") or [])
+    if idx < 1 or idx > len(ranked):
+        send(chat_id, "⚠️ Pick expired — send your CPMS/IGO update message again.")
+        return True
+    row = ranked[idx - 1]
+    if not isinstance(row, dict):
+        return False
+    return _cpms_igo_continue_routing_after_typo_pick(
+        chat_id,
+        sk,
+        str(row.get("kind") or ""),
+        str(row.get("env") or ""),
+        str(row.get("sid") or ""),
+        send,
+        lark_message_id=lark_message_id,
+    )
+
+
 def _fpms_lark_dispatch_cpms_igo_uat_parameter_flow(
     chat_id: str,
     session_key: str,
@@ -9380,17 +9799,11 @@ def _fpms_lark_dispatch_cpms_igo_uat_parameter_flow(
     # --- Route each requested service to its target environment(s); detect cross-env splits. ---
     groups: dict[tuple[str, str], list[str]] = {}
     order: list[tuple[str, str]] = []
-    for tok in tokens:
+    typo_notes: list[str] = []
+    for ti, tok in enumerate(tokens):
         route = _cpms_igo_route_service(tok, cache)
         if route["status"] == "none":
-            sugg = route.get("suggestions") or []
-            if sugg:
-                lines = [f"❌ Service `{tok}` not found in CPMS/IGO UAT. Did you mean:"]
-                for kind, env, sid in sugg:
-                    lines.append(f"• `{sid}`  ({kind.upper()} / {env})")
-                send(chat_id, "\n".join(lines))
-            else:
-                send(chat_id, f"❌ Service `{tok}` not found in CPMS/IGO UAT.")
+            send(chat_id, f"❌ Service `{tok}` not found in CPMS/IGO UAT.")
             return True
         if route["status"] == "menu":
             cands = route.get("candidates") or []
@@ -9399,57 +9812,42 @@ def _fpms_lark_dispatch_cpms_igo_uat_parameter_flow(
                 lines.append(f"• `{sid}`  ({kind.upper()} / {env})")
             send(chat_id, "\n".join(lines))
             return True
-        for kind, env, sid in route.get("targets") or []:
-            key_ke = (kind, env)
-            if key_ke not in groups:
-                groups[key_ke] = []
-                order.append(key_ke)
-            if sid not in groups[key_ke]:
-                groups[key_ke].append(sid)
-
-    if len(order) >= 2:
-        return _fpms_lark_start_cpms_igo_sequence(
-            chat_id,
-            session_key,
-            [(k[0], k[1], groups[k]) for k in order],
-            branch,
-            version,
-            send,
-            lark_message_id=lark_message_id,
-        )
-
-    # Single environment.
-    kind, env = order[0]
-    url = CPMS_IGO_UAT_URL_BY_KIND.get(kind, "")
-    resolved_ids = groups[(kind, env)]
-    with _fpms_lark_sessions_lock:
-        prev = _fpms_lark_sessions.get(session_key)
-        if isinstance(prev, dict) and prev.get("state") == "jenkins_wait_build":
-            send(
+        if route["status"] == "typo_menu":
+            return _fpms_lark_start_cpms_igo_typo_pick(
                 chat_id,
-                "⏳ A Jenkins **Build** confirmation is already waiting in this chat. "
-                "**Tap YES/NO** (or type **yes** / **no**), or say **cancel** first.",
+                session_key,
+                typo_token=tok,
+                candidates=route.get("candidates") or [],
+                tokens=tokens,
+                token_index=ti,
+                groups=groups,
+                order=order,
+                branch=branch,
+                version=version,
+                body=body,
+                typo_notes=typo_notes,
+                send=send,
+                lark_message_id=lark_message_id,
             )
-            return True
-    data = {
-        "environment": env,
-        "branch": branch,
-        "version": version,
-        "service_tokens": resolved_ids,
-        "update_all_services": False,
-    }
-    _fpms_lark_begin_jenkins_run(
+        if route.get("typo_from") and route.get("typo_to"):
+            typo_notes.append(
+                f"Using `{route['typo_to']}` for typo `{route['typo_from']}`."
+            )
+        for kind, env, sid in route.get("targets") or []:
+            _cpms_igo_merge_targets_into_groups(groups, order, [(kind, env, sid)])
+
+    return _cpms_igo_finish_routing_from_groups(
         chat_id,
         session_key,
-        data,
-        resolved_ids,
+        groups,
+        order,
+        branch,
+        version,
+        body,
+        typo_notes,
         send,
-        raw_prompt_body=body,
-        jenkins_build_url=url,
-        job_profile="cpms_igo_uat",
         lark_message_id=lark_message_id,
     )
-    return True
 
 
 def _fpms_lark_start_cpms_igo_sequence(
@@ -11394,6 +11792,12 @@ def handle_lark_jenkins_update_message(
         )
         if isinstance(alt_sess, dict) and alt_sess.get("state") == "choose_job":
             key, sess = alt_key, alt_sess
+        else:
+            alt_key2, alt_sess2 = _fpms_lark_find_cpms_igo_typo_session(
+                chat_id, sender_id, lark_sender_union_id
+            )
+            if isinstance(alt_sess2, dict) and alt_sess2.get("state") == "cpms_igo_typo_pick":
+                key, sess = alt_key2, alt_sess2
 
     if sess is not None:
         st = sess.get("state")
@@ -11441,6 +11845,46 @@ def handle_lark_jenkins_update_message(
             _fpms_lark_clear_session(chat_id, sender_id)
             return _fpms_lark_dispatch_job_row(
                 chat_id, key, pending, row, send, lark_message_id=lark_message_id
+            )
+        if st == "cpms_igo_typo_pick":
+            ranked = list(sess.get("ranked_cpms") or [])
+            if not ranked:
+                _fpms_lark_clear_session(chat_id, sender_id)
+                send(chat_id, "Session error — send your CPMS/IGO update message again.")
+                return True
+            idx = _parse_single_menu_index(clean_text.strip(), len(ranked))
+            if idx is None:
+                typo_tok = str(sess.get("typo_token") or "?")
+                ps = str(sess.get("picker_sid") or "").strip()
+                cands = [
+                    (str(r.get("kind") or ""), str(r.get("env") or ""), str(r.get("sid") or ""))
+                    for r in ranked
+                    if isinstance(r, dict)
+                ]
+                card_js = _fpms_lark_cpms_igo_typo_pick_card_json(
+                    typo_tok, cands, picker_sid=ps or None
+                )
+                try:
+                    send(chat_id, card_js, msg_type="interactive")
+                except TypeError:
+                    lines = [f"Pick service for typo `{typo_tok}`:"]
+                    for i, (kind, env, sid) in enumerate(cands, start=1):
+                        lines.append(f"  {i}. `{sid}` — {kind.upper()} / {env}")
+                    send(chat_id, "\n".join(lines))
+                return True
+            row = ranked[idx - 1]
+            if not isinstance(row, dict):
+                _fpms_lark_clear_session(chat_id, sender_id)
+                send(chat_id, "Session error — send your CPMS/IGO update message again.")
+                return True
+            return _cpms_igo_continue_routing_after_typo_pick(
+                chat_id,
+                key,
+                str(row.get("kind") or ""),
+                str(row.get("env") or ""),
+                str(row.get("sid") or ""),
+                send,
+                lark_message_id=lark_message_id,
             )
         if st == "choose_bi_repo":
             ranked_opts = list(sess.get("repo_ranked") or [])
@@ -12028,6 +12472,11 @@ def handle_lark_jenkins_card_action(
             allow_start=True,
             lark_sender_union_id=card_union,
         )
+    if k == "cpms_svc":
+        if _fpms_lark_handle_cpms_igo_typo_pick(
+            chat_id, sender_id, parsed, send, lark_message_id=None
+        ):
+            return True
     if k == "job":
         try:
             idx = int(str(parsed.get("i")).strip())
