@@ -2,6 +2,9 @@
 """
 Sync SNSoft Public Holiday Listing (Lark calendar) → ``holiday.csv``.
 
+Uses the app ``tenant_access_token`` (same API path as HRMS leave calendar in ``leavewfh.py``).
+No user OAuth required.
+
 CSV columns (no header): Code, Name, Date (DD/MM/YYYY), Day
 
 Usage:
@@ -81,26 +84,13 @@ def _year_unix_range(year: int) -> tuple[int, int]:
     return int(start.timestamp()), int(end.timestamp())
 
 
-def _calendar_auth_tokens() -> list[tuple[str, str]]:
-    """Try tenant token first, then OAuth user token (subscribed calendars often need user scope)."""
-    out: list[tuple[str, str]] = []
-    try:
-        out.append(("tenant", od.get_tenant_access_token()))
-    except Exception as exc:
-        print(f"[holiday_sync] tenant token unavailable: {exc!r}", flush=True)
-    try:
-        import user_token as ut
-
-        user_tok = ut.get_user_access_token()
-        if user_tok:
-            out.append(("user", user_tok))
-    except Exception as exc:
-        print(f"[holiday_sync] user token unavailable: {exc!r}", flush=True)
-    return out
+def _tenant_token() -> str:
+    """App tenant_access_token (same as leave/WFH calendar sync)."""
+    return od.get_tenant_access_token()
 
 
-def search_calendars(token: str, query: str) -> tuple[list[dict[str, str]], Optional[str]]:
-    """Return ``([{calendar_id, summary}, ...], error_or_None)`` from Lark calendar search."""
+def _search_calendars_tenant(token: str, query: str) -> tuple[list[dict[str, str]], Optional[str]]:
+    """Search calendars with the tenant token (``leavewfh`` HRMS calendar pattern)."""
     url = f"{_open_api_base()}/calendar/v4/calendars/search"
     try:
         res = _calendar_get_json(
@@ -142,50 +132,39 @@ def _pick_holiday_calendar(candidates: list[dict[str, str]]) -> tuple[str, str]:
     return "", title
 
 
-def resolve_public_holiday_calendar(token: Optional[str] = None) -> tuple[str, str, str, str]:
+def resolve_public_holiday_calendar() -> tuple[str, str, str]:
     """
-    Return ``(calendar_id, calendar_title, auth_kind, auth_token)``.
+    Return ``(calendar_id, calendar_title, tenant_token)``.
 
-    Set ``PUBLIC_HOLIDAY_CALENDAR_ID`` in ``.env`` when search cannot see a subscribed calendar.
-    User OAuth may also be required — add ``calendar:calendar:readonly`` to ``LARK_OAUTH_SCOPES`` and re-auth.
+    Uses the app ``tenant_access_token`` (same as HRMS leave calendar in ``leavewfh.py``).
+    Set ``PUBLIC_HOLIDAY_CALENDAR_ID`` in ``.env`` when search does not find the calendar.
+    Requires app scope ``calendar:calendar:readonly`` on the Duty Bot app.
     """
+    token = _tenant_token()
     if _PUBLIC_HOLIDAY_CALENDAR_ID:
-        tokens = _calendar_auth_tokens()
-        auth_kind, auth_token = tokens[0] if tokens else ("tenant", "")
-        if not auth_token:
-            auth_token = od.get_tenant_access_token()
-            auth_kind = "tenant"
-        return _PUBLIC_HOLIDAY_CALENDAR_ID, _PUBLIC_HOLIDAY_CALENDAR_QUERY, auth_kind, auth_token
+        return _PUBLIC_HOLIDAY_CALENDAR_ID, _PUBLIC_HOLIDAY_CALENDAR_QUERY, token
 
+    title = _PUBLIC_HOLIDAY_CALENDAR_QUERY
     seen: set[str] = set()
     merged: list[dict[str, str]] = []
-    used_kind = ""
-    used_token = ""
-    search_errors: list[str] = []
-    for auth_kind, auth_token in _calendar_auth_tokens():
-        for query in _CALENDAR_SEARCH_QUERIES:
-            found, err = search_calendars(auth_token, query)
-            if err:
-                search_errors.append(f"{auth_kind} search {query!r}: {err}")
-            for cal in found:
-                cid = cal["calendar_id"]
-                if cid in seen:
-                    continue
-                seen.add(cid)
-                merged.append(cal)
-        if merged:
-            used_kind, used_token = auth_kind, auth_token
-            break
+    for query in _CALENDAR_SEARCH_QUERIES:
+        found, _err = _search_calendars_tenant(token, query)
+        for cal in found:
+            cid = cal["calendar_id"]
+            if cid in seen:
+                continue
+            seen.add(cid)
+            merged.append(cal)
 
     cal_id, cal_title = _pick_holiday_calendar(merged)
-    if cal_id and used_token:
-        return cal_id, cal_title, used_kind, used_token
-    return "", _PUBLIC_HOLIDAY_CALENDAR_QUERY, "", ""
+    if cal_id:
+        return cal_id, cal_title, token
+    return "", title, token
 
 
 def resolve_public_holiday_calendar_id(token: str) -> tuple[str, str]:
-    """Backward-compatible wrapper — prefer :func:`resolve_public_holiday_calendar`."""
-    cal_id, cal_title, _, _ = resolve_public_holiday_calendar(token)
+    """Backward-compatible wrapper."""
+    cal_id, cal_title, _ = resolve_public_holiday_calendar()
     return cal_id, cal_title
 
 
@@ -340,43 +319,35 @@ def write_holiday_csv(rows: list[dict[str, Any]], csv_path: Path | str = _HOLIDA
 
 
 def list_public_holiday_calendars() -> dict[str, Any]:
-    """Search Lark for calendars matching public-holiday queries (debug helper)."""
+    """Search Lark for calendars matching public-holiday queries (tenant token)."""
+    token = _tenant_token()
     hits: list[dict[str, str]] = []
     search_errors: list[str] = []
-    user_auth: dict[str, Any] = {}
-    try:
-        import user_token as ut
-
-        user_auth = ut.status()
-    except Exception:
-        pass
-    for auth_kind, auth_token in _calendar_auth_tokens():
-        for query in _CALENDAR_SEARCH_QUERIES:
-            found, err = search_calendars(auth_token, query)
-            if err:
-                search_errors.append(f"{auth_kind} search {query!r}: {err}")
-            for cal in found:
-                hits.append(
-                    {
-                        "auth": auth_kind,
-                        "query": query,
-                        "calendar_id": cal["calendar_id"],
-                        "summary": cal["summary"],
-                    }
-                )
-    cal_id, cal_title, used_kind, _ = resolve_public_holiday_calendar()
+    for query in _CALENDAR_SEARCH_QUERIES:
+        found, err = _search_calendars_tenant(token, query)
+        if err:
+            search_errors.append(f"tenant search {query!r}: {err}")
+        for cal in found:
+            hits.append(
+                {
+                    "auth": "tenant",
+                    "query": query,
+                    "calendar_id": cal["calendar_id"],
+                    "summary": cal["summary"],
+                }
+            )
+    cal_id, cal_title, _ = resolve_public_holiday_calendar()
     return {
         "ok": bool(cal_id),
         "selected_calendar_id": cal_id,
         "selected_calendar_title": cal_title,
-        "selected_auth": used_kind,
+        "selected_auth": "tenant",
         "search_hits": hits,
         "search_errors": search_errors,
-        "user_oauth": user_auth,
         "env_calendar_id": _PUBLIC_HOLIDAY_CALENDAR_ID or None,
         "hint": (
-            "If user_oauth.has_calendar_readonly is false, re-run: "
-            "python user_token_setup.py url → authorize → python user_token_setup.py code <CODE>"
+            "Uses tenant_access_token (same as HRMS leave calendar). "
+            "Enable calendar:calendar:readonly on the Duty Bot app, or set PUBLIC_HOLIDAY_CALENDAR_ID."
         ),
     }
 
@@ -384,7 +355,7 @@ def list_public_holiday_calendars() -> dict[str, Any]:
 def probe_public_holiday_calendar(*, year: Optional[int] = None, limit: int = 10) -> dict[str, Any]:
     """Fetch raw calendar events for debugging event title/description format."""
     ref_year = year or date.today().year
-    cal_id, cal_title, auth_kind, auth_token = resolve_public_holiday_calendar()
+    cal_id, cal_title, auth_token = resolve_public_holiday_calendar()
     if not cal_id or not auth_token:
         return {
             "ok": False,
@@ -410,7 +381,7 @@ def probe_public_holiday_calendar(*, year: Optional[int] = None, limit: int = 10
         "year": ref_year,
         "calendar_id": cal_id,
         "calendar_title": cal_title,
-        "auth": auth_kind,
+        "auth": "tenant",
         "raw_events": len(events),
         "parsed_rows": len(events_to_holiday_rows(events)),
         "awal_muharram_rows": awal,
@@ -450,14 +421,14 @@ def sync_public_holidays_from_calendar(
     Returns a result dict with ``ok``, ``count``, ``calendar_title``, ``years``, etc.
     """
     years = _sync_years(year)
-    cal_id, cal_title, auth_kind, auth_token = resolve_public_holiday_calendar()
+    cal_id, cal_title, auth_token = resolve_public_holiday_calendar()
     if not cal_id or not auth_token:
         return {
             "ok": False,
             "error": (
                 f"Public holiday calendar not found (search: {_PUBLIC_HOLIDAY_CALENDAR_QUERY!r}). "
-                "Set PUBLIC_HOLIDAY_CALENDAR_ID in .env, or re-auth user OAuth with "
-                "calendar:calendar:readonly (see `python holiday_sync.py --list-calendars`)."
+                "Set PUBLIC_HOLIDAY_CALENDAR_ID in .env, or enable calendar:calendar:readonly "
+                "on the Duty Bot app (same as HRMS leave calendar)."
             ),
             "years": years,
             "list": list_public_holiday_calendars(),
@@ -517,7 +488,7 @@ def sync_public_holidays_from_calendar(
         "count": len(rows),
         "calendar_id": cal_id,
         "calendar_title": cal_title,
-        "auth": auth_kind,
+        "auth": "tenant",
         "raw_events": len(all_events),
         "csv_path": str(csv_path),
         "dry_run": dry_run,
