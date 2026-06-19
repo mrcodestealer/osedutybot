@@ -5972,15 +5972,27 @@ def _cpms_igo_all_entries(cache: dict) -> list[tuple[str, str, str]]:
     return rows
 
 
+def _cpms_igo_find_kind_for_env(env: str, cache: dict) -> str | None:
+    """Which job (``cpms`` / ``igo``) owns this Environment value."""
+    ek = (env or "").strip().casefold()
+    for kind, envs in (cache or {}).items():
+        if isinstance(envs, dict):
+            for e in envs:
+                if e.strip().casefold() == ek:
+                    return kind
+    return None
+
+
 def _cpms_igo_route_service(token: str, cache: dict) -> dict:
     """
-    Decide which (job, environment, service id) a requested service maps to.
+    Resolve a requested service to its target environment(s).
 
     Returns a dict with ``status``:
-      * ``"direct"``  — unique service in one env; keys: ``kind``, ``env``, ``service_id``, ``url``.
-      * ``"menu"``    — the token is contained in several service names, or the same id exists in
-                        several environments; key: ``candidates`` = list of ``(kind, env, service_id)``.
-      * ``"none"``    — not found; ``suggestions`` = nearest ``(kind, env, service_id)`` rows (typo help).
+      * ``"targets"`` — ``targets`` = list of ``(kind, env, service_id)``. **One** row = single
+                        environment; **several** rows (same service id) = the service exists in more
+                        than one environment, so the run is split (one build per environment).
+      * ``"menu"``    — the token is a sub-name of several *different* services; ``candidates`` rows.
+      * ``"none"``    — not found; ``suggestions`` = nearest ``(kind, env, service_id)`` rows.
     """
     rows = _cpms_igo_all_entries(cache)
     if not rows:
@@ -5989,39 +6001,25 @@ def _cpms_igo_route_service(token: str, cache: dict) -> dict:
 
     exact = [r for r in rows if _normalize_service_query_key(r[2]) == qk]
     if exact:
-        if len(exact) == 1:
-            kind, env, sid = exact[0]
-            # Ambiguous only if the token is a sub-name of OTHER services in the SAME env
-            # (e.g. ``cpms`` when ``cpms1`` also exists) — then let the user choose.
-            siblings = [
-                (kind, env, s)
-                for s in cache.get(kind, {}).get(env, [])
-                if qk in _normalize_service_query_key(s)
-                and _normalize_service_query_key(s) != qk
-            ]
-            if siblings:
-                return {"status": "menu", "candidates": exact + siblings}
-            return {
-                "status": "direct",
-                "kind": kind,
-                "env": env,
-                "service_id": sid,
-                "url": CPMS_IGO_UAT_URL_BY_KIND.get(kind, ""),
-            }
-        return {"status": "menu", "candidates": exact}
+        # Ambiguous only if the token is a sub-name of OTHER (different) services in a matched env
+        # (e.g. ``cpms`` when ``cpms1`` also exists) — then let the user choose the exact one.
+        siblings: list[tuple[str, str, str]] = []
+        for kind, env, _sid in exact:
+            for s in cache.get(kind, {}).get(env, []):
+                ck = _normalize_service_query_key(s)
+                if qk in ck and ck != qk:
+                    siblings.append((kind, env, s))
+        if siblings:
+            return {"status": "menu", "candidates": exact + siblings}
+        return {"status": "targets", "targets": exact}
 
-    # Token is a substring/prefix of one or more service names → user picks the full one.
+    # Token is a substring/prefix of service name(s).
     superset = [r for r in rows if qk and qk in _normalize_service_query_key(r[2])]
     if superset:
-        if len(superset) == 1:
-            kind, env, sid = superset[0]
-            return {
-                "status": "direct",
-                "kind": kind,
-                "env": env,
-                "service_id": sid,
-                "url": CPMS_IGO_UAT_URL_BY_KIND.get(kind, ""),
-            }
+        distinct_ids = {_normalize_service_query_key(r[2]) for r in superset}
+        if len(distinct_ids) == 1:
+            # Same service id across one or more environments → split, no menu.
+            return {"status": "targets", "targets": superset}
         return {"status": "menu", "candidates": superset}
 
     # Not found anywhere → likely a typo: suggest the nearest service names.
@@ -9077,18 +9075,22 @@ def _fpms_lark_send_venue_env_pick_card(
     )
 
 
-def _parse_cpms_igo_uat_request(body: str) -> tuple[list[str], str, str, bool]:
+def _parse_cpms_igo_uat_request(body: str) -> tuple[list[str], str, str, bool, str]:
     """
-    Parse a CPMS / IGO UAT chat message into ``(service_tokens, branch, version, update_all)``.
+    Parse a CPMS / IGO UAT chat message into
+    ``(service_tokens, branch, version, update_all, environment)``.
 
     * ``branch`` defaults to ``master`` when no ``branch:`` line is given.
     * ``version`` comes from a ``version:`` line, else the trailing token on the
       ``Update CPMS UAT CPMS2- 1.0.80`` headline (``CPMS2-1.0.80``); ``""`` if absent.
+    * ``environment`` is only set when an explicit ``environment:`` line is present (used by the
+      per-environment segments of an auto-split run). Empty otherwise → route by service.
     """
     raw_lines = [_normalize_config_colons(L) for L in (body or "").splitlines()]
     lines = [L.strip() for L in raw_lines if L.strip() != ""]
     branch: str = ""
     version: str = ""
+    environment: str = ""
     service_lines: list[str] = []
     last_key: str | None = None
     port_head = re.compile(r"^\d{3,5}\b")
@@ -9100,7 +9102,9 @@ def _parse_cpms_igo_uat_request(body: str) -> tuple[list[str], str, str, bool]:
                 key = "services"
             rest = _clean_key_rest(m.group("rest") or "")
             last_key = key
-            if key == "branch":
+            if key == "environment":
+                environment = normalize_parameter_text(rest) or environment
+            elif key == "branch":
                 branch = _branch_from_config_block(rest, preserve_case=True) or branch
             elif key == "version":
                 version = _version_from_config_block(rest) or version
@@ -9137,7 +9141,7 @@ def _parse_cpms_igo_uat_request(body: str) -> tuple[list[str], str, str, bool]:
                 t = part.strip()
                 if t:
                     tokens.append(t)
-    return tokens, branch, version, update_all
+    return tokens, branch, version, update_all, environment
 
 
 def _cpms_igo_resolve_tokens_in_env(
@@ -9254,8 +9258,13 @@ def _fpms_lark_dispatch_cpms_igo_uat_parameter_flow(
     *,
     lark_message_id: str | None = None,
 ) -> bool:
-    """CPMS / IGO UAT: route the requested service to the right job+environment, then run."""
-    tokens, branch, version, update_all = _parse_cpms_igo_uat_request(body)
+    """CPMS / IGO UAT: route the requested service(s) to the right job+environment, then run.
+
+    When the requested services live in **different environments** (e.g. some in ``igo-shared-uat``
+    and some in ``igo-sw-uat``), auto-split into a **sequential** queue: build the first environment,
+    wait for jenkinsbot to finish/monitor, then proceed to the next environment's services.
+    """
+    tokens, branch, version, update_all, explicit_env = _parse_cpms_igo_uat_request(body)
     if update_all or not tokens:
         send(
             chat_id,
@@ -9270,15 +9279,6 @@ def _fpms_lark_dispatch_cpms_igo_uat_parameter_flow(
             "(`Update CPMS UAT CPMS2-1.0.80`) or add a `version:` line.",
         )
         return True
-    with _fpms_lark_sessions_lock:
-        prev = _fpms_lark_sessions.get(session_key)
-        if isinstance(prev, dict) and prev.get("state") == "jenkins_wait_build":
-            send(
-                chat_id,
-                "⏳ A Jenkins **Build** confirmation is already waiting in this chat. "
-                "**Tap YES/NO** (or type **yes** / **no**), or say **cancel** first.",
-            )
-            return True
     cache = _load_cpms_igo_cache()
     if not _cpms_igo_cache_is_populated(cache):
         send(
@@ -9300,32 +9300,102 @@ def _fpms_lark_dispatch_cpms_igo_uat_parameter_flow(
                 "❌ CPMS/IGO scan found no services. Check Jenkins access, then try again.",
             )
             return True
-    route = _cpms_igo_route_service(tokens[0], cache)
-    if route["status"] == "none":
-        sugg = route.get("suggestions") or []
-        if sugg:
-            lines = [f"❌ Service `{tokens[0]}` not found in CPMS/IGO UAT. Did you mean:"]
-            for kind, env, sid in sugg:
+
+    # --- Per-environment segment (auto-split queue): an explicit ``environment:`` was given. ---
+    if explicit_env:
+        kind = _cpms_igo_find_kind_for_env(explicit_env, cache)
+        if not kind:
+            send(chat_id, f"❌ Unknown CPMS/IGO environment `{explicit_env}`.")
+            return True
+        url = CPMS_IGO_UAT_URL_BY_KIND.get(kind, "")
+        catalog = cache.get(kind, {}).get(explicit_env, [])
+        resolved_ids, problem = _cpms_igo_resolve_tokens_in_env(tokens, catalog)
+        if problem:
+            send(chat_id, f"({kind.upper()} / {explicit_env})\n{problem}")
+            return True
+        with _fpms_lark_sessions_lock:
+            prev = _fpms_lark_sessions.get(session_key)
+            if isinstance(prev, dict) and prev.get("state") == "jenkins_wait_build":
+                send(
+                    chat_id,
+                    "⏳ A Jenkins **Build** confirmation is already waiting in this chat. "
+                    "**Tap YES/NO** (or type **yes** / **no**), or say **cancel** first.",
+                )
+                return True
+        data = {
+            "environment": explicit_env,
+            "branch": branch,
+            "version": version,
+            "service_tokens": resolved_ids,
+            "update_all_services": False,
+        }
+        _fpms_lark_begin_jenkins_run(
+            chat_id,
+            session_key,
+            data,
+            resolved_ids,
+            send,
+            raw_prompt_body=body,
+            jenkins_build_url=url,
+            job_profile="cpms_igo_uat",
+            lark_message_id=lark_message_id,
+        )
+        return True
+
+    # --- Route each requested service to its target environment(s); detect cross-env splits. ---
+    groups: dict[tuple[str, str], list[str]] = {}
+    order: list[tuple[str, str]] = []
+    for tok in tokens:
+        route = _cpms_igo_route_service(tok, cache)
+        if route["status"] == "none":
+            sugg = route.get("suggestions") or []
+            if sugg:
+                lines = [f"❌ Service `{tok}` not found in CPMS/IGO UAT. Did you mean:"]
+                for kind, env, sid in sugg:
+                    lines.append(f"• `{sid}`  ({kind.upper()} / {env})")
+                send(chat_id, "\n".join(lines))
+            else:
+                send(chat_id, f"❌ Service `{tok}` not found in CPMS/IGO UAT.")
+            return True
+        if route["status"] == "menu":
+            cands = route.get("candidates") or []
+            lines = [f"Several services match `{tok}` — re-send the exact service id:"]
+            for kind, env, sid in cands:
                 lines.append(f"• `{sid}`  ({kind.upper()} / {env})")
             send(chat_id, "\n".join(lines))
-        else:
-            send(chat_id, f"❌ Service `{tokens[0]}` not found in CPMS/IGO UAT.")
-        return True
-    if route["status"] == "menu":
-        cands = route.get("candidates") or []
-        lines = [f"Several services match `{tokens[0]}` — re-send the exact service id:"]
-        for kind, env, sid in cands:
-            lines.append(f"• `{sid}`  ({kind.upper()} / {env})")
-        send(chat_id, "\n".join(lines))
-        return True
-    kind = route["kind"]
-    env = route["env"]
-    url = route.get("url") or CPMS_IGO_UAT_URL_BY_KIND.get(kind, "")
-    catalog = cache.get(kind, {}).get(env, [])
-    resolved_ids, problem = _cpms_igo_resolve_tokens_in_env(tokens, catalog)
-    if problem:
-        send(chat_id, f"({kind.upper()} / {env})\n{problem}")
-        return True
+            return True
+        for kind, env, sid in route.get("targets") or []:
+            key_ke = (kind, env)
+            if key_ke not in groups:
+                groups[key_ke] = []
+                order.append(key_ke)
+            if sid not in groups[key_ke]:
+                groups[key_ke].append(sid)
+
+    if len(order) >= 2:
+        return _fpms_lark_start_cpms_igo_sequence(
+            chat_id,
+            session_key,
+            [(k[0], k[1], groups[k]) for k in order],
+            branch,
+            version,
+            send,
+            lark_message_id=lark_message_id,
+        )
+
+    # Single environment.
+    kind, env = order[0]
+    url = CPMS_IGO_UAT_URL_BY_KIND.get(kind, "")
+    resolved_ids = groups[(kind, env)]
+    with _fpms_lark_sessions_lock:
+        prev = _fpms_lark_sessions.get(session_key)
+        if isinstance(prev, dict) and prev.get("state") == "jenkins_wait_build":
+            send(
+                chat_id,
+                "⏳ A Jenkins **Build** confirmation is already waiting in this chat. "
+                "**Tap YES/NO** (or type **yes** / **no**), or say **cancel** first.",
+            )
+            return True
     data = {
         "environment": env,
         "branch": branch,
@@ -9345,6 +9415,77 @@ def _fpms_lark_dispatch_cpms_igo_uat_parameter_flow(
         lark_message_id=lark_message_id,
     )
     return True
+
+
+def _fpms_lark_start_cpms_igo_sequence(
+    chat_id: str,
+    session_key: str,
+    groups: list[tuple[str, str, list[str]]],
+    branch: str,
+    version: str,
+    send,
+    *,
+    lark_message_id: str | None = None,
+) -> bool:
+    """
+    Run several CPMS/IGO environments **one at a time** (one build each, waiting for the previous to
+    finish via jenkinsbot) by building a ``/updatemore`` queue — one segment per environment.
+    """
+    import updatemore as um
+
+    sender_id = session_key.split(":", 1)[1] if ":" in session_key else session_key
+    segments: list[dict] = []
+    for i, (kind, env, svc_ids) in enumerate(groups):
+        headline = "cpms uat" if kind == "cpms" else "igo uat"
+        lines = [
+            f"environment: {env}",
+            f"branch: {branch}",
+            f"version: {version}",
+            "services:",
+            *svc_ids,
+        ]
+        segments.append(
+            {
+                "env_line": headline,
+                "lines": lines,
+                "email_subject": None,
+                "same_as_prev": i > 0,
+            }
+        )
+    um.assign_email_batches(segments)
+    q = um.init_queue(segments, chat_id=chat_id, sender_id=sender_id, skip_build=False)
+    with _fpms_lark_sessions_lock:
+        prev = _fpms_lark_sessions.get(session_key)
+        if isinstance(prev, dict):
+            _fpms_lark_unregister_picker_sid_from_sess(prev)
+    _fpms_lark_sessions_put_chat_key(session_key, {"updatemore_queue": q})
+    _fpms_lark_begin_update_thread(
+        chat_id,
+        session_key,
+        f"cpms/igo uat — {len(groups)} environments",
+        lark_message_id,
+        force_new=True,
+    )
+    summary = [
+        f"🔀 **Detected — need to separate update into {len(groups)} different environments.**",
+        "Each environment is built one at a time (its own YES/NO + Build; waits for "
+        "**Finished: SUCCESS** before the next).",
+        "",
+    ]
+    for kind, env, svc_ids in groups:
+        summary.append(f"**{env}**  ({kind.upper()})")
+        for sid in svc_ids:
+            summary.append(f"• {sid}")
+        summary.append("")
+    send(chat_id, "\n".join(summary).rstrip())
+    return _dispatch_lark_update_command_body(
+        chat_id,
+        session_key,
+        um.segment_to_update_body(segments[0]),
+        send,
+        from_updatemore=True,
+        lark_message_id=lark_message_id,
+    )
 
 
 def _fpms_lark_dispatch_igo_prod_script_parameter_flow(
@@ -12656,6 +12797,15 @@ def run(
                     next_build_number=next_build_number,
                     screenshot_img_key=screenshot_img_key,
                 )
+                # CPMS / IGO UAT: after the whole-form card, also show the clicked-Services close-up.
+                if jp == "cpms_igo_uat" and len(shot_paths) > 1:
+                    _fpms_lark_send_parameter_screenshots(
+                        cid,
+                        send,
+                        shot_paths[1:],
+                        job_profile=jp,
+                        bot_lark_gate=bot_lark_gate,
+                    )
                 if shot_dir:
                     _fpms_lark_cleanup_screenshot_dir(shot_dir)
                 with _fpms_lark_sessions_lock:
