@@ -24,6 +24,8 @@ from typing import Any, Optional
 
 from dotenv import load_dotenv
 
+from zoneinfo import ZoneInfo
+
 load_dotenv()
 
 import ose_Duty as od
@@ -34,6 +36,7 @@ except ImportError:
     from leave import CalendarFetchError, _calendar_get_json, _event_date_range  # type: ignore
 
 _HOLIDAY_CSV_PATH = Path(os.getenv("HOLIDAY_CSV_PATH", "holiday.csv"))
+_HOLIDAY_CALENDAR_TZ = ZoneInfo(os.getenv("HOLIDAY_CALENDAR_TZ", "Asia/Kuala_Lumpur"))
 _PUBLIC_HOLIDAY_CALENDAR_QUERY = (
     os.getenv("PUBLIC_HOLIDAY_CALENDAR_QUERY") or "SNSoft Public Holiday Listing"
 ).strip()
@@ -42,6 +45,12 @@ _PUBLIC_HOLIDAY_CALENDAR_ID = (
     or os.getenv("OSE_PUBLIC_HOLIDAY_CALENDAR_ID")
     or ""
 ).strip()
+_CALENDAR_SEARCH_QUERIES = (
+    _PUBLIC_HOLIDAY_CALENDAR_QUERY,
+    "Public Holiday Listing",
+    "SNSoft Public Holiday",
+    "Public Holiday",
+)
 
 _HOLIDAY_CODE_PREFIX_RE = re.compile(
     r"^(?P<code>N\d+|R\d+)\s*(?:[-–—,:]\s*|\s+)(?P<name>.+)$",
@@ -67,37 +76,114 @@ def _plain_text(text: str) -> str:
 
 
 def _year_unix_range(year: int) -> tuple[int, int]:
-    start = int(datetime(year, 1, 1).timestamp())
-    end = int(datetime(year, 12, 31, 23, 59, 59).timestamp())
-    return start, end
+    start = datetime(year, 1, 1, 0, 0, 0, tzinfo=_HOLIDAY_CALENDAR_TZ)
+    end = datetime(year, 12, 31, 23, 59, 59, tzinfo=_HOLIDAY_CALENDAR_TZ)
+    return int(start.timestamp()), int(end.timestamp())
+
+
+def _calendar_auth_tokens() -> list[tuple[str, str]]:
+    """Try tenant token first, then OAuth user token (subscribed calendars often need user scope)."""
+    out: list[tuple[str, str]] = []
+    try:
+        out.append(("tenant", od.get_tenant_access_token()))
+    except Exception as exc:
+        print(f"[holiday_sync] tenant token unavailable: {exc!r}", flush=True)
+    try:
+        import user_token as ut
+
+        user_tok = ut.get_user_access_token()
+        if user_tok:
+            out.append(("user", user_tok))
+    except Exception as exc:
+        print(f"[holiday_sync] user token unavailable: {exc!r}", flush=True)
+    return out
+
+
+def search_calendars(token: str, query: str) -> list[dict[str, str]]:
+    """Return ``[{calendar_id, summary}]`` from Lark calendar search."""
+    url = f"{_open_api_base()}/calendar/v4/calendars/search"
+    try:
+        res = _calendar_get_json(
+            url,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json_body={"query": query},
+            method="post",
+        )
+    except CalendarFetchError as exc:
+        print(f"[holiday_sync] calendar search {query!r} failed: {exc}", flush=True)
+        return []
+    out: list[dict[str, str]] = []
+    for item in (res.get("data") or {}).get("items") or []:
+        cal = item.get("calendar") or item
+        cal_id = str(cal.get("calendar_id") or "").strip()
+        summary = str(cal.get("summary") or "").strip()
+        if cal_id:
+            out.append({"calendar_id": cal_id, "summary": summary})
+    return out
+
+
+def _pick_holiday_calendar(candidates: list[dict[str, str]]) -> tuple[str, str]:
+    title = _PUBLIC_HOLIDAY_CALENDAR_QUERY
+    for cal in candidates:
+        summary = cal.get("summary") or ""
+        if summary.lower() == title.lower():
+            return cal["calendar_id"], summary
+    for cal in candidates:
+        summary = cal.get("summary") or ""
+        hay = summary.lower()
+        if title.lower() in hay or ("public holiday" in hay and "snsoft" in hay):
+            return cal["calendar_id"], summary
+    for cal in candidates:
+        summary = cal.get("summary") or ""
+        if "public holiday" in (summary or "").lower():
+            return cal["calendar_id"], summary
+    if candidates:
+        cal = candidates[0]
+        return cal["calendar_id"], cal.get("summary") or title
+    return "", title
+
+
+def resolve_public_holiday_calendar(token: Optional[str] = None) -> tuple[str, str, str, str]:
+    """
+    Return ``(calendar_id, calendar_title, auth_kind, auth_token)``.
+
+    Set ``PUBLIC_HOLIDAY_CALENDAR_ID`` in ``.env`` when search cannot see a subscribed calendar.
+    User OAuth may also be required — add ``calendar:calendar:readonly`` to ``LARK_OAUTH_SCOPES`` and re-auth.
+    """
+    if _PUBLIC_HOLIDAY_CALENDAR_ID:
+        tokens = _calendar_auth_tokens()
+        auth_kind, auth_token = tokens[0] if tokens else ("tenant", "")
+        if not auth_token:
+            auth_token = od.get_tenant_access_token()
+            auth_kind = "tenant"
+        return _PUBLIC_HOLIDAY_CALENDAR_ID, _PUBLIC_HOLIDAY_CALENDAR_QUERY, auth_kind, auth_token
+
+    seen: set[str] = set()
+    merged: list[dict[str, str]] = []
+    used_kind = ""
+    used_token = ""
+    for auth_kind, auth_token in _calendar_auth_tokens():
+        for query in _CALENDAR_SEARCH_QUERIES:
+            for cal in search_calendars(auth_token, query):
+                cid = cal["calendar_id"]
+                if cid in seen:
+                    continue
+                seen.add(cid)
+                merged.append(cal)
+        if merged:
+            used_kind, used_token = auth_kind, auth_token
+            break
+
+    cal_id, cal_title = _pick_holiday_calendar(merged)
+    if cal_id and used_token:
+        return cal_id, cal_title, used_kind, used_token
+    return "", _PUBLIC_HOLIDAY_CALENDAR_QUERY, "", ""
 
 
 def resolve_public_holiday_calendar_id(token: str) -> tuple[str, str]:
-    """Return ``(calendar_id, calendar_title)`` for the SNSoft public holiday calendar."""
-    if _PUBLIC_HOLIDAY_CALENDAR_ID:
-        return _PUBLIC_HOLIDAY_CALENDAR_ID, _PUBLIC_HOLIDAY_CALENDAR_QUERY
-    title = _PUBLIC_HOLIDAY_CALENDAR_QUERY
-    url = f"{_open_api_base()}/calendar/v4/calendars/search"
-    res = _calendar_get_json(
-        url,
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        json_body={"query": title},
-        method="post",
-    )
-    for item in (res.get("data") or {}).get("items") or []:
-        cal = item.get("calendar") or item
-        summary = str(cal.get("summary") or "").strip()
-        cal_id = str(cal.get("calendar_id") or "").strip()
-        if cal_id and summary.lower() == title.lower():
-            return cal_id, summary
-    for item in (res.get("data") or {}).get("items") or []:
-        cal = item.get("calendar") or item
-        summary = str(cal.get("summary") or "").strip()
-        cal_id = str(cal.get("calendar_id") or "").strip()
-        hay = summary.lower()
-        if cal_id and title.lower() in hay and "holiday" in hay:
-            return cal_id, summary
-    return "", title
+    """Backward-compatible wrapper — prefer :func:`resolve_public_holiday_calendar`."""
+    cal_id, cal_title, _, _ = resolve_public_holiday_calendar(token)
+    return cal_id, cal_title
 
 
 def fetch_public_holiday_events(token: str, calendar_id: str, year: int) -> list[dict[str, Any]]:
@@ -232,6 +318,16 @@ def events_to_holiday_rows(events: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 def write_holiday_csv(rows: list[dict[str, Any]], csv_path: Path | str = _HOLIDAY_CSV_PATH) -> None:
     path = Path(csv_path)
+    if path.is_file() and len(rows) < 5:
+        try:
+            existing = sum(1 for _ in open(path, encoding="utf-8"))
+        except OSError:
+            existing = 0
+        if existing >= 5:
+            raise RuntimeError(
+                f"Refusing to overwrite {path} with only {len(rows)} row(s) "
+                f"(existing file has {existing} lines). Check calendar access / parser."
+            )
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -240,14 +336,43 @@ def write_holiday_csv(rows: list[dict[str, Any]], csv_path: Path | str = _HOLIDA
     tmp.replace(path)
 
 
+def list_public_holiday_calendars() -> dict[str, Any]:
+    """Search Lark for calendars matching public-holiday queries (debug helper)."""
+    hits: list[dict[str, str]] = []
+    for auth_kind, auth_token in _calendar_auth_tokens():
+        for query in _CALENDAR_SEARCH_QUERIES:
+            for cal in search_calendars(auth_token, query):
+                hits.append(
+                    {
+                        "auth": auth_kind,
+                        "query": query,
+                        "calendar_id": cal["calendar_id"],
+                        "summary": cal["summary"],
+                    }
+                )
+    cal_id, cal_title, used_kind, _ = resolve_public_holiday_calendar()
+    return {
+        "ok": bool(cal_id),
+        "selected_calendar_id": cal_id,
+        "selected_calendar_title": cal_title,
+        "selected_auth": used_kind,
+        "search_hits": hits,
+        "env_calendar_id": _PUBLIC_HOLIDAY_CALENDAR_ID or None,
+    }
+
+
 def probe_public_holiday_calendar(*, year: Optional[int] = None, limit: int = 10) -> dict[str, Any]:
     """Fetch raw calendar events for debugging event title/description format."""
     ref_year = year or date.today().year
-    token = od.get_tenant_access_token()
-    cal_id, cal_title = resolve_public_holiday_calendar_id(token)
-    if not cal_id:
-        return {"ok": False, "error": "calendar not found", "year": ref_year}
-    events = fetch_public_holiday_events(token, cal_id, ref_year)
+    cal_id, cal_title, auth_kind, auth_token = resolve_public_holiday_calendar()
+    if not cal_id or not auth_token:
+        return {
+            "ok": False,
+            "error": "calendar not found",
+            "year": ref_year,
+            "list": list_public_holiday_calendars(),
+        }
+    events = fetch_public_holiday_events(auth_token, cal_id, ref_year)
     sample = []
     for ev in events[:limit]:
         sample.append(
@@ -259,12 +384,16 @@ def probe_public_holiday_calendar(*, year: Optional[int] = None, limit: int = 10
                 "parsed": events_to_holiday_rows([ev]),
             }
         )
+    awal = [r for r in events_to_holiday_rows(events) if "awal" in (r.get("name") or "").lower()]
     return {
         "ok": True,
         "year": ref_year,
         "calendar_id": cal_id,
         "calendar_title": cal_title,
+        "auth": auth_kind,
         "raw_events": len(events),
+        "parsed_rows": len(events_to_holiday_rows(events)),
+        "awal_muharram_rows": awal,
         "sample": sample,
     }
 
@@ -301,23 +430,24 @@ def sync_public_holidays_from_calendar(
     Returns a result dict with ``ok``, ``count``, ``calendar_title``, ``years``, etc.
     """
     years = _sync_years(year)
-    token = od.get_tenant_access_token()
-    cal_id, cal_title = resolve_public_holiday_calendar_id(token)
-    if not cal_id:
+    cal_id, cal_title, auth_kind, auth_token = resolve_public_holiday_calendar()
+    if not cal_id or not auth_token:
         return {
             "ok": False,
             "error": (
                 f"Public holiday calendar not found (search: {_PUBLIC_HOLIDAY_CALENDAR_QUERY!r}). "
-                "Set PUBLIC_HOLIDAY_CALENDAR_ID in .env."
+                "Set PUBLIC_HOLIDAY_CALENDAR_ID in .env, or re-auth user OAuth with "
+                "calendar:calendar:readonly (see `python holiday_sync.py --list-calendars`)."
             ),
             "years": years,
+            "list": list_public_holiday_calendars(),
         }
 
     all_events: list[dict[str, Any]] = []
     fetch_errors: list[str] = []
     for ref_year in years:
         try:
-            all_events.extend(fetch_public_holiday_events(token, cal_id, ref_year))
+            all_events.extend(fetch_public_holiday_events(auth_token, cal_id, ref_year))
         except CalendarFetchError as exc:
             fetch_errors.append(f"{ref_year}: {exc}")
 
@@ -342,11 +472,22 @@ def sync_public_holidays_from_calendar(
         }
 
     if not dry_run:
-        write_holiday_csv(rows, csv_path)
+        try:
+            write_holiday_csv(rows, csv_path)
+        except RuntimeError as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "years": years,
+                "calendar_id": cal_id,
+                "calendar_title": cal_title,
+                "raw_events": len(all_events),
+                "parsed_rows": len(rows),
+            }
         try:
             from holiday import reload_holidays
 
-            reload_holidays()
+            reload_holidays(str(csv_path))
         except ImportError:
             pass
 
@@ -356,6 +497,7 @@ def sync_public_holidays_from_calendar(
         "count": len(rows),
         "calendar_id": cal_id,
         "calendar_title": cal_title,
+        "auth": auth_kind,
         "raw_events": len(all_events),
         "csv_path": str(csv_path),
         "dry_run": dry_run,
@@ -368,8 +510,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--year", type=int, default=None, help="Calendar year (default: current year)")
     parser.add_argument("--dry-run", action="store_true", help="Fetch and parse only; do not write CSV")
     parser.add_argument("--probe", action="store_true", help="Print sample raw calendar events")
+    parser.add_argument("--list-calendars", action="store_true", help="List calendar search hits")
     parser.add_argument("--csv", default=str(_HOLIDAY_CSV_PATH), help="Output CSV path")
     args = parser.parse_args(argv)
+
+    if args.list_calendars:
+        import json
+
+        print(json.dumps(list_public_holiday_calendars(), indent=2, default=str))
+        return 0
 
     if args.probe:
         import json

@@ -1926,11 +1926,15 @@ def public_holiday_csv_sync():
         if result.get("ok"):
             print(
                 f"[Holiday sync] {result['count']} row(s) from {result.get('calendar_title')!r} "
+                f"via {result.get('auth') or '?'} "
                 f"({', '.join(str(y) for y in result.get('years') or [])}) → {result.get('csv_path')}",
                 flush=True,
             )
         else:
             print(f"[Holiday sync] failed: {result.get('error')}", flush=True)
+            lst = result.get("list")
+            if isinstance(lst, dict) and lst.get("search_hits"):
+                print(f"[Holiday sync] search hits: {lst.get('search_hits')}", flush=True)
     except Exception as exc:
         print(f"[Holiday sync] error: {exc!r}", flush=True)
     finally:

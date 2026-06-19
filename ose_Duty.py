@@ -829,6 +829,15 @@ def _put_ose_shift_sheet_cell_styles(
         )
         if not back_color:
             continue
+        if back_color == _OSE_SHIFT_SHEET_BG_HOLIDAY:
+            on = (col_dates or {}).get(col_idx) or (
+                _date_for_matrix_column(values, col_idx) if values else None
+            )
+            print(
+                f"[ose_Duty] offset holiday style row={row_idx + 1} col={col_idx + 1} "
+                f"val={val!r} date={on} -> {back_color}",
+                flush=True,
+            )
         data.append({"ranges": [_shift_sheet_cell_range(row_idx, col_idx)], "style": {"backColor": back_color}})
     if not data:
         return

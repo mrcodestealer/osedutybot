@@ -1,5 +1,6 @@
 from datetime import datetime, date
 import csv
+import os
 from dotenv import load_dotenv
 load_dotenv()
 def get_today_date():
@@ -8,6 +9,8 @@ def get_today_date():
 
 # ---------- Holiday handling ----------
 _holidays = None
+_holiday_csv_mtime: float = 0.0
+_holiday_csv_path = os.getenv("HOLIDAY_CSV_PATH", "holiday.csv")
 
 def _load_holidays(csv_path='holiday.csv'):
     """Load holidays from CSV. Expected columns: Code, Name, Date (DD/MM/YYYY), Day."""
@@ -38,15 +41,26 @@ def _load_holidays(csv_path='holiday.csv'):
 
 def get_holidays():
     """Return the holiday list, loading it if necessary."""
-    global _holidays
-    if _holidays is None:
-        _holidays = _load_holidays()
+    global _holidays, _holiday_csv_mtime
+    path = _holiday_csv_path
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = 0.0
+    if _holidays is None or mtime != _holiday_csv_mtime:
+        _holidays = _load_holidays(path)
+        _holiday_csv_mtime = mtime
     return _holidays
 
 def reload_holidays(csv_path: str = "holiday.csv") -> list[dict]:
     """Reload holidays from disk (after calendar sync writes ``holiday.csv``)."""
-    global _holidays
+    global _holidays, _holiday_csv_mtime, _holiday_csv_path
+    _holiday_csv_path = csv_path
     _holidays = _load_holidays(csv_path)
+    try:
+        _holiday_csv_mtime = os.path.getmtime(csv_path)
+    except OSError:
+        _holiday_csv_mtime = 0.0
     return _holidays
 
 def get_holiday_date_set() -> frozenset[date]:
