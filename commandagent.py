@@ -652,7 +652,7 @@ def build_intent_catalog(*, jenkins_available: bool = True) -> list[IntentSpec]:
             "delete reminder|remove reminder|delete a reminder|remove a reminder|"
             "cancel reminder|delete reminders|remove reminders|list reminders to delete|"
             "i want to delete a reminder|delete my reminder|remove my reminder|"
-            "show reminders to delete|clear reminder",
+            "show reminder|show reminders to delete|clear reminder",
         )
     )
 
@@ -908,6 +908,17 @@ def detect_checkcredit_command(text: str) -> Optional[str]:
     base = "/machineerror" if is_error else "/checkcredit"
     dm = _CC_DATE_RE.search(raw)
     return f"{base} {machine} {dm.group(1)}" if dm else f"{base} {machine}"
+
+
+_SHOW_REMINDER_RE = re.compile(r"(?i)^show reminder\s*[?.!]*$")
+
+
+def detect_show_reminder_command(text: str) -> Optional[str]:
+    """Map exactly ``show reminder`` → ``/deletereminder`` (reminder list card)."""
+    raw = (text or "").strip()
+    if _SHOW_REMINDER_RE.match(raw):
+        return "/deletereminder"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1178,6 +1189,10 @@ def command_signal(text: str) -> dict[str, Any]:
         tag = "cmd_machineerror" if cc.startswith("/machineerror") else "cmd_checkcredit"
         out.update(tag=tag, confidence=1.0, margin=1.0, command=cc, deterministic=True)
         return out
+    sr = detect_show_reminder_command(raw)
+    if sr:
+        out.update(tag="cmd_deletereminder", confidence=1.0, margin=1.0, command=sr, deterministic=True)
+        return out
     clf = _get_classifier()
     if clf is None:
         return out
@@ -1217,6 +1232,10 @@ def translate_if_enabled(text: str) -> Optional[str]:
     if cc:
         print(f"[commandagent] Check-credit map: {raw[:80]!r} → {cc!r}", flush=True)
         return cc
+    sr = detect_show_reminder_command(raw)
+    if sr:
+        print(f"[commandagent] Show-reminder map: {raw[:80]!r} → {sr!r}", flush=True)
+        return sr
     try:
         import jenkinsupdate as _jenkins_gate
 

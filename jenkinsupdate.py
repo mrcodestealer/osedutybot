@@ -136,6 +136,37 @@ PMS_UAT_UPDATE_URL = (
     "https://jenkins.client8.me/job/PMS/job/UAT/job/PMS-UAT-UPDATE/build?delay=0sec"
 )
 
+# CPMS / IGO UAT update — both are FPMS-style forms (Environment <select> → reactive UnoChoice
+# Services checkboxes → Branch → Version). CPMS has **one** environment; IGO has **two**, each with
+# a different Services list. The bot scans both jobs once and caches ``environment → [services]`` so
+# routing a requested service to the correct (job, environment) is instant.
+CPMS_UAT_UPDATE_URL = (
+    "https://jenkins.client8.me/job/CPMS/job/UAT/job/CPMS-UAT-UPDATE/build?delay=0sec"
+)
+IGO_UAT_UPDATE_URL = (
+    "https://jenkins.client8.me/job/IGO/job/UAT/job/IGO-UAT-UPDATE/build?delay=0sec"
+)
+# IGO PROD SCRIPT RUN — same form as FPMS PROD SCRIPT (Environment <select> + Command), but the
+# Environment option is chosen from the chat phrase, not fixed.
+IGO_PROD_SCRIPT_RUN_URL = (
+    "https://jenkins.client8.me/job/IGO/job/PROD/job/IGO-PROD-SCRIPT-RUN/build?delay=0sec"
+)
+# Phrase → IGO PROD SCRIPT RUN Environment option value (longest phrase first when matching).
+IGO_PROD_SCRIPT_ENV_BY_PHRASE: tuple[tuple[str, str], ...] = (
+    ("gov report", "igo-gov-report-prod"),
+    ("report", "igo-report-prod"),
+    ("", "igo-prod"),
+)
+# Persisted discovery cache for CPMS / IGO UAT: {"cpms": {env: [svc...]}, "igo": {env: [svc...]}}.
+_CPMS_IGO_SERVICES_CACHE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "cpms_igo_uat_services.json"
+)
+# Build URL per discovery "kind" key used in the cache.
+CPMS_IGO_UAT_URL_BY_KIND: dict[str, str] = {
+    "cpms": CPMS_UAT_UPDATE_URL,
+    "igo": IGO_UAT_UPDATE_URL,
+}
+
 # BRAZIL / NEWPORT UAT update — structurally identical to the FPMS UAT branch job
 # (Environment <select> → Active-Choices Services checkboxes → Branch text; Version OPTIONAL).
 # Newport's form mirrors Brazil's; they differ only by build URL.
@@ -391,9 +422,20 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
         FPMS_NT_UAT_BO_UPDATE_URL,
     ),
     "cpms uat update": (
-        "CPMS-UAT-UPDATE",
-        "https://jenkins.client8.me/job/IGO/job/UAT/job/IGO-UAT-UPDATE/build?delay=0sec\n"
-        "https://jenkins.client8.me/job/CPMS/job/UAT/job/CPMS-UAT-UPDATE/build?delay=0sec",
+        "CPMS / IGO UAT UPDATE",
+        IGO_UAT_UPDATE_URL + "\n" + CPMS_UAT_UPDATE_URL,
+    ),
+    "cpms uat": (
+        "CPMS / IGO UAT UPDATE",
+        IGO_UAT_UPDATE_URL + "\n" + CPMS_UAT_UPDATE_URL,
+    ),
+    "igo uat update": (
+        "CPMS / IGO UAT UPDATE",
+        IGO_UAT_UPDATE_URL + "\n" + CPMS_UAT_UPDATE_URL,
+    ),
+    "igo uat": (
+        "CPMS / IGO UAT UPDATE",
+        IGO_UAT_UPDATE_URL + "\n" + CPMS_UAT_UPDATE_URL,
     ),
     "pms": (
         "PMS-UAT-UPDATE",
@@ -456,10 +498,9 @@ JENKINS_UPDATE_JOB_REGISTRY: dict[str, tuple[str, str]] = {
         "FPMS UAT MASTER UPDATE",
         "https://jenkins.client8.me/job/FPMS/view/FPMS-UAT/job/FPMS_UAT_MASTER_UPDATE/",
     ),
-    "igo prod script": (
-        "IGO PROD SCRIPT RUN",
-        "https://jenkins.client8.me/job/IGO/job/PROD/job/IGO-PROD-SCRIPT-RUN/build?delay=0sec",
-    ),
+    "igo prod script": ("IGO PROD SCRIPT RUN", IGO_PROD_SCRIPT_RUN_URL),
+    "igo report prod script": ("IGO PROD SCRIPT RUN", IGO_PROD_SCRIPT_RUN_URL),
+    "igo gov report prod script": ("IGO PROD SCRIPT RUN", IGO_PROD_SCRIPT_RUN_URL),
     "fpms prod script": (
         "FPMS PROD SCRIPT RUN",
         "https://jenkins.client8.me/job/FPMS/job/FPMS_PROD_SCRIPT_RUN/build?delay=0sec",
@@ -486,8 +527,10 @@ JENKINS_UPDATE_CMD_RE = re.compile(
 _NL_JENKINS_UPDATE_RE = re.compile(
     r"(?i)(?:"
     r"(?:want|need|please|help(?:\s+me)?|can you)\s+(?:to\s+)?(?:update|deploy|trigger|run)\b"
-    r"|(?:update|deploy|trigger|run)\s+(?:jenkins\b|(?:fpms|pms|bi|cpms|sre|fe|nt|sms|fnt|rc)\b|rc[\s-]*uat\b)"
+    r"|(?:update|deploy|trigger|run)\s+(?:jenkins\b|(?:fpms|pms|bi|cpms|igo|sre|fe|nt|sms|fnt|rc)\b|rc[\s-]*uat\b)"
     r"|\brc[\s-]*uat(?:[\s-]*master)?\b"
+    r"|\b(?:cpms|igo)[\s-]*uat\b"
+    r"|\bigo\b.*\bprod\s*script\b"
     r"|jenkins\s+(?:update|deploy|build)"
     r")"
 )
@@ -4686,6 +4729,34 @@ def read_services_checked_values(page) -> list[str]:
     return [normalize_parameter_text(str(x)) for x in out if str(x).strip()]
 
 
+def read_all_service_values(page) -> list[str]:
+    """Every service ``value`` / ``json`` (checked or not) under the Services UnoChoice root."""
+    out = page.evaluate(
+        "() => {\n"
+        + _SERVICES_UNOCHOICE_JS_FN
+        + r"""
+        const root = __fpmsServicesCheckboxRoot();
+        if (!root) return [];
+        const acc = [];
+        for (const el of root.querySelectorAll('input[type="checkbox"]')) {
+            const v = (el.getAttribute('value') || el.getAttribute('json') || '').trim();
+            if (v) acc.push(v);
+        }
+        return acc;
+    }"""
+    )
+    if not isinstance(out, list):
+        return []
+    seen: set[str] = set()
+    result: list[str] = []
+    for x in out:
+        v = normalize_parameter_text(str(x))
+        if v and v not in seen:
+            seen.add(v)
+            result.append(v)
+    return result
+
+
 def read_ecp_checked_values(page, label: str = "Services") -> list[str]:
     """
     Checked checkbox ids under a Jenkins **Extended Choice (ECP)** parameter
@@ -5692,6 +5763,12 @@ def _jenkins_update_job_automation_profile(raw_urls: str) -> str | None:
         return "venue_uat"
     if "/job/newport/job/uat/job/newport-uat-update/" in ul:
         return "venue_uat"
+    if "/job/cpms/job/uat/job/cpms-uat-update/" in ul:
+        return "cpms_igo_uat"
+    if "/job/igo/job/uat/job/igo-uat-update/" in ul:
+        return "cpms_igo_uat"
+    if "/job/igo/job/prod/job/igo-prod-script-run/" in ul:
+        return "igo_prod_script"
     return None
 
 
@@ -5717,6 +5794,243 @@ def _fnt_rc_headline_detect(body: str) -> str | None:
     if re.search(r"\brc[\s-]*uat(?:[\s-]*master)?\b", s_low):
         return JENKINS_UPDATE_JOB_REGISTRY["rc uat master"][1]
     return None
+
+
+def _cpms_igo_uat_headline_detect(body: str) -> str | None:
+    """
+    True (returns the matched headline) when **any** line says ``CPMS UAT`` / ``IGO UAT``
+    (optionally led by ``update``). The job line is often not the first line (the user usually
+    starts with a greeting), so scan every line.
+    """
+    for line in (body or "").replace("\r\n", "\n").splitlines():
+        s = JENKINS_UPDATE_CMD_RE.sub("", line, count=1).strip()
+        s_low = re.sub(r"[`*_]", " ", s).casefold()
+        s_low = re.sub(r"\s+", " ", s_low).strip()
+        if re.search(r"\b(?:cpms|igo)[\s-]*uat\b", s_low) and not re.search(
+            r"\b(?:script|prod)\b", s_low
+        ):
+            return line.strip()
+    return None
+
+
+def _cpms_igo_uat_version_from_headline(headline: str) -> str:
+    """
+    Pull a trailing version off the CPMS/IGO headline, e.g. ``Update CPMS UAT CPMS2- 1.0.80``
+    → ``CPMS2-1.0.80`` (collapse spaces around dashes so ``CPMS2- 1.0.80`` becomes one token).
+    Returns ``""`` when no trailing version-like text is present.
+    """
+    s = JENKINS_UPDATE_CMD_RE.sub("", headline or "", count=1)
+    s = re.sub(r"[`*_]", " ", s)
+    m = re.search(r"\b(?:cpms|igo)[\s-]*uat\b", s, re.I)
+    rest = s[m.end():].strip() if m else ""
+    if not rest:
+        return ""
+    rest = re.sub(r"\s*-\s*", "-", rest).strip()
+    # Take the first whitespace-free token (e.g. ``CPMS2-1.0.80``); ignore trailing words.
+    tok = rest.split()[0] if rest.split() else ""
+    return tok.strip()
+
+
+def _igo_prod_script_phrase_env(body: str) -> str | None:
+    """
+    Map an ``update igo [gov] [report] prod script`` headline to the IGO PROD SCRIPT RUN
+    Environment value (``igo-prod`` / ``igo-report-prod`` / ``igo-gov-report-prod``).
+    Returns ``None`` when no IGO prod-script headline is present.
+    """
+    for line in (body or "").replace("\r\n", "\n").splitlines():
+        s = JENKINS_UPDATE_CMD_RE.sub("", line, count=1)
+        s_low = re.sub(r"[`*_]", " ", s).casefold()
+        s_low = re.sub(r"\s+", " ", s_low).strip()
+        m = re.search(r"\bigo\b(?P<mid>.*?)\bprod\s*script\b", s_low)
+        if not m:
+            continue
+        mid = m.group("mid") or ""
+        for phrase, env in IGO_PROD_SCRIPT_ENV_BY_PHRASE:
+            if phrase and phrase in mid:
+                return env
+        return "igo-prod"
+    return None
+
+
+# ----- CPMS / IGO UAT: env→services discovery cache + service routing -----
+_cpms_igo_cache_lock = threading.Lock()
+
+
+def _load_cpms_igo_cache() -> dict:
+    """Read the persisted ``{kind: {env: [services]}}`` map (``{}`` when missing/corrupt)."""
+    with _cpms_igo_cache_lock:
+        try:
+            with open(_CPMS_IGO_SERVICES_CACHE_PATH, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, dict[str, list[str]]] = {}
+    for kind, envs in data.items():
+        if not isinstance(envs, dict):
+            continue
+        out[str(kind)] = {
+            str(env): [str(s) for s in svcs if str(s).strip()]
+            for env, svcs in envs.items()
+            if isinstance(svcs, list)
+        }
+    return out
+
+
+def _save_cpms_igo_cache(data: dict) -> None:
+    with _cpms_igo_cache_lock:
+        try:
+            with open(_CPMS_IGO_SERVICES_CACHE_PATH, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, ensure_ascii=False, indent=2)
+        except OSError as ex:
+            print(f"[cpms_igo] cache save failed: {ex!r}", flush=True)
+
+
+def _cpms_igo_cache_is_populated(cache: dict) -> bool:
+    for envs in (cache or {}).values():
+        if isinstance(envs, dict):
+            for svcs in envs.values():
+                if svcs:
+                    return True
+    return False
+
+
+def discover_cpms_igo_env_services(
+    *, headless: bool = True, kinds: Sequence[str] | None = None
+) -> dict:
+    """
+    Open CPMS-UAT-UPDATE / IGO-UAT-UPDATE once, and for **every Environment option** read the full
+    Services checkbox list (UnoChoice). Persist ``{kind: {env: [services]}}`` so later requests route
+    a service to the right (job, environment) instantly. Only reads the form — never clicks Build.
+    """
+    want = [k for k in (kinds or ("cpms", "igo")) if k in CPMS_IGO_UAT_URL_BY_KIND]
+    user, pw = _credentials()
+    cache = _load_cpms_igo_cache()
+    bname = (os.environ.get("FPMS_PLAYWRIGHT_BROWSER") or "chromium").strip().lower()
+    if bname not in ("chromium", "firefox"):
+        bname = "chromium"
+    with sync_playwright() as p:
+        browser_obj, context, page = _playwright_browser_context_and_page(
+            p, browser_name=bname, headless=headless, slow_mo=0, user_data_dir=None
+        )
+        try:
+            first = True
+            for kind in want:
+                url = CPMS_IGO_UAT_URL_BY_KIND[kind]
+                try:
+                    open_fpms_build_with_login(
+                        page, user, pw, first_visit=first, warmup=False, build_url=url
+                    )
+                    first = False
+                    page.wait_for_selector("div.jenkins-form-item", timeout=60_000)
+                    _safe_page_wait(page, _MS_FORM_READY)
+                    _safe_page_wait(page, _MS_POST_LOGIN_BEFORE_FORM)
+                    env_options = [ov for ov, _ot in _read_select_options(page, "Environment")]
+                    env_map: dict[str, list[str]] = {}
+                    for env in env_options:
+                        try:
+                            select_environment(page, env)
+                            _safe_page_wait(page, max(300, _MS_ENV_SETTLE))
+                            svcs = read_all_service_values(page)
+                            env_map[env] = svcs
+                            print(
+                                f"[cpms_igo] {kind} env={env!r}: {len(svcs)} services",
+                                flush=True,
+                            )
+                        except Exception as env_ex:
+                            print(
+                                f"[cpms_igo] {kind} env={env!r} read failed: {env_ex!r}",
+                                flush=True,
+                            )
+                    if env_map:
+                        cache[kind] = env_map
+                except Exception as kind_ex:
+                    print(f"[cpms_igo] discover {kind} failed: {kind_ex!r}", flush=True)
+        finally:
+            try:
+                context.close()
+            except Exception:
+                pass
+            try:
+                browser_obj.close()
+            except Exception:
+                pass
+    _save_cpms_igo_cache(cache)
+    return cache
+
+
+def _cpms_igo_all_entries(cache: dict) -> list[tuple[str, str, str]]:
+    """Flatten cache to ``(kind, env, service_id)`` rows."""
+    rows: list[tuple[str, str, str]] = []
+    for kind, envs in (cache or {}).items():
+        if not isinstance(envs, dict):
+            continue
+        for env, svcs in envs.items():
+            for sid in svcs:
+                rows.append((kind, env, sid))
+    return rows
+
+
+def _cpms_igo_route_service(token: str, cache: dict) -> dict:
+    """
+    Decide which (job, environment, service id) a requested service maps to.
+
+    Returns a dict with ``status``:
+      * ``"direct"``  — unique service in one env; keys: ``kind``, ``env``, ``service_id``, ``url``.
+      * ``"menu"``    — the token is contained in several service names, or the same id exists in
+                        several environments; key: ``candidates`` = list of ``(kind, env, service_id)``.
+      * ``"none"``    — not found; ``suggestions`` = nearest ``(kind, env, service_id)`` rows (typo help).
+    """
+    rows = _cpms_igo_all_entries(cache)
+    if not rows:
+        return {"status": "none", "suggestions": []}
+    qk = _normalize_service_query_key(token)
+
+    exact = [r for r in rows if _normalize_service_query_key(r[2]) == qk]
+    if exact:
+        if len(exact) == 1:
+            kind, env, sid = exact[0]
+            # Ambiguous only if the token is a sub-name of OTHER services in the SAME env
+            # (e.g. ``cpms`` when ``cpms1`` also exists) — then let the user choose.
+            siblings = [
+                (kind, env, s)
+                for s in cache.get(kind, {}).get(env, [])
+                if qk in _normalize_service_query_key(s)
+                and _normalize_service_query_key(s) != qk
+            ]
+            if siblings:
+                return {"status": "menu", "candidates": exact + siblings}
+            return {
+                "status": "direct",
+                "kind": kind,
+                "env": env,
+                "service_id": sid,
+                "url": CPMS_IGO_UAT_URL_BY_KIND.get(kind, ""),
+            }
+        return {"status": "menu", "candidates": exact}
+
+    # Token is a substring/prefix of one or more service names → user picks the full one.
+    superset = [r for r in rows if qk and qk in _normalize_service_query_key(r[2])]
+    if superset:
+        if len(superset) == 1:
+            kind, env, sid = superset[0]
+            return {
+                "status": "direct",
+                "kind": kind,
+                "env": env,
+                "service_id": sid,
+                "url": CPMS_IGO_UAT_URL_BY_KIND.get(kind, ""),
+            }
+        return {"status": "menu", "candidates": superset}
+
+    # Not found anywhere → likely a typo: suggest the nearest service names.
+    scored = sorted(
+        ((_service_search_score(token, r[2]), r) for r in rows),
+        key=lambda x: -x[0],
+    )
+    suggestions = [r for sc, r in scored[:6] if sc > 0]
+    return {"status": "none", "suggestions": suggestions}
 
 
 def _venue_uat_headline_detect(text: str) -> tuple[str, str, str] | None:
@@ -7523,6 +7837,8 @@ def _fpms_lark_verification_card_json(
         title_text = "BI SCRIPT UPDATE"
     elif jp == "venue_uat":
         title_text = "VENUE UAT"
+    elif jp == "cpms_igo_uat":
+        title_text = "CPMS / IGO UAT"
     else:
         title_text = "FPMS UAT"
     if isinstance(next_build_number, int) and next_build_number > 0:
@@ -7596,6 +7912,8 @@ def _fpms_lark_verification_plain_fallback(
         head = "BI SCRIPT UPDATE"
     elif jp == "venue_uat":
         head = "VENUE UAT"
+    elif jp == "cpms_igo_uat":
+        head = "CPMS / IGO UAT"
     else:
         head = "FPMS UAT"
     if isinstance(next_build_number, int) and next_build_number > 0:
@@ -7675,6 +7993,7 @@ def _jenkins_job_profile_display(job_profile: str) -> str:
         "bi_script_update": "BI SCRIPT UPDATE",
         "vpn_creation": "VPN CREATION",
         "venue_uat": "VENUE UAT",
+        "cpms_igo_uat": "CPMS / IGO UAT",
     }.get(jp, jp.upper().replace("_", " "))
 
 
@@ -8156,6 +8475,8 @@ def _fpms_lark_begin_jenkins_run(
         cfg = _bi_script_update_bot_build_config_block(data, resolved)
     elif jp == "venue_uat":
         cfg = _venue_uat_bot_build_config_block(data, resolved)
+    elif jp == "cpms_igo_uat":
+        cfg = _cpms_igo_uat_bot_build_config_block(data, resolved)
     else:
         cfg = _fpms_bot_build_config_block(data, resolved)
     ev = threading.Event()
@@ -8348,6 +8669,14 @@ def _fpms_lark_dispatch_job_row(
         )
     if prof == "venue_uat":
         return _fpms_lark_dispatch_venue_uat_parameter_flow(
+            chat_id, session_key, body, ju, send, lark_message_id=lark_message_id
+        )
+    if prof == "cpms_igo_uat":
+        return _fpms_lark_dispatch_cpms_igo_uat_parameter_flow(
+            chat_id, session_key, body, send, lark_message_id=lark_message_id
+        )
+    if prof == "igo_prod_script":
+        return _fpms_lark_dispatch_igo_prod_script_parameter_flow(
             chat_id, session_key, body, ju, send, lark_message_id=lark_message_id
         )
     if prof == "pms_uat":
@@ -8746,6 +9075,317 @@ def _fpms_lark_send_venue_env_pick_card(
         chat_id,
         f"Pick the Environment for `{keyword}`: " + ", ".join(candidates),
     )
+
+
+def _parse_cpms_igo_uat_request(body: str) -> tuple[list[str], str, str, bool]:
+    """
+    Parse a CPMS / IGO UAT chat message into ``(service_tokens, branch, version, update_all)``.
+
+    * ``branch`` defaults to ``master`` when no ``branch:`` line is given.
+    * ``version`` comes from a ``version:`` line, else the trailing token on the
+      ``Update CPMS UAT CPMS2- 1.0.80`` headline (``CPMS2-1.0.80``); ``""`` if absent.
+    """
+    raw_lines = [_normalize_config_colons(L) for L in (body or "").splitlines()]
+    lines = [L.strip() for L in raw_lines if L.strip() != ""]
+    branch: str = ""
+    version: str = ""
+    service_lines: list[str] = []
+    last_key: str | None = None
+    port_head = re.compile(r"^\d{3,5}\b")
+    for line in lines:
+        m = _match_key_line_fuzzy(line)
+        if m:
+            key = m.group("key").lower()
+            if key == "service":
+                key = "services"
+            rest = _clean_key_rest(m.group("rest") or "")
+            last_key = key
+            if key == "branch":
+                branch = _branch_from_config_block(rest, preserve_case=True) or branch
+            elif key == "version":
+                version = _version_from_config_block(rest) or version
+            elif key == "services" and rest:
+                service_lines.append(rest)
+            continue
+        if last_key == "services":
+            if _looks_like_chat_trailing_line_under_services(line):
+                continue
+            if port_head.match(line) or (
+                re.search(r"[a-zA-Z_]", line)
+                and len(line) < 200
+                and not re.match(r"^\s*update\b", line, re.I)
+            ):
+                service_lines.append(line)
+            continue
+        # Value on the line *after* a ``Branch:`` / ``Version:`` label (label-only line above).
+        if last_key == "branch" and not branch:
+            branch = _branch_from_config_block(line, preserve_case=True) or branch
+            continue
+        if last_key == "version" and not version:
+            version = _version_from_config_block(line) or version
+            continue
+    if not version:
+        headline = _cpms_igo_uat_headline_detect(body) or ""
+        version = _cpms_igo_uat_version_from_headline(headline)
+    if not branch:
+        branch = "master"
+    update_all = bool(service_lines) and _service_lines_mean_update_all(service_lines)
+    tokens: list[str] = []
+    if not update_all:
+        for raw in service_lines:
+            for part in re.split(r"[,，;]+", raw):
+                t = part.strip()
+                if t:
+                    tokens.append(t)
+    return tokens, branch, version, update_all
+
+
+def _cpms_igo_resolve_tokens_in_env(
+    tokens: list[str], catalog: Sequence[str]
+) -> tuple[list[str], str | None]:
+    """
+    Resolve each requested service against one environment's catalog.
+
+    Returns ``(resolved_ids, problem_message)``. ``problem_message`` is ``None`` on success;
+    otherwise a chat-ready message (ambiguous sub-name → choose; typo → nearest matches).
+    """
+    resolved: list[str] = []
+    cat = list(catalog or [])
+    for tok in tokens:
+        qk = _normalize_service_query_key(tok)
+        exact = _catalog_exact_service_id(tok, cat)
+        if exact is not None:
+            siblings = [
+                s
+                for s in cat
+                if qk in _normalize_service_query_key(s)
+                and _normalize_service_query_key(s) != qk
+            ]
+            if siblings:
+                opts = "\n".join(f"• `{s}`" for s in [exact] + siblings)
+                return [], (
+                    f"`{tok}` matches several services — re-send the exact one:\n{opts}"
+                )
+            resolved.append(exact)
+            continue
+        superset = [s for s in cat if qk and qk in _normalize_service_query_key(s)]
+        if len(superset) == 1:
+            resolved.append(superset[0])
+            continue
+        if superset:
+            opts = "\n".join(f"• `{s}`" for s in superset)
+            return [], f"`{tok}` matches several services — re-send the exact one:\n{opts}"
+        nearest = sorted(
+            ((_service_search_score(tok, s), s) for s in cat), key=lambda x: -x[0]
+        )
+        sugg = [s for sc, s in nearest[:5] if sc > 0]
+        if sugg:
+            opts = "\n".join(f"• `{s}`" for s in sugg)
+            return [], f"Service `{tok}` not found here. Did you mean:\n{opts}"
+        return [], f"Service `{tok}` not found in this environment."
+    # Preserve catalog order, drop duplicates.
+    ordered = [s for s in cat if s in set(resolved)]
+    return ordered or resolved, None
+
+
+def parse_cpms_igo_uat_run_config_block(
+    text: str,
+) -> tuple[str, list[str], str, str, bool]:
+    """Parse the internal ``CPMS_IGO_UAT_V1`` block passed to :func:`run`."""
+    raw_lines = [_normalize_config_colons(L) for L in (text or "").splitlines()]
+    lines = [L.strip() for L in raw_lines if L.strip() != ""]
+    if not lines or not lines[0].upper().startswith("CPMS_IGO_UAT_V1"):
+        raise ConfigBlockError("Internal CPMS/IGO config must start with CPMS_IGO_UAT_V1.")
+    env = ""
+    branch = ""
+    version = ""
+    service_lines: list[str] = []
+    last_key: str | None = None
+    for line in lines[1:]:
+        m = _match_key_line_fuzzy(line)
+        if m:
+            key = m.group("key").lower()
+            if key == "service":
+                key = "services"
+            rest = _clean_key_rest(m.group("rest") or "")
+            last_key = key
+            if key == "environment":
+                env = normalize_parameter_text(rest)
+            elif key == "branch":
+                branch = _branch_from_config_block(rest, preserve_case=True)
+            elif key == "version":
+                version = _version_from_config_block(rest)
+            elif key == "services" and rest:
+                service_lines.append(rest)
+            continue
+        if last_key == "services" and re.search(r"[a-zA-Z0-9_]", line):
+            service_lines.append(line)
+    update_all = bool(service_lines) and _service_lines_mean_update_all(service_lines)
+    services: list[str] = []
+    if not update_all:
+        for raw in service_lines:
+            for part in re.split(r"[,，;]+", raw):
+                t = part.strip()
+                if t:
+                    services.append(t)
+    if not env:
+        raise ConfigBlockError("CPMS/IGO config: missing environment:.")
+    if not branch:
+        raise ConfigBlockError("CPMS/IGO config: missing branch:.")
+    return env, services, branch, version, update_all
+
+
+def _cpms_igo_uat_bot_build_config_block(data: dict, resolved_ids: list[str]) -> str:
+    svc = "all" if data.get("update_all_services") else "\n".join(resolved_ids)
+    return (
+        "CPMS_IGO_UAT_V1\n"
+        f"environment: {data['environment']}\n"
+        f"branch: {data['branch']}\n"
+        f"version: {data.get('version') or ''}\n"
+        f"services:\n{svc}\n"
+    )
+
+
+def _fpms_lark_dispatch_cpms_igo_uat_parameter_flow(
+    chat_id: str,
+    session_key: str,
+    body: str,
+    send,
+    *,
+    lark_message_id: str | None = None,
+) -> bool:
+    """CPMS / IGO UAT: route the requested service to the right job+environment, then run."""
+    tokens, branch, version, update_all = _parse_cpms_igo_uat_request(body)
+    if update_all or not tokens:
+        send(
+            chat_id,
+            "❌ For **CPMS / IGO UAT**, list the service(s) so I can pick the right environment/link, "
+            "e.g.\n`service: igo-sw-http-main-apisix-ftg`",
+        )
+        return True
+    if not version:
+        send(
+            chat_id,
+            "❌ Missing **version** for CPMS / IGO UAT. Put it on the headline "
+            "(`Update CPMS UAT CPMS2-1.0.80`) or add a `version:` line.",
+        )
+        return True
+    with _fpms_lark_sessions_lock:
+        prev = _fpms_lark_sessions.get(session_key)
+        if isinstance(prev, dict) and prev.get("state") == "jenkins_wait_build":
+            send(
+                chat_id,
+                "⏳ A Jenkins **Build** confirmation is already waiting in this chat. "
+                "**Tap YES/NO** (or type **yes** / **no**), or say **cancel** first.",
+            )
+            return True
+    cache = _load_cpms_igo_cache()
+    if not _cpms_igo_cache_is_populated(cache):
+        send(
+            chat_id,
+            "🔎 First **CPMS / IGO UAT** run — scanning both jobs once to learn which environment "
+            "owns which services (one-time step, ~30s)…",
+        )
+        try:
+            cache = discover_cpms_igo_env_services(headless=True)
+        except Exception as ex:
+            send(
+                chat_id,
+                f"❌ Could not scan CPMS/IGO Jenkins (login/VPN?):\n```\n{ex}\n```",
+            )
+            return True
+        if not _cpms_igo_cache_is_populated(cache):
+            send(
+                chat_id,
+                "❌ CPMS/IGO scan found no services. Check Jenkins access, then try again.",
+            )
+            return True
+    route = _cpms_igo_route_service(tokens[0], cache)
+    if route["status"] == "none":
+        sugg = route.get("suggestions") or []
+        if sugg:
+            lines = [f"❌ Service `{tokens[0]}` not found in CPMS/IGO UAT. Did you mean:"]
+            for kind, env, sid in sugg:
+                lines.append(f"• `{sid}`  ({kind.upper()} / {env})")
+            send(chat_id, "\n".join(lines))
+        else:
+            send(chat_id, f"❌ Service `{tokens[0]}` not found in CPMS/IGO UAT.")
+        return True
+    if route["status"] == "menu":
+        cands = route.get("candidates") or []
+        lines = [f"Several services match `{tokens[0]}` — re-send the exact service id:"]
+        for kind, env, sid in cands:
+            lines.append(f"• `{sid}`  ({kind.upper()} / {env})")
+        send(chat_id, "\n".join(lines))
+        return True
+    kind = route["kind"]
+    env = route["env"]
+    url = route.get("url") or CPMS_IGO_UAT_URL_BY_KIND.get(kind, "")
+    catalog = cache.get(kind, {}).get(env, [])
+    resolved_ids, problem = _cpms_igo_resolve_tokens_in_env(tokens, catalog)
+    if problem:
+        send(chat_id, f"({kind.upper()} / {env})\n{problem}")
+        return True
+    data = {
+        "environment": env,
+        "branch": branch,
+        "version": version,
+        "service_tokens": resolved_ids,
+        "update_all_services": False,
+    }
+    _fpms_lark_begin_jenkins_run(
+        chat_id,
+        session_key,
+        data,
+        resolved_ids,
+        send,
+        raw_prompt_body=body,
+        jenkins_build_url=url,
+        job_profile="cpms_igo_uat",
+        lark_message_id=lark_message_id,
+    )
+    return True
+
+
+def _fpms_lark_dispatch_igo_prod_script_parameter_flow(
+    chat_id: str,
+    session_key: str,
+    body: str,
+    jenkins_build_url: str,
+    send,
+    *,
+    lark_message_id: str | None = None,
+) -> bool:
+    """IGO PROD SCRIPT RUN: env from the phrase (igo-prod / igo-report-prod / igo-gov-report-prod)."""
+    env = _igo_prod_script_phrase_env(body) or "igo-prod"
+    try:
+        data = parse_fpms_prod_script_bot_block(body)
+    except Exception as ex:
+        with _fpms_lark_sessions_lock:
+            _fpms_lark_sessions[session_key] = {
+                "state": "fpms_prod_script_need_command",
+                "jenkins_job_url": jenkins_build_url,
+            }
+        send(
+            chat_id,
+            "❌ Could not parse IGO PROD script command.\n```\n%s\n```\n"
+            "Re-send the `node …` command, e.g.\n"
+            "`node wtAliScript/resendPulsar/sendConsumptionPcr.js`" % ex,
+        )
+        return True
+    data["environment"] = env
+    _fpms_lark_begin_jenkins_run(
+        chat_id,
+        session_key,
+        data,
+        [],
+        send,
+        raw_prompt_body=body,
+        jenkins_build_url=jenkins_build_url,
+        job_profile="fpms_prod_script",
+        lark_message_id=lark_message_id,
+    )
+    return True
 
 
 def _fpms_lark_dispatch_venue_uat_parameter_flow(
@@ -9255,6 +9895,10 @@ def looks_like_natural_jenkins_update(text: str) -> bool:
         return False
     if _venue_uat_headline_detect(raw):
         return True
+    if _cpms_igo_uat_headline_detect(raw):
+        return True
+    if _igo_prod_script_phrase_env(raw):
+        return True
     if _body_requests_bi_script_update(raw):
         return True
     if _looks_like_bi_api_update_paste(raw):
@@ -9265,7 +9909,8 @@ def looks_like_natural_jenkins_update(text: str) -> bool:
     has_svc = bool(re.search(r"\bservices?\s*:", raw, re.I))
     has_update_hint = bool(
         re.search(
-            r"(?i)\bjenkins\b|\bupdate\s+(?:fpms|pms|bi|cpms|sre|fe|nt|sms|fnt|rc)\b|\brc[\s-]*uat\b",
+            r"(?i)\bjenkins\b|\bupdate\s+(?:fpms|pms|bi|cpms|igo|sre|fe|nt|sms|fnt|rc)\b"
+            r"|\brc[\s-]*uat\b|\b(?:cpms|igo)[\s-]*uat\b",
             raw,
         )
     )
@@ -10136,6 +10781,18 @@ def _dispatch_lark_update_command_body(
             FPMS_PROD_SCRIPT_BUILD_URL,
             send,
             lark_message_id=lark_message_id,
+        )
+
+    # IGO PROD SCRIPT RUN — phrase picks the environment (igo-prod / igo-report-prod / igo-gov-report-prod).
+    if _igo_prod_script_phrase_env(body):
+        return _fpms_lark_dispatch_igo_prod_script_parameter_flow(
+            chat_id, key, body, IGO_PROD_SCRIPT_RUN_URL, send, lark_message_id=lark_message_id
+        )
+
+    # CPMS / IGO UAT — route the requested service to the correct job + environment.
+    if _cpms_igo_uat_headline_detect(body):
+        return _fpms_lark_dispatch_cpms_igo_uat_parameter_flow(
+            chat_id, key, body, send, lark_message_id=lark_message_id
         )
 
     # BI-SCRIPT-UPDATE wins over BI-API-UPDATE when the named API is a DEPLOYMENT_FILE_NAME.
@@ -11465,6 +12122,22 @@ def run(
                 "\n→ Parsed FPMS PROD SCRIPT config block:\n"
                 f"    environment: {environment!r}\n"
                 f"    command:     {command!r}\n"
+            )
+        elif cl.upper().startswith("CPMS_IGO_UAT_V1"):
+            environment, services, branch, version, parsed_update_all = (
+                parse_cpms_igo_uat_run_config_block(config_block)
+            )
+            svc_note = (
+                f"update-all ({_jenkins_update_all_stapler_name()})"
+                if parsed_update_all
+                else ", ".join(services)
+            )
+            print(
+                "\n→ Parsed CPMS/IGO UAT config block:\n"
+                f"    environment: {environment!r}\n"
+                f"    branch:      {branch!r}\n"
+                f"    version:     {version!r}\n"
+                f"    services ({len(services) if not parsed_update_all else 'all'}): {svc_note}\n"
             )
         elif cl.upper().startswith("VENUE_UAT_RUN_V1"):
             environment, services, branch, version, parsed_update_all = (
