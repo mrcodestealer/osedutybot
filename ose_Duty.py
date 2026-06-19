@@ -534,46 +534,75 @@ def _offset_note_text(counterparty: str, this_day: int, other_day: int, *, same_
     return f"Offset with {cp} {this_day} --> {other_day}"
 
 
+def _extract_note_ids(data: dict[str, Any]) -> tuple[str, str]:
+    comment_id = str((data or {}).get("comment_id") or "")
+    reply_id = ""
+    try:
+        replies = (((data or {}).get("reply_list") or {}).get("replies")) or []
+        if replies:
+            reply_id = str(replies[0].get("reply_id") or "")
+    except Exception:
+        reply_id = ""
+    return comment_id, reply_id
+
+
 def _post_ose_shift_sheet_cell_note(
     token: str, row_idx: int, col_idx: int, text: str
 ) -> dict[str, Any]:
     """Add a cell comment (note) on the OSE shift sheet; returns its comment/reply ids.
 
     Lark has no open API for true cell ``备注`` notes, so we use the drive cell-comment
-    endpoint (``new_comments`` with a sheet ``anchor``) which renders as a cell note.
+    endpoint with a sheet ``anchor`` which renders as a cell note. We try the v2
+    ``new_comments`` endpoint first, then fall back to the v1 ``comments`` endpoint so a
+    single gateway difference does not silently drop every note.
     """
     if row_idx < 0 or col_idx < 0 or not (text or "").strip():
         return {}
     if not SPREADSHEET_TOKEN or not SHEET_ID:
         raise RuntimeError("OSE shift sheet not configured (OSE_SPREADSHEET_TOKEN / OSE_SHEET_ID)")
-    url = (
-        f"https://open.larksuite.com/open-apis/drive/v1/files/{SPREADSHEET_TOKEN}/new_comments"
-    )
-    params = {"file_type": "sheet"}
-    body = {
-        "file_type": "sheet",
-        "reply_elements": [{"type": "text", "text": text}],
-        "anchor": {"block_id": SHEET_ID, "sheet_col": int(col_idx), "sheet_row": int(row_idx)},
-    }
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"}
-    res = requests.post(url, headers=headers, params=params, json=body, timeout=60).json()
-    if res.get("code") != 0:
-        raise RuntimeError(f"OSE shift sheet note write failed: {res}")
-    data = res.get("data") or {}
-    reply_id = ""
-    try:
-        replies = ((data.get("reply_list") or {}).get("replies")) or []
-        if replies:
-            reply_id = str(replies[0].get("reply_id") or "")
-    except Exception:
-        reply_id = ""
-    return {
-        "comment_id": str(data.get("comment_id") or ""),
-        "reply_id": reply_id,
-        "row": int(row_idx),
-        "col": int(col_idx),
-        "text": text,
-    }
+    base = f"https://open.larksuite.com/open-apis/drive/v1/files/{SPREADSHEET_TOKEN}"
+    attempts = (
+        (
+            f"{base}/new_comments",
+            {
+                "file_type": "sheet",
+                "reply_elements": [{"type": "text", "text": text}],
+                "anchor": {"block_id": SHEET_ID, "sheet_col": int(col_idx), "sheet_row": int(row_idx)},
+            },
+        ),
+        (
+            f"{base}/comments",
+            {
+                "anchor": {"sheet_id": SHEET_ID, "sheet_col": int(col_idx), "sheet_row": int(row_idx)},
+                "reply_list": {
+                    "replies": [
+                        {"content": {"elements": [{"type": "text_run", "text_run": {"text": text}}]}}
+                    ]
+                },
+            },
+        ),
+    )
+    errors: list[str] = []
+    for url, body in attempts:
+        try:
+            res = requests.post(
+                url, headers=headers, params={"file_type": "sheet"}, json=body, timeout=60
+            ).json()
+        except Exception as exc:
+            errors.append(f"{url.rsplit('/', 1)[-1]}: {exc!r}")
+            continue
+        if res.get("code") == 0:
+            comment_id, reply_id = _extract_note_ids(res.get("data") or {})
+            return {
+                "comment_id": comment_id,
+                "reply_id": reply_id,
+                "row": int(row_idx),
+                "col": int(col_idx),
+                "text": text,
+            }
+        errors.append(f"{url.rsplit('/', 1)[-1]}: {res}")
+    raise RuntimeError("OSE shift sheet note write failed: " + " | ".join(errors))
 
 
 def _delete_ose_shift_sheet_cell_note(token: str, comment_id: str, reply_id: str) -> bool:
@@ -601,6 +630,11 @@ def _apply_offset_shift_sheet_notes(
             info = _post_ose_shift_sheet_cell_note(token, row_idx, col_idx, text)
             if info:
                 out.append(info)
+                print(
+                    f"[ose_Duty] offset cell note added r{row_idx}c{col_idx} "
+                    f"comment_id={info.get('comment_id')!r} text={text!r}",
+                    flush=True,
+                )
         except Exception as exc:
             print(
                 f"[ose_Duty] offset cell note add failed for r{row_idx}c{col_idx}: {exc!r}",
@@ -1100,12 +1134,12 @@ def scan_bitable_approved_offsets_for_shift_sheet() -> dict[str, int]:
         _OFFSET_SHIFT_SHEET_REENSURE_DONE = True
         try:
             stats = reensure_applied_offset_shift_sheet_styles_and_notes()
-            if stats.get("styled") or stats.get("noted"):
-                print(
-                    f"[ose_Duty] offset re-ensure after restart: styled={stats.get('styled')} "
-                    f"noted={stats.get('noted')} errors={stats.get('errors')}",
-                    flush=True,
-                )
+            print(
+                f"[ose_Duty] offset re-ensure after restart: scanned={stats.get('scanned')} "
+                f"styled={stats.get('styled')} noted={stats.get('noted')} "
+                f"errors={stats.get('errors')}",
+                flush=True,
+            )
         except Exception as exc:
             print(f"[ose_Duty] offset re-ensure pass failed: {exc!r}", flush=True)
     items = (get_ose_offset_records_admin() or {}).get("items") or []
