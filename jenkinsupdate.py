@@ -9461,11 +9461,84 @@ def _fpms_lark_cpms_igo_typo_pick_card_json(
         "config": {"update_multi": True, "width_mode": "fill"},
         "header": {
             "template": "blue",
-            "title": {"tag": "plain_text", "content": "CPMS / IGO — pick service"},
+            "title": {
+                "tag": "plain_text",
+                "content": f"CPMS / IGO — Verify {_fpms_lark_short_line(token, 56)}",
+            },
         },
         "body": {"elements": body_elements},
     }
     return json.dumps(card, ensure_ascii=False)
+
+
+def _fpms_lark_find_cpms_igo_typo_pick_session(
+    chat_id: str,
+    sender_id: str,
+    lark_sender_union_id: str | None = None,
+    clean_text: str = "",
+) -> tuple[str, dict] | tuple[None, None]:
+    """Locate an active ``cpms_igo_typo_pick`` session for this chat + sender."""
+    if _parse_single_menu_index((clean_text or "").strip(), 9) is not None:
+        alt_key, alt_sess = _fpms_lark_find_cpms_igo_typo_session(
+            chat_id, sender_id, lark_sender_union_id
+        )
+        if isinstance(alt_sess, dict) and alt_sess.get("state") == "cpms_igo_typo_pick":
+            return alt_key, alt_sess
+    key = _fpms_lark_session_key(chat_id, sender_id)
+    with _fpms_lark_sessions_lock:
+        sess = _fpms_lark_sessions.get(key)
+    if isinstance(sess, dict) and sess.get("state") == "cpms_igo_typo_pick":
+        return key, sess
+    alt_key, alt_sess = _fpms_lark_find_cpms_igo_typo_session(
+        chat_id, sender_id, lark_sender_union_id
+    )
+    if isinstance(alt_sess, dict) and alt_sess.get("state") == "cpms_igo_typo_pick":
+        return alt_key, alt_sess
+    return None, None
+
+
+def _fpms_lark_handle_cpms_igo_typo_pick_text(
+    chat_id: str,
+    session_key: str,
+    sess: dict,
+    clean_text: str,
+    send,
+    *,
+    lark_message_id: str | None = None,
+) -> bool:
+    """Typed **1**–**N** (or any reply) while a CPMS/IGO service pick card is open."""
+    ranked = list(sess.get("ranked_cpms") or [])
+    if not ranked:
+        if ":" in session_key:
+            cchat, sender = session_key.split(":", 1)
+            _fpms_lark_clear_session(cchat, sender)
+        send(chat_id, "Session error — send your CPMS/IGO update message again.")
+        return True
+    idx = _parse_single_menu_index((clean_text or "").strip(), len(ranked))
+    if idx is not None:
+        row = ranked[idx - 1]
+        if not isinstance(row, dict):
+            if ":" in session_key:
+                cchat, sender = session_key.split(":", 1)
+                _fpms_lark_clear_session(cchat, sender)
+            send(chat_id, "Session error — send your CPMS/IGO update message again.")
+            return True
+        return _cpms_igo_continue_routing_after_typo_pick(
+            chat_id,
+            session_key,
+            str(row.get("kind") or ""),
+            str(row.get("env") or ""),
+            str(row.get("sid") or ""),
+            send,
+            lark_message_id=lark_message_id,
+        )
+    typo_tok = str(sess.get("typo_token") or "?")
+    send(
+        chat_id,
+        f"⏳ Pick **`{typo_tok}`** — tap **1**–**{len(ranked)}** on the card above "
+        f"or type the number.",
+    )
+    return True
 
 
 def _fpms_lark_start_cpms_igo_typo_pick(
@@ -9486,6 +9559,20 @@ def _fpms_lark_start_cpms_igo_typo_pick(
     lark_message_id: str | None = None,
     ambiguous: bool = False,
 ) -> bool:
+    ranked_rows = [{"kind": k, "env": e, "sid": s} for k, e, s in candidates]
+    chat_id_part, sender_part = (
+        session_key.split(":", 1) if ":" in session_key else (chat_id, session_key)
+    )
+    sk = _fpms_lark_session_key(chat_id_part, sender_part)
+    with _fpms_lark_sessions_lock:
+        prev = _fpms_lark_sessions.get(sk)
+    if (
+        isinstance(prev, dict)
+        and prev.get("state") == "cpms_igo_typo_pick"
+        and str(prev.get("typo_token") or "") == typo_token
+        and list(prev.get("ranked_cpms") or []) == ranked_rows
+    ):
+        return True
     picker_sid = secrets.token_hex(16)
     sess_new = {
         "state": "cpms_igo_typo_pick",
@@ -9498,14 +9585,11 @@ def _fpms_lark_start_cpms_igo_typo_pick(
         "cpms_groups": {f"{k}:{e}": list(svcs) for (k, e), svcs in groups.items()},
         "cpms_order": [f"{k}:{e}" for k, e in order],
         "typo_notes": list(typo_notes),
-        "ranked_cpms": [{"kind": k, "env": e, "sid": s} for k, e, s in candidates],
+        "ranked_cpms": ranked_rows,
         "picker_sid": picker_sid,
         "cpms_pick_ambiguous": bool(ambiguous),
     }
     _fpms_lark_register_picker_sid(picker_sid, session_key)
-    chat_id_part, sender_part = (
-        session_key.split(":", 1) if ":" in session_key else (chat_id, session_key)
-    )
     _fpms_lark_sessions_put(chat_id_part, sender_part, sess_new)
     card_js = _fpms_lark_cpms_igo_typo_pick_card_json(
         typo_token, candidates, picker_sid=picker_sid, ambiguous=ambiguous
@@ -11399,6 +11483,10 @@ def _dispatch_lark_update_command_body(
         )
 
     # CPMS / IGO UAT — route the requested service to the correct job + environment.
+    with _fpms_lark_sessions_lock:
+        _cpms_pend = _fpms_lark_sessions.get(key)
+    if isinstance(_cpms_pend, dict) and _cpms_pend.get("state") == "cpms_igo_typo_pick":
+        return False
     if _cpms_igo_uat_headline_detect(body) or _looks_like_cpms_igo_uat_paste(body):
         return _fpms_lark_dispatch_cpms_igo_uat_parameter_flow(
             chat_id, key, body, send, lark_message_id=lark_message_id
@@ -11720,6 +11808,22 @@ def handle_lark_jenkins_update_message(
     # Do this **before** the expert-agent normalizer and the job ranker so they never fall into the
     # generic job-picker menu (the ranker would otherwise tie ``igo uat`` with ``rc uat`` and spam a
     # "pick one" card). Also clears any stale ``choose_job`` menu session for this user.
+    #
+    # If a CPMS/IGO service pick card is already open, handle **1**–**N** here — never re-route the
+    # pasted block (that was clearing the session and spamming duplicate pick cards).
+    _pk_key, _pk_sess = _fpms_lark_find_cpms_igo_typo_pick_session(
+        chat_id, sender_id, lark_sender_union_id, clean_text
+    )
+    if isinstance(_pk_sess, dict):
+        return _fpms_lark_handle_cpms_igo_typo_pick_text(
+            chat_id,
+            _pk_key,
+            _pk_sess,
+            clean_text,
+            send,
+            lark_message_id=lark_message_id,
+        )
+
     if (
         allow_start
         and not (um and um.UPDATEMORE_CMD_RE.search(body_early or ""))
@@ -11879,43 +11983,11 @@ def handle_lark_jenkins_update_message(
                 chat_id, key, pending, row, send, lark_message_id=lark_message_id
             )
         if st == "cpms_igo_typo_pick":
-            ranked = list(sess.get("ranked_cpms") or [])
-            if not ranked:
-                _fpms_lark_clear_session(chat_id, sender_id)
-                send(chat_id, "Session error — send your CPMS/IGO update message again.")
-                return True
-            idx = _parse_single_menu_index(clean_text.strip(), len(ranked))
-            if idx is None:
-                typo_tok = str(sess.get("typo_token") or "?")
-                ps = str(sess.get("picker_sid") or "").strip()
-                amb = bool(sess.get("cpms_pick_ambiguous"))
-                cands = [
-                    (str(r.get("kind") or ""), str(r.get("env") or ""), str(r.get("sid") or ""))
-                    for r in ranked
-                    if isinstance(r, dict)
-                ]
-                card_js = _fpms_lark_cpms_igo_typo_pick_card_json(
-                    typo_tok, cands, picker_sid=ps or None, ambiguous=amb
-                )
-                try:
-                    send(chat_id, card_js, msg_type="interactive")
-                except TypeError:
-                    lines = [f"Pick service for typo `{typo_tok}`:"]
-                    for i, (kind, env, sid) in enumerate(cands, start=1):
-                        lines.append(f"  {i}. `{sid}` — {kind.upper()} / {env}")
-                    send(chat_id, "\n".join(lines))
-                return True
-            row = ranked[idx - 1]
-            if not isinstance(row, dict):
-                _fpms_lark_clear_session(chat_id, sender_id)
-                send(chat_id, "Session error — send your CPMS/IGO update message again.")
-                return True
-            return _cpms_igo_continue_routing_after_typo_pick(
+            return _fpms_lark_handle_cpms_igo_typo_pick_text(
                 chat_id,
                 key,
-                str(row.get("kind") or ""),
-                str(row.get("env") or ""),
-                str(row.get("sid") or ""),
+                sess,
+                clean_text,
                 send,
                 lark_message_id=lark_message_id,
             )
