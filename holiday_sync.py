@@ -24,6 +24,7 @@ import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 
@@ -169,9 +170,13 @@ def resolve_public_holiday_calendar_id(token: str) -> tuple[str, str]:
     return cal_id, cal_title
 
 
-def fetch_public_holiday_events(token: str, calendar_id: str, year: int) -> list[dict[str, Any]]:
-    """All non-cancelled events on the public holiday calendar for ``year``."""
-    start_ts, end_ts = _year_unix_range(year)
+def _list_calendar_events_in_range(
+    token: str,
+    calendar_id: str,
+    start_ts: int,
+    end_ts: int,
+) -> list[dict[str, Any]]:
+    """Raw event list from the calendar API (recurring masters may omit future-year instances)."""
     url = f"{_open_api_base()}/calendar/v4/calendars/{calendar_id}/events"
     items: list[dict[str, Any]] = []
     page_token = ""
@@ -196,7 +201,101 @@ def fetch_public_holiday_events(token: str, calendar_id: str, year: int) -> list
         page_token = str(data.get("page_token") or "").strip()
         if not page_token:
             break
-    return [ev for ev in items if (ev.get("status") or "").strip().lower() != "cancelled"]
+    return items
+
+
+def _fetch_recurring_event_instances(
+    token: str,
+    calendar_id: str,
+    event_id: str,
+    start_ts: int,
+    end_ts: int,
+) -> list[dict[str, Any]]:
+    """Expand one recurring event into concrete instances for ``(start_ts, end_ts)``."""
+    eid = quote((event_id or "").strip(), safe="")
+    if not eid:
+        return []
+    url = (
+        f"{_open_api_base()}/calendar/v4/calendars/{calendar_id}/events/{eid}/instances"
+    )
+    items: list[dict[str, Any]] = []
+    page_token = ""
+    while True:
+        params: dict[str, str] = {
+            "start_time": str(start_ts),
+            "end_time": str(end_ts),
+            "page_size": "500",
+        }
+        if page_token:
+            params["page_token"] = page_token
+        res = _calendar_get_json(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            params=params,
+            method="get",
+        )
+        data = res.get("data") or {}
+        items.extend(data.get("items") or [])
+        if not data.get("has_more"):
+            break
+        page_token = str(data.get("page_token") or "").strip()
+        if not page_token:
+            break
+    return items
+
+
+def _expand_recurring_events(
+    token: str,
+    calendar_id: str,
+    events: list[dict[str, Any]],
+    start_ts: int,
+    end_ts: int,
+) -> list[dict[str, Any]]:
+    """
+    Replace recurring masters with per-year instances (e.g. annual Malaysia Day on Sep 16).
+
+    Without this, list-events only returns the series start date (often 2025), so 2026 rows are missing.
+    """
+    out: list[dict[str, Any]] = []
+    seen_masters: set[str] = set()
+    for ev in events:
+        if (ev.get("status") or "").strip().lower() == "cancelled":
+            continue
+        rec = (ev.get("recurrence") or "").strip()
+        eid = str(ev.get("event_id") or "").strip()
+        if rec and eid:
+            if eid in seen_masters:
+                continue
+            seen_masters.add(eid)
+            try:
+                inst = _fetch_recurring_event_instances(token, calendar_id, eid, start_ts, end_ts)
+            except CalendarFetchError as exc:
+                print(
+                    f"[holiday_sync] recurring instances failed for {eid!r} "
+                    f"({ev.get('summary')!r}): {exc}",
+                    flush=True,
+                )
+                inst = []
+            active = [
+                i
+                for i in inst
+                if (i.get("status") or "").strip().lower() != "cancelled"
+            ]
+            if active:
+                out.extend(active)
+            else:
+                out.append(ev)
+        else:
+            out.append(ev)
+    return out
+
+
+def fetch_public_holiday_events(token: str, calendar_id: str, year: int) -> list[dict[str, Any]]:
+    """All non-cancelled events for ``year``, with recurring holidays expanded to that year."""
+    start_ts, end_ts = _year_unix_range(year)
+    raw = _list_calendar_events_in_range(token, calendar_id, start_ts, end_ts)
+    expanded = _expand_recurring_events(token, calendar_id, raw, start_ts, end_ts)
+    return [ev for ev in expanded if (ev.get("status") or "").strip().lower() != "cancelled"]
 
 
 def _infer_holiday_code(name: str) -> str:
@@ -366,6 +465,62 @@ def list_public_holiday_calendars() -> dict[str, Any]:
     }
 
 
+def probe_named_holiday(name_query: str, *, year: Optional[int] = None) -> dict[str, Any]:
+    """Debug one holiday name — shows raw vs expanded recurring instances."""
+    ref_year = year or date.today().year
+    q = (name_query or "").strip().lower()
+    cal_id, cal_title, token = resolve_public_holiday_calendar()
+    if not cal_id or not token:
+        return {"ok": False, "error": "calendar not found", "query": name_query, "year": ref_year}
+    start_ts, end_ts = _year_unix_range(ref_year)
+    raw = _list_calendar_events_in_range(token, cal_id, start_ts, end_ts)
+    raw_hits = [
+        ev
+        for ev in raw
+        if q in _plain_text(str(ev.get("summary") or "")).lower()
+        or q in _plain_text(str(ev.get("description") or "")).lower()
+    ]
+    expanded = fetch_public_holiday_events(token, cal_id, ref_year)
+    exp_hits = [
+        ev
+        for ev in expanded
+        if q in _plain_text(str(ev.get("summary") or "")).lower()
+        or q in _plain_text(str(ev.get("description") or "")).lower()
+    ]
+    rows = events_to_holiday_rows(exp_hits)
+    detail = []
+    for ev in raw_hits:
+        eid = str(ev.get("event_id") or "")
+        rec = (ev.get("recurrence") or "").strip()
+        inst: list[dict[str, Any]] = []
+        if rec and eid:
+            try:
+                inst = _fetch_recurring_event_instances(token, cal_id, eid, start_ts, end_ts)
+            except CalendarFetchError as exc:
+                inst = [{"error": str(exc)}]
+        detail.append(
+            {
+                "summary": ev.get("summary"),
+                "event_id": eid,
+                "recurrence": rec or None,
+                "start_time": ev.get("start_time"),
+                "instances_in_year": inst,
+                "parsed_master": events_to_holiday_rows([ev]),
+            }
+        )
+    return {
+        "ok": True,
+        "year": ref_year,
+        "query": name_query,
+        "calendar_id": cal_id,
+        "calendar_title": cal_title,
+        "raw_matches": len(raw_hits),
+        "expanded_matches": len(exp_hits),
+        "parsed_rows": rows,
+        "detail": detail,
+    }
+
+
 def probe_public_holiday_calendar(*, year: Optional[int] = None, limit: int = 10) -> dict[str, Any]:
     """Fetch raw calendar events for debugging event title/description format."""
     ref_year = year or date.today().year
@@ -390,6 +545,9 @@ def probe_public_holiday_calendar(*, year: Optional[int] = None, limit: int = 10
             }
         )
     awal = [r for r in events_to_holiday_rows(events) if "awal" in (r.get("name") or "").lower()]
+    malaysia = [
+        r for r in events_to_holiday_rows(events) if "malaysia day" in (r.get("name") or "").lower()
+    ]
     return {
         "ok": True,
         "year": ref_year,
@@ -399,6 +557,7 @@ def probe_public_holiday_calendar(*, year: Optional[int] = None, limit: int = 10
         "raw_events": len(events),
         "parsed_rows": len(events_to_holiday_rows(events)),
         "awal_muharram_rows": awal,
+        "malaysia_day_rows": malaysia,
         "sample": sample,
     }
 
@@ -518,6 +677,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--year", type=int, default=None, help="Anchor year (fetches anchor-1, anchor, anchor+1)")
     parser.add_argument("--dry-run", action="store_true", help="Fetch and parse only; do not write CSV")
     parser.add_argument("--probe", action="store_true", help="Print sample raw calendar events")
+    parser.add_argument(
+        "--probe-name",
+        metavar="NAME",
+        help="Debug one holiday (e.g. 'Malaysia Day') including recurring instances",
+    )
     parser.add_argument("--list-calendars", action="store_true", help="List calendar search hits")
     parser.add_argument("--csv", default=str(_HOLIDAY_CSV_PATH), help="Output CSV path")
     args = parser.parse_args(argv)
@@ -532,6 +696,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         import json
 
         result = probe_public_holiday_calendar(year=args.year)
+        print(json.dumps(result, indent=2, default=str))
+        return 0 if result.get("ok") else 1
+
+    if args.probe_name:
+        import json
+
+        result = probe_named_holiday(args.probe_name, year=args.year)
         print(json.dumps(result, indent=2, default=str))
         return 0 if result.get("ok") else 1
 
