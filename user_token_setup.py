@@ -1,4 +1,4 @@
-"""One-time setup for the Lark user_access_token used to add offset cell notes.
+"""One-time setup for the Lark user_access_token (OAuth).
 
 Run on the SERVER (where APP_ID/APP_SECRET are set):
 
@@ -6,15 +6,13 @@ Run on the SERVER (where APP_ID/APP_SECRET are set):
     python user_token_setup.py code <CODE>         # exchange the code -> store tokens
     python user_token_setup.py code "<FULL_URL>"   # or paste the whole redirect URL (Windows: use quotes)
     python user_token_setup.py status              # show token validity / scope
-    python user_token_setup.py probe <row> <col>  # try all API body variants (diagnostics)
-    python user_token_setup.py test <row> <col>    # post a test note with the user token
 
 Before this, in the Lark developer console:
     - Security settings: add the redirect URL (LARK_OAUTH_REDIRECT_URI, default
       https://example.com/api/oauth/callback). The page may 404 — that's fine, just copy
       the `code` query param from the redirected URL.
-    - Permissions: enable ``drive:drive``, ``offline_access``, and
-      ``docs:document.comment:write_only`` (回复/修改/删除云文档评论), then publish.
+    - Permissions: enable required scopes (e.g. ``drive:drive``, ``offline_access``,
+      ``calendar:calendar:readonly`` for holiday sync), then publish.
 """
 import json
 import sys
@@ -55,34 +53,6 @@ def main() -> None:
 
     elif cmd == "status":
         print(json.dumps(ut.status(), ensure_ascii=False, indent=2))
-
-    elif cmd == "probe":
-        if len(sys.argv) < 4:
-            print("usage: python user_token_setup.py probe <row> <col>   (0-based matrix indices)")
-            return
-        import ose_Duty as od
-
-        row, col = int(sys.argv[2]), int(sys.argv[3])
-        token = ut.get_user_access_token() or ""
-        if not token:
-            print("❌ no user_access_token — run url + code first")
-            return
-        cell = od._sheet_matrix_cell_a1(row, col)
-        print(f"spreadsheet={od.SPREADSHEET_TOKEN} sheet={od.SHEET_ID} matrix r{row}c{col} → {cell}")
-        results = od.probe_sheet_cell_note_variants(token, row, col)
-        print(json.dumps(results, ensure_ascii=False, indent=2))
-
-    elif cmd == "test":
-        if len(sys.argv) < 4:
-            print("usage: python user_token_setup.py test <row> <col>   (0-based)")
-            return
-        import ose_Duty as od
-
-        row, col = int(sys.argv[2]), int(sys.argv[3])
-        info = od._post_ose_shift_sheet_cell_note(
-            ut.get_user_access_token() or "", row, col, "TEST offset note"
-        )
-        print("note created:", json.dumps(info, ensure_ascii=False))
 
     else:
         print(__doc__)

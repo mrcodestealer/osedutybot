@@ -131,6 +131,42 @@ TARGET_USER_OPEN_ID = (
     or "ou_d7bc33724e2d6ced4050c944c2ca5650"
 )
 
+# Roster / offset requester names → Lark open_id when Bitable person fields are empty.
+# Extend via ``OSE_PERSON_OPEN_IDS`` JSON in ``.env`` (same shape as ``LEAVE_CALENDAR_OPEN_IDS``).
+_OSE_PERSON_OPEN_ID_DEFAULTS: dict[str, str] = {
+    "Jewel": "ou_01a0b531dfbcc0d8af7d64c24262f7e9",
+    "Jewell": "ou_01a0b531dfbcc0d8af7d64c24262f7e9",
+    "Man Chung": "ou_50afe44c066a50645271f87b690d84a8",
+    "Eduard James": "ou_cd2d456b36f2fab676b22e45e2b1425b",
+    "Louie": "ou_da0c9fead4a1fc32475939898a42ceed",
+}
+
+
+def _ose_person_open_id_overrides() -> dict[str, str]:
+    """Name / name-key → open_id overrides (defaults + optional ``OSE_PERSON_OPEN_IDS`` env JSON)."""
+    merged: dict[str, str] = dict(_OSE_PERSON_OPEN_ID_DEFAULTS)
+    raw = (os.getenv("OSE_PERSON_OPEN_IDS") or "").strip()
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                for k, v in parsed.items():
+                    oid = str(v or "").strip()
+                    if oid.startswith("ou_"):
+                        merged[str(k).strip()] = oid
+        except json.JSONDecodeError:
+            pass
+    out: dict[str, str] = {}
+    for name, oid in merged.items():
+        nm = _title_name(name)
+        if not nm or not oid.startswith("ou_"):
+            continue
+        out[nm] = oid
+        nk = _name_key(nm)
+        if nk:
+            out[nk] = oid
+    return out
+
 
 def _name_key(name: str) -> str:
     # "Augustine (Si Yew)" and "Augustine Si Yew" should match.
@@ -590,222 +626,6 @@ def _cell_is_holiday(
     return bool(d and d in holidays)
 
 
-def _offset_note_text(counterparty: str, this_day: int, other_day: int, *, same_person: bool) -> str:
-    """Cell-note text for an approved offset swap (e.g. ``Offset with Louie 8 --> 6``)."""
-    cp = (counterparty or "").strip()
-    if same_person or not cp:
-        return f"Offset {this_day} --> {other_day}"
-    return f"Offset with {cp} {this_day} --> {other_day}"
-
-
-def _extract_note_ids(data: dict[str, Any]) -> tuple[str, str]:
-    comment_id = str((data or {}).get("comment_id") or "")
-    reply_id = ""
-    try:
-        replies = (((data or {}).get("reply_list") or {}).get("replies")) or []
-        if replies:
-            reply_id = str(replies[0].get("reply_id") or "")
-    except Exception:
-        reply_id = ""
-    return comment_id, reply_id
-
-
-def _escape_comment_text(text: str) -> str:
-    """Lark comment renderer treats ``<``/``>`` as markup; escape like the official CLI."""
-    return (text or "").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def _sheet_matrix_cell_a1(row_idx: int, col_idx: int) -> str:
-    """A1-style cell ref for matrix indices (0-based row/col → 1-based sheet notation)."""
-    return f"{col_index_to_letter(col_idx + 1)}{row_idx + 1}"
-
-
-def _iter_sheet_cell_note_bodies(row_idx: int, col_idx: int, text: str) -> list[tuple[str, dict[str, Any]]]:
-    """Candidate ``new_comments`` bodies; Lark tenants differ on 0- vs 1-based sheet anchors."""
-    safe = _escape_comment_text(text)
-    reply = [{"type": "text", "text": safe}]
-    cell = _sheet_matrix_cell_a1(row_idx, col_idx)
-    sid = SHEET_ID
-    return [
-        (
-            "anchor 0-based col/row",
-            {
-                "file_type": "sheet",
-                "reply_elements": reply,
-                "anchor": {"block_id": sid, "sheet_col": int(col_idx), "sheet_row": int(row_idx)},
-            },
-        ),
-        (
-            "anchor 1-based col/row",
-            {
-                "file_type": "sheet",
-                "reply_elements": reply,
-                "anchor": {"block_id": sid, "sheet_col": int(col_idx) + 1, "sheet_row": int(row_idx) + 1},
-            },
-        ),
-        (
-            "anchor block_id sheetId!cell",
-            {
-                "file_type": "sheet",
-                "reply_elements": reply,
-                "anchor": {"block_id": f"{sid}!{cell}"},
-            },
-        ),
-        (
-            "anchor block_id+0-based",
-            {
-                "file_type": "sheet",
-                "reply_elements": reply,
-                "anchor": {
-                    "block_id": f"{sid}!{cell}",
-                    "sheet_col": int(col_idx),
-                    "sheet_row": int(row_idx),
-                },
-            },
-        ),
-        (
-            "anchor block_id+1-based",
-            {
-                "file_type": "sheet",
-                "reply_elements": reply,
-                "anchor": {
-                    "block_id": f"{sid}!{cell}",
-                    "sheet_col": int(col_idx) + 1,
-                    "sheet_row": int(row_idx) + 1,
-                },
-            },
-        ),
-    ]
-
-
-def probe_sheet_cell_note_variants(
-    token: str, row_idx: int, col_idx: int, text: str = "PROBE offset note"
-) -> list[dict[str, Any]]:
-    """Try every known ``new_comments`` body shape; for diagnostics (``user_token_setup.py probe``)."""
-    if not SPREADSHEET_TOKEN or not SHEET_ID:
-        raise RuntimeError("OSE shift sheet not configured")
-    url = f"https://open.larksuite.com/open-apis/drive/v1/files/{SPREADSHEET_TOKEN}/new_comments"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"}
-    out: list[dict[str, Any]] = []
-    for name, body in _iter_sheet_cell_note_bodies(row_idx, col_idx, text):
-        try:
-            res = requests.post(url, headers=headers, json=body, timeout=60).json()
-        except Exception as exc:
-            out.append({"variant": name, "ok": False, "error": repr(exc)})
-            continue
-        ok = res.get("code") == 0
-        entry: dict[str, Any] = {
-            "variant": name,
-            "ok": ok,
-            "code": res.get("code"),
-            "msg": res.get("msg"),
-        }
-        if ok:
-            entry["data"] = res.get("data")
-        else:
-            entry["response"] = res
-        out.append(entry)
-        if ok:
-            break
-    return out
-
-
-def _post_ose_shift_sheet_cell_note(
-    token: str, row_idx: int, col_idx: int, text: str
-) -> dict[str, Any]:
-    """Add a cell comment on the OSE shift sheet (requires ``user_access_token``)."""
-    if row_idx < 0 or col_idx < 0 or not (text or "").strip():
-        return {}
-    if not token:
-        raise RuntimeError("missing user_access_token for cell note")
-    if not SPREADSHEET_TOKEN or not SHEET_ID:
-        raise RuntimeError("OSE shift sheet not configured (OSE_SPREADSHEET_TOKEN / OSE_SHEET_ID)")
-    url = f"https://open.larksuite.com/open-apis/drive/v1/files/{SPREADSHEET_TOKEN}/new_comments"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"}
-    errors: list[str] = []
-    for name, body in _iter_sheet_cell_note_bodies(row_idx, col_idx, text):
-        res = requests.post(url, headers=headers, json=body, timeout=60).json()
-        if res.get("code") == 0:
-            comment_id, reply_id = _extract_note_ids(res.get("data") or {})
-            print(f"[ose_Duty] offset cell note variant OK: {name!r}", flush=True)
-            return {
-                "comment_id": comment_id,
-                "reply_id": reply_id,
-                "row": int(row_idx),
-                "col": int(col_idx),
-                "text": text,
-                "variant": name,
-            }
-        errors.append(f"{name}: {res}")
-    raise RuntimeError("OSE shift sheet note write failed: " + " | ".join(errors))
-
-
-def _delete_ose_shift_sheet_cell_note(comment_id: str, reply_id: str) -> bool:
-    """Best-effort removal of an offset cell note (deletes the comment's only reply)."""
-    cid = (comment_id or "").strip()
-    rid = (reply_id or "").strip()
-    if not cid or not rid or not SPREADSHEET_TOKEN:
-        return False
-    try:
-        import user_token as _ut
-
-        token = _ut.get_user_access_token()
-    except Exception:
-        token = None
-    if not token:
-        return False
-    url = (
-        f"https://open.larksuite.com/open-apis/drive/v1/files/{SPREADSHEET_TOKEN}"
-        f"/comments/{cid}/replies/{rid}"
-    )
-    headers = {"Authorization": f"Bearer {token}"}
-    res = requests.delete(url, headers=headers, params={"file_type": "sheet"}, timeout=60).json()
-    return res.get("code") == 0
-
-
-def _get_user_token_for_notes() -> Optional[str]:
-    try:
-        import user_token as _ut
-
-        return _ut.get_user_access_token()
-    except Exception as exc:
-        print(f"[ose_Duty] user_token unavailable for notes: {exc!r}", flush=True)
-        return None
-
-
-def _apply_offset_shift_sheet_notes(
-    note_specs: list[tuple[int, int, str]]
-) -> list[dict[str, Any]]:
-    """Add each (row, col, text) note with the user token; best-effort (never blocks swap)."""
-    if not note_specs:
-        return []
-    user_token = _get_user_token_for_notes()
-    if not user_token:
-        print(
-            "[ose_Duty] offset cell notes skipped: no user_access_token configured "
-            "(run `python user_token_setup.py url`)",
-            flush=True,
-        )
-        return []
-    out: list[dict[str, Any]] = []
-    for row_idx, col_idx, text in note_specs:
-        try:
-            info = _post_ose_shift_sheet_cell_note(user_token, row_idx, col_idx, text)
-            if info:
-                out.append(info)
-                print(
-                    f"[ose_Duty] offset cell note added r{row_idx}c{col_idx} "
-                    f"comment_id={info.get('comment_id')!r} text={text!r}",
-                    flush=True,
-                )
-        except Exception as exc:
-            print(
-                f"[ose_Duty] offset cell note add failed for r{row_idx}c{col_idx}: {exc!r}",
-                flush=True,
-            )
-    return out
-
-
 def _put_ose_shift_sheet_cell_styles(
     token: str,
     cell_updates: list[tuple[int, int, str]],
@@ -974,11 +794,7 @@ def _compute_offset_shift_sheet_plan(
     shift_type: str,
     values: list[list[Any]],
 ) -> dict[str, Any]:
-    """Resolve the cell value updates + note specs for one approved offset swap.
-
-    Cells that gain a duty (``D``/``N``) also get a note describing the swap, e.g. the
-    requester's exchange-day cell reads ``Offset with <exchange person> <new day> --> <old day>``.
-    """
+    """Resolve the cell value updates for one approved offset swap."""
     st = (shift_type or "").strip().upper()
     if st not in OSE_SHIFT_TYPES:
         raise ValueError(f"Shift Type must be one of {OSE_SHIFT_TYPES}")
@@ -1002,39 +818,17 @@ def _compute_offset_shift_sheet_plan(
         (req_row, orig_col, "*"),
         (req_row, exc_col, st),
     ]
-    # Requester now works the exchange day (the cell turning into D/N).
-    note_specs: list[tuple[int, int, str]] = [
-        (
-            req_row,
-            exc_col,
-            _offset_note_text(
-                "" if same_person else exc,
-                exchange_date.day,
-                original_date.day,
-                same_person=same_person,
-            ),
-        )
-    ]
     if not same_person:
         exc_row = _sheet_row_index_for_person(values, exc)
         if exc_row is None:
             raise ValueError(f"Could not find shift sheet row for exchange person {exc!r}")
         updates.extend([(exc_row, orig_col, st), (exc_row, exc_col, "*")])
-        # Exchange person now works the requester's original day.
-        note_specs.append(
-            (
-                exc_row,
-                orig_col,
-                _offset_note_text(req, original_date.day, exchange_date.day, same_person=False),
-            )
-        )
     return {
         "req": req,
         "exc": exc,
         "st": st,
         "same_person": same_person,
         "updates": updates,
-        "note_specs": note_specs,
         "col_dates": {orig_col: original_date, exc_col: exchange_date},
     }
 
@@ -1050,7 +844,6 @@ def apply_approved_offset_to_shift_sheet(
     """
     Apply an approved offset swap to OSE2026 (``3RIBRL``): ``*`` on swapped-off days,
     ``D``/``N`` on swapped-on days. Exchange with self only updates the requester's row.
-    Each swapped-on (duty) cell also gets a note describing the swap.
     """
     values, err = _get_cached_ose_sheet_values()
     if not values:
@@ -1066,7 +859,6 @@ def apply_approved_offset_to_shift_sheet(
     updates = plan["updates"]
     token = get_tenant_access_token()
     _put_ose_shift_sheet_cells(token, updates, values=values, col_dates=plan["col_dates"])
-    notes = _apply_offset_shift_sheet_notes(plan["note_specs"])
     return {
         "ok": True,
         "request_person": plan["req"],
@@ -1076,7 +868,6 @@ def apply_approved_offset_to_shift_sheet(
         "shift_type": plan["st"],
         "cells_updated": len(updates),
         "myself": plan["same_person"],
-        "notes": notes,
     }
 
 
@@ -1105,8 +896,6 @@ def apply_approved_offset_shift_sheet_for_record(record_id: str) -> dict[str, An
         shift_type=str(row.get("shift_type") or ""),
     )
     snapshot = _offset_shift_sheet_snapshot_for_row(row)
-    snapshot["notes"] = result.get("notes") or []
-    snapshot["notes_applied"] = bool(result.get("notes"))
     _mark_offset_shift_sheet_applied(rid, snapshot=snapshot)
     return {"record_id": rid, **result}
 
@@ -1193,7 +982,6 @@ def revert_approved_offset_shift_sheet_for_record(record_id: str) -> dict[str, A
         return {"ok": True, "record_id": rid, "skipped": "not_applied"}
     state = _load_offset_shift_sheet_state()
     stored = dict((state.get("by_record") or {}).get(rid) or {})
-    note_list = list(stored.get("notes") or [])
     snapshot: dict[str, Any] = stored
     row: Optional[dict[str, Any]] = None
     try:
@@ -1210,14 +998,6 @@ def revert_approved_offset_shift_sheet_for_record(record_id: str) -> dict[str, A
     elif not snapshot.get("original_date") or not snapshot.get("exchange_date"):
         return {"ok": False, "record_id": rid, "skipped": "missing_snapshot"}
     result = _revert_shift_sheet_from_snapshot(snapshot)
-    if note_list:
-        for note in note_list:
-            try:
-                _delete_ose_shift_sheet_cell_note(
-                    str(note.get("comment_id") or ""), str(note.get("reply_id") or "")
-                )
-            except Exception as exc:
-                print(f"[ose_Duty] offset note cleanup failed for {rid!r}: {exc!r}", flush=True)
     _unmark_offset_shift_sheet_applied(rid)
     return {"record_id": rid, **result}
 
@@ -1253,16 +1033,9 @@ _OFFSET_SHIFT_SHEET_REENSURE_DONE = False
 
 
 def reensure_applied_offset_shift_sheet_styles_and_notes() -> dict[str, int]:
-    """Re-apply offset cell background + notes for already-applied approved rows.
-
-    Cell values survive a restart, but the ``*`` background and the swap notes may not be
-    re-sent because the record is marked applied. This re-asserts the styling (idempotent)
-    and back-fills any missing notes (records applied before notes existed) without creating
-    duplicate notes for rows that already have them.
-    """
+    """Re-apply offset cell backgrounds for already-applied approved rows (idempotent)."""
     state = _load_offset_shift_sheet_state()
     applied_ids = list(state.get("record_ids") or [])
-    by_record = dict(state.get("by_record") or {})
     if not applied_ids:
         return {"scanned": 0, "styled": 0, "noted": 0, "errors": 0}
     values, err = _get_cached_ose_sheet_values()
@@ -1271,7 +1044,6 @@ def reensure_applied_offset_shift_sheet_styles_and_notes() -> dict[str, int]:
         return {"scanned": len(applied_ids), "styled": 0, "noted": 0, "errors": 1}
     token = get_tenant_access_token()
     styled = 0
-    noted = 0
     errors = 0
     for rid in applied_ids:
         try:
@@ -1299,19 +1071,10 @@ def reensure_applied_offset_shift_sheet_styles_and_notes() -> dict[str, int]:
                 token, plan["updates"], values=values, col_dates=plan.get("col_dates")
             )
             styled += 1
-            snap = dict(by_record.get(rid) or {})
-            if not snap.get("notes"):
-                notes = _apply_offset_shift_sheet_notes(plan["note_specs"])
-                if notes:
-                    snap.update(_offset_shift_sheet_snapshot_for_row(row))
-                    snap["notes"] = notes
-                    snap["notes_applied"] = True
-                    _mark_offset_shift_sheet_applied(rid, snapshot=snap)
-                    noted += 1
         except Exception as exc:
             errors += 1
             print(f"[ose_Duty] offset re-ensure failed for {rid!r}: {exc!r}", flush=True)
-    return {"scanned": len(applied_ids), "styled": styled, "noted": noted, "errors": errors}
+    return {"scanned": len(applied_ids), "styled": styled, "noted": 0, "errors": errors}
 
 
 def scan_bitable_approved_offsets_for_shift_sheet() -> dict[str, int]:
@@ -2219,12 +1982,13 @@ def _build_ose_person_open_id_index(
 
 def _get_ose_person_open_id_index(token: str) -> dict[str, str]:
     cached = _OSE_BITABLE_RAW.get("person_ids")
-    if isinstance(cached, dict):
-        return cached
-    leave_disp, leave_appr, offset = _get_bitable_raw_triple(token)
-    idx = _build_ose_person_open_id_index(leave_disp + leave_appr, offset)
-    _OSE_BITABLE_RAW["person_ids"] = idx
-    return idx
+    if not isinstance(cached, dict):
+        leave_disp, leave_appr, offset = _get_bitable_raw_triple(token)
+        cached = _build_ose_person_open_id_index(leave_disp + leave_appr, offset)
+        _OSE_BITABLE_RAW["person_ids"] = cached
+    out = dict(cached)
+    out.update(_ose_person_open_id_overrides())
+    return out
 
 
 def _lookup_person_open_id(name: str, idx: dict[str, str]) -> str:
