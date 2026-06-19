@@ -11107,6 +11107,36 @@ def handle_lark_jenkins_update_message(
     except Exception:
         um = None
 
+    # CPMS / IGO UAT and IGO PROD SCRIPT route deterministically straight from the message text.
+    # Do this **before** the expert-agent normalizer and the job ranker so they never fall into the
+    # generic job-picker menu (the ranker would otherwise tie ``igo uat`` with ``rc uat`` and spam a
+    # "pick one" card). Also clears any stale ``choose_job`` menu session for this user.
+    if (
+        allow_start
+        and not (um and um.UPDATEMORE_CMD_RE.search(body_early or ""))
+        and clean_text.strip().casefold() not in ("yes", "no", "y", "n", "cancel")
+        and _parse_single_menu_index(clean_text.strip(), 9) is None
+    ):
+        if _igo_prod_script_phrase_env(body_early):
+            _fpms_lark_clear_session(chat_id, sender_id)
+            return _fpms_lark_dispatch_igo_prod_script_parameter_flow(
+                chat_id,
+                key,
+                body_early,
+                IGO_PROD_SCRIPT_RUN_URL,
+                send,
+                lark_message_id=lark_message_id,
+            )
+        if _cpms_igo_uat_headline_detect(body_early):
+            _fpms_lark_clear_session(chat_id, sender_id)
+            return _fpms_lark_dispatch_cpms_igo_uat_parameter_flow(
+                chat_id,
+                key,
+                body_early,
+                send,
+                lark_message_id=lark_message_id,
+            )
+
     # Expert agent: a free-form request (no slash command) is normalized into a canonical
     # ``/update`` (one environment) or ``/updatemore`` (several) body, so plain pastes like
     # "help update jenkins …" auto-route by how many environments are found. Only runs for a
