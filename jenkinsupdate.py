@@ -9843,6 +9843,7 @@ def _fpms_lark_dispatch_cpms_igo_uat_parameter_flow(
     send,
     *,
     lark_message_id: str | None = None,
+    lark_thread_root_id: str | None = None,
 ) -> bool:
     """CPMS / IGO UAT: route the requested service(s) to the right job+environment, then run.
 
@@ -9850,6 +9851,14 @@ def _fpms_lark_dispatch_cpms_igo_uat_parameter_flow(
     and some in ``igo-sw-uat``), auto-split into a **sequential** queue: build the first environment,
     wait for jenkinsbot to finish/monitor, then proceed to the next environment's services.
     """
+    _fpms_lark_begin_update_thread(
+        chat_id,
+        session_key,
+        body,
+        lark_message_id,
+        lark_thread_root_id=lark_thread_root_id,
+        force_new=bool((lark_thread_root_id or lark_message_id or "").strip()),
+    )
     tokens, branch, version, update_all, explicit_env = _parse_cpms_igo_uat_request(body)
     send(
         chat_id,
@@ -11521,7 +11530,12 @@ def _dispatch_lark_update_command_body(
         return False
     if _cpms_igo_uat_headline_detect(body) or _looks_like_cpms_igo_uat_paste(body):
         return _fpms_lark_dispatch_cpms_igo_uat_parameter_flow(
-            chat_id, key, body, send, lark_message_id=lark_message_id
+            chat_id,
+            key,
+            body,
+            send,
+            lark_message_id=lark_message_id,
+            lark_thread_root_id=lark_thread_root_id,
         )
 
     # BI-SCRIPT-UPDATE wins over BI-API-UPDATE when the named API is a DEPLOYMENT_FILE_NAME.
@@ -11880,6 +11894,7 @@ def handle_lark_jenkins_update_message(
                 body_early,
                 send,
                 lark_message_id=lark_message_id,
+                lark_thread_root_id=lark_thread_root_id,
             )
 
     # Expert agent: a free-form request (no slash command) is normalized into a canonical
