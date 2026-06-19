@@ -9411,13 +9411,21 @@ def _fpms_lark_cpms_igo_typo_pick_card_json(
     candidates: list[tuple[str, str, str]],
     *,
     picker_sid: str | None = None,
+    ambiguous: bool = False,
 ) -> str:
-    """Numbered pick card for a CPMS/IGO typo — tap **1** … **N** or type the number."""
+    """Numbered pick card for CPMS/IGO service disambiguation — tap **1** … **N** or type the number."""
     ps = (picker_sid or "").strip()
-    lines_md = [
-        f"Service `{token}` not found exactly. **Pick the nearest** (or type **1**–**{len(candidates)}**):",
-        "",
-    ]
+    if ambiguous:
+        intro = (
+            f"Several services match `{token}`. **Pick one** "
+            f"(tap **1**–**{len(candidates)}** or type the number):"
+        )
+    else:
+        intro = (
+            f"Service `{token}` not found exactly. **Pick the nearest** "
+            f"(tap **1**–**{len(candidates)}** or type the number):"
+        )
+    lines_md = [intro, ""]
     buttons: list[dict] = []
     for i, (kind, env, sid) in enumerate(candidates, start=1):
         lines_md.append(f"**{i}.** `{sid}` — {kind.upper()} / `{env}`")
@@ -9476,6 +9484,7 @@ def _fpms_lark_start_cpms_igo_typo_pick(
     typo_notes: list[str],
     send,
     lark_message_id: str | None = None,
+    ambiguous: bool = False,
 ) -> bool:
     picker_sid = secrets.token_hex(16)
     sess_new = {
@@ -9491,6 +9500,7 @@ def _fpms_lark_start_cpms_igo_typo_pick(
         "typo_notes": list(typo_notes),
         "ranked_cpms": [{"kind": k, "env": e, "sid": s} for k, e, s in candidates],
         "picker_sid": picker_sid,
+        "cpms_pick_ambiguous": bool(ambiguous),
     }
     _fpms_lark_register_picker_sid(picker_sid, session_key)
     chat_id_part, sender_part = (
@@ -9498,7 +9508,7 @@ def _fpms_lark_start_cpms_igo_typo_pick(
     )
     _fpms_lark_sessions_put(chat_id_part, sender_part, sess_new)
     card_js = _fpms_lark_cpms_igo_typo_pick_card_json(
-        typo_token, candidates, picker_sid=picker_sid
+        typo_token, candidates, picker_sid=picker_sid, ambiguous=ambiguous
     )
     try:
         send(chat_id, card_js, msg_type="interactive")
@@ -9620,12 +9630,23 @@ def _cpms_igo_continue_routing_after_typo_pick(
             send(chat_id, f"❌ Service `{tok}` not found in CPMS/IGO UAT.")
             return True
         if route["status"] == "menu":
-            cands = route.get("candidates") or []
-            lines = [f"Several services match `{tok}` — re-send the exact service id:"]
-            for kind, env, sid in cands:
-                lines.append(f"• `{sid}`  ({kind.upper()} / {env})")
-            send(chat_id, "\n".join(lines))
-            return True
+            return _fpms_lark_start_cpms_igo_typo_pick(
+                chat_id,
+                session_key,
+                typo_token=tok,
+                candidates=route.get("candidates") or [],
+                tokens=tokens,
+                token_index=ti,
+                groups=groups,
+                order=order,
+                branch=branch,
+                version=version,
+                body=body,
+                typo_notes=typo_notes,
+                send=send,
+                lark_message_id=lark_message_id,
+                ambiguous=True,
+            )
         if route["status"] == "typo_menu":
             return _fpms_lark_start_cpms_igo_typo_pick(
                 chat_id,
@@ -9806,12 +9827,23 @@ def _fpms_lark_dispatch_cpms_igo_uat_parameter_flow(
             send(chat_id, f"❌ Service `{tok}` not found in CPMS/IGO UAT.")
             return True
         if route["status"] == "menu":
-            cands = route.get("candidates") or []
-            lines = [f"Several services match `{tok}` — re-send the exact service id:"]
-            for kind, env, sid in cands:
-                lines.append(f"• `{sid}`  ({kind.upper()} / {env})")
-            send(chat_id, "\n".join(lines))
-            return True
+            return _fpms_lark_start_cpms_igo_typo_pick(
+                chat_id,
+                session_key,
+                typo_token=tok,
+                candidates=route.get("candidates") or [],
+                tokens=tokens,
+                token_index=ti,
+                groups=groups,
+                order=order,
+                branch=branch,
+                version=version,
+                body=body,
+                typo_notes=typo_notes,
+                send=send,
+                lark_message_id=lark_message_id,
+                ambiguous=True,
+            )
         if route["status"] == "typo_menu":
             return _fpms_lark_start_cpms_igo_typo_pick(
                 chat_id,
@@ -11856,13 +11888,14 @@ def handle_lark_jenkins_update_message(
             if idx is None:
                 typo_tok = str(sess.get("typo_token") or "?")
                 ps = str(sess.get("picker_sid") or "").strip()
+                amb = bool(sess.get("cpms_pick_ambiguous"))
                 cands = [
                     (str(r.get("kind") or ""), str(r.get("env") or ""), str(r.get("sid") or ""))
                     for r in ranked
                     if isinstance(r, dict)
                 ]
                 card_js = _fpms_lark_cpms_igo_typo_pick_card_json(
-                    typo_tok, cands, picker_sid=ps or None
+                    typo_tok, cands, picker_sid=ps or None, ambiguous=amb
                 )
                 try:
                     send(chat_id, card_js, msg_type="interactive")
