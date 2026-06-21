@@ -116,6 +116,59 @@ DEBUG = False
 # In-memory OSE shift sheet (avoids one full-sheet fetch per day for calendar / repeated /ose).
 _OSE_SHEET_CACHE_TTL_SEC = int(os.getenv("OSE_SHEET_CACHE_SEC", "120"))
 _OSE_SHEET_CACHE: dict[str, Any] = {"mono": 0.0, "values": None}
+
+# Transient TLS/network blips (e.g. 07:00 morning card) — retry before surfacing an error card.
+_OSE_LARK_HTTP_RETRIES = max(1, int(os.getenv("OSE_LARK_HTTP_RETRIES", "4")))
+_OSE_LARK_HTTP_RETRY_BASE_SEC = float(os.getenv("OSE_LARK_HTTP_RETRY_BASE_SEC", "3"))
+_OSE_BUILD_RETRIES = max(1, int(os.getenv("OSE_BUILD_RETRIES", "3")))
+_OSE_BUILD_RETRY_SEC = float(os.getenv("OSE_BUILD_RETRY_SEC", "15"))
+_TRANSIENT_REQUEST_ERRORS = (
+    requests.exceptions.SSLError,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    requests.exceptions.ChunkedEncodingError,
+)
+
+
+def is_transient_ose_load_error(message: str) -> bool:
+    """True for intermittent HTTPS/TLS failures that often succeed on retry."""
+    s = (message or "").lower()
+    return any(
+        needle in s
+        for needle in (
+            "ssl:",
+            "sslerror",
+            "tlsv1_alert",
+            "connectionpool",
+            "connection error",
+            "connection reset",
+            "timed out",
+            "temporarily unavailable",
+            "max retries exceeded",
+        )
+    )
+
+
+def _lark_request(method: str, url: str, *, retries: Optional[int] = None, **kwargs: Any) -> requests.Response:
+    attempts = _OSE_LARK_HTTP_RETRIES if retries is None else max(1, retries)
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return getattr(requests, method.lower())(url, **kwargs)
+        except _TRANSIENT_REQUEST_ERRORS as exc:
+            last_exc = exc
+            if attempt >= attempts:
+                break
+            delay = _OSE_LARK_HTTP_RETRY_BASE_SEC * attempt
+            print(
+                f"[ose_Duty] Lark HTTP retry {attempt}/{attempts} in {delay:.0f}s "
+                f"({method.upper()} {url[:96]}): {exc!r}",
+                flush=True,
+            )
+            time.sleep(delay)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"Lark HTTP {method.upper()} failed with no response")
 _OSE_DIR = os.path.dirname(os.path.abspath(__file__))
 _OFFSET_SHIFT_SHEET_APPLIED_PATH = os.path.join(_OSE_DIR, "offset_shift_sheet_applied.json")
 
@@ -351,7 +404,7 @@ def get_tenant_access_token() -> str:
     url = "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal"
     headers = {"Content-Type": "application/json"}
     data = {"app_id": APP_ID, "app_secret": APP_SECRET}
-    resp = requests.post(url, headers=headers, json=data, timeout=20)
+    resp = _lark_request("post", url, headers=headers, json=data, timeout=20)
     result = resp.json()
     if result.get("code") != 0:
         raise RuntimeError(f"Failed to get token: {result}")
@@ -361,7 +414,7 @@ def get_tenant_access_token() -> str:
 def get_sheet_metadata(token: str, spreadsheet_token: str, sheet_id: str) -> Optional[dict[str, Any]]:
     url = f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/metainfo"
     headers = {"Authorization": f"Bearer {token}"}
-    result = requests.get(url, headers=headers, timeout=20).json()
+    result = _lark_request("get", url, headers=headers, timeout=20).json()
     if result.get("code") != 0:
         debug_print(f"Metadata error: {result.get('msg')}")
         return None
@@ -381,7 +434,7 @@ def get_range_values(token: str, spreadsheet_token: str, sheet_id: str, range_st
         f"{spreadsheet_token}/values/{sheet_id}!{range_str}?valueRenderOption=FormattedValue"
     )
     headers = {"Authorization": f"Bearer {token}"}
-    result = requests.get(url, headers=headers, timeout=30).json()
+    result = _lark_request("get", url, headers=headers, timeout=30).json()
     if result.get("code") != 0:
         debug_print(f"Range values error: {result}")
         return None
@@ -666,7 +719,7 @@ def _put_ose_shift_sheet_cell_styles(
         f"{SPREADSHEET_TOKEN}/styles_batch_update"
     )
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"}
-    res = requests.put(url, headers=headers, json={"data": data}, timeout=60).json()
+    res = _lark_request("put", url, headers=headers, json={"data": data}, timeout=60).json()
     if res.get("code") != 0:
         raise RuntimeError(f"OSE shift sheet style write failed: {res}")
 
@@ -695,7 +748,7 @@ def _put_ose_shift_sheet_cells(
         f"{SPREADSHEET_TOKEN}/values_batch_update"
     )
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"}
-    res = requests.post(url, headers=headers, json={"valueRanges": value_ranges}, timeout=60).json()
+    res = _lark_request("post", url, headers=headers, json={"valueRanges": value_ranges}, timeout=60).json()
     if res.get("code") != 0:
         raise RuntimeError(f"OSE shift sheet write failed: {res}")
     _put_ose_shift_sheet_cell_styles(token, cell_updates, values=values, col_dates=col_dates)
@@ -1391,7 +1444,7 @@ def _bitable_get_all_records(token: str, app_token: str, table_id: str) -> list[
         params: dict[str, Any] = {"page_size": 200}
         if page_token:
             params["page_token"] = page_token
-        res = requests.get(url, headers=headers, params=params, timeout=30).json()
+        res = _lark_request("get", url, headers=headers, params=params, timeout=30).json()
         if res.get("code") != 0:
             raise RuntimeError(f"Bitable fetch failed: {res}")
         data = res.get("data", {})
@@ -1493,7 +1546,9 @@ def _section_lines(title: str, rows: list[str], *, empty_text: str = "• -") ->
     return out
 
 
-def _build_ose_context(target_date: date, mode: str) -> tuple[list[str], list[str], list[str], list[dict[str, Any]], Optional[str]]:
+def _build_ose_context_once(
+    target_date: date, mode: str
+) -> tuple[list[str], list[str], list[str], list[dict[str, Any]], Optional[str]]:
     """
     mode:
       - 'morning': Rest yesterday night, Luck today morning
@@ -1534,6 +1589,31 @@ def _build_ose_context(target_date: date, mode: str) -> tuple[list[str], list[st
     rest_names = [n for n in rest_names if not _on_leave(n)]
     luck_names = [n for n in luck_names if not _on_leave(n)]
     return sorted(rest_names), sorted(luck_names), offset_lines, leave_entries, None
+
+
+def _build_ose_context(
+    target_date: date, mode: str
+) -> tuple[list[str], list[str], list[str], list[dict[str, Any]], Optional[str]]:
+    """Load OSE context; retry transient Lark HTTPS failures before returning an error card."""
+    last = _build_ose_context_once(target_date, mode)
+    err = last[4]
+    if not err or not is_transient_ose_load_error(err):
+        return last
+    for attempt in range(2, _OSE_BUILD_RETRIES + 1):
+        wait = _OSE_BUILD_RETRY_SEC * (attempt - 1)
+        print(
+            f"[ose_Duty] OSE load retry {attempt}/{_OSE_BUILD_RETRIES} in {wait:.0f}s: {err[:160]}",
+            flush=True,
+        )
+        time.sleep(wait)
+        _OSE_SHEET_CACHE["mono"] = 0.0
+        last = _build_ose_context_once(target_date, mode)
+        err = last[4]
+        if not err:
+            return last
+        if not is_transient_ose_load_error(err):
+            return last
+    return last
 
 
 def build_ose_message_card(
@@ -1869,7 +1949,8 @@ def _bitable_create_record(token: str, table_id: str, fields: dict[str, Any]) ->
         f"{OSE_BASE_TOKEN}/tables/{table_id}/records"
     )
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    res = requests.post(
+    res = _lark_request(
+        "post",
         url,
         headers=headers,
         params={"user_id_type": "open_id"},
@@ -1895,7 +1976,8 @@ def _bitable_update_record(
         f"{OSE_BASE_TOKEN}/tables/{table_id}/records/{rid}"
     )
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    res = requests.put(
+    res = _lark_request(
+        "put",
         url,
         headers=headers,
         params={"user_id_type": "open_id"},
@@ -2854,7 +2936,8 @@ def delete_ose_offset_record(*, record_id: str, skip_cache_invalidate: bool = Fa
         f"{OSE_BASE_TOKEN}/tables/{OSE_OFFSET_TABLE_ID}/records/{rid}"
     )
     headers = {"Authorization": f"Bearer {token}"}
-    res = requests.delete(
+    res = _lark_request(
+        "delete",
         url,
         headers=headers,
         params={"user_id_type": "open_id"},
