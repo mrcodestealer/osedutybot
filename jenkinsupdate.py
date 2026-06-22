@@ -531,6 +531,7 @@ _NL_JENKINS_UPDATE_RE = re.compile(
     r"|\brc[\s-]*uat(?:[\s-]*master)?\b"
     r"|\b(?:cpms|igo)[\s-]*uat\b"
     r"|\bigo\b.*\bprod\s*script\b"
+    r"|\bfpms\b.*\bprod\s*script\b"
     r"|jenkins\s+(?:update|deploy|build)"
     r")"
 )
@@ -5928,6 +5929,35 @@ def _igo_prod_script_phrase_env(body: str) -> str | None:
     return None
 
 
+def _strip_lark_message_mentions(text: str) -> str:
+    """Remove @-mentions and common ``@Duty Bot`` prefix from pasted Lark text."""
+    t = (text or "").replace("\r\n", "\n")
+    for pat in (r"@_user_\d+", r"<[^>]+>"):
+        t = re.sub(pat, "", t)
+    lines: list[str] = []
+    for line in t.split("\n"):
+        ln = re.sub(r"(?i)^(?:@\S+\s+)+", "", line.strip())
+        ln = re.sub(r"(?i)^duty\s+bot\s+", "", ln).strip()
+        if ln:
+            lines.append(ln)
+    return "\n".join(lines).strip()
+
+
+def _looks_like_fpms_prod_script_paste(body: str) -> bool:
+    """
+    Natural ``fpms prod script`` + ``node …`` paste (no ``/update`` prefix required).
+    Excludes IGO prod-script headlines (handled separately).
+    """
+    raw = _strip_lark_message_mentions(body)
+    if not raw:
+        return False
+    if _igo_prod_script_phrase_env(raw):
+        return False
+    if not re.search(r"(?i)\bfpms\b.*\bprod\s*script\b", raw):
+        return False
+    return bool(_split_fpms_prod_script_commands(raw))
+
+
 # ----- CPMS / IGO UAT: env→services discovery cache + service routing -----
 _cpms_igo_cache_lock = threading.Lock()
 
@@ -8915,6 +8945,13 @@ def _fpms_lark_dispatch_fpms_prod_script_parameter_flow(
     Multiple ``node …`` commands in one message are auto-split into a sequential queue
     (one build each, waiting for the previous to finish).
     """
+    _fpms_lark_begin_update_thread(
+        chat_id,
+        session_key,
+        body,
+        lark_message_id,
+        force_new=bool((lark_message_id or "").strip()),
+    )
     multi_cmds = _split_fpms_prod_script_commands(body)
     if len(multi_cmds) >= 2:
         return _fpms_lark_start_prod_script_sequence(
@@ -8925,6 +8962,24 @@ def _fpms_lark_dispatch_fpms_prod_script_parameter_flow(
             send,
             lark_message_id=lark_message_id,
         )
+    if len(multi_cmds) == 1:
+        data = {
+            "_job_kind": "fpms_prod_script",
+            "environment": "fpms-prod",
+            "command": multi_cmds[0],
+        }
+        _fpms_lark_begin_jenkins_run(
+            chat_id,
+            session_key,
+            data,
+            [],
+            send,
+            raw_prompt_body=body,
+            jenkins_build_url=jenkins_build_url,
+            job_profile="fpms_prod_script",
+            lark_message_id=lark_message_id,
+        )
+        return True
     try:
         data = parse_fpms_prod_script_bot_block(body)
     except Exception as ex:
@@ -10652,6 +10707,8 @@ def looks_like_natural_jenkins_update(text: str) -> bool:
         return True
     if _igo_prod_script_phrase_env(raw):
         return True
+    if _looks_like_fpms_prod_script_paste(raw):
+        return True
     if _body_requests_bi_script_update(raw):
         return True
     if _looks_like_bi_api_update_paste(raw):
@@ -10673,9 +10730,19 @@ def looks_like_natural_jenkins_update(text: str) -> bool:
 
 def normalize_natural_jenkins_body(text: str) -> str:
     """Turn NL Jenkins requests into ``/update …`` + config block for existing dispatch."""
-    raw = (text or "").replace("\r\n", "\n").strip()
+    raw = _strip_lark_message_mentions(text)
+    if not raw:
+        raw = (text or "").replace("\r\n", "\n").strip()
     if JENKINS_UPDATE_CMD_RE.search(raw):
         return raw
+    if _looks_like_fpms_prod_script_paste(raw):
+        cmds = _split_fpms_prod_script_commands(raw)
+        out = "/jenkinsupdate --fpmsprodscript"
+        if len(cmds) == 1:
+            out += f"\nCommand: {cmds[0]}"
+        elif cmds:
+            out += "\n" + "\n".join(cmds)
+        return out
     if _body_requests_bi_script_update(raw):
         return _normalize_bi_script_update_freeform_body(raw)
     if _looks_like_bi_api_update_paste(raw):
@@ -10690,6 +10757,7 @@ def normalize_natural_jenkins_body(text: str) -> str:
         else:
             head, tail = raw, ""
     head = re.sub(r"(?i)^(?:@\S+\s+)*", "", head)
+    head = re.sub(r"(?i)^duty\s+bot\s+", "", head).strip()
     head = re.sub(
         r"(?i)^(?:i\s+)?(?:want|need|please)\s+(?:to\s+)?(?:update|deploy|trigger|run)\s+(?:jenkins\s+)?",
         "",
@@ -11527,7 +11595,7 @@ def _dispatch_lark_update_command_body(
             _fpms_lark_preserve_updatemore_queue(prev if isinstance(prev, dict) else None, stub)
             _fpms_lark_sessions[key] = stub
 
-    if FPMS_PROD_SCRIPT_FLAG_RE.search(body):
+    if FPMS_PROD_SCRIPT_FLAG_RE.search(body) or _looks_like_fpms_prod_script_paste(body):
         return _fpms_lark_dispatch_fpms_prod_script_parameter_flow(
             chat_id,
             key,
@@ -11896,6 +11964,16 @@ def handle_lark_jenkins_update_message(
         and clean_text.strip().casefold() not in ("yes", "no", "y", "n", "cancel")
         and _parse_single_menu_index(clean_text.strip(), 9) is None
     ):
+        if _looks_like_fpms_prod_script_paste(body_early):
+            _fpms_lark_clear_session(chat_id, sender_id)
+            return _fpms_lark_dispatch_fpms_prod_script_parameter_flow(
+                chat_id,
+                key,
+                body_early,
+                FPMS_PROD_SCRIPT_BUILD_URL,
+                send,
+                lark_message_id=lark_message_id,
+            )
         if _igo_prod_script_phrase_env(body_early):
             _fpms_lark_clear_session(chat_id, sender_id)
             return _fpms_lark_dispatch_igo_prod_script_parameter_flow(
