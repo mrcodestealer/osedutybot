@@ -1502,6 +1502,36 @@ def apply_leave_to_shift_sheet(
     }
 
 
+def _shift_sheet_cell_value(values: list[list[Any]], row: int, col: int) -> str:
+    if row < 0 or col < 0 or row >= len(values):
+        return ""
+    row_data = values[row]
+    if col >= len(row_data):
+        return ""
+    return _field_text(row_data[col]).strip().upper()
+
+
+def _leave_shift_sheet_live_ok(
+    values: list[list[Any]],
+    snapshot: dict[str, Any],
+    *,
+    shift_code: str,
+) -> bool:
+    """True when every tracked cell on the sheet already shows the expected leave code."""
+    cells = snapshot.get("cells") or []
+    if not cells:
+        return False
+    code = str(snapshot.get("shift_code") or shift_code or "").strip().upper()
+    for c in cells:
+        expected = str(c.get("code") or code).strip().upper()
+        if not expected:
+            continue
+        cur = _shift_sheet_cell_value(values, int(c["row"]), int(c["col"]))
+        if cur != expected:
+            return False
+    return True
+
+
 def apply_leave_shift_sheet_for_record(
     record_id: str,
     *,
@@ -1538,7 +1568,12 @@ def apply_leave_shift_sheet_for_record(
         prior_cells=prior_cells,
     )
     new_snap = _leave_shift_sheet_snapshot_from_plan(parsed, plan)
-    if old_snap and _leave_shift_sheet_snapshots_match(old_snap, new_snap):
+    if (
+        old_snap
+        and _leave_shift_sheet_snapshots_match(old_snap, new_snap)
+        and not plan["updates"]
+        and _leave_shift_sheet_live_ok(values, new_snap, shift_code=shift_code)
+    ):
         return {
             "ok": True,
             "record_id": rid,
@@ -1547,11 +1582,29 @@ def apply_leave_shift_sheet_for_record(
             "skipped": "already_applied",
         }
     token = get_tenant_access_token()
-    if old_snap and not _leave_shift_sheet_snapshots_match(old_snap, new_snap):
+    if (
+        old_snap
+        and not _leave_shift_sheet_snapshots_match(old_snap, new_snap)
+    ):
         _revert_leave_shift_sheet_snapshot(token, old_snap, values=values)
         values, err = _get_cached_ose_sheet_values()
         if not values:
             raise RuntimeError(err or "Could not reload OSE shift sheet after revert")
+        plan = _compute_leave_shift_sheet_plan(
+            person=parsed["person"],
+            start_date=parsed["start"],
+            end_date=parsed["end"],
+            values=values,
+            shift_code=shift_code,
+        )
+        new_snap = _leave_shift_sheet_snapshot_from_plan(parsed, plan)
+    elif (
+        old_snap
+        and _leave_shift_sheet_snapshots_match(old_snap, new_snap)
+        and not plan["updates"]
+        and not _leave_shift_sheet_live_ok(values, new_snap, shift_code=shift_code)
+    ):
+        # State file says applied but sheet drifted (e.g. manual edit or failed write).
         plan = _compute_leave_shift_sheet_plan(
             person=parsed["person"],
             start_date=parsed["start"],
@@ -1769,6 +1822,18 @@ def probe_leave_shift_sheet_sync(*, apply: bool = False, json_out: bool = False)
                 "end": parsed["end"].isoformat() if parsed else None,
                 "skip": skip or None,
                 "plan": plan_info,
+                "live_ok": (
+                    _leave_shift_sheet_live_ok(
+                        values,
+                        {
+                            "shift_code": parsed.get("shift_code"),
+                            "cells": plan_info.get("cell_details") or [],
+                        },
+                        shift_code=str(parsed.get("shift_code") or "L"),
+                    )
+                    if parsed and values and plan_info.get("cell_details")
+                    else None
+                ),
             }
         )
     sync_result: Optional[dict[str, Any]] = None
@@ -1806,9 +1871,12 @@ def probe_leave_shift_sheet_sync(*, apply: bool = False, json_out: bool = False)
                 code = (r.get("plan") or {}).get("shift_code") or r.get("shift_code") or "?"
                 n = (r.get("plan") or {}).get("cells_to_mark", 0)
                 lt = r.get("leave_type") or ""
+                live = r.get("live_ok")
+                live_note = "" if live is None else (" sheet OK" if live else " sheet NOT updated yet")
+                rid = r.get("record_id") or ""
                 print(
                     f"  OK    {label}  {r.get('start')}..{r.get('end')}  "
-                    f"→ {n} cell(s) D/N→{code} ({lt})"
+                    f"→ {n} cell(s) D/N→{code} ({lt}){live_note}  [{rid[:12]}…]"
                 )
         if apply and sync_result:
             print(f"\nApply: {sync_result}")
