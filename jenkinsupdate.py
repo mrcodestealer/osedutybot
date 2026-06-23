@@ -13646,7 +13646,10 @@ def run(
                             _click_jenkins_build_button(page)
                             build_clicked = True
                             print("→ **Build** clicked (Lark-approved).")
-                            send(cid, "**Build** clicked in Jenkins.")
+                            if is_vpn:
+                                send(cid, "Creating VPN file. Kindly wait...")
+                            else:
+                                send(cid, "**Build** clicked in Jenkins.")
                             folder_u = _jenkins_job_folder_url(build_url)
                             _raw_wait_bn = (os.environ.get("JENKINS_POST_BUILD_NUMBER_WAIT_MS") or "20000").strip()
                             try:
