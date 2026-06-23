@@ -196,6 +196,9 @@ _OSE_PERSON_OPEN_ID_DEFAULTS: dict[str, str] = {
     "Man Chung": "ou_50afe44c066a50645271f87b690d84a8",
     "Eduard James": "ou_cd2d456b36f2fab676b22e45e2b1425b",
     "Louie": "ou_da0c9fead4a1fc32475939898a42ceed",
+    "Kenneth": "ou_ff21929cc95a20ce54db36fc69a220d8",
+    "Augustine Si Yew": "ou_d584e2a7bead0675ce4fd067ff1aa323",
+    "Augustine (Si Yew)": "ou_d584e2a7bead0675ce4fd067ff1aa323",
 }
 
 
