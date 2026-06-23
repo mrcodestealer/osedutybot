@@ -592,7 +592,7 @@ def _shift_codes_from_matrix(
             morning.append(_title_name(name))
         elif code == "N":
             night.append(_title_name(name))
-        elif code == "L":
+        elif code in _OSE_SHIFT_SHEET_LEAVE_CODES:
             roster_leave.append(_title_name(name))
     return sorted(morning), sorted(night), sorted(roster_leave)
 
@@ -646,7 +646,8 @@ def _sheet_row_index_for_person(values: list[list[Any]], person: str) -> Optiona
 _OSE_SHIFT_SHEET_BG_DUTY = "#FFFFFF"
 _OSE_SHIFT_SHEET_BG_OFFSET = "#8F959E"
 _OSE_SHIFT_SHEET_BG_HOLIDAY = "#8EE085"
-_OSE_SHIFT_SHEET_STYLED_VALUES = frozenset({"D", "N", "L"})
+_OSE_SHIFT_SHEET_STYLED_VALUES = frozenset({"D", "N", "L", "AL", "SL"})
+_OSE_SHIFT_SHEET_LEAVE_CODES = frozenset({"L", "AL", "SL"})
 
 
 def _shift_sheet_cell_range(row_idx: int, col_idx: int) -> str:
@@ -734,7 +735,7 @@ def _put_ose_shift_sheet_cell_styles(
     values: Optional[list[list[Any]]] = None,
     col_dates: Optional[dict[int, date]] = None,
 ) -> None:
-    """Set background on offset swap cells: D/N/L white, ``*`` #8F959E; holiday #8EE085 for D/N/L/*."""
+    """Set background on duty cells: D/N/L/AL/SL white, ``*`` #8F959E; holiday #8EE085 for duty/leave codes."""
     if not cell_updates:
         return
     if not SPREADSHEET_TOKEN or not SHEET_ID:
@@ -1243,6 +1244,16 @@ def _ose_leave_items_for_shift_sheet(token: str) -> list[dict[str, Any]]:
     return items
 
 
+def _leave_type_to_shift_code(leave_type: str) -> str:
+    """Map leaveose ``Leave Type`` to shift-sheet code: Annual Leave → ``AL``, Sick Leave → ``SL``."""
+    lt = (leave_type or "").strip().lower()
+    if "annual" in lt or re.search(r"\bal\b", lt):
+        return "AL"
+    if "sick" in lt or re.search(r"\bsl\b", lt) or lt in ("mc", "medical", "medical leave"):
+        return "SL"
+    return "L"
+
+
 def _parse_ose_leave_bitable_item(it: dict[str, Any]) -> Optional[dict[str, Any]]:
     rid = str(it.get("record_id") or "").strip()
     if not rid:
@@ -1257,7 +1268,16 @@ def _parse_ose_leave_bitable_item(it: dict[str, Any]) -> Optional[dict[str, Any]
     ed = _parse_date_value(_get_field_by_aliases(f, ["End Date", "Leave End Date", "To"]))
     if not st or not ed:
         return None
-    return {"record_id": rid, "person": roster_key, "start": st, "end": ed}
+    leave_type = _field_text(_get_field_by_aliases(f, ["Leave Type", "Type"])) or "Leave"
+    shift_code = _leave_type_to_shift_code(leave_type)
+    return {
+        "record_id": rid,
+        "person": roster_key,
+        "start": st,
+        "end": ed,
+        "leave_type": leave_type,
+        "shift_code": shift_code,
+    }
 
 
 def _parse_ose_leave_bitable_item_skip_reason(it: dict[str, Any]) -> str:
@@ -1341,6 +1361,7 @@ def _leave_shift_sheet_snapshots_match(a: dict[str, Any], b: dict[str, Any]) -> 
         str(a.get("person") or "") == str(b.get("person") or "")
         and str(a.get("start") or "") == str(b.get("start") or "")
         and str(a.get("end") or "") == str(b.get("end") or "")
+        and str(a.get("shift_code") or "") == str(b.get("shift_code") or "")
         and list(a.get("cells") or []) == list(b.get("cells") or [])
     )
 
@@ -1350,6 +1371,8 @@ def _leave_shift_sheet_snapshot_from_plan(parsed: dict[str, Any], plan: dict[str
         "person": parsed["person"],
         "start": parsed["start"].isoformat(),
         "end": parsed["end"].isoformat(),
+        "leave_type": parsed.get("leave_type"),
+        "shift_code": plan.get("shift_code"),
         "cells": list(plan.get("cells") or []),
     }
 
@@ -1360,8 +1383,12 @@ def _compute_leave_shift_sheet_plan(
     start_date: date,
     end_date: date,
     values: list[list[Any]],
+    shift_code: str = "L",
 ) -> dict[str, Any]:
-    """Mark roster ``D``/``N`` cells as ``L`` for each leave day (skip ``*`` offset cells)."""
+    """Mark roster ``D``/``N`` cells as ``AL``/``SL``/``L`` for each leave day (skip ``*`` offset cells)."""
+    code = (shift_code or "L").strip().upper()
+    if code not in _OSE_SHIFT_SHEET_LEAVE_CODES:
+        code = _leave_type_to_shift_code(shift_code)
     nm = _title_name(person)
     row = _sheet_row_index_for_person(values, nm)
     if row is None:
@@ -1376,17 +1403,20 @@ def _compute_leave_shift_sheet_plan(
             row_data = values[row] if row < len(values) else []
             current = _field_text(row_data[col] if col < len(row_data) else "").upper()
             if current in ("D", "N"):
-                updates.append((row, col, "L"))
-                cells.append({"row": row, "col": col, "prev": current, "date": d.isoformat()})
+                updates.append((row, col, code))
+                cells.append(
+                    {"row": row, "col": col, "prev": current, "date": d.isoformat(), "code": code}
+                )
                 col_dates[col] = d
-            elif current == "L":
-                updates.append((row, col, "L"))
+            elif current in _OSE_SHIFT_SHEET_LEAVE_CODES:
+                updates.append((row, col, code))
                 col_dates[col] = d
         d += timedelta(days=1)
     return {
         "person": nm,
         "start": start_date,
         "end": end_date,
+        "shift_code": code,
         "updates": updates,
         "cells": cells,
         "col_dates": col_dates,
@@ -1418,8 +1448,10 @@ def _revert_leave_shift_sheet_snapshot(
         _put_ose_shift_sheet_cells(token, updates, values=values, col_dates=col_dates)
 
 
-def apply_leave_to_shift_sheet(*, person: str, start_date: date, end_date: date) -> dict[str, Any]:
-    """Write ``L`` on shift days that were ``D``/``N`` for an approved OSE leave range."""
+def apply_leave_to_shift_sheet(
+    *, person: str, start_date: date, end_date: date, shift_code: str = "L"
+) -> dict[str, Any]:
+    """Write ``AL``/``SL``/``L`` on shift days that were ``D``/``N`` for an approved OSE leave range."""
     values, err = _get_cached_ose_sheet_values()
     if not values:
         raise RuntimeError(err or "Could not load OSE shift sheet")
@@ -1428,6 +1460,7 @@ def apply_leave_to_shift_sheet(*, person: str, start_date: date, end_date: date)
         start_date=start_date,
         end_date=end_date,
         values=values,
+        shift_code=shift_code,
     )
     if not plan["updates"]:
         return {
@@ -1480,6 +1513,7 @@ def apply_leave_shift_sheet_for_record(
         start_date=parsed["start"],
         end_date=parsed["end"],
         values=values,
+        shift_code=str(parsed.get("shift_code") or "L"),
     )
     new_snap = _leave_shift_sheet_snapshot_from_plan(parsed, plan)
     token = get_tenant_access_token()
@@ -1493,6 +1527,7 @@ def apply_leave_shift_sheet_for_record(
             start_date=parsed["start"],
             end_date=parsed["end"],
             values=values,
+            shift_code=str(parsed.get("shift_code") or "L"),
         )
         new_snap = _leave_shift_sheet_snapshot_from_plan(parsed, plan)
     if not plan["updates"]:
@@ -1576,6 +1611,7 @@ def reensure_applied_leave_shift_sheet_styles() -> dict[str, int]:
                 start_date=st,
                 end_date=ed,
                 values=values,
+                shift_code=str(snap.get("shift_code") or "L"),
             )
             if not plan["updates"]:
                 continue
@@ -1680,9 +1716,12 @@ def probe_leave_shift_sheet_sync(*, apply: bool = False, json_out: bool = False)
                     start_date=parsed["start"],
                     end_date=parsed["end"],
                     values=values,
+                    shift_code=str(parsed.get("shift_code") or "L"),
                 )
                 plan_info = {
-                    "cells_to_L": len(plan.get("updates") or []),
+                    "shift_code": plan.get("shift_code"),
+                    "leave_type": parsed.get("leave_type"),
+                    "cells_to_mark": len(plan.get("updates") or []),
                     "cell_details": plan.get("cells") or [],
                 }
                 if not plan.get("updates"):
@@ -1697,6 +1736,8 @@ def probe_leave_shift_sheet_sync(*, apply: bool = False, json_out: bool = False)
                 "record_id": rid,
                 "name": name,
                 "roster_key": parsed["person"] if parsed else _resolve_ose_roster_key(name),
+                "leave_type": parsed.get("leave_type") if parsed else None,
+                "shift_code": parsed.get("shift_code") if parsed else None,
                 "start": parsed["start"].isoformat() if parsed else None,
                 "end": parsed["end"].isoformat() if parsed else None,
                 "skip": skip or None,
@@ -1707,7 +1748,7 @@ def probe_leave_shift_sheet_sync(*, apply: bool = False, json_out: bool = False)
     if apply:
         sync_result = scan_bitable_approved_leave_for_shift_sheet()
     out = {
-        "ok": bool(values) and any(r.get("plan", {}).get("cells_to_L") for r in rows),
+        "ok": bool(values) and any(r.get("plan", {}).get("cells_to_mark") for r in rows),
         "leaveose_url_table": LEAVEOSE_TABLE_ID_CANONICAL,
         "base_token": OSE_BASE_TOKEN,
         "shift_spreadsheet": SPREADSHEET_TOKEN,
@@ -1735,8 +1776,13 @@ def probe_leave_shift_sheet_sync(*, apply: bool = False, json_out: bool = False)
             if r.get("skip"):
                 print(f"  SKIP  {label}  {r.get('start')}..{r.get('end')}  → {r['skip']}")
             else:
-                n = (r.get("plan") or {}).get("cells_to_L", 0)
-                print(f"  OK    {label}  {r.get('start')}..{r.get('end')}  → {n} cell(s) D/N→L")
+                code = (r.get("plan") or {}).get("shift_code") or r.get("shift_code") or "?"
+                n = (r.get("plan") or {}).get("cells_to_mark", 0)
+                lt = r.get("leave_type") or ""
+                print(
+                    f"  OK    {label}  {r.get('start')}..{r.get('end')}  "
+                    f"→ {n} cell(s) D/N→{code} ({lt})"
+                )
         if apply and sync_result:
             print(f"\nApply: {sync_result}")
     return out
