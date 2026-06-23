@@ -202,6 +202,7 @@ VPN_CREATION_JOB_FOLDER_URL = (
     "https://ose-jenkinsaliyun.bewen.me/job/DEVOPS_CP/job/VPN_CONFIGURATION/job/VPN_CREATION/"
 )
 VPN_CREATION_BUILD_URL = VPN_CREATION_JOB_FOLDER_URL + "build?delay=0sec"
+# Speed: ``VPN_FAST_FILL=1`` (default) — short waits; ``JENKINSUPDATE_VPN_FORM_SCREENSHOT=1`` for YES/NO card image.
 # Dropdown values for VPN_LOCATION (keep in sync with the Jenkins job parameter).
 VPN_LOCATION_OPTIONS: list[str] = [
     "HK_235",
@@ -846,6 +847,30 @@ def _ensure_fast_fill_mode(*, announce: bool = True) -> None:
 
 if not _truthy_stable_fill_env():
     _ensure_fast_fill_mode(announce=False)
+
+
+def _vpn_fast_fill_enabled() -> bool:
+    """VPN_CREATION has only VPN_USERS + VPN_LOCATION — skip UnoChoice-oriented delays."""
+    raw = os.environ.get("VPN_FAST_FILL", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _ensure_vpn_fast_fill_mode() -> None:
+    """Tighter Playwright waits for VPN (two fields, no Services cascade). Idempotent."""
+    if not _vpn_fast_fill_enabled():
+        return
+    global _MS_POST_LOGIN_BEFORE_FORM, _MS_AFTER_LOGIN, _MS_FORM_READY
+    global _MS_POST_FILL_VERIFY, _MS_ENV_SETTLE
+
+    def _vpn_ms(name: str, default: int) -> int:
+        raw = (os.environ.get(name) or "").strip()
+        return int(raw) if raw.isdigit() else default
+
+    _MS_POST_LOGIN_BEFORE_FORM = _vpn_ms("VPN_MS_POST_LOGIN_BEFORE_FORM", 0)
+    _MS_AFTER_LOGIN = min(_MS_AFTER_LOGIN, _vpn_ms("VPN_MS_AFTER_LOGIN", 300))
+    _MS_FORM_READY = min(_MS_FORM_READY, _vpn_ms("VPN_MS_FORM_READY", 50))
+    _MS_POST_FILL_VERIFY = min(_MS_POST_FILL_VERIFY, _vpn_ms("VPN_MS_POST_FILL_VERIFY", 50))
+    _MS_ENV_SETTLE = min(_MS_ENV_SETTLE, _vpn_ms("VPN_MS_ENV_SETTLE", 50))
 
 
 class ServiceNotDetectedError(Exception):
@@ -8163,6 +8188,10 @@ def _fpms_lark_verification_plain_fallback(
 def _jenkins_form_screenshot_enabled(bot_lark_gate: dict | None) -> bool:
     if not bot_lark_gate:
         return False
+    jp = str((bot_lark_gate or {}).get("job_profile") or "").strip()
+    if jp == "vpn_creation":
+        raw_vpn = os.environ.get("JENKINSUPDATE_VPN_FORM_SCREENSHOT", "0").strip().lower()
+        return raw_vpn in ("1", "true", "yes", "on")
     raw = os.environ.get("JENKINSUPDATE_FORM_SCREENSHOT", "1").strip().lower()
     return raw not in ("0", "false", "no", "off")
 
@@ -8308,11 +8337,15 @@ def capture_jenkins_build_parameters_screenshots(
     prof = re.sub(r"[^\w.-]+", "_", (job_profile or "fpms").strip())[:40]
     paths: list[str] = []
 
+    settle_ms = 80 if (job_profile or "").strip() == "vpn_creation" else max(
+        300, min(800, _MS_POST_FILL_VERIFY)
+    )
+
     try:
         page.evaluate("() => window.scrollTo(0, 0)")
     except Exception:
         pass
-    _safe_page_wait(page, max(300, min(800, _MS_POST_FILL_VERIFY)))
+    _safe_page_wait(page, settle_ms)
 
     form_png = os.path.join(out_dir, f"{prof}_{ts}_form.png")
     captured = False
@@ -8803,8 +8836,11 @@ def _fpms_lark_spawn_run(
 
     def _job() -> None:
         try:
+            _rev = float(os.environ.get("FPMS_BOT_REVIEW_SECONDS", "2"))
+            if jp == "vpn_creation":
+                _rev = float(os.environ.get("VPN_BOT_REVIEW_SECONDS", "0") or "0")
             run(
-                review_seconds=float(os.environ.get("FPMS_BOT_REVIEW_SECONDS", "2")),
+                review_seconds=_rev,
                 headless=headless,
                 browser=os.environ.get("FPMS_PLAYWRIGHT_BROWSER", "chromium"),
                 config_block=config_block,
@@ -13014,6 +13050,8 @@ def run(
     is_bi_script_update = jp == "bi_script_update"
     is_vpn = jp == "vpn_creation"
     is_venue = jp == "venue_uat"
+    if is_vpn:
+        _ensure_vpn_fast_fill_mode()
 
     parsed_update_all = False
     command = ""
@@ -13284,19 +13322,26 @@ def run(
             open_fpms_build_with_login(page, user, pw, first_visit=True, warmup=False, build_url=ju)
             page.wait_for_selector("div.jenkins-form-item", timeout=60_000)
             _safe_page_wait(page, _MS_FORM_READY)
-            print(
-                f"→ Post-login: waiting {_MS_POST_LOGIN_BEFORE_FORM} ms before "
-                + (
-                    "REPOSITORY / ENVIRONMENT / SOURCE_BRANCH…"
-                    if is_bi_api_update
-                    else "ENVIRONMENT / SOURCE_BRANCH…"
-                    if is_qrqm_update
-                    else "Services / Branch / Version…"
-                    if skip_env
-                    else "Environment / Services / Branch…"
+            if is_vpn:
+                if _MS_POST_LOGIN_BEFORE_FORM > 0:
+                    print(
+                        f"→ VPN: post-login settle {_MS_POST_LOGIN_BEFORE_FORM} ms before VPN_USERS / VPN_LOCATION…"
+                    )
+                    _safe_page_wait(page, _MS_POST_LOGIN_BEFORE_FORM)
+            else:
+                print(
+                    f"→ Post-login: waiting {_MS_POST_LOGIN_BEFORE_FORM} ms before "
+                    + (
+                        "REPOSITORY / ENVIRONMENT / SOURCE_BRANCH…"
+                        if is_bi_api_update
+                        else "ENVIRONMENT / SOURCE_BRANCH…"
+                        if is_qrqm_update
+                        else "Services / Branch / Version…"
+                        if skip_env
+                        else "Environment / Services / Branch…"
+                    )
                 )
-            )
-            _safe_page_wait(page, _MS_POST_LOGIN_BEFORE_FORM)
+                _safe_page_wait(page, _MS_POST_LOGIN_BEFORE_FORM)
 
             # FPMS: UnoChoice rebuilds Services when Environment changes — Environment first, then Services.
             # FNT RC UAT master: no Environment row — Services only before Branch/Version.
@@ -13651,7 +13696,12 @@ def run(
                             else:
                                 send(cid, "**Build** clicked in Jenkins.")
                             folder_u = _jenkins_job_folder_url(build_url)
-                            _raw_wait_bn = (os.environ.get("JENKINS_POST_BUILD_NUMBER_WAIT_MS") or "20000").strip()
+                            _raw_wait_bn = (
+                                os.environ.get("VPN_POST_BUILD_NUMBER_WAIT_MS")
+                                if is_vpn
+                                else os.environ.get("JENKINS_POST_BUILD_NUMBER_WAIT_MS")
+                            ) or ("8000" if is_vpn else "20000")
+                            _raw_wait_bn = (_raw_wait_bn or "").strip()
                             try:
                                 wait_bn_ms = int(_raw_wait_bn or "20000")
                             except ValueError:
