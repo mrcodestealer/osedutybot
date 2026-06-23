@@ -1403,6 +1403,32 @@ def _split_unambiguous_service_tokens(
     return resolved, to_pick
 
 
+def _parse_service_lines_to_tokens(service_lines: list[str]) -> list[str]:
+    """
+    Turn ``services:`` block lines into individual Jenkins service id tokens.
+
+    Lark often flattens a multi-line service list into one space-separated chunk;
+    split on commas **and** whitespace so ``a b c`` becomes three tokens.
+    """
+    tokens: list[str] = []
+    for raw in service_lines:
+        line = (raw or "").strip()
+        if not line:
+            continue
+        for part in re.split(r"[,，;]+", line):
+            part = part.strip()
+            if not part:
+                continue
+            if re.search(r"\s", part):
+                for chunk in re.split(r"\s+", part):
+                    t = chunk.strip()
+                    if t:
+                        tokens.append(t)
+            else:
+                tokens.append(part)
+    return tokens
+
+
 def _service_ids_from_service_block_lines(
     lines: list[str],
     *,
@@ -6973,12 +6999,7 @@ def parse_fnt_rc_uat_master_bot_block(text: str) -> dict:
             "service_tokens": [],
             "update_all_services": True,
         }
-    tokens: list[str] = []
-    for raw in service_lines:
-        for part in re.split(r"[,，;]+", raw):
-            t = part.strip()
-            if t:
-                tokens.append(t)
+    tokens = _parse_service_lines_to_tokens(service_lines)
     if not tokens:
         raise ValueError("No service name tokens parsed.")
     return {
@@ -13535,8 +13556,13 @@ def run(
                     next_build_number=next_build_number,
                     screenshot_img_key=screenshot_img_key,
                 )
-                # CPMS / IGO UAT: after the whole-form card, also show the clicked-Services close-up.
-                if jp == "cpms_igo_uat" and len(shot_paths) > 1:
+                # After the whole-form YES/NO card, also send Services row + per-service close-ups.
+                if (
+                    len(shot_paths) > 1
+                    and not update_all_services
+                    and (services or [])
+                    and _jenkins_services_detail_screenshot_enabled()
+                ):
                     _fpms_lark_send_parameter_screenshots(
                         cid,
                         send,

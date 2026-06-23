@@ -3110,11 +3110,111 @@ def update_ose_offset_record_fields(
     return {"ok": True, "record_id": rid}
 
 
+def audit_person_open_ids(*, json_out: bool = False) -> dict[str, Any]:
+    """List OSE roster names and whether each has a Lark ``open_id`` (bitable + defaults/env)."""
+    token = get_tenant_access_token()
+    leave_disp, leave_appr, offset = _get_bitable_raw_triple(token)
+    bitable_idx = _build_ose_person_open_id_index(leave_disp + leave_appr, offset)
+    override_idx = _ose_person_open_id_overrides()
+    full_idx = dict(bitable_idx)
+    full_idx.update(override_idx)
+
+    roster_names = sorted(
+        {_title_name(n) for n in (*OSE_LEAVE_FORM_NAMES, *TARGET_NAMES) if (n or "").strip()},
+        key=str.lower,
+    )
+
+    people: list[dict[str, Any]] = []
+    missing: list[str] = []
+    for nm in roster_names:
+        oid_override = _lookup_person_open_id(nm, override_idx)
+        oid_bitable = _lookup_person_open_id(nm, bitable_idx)
+        oid = _lookup_person_open_id(nm, full_idx)
+        sources: list[str] = []
+        if oid_override:
+            sources.append("default/env")
+        if oid_bitable:
+            sources.append("bitable")
+        if not oid:
+            missing.append(nm)
+        people.append(
+            {
+                "name": nm,
+                "open_id": oid or None,
+                "sources": sources,
+                "ok": bool(oid),
+            }
+        )
+
+    approvers: list[dict[str, Any]] = []
+    try:
+        from offsetleave import OFFSET_APPROVER_OPEN_IDS
+    except ImportError:
+        OFFSET_APPROVER_OPEN_IDS = frozenset()  # type: ignore[misc, assignment]
+    for oid in sorted(OFFSET_APPROVER_OPEN_IDS):
+        roster = lookup_roster_name_for_open_id(oid, token)
+        approvers.append({"open_id": oid, "roster_name": roster or None})
+
+    try:
+        import leavewfh as lw
+
+        calendar_map = lw.resolve_roster_open_ids(token)
+        calendar_missing = [nm for nm in roster_names if not calendar_map.get(nm)]
+    except Exception as exc:
+        calendar_map = {}
+        calendar_missing = roster_names[:]
+        calendar_error = str(exc)
+    else:
+        calendar_error = ""
+
+    out = {
+        "ok": not missing,
+        "missing_count": len(missing),
+        "missing": missing,
+        "people": people,
+        "offset_approvers": approvers,
+        "calendar_missing": calendar_missing,
+        "calendar_missing_count": len(calendar_missing),
+        "calendar_error": calendar_error or None,
+        "hint": (
+            "Add missing names to OSE_PERSON_OPEN_IDS or LEAVE_CALENDAR_OPEN_IDS in .env "
+            '(JSON: {"Name":"ou_…"}), or ensure leave/offset Bitable person fields are filled.'
+        ),
+    }
+    if json_out:
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+    else:
+        print(f"OSE open_id audit — {len(roster_names)} roster name(s), {len(missing)} missing\n")
+        for row in people:
+            mark = "OK" if row["ok"] else "MISSING"
+            src = ", ".join(row["sources"]) if row["sources"] else "—"
+            oid = row["open_id"] or "—"
+            print(f"  [{mark:7}] {row['name']:<22} {oid}  ({src})")
+        if approvers:
+            print("\nOffset approvers:")
+            for row in approvers:
+                nm = row.get("roster_name") or "(name unknown)"
+                print(f"  {nm}: {row['open_id']}")
+        if calendar_missing:
+            print(f"\nLeave calendar map missing ({len(calendar_missing)}):")
+            print("  " + ", ".join(calendar_missing))
+        elif not calendar_error:
+            print("\nLeave calendar map: all roster names have open_id")
+        if calendar_error:
+            print(f"\nLeave calendar check skipped: {calendar_error}")
+        if missing:
+            print(f"\n{out['hint']}")
+    return out
+
+
 if __name__ == "__main__":
     if "--debug" in sys.argv:
         DEBUG = True
         sys.argv.remove("--debug")
-    if len(sys.argv) > 1:
+    if "--check-open-ids" in sys.argv:
+        json_out = "--json" in sys.argv
+        audit_person_open_ids(json_out=json_out)
+    elif len(sys.argv) > 1:
         print(osedate(sys.argv[1]))
     else:
         print(get_ose_today_duty())
