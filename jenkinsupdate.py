@@ -757,10 +757,12 @@ def _looks_like_chat_trailing_line_under_services(line: str) -> bool:
     """
     Ignore common chat trailing lines accidentally pasted under ``services:``.
     Examples: ``@CP OM Duty ...``, ``please assist ...``, ``thanks``,
-    ``Email: ...`` subject lines, ``cc @Someone``.
+    ``Email: ...`` subject lines, ``cc @Someone``, Lark bullet ``-``.
     """
     s = _normalize_config_colons(line).strip()
     if not s:
+        return True
+    if _is_junk_service_token(s):
         return True
     if s.startswith("@") or s.startswith("<at "):
         return True
@@ -945,6 +947,21 @@ def _normalize_service_query_key(tok: str) -> str:
     t = re.sub(r"[\u2010\u2011\u2012\u2013\u2014\u2212]", "-", t)
     t = t.replace("_", "-")
     return t.casefold()
+
+
+_JUNK_SERVICE_TOKEN_RE = re.compile(
+    r"^[\s\-–—•·\*\.:;|_]+$"
+)
+
+
+def _is_junk_service_token(tok: str) -> bool:
+    """Lark bullets / lone dashes under ``services:`` are not service names."""
+    t = (tok or "").strip()
+    if not t:
+        return True
+    if _JUNK_SERVICE_TOKEN_RE.match(t):
+        return True
+    return False
 
 
 def _fnt_rc_canonical_service_id(tok: str) -> str | None:
@@ -1374,9 +1391,15 @@ def _resolve_catalog_token_or_menu(tok: str, catalog: Sequence[str]) -> tuple[st
     This is the shared rule for **every** Jenkins job/environment: a service/repository
     is only filled directly when it uniquely identifies one option.
     """
+    if _is_junk_service_token(tok):
+        return None, True
     exact = _catalog_exact_service_id(tok, catalog)
     if exact is None:
         return None, True
+    # Full exact catalog id typed (e.g. ``risk-analysis-worker``) — use it even when a
+    # longer sibling exists (``risk-analysis-worker-inactive-player-snapshot``).
+    if _normalize_service_query_key(tok) == _normalize_service_query_key(exact):
+        return exact, False
     if _catalog_substring_superset_ids(tok, catalog):
         return exact, True
     return exact, False
@@ -1422,9 +1445,9 @@ def _parse_service_lines_to_tokens(service_lines: list[str]) -> list[str]:
             if re.search(r"\s", part):
                 for chunk in re.split(r"\s+", part):
                     t = chunk.strip()
-                    if t:
+                    if t and not _is_junk_service_token(t):
                         tokens.append(t)
-            else:
+            elif not _is_junk_service_token(part):
                 tokens.append(part)
     return tokens
 
@@ -1678,7 +1701,7 @@ def parse_fpms_config_block(
                 if not version:
                     raise ConfigBlockError("version: is empty after trim.")
             elif key == "services":
-                if rest:
+                if rest and not _is_junk_service_token(rest):
                     service_lines.append(rest)
             else:
                 raise ConfigBlockError(f"Unknown key in line: {line!r}")
@@ -6351,7 +6374,7 @@ def parse_venue_uat_bot_block(body: str, jenkins_build_url: str = "") -> dict:
             elif key == "version":
                 version = _version_from_config_block(rest)
             elif key == "services":
-                if rest:
+                if rest and not _is_junk_service_token(rest):
                     service_lines.append(rest)
             continue
         if last_key == "services":
@@ -6454,7 +6477,7 @@ def parse_venue_uat_run_config_block(
             elif key == "version":
                 version = _version_from_config_block(rest)
             elif key == "services":
-                if rest:
+                if rest and not _is_junk_service_token(rest):
                     service_lines.append(rest)
             continue
         if last_key == "services":
@@ -6831,7 +6854,7 @@ def parse_jenkins_update_fpms_bot_block(text: str, *, preserve_branch_case: bool
                 if not version:
                     raise ValueError("version: is empty.")
             elif key == "services":
-                if rest:
+                if rest and not _is_junk_service_token(rest):
                     service_lines.append(rest)
             else:
                 raise ValueError(f"Unknown key: {line!r}")
@@ -6943,7 +6966,7 @@ def parse_fnt_rc_uat_master_bot_block(text: str) -> dict:
                 if not version:
                     raise ValueError("version: is empty.")
             elif key == "services":
-                if rest:
+                if rest and not _is_junk_service_token(rest):
                     service_lines.append(rest)
             else:
                 raise ValueError(f"Unknown key: {line!r}")
@@ -7051,7 +7074,7 @@ def parse_fnt_rc_run_config_block(text: str) -> tuple[list[str], str, str, bool]
             elif key == "version":
                 version = _version_from_config_block(rest)
             elif key == "services":
-                if rest:
+                if rest and not _is_junk_service_token(rest):
                     service_lines.append(rest)
             elif key == "environment":
                 continue
@@ -7128,7 +7151,7 @@ def parse_sms_uat_update_bot_block(text: str) -> dict:
                 if not version:
                     raise ValueError("version: is empty.")
             elif key == "services":
-                if rest:
+                if rest and not _is_junk_service_token(rest):
                     service_lines.append(rest)
             else:
                 raise ValueError(f"Unknown key: {line!r}")
@@ -7521,7 +7544,7 @@ def parse_sms_uat_run_config_block(text: str) -> tuple[list[str], str, str, bool
             elif key == "version":
                 version = _version_from_config_block(rest)
             elif key == "services":
-                if rest:
+                if rest and not _is_junk_service_token(rest):
                     service_lines.append(rest)
             elif key == "environment":
                 continue
