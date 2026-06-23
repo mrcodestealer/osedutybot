@@ -867,10 +867,10 @@ def _ensure_vpn_fast_fill_mode() -> None:
         return int(raw) if raw.isdigit() else default
 
     _MS_POST_LOGIN_BEFORE_FORM = _vpn_ms("VPN_MS_POST_LOGIN_BEFORE_FORM", 0)
-    _MS_AFTER_LOGIN = min(_MS_AFTER_LOGIN, _vpn_ms("VPN_MS_AFTER_LOGIN", 300))
-    _MS_FORM_READY = min(_MS_FORM_READY, _vpn_ms("VPN_MS_FORM_READY", 50))
-    _MS_POST_FILL_VERIFY = min(_MS_POST_FILL_VERIFY, _vpn_ms("VPN_MS_POST_FILL_VERIFY", 50))
-    _MS_ENV_SETTLE = min(_MS_ENV_SETTLE, _vpn_ms("VPN_MS_ENV_SETTLE", 50))
+    _MS_AFTER_LOGIN = min(_MS_AFTER_LOGIN, _vpn_ms("VPN_MS_AFTER_LOGIN", 150))
+    _MS_FORM_READY = min(_MS_FORM_READY, _vpn_ms("VPN_MS_FORM_READY", 30))
+    _MS_POST_FILL_VERIFY = min(_MS_POST_FILL_VERIFY, _vpn_ms("VPN_MS_POST_FILL_VERIFY", 30))
+    _MS_ENV_SETTLE = min(_MS_ENV_SETTLE, _vpn_ms("VPN_MS_ENV_SETTLE", 30))
 
 
 class ServiceNotDetectedError(Exception):
@@ -8062,12 +8062,19 @@ def _fpms_lark_verification_card_json(
     link = (build_url or "").strip()
     env = (filled_env or "—").strip() or "—"
     branch = (filled_branch or "—").strip() or "—"
-    block = (
-        f"**Link:** [{link}]({link})\n"
-        f"**Env:** `{env}`\n"
-        f"**Branch:** `{branch}`"
-    )
     jp = (job_profile or "fpms").strip()
+    if jp == "vpn_creation":
+        block = (
+            f"**Link:** [{link}]({link})\n"
+            f"**VPN_LOCATION:** `{env}`\n"
+            f"**VPN_USERS:** `{branch}`"
+        )
+    else:
+        block = (
+            f"**Link:** [{link}]({link})\n"
+            f"**Env:** `{env}`\n"
+            f"**Branch:** `{branch}`"
+        )
     if jp == "vpn_creation":
         title_text = "VPN CREATION"
     elif jp == "fnt_rc":
@@ -8168,14 +8175,24 @@ def _fpms_lark_verification_plain_fallback(
     link = (build_url or "").strip()
     env = (filled_env or "—").strip() or "—"
     branch = (filled_branch or "—").strip() or "—"
-    lines = [
-        f"🧾 **{head}**",
-        "",
-        f"**Link:** {link}",
-        f"**Env:** `{env}`",
-        f"**Branch:** `{branch}`",
-        "",
-    ]
+    if jp == "vpn_creation":
+        lines = [
+            f"🧾 **{head}**",
+            "",
+            f"**Link:** {link}",
+            f"**VPN_LOCATION:** `{env}`",
+            f"**VPN_USERS:** `{branch}`",
+            "",
+        ]
+    else:
+        lines = [
+            f"🧾 **{head}**",
+            "",
+            f"**Link:** {link}",
+            f"**Env:** `{env}`",
+            f"**Branch:** `{branch}`",
+            "",
+        ]
     if ok_all:
         lines.append("Reply **yes** to click **Build**, or **no** to skip.")
     else:
@@ -13700,7 +13717,7 @@ def run(
                                 os.environ.get("VPN_POST_BUILD_NUMBER_WAIT_MS")
                                 if is_vpn
                                 else os.environ.get("JENKINS_POST_BUILD_NUMBER_WAIT_MS")
-                            ) or ("8000" if is_vpn else "20000")
+                            ) or ("6000" if is_vpn else "20000")
                             _raw_wait_bn = (_raw_wait_bn or "").strip()
                             try:
                                 wait_bn_ms = int(_raw_wait_bn or "20000")
