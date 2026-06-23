@@ -2491,7 +2491,9 @@ def _prod_batch_sm_bot_prepare_confirm(
     thread_root_message_id: str | None,
 ) -> None:
     site = _PROD_BATCH_ENV_TO_SITE.get(env_code) or env_code.lower()
-    matched, not_found, data_src = _prod_batch_lookup_target_rows(site, env_code, target_lines)
+    matched, not_found, data_src = _prod_batch_resolve_confirm_targets(
+        site, env_code, target_lines
+    )
     if "stuck" in data_src.lower() or "stalled" in data_src.lower():
         send_message(chat_id, f"❌ {data_src}")
         return
@@ -2562,10 +2564,6 @@ def _prod_batch_sm_on_action_submit(
         or None
     )
     _prod_batch_sm_refresh_thread_root(chat_id, thread_root)
-    send_message(
-        chat_id,
-        f"⏳ Checking live EGM (**{env_code}**) for **{ACTION_LABELS.get(action, action)}**…",
-    )
     threading.Thread(
         target=_prod_batch_sm_bot_prepare_confirm,
         args=(session_id, env_code, action, target_lines),
@@ -2724,6 +2722,49 @@ def _prod_batch_lookup_target_rows(
     not_found = list(dict.fromkeys(parse_not_found + scan_not_found + resolve_not_found))
     data_src = f"live EGM fast lookup ({sk.upper()}, {len(matched)} matched)"
     return matched, not_found, data_src
+
+
+def _prod_batch_lookup_webmachine_data(
+    env_code: str,
+    target_lines: list[str],
+) -> tuple[list[dict], list[str], str]:
+    """
+    Resolve target machines from ``webmachine_data.json`` (PROD rows only).
+
+    Used for set/unset maintenance/test confirm cards — the JSON file is kept up to date by
+    the scraper, so a live EGM paginated lookup is not needed just to build the machine list.
+    """
+    from maintenancemachineagent import _data_path_hint, _last_data_path, load_webmachine_rows
+
+    rows = load_webmachine_rows()
+    rows = [r for r in rows if str(r.get("environment") or "PROD").strip().upper() == "PROD"]
+    if not rows:
+        tokens: list[str] = []
+        for line in target_lines:
+            tokens.extend(_prod_batch_split_target_tokens(line))
+        return [], tokens, _data_path_hint()
+
+    matched, not_found = resolve_prod_batch_bot_targets(env_code, target_lines, rows)
+    path_note = f"`{_last_data_path}`" if _last_data_path else "webmachine_data.json"
+    data_src = f"webmachine_data.json ({len(matched)} matched) — {path_note}"
+    return matched, not_found, data_src
+
+
+def _prod_batch_resolve_confirm_targets(
+    site: str,
+    env_code: str,
+    target_lines: list[str],
+) -> tuple[list[dict], list[str], str]:
+    """Machine list for the confirm card — ``webmachine_data.json`` by default."""
+    use_live = (os.environ.get("PROD_BATCH_LIVE_LOOKUP") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    if use_live:
+        return _prod_batch_lookup_target_rows(site, env_code, target_lines)
+    return _prod_batch_lookup_webmachine_data(env_code, target_lines)
 
 
 def _prod_batch_scrape_site_rows(site: str) -> tuple[list[dict], str]:
@@ -2963,7 +3004,7 @@ def resolve_prod_batch_bot_targets(
 
 
 def _prod_batch_format_matched_line(m: dict) -> str:
-    """One confirm-card bullet — name from live EGM row + status | online."""
+    """One confirm-card bullet — machine name + status | online from webmachine_data.json."""
     head = f"{m.get('belongs', '')} — {m.get('machine', '')}"
     bits: list[str] = []
     st = (m.get("status") or "").strip()
@@ -3421,7 +3462,7 @@ def handle_prod_batch_bot_command(
     thread_root_message_id: str | None = None,
 ) -> tuple[bool, str | None]:
     """
-    Parse bot message, live-scrape EGM for the command site, send confirm card.
+    Parse bot message, resolve machines from ``webmachine_data.json``, send confirm card.
     Returns ``(handled, optional_error_text)``.
     """
     _prod_batch_cleanup_pending()
@@ -3459,10 +3500,6 @@ def handle_prod_batch_bot_command(
         return True, usage
 
     env_code = parsed["env_code"]
-    send_message(
-        chat_id,
-        f"⏳ 正在 fast lookup live EGM（**{env_code}**）… 只查你列出的机器",
-    )
     threading.Thread(
         target=_prod_batch_bot_prepare_confirm,
         args=(parsed, target_lines),

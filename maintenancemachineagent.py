@@ -1370,7 +1370,7 @@ def handle_maintenance_now_message(
 ) -> tuple[bool, str | None]:
     """
     Expand ``ALL <ENV> MACHINES <Venue>`` to machine names (from ``webmachine_data.json``) and run
-    the existing prod-batch flow (live status check → confirm card → execute).
+    the existing prod-batch flow (confirm card from JSON → execute on live EGM).
 
     Returns ``(handled, optional_reply_text)``.
     """
@@ -1407,11 +1407,6 @@ def handle_maintenance_now_message(
                 f"(If the file is fine, the venue name may differ — try the exact game type, "
                 f"or paste the machine names.)"
             )
-        send_message(
-            chat_id,
-            f"🔎 Found **{len(machines)}** {env_code}{venue_txt} machine(s) from the machine list "
-            f"— checking live status for **{label}**…" + (f"\n{note}" if note else ""),
-        )
     else:
         # Explicit machine list — env inferred from names; no site word needed.
         machines = c.get("machines") or []
