@@ -892,6 +892,36 @@ def list_sheet_reminders(*, get_token_func) -> list[dict]:
     return _normalize_sheet_rows(_bitable_get_all_records(get_token_func))
 
 
+def build_reminder_added_card_v2(row: dict) -> dict:
+    """Schema 2.0 success card — used for in-place form submit updates."""
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "green",
+            "title": {"tag": "plain_text", "content": "✅ Reminder Added"},
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": (
+                            f"🆔 **ID:** `{row['id']}`\n"
+                            f"📅 **Start Time:** `{row['start_date'].strftime('%Y/%m/%d')}`\n"
+                            f"📅 **End Time:** `{row['end_date'].strftime('%Y/%m/%d')}`\n"
+                            f"📆 **When:** `{row.get('when_display') or _WHEN_LABEL_DEFAULT}`\n"
+                            f"⏰ **Time:** `{row['time']}`\n"
+                            f"📝 **Reason:** {row['reason']}"
+                        ),
+                    },
+                }
+            ]
+        },
+    }
+
+
 def add_sheet_reminder(
     *,
     start_raw: str,
@@ -905,7 +935,8 @@ def add_sheet_reminder(
     target_user_id: str,
     schedule_chat_id: str | None = None,
     when_labels: list[str] | None = None,
-) -> str:
+    emit_chat_card: bool = True,
+) -> str | dict:
     if not _reminder_sheet_enabled():
         return "❌ REMINDERSHEETTOKEN / REMINDERSHEETID is not set."
     reason_n = (reason or "").strip()
@@ -965,21 +996,19 @@ def add_sheet_reminder(
         chat_id=(schedule_chat_id or chat_id),
         target_user_id=target_user_id,
     )
-    card = _sheet_rows_card(
-        [
-            {
-                "record_id": out.get("data", {}).get("record", {}).get("record_id", ""),
-                "id": new_id,
-                "start_date": start_d,
-                "end_date": end_d,
-                "time": time_s,
-                "reason": reason_n,
-                "when_tokens": when_tokens,
-                "when_display": when_display,
-            }
-        ],
-        title="✅ Reminder Added",
-    )
+    row = {
+        "record_id": out.get("data", {}).get("record", {}).get("record_id", ""),
+        "id": new_id,
+        "start_date": start_d,
+        "end_date": end_d,
+        "time": time_s,
+        "reason": reason_n,
+        "when_tokens": when_tokens,
+        "when_display": when_display,
+    }
+    if not emit_chat_card:
+        return row
+    card = _sheet_rows_card([row], title="✅ Reminder Added")
     send_func(chat_id, json.dumps(card), msg_type="interactive")
     return ""
 

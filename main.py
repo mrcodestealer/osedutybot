@@ -2609,6 +2609,117 @@ def _lark_find_field_deep(obj, name):
     return ""
 
 
+def _normalize_rem_add_date_field(raw: str) -> str:
+    s = str(raw or "").strip()
+    if re.match(r"^\d{10,13}$", s):
+        try:
+            ts = int(s)
+            if ts > 10**12:
+                ts = ts // 1000
+            return datetime.fromtimestamp(ts).strftime("%Y/%m/%d")
+        except Exception:
+            return s
+    m = re.match(r"^\s*(\d{4})-(\d{2})-(\d{2})(?:\s+.*)?$", s)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}/{m.group(3)}"
+    return s
+
+
+def _parse_rem_add_form_fields(ev_ca: dict, parsed_ca: dict) -> dict[str, str | list[str]]:
+    """Extract add-reminder form values from a card callback payload."""
+    act_ca = ev_ca.get("action") if isinstance(ev_ca.get("action"), dict) else {}
+    start_raw = _lark_get_card_form_field(act_ca, "start_date")
+    end_raw = _lark_get_card_form_field(act_ca, "end_date")
+    time_raw = _lark_get_card_form_field(act_ca, "time")
+    reason = _lark_get_card_form_field(act_ca, "reason")
+    if isinstance(parsed_ca, dict):
+        fv_rem = parsed_ca.get("form_value")
+        if isinstance(fv_rem, dict):
+            start_raw = start_raw or _lark_form_field_text(fv_rem.get("start_date"))
+            end_raw = end_raw or _lark_form_field_text(fv_rem.get("end_date"))
+            time_raw = time_raw or _lark_form_field_text(fv_rem.get("time"))
+            reason = reason or _lark_form_field_text(fv_rem.get("reason"))
+        start_raw = start_raw or _lark_form_field_text(parsed_ca.get("start_date"))
+        end_raw = end_raw or _lark_form_field_text(parsed_ca.get("end_date"))
+        time_raw = time_raw or _lark_form_field_text(parsed_ca.get("time"))
+        reason = reason or _lark_form_field_text(parsed_ca.get("reason"))
+    start_raw = start_raw or _lark_find_field_deep(ev_ca, "start_date")
+    end_raw = end_raw or _lark_find_field_deep(ev_ca, "end_date")
+    time_raw = time_raw or _lark_find_field_deep(ev_ca, "time")
+    reason = reason or _lark_find_field_deep(ev_ca, "reason")
+    time_raw = (time_raw or "").strip() or _lark_find_field_deep(ev_ca, "time_preset").strip()
+    fv_ca = act_ca.get("form_value") if isinstance(act_ca, dict) else {}
+    when_labels_cb: list[str] = []
+    if isinstance(fv_ca, dict):
+        when_labels_cb = reminder.parse_when_form_value(fv_ca.get("when"))
+    if isinstance(parsed_ca, dict) and isinstance(parsed_ca.get("form_value"), dict) and not when_labels_cb:
+        when_labels_cb = reminder.parse_when_form_value(parsed_ca["form_value"].get("when"))
+    if not when_labels_cb:
+        when_labels_cb = reminder.parse_when_form_value(_lark_find_field_deep(ev_ca, "when"))
+    start_raw = _normalize_rem_add_date_field(start_raw)
+    end_raw = _normalize_rem_add_date_field(end_raw)
+    m24 = re.match(r"^\s*(\d{1,2}):(\d{2})(?::\d{2})?\s*$", time_raw or "")
+    if m24:
+        hh = int(m24.group(1))
+        mm = int(m24.group(2))
+        if 0 <= hh <= 23 and 0 <= mm <= 59:
+            ap = "AM" if hh < 12 else "PM"
+            hh12 = hh % 12
+            if hh12 == 0:
+                hh12 = 12
+            time_raw = f"{hh12}:{mm:02d}{ap}"
+    return {
+        "start_raw": (start_raw or "").strip(),
+        "end_raw": (end_raw or "").strip(),
+        "time_raw": (time_raw or "").strip(),
+        "reason": (reason or "").strip(),
+        "when_labels": when_labels_cb,
+    }
+
+
+def _try_rem_add_submit_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> dict | None:
+    """Synchronous card.callback body for add-reminder form submit (keeps card in place)."""
+    if str(parsed_ca.get("k") or "").strip().lower() != "rem_add_submit":
+        return None
+    fields = _parse_rem_add_form_fields(ev_ca, parsed_ca)
+    if not (
+        fields["start_raw"]
+        and fields["end_raw"]
+        and fields["time_raw"]
+        and fields["reason"]
+    ):
+        return {
+            "toast": {
+                "type": "error",
+                "content": "Please fill all fields: Start Date, End Date, Time, Reason.",
+            }
+        }
+    when_labels = fields["when_labels"] or None
+    result = reminder.add_sheet_reminder(
+        start_raw=str(fields["start_raw"]),
+        end_raw=str(fields["end_raw"]),
+        time_raw=str(fields["time_raw"]),
+        reason=str(fields["reason"]),
+        get_token_func=get_tenant_access_token,
+        scheduler=scheduler,
+        send_func=send_message,
+        chat_id=chat_id_ca,
+        target_user_id=TARGET_USER_OPEN_ID,
+        schedule_chat_id=REMINDER_TARGET_CHAT_ID,
+        when_labels=when_labels if isinstance(when_labels, list) and when_labels else None,
+        emit_chat_card=False,
+    )
+    if isinstance(result, str):
+        err = (result or "").strip() or "Failed to add reminder."
+        if err.startswith("❌"):
+            err = err[1:].strip()
+        return {"toast": {"type": "error", "content": err}}
+    return {
+        "card": {"type": "raw", "data": reminder.build_reminder_added_card_v2(result)},
+        "toast": {"type": "success", "content": "Reminder added"},
+    }
+
+
 def _lark_test_card_json() -> str:
     """Minimal interactive card for ``/test`` — button triggers ``k=test_hi`` card callback."""
     card = {
@@ -3086,6 +3197,16 @@ def lark_webhook():
                 if eid_ca:
                     _remember_processed_message_id(eid_ca)
                 return _lark_http_card_callback_response(sm_sync)
+            ev_sync = data.get("event") if isinstance(data.get("event"), dict) else {}
+            rem_sync = _try_rem_add_submit_card_response(
+                parsed_sync,
+                ev_sync,
+                chat_id_ca or "",
+            )
+            if rem_sync is not None:
+                if eid_ca:
+                    _remember_processed_message_id(eid_ca)
+                return _lark_http_card_callback_response(rem_sync)
         # Never wait on ``processed_lock`` in this thread — Lark times out ~3s; lock contention → ``code: undefined``.
         def _run_card_callback_worker() -> None:
             if eid_ca and _remember_processed_message_id(eid_ca):
@@ -3218,95 +3339,7 @@ def lark_webhook():
                         send_message(chat_id_ca, f"❌ Reminder delete failed: {e}")
                     return
                 if isinstance(parsed_ca, dict) and str(parsed_ca.get("k") or "").strip().lower() == "rem_add_submit":
-                    act_ca = ev_ca.get("action") if isinstance(ev_ca.get("action"), dict) else {}
-                    start_raw = _lark_get_card_form_field(act_ca, "start_date")
-                    end_raw = _lark_get_card_form_field(act_ca, "end_date")
-                    time_raw = _lark_get_card_form_field(act_ca, "time")
-                    reason = _lark_get_card_form_field(act_ca, "reason")
-                    if isinstance(parsed_ca, dict):
-                        fv_rem = parsed_ca.get("form_value")
-                        if isinstance(fv_rem, dict):
-                            start_raw = start_raw or _lark_form_field_text(fv_rem.get("start_date"))
-                            end_raw = end_raw or _lark_form_field_text(fv_rem.get("end_date"))
-                            time_raw = time_raw or _lark_form_field_text(fv_rem.get("time"))
-                            reason = reason or _lark_form_field_text(fv_rem.get("reason"))
-                        start_raw = start_raw or _lark_form_field_text(parsed_ca.get("start_date"))
-                        end_raw = end_raw or _lark_form_field_text(parsed_ca.get("end_date"))
-                        time_raw = time_raw or _lark_form_field_text(parsed_ca.get("time"))
-                        reason = reason or _lark_form_field_text(parsed_ca.get("reason"))
-                    # Last-resort deep scan for provider-specific callback shapes.
-                    start_raw = start_raw or _lark_find_field_deep(ev_ca, "start_date")
-                    end_raw = end_raw or _lark_find_field_deep(ev_ca, "end_date")
-                    time_raw = time_raw or _lark_find_field_deep(ev_ca, "time")
-                    reason = reason or _lark_find_field_deep(ev_ca, "reason")
-                    # Older add-reminder cards used ``time_preset`` for the dropdown.
-                    time_raw = (time_raw or "").strip() or (
-                        _lark_find_field_deep(ev_ca, "time_preset").strip()
-                    )
-                    fv_ca = act_ca.get("form_value") if isinstance(act_ca, dict) else {}
-                    when_labels_cb: list[str] = []
-                    if isinstance(fv_ca, dict):
-                        when_labels_cb = reminder.parse_when_form_value(fv_ca.get("when"))
-                    if (
-                        isinstance(parsed_ca, dict)
-                        and isinstance(parsed_ca.get("form_value"), dict)
-                        and not when_labels_cb
-                    ):
-                        when_labels_cb = reminder.parse_when_form_value(
-                            parsed_ca["form_value"].get("when")
-                        )
-                    if not when_labels_cb:
-                        when_labels_cb = reminder.parse_when_form_value(
-                            _lark_find_field_deep(ev_ca, "when")
-                        )
-                    def _normalize_date_field(raw: str) -> str:
-                        s = str(raw or "").strip()
-                        if re.match(r"^\d{10,13}$", s):
-                            try:
-                                ts = int(s)
-                                if ts > 10**12:
-                                    ts = ts // 1000
-                                return datetime.fromtimestamp(ts).strftime("%Y/%m/%d")
-                            except Exception:
-                                return s
-                        m = re.match(r"^\s*(\d{4})-(\d{2})-(\d{2})(?:\s+.*)?$", s)
-                        if m:
-                            return f"{m.group(1)}/{m.group(2)}/{m.group(3)}"
-                        return s
-                    start_raw = _normalize_date_field(start_raw)
-                    end_raw = _normalize_date_field(end_raw)
-                    # picker_time may return 24-hour HH:MM; convert to parser-friendly H:MMPM/AM.
-                    m24 = re.match(r"^\s*(\d{1,2}):(\d{2})(?::\d{2})?\s*$", time_raw or "")
-                    if m24:
-                        hh = int(m24.group(1))
-                        mm = int(m24.group(2))
-                        if 0 <= hh <= 23 and 0 <= mm <= 59:
-                            ap = "AM" if hh < 12 else "PM"
-                            hh12 = hh % 12
-                            if hh12 == 0:
-                                hh12 = 12
-                            time_raw = f"{hh12}:{mm:02d}{ap}"
-                    if not (start_raw and end_raw and time_raw and reason):
-                        send_message(
-                            chat_id_ca,
-                            "❌ Please fill all fields: Start Date, End Date, Time, Reason.",
-                        )
-                        return
-                    result = reminder.add_sheet_reminder(
-                        start_raw=start_raw,
-                        end_raw=end_raw,
-                        time_raw=time_raw,
-                        reason=reason,
-                        get_token_func=get_tenant_access_token,
-                        scheduler=scheduler,
-                        send_func=send_message,
-                        chat_id=chat_id_ca,
-                        target_user_id=TARGET_USER_OPEN_ID,
-                        schedule_chat_id=REMINDER_TARGET_CHAT_ID,
-                        when_labels=when_labels_cb if when_labels_cb else None,
-                    )
-                    if (result or "").strip():
-                        send_message(chat_id_ca, result)
+                    # Handled synchronously in _try_rem_add_submit_card_response (in-place card update).
                     return
                 if (
                     isinstance(parsed_ca, dict)
