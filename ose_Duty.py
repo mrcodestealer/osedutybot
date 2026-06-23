@@ -1384,11 +1384,18 @@ def _compute_leave_shift_sheet_plan(
     end_date: date,
     values: list[list[Any]],
     shift_code: str = "L",
+    prior_cells: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     """Mark roster ``D``/``N`` cells as ``AL``/``SL``/``L`` for each leave day (skip ``*`` offset cells)."""
     code = (shift_code or "L").strip().upper()
     if code not in _OSE_SHIFT_SHEET_LEAVE_CODES:
         code = _leave_type_to_shift_code(shift_code)
+    prior_by_rc: dict[tuple[int, int], dict[str, Any]] = {}
+    for c in prior_cells or []:
+        try:
+            prior_by_rc[(int(c["row"]), int(c["col"]))] = dict(c)
+        except (KeyError, TypeError, ValueError):
+            continue
     nm = _title_name(person)
     row = _sheet_row_index_for_person(values, nm)
     if row is None:
@@ -1409,8 +1416,20 @@ def _compute_leave_shift_sheet_plan(
                 )
                 col_dates[col] = d
             elif current in _OSE_SHIFT_SHEET_LEAVE_CODES:
-                updates.append((row, col, code))
-                col_dates[col] = d
+                if current == code:
+                    prior = prior_by_rc.get((row, col))
+                    if prior:
+                        cells.append(prior)
+                else:
+                    updates.append((row, col, code))
+                    col_dates[col] = d
+                    prior = prior_by_rc.get((row, col))
+                    if prior and str(prior.get("prev") or "").strip().upper() in ("D", "N"):
+                        cells.append({**prior, "code": code})
+                    else:
+                        cells.append(
+                            {"row": row, "col": col, "prev": "", "date": d.isoformat(), "code": code}
+                        )
         d += timedelta(days=1)
     return {
         "person": nm,
@@ -1505,17 +1524,28 @@ def apply_leave_shift_sheet_for_record(
         raise ValueError(f"leave record {rid!r} is not approved OSE leave")
     state = _load_leave_shift_sheet_state()
     old_snap = dict((state.get("by_record") or {}).get(rid) or {})
+    prior_cells = list(old_snap.get("cells") or [])
     values, err = _get_cached_ose_sheet_values()
     if not values:
         raise RuntimeError(err or "Could not load OSE shift sheet")
+    shift_code = str(parsed.get("shift_code") or "L")
     plan = _compute_leave_shift_sheet_plan(
         person=parsed["person"],
         start_date=parsed["start"],
         end_date=parsed["end"],
         values=values,
-        shift_code=str(parsed.get("shift_code") or "L"),
+        shift_code=shift_code,
+        prior_cells=prior_cells,
     )
     new_snap = _leave_shift_sheet_snapshot_from_plan(parsed, plan)
+    if old_snap and _leave_shift_sheet_snapshots_match(old_snap, new_snap):
+        return {
+            "ok": True,
+            "record_id": rid,
+            "person": parsed["person"],
+            "cells_updated": 0,
+            "skipped": "already_applied",
+        }
     token = get_tenant_access_token()
     if old_snap and not _leave_shift_sheet_snapshots_match(old_snap, new_snap):
         _revert_leave_shift_sheet_snapshot(token, old_snap, values=values)
@@ -1527,7 +1557,7 @@ def apply_leave_shift_sheet_for_record(
             start_date=parsed["start"],
             end_date=parsed["end"],
             values=values,
-            shift_code=str(parsed.get("shift_code") or "L"),
+            shift_code=shift_code,
         )
         new_snap = _leave_shift_sheet_snapshot_from_plan(parsed, plan)
     if not plan["updates"]:
@@ -1540,17 +1570,6 @@ def apply_leave_shift_sheet_for_record(
             "cells_updated": 0,
             "skipped": "no_d_or_n_cells",
         }
-    if old_snap and _leave_shift_sheet_snapshots_match(old_snap, new_snap):
-        _put_ose_shift_sheet_cell_styles(
-            token, plan["updates"], values=values, col_dates=plan.get("col_dates")
-        )
-        return {
-            "ok": True,
-            "record_id": rid,
-            "person": parsed["person"],
-            "cells_updated": 0,
-            "restyled": len(plan["updates"]),
-        }
     _put_ose_shift_sheet_cells(token, plan["updates"], values=values, col_dates=plan["col_dates"])
     _mark_leave_shift_sheet_applied(rid, snapshot=new_snap)
     return {
@@ -1559,6 +1578,7 @@ def apply_leave_shift_sheet_for_record(
         "person": parsed["person"],
         "start": parsed["start"].isoformat(),
         "end": parsed["end"].isoformat(),
+        "shift_code": shift_code,
         "cells_updated": len(plan["updates"]),
     }
 
@@ -1612,6 +1632,7 @@ def reensure_applied_leave_shift_sheet_styles() -> dict[str, int]:
                 end_date=ed,
                 values=values,
                 shift_code=str(snap.get("shift_code") or "L"),
+                prior_cells=list(snap.get("cells") or []),
             )
             if not plan["updates"]:
                 continue
@@ -1717,6 +1738,12 @@ def probe_leave_shift_sheet_sync(*, apply: bool = False, json_out: bool = False)
                     end_date=parsed["end"],
                     values=values,
                     shift_code=str(parsed.get("shift_code") or "L"),
+                    prior_cells=list(
+                        (_load_leave_shift_sheet_state().get("by_record") or {})
+                        .get(rid, {})
+                        .get("cells")
+                        or []
+                    ),
                 )
                 plan_info = {
                     "shift_code": plan.get("shift_code"),
