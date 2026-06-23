@@ -860,7 +860,7 @@ def _ensure_vpn_fast_fill_mode() -> None:
     if not _vpn_fast_fill_enabled():
         return
     global _MS_POST_LOGIN_BEFORE_FORM, _MS_AFTER_LOGIN, _MS_FORM_READY
-    global _MS_POST_FILL_VERIFY, _MS_ENV_SETTLE
+    global _MS_POST_FILL_VERIFY, _MS_ENV_SETTLE, _MS_LOGIN_PROBE
 
     def _vpn_ms(name: str, default: int) -> int:
         raw = (os.environ.get(name) or "").strip()
@@ -871,6 +871,16 @@ def _ensure_vpn_fast_fill_mode() -> None:
     _MS_FORM_READY = min(_MS_FORM_READY, _vpn_ms("VPN_MS_FORM_READY", 30))
     _MS_POST_FILL_VERIFY = min(_MS_POST_FILL_VERIFY, _vpn_ms("VPN_MS_POST_FILL_VERIFY", 30))
     _MS_ENV_SETTLE = min(_MS_ENV_SETTLE, _vpn_ms("VPN_MS_ENV_SETTLE", 30))
+    # With a persistent VPN profile the build page often loads already-logged-in; don't burn
+    # the full 8s probing for a login form that isn't there.
+    _MS_LOGIN_PROBE = min(_MS_LOGIN_PROBE, _vpn_ms("VPN_MS_LOGIN_PROBE", 3500))
+
+
+def _vpn_persistent_profile_dir() -> str | None:
+    """Opt-in persistent Chromium profile for VPN runs so the Jenkins login round-trip is
+    skipped on repeat runs. Set ``VPN_PLAYWRIGHT_USER_DATA_DIR`` to enable."""
+    d = (os.environ.get("VPN_PLAYWRIGHT_USER_DATA_DIR") or "").strip()
+    return d or None
 
 
 class ServiceNotDetectedError(Exception):
@@ -2751,10 +2761,13 @@ def prompt_text(label: str) -> str:
         print("  (Required — please type a value.)")
 
 
+_MS_LOGIN_PROBE = int(os.environ.get("FPMS_MS_LOGIN_PROBE", "8000"))
+
+
 def jenkins_login_if_needed(page, username: str, password: str, timeout_ms: int = 60_000) -> None:
     user_loc = page.locator("input#j_username, input[name='j_username']").first
     try:
-        user_loc.wait_for(state="visible", timeout=8_000)
+        user_loc.wait_for(state="visible", timeout=max(800, _MS_LOGIN_PROBE))
     except PlaywrightTimeout:
         return
 
@@ -8207,8 +8220,8 @@ def _jenkins_form_screenshot_enabled(bot_lark_gate: dict | None) -> bool:
         return False
     jp = str((bot_lark_gate or {}).get("job_profile") or "").strip()
     if jp == "vpn_creation":
-        raw_vpn = os.environ.get("JENKINSUPDATE_VPN_FORM_SCREENSHOT", "0").strip().lower()
-        return raw_vpn in ("1", "true", "yes", "on")
+        raw_vpn = os.environ.get("JENKINSUPDATE_VPN_FORM_SCREENSHOT", "1").strip().lower()
+        return raw_vpn not in ("0", "false", "no", "off")
     raw = os.environ.get("JENKINSUPDATE_FORM_SCREENSHOT", "1").strip().lower()
     return raw not in ("0", "false", "no", "off")
 
@@ -8854,14 +8867,16 @@ def _fpms_lark_spawn_run(
     def _job() -> None:
         try:
             _rev = float(os.environ.get("FPMS_BOT_REVIEW_SECONDS", "2"))
+            _udd = (os.environ.get("FPMS_PLAYWRIGHT_USER_DATA_DIR") or "").strip() or None
             if jp == "vpn_creation":
                 _rev = float(os.environ.get("VPN_BOT_REVIEW_SECONDS", "0") or "0")
+                _udd = _vpn_persistent_profile_dir() or _udd
             run(
                 review_seconds=_rev,
                 headless=headless,
                 browser=os.environ.get("FPMS_PLAYWRIGHT_BROWSER", "chromium"),
                 config_block=config_block,
-                user_data_dir=(os.environ.get("FPMS_PLAYWRIGHT_USER_DATA_DIR") or "").strip() or None,
+                user_data_dir=_udd,
                 update_all_services=update_all_services,
                 bot_lark_gate={
                     "session_key": session_key,
