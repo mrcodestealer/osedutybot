@@ -171,6 +171,7 @@ def _lark_request(method: str, url: str, *, retries: Optional[int] = None, **kwa
     raise RuntimeError(f"Lark HTTP {method.upper()} failed with no response")
 _OSE_DIR = os.path.dirname(os.path.abspath(__file__))
 _OFFSET_SHIFT_SHEET_APPLIED_PATH = os.path.join(_OSE_DIR, "offset_shift_sheet_applied.json")
+_LEAVE_SHIFT_SHEET_APPLIED_PATH = os.path.join(_OSE_DIR, "leave_shift_sheet_applied.json")
 
 
 def debug_print(*args, **kwargs) -> None:
@@ -1168,6 +1169,427 @@ def scan_bitable_approved_offsets_for_shift_sheet() -> dict[str, int]:
     return {"scanned": len(items), "applied": applied, "errors": errors}
 
 
+def _fetch_ose_department_all_leave_records(token: str) -> list[dict[str, Any]]:
+    """leave 全员 rows for dutyList OSE department (open_id + shift-sheet leave sync)."""
+    table_id = (OSE_ALL_LEAVE_TABLE_ID or "").strip()
+    if not table_id or table_id == LEAVEOSE_TABLE_ID_CANONICAL:
+        return []
+    items = _bitable_get_all_records(token, OSE_BASE_TOKEN, table_id)
+    out: list[dict[str, Any]] = []
+    for it in items:
+        f = it.get("fields") or {}
+        name = _title_name(_field_text(_get_field_by_aliases(f, ["Name", "Employee Name", "Person"])))
+        if name and _is_ose_dutylist_leave_name(name):
+            out.append(it)
+    return out
+
+
+def _ose_leave_items_for_shift_sheet(token: str) -> list[dict[str, Any]]:
+    """Approved-leave sources: leaveose + OSE-filtered leave 全员 (deduped by record_id)."""
+    items = list(_get_leave_display_raw(token))
+    seen = {str(it.get("record_id") or "").strip() for it in items if str(it.get("record_id") or "").strip()}
+    for it in _fetch_ose_department_all_leave_records(token):
+        rid = str(it.get("record_id") or "").strip()
+        if rid and rid not in seen:
+            items.append(it)
+            seen.add(rid)
+    return items
+
+
+def _parse_ose_leave_bitable_item(it: dict[str, Any]) -> Optional[dict[str, Any]]:
+    rid = str(it.get("record_id") or "").strip()
+    if not rid:
+        return None
+    f = it.get("fields") or {}
+    if not _is_approved(_get_field_by_aliases(f, ["Status", "Approval Status"])):
+        return None
+    name = _title_name(_field_text(_get_field_by_aliases(f, ["Name", "Employee Name", "Person"])))
+    if not name or not _is_ose_dutylist_leave_name(name):
+        return None
+    entry = dlm.match_duty_entry(name)
+    canon = entry["name"] if entry else name
+    st = _parse_date_value(_get_field_by_aliases(f, ["Start Date", "Leave Start Date", "From"]))
+    ed = _parse_date_value(_get_field_by_aliases(f, ["End Date", "Leave End Date", "To"]))
+    if not st or not ed:
+        return None
+    return {"record_id": rid, "person": canon, "start": st, "end": ed}
+
+
+def _load_leave_shift_sheet_state() -> dict[str, Any]:
+    try:
+        with open(_LEAVE_SHIFT_SHEET_APPLIED_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return {"record_ids": [], "by_record": {}}
+    except Exception:
+        return {"record_ids": [], "by_record": {}}
+    if not isinstance(data, dict):
+        return {"record_ids": [], "by_record": {}}
+    ids = [str(x).strip() for x in (data.get("record_ids") or []) if str(x).strip()]
+    raw_by = data.get("by_record") if isinstance(data.get("by_record"), dict) else {}
+    by_record = {str(k).strip(): dict(v) for k, v in raw_by.items() if str(k).strip() and isinstance(v, dict)}
+    return {"record_ids": ids, "by_record": by_record}
+
+
+def _save_leave_shift_sheet_state(record_ids: set[str], by_record: dict[str, dict[str, Any]]) -> None:
+    tmp = _LEAVE_SHIFT_SHEET_APPLIED_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                "record_ids": sorted(record_ids),
+                "by_record": {k: by_record[k] for k in sorted(by_record)},
+            },
+            fh,
+            ensure_ascii=False,
+            indent=2,
+        )
+        fh.write("\n")
+    os.replace(tmp, _LEAVE_SHIFT_SHEET_APPLIED_PATH)
+
+
+def _mark_leave_shift_sheet_applied(record_id: str, *, snapshot: dict[str, Any]) -> None:
+    rid = (record_id or "").strip()
+    if not rid:
+        return
+    state = _load_leave_shift_sheet_state()
+    ids = set(state.get("record_ids") or [])
+    by_record = dict(state.get("by_record") or {})
+    ids.add(rid)
+    by_record[rid] = snapshot
+    _save_leave_shift_sheet_state(ids, by_record)
+
+
+def _unmark_leave_shift_sheet_applied(record_id: str) -> None:
+    rid = (record_id or "").strip()
+    if not rid:
+        return
+    state = _load_leave_shift_sheet_state()
+    ids = set(state.get("record_ids") or [])
+    by_record = dict(state.get("by_record") or {})
+    ids.discard(rid)
+    by_record.pop(rid, None)
+    _save_leave_shift_sheet_state(ids, by_record)
+
+
+def _leave_shift_sheet_snapshots_match(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    return (
+        str(a.get("person") or "") == str(b.get("person") or "")
+        and str(a.get("start") or "") == str(b.get("start") or "")
+        and str(a.get("end") or "") == str(b.get("end") or "")
+        and list(a.get("cells") or []) == list(b.get("cells") or [])
+    )
+
+
+def _leave_shift_sheet_snapshot_from_plan(parsed: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "person": parsed["person"],
+        "start": parsed["start"].isoformat(),
+        "end": parsed["end"].isoformat(),
+        "cells": list(plan.get("cells") or []),
+    }
+
+
+def _compute_leave_shift_sheet_plan(
+    *,
+    person: str,
+    start_date: date,
+    end_date: date,
+    values: list[list[Any]],
+) -> dict[str, Any]:
+    """Mark roster ``D``/``N`` cells as ``L`` for each leave day (skip ``*`` offset cells)."""
+    nm = _title_name(person)
+    row = _sheet_row_index_for_person(values, nm)
+    if row is None:
+        raise ValueError(f"Could not find shift sheet row for {nm!r}")
+    updates: list[tuple[int, int, str]] = []
+    cells: list[dict[str, Any]] = []
+    col_dates: dict[int, date] = {}
+    d = start_date
+    while d <= end_date:
+        col = _date_column_for_matrix(values, d)
+        if col is not None:
+            row_data = values[row] if row < len(values) else []
+            current = _field_text(row_data[col] if col < len(row_data) else "").upper()
+            if current in ("D", "N"):
+                updates.append((row, col, "L"))
+                cells.append({"row": row, "col": col, "prev": current, "date": d.isoformat()})
+                col_dates[col] = d
+            elif current == "L":
+                updates.append((row, col, "L"))
+                col_dates[col] = d
+        d += timedelta(days=1)
+    return {
+        "person": nm,
+        "start": start_date,
+        "end": end_date,
+        "updates": updates,
+        "cells": cells,
+        "col_dates": col_dates,
+    }
+
+
+def _revert_leave_shift_sheet_snapshot(
+    token: str,
+    snapshot: dict[str, Any],
+    *,
+    values: list[list[Any]],
+) -> None:
+    cells = snapshot.get("cells") or []
+    if not cells:
+        return
+    updates: list[tuple[int, int, str]] = []
+    col_dates: dict[int, date] = {}
+    for c in cells:
+        prev = str(c.get("prev") or "").strip().upper()
+        if prev not in ("D", "N"):
+            continue
+        row_idx = int(c["row"])
+        col_idx = int(c["col"])
+        updates.append((row_idx, col_idx, prev))
+        on = _parse_date_value(c.get("date"))
+        if on:
+            col_dates[col_idx] = on
+    if updates:
+        _put_ose_shift_sheet_cells(token, updates, values=values, col_dates=col_dates)
+
+
+def apply_leave_to_shift_sheet(*, person: str, start_date: date, end_date: date) -> dict[str, Any]:
+    """Write ``L`` on shift days that were ``D``/``N`` for an approved OSE leave range."""
+    values, err = _get_cached_ose_sheet_values()
+    if not values:
+        raise RuntimeError(err or "Could not load OSE shift sheet")
+    plan = _compute_leave_shift_sheet_plan(
+        person=person,
+        start_date=start_date,
+        end_date=end_date,
+        values=values,
+    )
+    if not plan["updates"]:
+        return {
+            "ok": True,
+            "person": plan["person"],
+            "start": start_date.isoformat(),
+            "end": end_date.isoformat(),
+            "cells_updated": 0,
+            "skipped": "no_d_or_n_cells",
+        }
+    token = get_tenant_access_token()
+    _put_ose_shift_sheet_cells(token, plan["updates"], values=values, col_dates=plan["col_dates"])
+    return {
+        "ok": True,
+        "person": plan["person"],
+        "start": start_date.isoformat(),
+        "end": end_date.isoformat(),
+        "cells_updated": len(plan["updates"]),
+        "cells": plan["cells"],
+    }
+
+
+def apply_leave_shift_sheet_for_record(
+    record_id: str,
+    *,
+    leave_item: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    rid = (record_id or "").strip()
+    if not rid:
+        raise ValueError("record_id is required")
+    if leave_item is None:
+        token = get_tenant_access_token()
+        leave_item = None
+        for it in _ose_leave_items_for_shift_sheet(token):
+            if str(it.get("record_id") or "").strip() == rid:
+                leave_item = it
+                break
+        if leave_item is None:
+            raise KeyError(f"leave record {rid!r} not found")
+    parsed = _parse_ose_leave_bitable_item(leave_item)
+    if not parsed:
+        raise ValueError(f"leave record {rid!r} is not approved OSE leave")
+    state = _load_leave_shift_sheet_state()
+    old_snap = dict((state.get("by_record") or {}).get(rid) or {})
+    values, err = _get_cached_ose_sheet_values()
+    if not values:
+        raise RuntimeError(err or "Could not load OSE shift sheet")
+    plan = _compute_leave_shift_sheet_plan(
+        person=parsed["person"],
+        start_date=parsed["start"],
+        end_date=parsed["end"],
+        values=values,
+    )
+    new_snap = _leave_shift_sheet_snapshot_from_plan(parsed, plan)
+    token = get_tenant_access_token()
+    if old_snap and not _leave_shift_sheet_snapshots_match(old_snap, new_snap):
+        _revert_leave_shift_sheet_snapshot(token, old_snap, values=values)
+        values, err = _get_cached_ose_sheet_values()
+        if not values:
+            raise RuntimeError(err or "Could not reload OSE shift sheet after revert")
+        plan = _compute_leave_shift_sheet_plan(
+            person=parsed["person"],
+            start_date=parsed["start"],
+            end_date=parsed["end"],
+            values=values,
+        )
+        new_snap = _leave_shift_sheet_snapshot_from_plan(parsed, plan)
+    if not plan["updates"]:
+        if old_snap:
+            _unmark_leave_shift_sheet_applied(rid)
+        return {
+            "ok": True,
+            "record_id": rid,
+            "person": parsed["person"],
+            "cells_updated": 0,
+            "skipped": "no_d_or_n_cells",
+        }
+    if old_snap and _leave_shift_sheet_snapshots_match(old_snap, new_snap):
+        _put_ose_shift_sheet_cell_styles(
+            token, plan["updates"], values=values, col_dates=plan.get("col_dates")
+        )
+        return {
+            "ok": True,
+            "record_id": rid,
+            "person": parsed["person"],
+            "cells_updated": 0,
+            "restyled": len(plan["updates"]),
+        }
+    _put_ose_shift_sheet_cells(token, plan["updates"], values=values, col_dates=plan["col_dates"])
+    _mark_leave_shift_sheet_applied(rid, snapshot=new_snap)
+    return {
+        "ok": True,
+        "record_id": rid,
+        "person": parsed["person"],
+        "start": parsed["start"].isoformat(),
+        "end": parsed["end"].isoformat(),
+        "cells_updated": len(plan["updates"]),
+    }
+
+
+def revert_leave_shift_sheet_for_record(record_id: str) -> dict[str, Any]:
+    rid = (record_id or "").strip()
+    if not rid:
+        raise ValueError("record_id is required")
+    state = _load_leave_shift_sheet_state()
+    snapshot = dict((state.get("by_record") or {}).get(rid) or {})
+    if not snapshot.get("cells"):
+        _unmark_leave_shift_sheet_applied(rid)
+        return {"ok": True, "record_id": rid, "skipped": "not_applied"}
+    values, err = _get_cached_ose_sheet_values()
+    if not values:
+        raise RuntimeError(err or "Could not load OSE shift sheet")
+    token = get_tenant_access_token()
+    _revert_leave_shift_sheet_snapshot(token, snapshot, values=values)
+    _unmark_leave_shift_sheet_applied(rid)
+    return {"ok": True, "record_id": rid, "reverted": True, "cells": len(snapshot.get("cells") or [])}
+
+
+_LEAVE_SHIFT_SHEET_REENSURE_DONE = False
+
+
+def reensure_applied_leave_shift_sheet_styles() -> dict[str, int]:
+    """Re-apply ``L`` cell backgrounds (incl. holiday green) for tracked leave rows."""
+    state = _load_leave_shift_sheet_state()
+    applied_ids = list(state.get("record_ids") or [])
+    if not applied_ids:
+        return {"scanned": 0, "styled": 0, "errors": 0}
+    values, err = _get_cached_ose_sheet_values()
+    if not values:
+        print(f"[ose_Duty] leave re-ensure skipped (no sheet): {err!r}", flush=True)
+        return {"scanned": len(applied_ids), "styled": 0, "errors": 1}
+    token = get_tenant_access_token()
+    styled = 0
+    errors = 0
+    by_record = dict(state.get("by_record") or {})
+    for rid in applied_ids:
+        try:
+            snap = dict(by_record.get(rid) or {})
+            person = str(snap.get("person") or "")
+            st = _parse_date_value(snap.get("start"))
+            ed = _parse_date_value(snap.get("end"))
+            if not person or not st or not ed:
+                continue
+            plan = _compute_leave_shift_sheet_plan(
+                person=person,
+                start_date=st,
+                end_date=ed,
+                values=values,
+            )
+            if not plan["updates"]:
+                continue
+            _put_ose_shift_sheet_cell_styles(
+                token, plan["updates"], values=values, col_dates=plan.get("col_dates")
+            )
+            styled += 1
+        except Exception as exc:
+            errors += 1
+            print(f"[ose_Duty] leave re-ensure failed for {rid!r}: {exc!r}", flush=True)
+    return {"scanned": len(applied_ids), "styled": styled, "errors": errors}
+
+
+def scan_revert_deleted_leave_from_shift_sheet() -> dict[str, int]:
+    """Restore ``D``/``N`` when a tracked leave row is removed or no longer approved."""
+    state = _load_leave_shift_sheet_state()
+    applied_ids = set(state.get("record_ids") or [])
+    if not applied_ids:
+        return {"scanned": 0, "reverted": 0, "errors": 0}
+    invalidate_ose_bitable_cache()
+    token = get_tenant_access_token()
+    items = _ose_leave_items_for_shift_sheet(token)
+    approved_ids = set()
+    for it in items:
+        parsed = _parse_ose_leave_bitable_item(it)
+        if parsed:
+            approved_ids.add(parsed["record_id"])
+    reverted = 0
+    errors = 0
+    for rid in sorted(applied_ids):
+        if rid in approved_ids:
+            continue
+        try:
+            out = revert_leave_shift_sheet_for_record(rid)
+            if out.get("reverted"):
+                reverted += 1
+        except Exception as exc:
+            errors += 1
+            print(f"[ose_Duty] leave shift sheet revert failed for {rid!r}: {exc!r}", flush=True)
+    return {"scanned": len(applied_ids), "reverted": reverted, "errors": errors}
+
+
+def scan_bitable_approved_leave_for_shift_sheet() -> dict[str, int]:
+    """Apply ``L`` on OSE shift sheet for approved leave from leaveose + OSE leave 全员."""
+    global _LEAVE_SHIFT_SHEET_REENSURE_DONE
+    invalidate_ose_bitable_cache()
+    if not _LEAVE_SHIFT_SHEET_REENSURE_DONE:
+        _LEAVE_SHIFT_SHEET_REENSURE_DONE = True
+        try:
+            stats = reensure_applied_leave_shift_sheet_styles()
+            print(
+                f"[ose_Duty] leave re-ensure after restart: scanned={stats.get('scanned')} "
+                f"styled={stats.get('styled')} errors={stats.get('errors')}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[ose_Duty] leave re-ensure pass failed: {exc!r}", flush=True)
+    token = get_tenant_access_token()
+    items = _ose_leave_items_for_shift_sheet(token)
+    applied = 0
+    restyled = 0
+    errors = 0
+    for it in items:
+        parsed = _parse_ose_leave_bitable_item(it)
+        if not parsed:
+            continue
+        rid = parsed["record_id"]
+        try:
+            out = apply_leave_shift_sheet_for_record(rid, leave_item=it)
+            if int(out.get("cells_updated") or 0) > 0:
+                applied += 1
+            elif out.get("restyled"):
+                restyled += 1
+        except Exception as exc:
+            errors += 1
+            print(f"[ose_Duty] leave shift sheet apply failed for {rid!r}: {exc!r}", flush=True)
+    return {"scanned": len(items), "applied": applied, "restyled": restyled, "errors": errors}
+
+
 def get_shift_names_for_date(target_date: date) -> tuple[list[str], list[str]]:
     """Return (morning_names, night_names) from OSE shift sheet."""
     values, _err = _get_cached_ose_sheet_values()
@@ -2066,7 +2488,8 @@ def _get_ose_person_open_id_index(token: str) -> dict[str, str]:
     cached = _OSE_BITABLE_RAW.get("person_ids")
     if not isinstance(cached, dict):
         leave_disp, leave_appr, offset = _get_bitable_raw_triple(token)
-        cached = _build_ose_person_open_id_index(leave_disp + leave_appr, offset)
+        leave_all_ose = _fetch_ose_department_all_leave_records(token)
+        cached = _build_ose_person_open_id_index(leave_disp + leave_appr + leave_all_ose, offset)
         _OSE_BITABLE_RAW["person_ids"] = cached
     out = dict(cached)
     out.update(_ose_person_open_id_overrides())

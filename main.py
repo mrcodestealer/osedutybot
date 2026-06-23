@@ -1833,6 +1833,18 @@ def poll_offset_approver_notifications_from_bitable():
         sr = int((rv or {}).get("reverted") or 0)
         if sr:
             print(f"[ose_Duty] shift sheet poll: reverted {sr} deleted offset(s)", flush=True)
+        lv = od.scan_bitable_approved_leave_for_shift_sheet()
+        la = int((lv or {}).get("applied") or 0)
+        lr = int((lv or {}).get("restyled") or 0)
+        if la or lr:
+            print(
+                f"[ose_Duty] leave shift sheet poll: applied {la} leave row(s), restyled {lr}",
+                flush=True,
+            )
+        lrv = od.scan_revert_deleted_leave_from_shift_sheet()
+        lsr = int((lrv or {}).get("reverted") or 0)
+        if lsr:
+            print(f"[ose_Duty] leave shift sheet poll: reverted {lsr} deleted/unapproved leave(s)", flush=True)
     except Exception as exc:
         print(f"[offsetleave] bitable approver poll failed: {exc!r}", flush=True)
 
