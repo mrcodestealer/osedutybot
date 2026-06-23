@@ -204,12 +204,15 @@ _OSE_PERSON_OPEN_ID_DEFAULTS: dict[str, str] = {
     "Chun Chee": "ou_107031ebafc8f57d869ec3b895d064e8",
     "Katleen": "ou_a3c65f73c2c60c454fba7428b2cc98a5",
     "Katleen Cantos": "ou_a3c65f73c2c60c454fba7428b2cc98a5",
-    "Kenneth": "ou_ff21929cc95a20ce54db36fc69a220d8",
-    "John Kenneth Chua": "ou_ff21929cc95a20ce54db36fc69a220d8",
-    "Kheng Kwan": "ou_24511204a056d20506dd44c15c1310cf",
+    "Kenneth": "ou_24511204a056d20506dd44c15c1310cf",
+    "John Kenneth Chua": "ou_24511204a056d20506dd44c15c1310cf",
+    "Kheng Kwan": "ou_ff21929cc95a20ce54db36fc69a220d8",
     "Kris Ng": "ou_3ae80e9dc0da4ee3ce8ffcb24d7ffbb2",
     "Lynette": "ou_3cb64233d3ee01b306eebd1b2878329c",
     "Lynette Enriquez": "ou_3cb64233d3ee01b306eebd1b2878329c",
+    "Jun Chen": "ou_5f660c0fb0769d184aca635d02209272",
+    "Jun Chen (Jc)": "ou_5f660c0fb0769d184aca635d02209272",
+    "Jan Rei": "ou_25dd43efc70ab656c8c3f98b97ecade2",
 }
 
 
