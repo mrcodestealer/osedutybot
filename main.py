@@ -3430,6 +3430,18 @@ def lark_webhook():
                         vpn_users_raw,
                         vpn_location_raw,
                         send_message,
+                        lark_message_id=(
+                            str(
+                                (
+                                    (ev_ca.get("context") or {})
+                                    if isinstance(ev_ca.get("context"), dict)
+                                    else {}
+                                ).get("open_message_id")
+                                or ev_ca.get("open_message_id")
+                                or ""
+                            ).strip()
+                            or None
+                        ),
                     )
                     return
                 ju = _get_jenkinsupdate()
@@ -3450,8 +3462,11 @@ def lark_webhook():
                         flush=True,
                     )
                     return
+                ctx_ca = ev_ca.get("context") if isinstance(ev_ca.get("context"), dict) else {}
+                card_omid = str(ctx_ca.get("open_message_id") or ev_ca.get("open_message_id") or "").strip() or None
                 ju.handle_lark_jenkins_card_action(
-                    chat_id_ca, sender_use, val_ca, send_message, operator=op_ca
+                    chat_id_ca, sender_use, val_ca, send_message, operator=op_ca,
+                    lark_message_id=card_omid,
                 )
             except Exception as ex:
                 print(f"❌ card callback worker: {ex!r}", flush=True)

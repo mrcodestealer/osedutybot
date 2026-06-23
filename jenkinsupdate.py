@@ -198,9 +198,10 @@ VENUE_UAT_ENVIRONMENTS = [
 # Job: DEVOPS_CP → VPN_CONFIGURATION → VPN_CREATION. Two parameters:
 #   VPN_USERS    — free-text box (the username)
 #   VPN_LOCATION — dropdown (values mirror the Jenkins job, see VPN_LOCATION_OPTIONS)
-VPN_CREATION_BUILD_URL = (
-    "https://ose-jenkinsaliyun.bewen.me/job/DEVOPS_CP/job/VPN_CONFIGURATION/job/VPN_CREATION/build?delay=0sec"
+VPN_CREATION_JOB_FOLDER_URL = (
+    "https://ose-jenkinsaliyun.bewen.me/job/DEVOPS_CP/job/VPN_CONFIGURATION/job/VPN_CREATION/"
 )
+VPN_CREATION_BUILD_URL = VPN_CREATION_JOB_FOLDER_URL + "build?delay=0sec"
 # Dropdown values for VPN_LOCATION (keep in sync with the Jenkins job parameter).
 VPN_LOCATION_OPTIONS: list[str] = [
     "HK_235",
@@ -11164,7 +11165,8 @@ def _fpms_lark_notify_jenkinsbot_vpn(
     bn = build_number if isinstance(build_number, int) and build_number > 0 else None
     conf = vpn_conf_filename(vpn_users, vpn_location)
 
-    cmd = f"/SuccessSendVpnConf {folder_url}"
+    job_url = VPN_CREATION_JOB_FOLDER_URL
+    cmd = f"/SuccessSendVpnConf {job_url}"
     if bn:
         cmd += f" {bn}"
     cmd += f" | {vpn_users} | {vpn_location}"
@@ -11175,7 +11177,7 @@ def _fpms_lark_notify_jenkinsbot_vpn(
         print(f"⚠️ VPN jenkinsbot notify failed: {ex!r}", flush=True)
 
     if bn:
-        console_url = f"{folder_url.rstrip('/')}/{bn}/console"
+        console_url = f"{job_url.rstrip('/')}/{bn}/console"
         send(
             chat_id,
             "🔧 **VPN creation started.**\n"
@@ -11217,8 +11219,10 @@ def _fpms_lark_begin_vpn_run(
         defer_fn = getattr(_main_mod, "defer_lark_done_reaction", None)
         if callable(defer_fn):
             defer_fn()
+        get_root = getattr(_main_mod, "_get_update_thread_root", None)
+        has_thread = bool(callable(get_root) and get_root(session_key))
     except Exception:
-        pass
+        has_thread = False
     wait_sess = {
         "state": "jenkins_wait_build",
         "build_gate_event": ev,
@@ -11233,7 +11237,7 @@ def _fpms_lark_begin_vpn_run(
         f"create vpn — {vpn_users} / {vpn_location}",
         lark_message_id,
         lark_thread_root_id=lark_thread_root_id,
-        force_new=True,
+        force_new=not has_thread,
     )
     raw_headless = os.environ.get("JENKINSUPDATE_BOT_HEADLESS", "1").strip().lower()
     bot_headless = raw_headless in ("1", "true", "yes", "on")
@@ -11388,10 +11392,9 @@ def _fpms_lark_send_vpn_location_picker(chat_id: str, username: str, send) -> No
     On rejection the Lark error code/msg is surfaced in chat (diagnostic) so we can see why
     interactive cards fail in this tenant without server log access.
     """
-    raw_send = _fpms_lark_raw_send() or send
     err_note = ""
     try:
-        res = raw_send(
+        res = send(
             chat_id, _fpms_lark_vpn_location_card_json(username), msg_type="interactive"
         )
         if isinstance(res, dict) and int(res.get("code", -1)) == 0:
@@ -11407,7 +11410,7 @@ def _fpms_lark_send_vpn_location_picker(chat_id: str, username: str, send) -> No
     except Exception as ex:
         print(f"[jenkinsupdate] VPN location card send error: {ex!r}", flush=True)
         err_note = f"\n\n⚠️ _card send error: `{str(ex)[:160]}`_"
-    raw_send(
+    send(
         chat_id,
         f"✅ VPN_USERS = **{username}**\n\n{_vpn_location_picker_text()}{err_note}",
     )
@@ -11425,6 +11428,18 @@ def begin_vpn_run_from_card(
     """Entry from the VPN form-card submit (called by main.py). Validates fields then runs."""
     key = _fpms_lark_session_key(chat_id, sender_id)
     send = _fpms_lark_wrap_thread_send(chat_id, key, send)
+    try:
+        import main as _main_mod
+
+        get_root = getattr(_main_mod, "_get_update_thread_root", None)
+        existing_root = get_root(key) if callable(get_root) else None
+    except Exception:
+        existing_root = None
+    trigger = (lark_message_id or existing_root or "").strip() or None
+    if trigger and not existing_root:
+        _fpms_lark_begin_update_thread(
+            chat_id, key, "create vpn", trigger, force_new=False
+        )
     user = _vpn_clean_username(vpn_users)
     loc = _vpn_resolve_location(vpn_location) or normalize_parameter_text(vpn_location)
     if not user:
@@ -11526,6 +11541,15 @@ def _fpms_lark_handle_vpn_flow(
 
     if inline_user and inline_loc:
         _fpms_lark_clear_session(chat_id, sender_id)
+        send = _fpms_lark_wrap_thread_send(chat_id, session_key, send)
+        _fpms_lark_begin_update_thread(
+            chat_id,
+            session_key,
+            body or "create vpn",
+            lark_message_id,
+            lark_thread_root_id=lark_thread_root_id,
+            force_new=True,
+        )
         send(chat_id, VPN_GUIDANCE_TEXT)
         _fpms_lark_begin_vpn_run(
             chat_id,
@@ -11539,12 +11563,20 @@ def _fpms_lark_handle_vpn_flow(
         return True
 
     _fpms_lark_clear_session(chat_id, sender_id)
-    raw_send = _fpms_lark_raw_send() or send
+    send = _fpms_lark_wrap_thread_send(chat_id, session_key, send)
+    _fpms_lark_begin_update_thread(
+        chat_id,
+        session_key,
+        body or "create vpn",
+        lark_message_id,
+        lark_thread_root_id=lark_thread_root_id,
+        force_new=True,
+    )
 
     if inline_user:
         new_sess = {"state": "vpn_choose_location", "vpn_users": inline_user}
         _fpms_lark_sessions_put_chat_key(session_key, new_sess)
-        raw_send(chat_id, VPN_GUIDANCE_TEXT)
+        send(chat_id, VPN_GUIDANCE_TEXT)
         _fpms_lark_send_vpn_location_picker(chat_id, inline_user, send)
         return True
 
@@ -11552,7 +11584,7 @@ def _fpms_lark_handle_vpn_flow(
     # If Lark rejects it, surface the exact error code inline and fall back to the text flow.
     card_err = ""
     try:
-        res = raw_send(chat_id, _fpms_lark_vpn_form_card_json(), msg_type="interactive")
+        res = send(chat_id, _fpms_lark_vpn_form_card_json(), msg_type="interactive")
         if isinstance(res, dict) and int(res.get("code", -1)) == 0:
             _fpms_lark_sessions_put_chat_key(session_key, {"state": "vpn_need_users"})
             return True
@@ -11570,7 +11602,7 @@ def _fpms_lark_handle_vpn_flow(
 
     new_sess = {"state": "vpn_need_users"}
     _fpms_lark_sessions_put_chat_key(session_key, new_sess)
-    raw_send(
+    send(
         chat_id,
         VPN_GUIDANCE_TEXT
         + "\n\n📝 **VPN_USERS** — reply with the username to create the VPN for (e.g. `tom`)."
@@ -12695,6 +12727,7 @@ def handle_lark_jenkins_card_action(
     send,
     *,
     operator: object = None,
+    lark_message_id: str | None = None,
 ) -> bool:
     """
     Feishu ``card.action.trigger``: YES/NO (**k** ``wb``), job index (**k** ``job``), service pick
@@ -12745,7 +12778,9 @@ def handle_lark_jenkins_card_action(
         if not username or loc not in VPN_LOCATION_OPTIONS:
             send(chat_id, "⚠️ VPN selection expired — `@Duty Bot create vpn` again.")
             return True
-        return begin_vpn_run_from_card(chat_id, sender_id, username, loc, send)
+        return begin_vpn_run_from_card(
+            chat_id, sender_id, username, loc, send, lark_message_id=lark_message_id
+        )
     if k == "venue_env":
         if _fpms_lark_handle_venue_env_pick(chat_id, sender_id, parsed, send):
             return True
@@ -13627,7 +13662,7 @@ def run(
                                 _fpms_lark_notify_jenkinsbot_vpn(
                                     send,
                                     cid,
-                                    folder_url=folder_u,
+                                    folder_url=VPN_CREATION_JOB_FOLDER_URL,
                                     build_number=resolved_bn,
                                     vpn_users=vpn_users,
                                     vpn_location=vpn_location,
