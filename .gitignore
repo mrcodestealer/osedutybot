@@ -31,6 +31,7 @@ allduty.json
 browser_state.json
 browser_data/
 cookies.json
+holiday.csv
 machineencoder.json
 maintenance.json
 offset_approver_notified.json
@@ -41,6 +42,7 @@ offset_rows_snapshot.json
 offset_shift_sheet_applied.json
 leave_shift_sheet_applied.json
 user_token.json
+webmachine_data.json
 # ---- Screenshots / scraped HTML ----
 *.png
 index.html
