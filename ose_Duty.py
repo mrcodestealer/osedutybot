@@ -1248,10 +1248,9 @@ def _parse_ose_leave_bitable_item(it: dict[str, Any]) -> Optional[dict[str, Any]
     if not rid:
         return None
     f = it.get("fields") or {}
-    if not _is_approved(_get_field_by_aliases(f, ["Status", "Approval Status"])):
+    if not _leave_row_is_approved(f):
         return None
-    name = _field_text(_get_field_by_aliases(f, ["Name", "Employee Name", "Person"]))
-    roster_key = _resolve_ose_roster_key(name)
+    roster_key = _resolve_ose_roster_key(_leave_row_person_name(f))
     if not roster_key:
         return None
     st = _parse_date_value(_get_field_by_aliases(f, ["Start Date", "Leave Start Date", "From"]))
@@ -1259,6 +1258,26 @@ def _parse_ose_leave_bitable_item(it: dict[str, Any]) -> Optional[dict[str, Any]
     if not st or not ed:
         return None
     return {"record_id": rid, "person": roster_key, "start": st, "end": ed}
+
+
+def _parse_ose_leave_bitable_item_skip_reason(it: dict[str, Any]) -> str:
+    """Why a leaveose row is ignored for shift-sheet ``L`` (for debugging)."""
+    rid = str(it.get("record_id") or "").strip()
+    if not rid:
+        return "missing_record_id"
+    f = it.get("fields") or {}
+    if not _leave_row_is_approved(f):
+        st = _field_text(_get_field_by_aliases(f, ["Status", "Approval Status"])).strip() or "(empty)"
+        return f"status_not_approved:{st}"
+    name = _leave_row_person_name(f)
+    roster_key = _resolve_ose_roster_key(name)
+    if not roster_key:
+        return f"not_shift_roster:{name or '(empty name)'}"
+    st = _parse_date_value(_get_field_by_aliases(f, ["Start Date", "Leave Start Date", "From"]))
+    ed = _parse_date_value(_get_field_by_aliases(f, ["End Date", "Leave End Date", "To"]))
+    if not st or not ed:
+        return "missing_start_or_end_date"
+    return ""
 
 
 def _load_leave_shift_sheet_state() -> dict[str, Any]:
@@ -1636,6 +1655,93 @@ def scan_bitable_approved_leave_for_shift_sheet() -> dict[str, int]:
     return {"scanned": len(items), "applied": applied, "restyled": restyled, "errors": errors}
 
 
+def probe_leave_shift_sheet_sync(*, apply: bool = False, json_out: bool = False) -> dict[str, Any]:
+    """
+    Debug leaveose → OSE shift sheet ``L`` sync.
+
+    Reads base ``OSE_BASE_TOKEN`` table ``tblvoXE0hsPjgb0j`` (leaveose) plus OSE rows from leave 全员.
+    """
+    token = get_tenant_access_token()
+    leaveose = _fetch_leaveose_bitable_records(token)
+    all_items = _ose_leave_items_for_shift_sheet(token)
+    values, sheet_err = _get_cached_ose_sheet_values()
+    rows: list[dict[str, Any]] = []
+    for it in all_items:
+        f = it.get("fields") or {}
+        rid = str(it.get("record_id") or "").strip()
+        name = _leave_row_person_name(f)
+        parsed = _parse_ose_leave_bitable_item(it)
+        skip = _parse_ose_leave_bitable_item_skip_reason(it)
+        plan_info: dict[str, Any] = {}
+        if parsed and values:
+            try:
+                plan = _compute_leave_shift_sheet_plan(
+                    person=parsed["person"],
+                    start_date=parsed["start"],
+                    end_date=parsed["end"],
+                    values=values,
+                )
+                plan_info = {
+                    "cells_to_L": len(plan.get("updates") or []),
+                    "cell_details": plan.get("cells") or [],
+                }
+                if not plan.get("updates"):
+                    skip = skip or "no_D_or_N_on_sheet_for_leave_dates"
+            except Exception as exc:
+                plan_info = {"error": str(exc)}
+                skip = skip or f"plan_error:{exc}"
+        elif not values:
+            skip = skip or f"sheet_unavailable:{sheet_err}"
+        rows.append(
+            {
+                "record_id": rid,
+                "name": name,
+                "roster_key": parsed["person"] if parsed else _resolve_ose_roster_key(name),
+                "start": parsed["start"].isoformat() if parsed else None,
+                "end": parsed["end"].isoformat() if parsed else None,
+                "skip": skip or None,
+                "plan": plan_info,
+            }
+        )
+    sync_result: Optional[dict[str, Any]] = None
+    if apply:
+        sync_result = scan_bitable_approved_leave_for_shift_sheet()
+    out = {
+        "ok": bool(values) and any(r.get("plan", {}).get("cells_to_L") for r in rows),
+        "leaveose_url_table": LEAVEOSE_TABLE_ID_CANONICAL,
+        "base_token": OSE_BASE_TOKEN,
+        "shift_spreadsheet": SPREADSHEET_TOKEN,
+        "shift_sheet_id": SHEET_ID,
+        "leaveose_rows": len(leaveose),
+        "combined_rows": len(all_items),
+        "sheet_ok": bool(values),
+        "sheet_error": sheet_err,
+        "rows": rows,
+        "sync_result": sync_result,
+    }
+    if json_out:
+        print(json.dumps(out, ensure_ascii=False, indent=2, default=str))
+    else:
+        print(
+            f"Leave → shift sheet probe\n"
+            f"  leaveose: {LEAVEOSE_TABLE_ID_CANONICAL} @ {OSE_BASE_TOKEN}\n"
+            f"  shift sheet: {SPREADSHEET_TOKEN} / {SHEET_ID}\n"
+            f"  leaveose rows: {len(leaveose)} | eligible checks: {len(rows)} | sheet OK: {bool(values)}\n"
+        )
+        if sheet_err:
+            print(f"  sheet error: {sheet_err}\n")
+        for r in rows:
+            label = ose_roster_sheet_label(r["roster_key"]) if r.get("roster_key") else r.get("name")
+            if r.get("skip"):
+                print(f"  SKIP  {label}  {r.get('start')}..{r.get('end')}  → {r['skip']}")
+            else:
+                n = (r.get("plan") or {}).get("cells_to_L", 0)
+                print(f"  OK    {label}  {r.get('start')}..{r.get('end')}  → {n} cell(s) D/N→L")
+        if apply and sync_result:
+            print(f"\nApply: {sync_result}")
+    return out
+
+
 def get_shift_names_for_date(target_date: date) -> tuple[list[str], list[str]]:
     """Return (morning_names, night_names) from OSE shift sheet."""
     values, _err = _get_cached_ose_sheet_values()
@@ -1925,6 +2031,32 @@ def _bitable_get_all_records(token: str, app_token: str, table_id: str) -> list[
 
 def _is_approved(v: Any) -> bool:
     return _field_text(v).strip().lower() == "approved"
+
+
+def _leave_row_is_approved(fields: dict[str, Any]) -> bool:
+    """
+    leaveose (``tblvoXE0hsPjgb0j``) HRMS sync usually has **no** Status column.
+    Empty status = approved (same rule as ``leavewfh._parse_leave_row``).
+    """
+    status_v = _get_field_by_aliases(fields, ["Status", "Approval Status"])
+    status_text = _field_text(status_v).strip().lower()
+    if status_text in ("rejected", "reject", "cancelled", "canceled", "denied"):
+        return False
+    if status_text and status_text != "approved":
+        return False
+    return True
+
+
+def _leave_row_person_name(fields: dict[str, Any]) -> str:
+    name_raw = _get_field_by_aliases(fields, ["Name", "Employee Name", "Person"])
+    name = _field_text(name_raw)
+    if name:
+        return name
+    if isinstance(name_raw, list) and name_raw:
+        first = name_raw[0]
+        if isinstance(first, dict):
+            return str(first.get("name") or first.get("en_name") or "").strip()
+    return ""
 
 
 def _is_ose_dutylist_leave_name(name: str) -> bool:
@@ -3709,6 +3841,10 @@ if __name__ == "__main__":
     if "--check-open-ids" in sys.argv:
         json_out = "--json" in sys.argv
         audit_person_open_ids(json_out=json_out)
+    elif "--probe-leave-shift" in sys.argv:
+        json_out = "--json" in sys.argv
+        apply = "--apply" in sys.argv
+        probe_leave_shift_sheet_sync(apply=apply, json_out=json_out)
     elif len(sys.argv) > 1:
         print(osedate(sys.argv[1]))
     else:
