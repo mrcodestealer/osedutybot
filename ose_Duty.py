@@ -56,24 +56,27 @@ OSE_LEAVE_API_BUILD = "20260603-leaveose-pinned-v4"
 LEAVEOSE_TABLE_ID_CANONICAL = "tblvoXE0hsPjgb0j"
 LEAVEOSE_TABLE_ID = LEAVEOSE_TABLE_ID_CANONICAL
 
-TARGET_NAMES = [
-    "Louie",
-    "Bryan Peh",
-    "Eduard James",
-    "Chrisjames",
-    "Augustine Si yew",
-    "Man Chung",
-    "Jan Rei",
-    "Katleen",
-    "Lynette",
-    "Chun Chee",
-    "Jun Chen",
-    "Kenneth",
-    "Jewel",
-    "Justine Miguel",
-    "Kheng Kwan",
-    "Kris Ng",
-]
+# OSE duty shift sheet roster — sheet col A labels vs roster keys used in code/leave matching.
+# HRMS variants like ``Augustine (Si Yew)`` resolve to key ``Augustine Si yew`` → row ``Augustine Si yew (Senior)``.
+OSE_SHIFT_ROSTER: tuple[tuple[str, str], ...] = (
+    ("Louie", "Louie (Senior)"),
+    ("Bryan Peh", "Bryan Peh [Platform]"),
+    ("Eduard James", "Eduard James [Platform]"),
+    ("Chrisjames", "Chrisjames [Game]"),
+    ("Augustine Si yew", "Augustine Si yew (Senior)"),
+    ("Man Chung", "Man Chung [Platform]"),
+    ("Jan Rei", "Jan Rei [Platform]"),
+    ("Katleen", "Katleen [Game]"),
+    ("Lynette", "Lynette (Senior)"),
+    ("Chun Chee", "Chun Chee [Platform]"),
+    ("Jun Chen", "Jun Chen [Game]"),
+    ("Kenneth", "Kenneth [Game]"),
+    ("Jewel", "Jewel [Platform]"),
+    ("Kheng Kwan", "Kheng Kwan [Platform]"),
+    ("Kris Ng", "Kris Ng [Game]"),
+)
+
+TARGET_NAMES = [key for key, _label in OSE_SHIFT_ROSTER]
 
 MONTH_MAP = {
     "January": 1,
@@ -227,6 +230,50 @@ def _name_key(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(name or "").lower())
 
 
+def _normalize_person_name_for_match(name: str) -> str:
+    """Strip sheet tags ``[Platform]`` / ``(Senior)``; ``Augustine (Si Yew)`` → ``Augustine Si Yew``."""
+    s = str(name or "").strip()
+    s = re.sub(r"\[[^\]]*\]", "", s)
+    s = re.sub(r"[()]", " ", s)
+    return _title_name(re.sub(r"\s+", " ", s))
+
+
+def _names_same_person_tokens(a: str, b: str) -> bool:
+    if not a or not b:
+        return False
+    rk, lk = _name_key(a), _name_key(b)
+    if rk and rk == lk:
+        return True
+    rt, lt = _word_tokens(a), _word_tokens(b)
+    return _token_prefix_matches_roster_to_leave(rt, lt) or _token_prefix_matches_roster_to_leave(lt, rt)
+
+
+def _resolve_ose_roster_key(name: str) -> str:
+    """Map HRMS/sheet/leave name to OSE shift roster key, or ``''`` if not on duty roster."""
+    norm = _normalize_person_name_for_match(name)
+    if not norm:
+        return ""
+    nk = _name_key(norm)
+    for key, _label in OSE_SHIFT_ROSTER:
+        if nk == _name_key(key):
+            return key
+        if _names_same_person_tokens(norm, key):
+            return key
+    return ""
+
+
+def is_ose_shift_roster_name(name: str) -> bool:
+    return bool(_resolve_ose_roster_key(name))
+
+
+def ose_roster_sheet_label(roster_key: str) -> str:
+    key = (roster_key or "").strip()
+    for rk, label in OSE_SHIFT_ROSTER:
+        if rk == key:
+            return label
+    return key
+
+
 def _word_tokens(name: str) -> list[str]:
     """Lowercase word tokens for roster short name vs leave-sheet full name."""
     return [t.lower() for t in re.findall(r"[A-Za-z0-9]+", str(name or "")) if t]
@@ -258,13 +305,13 @@ def _token_prefix_matches_roster_to_leave(roster_tokens: list[str], leave_tokens
 
 def _names_same_person(roster_name: str, leave_sheet_name: str) -> bool:
     """Roster / shift label vs leave Bitable full name (may differ in length)."""
-    if not roster_name or not leave_sheet_name:
-        return False
-    rk, lk = _name_key(roster_name), _name_key(leave_sheet_name)
-    if rk and rk == lk:
+    a = _normalize_person_name_for_match(roster_name)
+    b = _normalize_person_name_for_match(leave_sheet_name)
+    ra = _resolve_ose_roster_key(a) or a
+    rb = _resolve_ose_roster_key(b) or b
+    if ra and rb and _name_key(ra) == _name_key(rb):
         return True
-    rt, lt = _word_tokens(roster_name), _word_tokens(leave_sheet_name)
-    return _token_prefix_matches_roster_to_leave(rt, lt) or _token_prefix_matches_roster_to_leave(lt, rt)
+    return _names_same_person_tokens(ra, rb)
 
 
 def _title_name(name: str) -> str:
@@ -1179,7 +1226,7 @@ def _fetch_ose_department_all_leave_records(token: str) -> list[dict[str, Any]]:
     for it in items:
         f = it.get("fields") or {}
         name = _title_name(_field_text(_get_field_by_aliases(f, ["Name", "Employee Name", "Person"])))
-        if name and _is_ose_dutylist_leave_name(name):
+        if name and _resolve_ose_roster_key(name):
             out.append(it)
     return out
 
@@ -1203,16 +1250,15 @@ def _parse_ose_leave_bitable_item(it: dict[str, Any]) -> Optional[dict[str, Any]
     f = it.get("fields") or {}
     if not _is_approved(_get_field_by_aliases(f, ["Status", "Approval Status"])):
         return None
-    name = _title_name(_field_text(_get_field_by_aliases(f, ["Name", "Employee Name", "Person"])))
-    if not name or not _is_ose_dutylist_leave_name(name):
+    name = _field_text(_get_field_by_aliases(f, ["Name", "Employee Name", "Person"]))
+    roster_key = _resolve_ose_roster_key(name)
+    if not roster_key:
         return None
-    entry = dlm.match_duty_entry(name)
-    canon = entry["name"] if entry else name
     st = _parse_date_value(_get_field_by_aliases(f, ["Start Date", "Leave Start Date", "From"]))
     ed = _parse_date_value(_get_field_by_aliases(f, ["End Date", "Leave End Date", "To"]))
     if not st or not ed:
         return None
-    return {"record_id": rid, "person": canon, "start": st, "end": ed}
+    return {"record_id": rid, "person": roster_key, "start": st, "end": ed}
 
 
 def _load_leave_shift_sheet_state() -> dict[str, Any]:
@@ -2446,13 +2492,36 @@ def _index_person_field_value(v: Any, idx: dict[str, str]) -> None:
             nk = _name_key(nm)
             if nk:
                 idx[nk] = pid
-            for roster in OSE_LEAVE_FORM_NAMES:
+            for roster in TARGET_NAMES:
                 if _names_same_person(roster, raw_name):
                     roster_nm = _title_name(roster)
                     idx[roster_nm] = pid
                     roster_nk = _name_key(roster_nm)
                     if roster_nk:
                         idx[roster_nk] = pid
+
+
+def _index_shift_roster_person_field(v: Any, idx: dict[str, str]) -> None:
+    """Index ``open_id`` only for the 15-person OSE duty shift roster."""
+    blobs: list[str] = []
+    if isinstance(v, str) and v.strip():
+        blobs.append(v.strip())
+    for item in _person_field_items(v):
+        pid = _person_item_open_id(item)
+        if not pid:
+            continue
+        for raw in (
+            str(item.get("name") or "").strip(),
+            str(item.get("en_name") or "").strip(),
+        ):
+            key = _resolve_ose_roster_key(raw)
+            if not key:
+                continue
+            nm = _title_name(key)
+            idx[nm] = pid
+            nk = _name_key(nm)
+            if nk:
+                idx[nk] = pid
 
 
 def _build_ose_person_open_id_index(
@@ -2462,7 +2531,7 @@ def _build_ose_person_open_id_index(
     idx: dict[str, str] = {}
     for it in leave_items:
         f = it.get("fields") or {}
-        _index_person_field_value(_get_field_by_aliases(f, ["Name", "Employee Name", "Person"]), idx)
+        _index_shift_roster_person_field(_get_field_by_aliases(f, ["Name", "Employee Name", "Person"]), idx)
         _index_person_field_value(
             _get_field_by_aliases(f, ["Approver", "Approved By", "Approval Person"]),
             idx,
@@ -3543,13 +3612,13 @@ def audit_person_open_ids(*, json_out: bool = False) -> dict[str, Any]:
     full_idx.update(override_idx)
 
     roster_names = sorted(
-        {_title_name(n) for n in (*OSE_LEAVE_FORM_NAMES, *TARGET_NAMES) if (n or "").strip()},
-        key=str.lower,
+        [(key, ose_roster_sheet_label(key)) for key, _label in OSE_SHIFT_ROSTER],
+        key=lambda pair: pair[0].lower(),
     )
 
     people: list[dict[str, Any]] = []
     missing: list[str] = []
-    for nm in roster_names:
+    for nm, sheet_label in roster_names:
         oid_override = _lookup_person_open_id(nm, override_idx)
         oid_bitable = _lookup_person_open_id(nm, bitable_idx)
         oid = _lookup_person_open_id(nm, full_idx)
@@ -3559,10 +3628,11 @@ def audit_person_open_ids(*, json_out: bool = False) -> dict[str, Any]:
         if oid_bitable:
             sources.append("bitable")
         if not oid:
-            missing.append(nm)
+            missing.append(sheet_label)
         people.append(
             {
                 "name": nm,
+                "sheet_label": sheet_label,
                 "open_id": oid or None,
                 "sources": sources,
                 "ok": bool(oid),
@@ -3582,7 +3652,9 @@ def audit_person_open_ids(*, json_out: bool = False) -> dict[str, Any]:
         import leavewfh as lw
 
         calendar_map = lw.resolve_roster_open_ids(token)
-        calendar_missing = [nm for nm in roster_names if not calendar_map.get(nm)]
+        calendar_missing = [
+            label for key, label in roster_names if not calendar_map.get(_title_name(key))
+        ]
     except Exception as exc:
         calendar_map = {}
         calendar_missing = roster_names[:]
@@ -3607,12 +3679,12 @@ def audit_person_open_ids(*, json_out: bool = False) -> dict[str, Any]:
     if json_out:
         print(json.dumps(out, ensure_ascii=False, indent=2))
     else:
-        print(f"OSE open_id audit — {len(roster_names)} roster name(s), {len(missing)} missing\n")
+        print(f"OSE open_id audit — {len(roster_names)} shift roster(s), {len(missing)} missing\n")
         for row in people:
             mark = "OK" if row["ok"] else "MISSING"
             src = ", ".join(row["sources"]) if row["sources"] else "—"
             oid = row["open_id"] or "—"
-            print(f"  [{mark:7}] {row['name']:<22} {oid}  ({src})")
+            print(f"  [{mark:7}] {row['sheet_label']:<34} {oid}  ({src})")
         if approvers:
             print("\nOffset approvers:")
             for row in approvers:
