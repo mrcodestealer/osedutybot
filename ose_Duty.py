@@ -2715,8 +2715,11 @@ def validate_offset_swap_duty_dates(
     exchange_date: date,
 ) -> None:
     """
-    Original Date must be a D/N duty day for the requester; Exchange Date for the exchange person.
-    Raises ``ValueError`` with a user-facing message when validation fails.
+    Two-person swap: Original Date must be requester's D/N day; Exchange Date must be
+    exchange person's D/N day.
+
+    Exchange with self (``Myself``): only Original Date must be the requester's duty day;
+    Exchange Date is where duty moves to on approval (need not already be a duty day).
     """
     values, err = _get_cached_ose_sheet_values()
     if not values:
@@ -2724,8 +2727,14 @@ def validate_offset_swap_duty_dates(
     req = _title_name(request_person)
     if not req:
         raise ValueError("Request person is required")
-    exc = resolve_offset_exchange_person(exchange_person, request_person=req)
+    exc = _title_name(exchange_person) or req
     orig_ok = _person_shift_code_on_date(values, req, original_date) in OSE_SHIFT_TYPES
+    same_person = _names_same_person(req, exc)
+    if same_person:
+        if orig_ok:
+            return
+        footer = _OFFSET_DUTY_DATE_ERROR_FOOTER
+        raise ValueError(f"As checked the requested date is not your duty date. {footer}")
     exc_ok = _person_shift_code_on_date(values, exc, exchange_date) in OSE_SHIFT_TYPES
     if orig_ok and exc_ok:
         return
