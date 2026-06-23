@@ -137,8 +137,8 @@ WFH_TYPE = "Work From Home"
 
 # Spreadsheet cell text that means the person is on leave (not a shift code).
 _LEAVE_CELL_RE = re.compile(
-    r"(?i)(on\s*leave|annual\s*leave|\bAL\b|sick\s*leave|\bSL\b|hospital|"
-    r"compassionate|maternity|marriage|non\s*pay|replacement|\bMC\b|\bleave\b)"
+    r"(?i)(on\s*leave|annual\s*leave|\bAL\b|sick\s*leave|\bSL\b|hospital|\bHL\b|"
+    r"emergency\s*leave|\bEL\b|compassionate|maternity|marriage|non\s*pay|replacement|\bMC\b|\bleave\b)"
 )
 _SHIFT_CODES = frozenset({"D", "N", "*"})
 
@@ -270,8 +270,10 @@ def _leave_type_from_cell(cell: str) -> str:
         return ANNUAL_LEAVE_TYPE
     if "sick" in s or re.search(r"\bsl\b", s):
         return "Sick Leave"
-    if "hospital" in s:
+    if "hospital" in s or re.search(r"\bhl\b", s):
         return "Hospitalisation Leave"
+    if "emergency" in s or re.search(r"\bel\b", s):
+        return "Emergency Leave"
     if "compassionate" in s:
         return "Compassionate Leave"
     if "maternity" in s:

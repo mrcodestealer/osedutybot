@@ -646,8 +646,8 @@ def _sheet_row_index_for_person(values: list[list[Any]], person: str) -> Optiona
 _OSE_SHIFT_SHEET_BG_DUTY = "#FFFFFF"
 _OSE_SHIFT_SHEET_BG_OFFSET = "#8F959E"
 _OSE_SHIFT_SHEET_BG_HOLIDAY = "#8EE085"
-_OSE_SHIFT_SHEET_STYLED_VALUES = frozenset({"D", "N", "L", "AL", "SL"})
-_OSE_SHIFT_SHEET_LEAVE_CODES = frozenset({"L", "AL", "SL"})
+_OSE_SHIFT_SHEET_STYLED_VALUES = frozenset({"D", "N", "L", "AL", "SL", "HL", "EL"})
+_OSE_SHIFT_SHEET_LEAVE_CODES = frozenset({"L", "AL", "SL", "HL", "EL"})
 
 
 def _shift_sheet_cell_range(row_idx: int, col_idx: int) -> str:
@@ -735,7 +735,7 @@ def _put_ose_shift_sheet_cell_styles(
     values: Optional[list[list[Any]]] = None,
     col_dates: Optional[dict[int, date]] = None,
 ) -> None:
-    """Set background on duty cells: D/N/L/AL/SL white, ``*`` #8F959E; holiday #8EE085 for duty/leave codes."""
+    """Set background on duty cells: D/N/L/AL/SL/HL/EL white, ``*`` #8F959E; holiday #8EE085 for duty/leave codes."""
     if not cell_updates:
         return
     if not SPREADSHEET_TOKEN or not SHEET_ID:
@@ -1245,12 +1245,16 @@ def _ose_leave_items_for_shift_sheet(token: str) -> list[dict[str, Any]]:
 
 
 def _leave_type_to_shift_code(leave_type: str) -> str:
-    """Map leaveose ``Leave Type`` to shift-sheet code: Annual Leave → ``AL``, Sick Leave → ``SL``."""
+    """Map leaveose ``Leave Type`` to shift-sheet code: AL, SL, HL, EL, else ``L``."""
     lt = (leave_type or "").strip().lower()
     if "annual" in lt or re.search(r"\bal\b", lt):
         return "AL"
     if "sick" in lt or re.search(r"\bsl\b", lt) or lt in ("mc", "medical", "medical leave"):
         return "SL"
+    if "hospital" in lt or re.search(r"\bhl\b", lt):
+        return "HL"
+    if "emergency" in lt or re.search(r"\bel\b", lt):
+        return "EL"
     return "L"
 
 
@@ -1386,7 +1390,7 @@ def _compute_leave_shift_sheet_plan(
     shift_code: str = "L",
     prior_cells: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
-    """Mark roster ``D``/``N`` cells as ``AL``/``SL``/``L`` for each leave day (skip ``*`` offset cells)."""
+    """Mark roster ``D``/``N`` cells as ``AL``/``SL``/``HL``/``EL``/``L`` for each leave day (skip ``*`` offset cells)."""
     code = (shift_code or "L").strip().upper()
     if code not in _OSE_SHIFT_SHEET_LEAVE_CODES:
         code = _leave_type_to_shift_code(shift_code)
@@ -1470,7 +1474,7 @@ def _revert_leave_shift_sheet_snapshot(
 def apply_leave_to_shift_sheet(
     *, person: str, start_date: date, end_date: date, shift_code: str = "L"
 ) -> dict[str, Any]:
-    """Write ``AL``/``SL``/``L`` on shift days that were ``D``/``N`` for an approved OSE leave range."""
+    """Write ``AL``/``SL``/``HL``/``EL``/``L`` on shift days that were ``D``/``N`` for an approved OSE leave range."""
     values, err = _get_cached_ose_sheet_values()
     if not values:
         raise RuntimeError(err or "Could not load OSE shift sheet")
