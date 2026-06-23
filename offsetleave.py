@@ -667,6 +667,17 @@ def _match_roster_name(display: str) -> Optional[str]:
     for roster in od.OSE_LEAVE_FORM_NAMES:
         if titled == od._title_name(roster) or od._names_same_person(roster, raw):
             return od._title_name(roster)
+    # e.g. Lark "John Kenneth Chua" → roster "Kenneth"
+    display_tokens = {t.lower() for t in od._word_tokens(raw) if len(t) >= 3}
+    if not display_tokens:
+        return None
+    matches: list[str] = []
+    for roster in od.OSE_LEAVE_FORM_NAMES:
+        rtokens = od._word_tokens(roster)
+        if len(rtokens) == 1 and rtokens[0].lower() in display_tokens:
+            matches.append(od._title_name(roster))
+    if len(matches) == 1:
+        return matches[0]
     return None
 
 
@@ -689,7 +700,7 @@ def resolve_request_person(open_id: str, token: str) -> str:
     raise ValueError(
         f"Could not match your Lark account to an OSE roster name"
         + (f" (Lark name: {display!r})." if display else ".")
-        + " Use @bot leave or offset and pick your name from the roster list."
+        + " Ask an admin to add your open_id under OSE_PERSON_OPEN_IDS."
     )
 
 
@@ -936,21 +947,16 @@ def _roster_name_picker_elements() -> list[dict[str, Any]]:
     ]
 
 
-def build_offset_form_card(
-    *, owner_open_id: str, request_person: str, pick_roster_name: bool = False
-) -> dict[str, Any]:
-    exchange_names = list(od.ose_offset_form_exchange_names())
+def build_offset_form_card(*, owner_open_id: str, request_person: str) -> dict[str, Any]:
+    req = od._title_name(request_person)
+    if not req:
+        raise ValueError("Request person is required for the offset form.")
+    exchange_names = list(od.ose_offset_form_exchange_names(exclude_person=req))
     intro = (
-        "Select your roster name, then fill the fields below and tap **Submit**."
-        if pick_roster_name
-        else (
-            f"**Request person:** {request_person}\n"
-            "Fill the fields below, then tap **Submit**."
-        )
+        f"**Request person:** {req}\n"
+        "Pick **Exchange person** and the other fields below, then tap **Submit**."
     )
     form_elements: list[dict[str, Any]] = []
-    if pick_roster_name:
-        form_elements.extend(_roster_name_picker_elements())
     form_elements.extend(
         [
             {
@@ -1020,8 +1026,7 @@ def build_offset_form_card(
                         "value": _callback_payload(
                             _OFFSET_SUBMIT_KEY,
                             owner_open_id=owner_open_id,
-                            request_person=request_person,
-                            pick_roster_name=pick_roster_name,
+                            request_person=req,
                         ),
                     }
                 ],
@@ -1568,7 +1573,9 @@ def build_offset_edit_form_card(
 ) -> dict[str, Any]:
     rid = str(row.get("record_id") or "").strip()
     req_on_row = str(row.get("request_person") or request_person or "").strip()
-    exchange_names = list(od.ose_offset_form_exchange_names())
+    exchange_names = list(
+        od.ose_offset_form_exchange_names(exclude_person=req_on_row)
+    )
     exc_on_row = str(row.get("exchange_person") or "").strip()
     if od._title_name(exc_on_row) and od._title_name(exc_on_row) == od._title_name(req_on_row):
         exc_on_row = od.OFFSET_EXCHANGE_MYSELF_LABEL
@@ -1903,28 +1910,32 @@ def handle_mention(
         return True
     try:
         token = get_token_func()
-        request_person = try_resolve_request_person(oid, token)
-        pick_roster = request_person is None
-        if pick_roster:
-            request_person = ""
     except Exception as e:
         send_message(chat_id, f"❌ {e}")
         return True
     try:
         if want_offset:
+            try:
+                offset_request_person = resolve_request_person(oid, token)
+            except ValueError as e:
+                send_message(chat_id, f"❌ {e}")
+                return True
             _deliver_private_card(
                 owner_open_id=oid,
                 group_chat_id=chat_id,
                 chat_type=chat_type,
                 card=build_offset_form_card(
                     owner_open_id=oid,
-                    request_person=request_person,
-                    pick_roster_name=pick_roster,
+                    request_person=offset_request_person,
                 ),
                 send_message=send_message,
                 token=token,
             )
         if want_leave:
+            request_person = try_resolve_request_person(oid, token)
+            pick_roster = request_person is None
+            if pick_roster:
+                request_person = ""
             _deliver_private_card(
                 owner_open_id=oid,
                 group_chat_id=chat_id,
@@ -3894,6 +3905,14 @@ def handle_card_callback(
                 send_message(chat_id, "❌ Reason is required.")
             return True
         if key == _OFFSET_SUBMIT_KEY:
+            try:
+                request_person = resolve_request_person(
+                    owner, od.get_tenant_access_token()
+                )
+            except ValueError as exc:
+                if cid:
+                    send_message(chat_id, f"❌ {exc}")
+                return True
             exchange_person = _get_form_field(action, parsed, event_obj, "exchange_person")
             shift_type = _get_form_field(action, parsed, event_obj, "shift_type")
             original_date = _parse_date_iso(_get_form_field(action, parsed, event_obj, "original_date"))

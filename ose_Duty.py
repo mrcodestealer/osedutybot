@@ -2209,6 +2209,49 @@ def _is_ose_dutylist_leave_name(name: str) -> bool:
     return dlm.is_ose_dutylist_name(name)
 
 
+def _extract_ose_shift_roster_leave_for_date(
+    target_date: date,
+    token: str,
+    *,
+    items: Optional[list[dict[str, Any]]] = None,
+) -> list[dict[str, Any]]:
+    """Approved leaveose rows for the 15-person duty roster on ``target_date``."""
+    if items is None:
+        items = _get_leave_display_raw(token)
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for it in items:
+        parsed = _parse_ose_leave_bitable_item(it)
+        if not parsed:
+            continue
+        if not (parsed["start"] <= target_date <= parsed["end"]):
+            continue
+        person = parsed["person"]
+        lt = str(parsed.get("leave_type") or "Leave")
+        key = (person, parsed["start"].isoformat(), parsed["end"].isoformat(), lt.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            {
+                "name": person,
+                "display_name": ose_roster_sheet_label(person) or _title_name(person),
+                "leave_type": lt,
+                "start": parsed["start"],
+                "end": parsed["end"],
+            }
+        )
+    return sorted(out, key=lambda x: str(x.get("name") or "").lower())
+
+
+def _person_listed_on_leave(name: str, leave_entries: list[dict[str, Any]]) -> bool:
+    for r in leave_entries:
+        ln = str(r.get("name") or "").strip()
+        if ln and _names_same_person(name, ln):
+            return True
+    return False
+
+
 def _extract_leave_entries_for_date(
     target_date: date,
     token: str,
@@ -2313,8 +2356,8 @@ def _build_ose_context_once(
 
         token = get_tenant_access_token()
         leave_items, offset_items = _get_bitable_raw_pair(token)
-        leave_entries = _extract_leave_entries_for_date(
-            target_date, token, items=leave_items, require_approved=False
+        leave_entries = _extract_ose_shift_roster_leave_for_date(
+            target_date, token, items=leave_items
         )
         offset_lines = _extract_offset_lines_for_date(target_date, token, items=offset_items)
         values, _sheet_err = _get_cached_ose_sheet_values()
@@ -2324,15 +2367,20 @@ def _build_ose_context_once(
     except Exception as e:
         return [], [], [], [], f"❌ OSE data load failed: {e}"
 
-    def _on_leave(shift_label: str) -> bool:
-        for r in leave_entries:
-            ln = str(r.get("name") or "").strip()
-            if ln and _names_same_person(shift_label, ln):
-                return True
-        return False
-
-    rest_names = [n for n in rest_names if not _on_leave(n)]
-    luck_names = [n for n in luck_names if not _on_leave(n)]
+    if mode == "morning":
+        # 7am: Rest = last night's N (yesterday); Good Luck = today's D — filter leave per day.
+        try:
+            leave_yesterday = _extract_ose_shift_roster_leave_for_date(
+                target_date - timedelta(days=1), token, items=leave_items
+            )
+        except Exception:
+            leave_yesterday = []
+        rest_names = [n for n in rest_names if not _person_listed_on_leave(n, leave_yesterday)]
+        luck_names = [n for n in luck_names if not _person_listed_on_leave(n, leave_entries)]
+    else:
+        # 7pm, /ose, /osedate — both sections use today's leave list only.
+        rest_names = [n for n in rest_names if not _person_listed_on_leave(n, leave_entries)]
+        luck_names = [n for n in luck_names if not _person_listed_on_leave(n, leave_entries)]
     return sorted(rest_names), sorted(luck_names), offset_lines, leave_entries, None
 
 
@@ -2385,7 +2433,7 @@ def build_ose_message_card(
     if leave_entries:
         leave_lines: list[str] = []
         for row in leave_entries:
-            name = row["name"]
+            name = str(row.get("display_name") or row.get("name") or "")
             lt = row["leave_type"]
             st = row["start"]
             ed = row["end"]
@@ -2470,7 +2518,7 @@ def get_ose_payload_for_date(target_date: date, mode: str = "date", *, include_t
         lines.append("")
         lines.append("Leave")
         for row in leave_entries:
-            name = row["name"]
+            name = str(row.get("display_name") or row.get("name") or "")
             lt = row["leave_type"]
             st = row["start"]
             ed = row["end"]
