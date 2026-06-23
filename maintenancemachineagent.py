@@ -1418,18 +1418,20 @@ def handle_maintenance_now_message(
             flush=True,
         )
 
-    # Hand off to the existing prod-batch pipeline by building its slash-command form.
-    cmd_text = f"/{site}{suffix}\n" + "\n".join(machines)
-    handled, reply = smmachine.handle_prod_batch_bot_command(
-        cmd_text,
-        [],
+    # Hand off to prod-batch confirm card (machines from webmachine_data.json — no live lookup).
+    parsed_pb: dict[str, Any] = {
+        "action": action,
+        "env_code": env_code,
+        "site": site,
+    }
+    smmachine._prod_batch_bot_prepare_confirm(
+        parsed_pb,
+        machines,
         chat_id=chat_id,
         send_message=send_message,
         thread_root_message_id=thread_root_message_id,
     )
-    if not handled:
-        return True, "❌ Could not start the maintenance job for the resolved machines."
-    return True, reply
+    return True, None
 
 
 def build_reminder_reason(parsed: dict[str, Any]) -> str:

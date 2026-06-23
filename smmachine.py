@@ -2763,7 +2763,16 @@ def _prod_batch_resolve_confirm_targets(
         "on",
     )
     if use_live:
+        print(
+            f"[prod-batch] confirm lookup: live EGM ({env_code}, {len(target_lines)} line(s))",
+            flush=True,
+        )
         return _prod_batch_lookup_target_rows(site, env_code, target_lines)
+    print(
+        f"[prod-batch] confirm lookup: webmachine_data.json ({env_code}, "
+        f"{len(target_lines)} line(s))",
+        flush=True,
+    )
     return _prod_batch_lookup_webmachine_data(env_code, target_lines)
 
 
@@ -3419,9 +3428,12 @@ def _prod_batch_bot_prepare_confirm(
     send_message: Callable[..., Any],
     thread_root_message_id: str | None = None,
 ) -> None:
+    _prod_batch_cleanup_pending()
     env_code = parsed["env_code"]
     site = _PROD_BATCH_ENV_TO_SITE.get(env_code) or parsed.get("site") or ""
-    matched, not_found, data_src = _prod_batch_lookup_target_rows(site, env_code, target_lines)
+    matched, not_found, data_src = _prod_batch_resolve_confirm_targets(
+        site, env_code, target_lines
+    )
     if "stuck" in data_src.lower() or "stalled" in data_src.lower():
         send_message(chat_id, f"❌ {data_src}")
         return
@@ -3500,16 +3512,26 @@ def handle_prod_batch_bot_command(
         return True, usage
 
     env_code = parsed["env_code"]
-    threading.Thread(
-        target=_prod_batch_bot_prepare_confirm,
-        args=(parsed, target_lines),
-        kwargs={
-            "chat_id": chat_id,
-            "send_message": send_message,
-            "thread_root_message_id": thread_root_message_id,
-        },
-        daemon=True,
-    ).start()
+    kwargs = {
+        "chat_id": chat_id,
+        "send_message": send_message,
+        "thread_root_message_id": thread_root_message_id,
+    }
+    use_live = (os.environ.get("PROD_BATCH_LIVE_LOOKUP") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    if use_live:
+        threading.Thread(
+            target=_prod_batch_bot_prepare_confirm,
+            args=(parsed, target_lines),
+            kwargs=kwargs,
+            daemon=True,
+        ).start()
+    else:
+        _prod_batch_bot_prepare_confirm(parsed, target_lines, **kwargs)
     return True, None
 
 
