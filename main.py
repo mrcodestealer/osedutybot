@@ -2625,7 +2625,7 @@ def _normalize_rem_add_date_field(raw: str) -> str:
     return s
 
 
-def _parse_rem_add_form_fields(ev_ca: dict, parsed_ca: dict) -> dict[str, str | list[str]]:
+def _parse_rem_add_form_fields(ev_ca: dict, parsed_ca: dict) -> dict[str, Any]:
     """Extract add-reminder form values from a card callback payload."""
     act_ca = ev_ca.get("action") if isinstance(ev_ca.get("action"), dict) else {}
     start_raw = _lark_get_card_form_field(act_ca, "start_date")
@@ -2677,7 +2677,7 @@ def _parse_rem_add_form_fields(ev_ca: dict, parsed_ca: dict) -> dict[str, str | 
     }
 
 
-def _try_rem_add_submit_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> dict | None:
+def _try_rem_add_submit_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Optional[dict]:
     """Synchronous card.callback body for add-reminder form submit (keeps card in place)."""
     if str(parsed_ca.get("k") or "").strip().lower() != "rem_add_submit":
         return None

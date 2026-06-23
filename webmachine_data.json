@@ -22,7 +22,7 @@
     "belongs": "CP",
     "name": "5 Dragons-0280",
     "game_type": "Good Fortune",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -31,7 +31,7 @@
     "belongs": "CP",
     "name": "Celestial Horse-0285",
     "game_type": "Good Fortune",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -40,7 +40,7 @@
     "belongs": "CP",
     "name": "Celestial Horse-0286",
     "game_type": "Good Fortune",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -49,7 +49,7 @@
     "belongs": "CP",
     "name": "Dragon of the Eastern Ocean-0274",
     "game_type": "Good Fortune",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -76,7 +76,7 @@
     "belongs": "CP",
     "name": "Dragon of the Eastern Ocean-0277",
     "game_type": "Good Fortune",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -166,7 +166,7 @@
     "belongs": "CP",
     "name": "Echo Fortunes-0093",
     "game_type": "JJBX GOLD",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -175,7 +175,7 @@
     "belongs": "CP",
     "name": "Echo Fortunes-0094",
     "game_type": "JJBX GOLD",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -193,7 +193,7 @@
     "belongs": "CP",
     "name": "Echo Fortunes-0096",
     "game_type": "JJBX GOLD",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -274,7 +274,7 @@
     "belongs": "CP",
     "name": "Echo Fortunes-0157",
     "game_type": "JJBX GOLD",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -283,7 +283,7 @@
     "belongs": "CP",
     "name": "Echo Fortunes-0158",
     "game_type": "JJBX GOLD",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -425,6 +425,42 @@
   {
     "environment": "PROD",
     "belongs": "CP",
+    "name": "Empress-0293",
+    "game_type": "tiancijinlong",
+    "status": "occupy",
+    "online": "online",
+    "is_test": false
+  },
+  {
+    "environment": "PROD",
+    "belongs": "CP",
+    "name": "Empress-0294",
+    "game_type": "tiancijinlong",
+    "status": "normal",
+    "online": "online",
+    "is_test": false
+  },
+  {
+    "environment": "PROD",
+    "belongs": "CP",
+    "name": "Empress-0295",
+    "game_type": "tiancijinlong",
+    "status": "normal",
+    "online": "online",
+    "is_test": false
+  },
+  {
+    "environment": "PROD",
+    "belongs": "CP",
+    "name": "Empress-0296",
+    "game_type": "tiancijinlong",
+    "status": "normal",
+    "online": "online",
+    "is_test": false
+  },
+  {
+    "environment": "PROD",
+    "belongs": "CP",
     "name": "Endless Treasure-0077",
     "game_type": "JJBX GOLD",
     "status": "occupy",
@@ -436,7 +472,7 @@
     "belongs": "CP",
     "name": "Endless Treasure-0078",
     "game_type": "JJBX GOLD",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -445,7 +481,7 @@
     "belongs": "CP",
     "name": "Endless Treasure-0079",
     "game_type": "JJBX GOLD",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -481,7 +517,7 @@
     "belongs": "CP",
     "name": "Endless Treasure-0083",
     "game_type": "JJBX GOLD",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -499,7 +535,7 @@
     "belongs": "CP",
     "name": "Endless Treasure-0085",
     "game_type": "JJBX GOLD",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -508,7 +544,7 @@
     "belongs": "CP",
     "name": "Endless Treasure-0086",
     "game_type": "JJBX GOLD",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -526,7 +562,7 @@
     "belongs": "CP",
     "name": "Endless Treasure-0088",
     "game_type": "JJBX GOLD",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -544,7 +580,7 @@
     "belongs": "CP",
     "name": "Endless Treasure-0090",
     "game_type": "JJBX GOLD",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -553,6 +589,42 @@
     "belongs": "CP",
     "name": "Fortune King-0287",
     "game_type": "Good Fortune",
+    "status": "normal",
+    "online": "online",
+    "is_test": false
+  },
+  {
+    "environment": "PROD",
+    "belongs": "CP",
+    "name": "Fortune-0289",
+    "game_type": "tiancijinlong",
+    "status": "normal",
+    "online": "online",
+    "is_test": false
+  },
+  {
+    "environment": "PROD",
+    "belongs": "CP",
+    "name": "Fortune-0290",
+    "game_type": "tiancijinlong",
+    "status": "normal",
+    "online": "online",
+    "is_test": false
+  },
+  {
+    "environment": "PROD",
+    "belongs": "CP",
+    "name": "Fortune-0291",
+    "game_type": "tiancijinlong",
+    "status": "normal",
+    "online": "online",
+    "is_test": false
+  },
+  {
+    "environment": "PROD",
+    "belongs": "CP",
+    "name": "Fortune-0292",
+    "game_type": "tiancijinlong",
     "status": "normal",
     "online": "online",
     "is_test": false
@@ -634,7 +706,7 @@
     "belongs": "CP",
     "name": "Lucky Festival-0284",
     "game_type": "Good Fortune",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -643,7 +715,7 @@
     "belongs": "CP",
     "name": "Prosperous Rooster-0239",
     "game_type": "LIONLINK",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -652,7 +724,7 @@
     "belongs": "CP",
     "name": "Prosperous Rooster-0240",
     "game_type": "LIONLINK",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -661,7 +733,7 @@
     "belongs": "CP",
     "name": "Prosperous Rooster-0241",
     "game_type": "LIONLINK",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -670,7 +742,7 @@
     "belongs": "CP",
     "name": "Prosperous Rooster-0242",
     "game_type": "LIONLINK",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -688,7 +760,7 @@
     "belongs": "CP",
     "name": "Prosperous Rooster-0244",
     "game_type": "LIONLINK",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -697,7 +769,7 @@
     "belongs": "CP",
     "name": "Prosperous Rooster-0245",
     "game_type": "LIONLINK",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -733,7 +805,7 @@
     "belongs": "CP",
     "name": "Rising Rockets Emperor-0246",
     "game_type": "RISINGROCKETS",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -751,7 +823,7 @@
     "belongs": "CP",
     "name": "Rising Rockets Emperor-0248",
     "game_type": "RISINGROCKETS",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -760,7 +832,7 @@
     "belongs": "CP",
     "name": "Rising Rockets Emperor-0249",
     "game_type": "RISINGROCKETS",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -794,20 +866,20 @@
   {
     "environment": "PROD",
     "belongs": "CP",
-    "name": "Rising Rockets Emperor-0253(TEST)",
+    "name": "Rising Rockets Emperor-0253",
     "game_type": "RISINGROCKETS",
-    "status": "maintain",
+    "status": "occupy",
     "online": "online",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "CP",
-    "name": "Rising Rockets Emperor-0254(TEST)",
+    "name": "Rising Rockets Emperor-0254",
     "game_type": "RISINGROCKETS",
-    "status": "maintain",
+    "status": "occupy",
     "online": "online",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
@@ -823,7 +895,7 @@
     "belongs": "CP",
     "name": "Rising Rockets Emperor-0256",
     "game_type": "RISINGROCKETS",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -841,7 +913,7 @@
     "belongs": "CP",
     "name": "Rising Rockets Emperor-0258",
     "game_type": "RISINGROCKETS",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -859,7 +931,7 @@
     "belongs": "CP",
     "name": "Rising Rockets Empress-0260",
     "game_type": "RISINGROCKETS",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -931,7 +1003,7 @@
     "belongs": "CP",
     "name": "Rising Rockets Empress-0268",
     "game_type": "RISINGROCKETS",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -949,7 +1021,7 @@
     "belongs": "CP",
     "name": "Rising Rockets Empress-0270",
     "game_type": "RISINGROCKETS",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -958,7 +1030,7 @@
     "belongs": "CP",
     "name": "Rising Rockets Empress-0271",
     "game_type": "RISINGROCKETS",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -976,7 +1048,7 @@
     "belongs": "CP",
     "name": "Rising Rockets Empress-0273",
     "game_type": "RISINGROCKETS",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -985,7 +1057,7 @@
     "belongs": "CP",
     "name": "Wealth of the Dragon-0231",
     "game_type": "LIONLINK",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -1003,7 +1075,7 @@
     "belongs": "CP",
     "name": "Wealth of the Dragon-0233",
     "game_type": "LIONLINK",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -1030,7 +1102,7 @@
     "belongs": "CP",
     "name": "Wealth of the Dragon-0236",
     "game_type": "LIONLINK",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -1039,7 +1111,7 @@
     "belongs": "CP",
     "name": "Wealth of the Dragon-0237",
     "game_type": "LIONLINK",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -1057,7 +1129,7 @@
     "belongs": "DHS",
     "name": "Blessed Fortune-DHS3194",
     "game_type": "manfubao",
-    "status": "occupy",
+    "status": "maintain",
     "online": "online",
     "is_test": false
   },
@@ -1075,7 +1147,7 @@
     "belongs": "DHS",
     "name": "Blessed Fortune-DHS3196",
     "game_type": "manfubao",
-    "status": "occupy",
+    "status": "maintain",
     "online": "online",
     "is_test": false
   },
@@ -1084,7 +1156,7 @@
     "belongs": "DHS",
     "name": "Blessed Fortune-DHS3197",
     "game_type": "manfubao",
-    "status": "occupy",
+    "status": "maintain",
     "online": "online",
     "is_test": false
   },
@@ -1192,7 +1264,7 @@
     "belongs": "DHS",
     "name": "Bouncing Lions-DHS3110",
     "game_type": "superburst",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -1210,7 +1282,7 @@
     "belongs": "DHS",
     "name": "Bouncing Lions-DHS3112",
     "game_type": "superburst",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -1228,7 +1300,7 @@
     "belongs": "DHS",
     "name": "Bouncing Lions-DHS3114",
     "game_type": "superburst",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -1246,7 +1318,7 @@
     "belongs": "DHS",
     "name": "Buffalo Gold Collection-DHS3190",
     "game_type": "wlzbhelix",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -1435,7 +1507,7 @@
     "belongs": "DHS",
     "name": "Cartin Gold-DHS3123",
     "game_type": "superburst",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -1471,7 +1543,7 @@
     "belongs": "DHS",
     "name": "Cartin Gold-DHS3127",
     "game_type": "superburst",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -1480,7 +1552,7 @@
     "belongs": "DHS",
     "name": "Cartin Gold-DHS3128",
     "game_type": "superburst",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -1534,7 +1606,7 @@
     "belongs": "DHS",
     "name": "Eternal Prosperity-DHS3225",
     "game_type": "triplepot",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -1732,7 +1804,7 @@
     "belongs": "DHS",
     "name": "Heavenly Wealth-DHS3227",
     "game_type": "triplepot",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -1750,7 +1822,7 @@
     "belongs": "DHS",
     "name": "Heavenly Wealth-DHS3229",
     "game_type": "triplepot",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -1768,7 +1840,7 @@
     "belongs": "DHS",
     "name": "Heavenly Wealth-DHS3231",
     "game_type": "triplepot",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -1777,7 +1849,7 @@
     "belongs": "DHS",
     "name": "Heavenly Wealth-DHS3232",
     "game_type": "triplepot",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -1903,7 +1975,7 @@
     "belongs": "DHS",
     "name": "Imperial Power-DHS3207",
     "game_type": "manfubao",
-    "status": "occupy",
+    "status": "maintain",
     "online": "online",
     "is_test": false
   },
@@ -1957,7 +2029,7 @@
     "belongs": "DHS",
     "name": "Imperial Power-DHS3217",
     "game_type": "manfubao",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -2101,7 +2173,7 @@
     "belongs": "DHS",
     "name": "Lucky Festival-DHS3214",
     "game_type": "manfubao",
-    "status": "occupy",
+    "status": "maintain",
     "online": "online",
     "is_test": false
   },
@@ -2146,7 +2218,7 @@
     "belongs": "DHS",
     "name": "Luxury Jewelry-DHS3206",
     "game_type": "manfubao",
-    "status": "normal",
+    "status": "maintain",
     "online": "online",
     "is_test": false
   },
@@ -2722,7 +2794,7 @@
     "belongs": "DHS",
     "name": "Tiger-DHS3080",
     "game_type": "JJBXGRAND",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -2758,7 +2830,7 @@
     "belongs": "DHS",
     "name": "Tiger-DHS3084",
     "game_type": "JJBXGRAND",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -2893,7 +2965,7 @@
     "belongs": "DHS",
     "name": "Triple Festival-DHS3058",
     "game_type": "FULAICAILAI",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -2938,7 +3010,7 @@
     "belongs": "DHS",
     "name": "Wild Destiny-DHS3063",
     "game_type": "FULAICAILAI",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -3055,8 +3127,8 @@
     "belongs": "DHS",
     "name": "Wild Luxury-DHS3076",
     "game_type": "FULAICAILAI",
-    "status": "normal",
-    "online": "online",
+    "status": "maintain",
+    "online": "offline",
     "is_test": false
   },
   {
@@ -3064,7 +3136,7 @@
     "belongs": "DHS",
     "name": "Wild Luxury-DHS3077",
     "game_type": "FULAICAILAI",
-    "status": "normal",
+    "status": "maintain",
     "online": "online",
     "is_test": false
   },
@@ -3946,7 +4018,7 @@
     "belongs": "NCH",
     "name": "5 Dragons Pearl-NCH1084",
     "game_type": "Stand Alone",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -3955,7 +4027,7 @@
     "belongs": "NCH",
     "name": "5 Dragons Pearl-NCH1085",
     "game_type": "Stand Alone",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -3964,7 +4036,7 @@
     "belongs": "NCH",
     "name": "5 Dragons Pearl-NCH1086",
     "game_type": "Stand Alone",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -3982,7 +4054,7 @@
     "belongs": "NCH",
     "name": "5 DRAGONS PEARL-NCH1441",
     "game_type": "Stand Alone",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -3991,7 +4063,7 @@
     "belongs": "NCH",
     "name": "5 DRAGONS PEARL-NCH1442",
     "game_type": "Stand Alone",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -4000,7 +4072,7 @@
     "belongs": "NCH",
     "name": "5 DRAGONS PEARL-NCH1443",
     "game_type": "Stand Alone",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -4034,315 +4106,315 @@
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "5 Treasures-NCH1151(TEST)",
+    "name": "5 Treasures-NCH1151",
     "game_type": "₱0.5 Duo Fu Duo Cai",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "5 Treasures-NCH1152(TEST)",
+    "name": "5 Treasures-NCH1152",
     "game_type": "₱0.5 Duo Fu Duo Cai",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "5 Treasures-NCH1153(TEST)",
+    "name": "5 Treasures-NCH1153",
     "game_type": "₱0.5 Duo Fu Duo Cai",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "5 Treasures-NCH1154(TEST)",
+    "name": "5 Treasures-NCH1154",
     "game_type": "₱0.5 Duo Fu Duo Cai",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "5 Treasures-NCH1155(TEST)",
+    "name": "5 Treasures-NCH1155",
     "game_type": "₱0.5 Duo Fu Duo Cai",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "5 Treasures-NCH1156(TEST)",
+    "name": "5 Treasures-NCH1156",
     "game_type": "₱0.5 Duo Fu Duo Cai",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "5 Treasures-NCH1157(TEST)",
+    "name": "5 Treasures-NCH1157",
     "game_type": "₱0.5 Duo Fu Duo Cai",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "5 Treasures-NCH1158(TEST)",
+    "name": "5 Treasures-NCH1158",
     "game_type": "₱0.5 Duo Fu Duo Cai",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "5 Treasures-NCH1159(TEST)",
+    "name": "5 Treasures-NCH1159",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "5 Treasures-NCH1160(TEST)",
+    "name": "5 Treasures-NCH1160",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "5 Treasures-NCH1161(TEST)",
+    "name": "5 Treasures-NCH1161",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "5 Treasures-NCH1162(TEST)",
+    "name": "5 Treasures-NCH1162",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "5 Treasures-NCH1174(TEST)",
+    "name": "5 Treasures-NCH1174",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "5 Treasures-NCH1175(TEST)",
+    "name": "5 Treasures-NCH1175",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "5 Treasures-NCH1176(TEST)",
+    "name": "5 Treasures-NCH1176",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "5 Treasures-NCH1177(TEST)",
+    "name": "5 Treasures-NCH1177",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "5 Treasures-NCH1178(TEST)",
+    "name": "5 Treasures-NCH1178",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "88 Fortunes-NCH1163(TEST)",
+    "name": "88 Fortunes-NCH1163",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "88 Fortunes-NCH1164(TEST)",
+    "name": "88 Fortunes-NCH1164",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "88 Fortunes-NCH1165(TEST)",
+    "name": "88 Fortunes-NCH1165",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "88 Fortunes-NCH1166(TEST)",
+    "name": "88 Fortunes-NCH1166",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "88 Fortunes-NCH1167(TEST)",
+    "name": "88 Fortunes-NCH1167",
     "game_type": "₱0.5 Duo Fu Duo Cai",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "88 Fortunes-NCH1168(TEST)",
+    "name": "88 Fortunes-NCH1168",
     "game_type": "₱0.5 Duo Fu Duo Cai",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "88 Fortunes-NCH1169(TEST)",
+    "name": "88 Fortunes-NCH1169",
     "game_type": "₱0.5 Duo Fu Duo Cai",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "88 Fortunes-NCH1170(TEST)",
+    "name": "88 Fortunes-NCH1170",
     "game_type": "₱0.5 Duo Fu Duo Cai",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "88 Fortunes-NCH1365(TEST)",
+    "name": "88 Fortunes-NCH1365",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "88 Fortunes-NCH1366(TEST)",
+    "name": "88 Fortunes-NCH1366",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "88 Fortunes-NCH1371(TEST)",
+    "name": "88 Fortunes-NCH1371",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "88 Fortunes-NCH1372(TEST)",
+    "name": "88 Fortunes-NCH1372",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "88 Fortunes-NCH1373(TEST)",
+    "name": "88 Fortunes-NCH1373",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "88 Fortunes-NCH1374(TEST)",
+    "name": "88 Fortunes-NCH1374",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "88 Fortunes-NCH1375(TEST)",
+    "name": "88 Fortunes-NCH1375",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "88 Fortunes-NCH1376(TEST)",
+    "name": "88 Fortunes-NCH1376",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "88 Fortunes-NCH1378(TEST)",
+    "name": "88 Fortunes-NCH1378",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
     "name": "Autumn Moon-NCH1276",
     "game_type": "Dragon Link",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -4387,7 +4459,7 @@
     "belongs": "NCH",
     "name": "Autumn Moon-NCH1281",
     "game_type": "Dragon Link",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -4414,7 +4486,7 @@
     "belongs": "NCH",
     "name": "Beauty-NCH1423",
     "game_type": "LIGHTNINGGONGS",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -4441,7 +4513,7 @@
     "belongs": "NCH",
     "name": "Beauty-NCH1426",
     "game_type": "LIGHTNINGGONGS",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -4450,7 +4522,7 @@
     "belongs": "NCH",
     "name": "Blue Festival-NCH1122",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -4477,7 +4549,7 @@
     "belongs": "NCH",
     "name": "Blue Festival-NCH1125",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -4522,7 +4594,7 @@
     "belongs": "NCH",
     "name": "Blue Festival-NCH1130",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -4549,7 +4621,7 @@
     "belongs": "NCH",
     "name": "Blue Festival-NCH1133",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -4558,7 +4630,7 @@
     "belongs": "NCH",
     "name": "Blue Festival-NCH1134",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -4567,7 +4639,7 @@
     "belongs": "NCH",
     "name": "Blue Festival-NCH1135",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -4583,20 +4655,20 @@
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Blue Festival-NCH1388(TEST)",
+    "name": "Blue Festival-NCH1388",
     "game_type": "Bao Zhu Zhao Fu",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Blue Festival-NCH1389(TEST)",
+    "name": "Blue Festival-NCH1389",
     "game_type": "Bao Zhu Zhao Fu",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
@@ -4613,7 +4685,7 @@
     "name": "Blue Festival-NCH1391",
     "game_type": "Bao Zhu Zhao Fu",
     "status": "normal",
-    "online": "offline",
+    "online": "online",
     "is_test": false
   },
   {
@@ -4621,7 +4693,7 @@
     "belongs": "NCH",
     "name": "Blue Festival-NCH1392",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -4630,7 +4702,7 @@
     "belongs": "NCH",
     "name": "Blue Festival-NCH1393",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -4648,7 +4720,7 @@
     "belongs": "NCH",
     "name": "Blue Festival-NCH1483",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -4657,117 +4729,117 @@
     "belongs": "NCH",
     "name": "Blue Festival-NCH1484",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Dancing Drums-NCH1171(TEST)",
+    "name": "Dancing Drums-NCH1171",
     "game_type": "₱0.5 Duo Fu Duo Cai",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Dancing Drums-NCH1172(TEST)",
+    "name": "Dancing Drums-NCH1172",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Dancing Drums-NCH1173(TEST)",
+    "name": "Dancing Drums-NCH1173",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Diamond Eternity-NCH1357(TEST)",
+    "name": "Diamond Eternity-NCH1357",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Diamond Eternity-NCH1358(TEST)",
+    "name": "Diamond Eternity-NCH1358",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Diamond Eternity-NCH1359(TEST)",
+    "name": "Diamond Eternity-NCH1359",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Diamond Eternity-NCH1360(TEST)",
+    "name": "Diamond Eternity-NCH1360",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Diamond Eternity-NCH1361(TEST)",
+    "name": "Diamond Eternity-NCH1361",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Diamond Eternity-NCH1362(TEST)",
+    "name": "Diamond Eternity-NCH1362",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Diamond Eternity-NCH1363(TEST)",
+    "name": "Diamond Eternity-NCH1363",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Diamond Eternity-NCH1364(TEST)",
+    "name": "Diamond Eternity-NCH1364",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Diamond Eternity-NCH1377(TEST)",
+    "name": "Diamond Eternity-NCH1377",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
@@ -4783,7 +4855,7 @@
     "belongs": "NCH",
     "name": "Dragons Trio-NCH1457",
     "game_type": "DRAGONTRIO",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -4792,7 +4864,7 @@
     "belongs": "NCH",
     "name": "Dragons Trio-NCH1458",
     "game_type": "DRAGONTRIO",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -4801,7 +4873,7 @@
     "belongs": "NCH",
     "name": "Dragons Trio-NCH1459",
     "game_type": "DRAGONTRIO",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -4810,7 +4882,7 @@
     "belongs": "NCH",
     "name": "Dragons Trio-NCH1460",
     "game_type": "DRAGONTRIO",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -4828,7 +4900,7 @@
     "belongs": "NCH",
     "name": "Dragons Trio-NCH1462",
     "game_type": "DRAGONTRIO",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -4873,7 +4945,7 @@
     "belongs": "NCH",
     "name": "Dragons Trio-NCH1467",
     "game_type": "DRAGONTRIO",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -4889,11 +4961,83 @@
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Flower of Riches-NCH1367(TEST)",
+    "name": "Flower of Riches-NCH1367",
     "game_type": "dfdc10pct",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
+  },
+  {
+    "environment": "PROD",
+    "belongs": "NCH",
+    "name": "Fortune Trails-NCH1496",
+    "game_type": "COINTRIO",
+    "status": "occupy",
+    "online": "online",
+    "is_test": false
+  },
+  {
+    "environment": "PROD",
+    "belongs": "NCH",
+    "name": "Fortune Trails-NCH1497",
+    "game_type": "COINTRIO",
+    "status": "occupy",
+    "online": "online",
+    "is_test": false
+  },
+  {
+    "environment": "PROD",
+    "belongs": "NCH",
+    "name": "Fortune Trails-NCH1499",
+    "game_type": "COINTRIO",
+    "status": "occupy",
+    "online": "online",
+    "is_test": false
+  },
+  {
+    "environment": "PROD",
+    "belongs": "NCH",
+    "name": "Fortune Trails-NCH1500",
+    "game_type": "COINTRIO",
+    "status": "occupy",
+    "online": "online",
+    "is_test": false
+  },
+  {
+    "environment": "PROD",
+    "belongs": "NCH",
+    "name": "Fortune Trails-NCH1501",
+    "game_type": "COINTRIO",
+    "status": "occupy",
+    "online": "online",
+    "is_test": false
+  },
+  {
+    "environment": "PROD",
+    "belongs": "NCH",
+    "name": "Fortune Trails-NCH1502",
+    "game_type": "COINTRIO",
+    "status": "normal",
+    "online": "online",
+    "is_test": false
+  },
+  {
+    "environment": "PROD",
+    "belongs": "NCH",
+    "name": "Fortune Trails-NCH1503",
+    "game_type": "COINTRIO",
+    "status": "occupy",
+    "online": "online",
+    "is_test": false
+  },
+  {
+    "environment": "PROD",
+    "belongs": "NCH",
+    "name": "Fortune Trails-NCH1504",
+    "game_type": "COINTRIO",
+    "status": "occupy",
+    "online": "online",
+    "is_test": false
   },
   {
     "environment": "PROD",
@@ -4909,7 +5053,7 @@
     "belongs": "NCH",
     "name": "Fortunes-NCH1433",
     "game_type": "LIGHTNINGGONGS",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -4918,7 +5062,7 @@
     "belongs": "NCH",
     "name": "Fortunes-NCH1434",
     "game_type": "LIGHTNINGGONGS",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -4927,7 +5071,7 @@
     "belongs": "NCH",
     "name": "Fortunes-NCH1435",
     "game_type": "LIGHTNINGGONGS",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -4954,7 +5098,7 @@
     "belongs": "NCH",
     "name": "Golden Century-NCH1254",
     "game_type": "Dragon Link",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -4963,7 +5107,7 @@
     "belongs": "NCH",
     "name": "Golden Century-NCH1255",
     "game_type": "Dragon Link",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -4972,7 +5116,7 @@
     "belongs": "NCH",
     "name": "Golden Century-NCH1256",
     "game_type": "Dragon Link",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5116,7 +5260,7 @@
     "belongs": "NCH",
     "name": "Golden Century-NCH1272",
     "game_type": "Dragon Link",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5125,7 +5269,7 @@
     "belongs": "NCH",
     "name": "Golden Century-NCH1273",
     "game_type": "Dragon Link",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -5152,7 +5296,7 @@
     "belongs": "NCH",
     "name": "Happy And Prosperous-NCH1234",
     "game_type": "Dragon Link",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -5170,7 +5314,7 @@
     "belongs": "NCH",
     "name": "Happy And Prosperous-NCH1236",
     "game_type": "Dragon Link",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5179,7 +5323,7 @@
     "belongs": "NCH",
     "name": "Happy And Prosperous-NCH1237",
     "game_type": "Dragon Link",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5188,7 +5332,7 @@
     "belongs": "NCH",
     "name": "Happy And Prosperous-NCH1238",
     "game_type": "Dragon Link",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -5251,7 +5395,7 @@
     "belongs": "NCH",
     "name": "Happy And Prosperous-NCH1245",
     "game_type": "Dragon Link",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5260,7 +5404,7 @@
     "belongs": "NCH",
     "name": "Happy And Prosperous-NCH1246",
     "game_type": "Dragon Link",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -5287,7 +5431,7 @@
     "belongs": "NCH",
     "name": "Happy And Prosperous-NCH1249",
     "game_type": "Dragon Link",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -5296,7 +5440,7 @@
     "belongs": "NCH",
     "name": "Happy And Prosperous-NCH1250",
     "game_type": "Dragon Link",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5305,7 +5449,7 @@
     "belongs": "NCH",
     "name": "Happy And Prosperous-NCH1251",
     "game_type": "Dragon Link",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5314,7 +5458,7 @@
     "belongs": "NCH",
     "name": "Huff n Even More Puff-NCH1444",
     "game_type": "MOREPUFF",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -5323,7 +5467,7 @@
     "belongs": "NCH",
     "name": "Huff n Even More Puff-NCH1445",
     "game_type": "MOREPUFF",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -5332,7 +5476,7 @@
     "belongs": "NCH",
     "name": "Huff n Even More Puff-NCH1446",
     "game_type": "MOREPUFF",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -5341,7 +5485,7 @@
     "belongs": "NCH",
     "name": "Huff n Even More Puff-NCH1447",
     "game_type": "MOREPUFF",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5350,7 +5494,7 @@
     "belongs": "NCH",
     "name": "Huff n Even More Puff-NCH1448",
     "game_type": "MOREPUFF",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5368,7 +5512,7 @@
     "belongs": "NCH",
     "name": "Huff n Even More Puff-NCH1450",
     "game_type": "MOREPUFF",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5386,7 +5530,7 @@
     "belongs": "NCH",
     "name": "Huff n Even More Puff-NCH1452",
     "game_type": "MOREPUFF",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5431,7 +5575,7 @@
     "belongs": "NCH",
     "name": "Jade Celebration-NCH1220",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -5449,7 +5593,7 @@
     "belongs": "NCH",
     "name": "Jade Celebration-NCH1222",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -5458,7 +5602,7 @@
     "belongs": "NCH",
     "name": "Jade Celebration-NCH1223",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5474,27 +5618,27 @@
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Jade Celebration-NCH1225(TEST)",
+    "name": "Jade Celebration-NCH1225",
     "game_type": "Bao Zhu Zhao Fu",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Jade Celebration-NCH1226(TEST)",
+    "name": "Jade Celebration-NCH1226",
     "game_type": "Bao Zhu Zhao Fu",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
     "name": "Jade Celebration-NCH1227",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5512,7 +5656,7 @@
     "belongs": "NCH",
     "name": "Jade Celebration-NCH1229",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -5521,7 +5665,7 @@
     "belongs": "NCH",
     "name": "Jade Celebration-NCH1230",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5530,7 +5674,7 @@
     "belongs": "NCH",
     "name": "Jade Celebration-NCH1231",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5548,7 +5692,7 @@
     "belongs": "NCH",
     "name": "Jade Celebration-NCH1233",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5566,7 +5710,7 @@
     "belongs": "NCH",
     "name": "Jade Celebration-NCH1480",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5575,7 +5719,7 @@
     "belongs": "NCH",
     "name": "King-NCH1427",
     "game_type": "LIGHTNINGGONGS",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -5602,7 +5746,7 @@
     "belongs": "NCH",
     "name": "King-NCH1430",
     "game_type": "LIGHTNINGGONGS",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -5611,7 +5755,7 @@
     "belongs": "NCH",
     "name": "King-NCH1431",
     "game_type": "LIGHTNINGGONGS",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -5638,7 +5782,7 @@
     "belongs": "NCH",
     "name": "Lions-NCH1438",
     "game_type": "LIGHTNINGGONGS",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5647,7 +5791,7 @@
     "belongs": "NCH",
     "name": "Lions-NCH1439",
     "game_type": "LIGHTNINGGONGS",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -5701,7 +5845,7 @@
     "belongs": "NCH",
     "name": "MR LEE-NCH1420",
     "game_type": "Super Hot Flaming Pots",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -5710,7 +5854,7 @@
     "belongs": "NCH",
     "name": "MR LEE-NCH1421",
     "game_type": "Super Hot Flaming Pots",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5728,7 +5872,7 @@
     "belongs": "NCH",
     "name": "MRS WONG-NCH1408",
     "game_type": "Super Hot Flaming Pots",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -5737,7 +5881,7 @@
     "belongs": "NCH",
     "name": "MRS WONG-NCH1409",
     "game_type": "Super Hot Flaming Pots",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5746,7 +5890,7 @@
     "belongs": "NCH",
     "name": "MRS WONG-NCH1410",
     "game_type": "Super Hot Flaming Pots",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -5764,7 +5908,7 @@
     "belongs": "NCH",
     "name": "MRS WONG-NCH1412",
     "game_type": "Super Hot Flaming Pots",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5791,7 +5935,7 @@
     "belongs": "NCH",
     "name": "Panda Magic-NCH1295",
     "game_type": "Dragon Link",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5800,7 +5944,7 @@
     "belongs": "NCH",
     "name": "Panda Magic-NCH1296",
     "game_type": "Dragon Link",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -5809,7 +5953,7 @@
     "belongs": "NCH",
     "name": "Panda Magic-NCH1297",
     "game_type": "Dragon Link",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5845,7 +5989,7 @@
     "belongs": "NCH",
     "name": "Panda Magic-NCH1301",
     "game_type": "Dragon Link",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5854,6 +5998,24 @@
     "belongs": "NCH",
     "name": "Panda Magic-NCH1302",
     "game_type": "Dragon Link",
+    "status": "normal",
+    "online": "online",
+    "is_test": false
+  },
+  {
+    "environment": "PROD",
+    "belongs": "NCH",
+    "name": "Prosperity Trails-NCH1488",
+    "game_type": "COINTRIO",
+    "status": "normal",
+    "online": "online",
+    "is_test": false
+  },
+  {
+    "environment": "PROD",
+    "belongs": "NCH",
+    "name": "Prosperity Trails-NCH1489",
+    "game_type": "COINTRIO",
     "status": "occupy",
     "online": "online",
     "is_test": false
@@ -5861,8 +6023,53 @@
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Purple Celebration-NCH1202",
-    "game_type": "Bao Zhu Zhao Fu",
+    "name": "Prosperity Trails-NCH1490",
+    "game_type": "COINTRIO",
+    "status": "occupy",
+    "online": "online",
+    "is_test": false
+  },
+  {
+    "environment": "PROD",
+    "belongs": "NCH",
+    "name": "Prosperity Trails-NCH1491",
+    "game_type": "COINTRIO",
+    "status": "occupy",
+    "online": "online",
+    "is_test": false
+  },
+  {
+    "environment": "PROD",
+    "belongs": "NCH",
+    "name": "Prosperity Trails-NCH1492",
+    "game_type": "COINTRIO",
+    "status": "occupy",
+    "online": "online",
+    "is_test": false
+  },
+  {
+    "environment": "PROD",
+    "belongs": "NCH",
+    "name": "Prosperity Trails-NCH1493",
+    "game_type": "COINTRIO",
+    "status": "occupy",
+    "online": "online",
+    "is_test": false
+  },
+  {
+    "environment": "PROD",
+    "belongs": "NCH",
+    "name": "Prosperity Trails-NCH1494",
+    "game_type": "COINTRIO",
+    "status": "normal",
+    "online": "online",
+    "is_test": false
+  },
+  {
+    "environment": "PROD",
+    "belongs": "NCH",
+    "name": "Prosperity Trails-NCH1495",
+    "game_type": "COINTRIO",
     "status": "occupy",
     "online": "online",
     "is_test": false
@@ -5879,7 +6086,7 @@
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Purple Celebration-NCH1204",
+    "name": "Purple Celebration-NCH1205",
     "game_type": "Bao Zhu Zhao Fu",
     "status": "occupy",
     "online": "online",
@@ -5888,16 +6095,16 @@
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Purple Celebration-NCH1205",
+    "name": "Purple Celebration-NCH1206",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Purple Celebration-NCH1206",
+    "name": "Purple Celebration-NCH1207",
     "game_type": "Bao Zhu Zhao Fu",
     "status": "occupy",
     "online": "online",
@@ -5926,7 +6133,7 @@
     "belongs": "NCH",
     "name": "Purple Celebration-NCH1209",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5953,7 +6160,7 @@
     "belongs": "NCH",
     "name": "Purple Celebration-NCH1212",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5962,7 +6169,7 @@
     "belongs": "NCH",
     "name": "Purple Celebration-NCH1213",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5971,7 +6178,7 @@
     "belongs": "NCH",
     "name": "Purple Celebration-NCH1214",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -5980,7 +6187,7 @@
     "belongs": "NCH",
     "name": "Purple Celebration-NCH1215",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -5998,7 +6205,7 @@
     "belongs": "NCH",
     "name": "Purple Celebration-NCH1217",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6016,7 +6223,7 @@
     "belongs": "NCH",
     "name": "Purple Celebration-NCH1395",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -6052,7 +6259,7 @@
     "belongs": "NCH",
     "name": "Purple Celebration-NCH1399",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6061,7 +6268,7 @@
     "belongs": "NCH",
     "name": "Purple Celebration-NCH1400",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6077,11 +6284,11 @@
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Purple Celebration-NCH1402(TEST)",
+    "name": "Purple Celebration-NCH1402",
     "game_type": "Bao Zhu Zhao Fu",
     "status": "normal",
     "online": "online",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
@@ -6104,27 +6311,27 @@
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Purple Celebration-NCH1405(TEST)",
+    "name": "Purple Celebration-NCH1405",
     "game_type": "Bao Zhu Zhao Fu",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Purple Celebration-NCH1406(TEST)",
+    "name": "Purple Celebration-NCH1406",
     "game_type": "Bao Zhu Zhao Fu",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
     "name": "Purple Celebration-NCH1485",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6142,7 +6349,7 @@
     "belongs": "NCH",
     "name": "Red Festival-NCH1137",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -6178,7 +6385,7 @@
     "belongs": "NCH",
     "name": "Red Festival-NCH1141",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -6187,7 +6394,7 @@
     "belongs": "NCH",
     "name": "Red Festival-NCH1142",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -6196,7 +6403,7 @@
     "belongs": "NCH",
     "name": "Red Festival-NCH1143",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6205,7 +6412,7 @@
     "belongs": "NCH",
     "name": "Red Festival-NCH1144",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6214,7 +6421,7 @@
     "belongs": "NCH",
     "name": "Red Festival-NCH1145",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -6241,7 +6448,7 @@
     "belongs": "NCH",
     "name": "Red Festival-NCH1148",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6268,7 +6475,7 @@
     "belongs": "NCH",
     "name": "Red Festival-NCH1199",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6286,7 +6493,7 @@
     "belongs": "NCH",
     "name": "Red Festival-NCH1201",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -6313,7 +6520,7 @@
     "belongs": "NCH",
     "name": "Red Festival-NCH1381",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6322,7 +6529,7 @@
     "belongs": "NCH",
     "name": "Red Festival-NCH1382",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6331,7 +6538,7 @@
     "belongs": "NCH",
     "name": "Red Festival-NCH1383",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -6340,7 +6547,7 @@
     "belongs": "NCH",
     "name": "Red Festival-NCH1384",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6356,27 +6563,27 @@
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Red Festival-NCH1386(TEST)",
+    "name": "Red Festival-NCH1386",
     "game_type": "Bao Zhu Zhao Fu",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
-    "name": "Red Festival-NCH1387(TEST)",
+    "name": "Red Festival-NCH1387",
     "game_type": "Bao Zhu Zhao Fu",
     "status": "maintain",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NCH",
     "name": "Red Festival-NCH1481",
     "game_type": "Bao Zhu Zhao Fu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6386,6 +6593,15 @@
     "name": "Red Festival-NCH1482",
     "game_type": "Bao Zhu Zhao Fu",
     "status": "normal",
+    "online": "online",
+    "is_test": false
+  },
+  {
+    "environment": "PROD",
+    "belongs": "NCH",
+    "name": "Spring Festival-NCH1311",
+    "game_type": "Dragon Link",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -6421,7 +6637,7 @@
     "belongs": "NCH",
     "name": "Spring Festival-NCH1314",
     "game_type": "Dragon Link",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6431,6 +6647,15 @@
     "name": "Spring Festival-NCH1315",
     "game_type": "Dragon Link",
     "status": "occupy",
+    "online": "online",
+    "is_test": false
+  },
+  {
+    "environment": "PROD",
+    "belongs": "NCH",
+    "name": "Spring Festival-NCH1315",
+    "game_type": "Dragon Link",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6484,7 +6709,7 @@
     "belongs": "NP",
     "name": "5 Dragons Deluxe -NWR2134",
     "game_type": "Standalone",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6511,7 +6736,7 @@
     "belongs": "NP",
     "name": "5 Dragons Gold -NWR2136",
     "game_type": "Standalone",
-    "status": "maintain",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6520,7 +6745,7 @@
     "belongs": "NP",
     "name": "5 Dragons Gold -NWR2137",
     "game_type": "Standalone",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -6529,7 +6754,7 @@
     "belongs": "NP",
     "name": "5 Dragons Gold -NWR2151",
     "game_type": "Standalone",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6538,7 +6763,7 @@
     "belongs": "NP",
     "name": "5 Dragons Gold-NWR2201",
     "game_type": "Standalone",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -6574,7 +6799,7 @@
     "belongs": "NP",
     "name": "5 Dragons Gold-NWR2206",
     "game_type": "Standalone",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6610,7 +6835,7 @@
     "belongs": "NP",
     "name": "5 Dragons Rapid -NWR2145",
     "game_type": "Standalone",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6619,7 +6844,7 @@
     "belongs": "NP",
     "name": "5 Dragons Rapid -NWR2146",
     "game_type": "Standalone",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -6628,7 +6853,7 @@
     "belongs": "NP",
     "name": "5 Dragons Rapid-NWR2147",
     "game_type": "Standalone",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6637,18 +6862,18 @@
     "belongs": "NP",
     "name": "5 Dragons-NWR2113",
     "game_type": "WLZB",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NP",
-    "name": "5 Dragons-NWR2114(TEST)",
+    "name": "5 Dragons-NWR2114",
     "game_type": "WLZB",
-    "status": "maintain",
-    "online": "offline",
-    "is_test": true
+    "status": "normal",
+    "online": "online",
+    "is_test": false
   },
   {
     "environment": "PROD",
@@ -6664,7 +6889,7 @@
     "belongs": "NP",
     "name": "5 Dragons-NWR2116",
     "game_type": "WLZB",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6691,7 +6916,7 @@
     "belongs": "NP",
     "name": "5 Dragons-NWR2119",
     "game_type": "WLZB",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -6718,7 +6943,7 @@
     "belongs": "NP",
     "name": "5 Koi Legend-NWR2131",
     "game_type": "WLZB",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6727,7 +6952,7 @@
     "belongs": "NP",
     "name": "5 Koi-NWR2127",
     "game_type": "WLZB",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6826,7 +7051,7 @@
     "belongs": "NP",
     "name": "Bats Dragon-NWR2070",
     "game_type": "BIG FU CASH",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -6916,7 +7141,7 @@
     "belongs": "NP",
     "name": "DIAMOND ETERNITY VIP-NWR2199",
     "game_type": "Standalone",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6943,7 +7168,7 @@
     "belongs": "NP",
     "name": "Dragon Flies-NWR2048",
     "game_type": "Mighty Cash",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6952,7 +7177,7 @@
     "belongs": "NP",
     "name": "Dragon Flies-NWR2049",
     "game_type": "Mighty Cash",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6961,7 +7186,7 @@
     "belongs": "NP",
     "name": "Dragon Flies-NWR2050",
     "game_type": "Mighty Cash",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -6970,7 +7195,7 @@
     "belongs": "NP",
     "name": "Dragon Flies-NWR2051",
     "game_type": "Mighty Cash",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -7006,7 +7231,7 @@
     "belongs": "NP",
     "name": "Dragon Flies-NWR2055",
     "game_type": "Mighty Cash",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -7015,7 +7240,7 @@
     "belongs": "NP",
     "name": "Dragon Flies-NWR2056",
     "game_type": "Mighty Cash",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -7024,7 +7249,7 @@
     "belongs": "NP",
     "name": "Dragon Flies-NWR2057",
     "game_type": "Mighty Cash",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -7060,7 +7285,7 @@
     "belongs": "NP",
     "name": "Dragon's Riches-NWR2085",
     "game_type": "Lightning Link",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -7105,7 +7330,7 @@
     "belongs": "NP",
     "name": "Dragon's Riches-NWR2090",
     "game_type": "Lightning Link",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -7249,7 +7474,7 @@
     "belongs": "NP",
     "name": "Dynamite Dash Dual-NWR2173",
     "game_type": "All Aboard",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -7258,7 +7483,7 @@
     "belongs": "NP",
     "name": "Dynamite Dash Dual-NWR2174",
     "game_type": "All Aboard",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -7276,7 +7501,7 @@
     "belongs": "NP",
     "name": "Dynamite Dash Dual-NWR2179",
     "game_type": "All Aboard",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -7285,7 +7510,7 @@
     "belongs": "NP",
     "name": "Dynamite Dash Dual-NWR2180",
     "game_type": "All Aboard",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -7294,7 +7519,7 @@
     "belongs": "NP",
     "name": "Emperor-NWR2001",
     "game_type": "Ba Bao Huang Long",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -7339,7 +7564,7 @@
     "belongs": "NP",
     "name": "Emperor-NWR2006",
     "game_type": "Ba Bao Huang Long",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -7366,7 +7591,7 @@
     "belongs": "NP",
     "name": "Emperor-NWR2009",
     "game_type": "Ba Bao Huang Long",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -7384,7 +7609,7 @@
     "belongs": "NP",
     "name": "Emperor-NWR2011",
     "game_type": "Ba Bao Huang Long",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -7411,7 +7636,7 @@
     "belongs": "NP",
     "name": "Emperor-NWR2026",
     "game_type": "Tian Ci Jin Lu",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -7429,7 +7654,7 @@
     "belongs": "NP",
     "name": "Emperor-NWR2028",
     "game_type": "Tian Ci Jin Lu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -7474,7 +7699,7 @@
     "belongs": "NP",
     "name": "Emperor-NWR2033",
     "game_type": "Tian Ci Jin Lu",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -7501,7 +7726,7 @@
     "belongs": "NP",
     "name": "Eyes Of Fortune-NWR2111",
     "game_type": "Lightning Link",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -7510,7 +7735,7 @@
     "belongs": "NP",
     "name": "Eyes Of Fortune-NWR2112",
     "game_type": "Lightning Link",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -7537,7 +7762,7 @@
     "belongs": "NP",
     "name": "Fortune King Deluxe-NWR2124",
     "game_type": "WLZB",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -7555,7 +7780,7 @@
     "belongs": "NP",
     "name": "Fortune King Deluxe-NWR2126",
     "game_type": "WLZB",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -7573,7 +7798,7 @@
     "belongs": "NP",
     "name": "Fortune King Rapid -NWR2148",
     "game_type": "Standalone",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -7582,7 +7807,7 @@
     "belongs": "NP",
     "name": "Fortune King Rapid -NWR2149",
     "game_type": "Standalone",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -7591,7 +7816,7 @@
     "belongs": "NP",
     "name": "Golden Power Ingots-NWR2166",
     "game_type": "Lions Reward",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -7609,7 +7834,7 @@
     "belongs": "NP",
     "name": "Golden Power Ingots-NWR2168",
     "game_type": "Lions Reward",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -7636,7 +7861,7 @@
     "belongs": "NP",
     "name": "Golden Zodiac-NWR2140",
     "game_type": "Standalone",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -7726,7 +7951,7 @@
     "belongs": "NP",
     "name": "Happy Lantern-NWR2099",
     "game_type": "Lightning Link",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -7798,7 +8023,7 @@
     "belongs": "NP",
     "name": "Happy Lantern-NWR2107",
     "game_type": "Lightning Link",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -7807,7 +8032,7 @@
     "belongs": "NP",
     "name": "Happy Lantern-NWR2108",
     "game_type": "Lightning Link",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -7861,7 +8086,7 @@
     "belongs": "NP",
     "name": "Ingot-NWR2017",
     "game_type": "Ba Bao Huang Long",
-    "status": "metercheck",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -8032,18 +8257,18 @@
     "belongs": "NP",
     "name": "Phoenix-NWR2035",
     "game_type": "Tian Ci Jin Lu",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NP",
-    "name": "Phoenix-NWR2036(TEST)",
+    "name": "Phoenix-NWR2036",
     "game_type": "Tian Ci Jin Lu",
-    "status": "maintain",
-    "online": "offline",
-    "is_test": true
+    "status": "normal",
+    "online": "online",
+    "is_test": false
   },
   {
     "environment": "PROD",
@@ -8122,36 +8347,36 @@
     "belongs": "NP",
     "name": "Piggy Pennies Dual-NWR2181",
     "game_type": "All Aboard",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NP",
-    "name": "Piggy Pennies Dual-NWR2182(TEST)",
+    "name": "Piggy Pennies Dual-NWR2182",
     "game_type": "All Aboard",
-    "status": "maintain",
+    "status": "normal",
     "online": "online",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NP",
     "name": "Piggy Pennies Dual-NWR2183",
     "game_type": "All Aboard",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
   {
     "environment": "PROD",
     "belongs": "NP",
-    "name": "Power of Riches-NWR2190(TEST)",
+    "name": "Power of Riches-NWR2190",
     "game_type": "Standalone",
-    "status": "maintain",
-    "online": "offline",
-    "is_test": true
+    "status": "normal",
+    "online": "online",
+    "is_test": false
   },
   {
     "environment": "PROD",
@@ -8201,11 +8426,11 @@
   {
     "environment": "PROD",
     "belongs": "NP",
-    "name": "Tiger Roars-NWR2062(TEST)",
+    "name": "Tiger Roars-NWR2062",
     "game_type": "Mighty Cash",
-    "status": "maintain",
+    "status": "normal",
     "online": "online",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "PROD",
@@ -8248,7 +8473,7 @@
     "belongs": "TBP",
     "name": "Dragons-TBP8627",
     "game_type": "DFDCGRAND",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -8266,7 +8491,7 @@
     "belongs": "TBP",
     "name": "Dragons-TBP8629",
     "game_type": "DFDCGRAND",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -8275,7 +8500,7 @@
     "belongs": "TBP",
     "name": "Dragons-TBP8630",
     "game_type": "DFDCGRAND",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -8284,7 +8509,7 @@
     "belongs": "TBP",
     "name": "Dragons-TBP8631",
     "game_type": "DFDCGRAND",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -8374,7 +8599,7 @@
     "belongs": "TBP",
     "name": "Dragons-TBP8651",
     "game_type": "DFDCGRAND",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -8401,7 +8626,7 @@
     "belongs": "TBP",
     "name": "Dragons-TBP8754",
     "game_type": "DFDCGRAND",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -8410,7 +8635,7 @@
     "belongs": "TBP",
     "name": "Dragons-TBP8755",
     "game_type": "DFDCGRAND",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -8428,7 +8653,7 @@
     "belongs": "TBP",
     "name": "Echo Fortunes-TBP8350",
     "game_type": "JJBX",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -8536,7 +8761,7 @@
     "belongs": "TBP",
     "name": "Echo Fortunes-TBP8535",
     "game_type": "JJBX",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -8554,7 +8779,7 @@
     "belongs": "TBP",
     "name": "Echo Fortunes-TBP8609",
     "game_type": "JJBX",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -8572,7 +8797,7 @@
     "belongs": "TBP",
     "name": "Echo Fortunes-TBP8611",
     "game_type": "JJBX",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -8716,7 +8941,7 @@
     "belongs": "TBP",
     "name": "Echo Fortunes-TBP8681",
     "game_type": "JJBX",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -8725,7 +8950,7 @@
     "belongs": "TBP",
     "name": "Echo Fortunes-TBP8682",
     "game_type": "JJBX",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -9139,7 +9364,7 @@
     "belongs": "TBP",
     "name": "Endless Treasure-TBP8353",
     "game_type": "JJBX",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -9148,7 +9373,7 @@
     "belongs": "TBP",
     "name": "Endless Treasure-TBP8359",
     "game_type": "JJBX",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -9157,7 +9382,7 @@
     "belongs": "TBP",
     "name": "Endless Treasure-TBP8414",
     "game_type": "JJBX",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -9175,7 +9400,7 @@
     "belongs": "TBP",
     "name": "Endless Treasure-TBP8423",
     "game_type": "JJBX",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -9220,7 +9445,7 @@
     "belongs": "TBP",
     "name": "Endless Treasure-TBP8531",
     "game_type": "JJBX",
-    "status": "occupy",
+    "status": "maintain",
     "online": "online",
     "is_test": false
   },
@@ -9229,7 +9454,7 @@
     "belongs": "TBP",
     "name": "Endless Treasure-TBP8618",
     "game_type": "JJBX",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -9256,7 +9481,7 @@
     "belongs": "TBP",
     "name": "Endless Treasure-TBP8621",
     "game_type": "JJBX",
-    "status": "normal",
+    "status": "maintain",
     "online": "online",
     "is_test": false
   },
@@ -9274,7 +9499,7 @@
     "belongs": "TBP",
     "name": "Endless Treasure-TBP8623",
     "game_type": "JJBX",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -9292,7 +9517,7 @@
     "belongs": "TBP",
     "name": "Endless Treasure-TBP8696",
     "game_type": "JJBX",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -9814,7 +10039,7 @@
     "belongs": "TBP",
     "name": "Ingotcha-TBP8639",
     "game_type": "DFDCGRAND",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -9823,7 +10048,7 @@
     "belongs": "TBP",
     "name": "Ingotcha-TBP8640",
     "game_type": "DFDCGRAND",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -9850,7 +10075,7 @@
     "belongs": "TBP",
     "name": "Ingotcha-TBP8643",
     "game_type": "DFDCGRAND",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -9859,7 +10084,7 @@
     "belongs": "TBP",
     "name": "Ingotcha-TBP8644",
     "game_type": "DFDCGRAND",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -9868,7 +10093,7 @@
     "belongs": "TBP",
     "name": "Ingotcha-TBP8645",
     "game_type": "DFDCGRAND",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -9877,7 +10102,7 @@
     "belongs": "TBP",
     "name": "Ingotcha-TBP8646",
     "game_type": "DFDCGRAND",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -9886,7 +10111,7 @@
     "belongs": "TBP",
     "name": "Ingotcha-TBP8654",
     "game_type": "DFDCGRAND",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -9922,7 +10147,7 @@
     "belongs": "TBP",
     "name": "Ingotcha-TBP8658",
     "game_type": "DFDCGRAND",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -9931,7 +10156,7 @@
     "belongs": "TBP",
     "name": "Ingotcha-TBP8659",
     "game_type": "DFDCGRAND",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -9949,7 +10174,7 @@
     "belongs": "TBP",
     "name": "Ingotcha-TBP8751",
     "game_type": "DFDCGRAND",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -10003,7 +10228,7 @@
     "belongs": "TBR",
     "name": "Autumn Moon-TBR2092",
     "game_type": "DRAGONLINK",
-    "status": "maintain",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -10039,7 +10264,7 @@
     "belongs": "TBR",
     "name": "Carnival Cow-TBR2010",
     "game_type": "COINCOMBO",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -10075,7 +10300,7 @@
     "belongs": "TBR",
     "name": "Carnival Cow-TBR2048",
     "game_type": "COINCOMBO",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -10084,7 +10309,7 @@
     "belongs": "TBR",
     "name": "Carnival Cow-TBR2049",
     "game_type": "COINCOMBO",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -10093,7 +10318,7 @@
     "belongs": "TBR",
     "name": "Carnival Cow-TBR2050",
     "game_type": "COINCOMBO",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -10111,7 +10336,7 @@
     "belongs": "TBR",
     "name": "Carnival Cow-TBR2058",
     "game_type": "COINCOMBO",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -10129,7 +10354,7 @@
     "belongs": "TBR",
     "name": "Carnival Cow-TBR2060",
     "game_type": "COINCOMBO",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -10147,7 +10372,7 @@
     "belongs": "TBR",
     "name": "Carnival Cow-TBR2062",
     "game_type": "COINCOMBO",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -10183,7 +10408,7 @@
     "belongs": "TBR",
     "name": "Carnival Cow-TBR2068",
     "game_type": "COINCOMBO",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -10210,7 +10435,7 @@
     "belongs": "TBR",
     "name": "Carnival Cow-TBR2071",
     "game_type": "COINCOMBO",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -10246,7 +10471,7 @@
     "belongs": "TBR",
     "name": "Golden Century-TBR2085",
     "game_type": "DRAGONLINK",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -10282,7 +10507,7 @@
     "belongs": "TBR",
     "name": "Golden Century-TBR2089",
     "game_type": "DRAGONLINK",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -10300,7 +10525,7 @@
     "belongs": "TBR",
     "name": "Golden Century-TBR2091",
     "game_type": "DRAGONLINK",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -10318,7 +10543,7 @@
     "belongs": "TBR",
     "name": "Happy And Prosperous-TBR2102",
     "game_type": "DRAGONLINK",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -10336,7 +10561,7 @@
     "belongs": "TBR",
     "name": "Happy And Prosperous-TBR2104",
     "game_type": "DRAGONLINK",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -10345,7 +10570,7 @@
     "belongs": "TBR",
     "name": "Happy And Prosperous-TBR2105",
     "game_type": "DRAGONLINK",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -10354,7 +10579,7 @@
     "belongs": "TBR",
     "name": "Happy And Prosperous-TBR2106",
     "game_type": "DRAGONLINK",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -10372,7 +10597,7 @@
     "belongs": "TBR",
     "name": "Hyper Horse-TBR2031",
     "game_type": "COINCOMBO",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -10381,7 +10606,7 @@
     "belongs": "TBR",
     "name": "Hyper Horse-TBR2032",
     "game_type": "COINCOMBO",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -10390,7 +10615,7 @@
     "belongs": "TBR",
     "name": "Hyper Horse-TBR2033",
     "game_type": "COINCOMBO",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -10399,7 +10624,7 @@
     "belongs": "TBR",
     "name": "Hyper Horse-TBR2034",
     "game_type": "COINCOMBO",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -10417,7 +10642,7 @@
     "belongs": "TBR",
     "name": "Hyper Horse-TBR2036",
     "game_type": "COINCOMBO",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -10444,7 +10669,7 @@
     "belongs": "TBR",
     "name": "Hyper Horse-TBR2039",
     "game_type": "COINCOMBO",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -10480,7 +10705,7 @@
     "belongs": "TBR",
     "name": "Hyper Horse-TBR2043",
     "game_type": "COINCOMBO",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -10516,7 +10741,7 @@
     "belongs": "TBR",
     "name": "Hyper Horse-TBR2054",
     "game_type": "COINCOMBO",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -10525,7 +10750,7 @@
     "belongs": "TBR",
     "name": "Hyper Horse-TBR2055",
     "game_type": "COINCOMBO",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -10543,7 +10768,7 @@
     "belongs": "TBR",
     "name": "Panda Magic-TBR2096",
     "game_type": "DRAGONLINK",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -10552,7 +10777,7 @@
     "belongs": "TBR",
     "name": "Panda Magic-TBR2097",
     "game_type": "DRAGONLINK",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -10561,7 +10786,7 @@
     "belongs": "TBR",
     "name": "Panda Magic-TBR2098",
     "game_type": "DRAGONLINK",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -10579,7 +10804,7 @@
     "belongs": "TBR",
     "name": "Panda Magic-TBR2100",
     "game_type": "DRAGONLINK",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -10588,7 +10813,7 @@
     "belongs": "TBR",
     "name": "Spring Festival-TBR2107",
     "game_type": "DRAGONLINK",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -10696,7 +10921,7 @@
     "belongs": "WF",
     "name": "5 Dragons-WF8160",
     "game_type": "GoodFortune",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -10777,7 +11002,7 @@
     "belongs": "WF",
     "name": "5 Treasures-WF8078",
     "game_type": "DFDC",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -10804,7 +11029,7 @@
     "belongs": "WF",
     "name": "5 Treasures-WF8103",
     "game_type": "DFDC",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -10876,7 +11101,7 @@
     "belongs": "WF",
     "name": "5 Treasures-WF8343",
     "game_type": "DFDC",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -10894,7 +11119,7 @@
     "belongs": "WF",
     "name": "88 Fortunes-WF8100",
     "game_type": "DFDC",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -10930,7 +11155,7 @@
     "belongs": "WF",
     "name": "88 Fortunes-WF8120",
     "game_type": "DFDC",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -10966,7 +11191,7 @@
     "belongs": "WF",
     "name": "Dancing Drums-WF8076",
     "game_type": "DFDC",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -10975,7 +11200,7 @@
     "belongs": "WF",
     "name": "Dancing Drums-WF8079",
     "game_type": "DFDC",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -10993,7 +11218,7 @@
     "belongs": "WF",
     "name": "Dancing Drums-WF8094",
     "game_type": "DFDC",
-    "status": "maintain",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -11002,7 +11227,7 @@
     "belongs": "WF",
     "name": "Dancing Drums-WF8102",
     "game_type": "DFDC",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -11020,7 +11245,7 @@
     "belongs": "WF",
     "name": "Dancing Drums-WF8107",
     "game_type": "DFDC",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -11029,7 +11254,7 @@
     "belongs": "WF",
     "name": "Dancing Drums-WF8110",
     "game_type": "DFDC",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -11038,7 +11263,7 @@
     "belongs": "WF",
     "name": "Dancing Drums-WF8113",
     "game_type": "DFDC",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -11047,7 +11272,7 @@
     "belongs": "WF",
     "name": "Dancing Drums-WF8116",
     "game_type": "DFDC",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -11074,7 +11299,7 @@
     "belongs": "WF",
     "name": "Dancing Drums-WF8130",
     "game_type": "DFDC",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -11137,7 +11362,7 @@
     "belongs": "WF",
     "name": "Diamond Eternity-WF8344",
     "game_type": "DFDC",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -11173,7 +11398,7 @@
     "belongs": "WF",
     "name": "Dragon of the Eastern Ocean-WF8156",
     "game_type": "GoodFortune",
-    "status": "maintain",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -11182,7 +11407,7 @@
     "belongs": "WF",
     "name": "Dragon of the Eastern Ocean-WF8164",
     "game_type": "GoodFortune",
-    "status": "maintain",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -11200,7 +11425,7 @@
     "belongs": "WF",
     "name": "Dragon of the Eastern Ocean-WF8173",
     "game_type": "GoodFortune",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -11443,7 +11668,7 @@
     "belongs": "WF",
     "name": "Flower Of Riches-WF8345",
     "game_type": "DFDC",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -11812,7 +12037,7 @@
     "belongs": "WF",
     "name": "Pure Diamonds-WF8153",
     "game_type": "GoodFortune",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -11848,7 +12073,7 @@
     "belongs": "WF",
     "name": "Pure Diamonds-WF8170",
     "game_type": "GoodFortune",
-    "status": "occupy",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -12388,8 +12613,8 @@
     "belongs": "CP",
     "name": "19(Fortune Trails)",
     "game_type": "CT",
-    "status": "maintain",
-    "online": "offline",
+    "status": "normal",
+    "online": "online",
     "is_test": false
   },
   {
@@ -12398,7 +12623,7 @@
     "name": "3152",
     "game_type": "Stand Alone",
     "status": "normal",
-    "online": "online",
+    "online": "offline",
     "is_test": false
   },
   {
@@ -12496,7 +12721,7 @@
     "belongs": "CP",
     "name": "BWJL-1007 - USB 串口",
     "game_type": "BWJL",
-    "status": "maintain",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -12559,8 +12784,8 @@
     "belongs": "CP",
     "name": "CP0004-JJBX",
     "game_type": "JJBX",
-    "status": "maintain",
-    "online": "online",
+    "status": "normal",
+    "online": "offline",
     "is_test": false
   },
   {
@@ -12640,8 +12865,8 @@
     "belongs": "CP",
     "name": "DFDC3 (88 Fortunes)",
     "game_type": "dfdc",
-    "status": "normal",
-    "online": "offline",
+    "status": "occupy",
+    "online": "online",
     "is_test": false
   },
   {
@@ -12659,7 +12884,7 @@
     "name": "DFDC4 (Dancing Drums)1",
     "game_type": "dfdc",
     "status": "normal",
-    "online": "offline",
+    "online": "online",
     "is_test": false
   },
   {
@@ -12667,8 +12892,8 @@
     "belongs": "CP",
     "name": "DFDC5 (5 Treasure)",
     "game_type": "dfdc",
-    "status": "maintain",
-    "online": "offline",
+    "status": "normal",
+    "online": "online",
     "is_test": false
   },
   {
@@ -12737,38 +12962,38 @@
   {
     "environment": "QAT",
     "belongs": "CP",
-    "name": "Empress-0293(TEST)",
-    "game_type": "TIANCIJINLONG",
-    "status": "maintain",
-    "online": "online",
-    "is_test": true
-  },
-  {
-    "environment": "QAT",
-    "belongs": "CP",
-    "name": "Empress-0294(TEST)",
-    "game_type": "TIANCIJINLONG",
-    "status": "maintain",
-    "online": "online",
-    "is_test": true
-  },
-  {
-    "environment": "QAT",
-    "belongs": "CP",
-    "name": "Empress-0295(TEST)",
+    "name": "Empress-0293",
     "game_type": "TIANCIJINLONG",
     "status": "normal",
-    "online": "online",
-    "is_test": true
+    "online": "offline",
+    "is_test": false
   },
   {
     "environment": "QAT",
     "belongs": "CP",
-    "name": "Empress-0296(TEST)",
+    "name": "Empress-0294",
     "game_type": "TIANCIJINLONG",
-    "status": "maintain",
-    "online": "online",
-    "is_test": true
+    "status": "normal",
+    "online": "offline",
+    "is_test": false
+  },
+  {
+    "environment": "QAT",
+    "belongs": "CP",
+    "name": "Empress-0295",
+    "game_type": "TIANCIJINLONG",
+    "status": "normal",
+    "online": "offline",
+    "is_test": false
+  },
+  {
+    "environment": "QAT",
+    "belongs": "CP",
+    "name": "Empress-0296",
+    "game_type": "TIANCIJINLONG",
+    "status": "normal",
+    "online": "offline",
+    "is_test": false
   },
   {
     "environment": "QAT",
@@ -12818,38 +13043,38 @@
   {
     "environment": "QAT",
     "belongs": "CP",
-    "name": "Fortune-0289(TEST)",
+    "name": "Fortune-0289",
     "game_type": "TIANCIJINLONG",
     "status": "normal",
-    "online": "online",
-    "is_test": true
+    "online": "offline",
+    "is_test": false
   },
   {
     "environment": "QAT",
     "belongs": "CP",
-    "name": "Fortune-0290(TEST)",
-    "game_type": "TIANCIJINLONG",
-    "status": "maintain",
-    "online": "online",
-    "is_test": true
-  },
-  {
-    "environment": "QAT",
-    "belongs": "CP",
-    "name": "Fortune-0291(TEST)",
+    "name": "Fortune-0290",
     "game_type": "TIANCIJINLONG",
     "status": "normal",
-    "online": "online",
-    "is_test": true
+    "online": "offline",
+    "is_test": false
   },
   {
     "environment": "QAT",
     "belongs": "CP",
-    "name": "Fortune-0292(TEST)",
+    "name": "Fortune-0291",
     "game_type": "TIANCIJINLONG",
-    "status": "maintain",
-    "online": "online",
-    "is_test": true
+    "status": "normal",
+    "online": "offline",
+    "is_test": false
+  },
+  {
+    "environment": "QAT",
+    "belongs": "CP",
+    "name": "Fortune-0292",
+    "game_type": "TIANCIJINLONG",
+    "status": "normal",
+    "online": "offline",
+    "is_test": false
   },
   {
     "environment": "QAT",
@@ -12964,7 +13189,7 @@
     "belongs": "CP",
     "name": "manfubao-3152",
     "game_type": "manfubao",
-    "status": "occupy",
+    "status": "maintain",
     "online": "offline",
     "is_test": false
   },
@@ -13099,8 +13324,8 @@
     "belongs": "CP",
     "name": "Rising Rockets Emperor-140",
     "game_type": "RISINGROCKETS",
-    "status": "occupy",
-    "online": "online",
+    "status": "maintain",
+    "online": "offline",
     "is_test": false
   },
   {
@@ -13865,7 +14090,7 @@
     "name": "19(Fortune Trails)",
     "game_type": "CT",
     "status": "normal",
-    "online": "online",
+    "online": "offline",
     "is_test": false
   },
   {
@@ -14006,20 +14231,20 @@
   {
     "environment": "QAT",
     "belongs": "NCH",
-    "name": "Blue Festival-NCH1483(TEST)",
+    "name": "Blue Festival-NCH1483",
     "game_type": "BZZF",
     "status": "normal",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "QAT",
     "belongs": "NCH",
-    "name": "Blue Festival-NCH1484(TEST)",
+    "name": "Blue Festival-NCH1484",
     "game_type": "BZZF",
     "status": "normal",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "QAT",
@@ -14161,7 +14386,7 @@
     "belongs": "NCH",
     "name": "Dragons-NCH23",
     "game_type": "DFDCGRAND",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -14177,83 +14402,83 @@
   {
     "environment": "QAT",
     "belongs": "NCH",
-    "name": "Fortune-1496(TEST)",
+    "name": "Fortune-1496",
     "game_type": "CT",
     "status": "normal",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "QAT",
     "belongs": "NCH",
-    "name": "Fortune-1497(TEST)",
-    "game_type": "CT",
-    "status": "normal",
-    "online": "online",
-    "is_test": true
-  },
-  {
-    "environment": "QAT",
-    "belongs": "NCH",
-    "name": "Fortune-1498(TEST)",
+    "name": "Fortune-1497",
     "game_type": "CT",
     "status": "normal",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "QAT",
     "belongs": "NCH",
-    "name": "Fortune-1499(TEST)",
+    "name": "Fortune-1498",
     "game_type": "CT",
     "status": "normal",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "QAT",
     "belongs": "NCH",
-    "name": "Fortune-1500(TEST)",
+    "name": "Fortune-1499",
     "game_type": "CT",
     "status": "normal",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "QAT",
     "belongs": "NCH",
-    "name": "Fortune-1501(TEST)",
-    "game_type": "CT",
-    "status": "normal",
-    "online": "online",
-    "is_test": true
-  },
-  {
-    "environment": "QAT",
-    "belongs": "NCH",
-    "name": "Fortune-1502(TEST)",
-    "game_type": "CT",
-    "status": "normal",
-    "online": "online",
-    "is_test": true
-  },
-  {
-    "environment": "QAT",
-    "belongs": "NCH",
-    "name": "Fortune-1503(TEST)",
+    "name": "Fortune-1500",
     "game_type": "CT",
     "status": "normal",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "QAT",
     "belongs": "NCH",
-    "name": "Fortune-1504(TEST)",
+    "name": "Fortune-1501",
+    "game_type": "CT",
+    "status": "maintain",
+    "online": "offline",
+    "is_test": false
+  },
+  {
+    "environment": "QAT",
+    "belongs": "NCH",
+    "name": "Fortune-1502",
+    "game_type": "CT",
+    "status": "maintain",
+    "online": "offline",
+    "is_test": false
+  },
+  {
+    "environment": "QAT",
+    "belongs": "NCH",
+    "name": "Fortune-1503",
     "game_type": "CT",
     "status": "normal",
     "online": "offline",
-    "is_test": true
+    "is_test": false
+  },
+  {
+    "environment": "QAT",
+    "belongs": "NCH",
+    "name": "Fortune-1504",
+    "game_type": "CT",
+    "status": "normal",
+    "online": "offline",
+    "is_test": false
   },
   {
     "environment": "QAT",
@@ -14423,7 +14648,7 @@
     "name": "Ingotcha-NCH24",
     "game_type": "DFDCGRAND",
     "status": "normal",
-    "online": "offline",
+    "online": "online",
     "is_test": false
   },
   {
@@ -14456,20 +14681,20 @@
   {
     "environment": "QAT",
     "belongs": "NCH",
-    "name": "Jade Celebration-NCH1479(TEST)",
+    "name": "Jade Celebration-NCH1479",
     "game_type": "BZZF",
     "status": "normal",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "QAT",
     "belongs": "NCH",
-    "name": "Jade Celebration-NCH1480(TEST)",
+    "name": "Jade Celebration-NCH1480",
     "game_type": "BZZF",
     "status": "normal",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "QAT",
@@ -14746,7 +14971,7 @@
     "belongs": "NCH",
     "name": "NCH18",
     "game_type": "tcjl",
-    "status": "maintain",
+    "status": "normal",
     "online": "online",
     "is_test": false
   },
@@ -14801,89 +15026,89 @@
     "name": "NCH21",
     "game_type": "CT",
     "status": "normal",
-    "online": "online",
+    "online": "offline",
     "is_test": false
   },
   {
     "environment": "QAT",
     "belongs": "NCH",
-    "name": "Prosperity-1487(TEST)",
-    "game_type": "CT",
-    "status": "normal",
-    "online": "online",
-    "is_test": true
-  },
-  {
-    "environment": "QAT",
-    "belongs": "NCH",
-    "name": "Prosperity-1488(TEST)",
-    "game_type": "CT",
-    "status": "normal",
-    "online": "online",
-    "is_test": true
-  },
-  {
-    "environment": "QAT",
-    "belongs": "NCH",
-    "name": "Prosperity-1489(TEST)",
-    "game_type": "CT",
-    "status": "normal",
-    "online": "online",
-    "is_test": true
-  },
-  {
-    "environment": "QAT",
-    "belongs": "NCH",
-    "name": "Prosperity-1490(TEST)",
-    "game_type": "CT",
-    "status": "normal",
-    "online": "online",
-    "is_test": true
-  },
-  {
-    "environment": "QAT",
-    "belongs": "NCH",
-    "name": "Prosperity-1491(TEST)",
-    "game_type": "CT",
-    "status": "normal",
-    "online": "online",
-    "is_test": true
-  },
-  {
-    "environment": "QAT",
-    "belongs": "NCH",
-    "name": "Prosperity-1492(TEST)",
-    "game_type": "CT",
-    "status": "normal",
-    "online": "online",
-    "is_test": true
-  },
-  {
-    "environment": "QAT",
-    "belongs": "NCH",
-    "name": "Prosperity-1493(TEST)",
-    "game_type": "CT",
-    "status": "normal",
-    "online": "online",
-    "is_test": true
-  },
-  {
-    "environment": "QAT",
-    "belongs": "NCH",
-    "name": "Prosperity-1494(TEST)",
-    "game_type": "CT",
-    "status": "normal",
-    "online": "online",
-    "is_test": true
-  },
-  {
-    "environment": "QAT",
-    "belongs": "NCH",
-    "name": "Prosperity-1495(TEST)",
+    "name": "Prosperity-1487",
     "game_type": "CT",
     "status": "normal",
     "online": "offline",
-    "is_test": true
+    "is_test": false
+  },
+  {
+    "environment": "QAT",
+    "belongs": "NCH",
+    "name": "Prosperity-1488",
+    "game_type": "CT",
+    "status": "maintain",
+    "online": "offline",
+    "is_test": false
+  },
+  {
+    "environment": "QAT",
+    "belongs": "NCH",
+    "name": "Prosperity-1489",
+    "game_type": "CT",
+    "status": "normal",
+    "online": "offline",
+    "is_test": false
+  },
+  {
+    "environment": "QAT",
+    "belongs": "NCH",
+    "name": "Prosperity-1490",
+    "game_type": "CT",
+    "status": "normal",
+    "online": "offline",
+    "is_test": false
+  },
+  {
+    "environment": "QAT",
+    "belongs": "NCH",
+    "name": "Prosperity-1491",
+    "game_type": "CT",
+    "status": "normal",
+    "online": "offline",
+    "is_test": false
+  },
+  {
+    "environment": "QAT",
+    "belongs": "NCH",
+    "name": "Prosperity-1492",
+    "game_type": "CT",
+    "status": "normal",
+    "online": "offline",
+    "is_test": false
+  },
+  {
+    "environment": "QAT",
+    "belongs": "NCH",
+    "name": "Prosperity-1493",
+    "game_type": "CT",
+    "status": "maintain",
+    "online": "offline",
+    "is_test": false
+  },
+  {
+    "environment": "QAT",
+    "belongs": "NCH",
+    "name": "Prosperity-1494",
+    "game_type": "CT",
+    "status": "normal",
+    "online": "offline",
+    "is_test": false
+  },
+  {
+    "environment": "QAT",
+    "belongs": "NCH",
+    "name": "Prosperity-1495",
+    "game_type": "CT",
+    "status": "normal",
+    "online": "offline",
+    "is_test": false
   },
   {
     "environment": "QAT",
@@ -14906,20 +15131,20 @@
   {
     "environment": "QAT",
     "belongs": "NCH",
-    "name": "Purple Celebration-NCH1485(TEST)",
+    "name": "Purple Celebration-NCH1485",
     "game_type": "BZZF",
     "status": "normal",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "QAT",
     "belongs": "NCH",
-    "name": "Purple Celebration-NCH1486(TEST)",
+    "name": "Purple Celebration-NCH1486",
     "game_type": "BZZF",
     "status": "normal",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "QAT",
@@ -14942,20 +15167,20 @@
   {
     "environment": "QAT",
     "belongs": "NCH",
-    "name": "Red Festival-NCH1481(TEST)",
+    "name": "Red Festival-NCH1481",
     "game_type": "BZZF",
     "status": "normal",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "QAT",
     "belongs": "NCH",
-    "name": "Red Festival-NCH1482(TEST)",
+    "name": "Red Festival-NCH1482",
     "game_type": "BZZF",
     "status": "normal",
     "online": "offline",
-    "is_test": true
+    "is_test": false
   },
   {
     "environment": "QAT",
@@ -15221,7 +15446,7 @@
   {
     "environment": "QAT",
     "belongs": "TBP",
-    "name": "Dragons-Lab-TBP37",
+    "name": "Dragons-Lab-TBP36",
     "game_type": "DFDCGRAND",
     "status": "normal",
     "online": "online",
@@ -16787,9 +17012,9 @@
   {
     "environment": "QAT",
     "belongs": "TBP",
-    "name": "Ingotcha-Lab-TBP36",
+    "name": "Ingotcha-Lab-TBP37",
     "game_type": "DFDCGRAND",
-    "status": "normal",
+    "status": "occupy",
     "online": "online",
     "is_test": false
   },
@@ -18050,7 +18275,7 @@
     "name": "CP0004-JJBX",
     "game_type": "JJBX",
     "status": "normal",
-    "online": "offline",
+    "online": "online",
     "is_test": false
   },
   {
@@ -18463,8 +18688,8 @@
     "belongs": "CP",
     "name": "NCH21",
     "game_type": "CT",
-    "status": "normal",
-    "online": "offline",
+    "status": "maintain",
+    "online": "online",
     "is_test": false
   },
   {
@@ -18545,7 +18770,7 @@
     "name": "Rising Rockets Emperor-140",
     "game_type": "risingrocket",
     "status": "normal",
-    "online": "offline",
+    "online": "online",
     "is_test": false
   },
   {
@@ -18553,8 +18778,8 @@
     "belongs": "CP",
     "name": "Rising Rockets Emperor-141",
     "game_type": "risingrocket",
-    "status": "normal",
-    "online": "offline",
+    "status": "maintain",
+    "online": "online",
     "is_test": false
   },
   {
@@ -20785,8 +21010,8 @@
     "belongs": "NP",
     "name": "NP-Bouncing Lions-2001",
     "game_type": "superburstlink",
-    "status": "normal",
-    "online": "offline",
+    "status": "metercheck",
+    "online": "online",
     "is_test": false
   },
   {
@@ -20947,8 +21172,8 @@
     "belongs": "NP",
     "name": "Phoenix-NWR2036",
     "game_type": "Tian Ci Jin Lu",
-    "status": "normal",
-    "online": "online",
+    "status": "maintain",
+    "online": "offline",
     "is_test": false
   },
   {
