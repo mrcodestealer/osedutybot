@@ -100,6 +100,7 @@ import difflib
 import functools
 import json
 import os
+import queue as _queue
 import re
 import secrets
 import shutil
@@ -881,6 +882,349 @@ def _vpn_persistent_profile_dir() -> str | None:
     skipped on repeat runs. Set ``VPN_PLAYWRIGHT_USER_DATA_DIR`` to enable."""
     d = (os.environ.get("VPN_PLAYWRIGHT_USER_DATA_DIR") or "").strip()
     return d or None
+
+
+def _vpn_warm_enabled() -> bool:
+    return (os.environ.get("VPN_WARM_BROWSER", "1") or "").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _vpn_warm_profile_dir() -> str:
+    """Persistent profile for the warm VPN browser (keeps the Jenkins login between runs and
+    across bot restarts). Override with ``VPN_PLAYWRIGHT_USER_DATA_DIR``."""
+    d = _vpn_persistent_profile_dir()
+    if d:
+        return d
+    return os.path.join(tempfile.gettempdir(), "vpn_warm_profile")
+
+
+def _vpn_post_build_wait_ms() -> int:
+    raw = (os.environ.get("VPN_POST_BUILD_NUMBER_WAIT_MS") or "6000").strip()
+    try:
+        return max(0, int(raw or "6000"))
+    except ValueError:
+        return 6000
+
+
+class _VpnWarmBrowser:
+    """A single long-lived, pre-logged-in headless browser kept on the VPN build form so a
+    ``create vpn`` run only has to *fill two fields* (no per-run browser launch / login / page
+    load). Owns its Playwright objects in one dedicated thread (sync Playwright is thread-bound).
+
+    Jobs and warm-up requests are serialized through a queue. On any failure a job falls back to
+    the normal fresh-browser path (:func:`_fpms_lark_spawn_run`).
+    """
+
+    def __init__(self) -> None:
+        self._jobs: "_queue.Queue[dict]" = _queue.Queue()
+        self._thread = threading.Thread(
+            target=self._loop, name="vpn-warm-browser", daemon=True
+        )
+        self._started = False
+        self._lock = threading.Lock()
+        self._p = None
+        self._context = None
+        self._page = None
+        self._dirty = True  # form needs a fresh navigate before next fill
+
+    def start(self) -> None:
+        with self._lock:
+            if not self._started:
+                self._started = True
+                self._thread.start()
+
+    def submit_prewarm(self) -> None:
+        self.start()
+        self._jobs.put({"kind": "prewarm"})
+
+    def submit_job(self, job: dict) -> None:
+        self.start()
+        job["kind"] = "job"
+        self._jobs.put(job)
+
+    # ---- worker thread ----
+    def _loop(self) -> None:
+        while True:
+            item = self._jobs.get()
+            try:
+                kind = item.get("kind")
+                if kind == "prewarm":
+                    self._prewarm_safe()
+                elif kind == "job":
+                    self._run_job_safe(item)
+            except Exception as ex:  # never let the worker thread die
+                print(f"[vpn-warm] loop error: {ex!r}", flush=True)
+
+    def _credentials_vpn(self) -> tuple[str, str]:
+        u, p = _credentials()
+        vu = (os.environ.get("createvpnid") or "").strip()
+        vp = (os.environ.get("createvpnpass") or "").strip()
+        return (vu or u), (vp or p)
+
+    def _headless(self) -> bool:
+        raw = os.environ.get("JENKINSUPDATE_BOT_HEADLESS", "1").strip().lower()
+        hl = raw in ("1", "true", "yes", "on")
+        if (not hl) and sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+            hl = True
+        return hl
+
+    def _healthy(self) -> bool:
+        try:
+            return self._page is not None and not self._page.is_closed()
+        except Exception:
+            return False
+
+    def _launch(self) -> None:
+        self._teardown()
+        _ensure_vpn_fast_fill_mode()
+        self._p = sync_playwright().start()
+        profile = Path(_vpn_warm_profile_dir()).expanduser()
+        profile.mkdir(parents=True, exist_ok=True)
+        pc_kw: dict = {
+            "user_data_dir": str(profile),
+            "headless": self._headless(),
+            "viewport": {"width": 1400, "height": 900},
+            "ignore_https_errors": True,
+        }
+        proxy = _playwright_proxy_from_env()
+        if proxy:
+            pc_kw["proxy"] = proxy
+        self._context = self._p.chromium.launch_persistent_context(**pc_kw)
+        self._page = (
+            self._context.pages[0] if self._context.pages else self._context.new_page()
+        )
+        self._dirty = True
+        print("[vpn-warm] browser launched (persistent profile).", flush=True)
+
+    def _teardown(self) -> None:
+        for closer in (
+            lambda: self._context.close() if self._context else None,
+            lambda: self._p.stop() if self._p else None,
+        ):
+            try:
+                closer()
+            except Exception:
+                pass
+        self._context = None
+        self._page = None
+        self._p = None
+
+    def _form_present(self) -> bool:
+        try:
+            return self._page.locator("div.jenkins-form-item").first.is_visible(
+                timeout=1500
+            )
+        except Exception:
+            return False
+
+    def _navigate_fresh(self) -> None:
+        user, pw = self._credentials_vpn()
+        open_fpms_build_with_login(
+            self._page,
+            user,
+            pw,
+            first_visit=False,
+            warmup=False,
+            build_url=VPN_CREATION_BUILD_URL,
+        )
+        self._page.wait_for_selector("div.jenkins-form-item", timeout=60_000)
+        _safe_page_wait(self._page, _MS_FORM_READY)
+        self._dirty = False
+
+    def _ensure_form_ready(self) -> None:
+        if not self._healthy():
+            self._launch()
+            self._navigate_fresh()
+            return
+        if self._dirty or not self._form_present():
+            self._navigate_fresh()
+
+    def _prewarm_safe(self) -> None:
+        try:
+            self._ensure_form_ready()
+            print("[vpn-warm] pre-warmed (form ready).", flush=True)
+        except Exception as ex:
+            print(f"[vpn-warm] prewarm failed: {ex!r}", flush=True)
+            self._teardown()
+
+    def _run_job_safe(self, job: dict) -> None:
+        sk = job["session_key"]
+        cid = job["chat_id"]
+        trigger_mid = job.get("trigger_mid")
+        run_token = job.get("run_token")
+        try:
+            self._run_job(job)
+            _fpms_lark_mark_trigger_message_done(trigger_mid)
+            _fpms_lark_finish_jenkins_run_session(sk, cid, run_token=run_token)
+        except Exception as ex:
+            print(f"[vpn-warm] job failed, falling back to fresh browser: {ex!r}", flush=True)
+            self._teardown()
+            try:
+                # Rebuild the YES/NO gate session so the fresh-browser run has a clean gate.
+                _fpms_lark_sessions_put_chat_key(
+                    sk,
+                    {
+                        "state": "jenkins_wait_build",
+                        "build_gate_event": threading.Event(),
+                        "approve_build": None,
+                        "lark_cancel": False,
+                        "lark_trigger_message_id": trigger_mid,
+                    },
+                )
+                _fpms_lark_spawn_run(
+                    cid,
+                    sk,
+                    job["config_block"],
+                    job["send"],
+                    raw_prompt_body=job.get("raw_prompt_body", ""),
+                    jenkins_build_url=job["build_url"],
+                    job_profile="vpn_creation",
+                    update_all_services=False,
+                    headless=self._headless(),
+                    lark_message_id=trigger_mid,
+                )
+            except Exception as ex2:
+                print(f"[vpn-warm] fallback spawn also failed: {ex2!r}", flush=True)
+                _fpms_lark_mark_trigger_message_done(trigger_mid)
+                _fpms_lark_finish_jenkins_run_session(sk, cid, run_token=run_token)
+        finally:
+            self.submit_prewarm()
+
+    def _run_job(self, job: dict) -> None:
+        page = self._page
+        sk = job["session_key"]
+        cid = job["chat_id"]
+        send = job["send"]
+        vpn_users = job["vpn_users"]
+        vpn_location = job["vpn_location"]
+        build_url = job["build_url"]
+        to = float(job.get("timeout_sec", 7200))
+        trigger_mid = job.get("trigger_mid")
+        run_token = job.get("run_token")
+        gate = {
+            "job_profile": "vpn_creation",
+            "upload_image": job.get("upload_image"),
+            "send_image": job.get("send_image"),
+        }
+        self._ensure_form_ready()
+        page = self._page
+        fill_text_parameter(page, "VPN_USERS", vpn_users)
+        select_choice_parameter_by_value(page, "VPN_LOCATION", vpn_location)
+        self._dirty = True
+        _safe_page_wait(page, max(0, _MS_POST_FILL_VERIFY))
+
+        ok_all, verify_lines = verify_vpn_creation_parameters_display(
+            page, vpn_users, vpn_location
+        )
+        print("\n→ ===== VPN parameter re-check (warm) =====", flush=True)
+        for ln in verify_lines:
+            print(f"    {ln}", flush=True)
+
+        next_build_number = _predict_next_build_number_from_history(page)
+        filled_env, filled_branch = _jenkins_filled_env_branch_for_display(
+            "vpn_creation", vpn_users=vpn_users, vpn_location=vpn_location
+        )
+
+        shot_paths: list[str] = []
+        shot_dir = ""
+        img_key = ""
+        if _jenkins_form_screenshot_enabled(gate):
+            try:
+                shot_paths, shot_dir = capture_jenkins_build_parameters_screenshots(
+                    page, "vpn_creation", services_expected=None
+                )
+            except Exception as shot_ex:
+                print(f"[vpn-warm] screenshot failed: {shot_ex!r}", flush=True)
+                _fpms_lark_cleanup_screenshot_dir(shot_dir)
+                shot_paths, shot_dir = [], ""
+        if shot_paths:
+            up, _si = _fpms_lark_resolve_image_upload_helpers(gate)
+            if callable(up):
+                img_key = up(shot_paths[0]) or ""
+
+        _fpms_lark_send_verification_summary(
+            send,
+            cid,
+            filled_env=filled_env,
+            filled_branch=filled_branch,
+            ok_all=ok_all,
+            build_url=build_url,
+            job_profile="vpn_creation",
+            next_build_number=next_build_number,
+            screenshot_img_key=img_key,
+        )
+        if shot_dir:
+            _fpms_lark_cleanup_screenshot_dir(shot_dir)
+
+        with _fpms_lark_sessions_lock:
+            gsess = _fpms_lark_sessions.get(sk)
+            ev = gsess.get("build_gate_event") if isinstance(gsess, dict) else None
+        if not isinstance(ev, threading.Event):
+            raise RuntimeError("Lost Lark build gate event (warm VPN).")
+
+        if not ev.wait(timeout=to):
+            send(cid, "Timed out waiting for **yes** / **no**. **Build** skipped.")
+            return
+
+        with _fpms_lark_sessions_lock:
+            approved = _fpms_lark_sessions.get(sk, {}).get("approve_build")
+        if approved is True and ok_all:
+            _click_jenkins_build_button(page)
+            self._dirty = True
+            print("→ **Build** clicked (warm VPN, Lark-approved).", flush=True)
+            send(cid, "Creating VPN file. Kindly wait...")
+            resolved_bn = _resolve_build_number_after_jenkins_build_click(
+                page, next_build_number, timeout_ms=_vpn_post_build_wait_ms()
+            )
+            _fpms_lark_notify_jenkinsbot_vpn(
+                send,
+                cid,
+                folder_url=VPN_CREATION_JOB_FOLDER_URL,
+                build_number=resolved_bn,
+                vpn_users=vpn_users,
+                vpn_location=vpn_location,
+            )
+        elif approved is True and not ok_all:
+            send(
+                cid,
+                "**Build** was NOT clicked — verification still has ❌. Fix the job in Jenkins if needed.",
+            )
+        else:
+            with _fpms_lark_sessions_lock:
+                cancelled = bool(_fpms_lark_sessions.get(sk, {}).get("lark_cancel"))
+            send(
+                cid,
+                "⏹️ **Cancelled.** **Build** skipped; the Jenkins session will close."
+                if cancelled
+                else "**Build** skipped (you replied **no**).",
+            )
+
+
+_vpn_warm_singleton: "_VpnWarmBrowser | None" = None
+_vpn_warm_singleton_lock = threading.Lock()
+
+
+def _vpn_warm_get() -> "_VpnWarmBrowser":
+    global _vpn_warm_singleton
+    with _vpn_warm_singleton_lock:
+        if _vpn_warm_singleton is None:
+            _vpn_warm_singleton = _VpnWarmBrowser()
+        return _vpn_warm_singleton
+
+
+def _vpn_warm_prewarm() -> None:
+    """Kick off browser launch + login + form render in the background (call when a VPN flow
+    starts, so the form is already warm by the time the user submits)."""
+    if not _vpn_warm_enabled():
+        return
+    try:
+        _vpn_warm_get().submit_prewarm()
+    except Exception as ex:
+        print(f"[vpn-warm] prewarm dispatch failed: {ex!r}", flush=True)
 
 
 class ServiceNotDetectedError(Exception):
@@ -11316,6 +11660,47 @@ def _fpms_lark_begin_vpn_run(
         f"▶️ Creating VPN for **{vpn_users}** at **{vpn_location}** — filling Jenkins "
         "(a YES/NO confirmation card will follow)…",
     )
+
+    if _vpn_warm_enabled():
+        run_token = secrets.token_hex(8)
+        with _fpms_lark_sessions_lock:
+            _s0 = _fpms_lark_sessions.get(session_key)
+            if isinstance(_s0, dict):
+                _s0["_run_token"] = run_token
+        upload_image_fn = None
+        send_image_fn = None
+        try:
+            import main as _main_mod
+
+            upload_image_fn = getattr(_main_mod, "upload_image_lark", None)
+            send_image_fn = getattr(_main_mod, "send_image_message", None)
+            make_img = getattr(_main_mod, "make_update_thread_send_image", None)
+            if callable(make_img):
+                send_image_fn = make_img(chat_id, session_key, send_image_fn)
+        except Exception:
+            pass
+        try:
+            _vpn_warm_get().submit_job(
+                {
+                    "chat_id": chat_id,
+                    "session_key": session_key,
+                    "send": send,
+                    "vpn_users": vpn_users,
+                    "vpn_location": vpn_location,
+                    "build_url": VPN_CREATION_BUILD_URL,
+                    "timeout_sec": float(os.environ.get("FPMS_BOT_BUILD_WAIT_SEC", "7200")),
+                    "upload_image": upload_image_fn,
+                    "send_image": send_image_fn,
+                    "trigger_mid": trigger_mid,
+                    "run_token": run_token,
+                    "config_block": cfg,
+                    "raw_prompt_body": echo,
+                }
+            )
+            return
+        except Exception as ex:
+            print(f"[vpn-warm] submit failed, using fresh browser: {ex!r}", flush=True)
+
     _fpms_lark_spawn_run(
         chat_id,
         session_key,
@@ -11596,6 +11981,10 @@ def _fpms_lark_handle_vpn_flow(
     if not allow_start:
         # In groups the bot must be @mentioned to start.
         return False
+
+    # Head start: launch + login + render the VPN form now (background) while the user picks the
+    # location, so submitting only has to fill two fields.
+    _vpn_warm_prewarm()
 
     # Optional inline values (e.g. "create vpn user: tom location: PH_41").
     inline_user = ""
