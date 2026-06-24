@@ -4547,6 +4547,23 @@ def lark_webhook():
             if maint_reply:
                 send_message(chat_id, maint_reply)
             return _lark_im_done()
+    elif maintenancemachineagent.is_short_set_unset_only_message(original_text, mention_keys):
+        if chat_type == "group" and not bot_mentioned:
+            print("⏭️ set/unset shorthand ignored (bot not @mentioned in group)", flush=True)
+            return _lark_im_done()
+        if data.get("header", {}).get("event_type") == "im.message.receive_v1":
+            msg_obj = (data.get("event") or {}).get("message") or {}
+            thread_root = _prod_batch_thread_root_from_incoming_message(
+                msg_obj, message_id=message_id
+            )
+        else:
+            thread_root = (message_id or "").strip() or None
+        pb_send = make_prod_batch_thread_send(chat_id, thread_root=thread_root)
+        pb_send(
+            chat_id,
+            maintenancemachineagent.short_set_unset_usage_text(original_text, mention_keys),
+        )
+        return _lark_im_done()
     elif maintenancemachineagent.is_maintenance_now_message(original_text, mention_keys):
         # Immediate (no time) set/unset maintenance/test — either "ALL <ENV> MACHINES <Venue>"
         # (expanded from webmachine_data.json, PROD only) or an explicit machine list where the env
@@ -5384,8 +5401,9 @@ def _run_main_entry() -> int:
             import jenkinsupdate as _boot_ju
 
             _boot_ju.prewarm_vpn_browser_on_startup()
+            _boot_ju.prewarm_ju_pool_on_startup()
         except Exception as _boot_ju_err:
-            print(f"[vpn-warm] startup pre-warm skipped: {_boot_ju_err!r}", flush=True)
+            print(f"[warm] startup pre-warm skipped: {_boot_ju_err!r}", flush=True)
         print(
             "[lark] Listening http://0.0.0.0:%d (threaded=True). "
             "Feishu Request URL must be HTTPS and reachable from the internet; reverse-proxy to this port."

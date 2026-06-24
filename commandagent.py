@@ -779,7 +779,7 @@ def _pb_extract_machines(text: str) -> list[str]:
     if m:
         tail = m.group(1).strip()
         if _PB_MACHINE_TOKEN_RE.search(tail):
-            parts = re.split(r"[,\n;]+", tail)
+            parts = re.split(r"[,;&\n]+", tail)
             cleaned = [p.strip() for p in parts if p.strip() and _PB_MACHINE_TOKEN_RE.search(p)]
             if cleaned:
                 return cleaned

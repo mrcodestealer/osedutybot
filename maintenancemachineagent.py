@@ -277,17 +277,25 @@ def parse_action(text: str) -> str | None:
     anywhere in the message — not a fixed phrase. ``maintenance`` and ``test`` may appear in any
     order; both present → ``both``. A **stress test** implies *both* maintenance and test. If no
     explicit verb is found, it defaults to ``set`` (matches the existing commandagent behaviour).
+
+    Shorthand: bare ``set`` / ``unset`` or ``set nwr8237`` (no ``maintenance`` word) → maintenance.
     """
     tl = (text or "").lower()
     has_stress = bool(_STRESS_TEST_RE.search(tl))
     has_maint = bool(_MAINT_KW_RE.search(tl)) or has_stress
     has_test = bool(_TEST_KW_RE.search(tl)) or has_stress
-    if not (has_maint or has_test):
-        return None
     tl_scrub = _scrub_unset_false_positives(tl)
-    if _UNSET_RE.search(tl_scrub):
+    has_unset = bool(_UNSET_RE.search(tl_scrub))
+    has_set = bool(_SET_RE.search(tl))
+    if not (has_maint or has_test):
+        # ``@bot set nwr8237`` / bare ``set`` — maintenance implied when a verb is present.
+        if has_unset or has_set:
+            has_maint = True
+        else:
+            return None
+    if has_unset:
         op = "unset"
-    elif _SET_RE.search(tl):
+    elif has_set:
         op = "set"
     else:
         op = "set"  # "X maintenance" with no explicit verb almost always means set
@@ -656,7 +664,7 @@ def _row_asset_id(row: dict) -> str:
 
 # Explicit machine reference inside a command: a full display name ending in ``-1234`` /
 # ``WF8145``, or a bare asset id (``0253``). Used to honour "cp set test 0253,0254".
-_EXPLICIT_REF_SPLIT_RE = re.compile(r"[,\n;]+")
+_EXPLICIT_REF_SPLIT_RE = re.compile(r"[,;&\n]+")
 _TRAILING_ID_RE = re.compile(r"(\d{2,6})\s*(?:\([^)]*\))?\s*$")
 
 
@@ -1099,20 +1107,27 @@ def _looks_like_maintenance_request(text: str) -> bool:
 
     ``maintenance`` is a strong signal (needs only a verb or a scope word). A bare ``test`` is weak
     (casual chat), so it needs both a verb and a scope to qualify.
+
+    Shorthand ``set nwr8237`` / bare ``set`` / ``unset`` (maintenance implied) also qualifies.
     """
     t = (text or "").strip()
     if not t or t.lstrip().startswith("/"):
         return False
     tl = t.lower()
+    tl_scrub = _scrub_unset_false_positives(tl)
     has_stress = bool(_STRESS_TEST_RE.search(tl))
     has_maint = bool(_MAINT_KW_RE.search(tl)) or has_stress
     has_test = bool(_TEST_KW_RE.search(tl))
+    has_verb = bool(_SET_RE.search(tl) or _UNSET_RE.search(tl_scrub))
+    has_machine_ref = bool(_MACHINE_LINE_RE.search(t)) or bool(_MACHINE_TOKEN_RE.search(t))
+    # ``@bot set nwr8237`` or ``set`` + machines on following lines.
+    if has_verb and (has_machine_ref or re.fullmatch(r"(?i)(?:set|unset)\s*", t.strip())):
+        return True
     if not (has_maint or has_test):
         return False
-    has_verb = bool(_SET_RE.search(tl) or _UNSET_RE.search(tl))
     has_scope = (
         bool(re.search(r"\bmachines?\b|\ball\b|\bcabinets?\b|\begms?\b|机台|机器|全部|所有", tl))
-        or bool(_MACHINE_LINE_RE.search(t))
+        or has_machine_ref
         or bool(_ENV_WORD_RE.search(t))
     )
     if has_maint:
@@ -1339,6 +1354,31 @@ def is_maintenance_schedule_message(original_text: str, mention_keys: Sequence[s
     if c["target_kind"] == "list":
         return bool(c["machines"])
     return bool(_ENV_SITE_ALIAS.get(c.get("env_code") or ""))
+
+
+def is_short_set_unset_only_message(original_text: str, mention_keys: Sequence[str]) -> bool:
+    """
+    True when the message is only ``set`` or ``unset`` (maintenance implied) with no machine list.
+
+    Used to reply with usage instead of falling through silently.
+    """
+    body = _strip_mentions(original_text, mention_keys).strip()
+    if not re.fullmatch(r"(?i)(?:set|unset)\s*", body):
+        return False
+    return parse_action(body) is not None
+
+
+def short_set_unset_usage_text(original_text: str, mention_keys: Sequence[str]) -> str:
+    body = _strip_mentions(original_text, mention_keys).strip().lower()
+    verb = "unset" if _UNSET_RE.search(_scrub_unset_false_positives(body)) else "set"
+    return (
+        f"Usage: `@bot {verb} <machine>` — defaults to **{verb} maintenance**.\n\n"
+        f"Examples:\n"
+        f"• `@bot {verb} nwr8237`\n"
+        f"• `@bot {verb} nwr8237,nwr8238&nwr8239`\n"
+        f"• `@bot {verb} maintenance` also works explicitly\n\n"
+        f"You can also paste machine names on the lines after `{verb}`."
+    )
 
 
 def is_maintenance_now_message(original_text: str, mention_keys: Sequence[str]) -> bool:

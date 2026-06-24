@@ -1267,6 +1267,236 @@ def prewarm_vpn_browser_on_startup() -> None:
     _vpn_warm_prewarm()
 
 
+# ===================== Warm browser POOL for (non-VPN) Jenkins updates =====================
+# Keeps a small set of pre-launched, logged-in browsers so a /update only pays page-load + fill
+# (no per-run Chromium cold start + login). Parallelism is preserved up to the pool size: each
+# pool member is a dedicated thread owning its own Playwright objects (sync Playwright is
+# thread-bound). The form is NOT pre-rendered (FPMS/RC forms depend on the Environment picked
+# each run) — every run re-navigates fresh, so it is exactly as reliable as a fresh browser,
+# just without the launch/login cost. Disable with ``JU_WARM_POOL=0``.
+
+
+def _ju_warm_pool_enabled() -> bool:
+    return (os.environ.get("JU_WARM_POOL", "1") or "").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _ju_warm_pool_size() -> int:
+    try:
+        return max(1, int(os.environ.get("JU_WARM_POOL_SIZE", "2")))
+    except ValueError:
+        return 2
+
+
+def _ju_warm_base_url() -> str:
+    parsed = urlparse(BUILD_URL)
+    base = f"{parsed.scheme or 'https'}://{parsed.netloc}"
+    return (os.environ.get("JU_WARM_BASE_URL") or (base + "/login")).strip()
+
+
+class _JuWarmWorker:
+    """One pre-launched, logged-in browser in its own thread; runs one job at a time."""
+
+    def __init__(self, idx: int) -> None:
+        self.idx = idx
+        self._tasks: "_queue.Queue[dict]" = _queue.Queue()
+        self._thread = threading.Thread(
+            target=self._loop, name=f"ju-warm-{idx}", daemon=True
+        )
+        self._thread.start()
+        self._p = None
+        self._context = None
+        self._page = None
+
+    def execute(self, run_kwargs: dict) -> dict:
+        done = threading.Event()
+        box: dict = {}
+        self._tasks.put({"run_kwargs": run_kwargs, "done": done, "box": box})
+        done.wait()
+        return box
+
+    def submit_prewarm(self) -> None:
+        self._tasks.put({"prewarm": True})
+
+    # ---- worker thread ----
+    def _loop(self) -> None:
+        while True:
+            task = self._tasks.get()
+            if task.get("prewarm"):
+                try:
+                    self._ensure_ready()
+                    print(f"[ju-pool#{self.idx}] pre-warmed.", flush=True)
+                except Exception as ex:
+                    print(f"[ju-pool#{self.idx}] prewarm failed: {ex!r}", flush=True)
+                    self._teardown()
+                continue
+            box = task["box"]
+            try:
+                try:
+                    self._ensure_ready()
+                except Exception as ex:
+                    # Nothing has touched Jenkins yet → safe for caller to use a fresh browser.
+                    box["pre_error"] = ex
+                    self._teardown()
+                    continue
+                try:
+                    run(external_page=self._page, **task["run_kwargs"])
+                except Exception as ex:
+                    box["error"] = ex
+                    self._teardown()
+            finally:
+                if self._healthy():
+                    try:
+                        self._rewarm()
+                    except Exception:
+                        self._teardown()
+                task["done"].set()
+
+    def _healthy(self) -> bool:
+        try:
+            return self._page is not None and not self._page.is_closed()
+        except Exception:
+            return False
+
+    def _headless(self) -> bool:
+        raw = os.environ.get("JENKINSUPDATE_BOT_HEADLESS", "1").strip().lower()
+        hl = raw in ("1", "true", "yes", "on")
+        if (not hl) and sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+            hl = True
+        return hl
+
+    def _launch(self) -> None:
+        self._teardown()
+        self._p = sync_playwright().start()
+        profile = Path(
+            os.path.join(tempfile.gettempdir(), f"ju_warm_pool_profile_{self.idx}")
+        )
+        profile.mkdir(parents=True, exist_ok=True)
+        pc_kw: dict = {
+            "user_data_dir": str(profile),
+            "headless": self._headless(),
+            "viewport": {"width": 1400, "height": 900},
+            "ignore_https_errors": True,
+        }
+        proxy = _playwright_proxy_from_env()
+        if proxy:
+            pc_kw["proxy"] = proxy
+        self._context = self._p.chromium.launch_persistent_context(**pc_kw)
+        self._page = (
+            self._context.pages[0] if self._context.pages else self._context.new_page()
+        )
+        print(f"[ju-pool#{self.idx}] browser launched.", flush=True)
+
+    def _teardown(self) -> None:
+        for closer in (
+            lambda: self._context.close() if self._context else None,
+            lambda: self._p.stop() if self._p else None,
+        ):
+            try:
+                closer()
+            except Exception:
+                pass
+        self._context = None
+        self._page = None
+        self._p = None
+
+    def _ensure_ready(self) -> None:
+        if not self._healthy():
+            self._launch()
+            user, pw = _credentials()
+            try:
+                self._page.goto(
+                    _ju_warm_base_url(), wait_until="domcontentloaded", timeout=90_000
+                )
+                jenkins_login_if_needed(self._page, user, pw)
+            except Exception as ex:
+                print(f"[ju-pool#{self.idx}] warm login skipped: {ex!r}", flush=True)
+
+    def _rewarm(self) -> None:
+        # Leave the heavy job page → light base page, keeping the logged-in session warm.
+        try:
+            self._page.goto(
+                _ju_warm_base_url(), wait_until="domcontentloaded", timeout=60_000
+            )
+        except Exception:
+            pass
+
+
+class _JuWarmPool:
+    def __init__(self, size: int) -> None:
+        self._workers = [_JuWarmWorker(i) for i in range(size)]
+        self._idle: "_queue.Queue[_JuWarmWorker]" = _queue.Queue()
+        for w in self._workers:
+            self._idle.put(w)
+
+    def prewarm_all(self) -> None:
+        for w in self._workers:
+            w.submit_prewarm()
+
+    def run_blocking(self, run_kwargs: dict) -> None:
+        worker = self._idle.get()  # blocks until a member is free (caps concurrency at size)
+        try:
+            box = worker.execute(run_kwargs)
+        finally:
+            self._idle.put(worker)
+        if "pre_error" in box:
+            # Browser/login warm-up failed before any Jenkins action — safe to use fresh browser.
+            print(
+                f"[ju-pool] pre-run warm failed; using fresh browser: {box['pre_error']!r}",
+                flush=True,
+            )
+            run(**run_kwargs)
+            return
+        if "error" in box:
+            # The run itself failed (may have partially acted on Jenkins) — do NOT silently
+            # retry on a fresh browser (could double-trigger a build). Surface the error.
+            raise box["error"]
+
+
+_ju_warm_pool_singleton: "_JuWarmPool | None" = None
+_ju_warm_pool_lock = threading.Lock()
+
+
+def _ju_warm_pool_get() -> "_JuWarmPool":
+    global _ju_warm_pool_singleton
+    with _ju_warm_pool_lock:
+        if _ju_warm_pool_singleton is None:
+            _ju_warm_pool_singleton = _JuWarmPool(_ju_warm_pool_size())
+        return _ju_warm_pool_singleton
+
+
+def _ju_dispatch_run(run_kwargs: dict) -> None:
+    """Run a Jenkins update via the warm pool (non-VPN) or a fresh browser."""
+    jp = (run_kwargs.get("job_profile") or "").strip()
+    if jp and jp != "vpn_creation" and _ju_warm_pool_enabled():
+        _ju_warm_pool_get().run_blocking(run_kwargs)
+        return
+    run(**run_kwargs)
+
+
+def prewarm_ju_pool_on_startup() -> None:
+    """Public hook: pre-launch + login the Jenkins-update browser pool at bot startup."""
+    if not _ju_warm_pool_enabled():
+        print("[ju-pool] disabled (JU_WARM_POOL=0).", flush=True)
+        return
+    if (os.environ.get("JU_WARM_PREWARM_ON_STARTUP", "1") or "").strip().lower() in (
+        "0",
+        "false",
+        "no",
+        "off",
+    ):
+        return
+    try:
+        print(f"[ju-pool] startup pre-warm ({_ju_warm_pool_size()} browsers).", flush=True)
+        _ju_warm_pool_get().prewarm_all()
+    except Exception as ex:
+        print(f"[ju-pool] startup pre-warm failed: {ex!r}", flush=True)
+
+
 class ServiceNotDetectedError(Exception):
     """A requested service checkbox was not found or could not be checked (``run()`` may retry in a new browser)."""
 
@@ -9255,27 +9485,31 @@ def _fpms_lark_spawn_run(
             if jp == "vpn_creation":
                 _rev = float(os.environ.get("VPN_BOT_REVIEW_SECONDS", "0") or "0")
                 _udd = _vpn_persistent_profile_dir() or _udd
-            run(
-                review_seconds=_rev,
-                headless=headless,
-                browser=os.environ.get("FPMS_PLAYWRIGHT_BROWSER", "chromium"),
-                config_block=config_block,
-                user_data_dir=_udd,
-                update_all_services=update_all_services,
-                bot_lark_gate={
-                    "session_key": session_key,
-                    "chat_id": chat_id,
-                    "send": send,
-                    "timeout_sec": float(os.environ.get("FPMS_BOT_BUILD_WAIT_SEC", "7200")),
-                    "prompt_echo": raw_prompt_body,
-                    "build_url": ju,
+            _ju_dispatch_run(
+                {
+                    "review_seconds": _rev,
+                    "headless": headless,
+                    "browser": os.environ.get("FPMS_PLAYWRIGHT_BROWSER", "chromium"),
+                    "config_block": config_block,
+                    "user_data_dir": _udd,
+                    "update_all_services": update_all_services,
+                    "bot_lark_gate": {
+                        "session_key": session_key,
+                        "chat_id": chat_id,
+                        "send": send,
+                        "timeout_sec": float(
+                            os.environ.get("FPMS_BOT_BUILD_WAIT_SEC", "7200")
+                        ),
+                        "prompt_echo": raw_prompt_body,
+                        "build_url": ju,
+                        "job_profile": jp,
+                        "upload_image": upload_image_fn,
+                        "send_image": send_image_fn,
+                        "lark_message_id": trigger_mid,
+                    },
+                    "jenkins_build_url": ju,
                     "job_profile": jp,
-                    "upload_image": upload_image_fn,
-                    "send_image": send_image_fn,
-                    "lark_message_id": trigger_mid,
-                },
-                jenkins_build_url=ju,
-                job_profile=jp,
+                }
             )
         except Exception as ex:
             try:
@@ -13499,6 +13733,7 @@ def run(
     jenkins_build_url: str | None = None,
     job_profile: str | None = None,
     update_all_services: bool = False,
+    external_page=None,
 ) -> None:
     jp_g = (job_profile or "").strip()
     if not jp_g and bot_lark_gate:
@@ -13764,19 +13999,30 @@ def run(
         print(f"⚠️ Unknown browser {bname!r} — using chromium.")
         bname = "chromium"
 
-    with sync_playwright() as p:
-        if bname == "firefox":
-            print(
-                "→ Browser: Firefox (if missing: `playwright install firefox`). "
-                "Different engine can change UnoChoice / Services behavior vs Chromium."
+    # When an external (warm pool) page is supplied, reuse it: skip browser launch / login round
+    # trip and never close it here (the pool owns its lifecycle). Behavior is byte-for-byte the
+    # same as before when ``external_page is None``.
+    import contextlib as _contextlib
+
+    pw_ctx = _contextlib.nullcontext() if external_page is not None else sync_playwright()
+    with pw_ctx as p:
+        if external_page is not None:
+            browser_obj = None
+            context = None
+            page = external_page
+        else:
+            if bname == "firefox":
+                print(
+                    "→ Browser: Firefox (if missing: `playwright install firefox`). "
+                    "Different engine can change UnoChoice / Services behavior vs Chromium."
+                )
+            browser_obj, context, page = _playwright_browser_context_and_page(
+                p,
+                browser_name=bname,
+                headless=headless,
+                slow_mo=slow_mo,
+                user_data_dir=user_data_dir,
             )
-        browser_obj, context, page = _playwright_browser_context_and_page(
-            p,
-            browser_name=bname,
-            headless=headless,
-            slow_mo=slow_mo,
-            user_data_dir=user_data_dir,
-        )
         try:
             ju = ju_for_env
             print("\n→ Single browser session (post-login warm-up reload: **off**).")
@@ -14282,9 +14528,11 @@ def run(
             print("\n→ Ctrl+C received, closing browser…")
             return
         finally:
-            context.close()
-            if browser_obj is not None:
-                browser_obj.close()
+            if external_page is None:
+                if context is not None:
+                    context.close()
+                if browser_obj is not None:
+                    browser_obj.close()
 
 
 def main(argv: list[str] | None = None) -> int:

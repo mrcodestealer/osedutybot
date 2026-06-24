@@ -1963,8 +1963,8 @@ def _prod_batch_split_target_tokens(line: str) -> list[str]:
     line = (line or "").strip()
     if not line:
         return []
-    if re.search(r"[,;]", line):
-        return [p.strip() for p in re.split(r"[,;]+", line) if p.strip()]
+    if re.search(r"[,;&]", line):
+        return [p.strip() for p in re.split(r"[,;&]+", line) if p.strip()]
     # Full display name with spaces + asset digits — keep whole line.
     if re.search(r"(?:NWR|MDR|NCH|TBR|TBP|DHS|CP|OSM|WF|WINFORD)\s*-?\s*\d", line, re.I):
         return [line]
