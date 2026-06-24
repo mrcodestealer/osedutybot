@@ -259,6 +259,47 @@ def get_all_duty_check(month=None, year=None):
     lines.append("")
     return "\n".join(lines).strip()
 
+
+def _dispatch_daily_duty_reply(cmd: str) -> Optional[str]:
+    """Return today's duty text for a single department slash command, or ``None``."""
+    c = (cmd or "").strip().lower()
+    if c == "/fpms":
+        return fpms_duty.get_fpms_today_duty()
+    if c == "/pms":
+        return pms_duty.dutyNextDay()
+    if c == "/bi":
+        return bi_duty.get_bi_today_duty()
+    if c == "/fe":
+        return fe_duty.get_fe_next_three_duty()
+    if c == "/cpms":
+        return cpms_duty.format_output(cpms_duty.get_cpms_three_days())
+    if c == "/sre":
+        return sre_Duty.get_sre_week_duty()
+    if c in ("/db", "/dba"):
+        return db_duty.get_three_weeks_summary()
+    if c == "/liveslot":
+        return liveslot_duty.get_three_weeks_summary()
+    if c == "/ote":
+        return ote_duty.get_three_weeks_summary()
+    if c == "/ft":
+        return ft.get_ft_three_days()
+    return None
+
+
+def _build_multi_duty_reply(commands: list[str]) -> Optional[str]:
+    """Combine several department duty blocks into one message."""
+    blocks: list[str] = []
+    for cmd in commands:
+        body = _dispatch_daily_duty_reply(cmd)
+        if not body:
+            continue
+        label = cmd.strip().upper().lstrip("/")
+        blocks.append(f"**【{label}】**\n{body}")
+    if not blocks:
+        return None
+    return "\n\n".join(blocks).strip()
+
+
 def display_all_duty():
     summary = get_all_duty_summary()
     send_message(DUTY_CHAT_ID, summary)
@@ -3914,6 +3955,21 @@ def lark_webhook():
     if not _skip_commandagent:
         try:
             import commandagent as _commandagent
+
+            _multi_cmds = _commandagent.detect_multi_duty_commands(clean_text)
+            if _multi_cmds:
+                _multi_reply = _build_multi_duty_reply(_multi_cmds)
+                if _multi_reply:
+                    send_message(chat_id, _multi_reply)
+                    print(
+                        f"✅ Multi-duty reply ({len(_multi_cmds)} depts): {_multi_cmds}",
+                        flush=True,
+                    )
+                    return _lark_im_done()
+                print(
+                    f"⚠️ Multi-duty detected {_multi_cmds} but no handler output — fallback",
+                    flush=True,
+                )
 
             ai_command = None
             # Router may have already produced the mapped command (e.g. prod-batch).

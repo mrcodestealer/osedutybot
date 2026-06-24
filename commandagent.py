@@ -932,6 +932,31 @@ _SEARCH_PREFIX_RE = re.compile(
 _DEPT_IN_TEXT_RE = re.compile(
     r"(?i)\b(fpms|pms|bi|fe|cpms|sre|db|dba|liveslot|ote|ft)\b"
 )
+# Stable order when one message asks for several department duty rosters.
+_MULTI_DUTY_DEPT_ORDER = (
+    "fpms",
+    "pms",
+    "bi",
+    "fe",
+    "cpms",
+    "sre",
+    "db",
+    "liveslot",
+    "ote",
+    "ft",
+)
+_MULTI_DUTY_CONTEXT_RE = re.compile(
+    r"(?i)\b("
+    r"duty|on[\s-]?call|roster|schedule|shift|today|cover|"
+    r"who\s+is\s+on|provide|show|tell|list|give\s+me"
+    r")\b"
+)
+_MULTI_DUTY_SKIP_RE = re.compile(
+    r"(?i)\b("
+    r"leave|wfh|holiday|jenkins|maintenance|machine|checkcredit|machineerror|"
+    r"update|deploy|reminder|offset|cctv|credit"
+    r")\b|/"
+)
 _MACHINE_ID_RE = re.compile(
     r"(?i)\b(?:(?:nch|nwr|wf|winford|tbp|cp|dhs|mdr)\s*)?(\d{3,}|[A-Z]{2,4}\d+)\b"
 )
@@ -1161,6 +1186,57 @@ def _get_classifier() -> Optional[CommandClassifier]:
         traceback.print_exc()
         _classifier_failed = True
         return None
+
+
+def multi_duty_enabled() -> bool:
+    """When on (default), detect 2+ department names in one duty request."""
+    return (os.getenv("BOT_MULTI_DUTY") or "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def detect_multi_duty_commands(text: str) -> Optional[list[str]]:
+    """
+    If ``text`` asks for duty/roster for **two or more** departments, return
+    slash commands in stable order (e.g. ``['/fpms', '/cpms']``).
+
+    Deterministic (no LLM). Runs before single-intent ``translate_if_enabled``.
+    """
+    if not multi_duty_enabled():
+        return None
+    raw = (text or "").strip()
+    if not raw or _looks_like_slash_command(raw):
+        return None
+    if not _MULTI_DUTY_CONTEXT_RE.search(raw):
+        return None
+    if _MULTI_DUTY_SKIP_RE.search(raw):
+        return None
+    if detect_prod_batch_command(raw) or detect_checkcredit_command(raw):
+        return None
+    try:
+        import jenkinsupdate as _jenkins_gate
+
+        if _jenkins_gate.looks_like_natural_jenkins_update(raw):
+            return None
+    except Exception:
+        pass
+
+    found_depts: list[str] = []
+    for dept in _MULTI_DUTY_DEPT_ORDER:
+        if re.search(rf"(?i)\b{re.escape(dept)}\b", raw):
+            found_depts.append(dept)
+    if re.search(r"(?i)\bdba\b", raw) and "db" not in found_depts:
+        found_depts.append("db")
+
+    if len(found_depts) < 2:
+        return None
+
+    order_idx = {d: i for i, d in enumerate(_MULTI_DUTY_DEPT_ORDER)}
+    found_depts.sort(key=lambda d: order_idx.get(d, 999))
+    return [f"/{d}" for d in found_depts]
 
 
 def command_signal(text: str) -> dict[str, Any]:

@@ -1221,7 +1221,7 @@ class _VpnWarmBrowser:
                 cancelled = bool(_fpms_lark_sessions.get(sk, {}).get("lark_cancel"))
             send(
                 cid,
-                "⏹️ **Cancelled.** **Build** skipped; the Jenkins session will close."
+                "⏹️ **Cancelled.** **Build** skipped — back to ready."
                 if cancelled
                 else "**Build** skipped (you replied **no**).",
             )
@@ -8750,6 +8750,16 @@ def _fpms_lark_verification_card_json(
             }
         )
     body_elements.extend([yes_btn, no_btn])
+    if jp == "vpn_creation":
+        # Explicit Cancel for VPN: skip Build and return the warm browser to ready.
+        body_elements.append(
+            _fpms_lark_v2_callback_button(
+                "Cancel",
+                "danger",
+                {"k": "wb", "v": "c"},
+                element_id="ju_wb_c",
+            )
+        )
     card: dict = {
         "schema": "2.0",
         "config": {"update_multi": True, "width_mode": "fill"},
@@ -13058,6 +13068,18 @@ def handle_lark_jenkins_update_message(
                         if isinstance(ev2, threading.Event):
                             ev2.set()
                 return True
+            if low in ("cancel", "c"):
+                # Explicit Cancel — skip Build and let the warm browser return to ready.
+                with _fpms_lark_sessions_lock:
+                    sg = _fpms_lark_sessions.get(key)
+                    if isinstance(sg, dict) and sg.get("state") == "jenkins_wait_build":
+                        sg["approve_build"] = False
+                        sg["lark_cancel"] = True
+                        sg["state"] = "jenkins_post_gate"
+                        ev2 = sg.get("build_gate_event")
+                        if isinstance(ev2, threading.Event):
+                            ev2.set()
+                return True
             # /fpms, /date, etc. — do not consume; YES/NO card already shown above.
             return False
         if st in ("jenkins_post_gate", "jenkins_cancelled"):
@@ -13521,6 +13543,8 @@ def handle_lark_jenkins_card_action(
             token = "yes"
         elif v == "n":
             token = "no"
+        elif v == "c":
+            token = "cancel"
         else:
             return False
         return handle_lark_jenkins_update_message(
