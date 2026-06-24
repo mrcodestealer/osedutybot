@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import logging
 import os
+import queue as _queue
 import re
 import tempfile
+import threading
 import time
+from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import quote
 
@@ -1702,6 +1705,394 @@ def _run_phased_env(
     return all_ok, all_fail
 
 
+def _dispatch_env_processing(
+    page,
+    belongs: str,
+    env_machines: list[dict],
+    action: str,
+    remark: str,
+    cancel_check: Callable[[], bool],
+    manual_stop_check: Callable[[], bool],
+    *,
+    timeout_ms: int,
+    max_pages: int | None,
+    on_phase_retry: Optional[Callable[[str, int, list[dict]], None]] = None,
+) -> tuple[list[dict], list[dict]]:
+    """Run one environment's machines on ``page`` using the right strategy for ``action``."""
+    if action in PHASED_STEPS:
+        return _run_phased_env(
+            page, belongs, env_machines, action, remark,
+            cancel_check, manual_stop_check,
+            timeout_ms=timeout_ms, max_pages=max_pages, on_phase_retry=on_phase_retry,
+        )
+    if action in AUTO_RETRY_ACTIONS:
+        return _run_single_action_env(
+            page, belongs, env_machines, action, remark,
+            cancel_check, manual_stop_check,
+            timeout_ms=timeout_ms, max_pages=max_pages, on_phase_retry=on_phase_retry,
+        )
+    return _process_env(
+        page, belongs, env_machines, action, remark,
+        cancel_check, manual_stop_check,
+        timeout_ms=timeout_ms, max_pages=max_pages,
+    )
+
+
+# ===================== Warm browser POOL (one per PROD environment) =====================
+# Keeps a pre-launched, already-logged-in EGM browser for each PROD environment so a
+# set/unset maintenance/test job only pays the click + live-recheck cost (no per-run Chromium
+# cold start + EGM login). Each environment owns its own thread + Playwright objects (sync
+# Playwright is thread-bound), so multi-environment jobs also run in parallel.
+#
+# Disable with ``PROD_WARM_POOL=0``. Choose which environments to keep open with
+# ``PROD_WARM_ENVS`` (comma list, default = all). Pre-warm at startup unless
+# ``PROD_WARM_PREWARM_ON_STARTUP=0``.
+
+# Distinct PROD EGM backends (normalised ``belongs``). NWR/NP share one ("NP").
+PROD_WARM_ALL_ENVS: tuple[str, ...] = ("NP", "NCH", "TBR", "TBP", "MDR", "DHS", "CP", "WF")
+
+# Re-load the EGM list this often so a warm session never goes stale.
+_PROD_WARM_KEEPALIVE_SEC = 240.0
+
+
+def _prod_warm_pool_enabled() -> bool:
+    return (os.environ.get("PROD_WARM_POOL", "1") or "").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
+def _prod_warm_prewarm_on_startup() -> bool:
+    return (os.environ.get("PROD_WARM_PREWARM_ON_STARTUP", "1") or "").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
+def _prod_warm_envs() -> list[str]:
+    raw = (os.environ.get("PROD_WARM_ENVS") or "").strip()
+    if not raw:
+        return list(PROD_WARM_ALL_ENVS)
+    out: list[str] = []
+    seen: set[str] = set()
+    for tok in re.split(r"[,\s;]+", raw):
+        env = _belongs_for_machine(tok)
+        if env and env in PROD_WARM_ALL_ENVS and env not in seen:
+            seen.add(env)
+            out.append(env)
+    return out or list(PROD_WARM_ALL_ENVS)
+
+
+def _prod_warm_headless() -> bool:
+    return _smachine_resolve_headless(
+        os.environ.get("SMACHINE_HEADLESS", "1").strip().lower() not in ("0", "false", "no")
+    )
+
+
+class _ProdEnvWarm:
+    """One pre-launched, EGM-logged-in browser for a single PROD environment, on its own thread."""
+
+    def __init__(self, env: str) -> None:
+        self.env = _belongs_for_machine(env)
+        self._tasks: "_queue.Queue[dict]" = _queue.Queue()
+        self._p = None
+        self._context = None
+        self._page = None
+        self._last_active = time.monotonic()
+        self._thread = threading.Thread(
+            target=self._loop, name=f"prod-warm-{self.env}", daemon=True
+        )
+        self._thread.start()
+        self._keepalive = threading.Thread(
+            target=self._keepalive_loop, name=f"prod-warm-ka-{self.env}", daemon=True
+        )
+        self._keepalive.start()
+
+    # ---- public API ----
+    def submit_prewarm(self) -> None:
+        self._tasks.put({"kind": "prewarm"})
+
+    def run_env(
+        self,
+        action: str,
+        env_machines: list[dict],
+        remark: str,
+        cancel_check: Callable[[], bool],
+        manual_stop_check: Callable[[], bool],
+        *,
+        timeout_ms: int,
+        max_pages: int | None,
+        on_phase_retry: Optional[Callable[[str, int, list[dict]], None]] = None,
+        want_shots: bool,
+    ) -> dict:
+        done = threading.Event()
+        box: dict = {}
+        self._tasks.put({
+            "kind": "run",
+            "action": action,
+            "machines": env_machines,
+            "remark": remark,
+            "cancel_check": cancel_check,
+            "manual_stop_check": manual_stop_check,
+            "timeout_ms": timeout_ms,
+            "max_pages": max_pages,
+            "on_phase_retry": on_phase_retry,
+            "want_shots": want_shots,
+            "done": done,
+            "box": box,
+        })
+        done.wait()
+        return box
+
+    # ---- worker thread ----
+    def _loop(self) -> None:
+        while True:
+            task = self._tasks.get()
+            kind = task.get("kind")
+            if kind == "prewarm":
+                try:
+                    self._ensure_ready(task.get("timeout_ms") or _default_timeout_ms(),
+                                       task.get("max_pages"))
+                    print(f"[prod-warm:{self.env}] pre-warmed.", flush=True)
+                except Exception as ex:
+                    print(f"[prod-warm:{self.env}] prewarm failed: {ex!r}", flush=True)
+                    self._teardown()
+                continue
+            if kind == "keepalive":
+                try:
+                    if self._healthy():
+                        self._rewarm(task.get("timeout_ms") or _default_timeout_ms())
+                except Exception:
+                    self._teardown()
+                continue
+            if kind == "run":
+                self._handle_run(task)
+                continue
+
+    def _handle_run(self, task: dict) -> None:
+        box = task["box"]
+        timeout_ms = task["timeout_ms"]
+        max_pages = task["max_pages"]
+        self._last_active = time.monotonic()
+        try:
+            ok_login, login_err = self._ensure_ready(timeout_ms, max_pages)
+            if not ok_login:
+                box["ok"] = []
+                box["fail"] = [
+                    {
+                        "belongs": m.get("belongs", self.env),
+                        "machine": _machine_display_name(m),
+                        "error": login_err or "login failed",
+                    }
+                    for m in task["machines"]
+                    if _machine_display_name(m)
+                ]
+                box["shots"] = []
+                box["shot_errs"] = []
+                self._teardown()
+                return
+            ok, fail = _dispatch_env_processing(
+                self._page,
+                self.env,
+                task["machines"],
+                task["action"],
+                task["remark"],
+                task["cancel_check"],
+                task["manual_stop_check"],
+                timeout_ms=timeout_ms,
+                max_pages=max_pages,
+                on_phase_retry=task["on_phase_retry"],
+            )
+            box["ok"] = ok
+            box["fail"] = fail
+            shots: list[dict[str, Any]] = []
+            shot_errs: list[dict[str, Any]] = []
+            if task["want_shots"] and task["machines"] and not task["cancel_check"]() \
+                    and not _prod_batch_fast_mode():
+                try:
+                    shots, shot_errs = _capture_prod_batch_screenshots_on_page(
+                        self._page, task["machines"], timeout_ms=timeout_ms, max_pages=max_pages
+                    )
+                except Exception as exc:
+                    logger.exception("prod-warm:%s screenshot failed", self.env)
+                    shot_errs.append({"belongs": self.env, "machine": "", "error": str(exc)})
+            box["shots"] = shots
+            box["shot_errs"] = shot_errs
+        except Exception as ex:
+            # A failure mid-run may have partially acted on EGM — never silently re-run elsewhere.
+            box["ok"] = box.get("ok") or []
+            box["fail"] = box.get("fail") or [
+                {
+                    "belongs": m.get("belongs", self.env),
+                    "machine": _machine_display_name(m),
+                    "error": str(ex),
+                }
+                for m in task["machines"]
+                if _machine_display_name(m)
+            ]
+            box["shots"] = box.get("shots") or []
+            box["shot_errs"] = box.get("shot_errs") or []
+            self._teardown()
+        finally:
+            self._last_active = time.monotonic()
+            if self._healthy():
+                try:
+                    self._rewarm(timeout_ms)
+                except Exception:
+                    self._teardown()
+            task["done"].set()
+
+    def _keepalive_loop(self) -> None:
+        while True:
+            time.sleep(_PROD_WARM_KEEPALIVE_SEC)
+            if self._healthy() and (time.monotonic() - self._last_active) >= _PROD_WARM_KEEPALIVE_SEC:
+                self._tasks.put({"kind": "keepalive"})
+
+    # ---- browser lifecycle ----
+    def _healthy(self) -> bool:
+        try:
+            return self._page is not None and not self._page.is_closed()
+        except Exception:
+            return False
+
+    def _launch(self) -> None:
+        from playwright.sync_api import sync_playwright
+
+        self._teardown()
+        self._p = sync_playwright().start()
+        profile = Path(os.path.join(tempfile.gettempdir(), f"prod_warm_profile_{self.env.lower()}"))
+        profile.mkdir(parents=True, exist_ok=True)
+        self._context = self._p.chromium.launch_persistent_context(
+            user_data_dir=str(profile),
+            headless=_prod_warm_headless(),
+            viewport={"width": 1600, "height": 900},
+            ignore_https_errors=True,
+        )
+        self._page = (
+            self._context.pages[0] if self._context.pages else self._context.new_page()
+        )
+        print(f"[prod-warm:{self.env}] browser launched.", flush=True)
+
+    def _teardown(self) -> None:
+        for closer in (
+            lambda: self._context.close() if self._context else None,
+            lambda: self._p.stop() if self._p else None,
+        ):
+            try:
+                closer()
+            except Exception:
+                pass
+        self._context = None
+        self._page = None
+        self._p = None
+
+    def _ensure_ready(self, timeout_ms: int, max_pages: int | None) -> tuple[bool, str]:
+        if not self._healthy():
+            self._launch()
+            self._page.set_default_timeout(timeout_ms)
+        return _ensure_env_egm_page(
+            self._page, self.env, timeout_ms=timeout_ms, max_pages=max_pages
+        )
+
+    def _rewarm(self, timeout_ms: int) -> None:
+        # Return to a clean first page of the EGM list so the next job starts ready.
+        try:
+            limit = _resolve_collect_page_limit(None)
+            _go_first_page(self._page, timeout_ms=timeout_ms, max_steps=limit)
+            _wait_table_idle(self._page, timeout_ms)
+        except Exception:
+            pass
+
+
+class _ProdEnvWarmPool:
+    def __init__(self) -> None:
+        self._workers: dict[str, _ProdEnvWarm] = {}
+        self._lock = threading.Lock()
+
+    def _get(self, env: str) -> _ProdEnvWarm:
+        norm = _belongs_for_machine(env)
+        with self._lock:
+            w = self._workers.get(norm)
+            if w is None:
+                w = _ProdEnvWarm(norm)
+                self._workers[norm] = w
+            return w
+
+    def prewarm(self, envs: list[str]) -> None:
+        for env in envs:
+            self._get(env).submit_prewarm()
+
+    def run_for_envs(
+        self,
+        by_env: dict[str, list[dict]],
+        action: str,
+        remark: str,
+        cancel_check: Callable[[], bool],
+        manual_stop_check: Callable[[], bool],
+        *,
+        timeout_ms: int,
+        max_pages: int | None,
+        on_phase_retry: Optional[Callable[[str, int, list[dict]], None]] = None,
+        want_shots: bool,
+    ) -> list[dict]:
+        """Run each environment's machines on its warm browser, in parallel; collect result boxes."""
+        boxes: dict[str, dict] = {}
+        threads: list[threading.Thread] = []
+
+        def _run(env: str, env_machines: list[dict]) -> None:
+            worker = self._get(env)
+            boxes[env] = worker.run_env(
+                action,
+                env_machines,
+                remark,
+                cancel_check,
+                manual_stop_check,
+                timeout_ms=timeout_ms,
+                max_pages=max_pages,
+                on_phase_retry=on_phase_retry,
+                want_shots=want_shots,
+            )
+
+        for belongs, env_machines in by_env.items():
+            if cancel_check():
+                break
+            t = threading.Thread(
+                target=_run, args=(belongs, env_machines),
+                name=f"prod-warm-dispatch-{belongs}", daemon=True,
+            )
+            t.start()
+            threads.append(t)
+        for t in threads:
+            t.join()
+        return list(boxes.values())
+
+
+_prod_env_warm_pool_singleton: "_ProdEnvWarmPool | None" = None
+_prod_env_warm_pool_lock = threading.Lock()
+
+
+def _prod_env_warm_pool() -> "_ProdEnvWarmPool":
+    global _prod_env_warm_pool_singleton
+    with _prod_env_warm_pool_lock:
+        if _prod_env_warm_pool_singleton is None:
+            _prod_env_warm_pool_singleton = _ProdEnvWarmPool()
+        return _prod_env_warm_pool_singleton
+
+
+def prewarm_prod_env_pool_on_startup() -> None:
+    """Pre-launch + EGM-login a browser for every configured PROD environment (call once at boot)."""
+    if not _prod_warm_pool_enabled():
+        print("[prod-warm] disabled (PROD_WARM_POOL=0).", flush=True)
+        return
+    if not _prod_warm_prewarm_on_startup():
+        print("[prod-warm] startup pre-warm skipped (PROD_WARM_PREWARM_ON_STARTUP=0).", flush=True)
+        return
+    envs = _prod_warm_envs()
+    try:
+        print(f"[prod-warm] startup pre-warm: {', '.join(envs)}", flush=True)
+        _prod_env_warm_pool().prewarm(envs)
+    except Exception as ex:
+        print(f"[prod-warm] startup pre-warm failed: {ex!r}", flush=True)
+
+
 def run_prod_batch_job(
     action: str,
     machines: list[dict],
@@ -1743,6 +2134,35 @@ def run_prod_batch_job(
         os.environ.get("SMACHINE_HEADLESS", "1").strip().lower() not in ("0", "false", "no")
     )
 
+    # Fast path: per-environment warm browsers (already logged into EGM). Each env runs on its own
+    # browser/thread → multi-env jobs run in parallel and there is no cold start + login per run.
+    if _prod_warm_pool_enabled():
+        try:
+            pool = _prod_env_warm_pool()
+        except Exception:
+            logger.exception("prod warm pool unavailable; using a fresh browser")
+            pool = None
+        if pool is not None:
+            boxes = pool.run_for_envs(
+                by_env, action, remark, cancel_check, manual_stop_check,
+                timeout_ms=timeout_ms, max_pages=max_pages,
+                on_phase_retry=on_phase_retry, want_shots=want_shots,
+            )
+            for box in boxes:
+                all_ok.extend(box.get("ok") or [])
+                all_fail.extend(box.get("fail") or [])
+                shot_list.extend(box.get("shots") or [])
+                shot_errs.extend(box.get("shot_errs") or [])
+            return {
+                "action": action,
+                "success": all_ok,
+                "failed": all_fail,
+                "ok": [f"{x['belongs']}::{x['machine']}" for x in all_ok],
+                "failed_keys": [f"{x['belongs']}::{x['machine']}" for x in all_fail],
+                "screenshots": shot_list,
+                "screenshot_errors": shot_errs,
+            }
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
         context = browser.new_context(
@@ -1752,49 +2172,21 @@ def run_prod_batch_job(
         page = context.new_page()
         page.set_default_timeout(timeout_ms)
         try:
-            use_retry = action in AUTO_RETRY_ACTIONS
-
             for belongs, env_machines in by_env.items():
                 if cancel_check():
                     break
-                if action in PHASED_STEPS:
-                    ok, fail = _run_phased_env(
-                        page,
-                        belongs,
-                        env_machines,
-                        action,
-                        remark,
-                        cancel_check,
-                        manual_stop_check,
-                        timeout_ms=timeout_ms,
-                        max_pages=max_pages,
-                        on_phase_retry=on_phase_retry,
-                    )
-                elif use_retry:
-                    ok, fail = _run_single_action_env(
-                        page,
-                        belongs,
-                        env_machines,
-                        action,
-                        remark,
-                        cancel_check,
-                        manual_stop_check,
-                        timeout_ms=timeout_ms,
-                        max_pages=max_pages,
-                        on_phase_retry=on_phase_retry,
-                    )
-                else:
-                    ok, fail = _process_env(
-                        page,
-                        belongs,
-                        env_machines,
-                        action,
-                        remark,
-                        cancel_check,
-                        manual_stop_check,
-                        timeout_ms=timeout_ms,
-                        max_pages=max_pages,
-                    )
+                ok, fail = _dispatch_env_processing(
+                    page,
+                    belongs,
+                    env_machines,
+                    action,
+                    remark,
+                    cancel_check,
+                    manual_stop_check,
+                    timeout_ms=timeout_ms,
+                    max_pages=max_pages,
+                    on_phase_retry=on_phase_retry,
+                )
                 all_ok.extend(ok)
                 all_fail.extend(fail)
 

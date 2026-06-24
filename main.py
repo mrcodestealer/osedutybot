@@ -5404,6 +5404,12 @@ def _run_main_entry() -> int:
             _boot_ju.prewarm_ju_pool_on_startup()
         except Exception as _boot_ju_err:
             print(f"[warm] startup pre-warm skipped: {_boot_ju_err!r}", flush=True)
+        try:
+            import prod_machine_batch as _boot_pmb
+
+            _boot_pmb.prewarm_prod_env_pool_on_startup()
+        except Exception as _boot_pmb_err:
+            print(f"[prod-warm] startup pre-warm skipped: {_boot_pmb_err!r}", flush=True)
         print(
             "[lark] Listening http://0.0.0.0:%d (threaded=True). "
             "Feishu Request URL must be HTTPS and reachable from the internet; reverse-proxy to this port."
