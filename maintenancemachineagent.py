@@ -930,7 +930,12 @@ _MAINT_LLM_SYSTEM = (
     '  "venue": string|null,            // e.g. "Good Fortune" for all_group, else null\n'
     '  "action_datetime": string|null   // ISO-8601 local time of when to do it, e.g. "2026-06-09T21:45", else null\n'
     "}\n"
-    "Rules: 'maintenance and test' => what='both'. If only a future time is mentioned it is action_datetime. "
+    "Environment aliases (stress test / maintenance):\n"
+    "- **OSM and CP are the same environment** — always set env to **CP** when the message says OSM, CP, "
+    "osmslot, or machines like OSM253 / OSMCP181 / CP-xxxx (CP environment).\n"
+    "- Do not treat OSM as a separate env from CP.\n"
+    "Rules: 'maintenance and test' => what='both'. Stress test announcements => what='both'. "
+    "If only a future time is mentioned it is action_datetime. "
     "Do NOT invent machine names or a venue. If the message is not about machine maintenance/test, "
     "set is_maintenance_request=false."
 )
