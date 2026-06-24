@@ -936,6 +936,26 @@ class _VpnWarmBrowser:
             if not self._started:
                 self._started = True
                 self._thread.start()
+                threading.Thread(
+                    target=self._keepalive_loop,
+                    name="vpn-warm-keepalive",
+                    daemon=True,
+                ).start()
+
+    def _keepalive_loop(self) -> None:
+        """Periodically re-render the form so the warm session never goes stale (cookies /
+        crumb / Active Choices). Skips when a job is already queued/running."""
+        try:
+            interval = max(60, int(os.environ.get("VPN_WARM_KEEPALIVE_SEC", "240")))
+        except ValueError:
+            interval = 240
+        while True:
+            time.sleep(interval)
+            try:
+                if self._jobs.empty():
+                    self._jobs.put({"kind": "prewarm"})
+            except Exception:
+                pass
 
     def submit_prewarm(self) -> None:
         self.start()
@@ -1015,9 +1035,12 @@ class _VpnWarmBrowser:
 
     def _form_present(self) -> bool:
         try:
-            return self._page.locator("div.jenkins-form-item").first.is_visible(
-                timeout=1500
-            )
+            loc = self._page.locator("div.jenkins-form-item").first
+            try:
+                loc.wait_for(state="visible", timeout=1500)
+                return True
+            except Exception:
+                return bool(loc.is_visible())
         except Exception:
             return False
 
@@ -1225,6 +1248,23 @@ def _vpn_warm_prewarm() -> None:
         _vpn_warm_get().submit_prewarm()
     except Exception as ex:
         print(f"[vpn-warm] prewarm dispatch failed: {ex!r}", flush=True)
+
+
+def prewarm_vpn_browser_on_startup() -> None:
+    """Public hook: launch + login + render the VPN form at bot startup so the *first*
+    ``create vpn`` is already warm (cold Chromium launch alone is ~20s). Call once from main."""
+    if not _vpn_warm_enabled():
+        print("[vpn-warm] disabled (VPN_WARM_BROWSER=0) — not pre-warming.", flush=True)
+        return
+    if (os.environ.get("VPN_WARM_PREWARM_ON_STARTUP", "1") or "").strip().lower() in (
+        "0",
+        "false",
+        "no",
+        "off",
+    ):
+        return
+    print("[vpn-warm] startup pre-warm requested.", flush=True)
+    _vpn_warm_prewarm()
 
 
 class ServiceNotDetectedError(Exception):

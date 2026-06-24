@@ -5380,6 +5380,12 @@ def _run_main_entry() -> int:
             _boot_router.startup_status()
         except Exception as _boot_router_err:
             print(f"[chathandleagent] startup check skipped: {_boot_router_err!r}", flush=True)
+        try:
+            import jenkinsupdate as _boot_ju
+
+            _boot_ju.prewarm_vpn_browser_on_startup()
+        except Exception as _boot_ju_err:
+            print(f"[vpn-warm] startup pre-warm skipped: {_boot_ju_err!r}", flush=True)
         print(
             "[lark] Listening http://0.0.0.0:%d (threaded=True). "
             "Feishu Request URL must be HTTPS and reachable from the internet; reverse-proxy to this port."
