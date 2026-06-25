@@ -4390,6 +4390,9 @@ def lark_webhook():
         email_text = original_text[cmd_m.end() :].strip() if cmd_m else ""
         if email_text.startswith('"') and email_text.endswith('"'):
             email_text = email_text[1:-1]
+        if not maintenance.is_evo_batch_command_chat(chat_id):
+            send_message(chat_id, maintenance.EVO_BATCH_WRONG_GROUP_MESSAGE)
+            return _lark_im_done()
         if not email_text:
             send_message(
                 chat_id,
