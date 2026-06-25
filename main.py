@@ -5161,6 +5161,24 @@ def lark_webhook():
             if maint_reply:
                 send_message(chat_id, maint_reply)
             return _lark_im_done()
+    elif maintenancemachineagent.is_machine_status_check_message(original_text, mention_keys):
+        # Read-only machine status from webmachine_data.json (same targeting as set/unset maintenance).
+        if chat_type == "group" and not bot_mentioned:
+            print("⏭️ status check ignored (bot not @mentioned in group)", flush=True)
+            return _lark_im_done()
+        try:
+            handled_st, st_reply = maintenancemachineagent.handle_machine_status_check_message(
+                original_text,
+                mention_keys,
+                chat_id=chat_id,
+                send_message=send_message,
+            )
+        except Exception as _st_err:
+            handled_st, st_reply = True, f"❌ Machine status check failed: {_st_err}"
+        if handled_st:
+            if st_reply:
+                send_message(chat_id, st_reply)
+            return _lark_im_done()
     elif maintenancemachineagent.is_short_set_unset_only_message(original_text, mention_keys):
         if chat_type == "group" and not bot_mentioned:
             print("⏭️ set/unset shorthand ignored (bot not @mentioned in group)", flush=True)

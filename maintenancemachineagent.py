@@ -251,6 +251,19 @@ _STRESS_TEST_RE = re.compile(r"stress\s*-?\s*test|压测|压力测试", re.I)
 # Operational steps that contain "clear" but are not unset-maintenance commands.
 _RAM_CLEAR_RE = re.compile(r"\bram\s+clear\b", re.I)
 
+# Read-only status check (no set/unset) — same machine targeting as maintenance commands.
+_STATUS_CHECK_RE = re.compile(
+    r"(?:"
+    r"\bcheck\s+(?:the\s+)?status(?:\s+of)?(?:\s+(?:the\s+)?(?:machines?|egms?|cabinets?))?"
+    r"|\bstatus\s+(?:of|for)\s+(?:the\s+)?(?:machines?|egms?|cabinets?)"
+    r"|\b(?:machines?|egms?)\s+status\b"
+    r"|\bshow\s+(?:the\s+)?status(?:\s+of)?(?:\s+(?:the\s+)?(?:machines?|egms?))?"
+    r"|\bget\s+(?:the\s+)?status(?:\s+of)?(?:\s+(?:the\s+)?(?:machines?|egms?))?"
+    r"|查看?状态|检查状态|机器状态|查状态"
+    r")",
+    re.I,
+)
+
 
 def _scrub_unset_false_positives(text: str) -> str:
     """Remove phrases like ``RAM Clear`` so they are not read as ``unset`` verbs."""
@@ -1340,6 +1353,224 @@ def _resolve_machines_for(c: dict[str, Any]) -> tuple[list[str], str]:
     if c.get("target_kind") == "all_group":
         return resolve_all_group(c.get("env_code") or "", c.get("venue") or "")
     return [], ""
+
+
+def _resolve_machine_targets(text: str) -> dict[str, Any] | None:
+    """
+    Resolve env + machine list from free-form text (shared by maintenance set/unset and status check).
+
+    Returns ``target_kind``, ``env_code``, ``venue``, ``machines`` (display names), ``note``.
+    """
+    machines = extract_machine_lines(text)
+    group = detect_group_target(text)
+    has_date = bool(_DATE_RE.search(text))
+    target_kind = "list"
+    env_code = ""
+    venue = ""
+    note = ""
+
+    if (
+        not machines
+        and group
+        and not has_date
+        and not _has_all_machines_scope(text)
+    ):
+        refs = resolve_env_asset_refs(group.get("env_code") or "", text)
+        if refs:
+            return {
+                "target_kind": "list",
+                "env_code": _normalize_env_code(group.get("env_code") or ""),
+                "venue": "",
+                "machines": refs,
+                "note": "",
+            }
+
+    if group and _has_all_machines_scope(text) and len(machines) < _EXPLICIT_LIST_MIN:
+        env_code = _normalize_env_code(group["env_code"])
+        venue = group["venue"]
+        machines, note = resolve_all_group(env_code, venue)
+        target_kind = "all_group"
+    elif machines:
+        envs = sorted({_normalize_env_code(e) for e in (_env_from_machine_name(m) for m in machines) if e})
+        env_code = envs[0] if len(envs) == 1 else ""
+        target_kind = "list"
+    elif group:
+        env_code = _normalize_env_code(group["env_code"])
+        venue = group["venue"]
+        machines, note = resolve_all_group(env_code, venue)
+        target_kind = "all_group"
+    else:
+        return None
+
+    if not machines:
+        return None
+    return {
+        "target_kind": target_kind,
+        "env_code": env_code,
+        "venue": venue,
+        "machines": machines,
+        "note": note,
+    }
+
+
+def _looks_like_status_check_request(text: str) -> bool:
+    """True for read-only machine status queries (not set/unset maintenance)."""
+    if _looks_like_maintenance_request(text):
+        return False
+    t = (text or "").strip()
+    if not t or t.lstrip().startswith("/"):
+        return False
+    if not _STATUS_CHECK_RE.search(t):
+        return False
+    tl = t.lower()
+    return bool(
+        re.search(r"\bmachines?\b|\ball\b|\bcabinets?\b|\begms?\b|机台|机器|全部|所有", tl)
+        or _MACHINE_LINE_RE.search(t)
+        or _MACHINE_TOKEN_RE.search(t)
+        or _ENV_WORD_RE.search(t)
+        or extract_machine_lines(t)
+        or detect_group_target(t)
+    )
+
+
+def _classify_status_check(text: str) -> dict[str, Any] | None:
+    """Routing classification for a status-check request."""
+    if not _looks_like_status_check_request(text):
+        return None
+    targets = _resolve_machine_targets(text)
+    if not targets:
+        return None
+    env_code = targets.get("env_code") or ""
+    if not env_code and targets.get("machines"):
+        envs = sorted(
+            {_normalize_env_code(e) for e in (_env_from_machine_name(m) for m in targets["machines"]) if e}
+        )
+        if len(envs) == 1:
+            env_code = envs[0]
+    return {
+        "action": "check_status",
+        "target_kind": targets["target_kind"],
+        "env_code": env_code,
+        "venue": targets.get("venue") or "",
+        "machines": targets.get("machines") or [],
+        "note": targets.get("note") or "",
+        "source": "rule",
+    }
+
+
+def _lookup_status_rows(env_code: str, machine_names: list[str]) -> tuple[list[dict], list[str]]:
+    """Match machine names against ``webmachine_data.json`` PROD rows (same rules as confirm card)."""
+    import smmachine
+
+    rows = load_webmachine_rows()
+    rows = [r for r in rows if str(r.get("environment") or "PROD").strip().upper() == "PROD"]
+    if not rows:
+        return [], list(machine_names)
+    return smmachine.resolve_prod_batch_bot_targets(env_code, machine_names, rows)
+
+
+def _format_status_line(m: dict) -> str:
+    head = f"{m.get('belongs', '')} — {m.get('machine', '')}"
+    bits: list[str] = []
+    st = (m.get("status") or "").strip()
+    onl = (m.get("online") or "").strip()
+    if st:
+        bits.append(st)
+    if onl:
+        bits.append(onl)
+    if m.get("is_test"):
+        bits.append("TEST")
+    if bits:
+        return f"• {head} — {' | '.join(bits)}"
+    return f"• {head}"
+
+
+def build_status_report(
+    matched: list[dict],
+    not_found: list[str],
+    *,
+    env_code: str = "",
+    note: str = "",
+) -> str:
+    """Human-readable status reply (same bullet style as the maintenance confirm card)."""
+    header = "Machine status:"
+    if env_code:
+        header = f"Machine status ({env_code}):"
+    lines = [header, "", "Found Machines -"]
+    if matched:
+        for m in matched[:80]:
+            lines.append(_format_status_line(m))
+        if len(matched) > 80:
+            lines.append(f"... and {len(matched) - 80} more")
+    else:
+        lines.append("• _(none)_")
+    if not_found:
+        lines.append("")
+        lines.append("Not Found Machines -")
+        for nf in not_found[:40]:
+            lines.append(f"• {nf}")
+        if len(not_found) > 40:
+            lines.append(f"... and {len(not_found) - 40} more")
+    if note:
+        lines.append("")
+        lines.append(note)
+    lines.append("")
+    lines.append(f"_(Source: webmachine_data.json — {_data_path_hint()})_")
+    return "\n".join(lines)
+
+
+def is_machine_status_check_message(original_text: str, mention_keys: Sequence[str]) -> bool:
+    """True when the message is a read-only machine status query."""
+    body = _strip_mentions(original_text, mention_keys)
+    c = _classify_status_check(body)
+    if not c:
+        return False
+    if c.get("machines"):
+        return True
+    return bool(_ENV_SITE_ALIAS.get(c.get("env_code") or ""))
+
+
+def handle_machine_status_check_message(
+    original_text: str,
+    mention_keys: Sequence[str],
+    *,
+    chat_id: str,
+    send_message: Callable[..., Any],
+) -> tuple[bool, str | None]:
+    """Resolve machines like maintenance commands; reply with status from ``webmachine_data.json``."""
+    body = _strip_mentions(original_text, mention_keys)
+    c = _classify_status_check(body)
+    if not c:
+        return False, None
+
+    env_code = (c.get("env_code") or "").strip().upper()
+    machine_names, note = _resolve_machines_for(c)
+    if not machine_names:
+        venue_txt = f" “{c.get('venue')}”" if c.get("venue") else ""
+        return True, (
+            f"⚠️ Understood a status check for **{env_code or '?'}**{venue_txt}, "
+            f"but found **0** machines.\n{_data_path_hint()}"
+        )
+
+    if not env_code:
+        envs = sorted({_normalize_env_code(e) for e in (_env_from_machine_name(m) for m in machine_names) if e})
+        if len(envs) == 1:
+            env_code = envs[0]
+        else:
+            return True, (
+                "⚠️ Machines span multiple environments — please include the site "
+                f"(e.g. `tbp`, `cp`) or paste machines from one env only."
+            )
+
+    matched, not_found = _lookup_status_rows(env_code, machine_names)
+    print(
+        f"[maintenanceagent] status-check env={env_code} requested={len(machine_names)} "
+        f"found={len(matched)} not_found={len(not_found)} data={_last_data_path or 'NOT FOUND'}",
+        flush=True,
+    )
+    reply = build_status_report(matched, not_found, env_code=env_code, note=note)
+    send_message(chat_id, reply)
+    return True, None
 
 
 def parse_announcement(text: str, *, now: datetime | None = None) -> dict[str, Any] | None:
