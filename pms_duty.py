@@ -290,35 +290,76 @@ def _format_level_section(level_name, names_list):
     return "\n".join(lines)
 
 
-def _format_daily_duty(date_obj, first_level, second_level):
-    """
-    格式化单日值班信息（只包含First和Second Level），输出格式：
-    📅 PMS Schedule - March 22, 2026 Sunday
-    First Level:
-    • Jason  (Phone: 60135186419)
-    Second Level:
-    • Mary  (Phone: 123456789)
-    若当天无First和Second，则只显示日期和 "No duty"。
-    """
-    date_str = date_obj.strftime("%B %d, %Y %A")
+def _find_duty_for_date(values, target_year, target_date):
+    """返回 target_date 所在排班周：(start, end, first, second, final_names)。"""
+    for row in values:
+        start_date, end_date, first_name, second_name, final_names = _parse_duty_row(row, target_year)
+        if start_date and end_date and start_date <= target_date <= end_date:
+            return start_date, end_date, first_name, second_name, final_names
+    return None, None, "", "", []
+
+
+def _format_week_duty(start_date, end_date, first_name, second_name, final_names):
+    """格式化单周值班（一周内 First/Second/Final 相同）。"""
+    if start_date.year == end_date.year:
+        if start_date.month == end_date.month:
+            date_str = f"{start_date.strftime('%B %d')} - {end_date.strftime('%d, %Y')}"
+        else:
+            date_str = f"{start_date.strftime('%B %d')} - {end_date.strftime('%B %d, %Y')}"
+    else:
+        date_str = f"{start_date.strftime('%B %d, %Y')} - {end_date.strftime('%B %d, %Y')}"
+
     lines = [f"📅 PMS Schedule - {date_str}"]
 
-    has_duty = first_level or second_level
-
-    if not has_duty:
+    if not (first_name or second_name or final_names):
         lines.append("No duty")
         return "\n".join(lines)
 
-    if first_level:
-        lines.append(_format_level_section("First Level", first_level))
-    if second_level:
-        lines.append(_format_level_section("Second Level", second_level))
+    if first_name:
+        lines.append(_format_level_section("First Level", [first_name]))
+    if second_name:
+        lines.append(_format_level_section("Second Level", [second_name]))
+    if final_names:
+        lines.append(_format_level_section("Final Level", final_names))
 
     return "\n".join(lines)
 
 
+def _sorted_weeks(values, target_year):
+    """从表格行解析并返回按开始日期排序的排班周列表。"""
+    weeks = []
+    for row in values:
+        start_date, end_date, first_name, second_name, final_names = _parse_duty_row(row, target_year)
+        if start_date and end_date:
+            weeks.append((start_date, end_date, first_name, second_name, final_names))
+    weeks.sort(key=lambda w: w[0])
+    return weeks
+
+
+def _weeks_from_today(values, target_year, today, count=3):
+    """返回从今天所在周开始的 count 个排班周。"""
+    weeks = _sorted_weeks(values, target_year)
+    start_idx = next(
+        (i for i, (start, end, *_rest) in enumerate(weeks) if start <= today <= end),
+        None,
+    )
+    if start_idx is None:
+        return []
+
+    selected = weeks[start_idx:start_idx + count]
+    if len(selected) >= count:
+        return selected
+
+    try:
+        next_values, next_year = _fetch_sheet_data(target_year + 1)
+        selected.extend(_sorted_weeks(next_values, next_year)[: count - len(selected)])
+    except Exception:
+        pass
+    return selected
+
+
 def dutyNextDay():
-    """返回未来三天（今天、明天、后天）的值班信息，Final Level汇总在最后"""
+    """返回从今天起连续三周的值班信息（每周一块）。"""
     today = datetime.now().date()
     year = today.year
 
@@ -327,42 +368,14 @@ def dutyNextDay():
     except Exception as e:
         return f"❌ {e}"
 
-    dates_to_show = [today + timedelta(days=i) for i in range(3)]
+    weeks = _weeks_from_today(values, target_year, today, count=3)
 
-    # 初始化每个日期的First、Second集合，以及全局Final集合
-    daily_first = {d: set() for d in dates_to_show}
-    daily_second = {d: set() for d in dates_to_show}
-    all_final = set()
+    if not weeks:
+        return f"📅 No PMS duty scheduled for the week of {today.strftime('%B %d, %Y')}."
 
-    for row in values:
-        start_date, end_date, first_name, second_name, final_names = _parse_duty_row(row, target_year)
-        if not start_date or not end_date:
-            continue
-
-        for d in dates_to_show:
-            if start_date <= d <= end_date:
-                if first_name:
-                    daily_first[d].add(first_name)
-                if second_name:
-                    daily_second[d].add(second_name)
-                for name in final_names:
-                    all_final.add(name)  # 收集所有Final人员（去重）
-
-    # 将集合转换为列表
-    for d in dates_to_show:
-        daily_first[d] = list(daily_first[d])
-        daily_second[d] = list(daily_second[d])
-    all_final = list(all_final)
-
-    # 生成每个日期的块（不含Final）
     blocks = []
-    for d in dates_to_show:
-        blocks.append(_format_daily_duty(d, daily_first[d], daily_second[d]))
-
-    # 如果有Final人员，在最后添加Final Level块
-    if all_final:
-        final_block = _format_level_section("Final Level", all_final)
-        blocks.append(final_block)
+    for start_date, end_date, first_name, second_name, final_names in weeks:
+        blocks.append(_format_week_duty(start_date, end_date, first_name, second_name, final_names))
 
     return "\n\n".join(blocks)
 
