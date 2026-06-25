@@ -5980,6 +5980,12 @@ def _run_main_entry() -> int:
         except Exception as _boot_router_err:
             print(f"[chathandleagent] startup check skipped: {_boot_router_err!r}", flush=True)
         try:
+            import codeassist as _boot_codeassist
+
+            _boot_codeassist.startup_status()
+        except Exception as _boot_code_err:
+            print(f"[codeassist] startup check skipped: {_boot_code_err!r}", flush=True)
+        try:
             import jenkinsupdate as _boot_ju
 
             _boot_ju.prewarm_vpn_browser_on_startup()

@@ -1,0 +1,14 @@
+[Unit]
+Description=Warmup Ollama model for osedutybot
+After=network-online.target ollama.service
+Wants=network-online.target
+Requires=ollama.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/root/osedutybot/.env
+ExecStart=/root/osedutybot/deploy/warmup-ollama.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

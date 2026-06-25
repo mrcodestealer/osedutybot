@@ -147,6 +147,15 @@ def _llm_model() -> str:
     return (os.getenv("BOT_CHAT_MODEL") or DEFAULT_LLM_MODEL).strip()
 
 
+def _llm_model_for_request(*, images: bool = False) -> str:
+    """Text chat uses BOT_CHAT_MODEL; vision needs a multimodal model (e.g. qwen3.5:9b)."""
+    if images:
+        vision_model = (os.getenv("BOT_CHAT_VISION_MODEL") or "").strip()
+        if vision_model:
+            return vision_model
+    return _llm_model()
+
+
 def _llm_base_url() -> str:
     return (os.getenv("BOT_CHAT_API_BASE") or DEFAULT_LLM_BASE).strip().rstrip("/")
 
@@ -1083,6 +1092,15 @@ def _llm_chat(
         return None
     url = f"{_llm_base_url()}/chat/completions"
     system_prompt = _SYSTEM_PROMPT + (_VISION_EXTRA if images else "")
+    try:
+        import codeassist as _codeassist
+
+        if _codeassist.is_enabled() and not images:
+            code_ctx = _codeassist.context_for_llm(user_text)
+            if code_ctx:
+                system_prompt += code_ctx
+    except Exception as _code_err:
+        print(f"[chatagent] codeassist skipped: {_code_err!r}", flush=True)
     history: list[dict[str, str]] = []
     if session_key and memory_enabled() and not images:
         history = _memory_get_history(session_key)
@@ -1113,7 +1131,7 @@ def _llm_chat(
     messages.extend(history)
     messages.append(user_message)
     payload = {
-        "model": _llm_model(),
+        "model": _llm_model_for_request(images=bool(images)),
         "messages": messages,
         "max_tokens": _llm_max_tokens(),
         "temperature": float(os.getenv("BOT_CHAT_LLM_TEMPERATURE", "0.75")),
@@ -1121,6 +1139,12 @@ def _llm_chat(
     if _is_ollama_base():
         think = (os.getenv("BOT_CHAT_LLM_THINK") or "false").strip().lower()
         payload["think"] = think in ("1", "true", "yes", "on")
+        keep_alive = (os.getenv("BOT_CHAT_OLLAMA_KEEP_ALIVE") or "-1").strip()
+        if keep_alive.lower() not in ("0", "off", "false", "no"):
+            try:
+                payload["keep_alive"] = int(keep_alive)
+            except ValueError:
+                payload["keep_alive"] = keep_alive
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
