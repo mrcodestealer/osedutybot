@@ -1,0 +1,577 @@
+{
+  "record_ids": [
+    "recviJj6ScZrjg",
+    "recviJj7xe5H2g",
+    "recviJj7xeGddd",
+    "recviJj7xeHyQW",
+    "recviJj7xeNQsl",
+    "recviJj7xeP3eq",
+    "recviJj7xeSz3m",
+    "recvkjL7GwxIku",
+    "recvkjLHMcfLEC",
+    "recvkjLwak5h12",
+    "recvkjpID6F8Jc",
+    "recvkjpR9Ascxv",
+    "recvmBGq9X33aC",
+    "recvmBGzrev0F7",
+    "recvmZ0udwwOoP",
+    "recvmadDvfD51k",
+    "recvmagJGkfeKJ",
+    "recvmcOwxKzlic",
+    "recvmd08AAGkBE",
+    "recvnn7GDbTUx5",
+    "recvnn7vtJwna8"
+  ],
+  "by_record": {
+    "recviJj6ScZrjg": {
+      "sheet_id": "3RIBRL",
+      "request_person": "Jewel",
+      "exchange_person": "Man Chung",
+      "original_date": "2026-07-03",
+      "exchange_date": "2026-07-08",
+      "shift_type": "D",
+      "cells": [
+        {
+          "row": 36,
+          "col": 184,
+          "val": "*"
+        },
+        {
+          "row": 36,
+          "col": 189,
+          "val": "D"
+        },
+        {
+          "row": 20,
+          "col": 184,
+          "val": "D"
+        },
+        {
+          "row": 20,
+          "col": 189,
+          "val": "*"
+        }
+      ]
+    },
+    "recviJj7xe5H2g": {
+      "sheet_id": "3RIBRL",
+      "request_person": "Jewel",
+      "exchange_person": "Jan Rei",
+      "original_date": "2026-07-02",
+      "exchange_date": "2026-07-14",
+      "shift_type": "D",
+      "cells": [
+        {
+          "row": 36,
+          "col": 183,
+          "val": "*"
+        },
+        {
+          "row": 36,
+          "col": 195,
+          "val": "D"
+        },
+        {
+          "row": 22,
+          "col": 183,
+          "val": "D"
+        },
+        {
+          "row": 22,
+          "col": 195,
+          "val": "*"
+        }
+      ]
+    },
+    "recviJj7xeGddd": {
+      "sheet_id": "3RIBRL",
+      "request_person": "Man Chung",
+      "exchange_person": "Kenneth",
+      "original_date": "2026-05-05",
+      "exchange_date": "2026-05-17",
+      "shift_type": "D",
+      "cells": [
+        {
+          "row": 20,
+          "col": 125,
+          "val": "*"
+        },
+        {
+          "row": 20,
+          "col": 137,
+          "val": "D"
+        },
+        {
+          "row": 34,
+          "col": 125,
+          "val": "D"
+        },
+        {
+          "row": 34,
+          "col": 137,
+          "val": "*"
+        }
+      ]
+    },
+    "recviJj7xeHyQW": {
+      "sheet_id": "3RIBRL",
+      "request_person": "Man Chung",
+      "exchange_person": "Kenneth",
+      "original_date": "2026-05-04",
+      "exchange_date": "2026-05-16",
+      "shift_type": "D",
+      "cells": [
+        {
+          "row": 20,
+          "col": 124,
+          "val": "*"
+        },
+        {
+          "row": 20,
+          "col": 136,
+          "val": "D"
+        },
+        {
+          "row": 34,
+          "col": 124,
+          "val": "D"
+        },
+        {
+          "row": 34,
+          "col": 136,
+          "val": "*"
+        }
+      ]
+    },
+    "recviJj7xeNQsl": {
+      "sheet_id": "3RIBRL",
+      "request_person": "Louie",
+      "exchange_person": "Lynette",
+      "original_date": "2026-05-08",
+      "exchange_date": "2026-05-19",
+      "shift_type": "N",
+      "cells": [
+        {
+          "row": 10,
+          "col": 128,
+          "val": "*"
+        },
+        {
+          "row": 10,
+          "col": 139,
+          "val": "N"
+        },
+        {
+          "row": 28,
+          "col": 128,
+          "val": "N"
+        },
+        {
+          "row": 28,
+          "col": 139,
+          "val": "*"
+        }
+      ]
+    },
+    "recviJj7xeP3eq": {
+      "sheet_id": "3RIBRL",
+      "request_person": "Eduard James",
+      "exchange_person": "Jun Chen",
+      "original_date": "2026-05-26",
+      "exchange_date": "2026-05-06",
+      "shift_type": "N",
+      "cells": [
+        {
+          "row": 14,
+          "col": 146,
+          "val": "*"
+        },
+        {
+          "row": 14,
+          "col": 126,
+          "val": "N"
+        },
+        {
+          "row": 32,
+          "col": 146,
+          "val": "N"
+        },
+        {
+          "row": 32,
+          "col": 126,
+          "val": "*"
+        }
+      ]
+    },
+    "recviJj7xeSz3m": {
+      "sheet_id": "3RIBRL",
+      "request_person": "Man Chung",
+      "exchange_person": "Kenneth",
+      "original_date": "2026-06-22",
+      "exchange_date": "2026-06-18",
+      "shift_type": "N",
+      "cells": [
+        {
+          "row": 20,
+          "col": 173,
+          "val": "*"
+        },
+        {
+          "row": 20,
+          "col": 169,
+          "val": "N"
+        },
+        {
+          "row": 34,
+          "col": 173,
+          "val": "N"
+        },
+        {
+          "row": 34,
+          "col": 169,
+          "val": "*"
+        }
+      ]
+    },
+    "recvkjL7GwxIku": {
+      "sheet_id": "3RIBRL",
+      "request_person": "Eduard James",
+      "exchange_person": "Chun Chee",
+      "original_date": "2026-05-28",
+      "exchange_date": "2026-05-22",
+      "shift_type": "N",
+      "cells": [
+        {
+          "row": 14,
+          "col": 148,
+          "val": "*"
+        },
+        {
+          "row": 14,
+          "col": 142,
+          "val": "N"
+        },
+        {
+          "row": 30,
+          "col": 148,
+          "val": "N"
+        },
+        {
+          "row": 30,
+          "col": 142,
+          "val": "*"
+        }
+      ]
+    },
+    "recvkjLHMcfLEC": {
+      "sheet_id": "3RIBRL",
+      "request_person": "Jewel",
+      "exchange_person": "Jan Rei",
+      "original_date": "2026-07-01",
+      "exchange_date": "2026-07-13",
+      "shift_type": "D",
+      "cells": [
+        {
+          "row": 36,
+          "col": 182,
+          "val": "*"
+        },
+        {
+          "row": 36,
+          "col": 194,
+          "val": "D"
+        },
+        {
+          "row": 22,
+          "col": 182,
+          "val": "D"
+        },
+        {
+          "row": 22,
+          "col": 194,
+          "val": "*"
+        }
+      ]
+    },
+    "recvkjLwak5h12": {
+      "sheet_id": "3RIBRL",
+      "request_person": "Eduard James",
+      "exchange_person": "Jun Chen",
+      "original_date": "2026-05-27",
+      "exchange_date": "2026-05-14",
+      "shift_type": "N",
+      "cells": [
+        {
+          "row": 14,
+          "col": 147,
+          "val": "*"
+        },
+        {
+          "row": 14,
+          "col": 134,
+          "val": "N"
+        },
+        {
+          "row": 32,
+          "col": 147,
+          "val": "N"
+        },
+        {
+          "row": 32,
+          "col": 134,
+          "val": "*"
+        }
+      ]
+    },
+    "recvkjpID6F8Jc": {
+      "sheet_id": "3RIBRL",
+      "request_person": "Man Chung",
+      "exchange_person": "Kenneth",
+      "original_date": "2026-06-20",
+      "exchange_date": "2026-06-15",
+      "shift_type": "N",
+      "cells": [
+        {
+          "row": 20,
+          "col": 171,
+          "val": "*"
+        },
+        {
+          "row": 20,
+          "col": 166,
+          "val": "N"
+        },
+        {
+          "row": 34,
+          "col": 171,
+          "val": "N"
+        },
+        {
+          "row": 34,
+          "col": 166,
+          "val": "*"
+        }
+      ]
+    },
+    "recvkjpR9Ascxv": {
+      "sheet_id": "3RIBRL",
+      "request_person": "Eduard James",
+      "exchange_person": "Chun Chee",
+      "original_date": "2026-05-29",
+      "exchange_date": "2026-05-23",
+      "shift_type": "N",
+      "cells": [
+        {
+          "row": 14,
+          "col": 149,
+          "val": "*"
+        },
+        {
+          "row": 14,
+          "col": 143,
+          "val": "N"
+        },
+        {
+          "row": 30,
+          "col": 149,
+          "val": "N"
+        },
+        {
+          "row": 30,
+          "col": 143,
+          "val": "*"
+        }
+      ]
+    },
+    "recvmBGq9X33aC": {
+      "sheet_id": "3RIBRL",
+      "request_person": "Jun Chen",
+      "exchange_person": "Chrisjames",
+      "original_date": "2026-09-11",
+      "exchange_date": "2026-09-15",
+      "shift_type": "N",
+      "cells": [
+        {
+          "row": 32,
+          "col": 254,
+          "val": "*"
+        },
+        {
+          "row": 32,
+          "col": 258,
+          "val": "N"
+        },
+        {
+          "row": 16,
+          "col": 254,
+          "val": "N"
+        },
+        {
+          "row": 16,
+          "col": 258,
+          "val": "*"
+        }
+      ]
+    },
+    "recvmBGzrev0F7": {
+      "sheet_id": "3RIBRL",
+      "request_person": "Jun Chen",
+      "exchange_person": "Chrisjames",
+      "original_date": "2026-09-12",
+      "exchange_date": "2026-09-16",
+      "shift_type": "N",
+      "cells": [
+        {
+          "row": 32,
+          "col": 255,
+          "val": "*"
+        },
+        {
+          "row": 32,
+          "col": 259,
+          "val": "N"
+        },
+        {
+          "row": 16,
+          "col": 255,
+          "val": "N"
+        },
+        {
+          "row": 16,
+          "col": 259,
+          "val": "*"
+        }
+      ]
+    },
+    "recvmZ0udwwOoP": {
+      "sheet_id": "3RIBRL",
+      "request_person": "Man Chung",
+      "exchange_person": "Jewel",
+      "original_date": "2026-09-10",
+      "exchange_date": "2026-09-14",
+      "shift_type": "D",
+      "cells": [
+        {
+          "row": 20,
+          "col": 253,
+          "val": "*"
+        },
+        {
+          "row": 20,
+          "col": 257,
+          "val": "D"
+        },
+        {
+          "row": 36,
+          "col": 253,
+          "val": "D"
+        },
+        {
+          "row": 36,
+          "col": 257,
+          "val": "*"
+        }
+      ]
+    },
+    "recvmadDvfD51k": {
+      "sheet_id": "3RIBRL",
+      "request_person": "Man Chung",
+      "exchange_person": "Kenneth",
+      "original_date": "2026-06-21",
+      "exchange_date": "2026-06-17",
+      "shift_type": "N",
+      "cells": [
+        {
+          "row": 20,
+          "col": 172,
+          "val": "*"
+        },
+        {
+          "row": 20,
+          "col": 168,
+          "val": "N"
+        },
+        {
+          "row": 34,
+          "col": 172,
+          "val": "N"
+        },
+        {
+          "row": 34,
+          "col": 168,
+          "val": "*"
+        }
+      ]
+    },
+    "recvmagJGkfeKJ": {
+      "sheet_id": "3RIBRL",
+      "request_person": "Jewel",
+      "exchange_person": "Man Chung",
+      "original_date": "2026-07-04",
+      "exchange_date": "2026-07-08",
+      "shift_type": "D",
+      "cells": [
+        {
+          "row": 36,
+          "col": 185,
+          "val": "*"
+        },
+        {
+          "row": 36,
+          "col": 189,
+          "val": "D"
+        },
+        {
+          "row": 20,
+          "col": 185,
+          "val": "D"
+        },
+        {
+          "row": 20,
+          "col": 189,
+          "val": "*"
+        }
+      ]
+    },
+    "recvnn7GDbTUx5": {
+      "sheet_id": "3RIBRL",
+      "request_person": "Jewel",
+      "exchange_person": "Jewel",
+      "original_date": "2026-07-02",
+      "exchange_date": "2026-07-14",
+      "shift_type": "D",
+      "cells": [
+        {
+          "row": 36,
+          "col": 183,
+          "val": "*"
+        },
+        {
+          "row": 36,
+          "col": 195,
+          "val": "D"
+        }
+      ]
+    },
+    "recvnn7vtJwna8": {
+      "sheet_id": "3RIBRL",
+      "request_person": "Jewel",
+      "exchange_person": "Jewel",
+      "original_date": "2026-07-01",
+      "exchange_date": "2026-07-13",
+      "shift_type": "D",
+      "cells": [
+        {
+          "row": 36,
+          "col": 182,
+          "val": "*"
+        },
+        {
+          "row": 36,
+          "col": 194,
+          "val": "D"
+        }
+      ]
+    }
+  }
+}

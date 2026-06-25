@@ -1755,6 +1755,15 @@ PROD_WARM_ALL_ENVS: tuple[str, ...] = ("NP", "NCH", "TBR", "TBP", "MDR", "DHS", 
 _PROD_WARM_KEEPALIVE_SEC = 240.0
 
 
+def _playwright_available() -> bool:
+    try:
+        import playwright  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
 def _prod_warm_pool_enabled() -> bool:
     return (os.environ.get("PROD_WARM_POOL", "1") or "").strip().lower() not in (
         "0", "false", "no", "off",
@@ -2084,6 +2093,14 @@ def prewarm_prod_env_pool_on_startup() -> None:
         return
     if not _prod_warm_prewarm_on_startup():
         print("[prod-warm] startup pre-warm skipped (PROD_WARM_PREWARM_ON_STARTUP=0).", flush=True)
+        return
+    if not _playwright_available():
+        print(
+            "[prod-warm] startup pre-warm skipped — playwright not installed "
+            "(pip install playwright && playwright install chromium). "
+            "Local chat-only PC: set PROD_WARM_POOL=0 in .env.",
+            flush=True,
+        )
         return
     envs = _prod_warm_envs()
     try:

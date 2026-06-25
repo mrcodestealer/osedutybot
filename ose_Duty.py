@@ -2915,7 +2915,7 @@ def _is_offset_exchange_myself_label(name: str) -> bool:
 def resolve_offset_exchange_person(exchange_person: str, *, request_person: str) -> str:
     """Map form value ``Myself`` to the requester's roster name."""
     if _is_offset_exchange_myself_label(exchange_person):
-        req = _title_name(request_person)
+        req = _canonical_roster_form_name(request_person)
         if not req:
             raise ValueError("Request person is required when Exchange person is Myself")
         return req
@@ -2923,13 +2923,13 @@ def resolve_offset_exchange_person(exchange_person: str, *, request_person: str)
 
 
 def _validate_offset_exchange_person(exchange_person: str) -> str:
-    exc = _title_name(exchange_person)
+    exc = _canonical_roster_form_name(exchange_person)
     allowed = {
-        _title_name(n)
+        _canonical_roster_form_name(n)
         for n in ose_offset_form_exchange_names()
         if not _is_offset_exchange_myself_label(n)
     }
-    if exc not in allowed:
+    if not exc or exc not in allowed:
         raise ValueError(f"Unknown or disallowed exchange person {exchange_person!r}")
     return exc
 
@@ -3195,6 +3195,11 @@ def _lookup_person_open_id(name: str, idx: dict[str, str]) -> str:
     return ""
 
 
+def _canonical_roster_form_name(name: str) -> str:
+    """Return the exact ``OSE_LEAVE_FORM_NAMES`` roster key, or empty if unknown."""
+    return _resolve_ose_leave_roster_key(name) or ""
+
+
 def lookup_roster_name_for_open_id(open_id: str, token: str) -> str:
     """
   Map Lark ``open_id`` → OSE roster name using leave/offset Bitable person fields
@@ -3207,13 +3212,13 @@ def lookup_roster_name_for_open_id(open_id: str, token: str) -> str:
     for roster in OSE_LEAVE_FORM_NAMES:
         rnm = _title_name(roster)
         if idx.get(rnm) == oid or idx.get(_name_key(rnm)) == oid:
-            return rnm
+            return roster
     for key, pid in idx.items():
         if pid != oid or key.startswith("ou_"):
             continue
         for roster in OSE_LEAVE_FORM_NAMES:
             if _names_same_person(roster, key):
-                return _title_name(roster)
+                return roster
     return ""
 
 
@@ -3957,8 +3962,8 @@ def submit_ose_offset(
     exchange_date: date,
     reason: str,
 ) -> dict[str, Any]:
-    req = _title_name(request_person)
-    if req not in OSE_LEAVE_FORM_NAMES:
+    req = _canonical_roster_form_name(request_person)
+    if not req:
         raise ValueError(f"Unknown request person {request_person!r}")
     exc = resolve_offset_exchange_person(exchange_person, request_person=req)
     st = (shift_type or "").strip().upper()
@@ -4138,11 +4143,10 @@ def update_ose_offset_request(
     row = get_ose_offset_record_admin_row(record_id)
     if not row.get("pending"):
         raise ValueError("Only pending offset requests can be edited.")
-    req = _title_name(request_person)
-    if _title_name(str(row.get("request_person") or "")) != req:
+    req = _canonical_roster_form_name(request_person)
+    row_req = _canonical_roster_form_name(str(row.get("request_person") or ""))
+    if not req or row_req != req:
         raise ValueError("This offset request does not belong to you.")
-    if req not in OSE_LEAVE_FORM_NAMES:
-        raise ValueError(f"Unknown request person {request_person!r}")
     exc = resolve_offset_exchange_person(exchange_person, request_person=req)
     st = (shift_type or "").strip().upper()
     if st not in OSE_SHIFT_TYPES:

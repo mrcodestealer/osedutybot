@@ -156,7 +156,10 @@ def _playwright_headless() -> bool:
     """
     Headed Chromium needs a display on Linux. Servers (no $DISPLAY) must use headless.
     CHECKCREDIT_HEADLESS=1 → always headless; CHECKCREDIT_HEADED=1 → always headed.
+    BOT_PLAYWRIGHT_HEADLESS=1 → force headless (local Duty Bot default via run_local_bot.py).
     """
+    if _env_truthy("BOT_PLAYWRIGHT_HEADLESS") or _env_truthy("PLAYWRIGHT_HEADLESS"):
+        return True
     if _env_truthy("CHECKCREDIT_HEADLESS"):
         return True
     if _env_truthy("CHECKCREDIT_HEADED"):
@@ -3554,6 +3557,8 @@ def _np_truthy_env(*names: str) -> bool:
 
 def _np_backend_playwright_headless() -> bool:
     """Prefer visible window when any *HEADED* env is set (NP / WF / generic alias for Duty Bot debug)."""
+    if _np_truthy_env("BOT_PLAYWRIGHT_HEADLESS", "PLAYWRIGHT_HEADLESS"):
+        return True
     if _np_truthy_env(
         "NP_BACKEND_HEADED",
         "WF_THIRD_HTTP_HEADED",

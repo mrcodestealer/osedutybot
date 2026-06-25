@@ -10,3 +10,4 @@ pillow
 paramiko
 pymysql
 openpyxl
+playwright

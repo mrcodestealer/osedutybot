@@ -1277,6 +1277,8 @@ def _collect_visible_table_machine_rows(page, *, timeout_ms: int) -> list[tuple[
 def _smachine_resolve_headless(headless: bool | None) -> bool:
     if headless is not None:
         return bool(headless)
+    if _truthy_env("BOT_PLAYWRIGHT_HEADLESS") or _truthy_env("PLAYWRIGHT_HEADLESS"):
+        return True
     if _truthy_env("SM_MACHINE_HEADLESS"):
         return True
     if _truthy_env("SM_MACHINE_HEADED"):

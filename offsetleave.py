@@ -948,7 +948,7 @@ def _roster_name_picker_elements() -> list[dict[str, Any]]:
 
 
 def build_offset_form_card(*, owner_open_id: str, request_person: str) -> dict[str, Any]:
-    req = od._title_name(request_person)
+    req = od._canonical_roster_form_name(request_person) or od._title_name(request_person)
     if not req:
         raise ValueError("Request person is required for the offset form.")
     exchange_names = list(od.ose_offset_form_exchange_names(exclude_person=req))

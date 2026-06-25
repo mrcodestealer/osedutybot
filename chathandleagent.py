@@ -126,6 +126,24 @@ def _chat_signal(text: str) -> dict:
         return {"tag": None, "confidence": 0.0, "margin": 0.0}
 
 
+def _looks_like_math(text: str) -> bool:
+    try:
+        import chatagent
+
+        return chatagent.looks_like_math_question(text)
+    except Exception:
+        return False
+
+
+def _looks_like_math_followup(text: str) -> bool:
+    try:
+        import chatagent
+
+        return chatagent.looks_like_math_followup(text)
+    except Exception:
+        return False
+
+
 def route(text: str, *, bot_mentioned: bool = True) -> RouteDecision:
     """Decide how to handle ``text``. Never raises."""
     raw = (text or "").strip()
@@ -138,6 +156,10 @@ def route(text: str, *, bot_mentioned: bool = True) -> RouteDecision:
         # 1) Explicit slash command — main.py handles it directly.
         if raw.lstrip().startswith("/"):
             return RouteDecision(_CMD, reason="slash", command=raw)
+
+        # 1b) Missing Credit ops paste → checkcredit flow (not casual chat).
+        if re.search(r"(?i)(?:type\s*:\s*)?missing\s+credit", raw):
+            return RouteDecision(_CMD, reason="missing_credit", command="/checkcreditdate")
 
         # 2) Deterministic prod-batch maintenance (highest precision).
         cmd_sig = _command_signal(raw)
@@ -152,10 +174,14 @@ def route(text: str, *, bot_mentioned: bool = True) -> RouteDecision:
         cmd_tag = cmd_sig.get("tag")
         is_none = cmd_tag == "cmd_none"
 
-        # 3) Strong work signals -> command (unless it's clearly a greeting).
+        # 3) Strong work signals -> command (unless it's clearly a greeting or math).
         has_kw = bool(_COMMAND_KEYWORDS_RE.search(raw))
         has_machine = bool(_MACHINE_ID_RE.search(raw))
         has_search = bool(_SEARCH_RE.search(raw))
+        if _looks_like_math(raw) and not has_kw and not has_search:
+            return RouteDecision(_CHAT, reason="math", chat_conf=max(chat_conf, 0.85))
+        if _looks_like_math_followup(raw) and not has_kw and not has_search:
+            return RouteDecision(_CHAT, reason="math_followup", chat_conf=max(chat_conf, 0.8))
         if (has_kw or has_machine or has_search) and not _looks_like_pure_chitchat(raw):
             return RouteDecision(
                 _CMD,

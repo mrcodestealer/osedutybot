@@ -41,23 +41,63 @@ def _wait_for_webhook(timeout_sec: float = 60.0) -> bool:
     return False
 
 
+def _ensure_inbound_message_id(payload: dict) -> dict:
+    """WebSocket SDK payloads should carry ``event.message.message_id`` for quoted replies."""
+    if not isinstance(payload, dict):
+        return payload
+    ev = payload.get("event")
+    if not isinstance(ev, dict):
+        return payload
+    msg = ev.get("message")
+    if not isinstance(msg, dict):
+        return payload
+    if (msg.get("message_id") or "").strip():
+        return payload
+    for alt in (
+        ev.get("message_id"),
+        (ev.get("message") or {}).get("message_id") if isinstance(ev.get("message"), dict) else None,
+    ):
+        mid = str(alt or "").strip()
+        if mid:
+            msg["message_id"] = mid
+            break
+    return payload
+
+
 def _to_webhook_payload(data) -> dict:
     import lark_oapi as lark
 
     raw = json.loads(lark.JSON.marshal(data))
     if isinstance(raw, dict) and "header" in raw and "event" in raw:
-        return raw
-    inner = raw.get("event", raw) if isinstance(raw, dict) else raw
-    return {
-        "schema": "2.0",
-        "header": {
-            "event_id": str(uuid.uuid4()),
-            "event_type": "im.message.receive_v1",
-            "create_time": str(int(time.time() * 1000)),
-            "token": VERIFICATION_TOKEN,
-        },
-        "event": inner,
-    }
+        payload = dict(raw)
+        hdr = dict(payload.get("header") or {})
+        payload["header"] = hdr
+    else:
+        inner = raw.get("event", raw) if isinstance(raw, dict) else raw
+        payload = {
+            "schema": "2.0",
+            "header": {
+                "event_id": str(uuid.uuid4()),
+                "event_type": "im.message.receive_v1",
+                "create_time": str(int(time.time() * 1000)),
+            },
+            "event": inner,
+        }
+
+    # WebSocket events often omit header.token; local webhook still validates it.
+    if VERIFICATION_TOKEN:
+        hdr = payload.setdefault("header", {})
+        if not str(hdr.get("token") or "").strip():
+            hdr["token"] = VERIFICATION_TOKEN
+    payload = _ensure_inbound_message_id(payload)
+    mid = (
+        ((payload.get("event") or {}).get("message") or {}).get("message_id")
+        if isinstance(payload.get("event"), dict)
+        else None
+    )
+    if not str(mid or "").strip():
+        print("[lark-ws] warning: forwarded payload missing event.message.message_id", flush=True)
+    return payload
 
 
 def _on_message(data) -> None:

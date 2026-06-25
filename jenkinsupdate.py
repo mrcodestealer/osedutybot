@@ -113,11 +113,27 @@ from collections.abc import Sequence
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
-from playwright.sync_api import (
-    Error as PlaywrightError,
-    sync_playwright,
-    TimeoutError as PlaywrightTimeout,
-)
+try:
+    from playwright.sync_api import (
+        Error as PlaywrightError,
+        sync_playwright,
+        TimeoutError as PlaywrightTimeout,
+    )
+
+    _PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    _PLAYWRIGHT_AVAILABLE = False
+
+    class PlaywrightError(Exception):
+        """Stub when playwright package is not installed."""
+
+    class PlaywrightTimeout(Exception):
+        """Stub when playwright package is not installed."""
+
+    def sync_playwright():  # type: ignore[misc]
+        raise ImportError(
+            "playwright is not installed — run: pip install playwright && playwright install chromium"
+        )
 
 BUILD_URL = (
     "https://jenkins.client8.me/job/FPMS/job/FPMS_UAT_BRANCH_UPDATE/build?delay=0sec"
@@ -536,6 +552,7 @@ _NL_JENKINS_UPDATE_RE = re.compile(
     r"|\bigo\b.*\bprod\s*script\b"
     r"|\bfpms\b.*\bprod\s*script\b"
     r"|jenkins\s+(?:update|deploy|build)"
+    r"|(?:帮我|请).{0,12}更新"
     r")"
 )
 # VPN creation triggers: slash command ``/createvpn`` and natural phrases like "create vpn".
@@ -1253,6 +1270,8 @@ def _vpn_warm_prewarm() -> None:
 def prewarm_vpn_browser_on_startup() -> None:
     """Public hook: launch + login + render the VPN form at bot startup so the *first*
     ``create vpn`` is already warm (cold Chromium launch alone is ~20s). Call once from main."""
+    if not _PLAYWRIGHT_AVAILABLE:
+        return
     if not _vpn_warm_enabled():
         print("[vpn-warm] disabled (VPN_WARM_BROWSER=0) — not pre-warming.", flush=True)
         return
@@ -1480,6 +1499,8 @@ def _ju_dispatch_run(run_kwargs: dict) -> None:
 
 def prewarm_ju_pool_on_startup() -> None:
     """Public hook: pre-launch + login the Jenkins-update browser pool at bot startup."""
+    if not _PLAYWRIGHT_AVAILABLE:
+        return
     if not _ju_warm_pool_enabled():
         print("[ju-pool] disabled (JU_WARM_POOL=0).", flush=True)
         return
@@ -8755,7 +8776,7 @@ def _fpms_lark_verification_card_json(
         body_elements.append(
             _fpms_lark_v2_callback_button(
                 "Cancel",
-                "danger",
+                "default",
                 {"k": "wb", "v": "c"},
                 element_id="ju_wb_c",
             )
@@ -11462,10 +11483,13 @@ def looks_like_natural_jenkins_update(text: str) -> bool:
     has_update_hint = bool(
         re.search(
             r"(?i)\bjenkins\b|\bupdate\s+(?:fpms|pms|bi|cpms|igo|sre|fe|nt|sms|fnt|rc)\b"
-            r"|\brc[\s-]*uat\b|\b(?:cpms|igo)[\s-]*uat\b",
+            r"|\brc[\s-]*uat\b|\b(?:cpms|igo)[\s-]*uat\b"
+            r"|更新\s*(?:rc|uat|master)|update\s+rc",
             raw,
         )
     )
+    if re.search(r"(?i)帮我更新|请.*更新", raw) and (has_branch or has_svc):
+        return True
     return has_branch and has_svc and has_update_hint
 
 
@@ -11499,6 +11523,14 @@ def normalize_natural_jenkins_body(text: str) -> str:
             head, tail = raw, ""
     head = re.sub(r"(?i)^(?:@\S+\s+)*", "", head)
     head = re.sub(r"(?i)^duty\s+bot\s+", "", head).strip()
+    head = re.sub(r"(?i)^(?:帮我|请)\s*更新(?:这个|一下)?\s*", "", head).strip()
+    if not head or re.search(r"[\u4e00-\u9fff]", head):
+        m_rc = re.search(
+            r"(?i)(update\s+)?(rc[\s-]*uat(?:[\s-]*master)?|rc\s*uat\s*master)",
+            raw,
+        )
+        if m_rc:
+            head = re.sub(r"\s+", " ", m_rc.group(2)).strip().casefold()
     head = re.sub(
         r"(?i)^(?:i\s+)?(?:want|need|please)\s+(?:to\s+)?(?:update|deploy|trigger|run)\s+(?:jenkins\s+)?",
         "",
@@ -13539,12 +13571,39 @@ def handle_lark_jenkins_card_action(
             return True
     if k == "wb":
         v = str(parsed.get("v") or "").strip().lower()
+        if v == "c":
+            # Cancel the pending build gate directly. (Routing the token "cancel" through
+            # handle_lark_jenkins_update_message would hit the early ``low == "cancel"`` full-cleanup
+            # branch before ever reaching the jenkins_wait_build gate, so do it here instead.)
+            cancelled_ok = False
+            with _fpms_lark_sessions_lock:
+                sg = _fpms_lark_sessions.get(sk)
+                if isinstance(sg, dict) and sg.get("state") == "jenkins_wait_build":
+                    sg["approve_build"] = False
+                    sg["lark_cancel"] = True
+                    sg["state"] = "jenkins_post_gate"
+                    ev2 = sg.get("build_gate_event")
+                    if isinstance(ev2, threading.Event):
+                        ev2.set()
+                    cancelled_ok = True
+            if cancelled_ok:
+                # The waiting run thread wakes on the gate event and posts the
+                # "Cancelled — back to ready" message, so don't double-send here.
+                return True
+            # No active gate (already resolved) — fall back to the generic cancel/cleanup.
+            return handle_lark_jenkins_update_message(
+                chat_id,
+                sender_id,
+                "cancel",
+                "cancel",
+                send,
+                allow_start=True,
+                lark_sender_union_id=card_union,
+            )
         if v == "y":
             token = "yes"
         elif v == "n":
             token = "no"
-        elif v == "c":
-            token = "cancel"
         else:
             return False
         return handle_lark_jenkins_update_message(

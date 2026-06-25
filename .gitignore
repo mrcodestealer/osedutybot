@@ -1,57 +1,60 @@
-# ---- Secrets ----
+# ---- Secrets (copy .env to server manually; never commit real keys) ----
 .env
 *.env
 .env.*
+!.env.example
+
 # ---- Python ----
 __pycache__/
 *.py[cod]
+
 # ---- OS / editor ----
 .DS_Store
 .idea/
 .vscode/
+
 # ---- Virtual envs ----
 my_ai_env/
 venv/
 .venv/
-# ---- ML model dirs (large) ----
+
+# ---- ML model dirs (large; sync separately if needed) ----
 deep_person_chatbot_pt/
 commandagent_pt/
 command_intent_pt/
 chatagent_pt/
 chatagent_llm_pt/
+
 # ---- Logs ----
 *.log
-# ---- Runtime state / caches (generated) ----
+
+# ---- Runtime-only (regenerated on server; do not deploy) ----
 .all_leave_calendar_sync_state.json
 .leave_calendar_sync_state.json
 .offset_duty_sync_state.json
 .prod_batch_sm_sessions.json
 .wfh_calendar_sync_state.json
-allduty.json
 browser_state.json
 browser_data/
 cookies.json
-holiday.csv
-machineencoder.json
-maintenance.json
-offset_approver_notified.json
-offset_peer_approver_approval_notified.json
-offset_requester_approval_notified.json
-offset_requester_open_id.json
-offset_rows_snapshot.json
-offset_shift_sheet_applied.json
-leave_shift_sheet_applied.json
 user_token.json
-webmachine_data.json
+
 # ---- Screenshots / scraped HTML ----
 *.png
 index.html
 index.html.*
 error_misc_menu.html
+
 # ---- Backups ----
 *.bak
+
 # ---- Big downloads / vendored ----
 cloudflared.rpm
 miniconda.sh
 *.tar.xz
 wireguard-go-*/
+
+# Tracked for server deploy (do NOT add here):
+# allduty.json, machineencoder.json, webmachine_data.json, maintenance.json,
+# holiday.csv, cpms_igo_uat_services.json, offset_*.json, leave_shift_sheet_applied.json,
+# offset_shift_sheet_applied.json, restart_pending.json

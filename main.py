@@ -1286,6 +1286,21 @@ def lark_background_task(fn, *args, **kwargs):
         mark_lark_process_done()
 
 
+def start_lark_background_thread(fn, *args, **kwargs) -> None:
+    """Spawn a daemon thread that preserves Lark incoming-message context for quoted replies."""
+    ctx = contextvars.copy_context()
+
+    def _target() -> None:
+        ctx.run(lark_background_task, fn, *args, **kwargs)
+
+    threading.Thread(target=_target, daemon=True).start()
+
+
+def _lark_im_ack():
+    """HTTP 200 for Lark without GotIt/Done reactions (ignored messages)."""
+    return jsonify({"success": True})
+
+
 def _lark_im_done():
     finish_lark_incoming_message_if_sync()
     return jsonify({"success": True})
@@ -1301,18 +1316,67 @@ def recall_message(message_id):
     else:
         print(f"❌ Failed to recall message {message_id}: {resp.text}")
         
-def send_message(chat_id, text, msg_type="text", mentions=None, receive_id_type="chat_id"):
+def _lark_build_message_content(text, msg_type: str = "text") -> str:
+    if msg_type == "interactive":
+        return text if isinstance(text, str) else json.dumps(text)
+    if msg_type == "image":
+        return json.dumps({"image_key": text})
+    return json.dumps({"text": text})
+
+
+def _lark_post_message_reply(
+    parent_message_id: str,
+    text,
+    *,
+    msg_type: str = "text",
+    mentions=None,
+    reply_in_thread: bool = False,
+) -> dict:
+    """POST ``/im/v1/messages/{message_id}/reply`` — quoted reply or thread-only reply."""
+    mid = (parent_message_id or "").strip()
+    if not mid:
+        return {"code": -1, "msg": "no message_id"}
+    token = get_tenant_access_token()
+    if not token:
+        print("[lark] message reply skipped: no tenant_access_token", flush=True)
+        return {"code": -1, "msg": "no tenant_access_token"}
+    url = f"https://open.larksuite.com/open-apis/im/v1/messages/{mid}/reply"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    body: dict[str, Any] = {
+        "msg_type": msg_type,
+        "content": _lark_build_message_content(text, msg_type),
+    }
+    if reply_in_thread:
+        body["reply_in_thread"] = True
+    if mentions:
+        body["mentions"] = mentions
+    return requests.post(url, headers=headers, json=body).json()
+
+
+def send_message(
+    chat_id,
+    text,
+    msg_type="text",
+    mentions=None,
+    receive_id_type="chat_id",
+    reply_to_message_id=None,
+):
+    """Send to chat, or quote-reply to ``reply_to_message_id`` (defaults to inbound user message)."""
+    if reply_to_message_id is not None:
+        reply_mid = (reply_to_message_id or "").strip() or None
+    else:
+        reply_mid = (_lark_user_message_id.get() or "").strip() or None
+    if reply_mid:
+        return _lark_post_message_reply(
+            reply_mid, text, msg_type=msg_type, mentions=mentions, reply_in_thread=False
+        )
     token = get_tenant_access_token()
     if not token:
         print("[lark] send_message skipped: no tenant_access_token", flush=True)
         return {"code": -1, "msg": "no tenant_access_token"}
     url = "https://open.larksuite.com/open-apis/im/v1/messages"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    if msg_type == "interactive":
-        # Lark: content is the interactive card JSON string (not wrapped in {"text": ...}).
-        content = text if isinstance(text, str) else json.dumps(text)
-    else:
-        content = json.dumps({"text": text})
+    content = _lark_build_message_content(text, msg_type)
     # Lark `POST /im/v1/messages` request body is only receive_id + msg_type + content (+ optional uuid).
     # Do not send undocumented fields — stray keys have caused odd interactive-card behavior in the wild.
     body = {
@@ -1350,29 +1414,13 @@ def reply_message_in_thread(
     mentions=None,
 ) -> dict:
     """Reply inside a thread only (``reply_in_thread=true`` — not main chat stream)."""
-    mid = (parent_message_id or "").strip()
-    if not mid:
-        return {"code": -1, "msg": "no message_id"}
-    token = get_tenant_access_token()
-    if not token:
-        print("[lark] reply_message_in_thread skipped: no tenant_access_token", flush=True)
-        return {"code": -1, "msg": "no tenant_access_token"}
-    url = f"https://open.larksuite.com/open-apis/im/v1/messages/{mid}/reply"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    if msg_type == "interactive":
-        content = text if isinstance(text, str) else json.dumps(text)
-    elif msg_type == "image":
-        content = json.dumps({"image_key": text})
-    else:
-        content = json.dumps({"text": text})
-    body = {
-        "msg_type": msg_type,
-        "content": content,
-        "reply_in_thread": True,
-    }
-    if mentions:
-        body["mentions"] = mentions
-    return requests.post(url, headers=headers, json=body).json()
+    return _lark_post_message_reply(
+        parent_message_id,
+        text,
+        msg_type=msg_type,
+        mentions=mentions,
+        reply_in_thread=True,
+    )
 
 def send_file(chat_id, file_token):
     token = get_tenant_access_token()
@@ -2323,10 +2371,328 @@ def _lark_extract_message_text(content_str: str) -> str:
     return flat_all.strip()
 
 
+def _lark_extract_image_keys(
+    content_str: str, *, message_type: Optional[str] = None
+) -> list[str]:
+    """Collect Lark ``image_key`` values from image or post/rich messages."""
+    keys: list[str] = []
+    raw = (content_str or "").strip()
+    if not raw:
+        return keys
+    try:
+        content = json.loads(raw)
+    except json.JSONDecodeError:
+        return keys
+    if not isinstance(content, dict):
+        return keys
+
+    def _add_key(value) -> None:
+        key = str(value or "").strip()
+        if key and key not in keys:
+            keys.append(key)
+
+    if (message_type or "").strip().lower() == "image":
+        _add_key(content.get("image_key"))
+        return keys
+
+    _add_key(content.get("image_key"))
+
+    def _walk(obj) -> None:
+        if isinstance(obj, dict):
+            if str(obj.get("tag") or "").lower() == "img":
+                _add_key(obj.get("image_key"))
+            for value in obj.values():
+                _walk(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                _walk(item)
+
+    _walk(content)
+    return keys
+
+
+def _lark_full_message_body(
+    original_text: str, clean_text: str, message_content_raw: str
+) -> str:
+    """Best-effort full user text (multi-line post / Branch: blocks), not mention-stripped one-liner."""
+    for candidate in (original_text, clean_text):
+        c = (candidate or "").replace("\r\n", "\n").strip()
+        if not c:
+            continue
+        low = c.casefold()
+        if "branch:" in low or "services:" in low or "missing credit" in low:
+            return c
+        if len(c.splitlines()) >= 2:
+            return c
+    flat = _lark_extract_message_text(message_content_raw or "")
+    if flat.strip():
+        return flat.strip()
+    return (clean_text or original_text or "").strip()
+
+
+def _parse_missing_credit_alert(text: str) -> Optional[dict]:
+    raw = (text or "").replace("\r\n", "\n")
+    if not re.search(r"(?i)(?:type\s*:\s*)?missing\s+credit", raw):
+        return None
+    out: dict[str, str] = {}
+    m = re.search(r"(?im)^\s*account\s*:\s*(\d+)", raw)
+    if m:
+        out["account"] = m.group(1)
+    m = re.search(r"(?im)^\s*amount\s+missing\s*:\s*([\d.]+)", raw)
+    if m:
+        out["amount"] = m.group(1)
+    m = re.search(
+        r"(?im)withdrawal\s+time\s*:\s*(\d{4})[/-](\d{2})[/-](\d{2})(?:\s+\d{2}:\d{2}:\d{2})?",
+        raw,
+    )
+    if m:
+        out["date_iso"] = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    m = re.search(r"(?im)proposal\s+withdrawal\s*:\s*(\S+)", raw)
+    if m:
+        out["proposal"] = m.group(1)
+    return out or None
+
+
+def _looks_like_jenkins_nl_update(text: str) -> bool:
+    try:
+        ju = _get_jenkinsupdate()
+        if ju is not None:
+            return bool(ju.looks_like_natural_jenkins_update(text))
+        import jenkinsupdate as _ju
+
+        return bool(_ju.looks_like_natural_jenkins_update(text))
+    except Exception:
+        raw = (text or "").replace("\r\n", "\n")
+        low = raw.casefold()
+        return bool(
+            re.search(r"(?im)^\s*branch\s*:", raw)
+            and re.search(r"(?im)^\s*services?\s*:", raw)
+            and re.search(r"(?i)update|uat|jenkins|rc[\s-]*uat|部署|更新", raw)
+        )
+
+
+def _try_missing_credit_inquiry(
+    chat_id: str,
+    body: str,
+    *,
+    bot_mentioned: bool,
+    message_id: Optional[str],
+    send_func,
+) -> bool:
+    if not bot_mentioned:
+        return False
+    parsed = _parse_missing_credit_alert(body)
+    if not parsed:
+        return False
+    lines = [
+        "📋 **Missing Credit alert parsed**",
+        f"• Account: `{parsed.get('account', '?')}`",
+        f"• Amount missing: `{parsed.get('amount', '?')}`",
+        f"• Withdrawal date: `{parsed.get('date_iso', '?')}`",
+    ]
+    if parsed.get("proposal"):
+        lines.append(f"• Proposal: `{parsed['proposal']}`")
+    lines.append(
+        "\n⏳ I need the **machine type** (e.g. `NWR2074`) to scan logs. "
+        "Fill the form below — player/date are pre-filled when possible."
+    )
+    send_func(chat_id, "\n".join(lines))
+    try:
+        import checkcredit
+
+        card = checkcredit.build_checkcredit_player_form_card()
+        send_func(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
+    except Exception as ex:
+        acct = parsed.get("account") or ""
+        dt = parsed.get("date_iso") or ""
+        send_func(
+            chat_id,
+            f"Use `@Duty Bot /checkcreditdate <machine>` with player `{acct}` date `{dt}`.",
+        )
+        print(f"[missing-credit] card failed: {ex!r}", flush=True)
+    print(f"[missing-credit] parsed {parsed!r}", flush=True)
+    return True
+
+
+def download_lark_message_image(
+    message_id: str, file_key: str
+) -> Optional[tuple[str, bytes]]:
+    """Download an image resource from a Lark message. Returns (mime_type, bytes)."""
+    mid = (message_id or "").strip()
+    fk = (file_key or "").strip()
+    if not mid or not fk:
+        return None
+    token = get_tenant_access_token()
+    if not token:
+        print("[lark] image download skipped: no tenant_access_token", flush=True)
+        return None
+    url = (
+        "https://open.larksuite.com/open-apis/im/v1/messages/"
+        f"{mid}/resources/{fk}"
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        resp = requests.get(url, headers=headers, params={"type": "image"}, timeout=90)
+    except Exception as ex:
+        print(f"[lark] image download request failed: {ex!r}", flush=True)
+        return None
+    if resp.status_code != 200:
+        preview = (resp.text or "")[:300]
+        print(
+            f"[lark] image download HTTP {resp.status_code} message_id={mid!r} "
+            f"file_key={fk!r} body={preview!r}",
+            flush=True,
+        )
+        return None
+    ctype = (resp.headers.get("Content-Type") or "image/jpeg").split(";")[0].strip().lower()
+    if not ctype.startswith("image/"):
+        ctype = "image/jpeg"
+    data = resp.content
+    if not data:
+        return None
+    return ctype, data
+
+
+def _try_lark_vision_reply(
+    chat_id: str,
+    message_id: Optional[str],
+    message_content_raw: str,
+    *,
+    message_type: Optional[str],
+    user_text: str,
+    bot_mentioned: bool,
+    send_func,
+    session_key: Optional[str] = None,
+) -> bool:
+    """Download image(s) from Lark and reply via vision LLM. Returns True if handled."""
+    if not bot_mentioned:
+        return False
+    if (user_text or "").lstrip().startswith("/"):
+        return False
+    image_keys = _lark_extract_image_keys(
+        message_content_raw, message_type=message_type
+    )
+    if not image_keys:
+        return False
+    mid = (message_id or "").strip()
+    if not mid:
+        return False
+    try:
+        import chatagent as _chatagent
+
+        if not (
+            _chatagent.is_enabled()
+            and _chatagent.vision_enabled()
+            and _chatagent.llm_available()
+        ):
+            send_func(
+                chat_id,
+                "ℹ️ Image recognition needs `BOT_USE_CHATAGENT=1` and a vision-capable model "
+                "(e.g. `qwen3.5:9b` on Ollama).",
+            )
+            return True
+    except Exception as ex:
+        print(f"[lark] vision precheck failed: {ex!r}", flush=True)
+        return False
+
+    images: list[tuple[str, bytes]] = []
+    for key in image_keys[: int(os.getenv("BOT_CHAT_VISION_MAX_IMAGES", "3") or "3")]:
+        got = download_lark_message_image(mid, key)
+        if got:
+            images.append(got)
+    if not images:
+        send_func(
+            chat_id,
+            "⚠️ Could not download the image from Lark.\n"
+            "Check the bot app has permission to read message resources "
+            "(im:message / download message images in Lark developer console).",
+        )
+        return True
+
+    print(
+        f"[lark] vision: {len(images)} image(s) keys={image_keys[:3]!r} "
+        f"prompt={user_text!r}",
+        flush=True,
+    )
+    try:
+        import chatagent as _chatagent
+
+        vis_reply = _chatagent.reply_with_images(
+            user_text or "", images, session_key=session_key
+        )
+    except Exception as ex:
+        print(f"[lark] vision LLM failed: {ex!r}", flush=True)
+        send_func(chat_id, f"⚠️ Image recognition failed: {ex}")
+        return True
+    if vis_reply:
+        send_func(chat_id, vis_reply)
+        print(f"🖼️ Vision reply to chat {chat_id}", flush=True)
+    else:
+        send_func(
+            chat_id,
+            "⚠️ Could not analyze the image (model returned empty). "
+            "Try a smaller screenshot or ask again.",
+        )
+    return True
+
+
 processed_messages = set()
 processed_lock = threading.Lock()
 _MAX_PROCESSED_MESSAGE_IDS = 50_000
 _PROCESSED_PRUNE_CHUNK = 10_000
+# Lark WebSocket may redeliver recent events after reconnect; in-memory dedup is cleared on restart.
+_BOT_STARTED_AT_MS = int(time.time() * 1000)
+
+
+def _lark_event_create_time_ms(data: dict) -> Optional[int]:
+    """Best-effort event/message timestamp (ms) from Lark schema 2.0 or legacy callback."""
+    if not isinstance(data, dict):
+        return None
+    hdr = data.get("header")
+    if isinstance(hdr, dict):
+        ct = hdr.get("create_time")
+        if ct is not None:
+            try:
+                return int(ct)
+            except (TypeError, ValueError):
+                pass
+    ev = data.get("event")
+    if isinstance(ev, dict):
+        msg = ev.get("message")
+        if isinstance(msg, dict):
+            ct = msg.get("create_time")
+            if ct is not None:
+                try:
+                    return int(ct)
+                except (TypeError, ValueError):
+                    pass
+        ct = ev.get("create_time")
+        if ct is not None:
+            try:
+                return int(ct)
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def _lark_skip_stale_event_on_startup(data: dict) -> bool:
+    """Ignore events that happened before this process started (replay on WS reconnect)."""
+    skip = (os.getenv("LARK_SKIP_STALE_ON_STARTUP") or "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+    if not skip:
+        return False
+    try:
+        grace_ms = int(os.getenv("LARK_STARTUP_STALE_GRACE_MS", "10000"))
+    except ValueError:
+        grace_ms = 10_000
+    created_ms = _lark_event_create_time_ms(data)
+    if created_ms is None:
+        return False
+    return created_ms < _BOT_STARTED_AT_MS - grace_ms
 
 
 def _remember_processed_message_id(message_id: str) -> bool:
@@ -3557,6 +3923,7 @@ def lark_webhook():
     mentions = []
     message_id = None
     is_mention_old = False
+    lark_message_type = None
 
     if data.get("header", {}).get("event_type") == "im.message.receive_v1":
         event = data.get("event", {})
@@ -3564,6 +3931,7 @@ def lark_webhook():
         chat_id = message.get("chat_id")
         message_id = message.get("message_id")
         chat_type = message.get("chat_type")
+        lark_message_type = (message.get("message_type") or "").strip() or None
         mentions = message.get("mentions", [])
         message_content_raw = message.get("content") or "{}"
         try:
@@ -3576,6 +3944,9 @@ def lark_webhook():
         chat_id = event.get("open_chat_id") or event.get("chat_id")
         message_id = event.get("open_message_id") or event.get("message_id")
         chat_type = event.get("chat_type")
+        lark_message_type = (
+            event.get("message_type") or event.get("msg_type") or ""
+        ).strip() or None
         mentions = event.get("mentions", [])
         is_mention_old = event.get("is_mention", False)
         message_content_raw = event.get("content") or "{}"
@@ -3600,6 +3971,13 @@ def lark_webhook():
             return _lark_http_card_callback_ok()
         return _lark_im_done()
 
+    if _lark_skip_stale_event_on_startup(data):
+        print(
+            f"⏭️ Stale event ignored (before bot start) message_id={message_id!r}",
+            flush=True,
+        )
+        return _lark_im_done()
+
     if message_id and _remember_processed_message_id(message_id):
         print(f"⏭️ Duplicate message {message_id} ignored")
         return _lark_im_done()
@@ -3620,22 +3998,7 @@ def lark_webhook():
             f"⏭️ EVO forward-only group — ignoring inbound message ({chat_id})",
             flush=True,
         )
-        return _lark_im_done()
-
-    if text == "我要验牌":
-        reply = f'<at user_id="{sender_id}"></at> 给我擦皮鞋'
-        send_message(chat_id, reply)
-        return _lark_im_done()
-    
-    if text == "good luck" or text == "Good luck":
-        add_heart_reaction(message_id)
-        
-    if text == "random":
-        add_random_reaction(message_id)
-        
-    if text == "spamreact":
-        add_all_reactions(message_id)
-        return _lark_im_done()
+        return _lark_im_ack()
 
     original_text = text
     print(
@@ -3650,8 +4013,9 @@ def lark_webhook():
         text = text.replace(key, "")
     text = re.sub(r'@_user_\d+', '', text)
     text = re.sub(r'<[^>]+>', '', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    clean_text = text
+    clean_text_multiline = re.sub(r'[ \t]+\n', '\n', text).strip()
+    clean_text_multiline = re.sub(r'\n[ \t]+', '\n', clean_text_multiline)
+    clean_text = re.sub(r'\s+', ' ', clean_text_multiline).strip()
     print(f"🧹 Cleaned text (repr): {repr(clean_text)}")
 
     jenkins_bot_oid = _jenkins_bot_open_id()
@@ -3667,9 +4031,11 @@ def lark_webhook():
     except Exception:
         duty_blob = (clean_text or original_text or message_content_raw or "").strip()
 
-    # Group: Got It / DONE only when the bot is @mentioned; p2p always.
-    bot_mentioned = chat_type != "group"
-    if chat_type == "group":
+    # Group (and unknown chat_type): require @Duty Bot; p2p: always respond.
+    bot_mentioned = chat_type == "p2p"
+    if chat_type != "p2p":
+        if chat_type is None:
+            print("[lark] chat_type missing — treating as group (require @mention)", flush=True)
         bot_mentioned = False
         for mention in mentions:
             mention_id_obj = mention.get("id")
@@ -3704,15 +4070,6 @@ def lark_webhook():
             if re.search(r"/?replyupdateemail\b", duty_blob or "", re.I):
                 bot_mentioned = True
 
-    lark_reactions_enabled = bool(message_id) and (
-        chat_type != "group" or bot_mentioned
-    )
-    if lark_reactions_enabled:
-        set_lark_incoming_message(message_id)
-        add_gotit_reaction(message_id)
-    else:
-        set_lark_incoming_message(None)
-
     # ================= 跨群组 P0 交互确认 =================
     handled_p0, p0_reply = handle_p0_confirmation(chat_id, sender_id, clean_text, original_text, send_message)
     if handled_p0:
@@ -3734,11 +4091,7 @@ def lark_webhook():
         choices_np = (pend_np or {}).get("np_choices") or []
         idx_np = int(stripped_choice)
         if pend_np and 1 <= idx_np <= len(choices_np):
-            threading.Thread(
-                target=lark_background_task,
-                args=(run_np_third_http_by_choice, chat_id, idx_np),
-                daemon=True,
-            ).start()
+            start_lark_background_thread(run_np_third_http_by_choice, chat_id, idx_np)
             return _lark_im_done()
 
     # jenkinsbot / any sender → duty email callbacks — no @duty required when command is present.
@@ -3795,6 +4148,72 @@ def lark_webhook():
     jenkins_sess_active = (
         ju.jenkins_update_has_active_lark_session(chat_id, sender_id) if ju else False
     )
+
+    if chat_type != "p2p" and not bot_mentioned and not jenkins_sess_active:
+        if is_jenkins_bot_sender:
+            print(
+                f"⏭️ Jenkinsbot message ignored (no duty command) text={original_text!r} "
+                f"content={message_content_raw[:240]!r}",
+                flush=True,
+            )
+        else:
+            print("⏭️ Bot not mentioned in group chat – ignoring further commands")
+        return _lark_im_ack()
+
+    set_lark_incoming_message(message_id)
+    if message_id and (chat_type == "p2p" or bot_mentioned):
+        add_gotit_reaction(message_id)
+
+    if text == "我要验牌":
+        reply = f'<at user_id="{sender_id}"></at> 给我擦皮鞋'
+        send_message(chat_id, reply)
+        return _lark_im_done()
+
+    if text == "good luck" or text == "Good luck":
+        add_heart_reaction(message_id)
+        return _lark_im_done()
+
+    if text == "random":
+        add_random_reaction(message_id)
+        return _lark_im_done()
+
+    if text == "spamreact":
+        add_all_reactions(message_id)
+        return _lark_im_done()
+
+    _full_body = _lark_full_message_body(
+        original_text, clean_text_multiline, message_content_raw
+    )
+    _chat_memory_key = None
+    try:
+        import chatagent as _chatagent_mem
+
+        if chat_id and sender_id:
+            _chat_memory_key = _chatagent_mem.memory_session_key(chat_id, sender_id)
+    except Exception:
+        pass
+
+    if _try_missing_credit_inquiry(
+        chat_id,
+        _full_body,
+        bot_mentioned=bot_mentioned,
+        message_id=message_id,
+        send_func=send_message,
+    ):
+        return _lark_im_done()
+
+    if _try_lark_vision_reply(
+        chat_id,
+        message_id,
+        message_content_raw,
+        message_type=lark_message_type,
+        user_text=clean_text_multiline or clean_text,
+        bot_mentioned=bot_mentioned,
+        send_func=send_message,
+        session_key=_chat_memory_key,
+    ):
+        return _lark_im_done()
+
     update_thread_root = None
     if data.get("header", {}).get("event_type") == "im.message.receive_v1":
         msg_obj = (data.get("event") or {}).get("message") or {}
@@ -3806,8 +4225,8 @@ def lark_webhook():
     if ju and ju.handle_lark_jenkins_update_message(
         chat_id,
         sender_id,
-        clean_text,
-        original_text,
+        _full_body,
+        _full_body,
         send_message,
         allow_start=bot_mentioned,
         lark_sender_union_id=sender_union_id,
@@ -3816,15 +4235,16 @@ def lark_webhook():
     ):
         return _lark_im_done()
 
-    if chat_type == "group" and not bot_mentioned and not jenkins_sess_active:
-        if is_jenkins_bot_sender:
-            print(
-                f"⏭️ Jenkinsbot message ignored (no duty command) text={original_text!r} "
-                f"content={message_content_raw[:240]!r}",
-                flush=True,
-            )
-        else:
-            print("⏭️ Bot not mentioned in group chat – ignoring further commands")
+    if ju is None and _looks_like_jenkins_nl_update(_full_body):
+        send_message(
+            chat_id,
+            "⚠️ **Jenkins `/update` is not available on this PC.**\n"
+            "Install Playwright so the bot can fill the form and show **Confirm / Cancel** "
+            "(it will **not** auto-build without your click):\n"
+            "```\npip install playwright\nplaywright install chromium\n```\n"
+            "Then restart `python run_local_bot.py`.\n"
+            "Or paste: `@Duty Bot /jenkinsupdate rc uat master` + Branch/Version/Services block.",
+        )
         return _lark_im_done()
 
     if bot_help.handle_help_command(
@@ -3935,7 +4355,10 @@ def lark_webhook():
     try:
         import chathandleagent as _router
 
-        _router_decision = _router.route(clean_text, bot_mentioned=bot_mentioned)
+        _router_decision = _router.route(
+            _full_body or clean_text_multiline or clean_text,
+            bot_mentioned=bot_mentioned,
+        )
         print(
             f"🧭 Router: {clean_text!r} → {_router_decision.kind} "
             f"(reason={_router_decision.reason}, cmd_conf={_router_decision.command_conf:.2f}, "
@@ -3954,6 +4377,66 @@ def lark_webhook():
                 print(f"💬 Chitchat gate: skip commandagent for {clean_text!r}", flush=True)
         except Exception:
             pass
+
+    try:
+        import chatagent as _math_agent
+
+        _math_src = (clean_text_multiline or clean_text or "").strip()
+        if _math_src:
+            if _math_agent.looks_like_math_question(_math_src):
+                _math_reply = _math_agent.resolve_math_from_context(
+                    _math_src, session_key=_chat_memory_key
+                )
+                if not _math_reply:
+                    _math_reply = _math_agent.math_parse_failure_message(_math_src)
+                if _math_reply:
+                    _math_reply = (
+                        _math_agent.sanitize_outbound_chat_reply(_math_reply)
+                        or _math_reply
+                    )
+                    _math_agent.remember_chat_turn(
+                        _chat_memory_key, _math_src, _math_reply
+                    )
+                    send_message(chat_id, _math_reply)
+                    print(f"💬 Math reply to chat {chat_id}", flush=True)
+                    return _lark_im_done()
+            elif _math_agent.looks_like_math_followup(_math_src):
+                _math_reply = _math_agent.resolve_math_from_context(
+                    _math_src, session_key=_chat_memory_key
+                )
+                if _math_reply:
+                    _math_reply = (
+                        _math_agent.sanitize_outbound_chat_reply(_math_reply)
+                        or _math_reply
+                    )
+                    _math_agent.remember_chat_turn(
+                        _chat_memory_key, _math_src, _math_reply
+                    )
+                    send_message(chat_id, _math_reply)
+                    print(f"💬 Math follow-up reply to chat {chat_id}", flush=True)
+                    return _lark_im_done()
+            elif (
+                bot_mentioned
+                and (
+                    _math_agent.has_pending_recall(_chat_memory_key)
+                    or _math_agent.looks_like_memory_recall(_math_src)
+                    or _math_agent.looks_like_math_memory_recall(_math_src)
+                    or _math_agent.looks_like_today_memory_recall(_math_src)
+                    or _math_agent.looks_like_vague_memory_recall(_math_src)
+                )
+            ):
+                _recall_reply = _math_agent.try_memory_recall_reply(
+                    _math_src, session_key=_chat_memory_key
+                )
+                if _recall_reply:
+                    _math_agent.remember_chat_turn(
+                        _chat_memory_key, _math_src, _recall_reply
+                    )
+                    send_message(chat_id, _recall_reply)
+                    print(f"💬 Memory recall reply to chat {chat_id}", flush=True)
+                    return _lark_im_done()
+    except Exception as _math_err:
+        print(f"⚠️ Deterministic chat shortcut skipped: {_math_err!r}", flush=True)
 
     if not _skip_commandagent:
         try:
@@ -4816,11 +5299,7 @@ def lark_webhook():
             parts = clean_text.split()
             date_param = parts[1].strip() if len(parts) > 1 else None
             send_message(chat_id, "⏳ Checking Amount Loss (CHECKLOG), please wait...")
-            threading.Thread(
-                target=lark_background_task,
-                args=(run_amountloss_check, chat_id, date_param),
-                daemon=True,
-            ).start()
+            start_lark_background_thread(run_amountloss_check, chat_id, date_param)
             return _lark_im_done()
     elif re.match(r"^/cctv\b", clean_text, re.I):
         m_cv = re.match(r"^/cctv\s+(\S+)", clean_text.strip(), re.I)
@@ -4831,19 +5310,11 @@ def lark_webhook():
                 "Example: `@Duty Bot /cctv OSMCP181` · `/cctv Dragons-0181`",
             )
             return _lark_im_done()
-        threading.Thread(
-            target=lark_background_task,
-            args=(run_cctv_screenshot_job, chat_id, m_cv.group(1)),
-            daemon=True,
-        ).start()
+        start_lark_background_thread(run_cctv_screenshot_job, chat_id, m_cv.group(1))
         return _lark_im_done()
     elif clean_text.lower().startswith("/npthirdhttp"):
         parts = clean_text.split()
-        threading.Thread(
-            target=lark_background_task,
-            args=(run_np_third_http_job, chat_id, parts[1:]),
-            daemon=True,
-        ).start()
+        start_lark_background_thread(run_np_third_http_job, chat_id, parts[1:])
         return _lark_im_done()
     elif re.match(r"^/checkcreditdate\s*$", clean_text, re.I):
         # Bare `/checkcreditdate` — interactive card (machine + player + date). With a machine token, use the branch below.
@@ -4902,27 +5373,19 @@ def lark_webhook():
             else "⏳ Running LogNavigator checkcredit, browser may take a while — please wait..."
         )
         _checkcredit_send(chat_id, wait_msg, thread_root=thread_root)
-        threading.Thread(
-            target=lark_background_task,
-            args=(
-                run_checkcredit_finderror,
-                chat_id,
-                machine_q,
-                date_arg,
-                "error_only" if cmd_cc == "machineerror" else "default",
-                None,
-                thread_root,
-            ),
-            daemon=True,
-        ).start()
+        start_lark_background_thread(
+            run_checkcredit_finderror,
+            chat_id,
+            machine_q,
+            date_arg,
+            "error_only" if cmd_cc == "machineerror" else "default",
+            None,
+            thread_root,
+        )
         return _lark_im_done()
     elif clean_text.lower().startswith("/smsfail"):
         send_message(chat_id, "⏳ Running SMS gateway OTP log check, please wait...")
-        threading.Thread(
-            target=lark_background_task,
-            args=(run_smsfail_check, chat_id),
-            daemon=True,
-        ).start()
+        start_lark_background_thread(run_smsfail_check, chat_id)
         return _lark_im_done()
     elif clean_text.lower().startswith("/smscheckplayer"):
         parts = clean_text.split(maxsplit=1)
@@ -4937,11 +5400,7 @@ def lark_webhook():
             chat_id,
             "⏳ Running SMS OTP log check for player(s) (today 00:00—now, up to 3 newest rows each), please wait...",
         )
-        threading.Thread(
-            target=lark_background_task,
-            args=(run_smscheckplayer_check, chat_id, payload),
-            daemon=True,
-        ).start()
+        start_lark_background_thread(run_smscheckplayer_check, chat_id, payload)
         return _lark_im_done()
     elif clean_text.lower().startswith('/pid'):
         parts = clean_text.split(maxsplit=1)
@@ -5090,22 +5549,48 @@ def lark_webhook():
         print(f"⚠️ No command matched and no reply generated for chat {chat_id}")
         # Use the mention-stripped text so chitchat's anchored ^…$ rules match
         # (original_text still has "@_user_1 …" which broke greeting matching).
-        _chat_source = (clean_text or original_text or "").strip()
+        _chat_source = (
+            clean_text_multiline or clean_text or _full_body or original_text or ""
+        ).strip()
         # Is this a casual/chat message (router said chat, or it looks like small talk)?
         _is_chatty = False
         try:
             if _router_decision is not None and getattr(_router_decision, "is_chat", False):
                 _is_chatty = True
+            elif _router_decision is not None and getattr(_router_decision, "reason", "") == "missing_credit":
+                _is_chatty = False
             else:
                 import chitchat as _chitchat_probe
 
                 _is_chatty = _chitchat_probe.looks_like_chitchat(_chat_source)
         except Exception:
             pass
-        if (
-            bot_mentioned
-            and _chat_source
+        if _looks_like_jenkins_nl_update(_full_body):
+            send_message(
+                chat_id,
+                "⚠️ Jenkins **update** was not started from that message.\n"
+                "Try `@Duty Bot /jenkinsupdate rc uat master` then paste Branch/Version/Services, "
+                "or say **cancel** and send the full block again.\n"
+                "The bot fills the form + screenshot — you tap **Confirm** or **Cancel** (no auto-build).",
+            )
+            print(f"💬 Jenkins NL fallback hint for chat {chat_id}", flush=True)
+        elif (mc := _parse_missing_credit_alert(_full_body)) and bot_mentioned:
+            send_message(
+                chat_id,
+                "Use the **checkcredit** card above, or `@Duty Bot /checkcreditdate <machine>` "
+                f"with player `{mc.get('account', '?')}` and date `{mc.get('date_iso', '?')}`.",
+            )
+        elif (
+            _chat_source
             and not _chat_source.lstrip().startswith("/")
+            and (
+                bot_mentioned
+                or (
+                    _router_decision is not None
+                    and getattr(_router_decision, "reason", "")
+                    in ("math", "math_followup")
+                )
+            )
         ):
             chat_reply = None
             try:
@@ -5118,21 +5603,56 @@ def lark_webhook():
                 try:
                     import chatagent as _chatagent
 
-                    chat_reply = _chatagent.reply_if_enabled(_chat_source)
+                    chat_reply = _chatagent.reply_if_enabled(
+                        _chat_source, session_key=_chat_memory_key
+                    )
+                    if not chat_reply:
+                        print(
+                            f"[chat] chatagent returned no reply for {_chat_source!r} "
+                            f"(enabled={_chatagent.is_enabled()}, backend={_chatagent.backend_mode()}, "
+                            f"llm={_chatagent.llm_available()})",
+                            flush=True,
+                        )
                 except Exception as _chatagent_err:
                     print(f"⚠️ Chat agent skipped: {_chatagent_err!r}", flush=True)
             if chat_reply:
+                try:
+                    import chatagent as _chatagent_sanitize
+
+                    chat_reply = _chatagent_sanitize.sanitize_outbound_chat_reply(chat_reply)
+                except Exception:
+                    pass
+            if chat_reply:
                 send_message(chat_id, chat_reply)
                 print(f"💬 Chat reply to chat {chat_id}", flush=True)
-            elif _is_chatty:
-                # It's small talk we just don't have a canned line for — stay friendly,
-                # don't show the scary "command agent" error.
-                send_message(
-                    chat_id,
-                    "Hi! 👋 I'm Duty Bot. I'm here for duty/leave/machine stuff — "
-                    "ask me e.g. “who is on fpms duty” or say `/help`. 😊",
-                )
-                print(f"💬 Friendly chat fallback to chat {chat_id}", flush=True)
+            elif _is_chatty or (
+                _router_decision is not None
+                and getattr(_router_decision, "reason", "") in ("math", "math_followup")
+            ):
+                _math_fb = None
+                try:
+                    import chatagent as _math_agent_fb
+
+                    _math_fb = _math_agent_fb.resolve_math_from_context(
+                        _chat_source, session_key=_chat_memory_key
+                    )
+                    if _math_fb:
+                        _math_fb = (
+                            _math_agent_fb.sanitize_outbound_chat_reply(_math_fb)
+                            or _math_fb
+                        )
+                except Exception:
+                    pass
+                if _math_fb:
+                    send_message(chat_id, _math_fb)
+                    print(f"💬 Math fallback reply to chat {chat_id}", flush=True)
+                else:
+                    send_message(
+                        chat_id,
+                        "Hi! 👋 I'm Duty Bot. I'm here for duty/leave/machine stuff — "
+                        "ask me e.g. “who is on fpms duty” or say `/help`. 😊",
+                    )
+                    print(f"💬 Friendly chat fallback to chat {chat_id}", flush=True)
             else:
                 try:
                     import commandagent as _commandagent
