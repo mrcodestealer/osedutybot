@@ -3058,8 +3058,11 @@ def _process_evo_sd_batch_paste(chat_id: str, email_text: str) -> None:
     """Run the EVO Service Desk batch pipeline (same as ``/m``) and post the cards.
 
     Shared by the explicit ``/m`` command and the no-command auto-detection so both
-    paths behave identically.
+    paths behave identically. Only allowed in the OSE BOT - Ops & Maintenance group.
     """
+    if not maintenance.is_evo_batch_command_chat(chat_id):
+        send_message(chat_id, maintenance.EVO_BATCH_WRONG_GROUP_MESSAGE)
+        return
     try:
         token = get_tenant_access_token()
         batch = maintenance.process_evo_sd_batch_maintenance(email_text, token)

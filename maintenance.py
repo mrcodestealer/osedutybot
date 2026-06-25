@@ -4819,7 +4819,28 @@ def _evo_email_subject_date(blocks_out: list[str]) -> str:
 
 
 EVO_BATCH_FORWARD_CHAT_ID_DEFAULT = "oc_9ffa9a76810abf72e39d597aee37d65a"
+EVO_BATCH_COMMAND_CHAT_ID_DEFAULT = "oc_51b6fbf2636525acfb4ead3afa3c93ce"
 MAINTENANCE_CONFIRM_CHAT_ID_DEFAULT = "oc_9de3d63fc589df6feeb9b0bee9c45b72"
+
+EVO_BATCH_WRONG_GROUP_MESSAGE = (
+    "Wrong group detected, kindly send this message to OSE BOT - Ops & Maintenance"
+)
+
+
+def evo_batch_command_chat_id() -> str:
+    """Lark group where ``/m`` EVO batch paste is allowed (OSE BOT - Ops & Maintenance)."""
+    return (
+        os.getenv("EVO_BATCH_COMMAND_CHAT_ID", "").strip()
+        or os.getenv("evo_batch_command_chat_id", "").strip()
+        or EVO_BATCH_COMMAND_CHAT_ID_DEFAULT
+    )
+
+
+def is_evo_batch_command_chat(chat_id: str | None) -> bool:
+    """True when ``/m`` batch paste may run (and send outbound email)."""
+    cid = (chat_id or "").strip()
+    want = evo_batch_command_chat_id()
+    return bool(cid) and bool(want) and cid == want
 
 
 def evo_batch_forward_chat_id() -> str:

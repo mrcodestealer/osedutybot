@@ -1,7 +1,7 @@
 """
 Casual chat agent for Duty Bot — three backends:
 
-1. **API LLM** — OpenAI-compatible (GPT, Ollama, etc.), no local training
+1. **API LLM** — OpenAI-compatible (Claude, GPT, Ollama, etc.), no local training
 2. **Local generative** — fine-tune DistilGPT-2 on your chat pairs (``train-llm``)
 3. **Local classifier** — DistilBERT intent + templates (``train``)
 
@@ -110,7 +110,12 @@ def backend_mode() -> str:
 
 
 def _llm_api_key() -> str:
-    return (os.getenv("BOT_CHAT_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
+    return (
+        os.getenv("BOT_CHAT_API_KEY")
+        or os.getenv("ANTHROPIC_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+        or ""
+    ).strip()
 
 
 def _llm_model() -> str:
