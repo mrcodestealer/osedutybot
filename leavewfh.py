@@ -368,9 +368,9 @@ def fetch_leave_rows_from_spreadsheets(
     warnings: list[str] = []
     rows: list[dict[str, Any]] = []
     leave_ss = (os.getenv("OSE_LEAVE_SPREADSHEET_TOKEN") or _OSE_SPREADSHEET or "").strip()
-    leave_sid = (os.getenv("OSE_LEAVE_SHEET_ID") or "65p5cn").strip()
+    leave_sid = (os.getenv("OSE_LEAVE_SHEET_ID") or os.getenv("OSE_SHEET_ID") or "AS33r7").strip()
     duty_ss = (os.getenv("OSE_SPREADSHEET_TOKEN") or leave_ss).strip()
-    duty_sid = (os.getenv("OSE_SHEET_ID") or "3RIBRL").strip().replace(" ", "")
+    duty_sid = (os.getenv("OSE_SHEET_ID") or leave_sid).strip().replace(" ", "")
 
     if leave_ss and leave_sid:
         vals = od.get_range_values(token, leave_ss, leave_sid, "A1:BN80")

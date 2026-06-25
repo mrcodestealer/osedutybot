@@ -2,8 +2,7 @@
 """
 OSE Duty + Leave + Offset
 
-- Duty shift source: sheet ``3RIBRL`` (``D``/``N``/``*`` offset swaps, 7am/7pm cards)
-- Leave shift source: sheet ``AS33r7`` (``AL``/``SL``/``HL``/``EL``/``L`` from approved leave)
+- Duty + leave sheet: ``AS33r7`` (``D``/``N``/``*`` offset, ``AL``/``SL``/ leave codes)
 - leaveose (OSE HRMS display): ``OSE_HRMS_LEAVE_TABLE_ID`` → tblvoXE0hsPjgb0j
 - leave 全员 (company HRMS): ``OSE_ALL_LEAVE_TABLE_ID`` → tblmHJHe12BCJRD8 (``--sync-all-leave-month``)
 - OSE submit / approve: ``OSE_LEAVE_TABLE_ID`` (default same as leave 全员 table)
@@ -32,9 +31,9 @@ APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
 
 SPREADSHEET_TOKEN = (os.getenv("OSE_SPREADSHEET_TOKEN") or "UjF0saOVuhJSWLtBv9GlaQOkgbe").strip()
-SHEET_ID = (os.getenv("OSE_SHEET_ID") or "3RIBRL").strip()
-# Leave codes (AL/SL/HL/EL/L) — expanded roster on wiki sheet AS33r7 (same workbook as duty sheet).
-LEAVE_SHEET_ID = (os.getenv("OSE_LEAVE_SHEET_ID") or "AS33r7").strip()
+# Single OSE wiki sheet (replaces legacy ``3RIBRL``).
+SHEET_ID = (os.getenv("OSE_SHEET_ID") or "AS33r7").strip()
+LEAVE_SHEET_ID = (os.getenv("OSE_LEAVE_SHEET_ID") or SHEET_ID).strip()
 
 # Leave / Offset Bitable (defaults from user-provided URLs).
 OSE_BASE_TOKEN = os.getenv("OSE_BASE_TOKEN", "CpdEbEofwaYyyEsSjlElKNxzgec")
@@ -59,29 +58,8 @@ OSE_LEAVE_API_BUILD = "20260603-leaveose-pinned-v4"
 LEAVEOSE_TABLE_ID_CANONICAL = "tblvoXE0hsPjgb0j"
 LEAVEOSE_TABLE_ID = LEAVEOSE_TABLE_ID_CANONICAL
 
-# OSE duty shift sheet roster — sheet col A labels vs roster keys used in code/leave matching.
-# HRMS variants like ``Augustine (Si Yew)`` resolve to key ``Augustine Si yew`` → row ``Augustine Si yew (Senior)``.
-OSE_SHIFT_ROSTER: tuple[tuple[str, str], ...] = (
-    ("Louie", "Louie (Senior)"),
-    ("Bryan Peh", "Bryan Peh [Platform]"),
-    ("Eduard James", "Eduard James [Platform]"),
-    ("Chrisjames", "Chrisjames [Game]"),
-    ("Augustine Si yew", "Augustine Si yew (Senior)"),
-    ("Man Chung", "Man Chung [Platform]"),
-    ("Jan Rei", "Jan Rei [Platform]"),
-    ("Katleen", "Katleen [Game]"),
-    ("Lynette", "Lynette (Senior)"),
-    ("Chun Chee", "Chun Chee [Platform]"),
-    ("Jun Chen", "Jun Chen [Game]"),
-    ("Kenneth", "Kenneth [Game]"),
-    ("Jewel", "Jewel [Platform]"),
-    ("Kheng Kwan", "Kheng Kwan [Platform]"),
-    ("Kris Ng", "Kris Ng [Game]"),
-)
-
-TARGET_NAMES = [key for key, _label in OSE_SHIFT_ROSTER]
-
-# Leave / offset forms + AS33r7 leave sheet (31 people; denser rows than duty sheet 3RIBRL).
+# OSE roster — sheet col A labels vs roster keys (31 people on ``AS33r7``).
+# HRMS variants like ``Augustine (Si Yew)`` resolve to key ``Augustine Si yew``.
 OSE_LEAVE_SHEET_ROSTER: tuple[tuple[str, str], ...] = (
     ("Louie", "Louie (Senior)"),
     ("Chrisjames", "Chrisjames [Game]"),
@@ -116,7 +94,9 @@ OSE_LEAVE_SHEET_ROSTER: tuple[tuple[str, str], ...] = (
     ("Kris Ng", "Kris Ng [Game]"),
 )
 
-OSE_LEAVE_ROSTER_KEYS = [key for key, _label in OSE_LEAVE_SHEET_ROSTER]
+OSE_SHIFT_ROSTER = OSE_LEAVE_SHEET_ROSTER
+TARGET_NAMES = [key for key, _label in OSE_LEAVE_SHEET_ROSTER]
+OSE_LEAVE_ROSTER_KEYS = TARGET_NAMES
 
 MONTH_MAP = {
     "January": 1,
@@ -307,7 +287,7 @@ def _names_same_person_tokens(a: str, b: str) -> bool:
 
 
 def _resolve_ose_leave_roster_key(name: str) -> str:
-    """Map HRMS/sheet/leave name to OSE leave-sheet roster key, or ``''`` if not on leave roster."""
+    """Map HRMS/sheet/leave name to OSE leave-sheet roster key, or ``''`` if not on roster."""
     norm = _normalize_person_name_for_match(name)
     if not norm:
         return ""
@@ -333,17 +313,8 @@ def ose_leave_roster_sheet_label(roster_key: str) -> str:
 
 
 def _resolve_ose_roster_key(name: str) -> str:
-    """Map HRMS/sheet/leave name to OSE shift roster key, or ``''`` if not on duty roster."""
-    norm = _normalize_person_name_for_match(name)
-    if not norm:
-        return ""
-    nk = _name_key(norm)
-    for key, _label in OSE_SHIFT_ROSTER:
-        if nk == _name_key(key):
-            return key
-        if _names_same_person_tokens(norm, key):
-            return key
-    return ""
+    """Map HRMS/sheet/leave name to OSE roster key, or ``''`` if not on roster."""
+    return _resolve_ose_leave_roster_key(name)
 
 
 def is_ose_shift_roster_name(name: str) -> bool:
@@ -352,7 +323,7 @@ def is_ose_shift_roster_name(name: str) -> bool:
 
 def ose_roster_sheet_label(roster_key: str) -> str:
     key = (roster_key or "").strip()
-    for rk, label in OSE_SHIFT_ROSTER:
+    for rk, label in OSE_LEAVE_SHEET_ROSTER:
         if rk == key:
             return label
     return key
@@ -586,9 +557,9 @@ def parse_month_year(text: Any) -> tuple[Optional[int], Optional[int]]:
 
 
 def _get_cached_ose_sheet_values_for(sheet_id: str) -> tuple[Optional[list[list[Any]]], Optional[str]]:
-    """Fetch full sheet once; short TTL cache per ``sheet_id`` (duty ``3RIBRL`` vs leave ``AS33r7``)."""
+    """Fetch full sheet once; short TTL cache per ``sheet_id``."""
     sid = (sheet_id or SHEET_ID).strip()
-    cache = _OSE_LEAVE_SHEET_CACHE if sid == LEAVE_SHEET_ID else _OSE_SHEET_CACHE
+    cache = _OSE_LEAVE_SHEET_CACHE if sid == LEAVE_SHEET_ID and LEAVE_SHEET_ID != SHEET_ID else _OSE_SHEET_CACHE
     now = time.monotonic()
     if (
         _OSE_SHEET_CACHE_TTL_SEC > 0
@@ -617,12 +588,12 @@ def _get_cached_ose_sheet_values_for(sheet_id: str) -> tuple[Optional[list[list[
 
 
 def _get_cached_ose_sheet_values() -> tuple[Optional[list[list[Any]]], Optional[str]]:
-    """Duty shift sheet (``3RIBRL``): D/N/* offset swaps and 7am/7pm cards."""
+    """OSE wiki shift sheet (``AS33r7``): duty, offset, and leave cell updates."""
     return _get_cached_ose_sheet_values_for(SHEET_ID)
 
 
 def _get_cached_ose_leave_sheet_values() -> tuple[Optional[list[list[Any]]], Optional[str]]:
-    """Leave sheet (``AS33r7``): AL/SL/HL/EL/L from approved leave."""
+    """Leave markers use the same sheet as duty when ``LEAVE_SHEET_ID`` matches ``SHEET_ID``."""
     return _get_cached_ose_sheet_values_for(LEAVE_SHEET_ID)
 
 
@@ -656,7 +627,12 @@ def _target_name_rows_from_matrix(
     targets: Optional[list[str]] = None,
 ) -> dict[str, int]:
     name_rows: dict[str, int] = {}
-    scan_targets = list(targets if targets is not None else TARGET_NAMES)
+    scan_targets = sorted(
+        list(targets if targets is not None else TARGET_NAMES),
+        key=lambda t: len(t),
+        reverse=True,
+    )
+    label_by_key = {key: label for key, label in OSE_LEAVE_SHEET_ROSTER}
     for row_idx in range(2, len(values)):
         row = values[row_idx]
         if not row:
@@ -666,7 +642,10 @@ def _target_name_rows_from_matrix(
             continue
         up = name_cell.upper()
         for target in scan_targets:
-            if up.startswith(target.upper()) and target not in name_rows:
+            if target in name_rows:
+                continue
+            label = label_by_key.get(target, target)
+            if up.startswith(label.upper()) or up.startswith(target.upper()):
                 name_rows[target] = row_idx
                 break
     return name_rows
@@ -1493,7 +1472,7 @@ def _leave_shift_sheet_snapshots_match(a: dict[str, Any], b: dict[str, Any]) -> 
 
 def _leave_shift_sheet_snapshot_from_plan(parsed: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
     return {
-        "sheet_id": LEAVE_SHEET_ID,
+        "sheet_id": SHEET_ID,
         "person": parsed["person"],
         "start": parsed["start"].isoformat(),
         "end": parsed["end"].isoformat(),
@@ -1512,7 +1491,7 @@ def _compute_leave_shift_sheet_plan(
     shift_code: str = "L",
     prior_cells: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
-    """Mark roster ``D``/``N`` cells as ``AL``/``SL``/``HL``/``EL``/``L`` for each leave day (skip ``*`` offset cells)."""
+    """Mark roster cells as ``AL``/``SL``/``HL``/``EL``/``L`` for each leave day."""
     code = (shift_code or "L").strip().upper()
     if code not in _OSE_SHIFT_SHEET_LEAVE_CODES:
         code = _leave_type_to_shift_code(shift_code)
@@ -1525,7 +1504,7 @@ def _compute_leave_shift_sheet_plan(
     nm = _title_name(person)
     row = _sheet_row_index_for_person(values, nm, targets=OSE_LEAVE_ROSTER_KEYS)
     if row is None:
-        raise ValueError(f"Could not find leave sheet row for {nm!r} on {LEAVE_SHEET_ID}")
+        raise ValueError(f"Could not find sheet row for {nm!r} on {SHEET_ID}")
     updates: list[tuple[int, int, str]] = []
     cells: list[dict[str, Any]] = []
     col_dates: dict[int, date] = {}
@@ -1535,10 +1514,11 @@ def _compute_leave_shift_sheet_plan(
         if col is not None:
             row_data = values[row] if row < len(values) else []
             current = _field_text(row_data[col] if col < len(row_data) else "").upper()
-            if current in ("D", "N"):
+            if current in ("D", "N", "*", ""):
+                prev = current if current in ("D", "N", "*") else "*"
                 updates.append((row, col, code))
                 cells.append(
-                    {"row": row, "col": col, "prev": current, "date": d.isoformat(), "code": code}
+                    {"row": row, "col": col, "prev": prev, "date": d.isoformat(), "code": code}
                 )
                 col_dates[col] = d
             elif current in _OSE_SHIFT_SHEET_LEAVE_CODES:
@@ -1581,7 +1561,7 @@ def _revert_leave_shift_sheet_snapshot(
     col_dates: dict[int, date] = {}
     for c in cells:
         prev = str(c.get("prev") or "").strip().upper()
-        if prev not in ("D", "N"):
+        if prev not in ("D", "N", "*"):
             continue
         row_idx = int(c["row"])
         col_idx = int(c["col"])
@@ -1591,7 +1571,7 @@ def _revert_leave_shift_sheet_snapshot(
             col_dates[col_idx] = on
     if updates:
         _put_ose_shift_sheet_cells(
-            token, updates, values=values, col_dates=col_dates, sheet_id=LEAVE_SHEET_ID
+            token, updates, values=values, col_dates=col_dates, sheet_id=SHEET_ID
         )
 
 
@@ -1620,7 +1600,7 @@ def apply_leave_to_shift_sheet(
         }
     token = get_tenant_access_token()
     _put_ose_shift_sheet_cells(
-        token, plan["updates"], values=values, col_dates=plan["col_dates"], sheet_id=LEAVE_SHEET_ID
+        token, plan["updates"], values=values, col_dates=plan["col_dates"], sheet_id=SHEET_ID
     )
     return {
         "ok": True,
@@ -1684,12 +1664,14 @@ def apply_leave_shift_sheet_for_record(
         raise ValueError(f"leave record {rid!r} is not approved OSE leave")
     state = _load_leave_shift_sheet_state()
     old_snap = dict((state.get("by_record") or {}).get(rid) or {})
-    if str(old_snap.get("sheet_id") or "") not in ("", LEAVE_SHEET_ID):
+    if str(old_snap.get("sheet_id") or "") not in ("", SHEET_ID, LEAVE_SHEET_ID):
+        old_snap = {}
+    elif str(old_snap.get("sheet_id") or "") in ("3RIBRL", "65p5cn"):
         old_snap = {}
     prior_cells = list(old_snap.get("cells") or [])
     values, err = _get_cached_ose_leave_sheet_values()
     if not values:
-        raise RuntimeError(err or f"Could not load OSE leave sheet {LEAVE_SHEET_ID!r}")
+        raise RuntimeError(err or f"Could not load OSE sheet {SHEET_ID!r}")
     shift_code = str(parsed.get("shift_code") or "L")
     plan = _compute_leave_shift_sheet_plan(
         person=parsed["person"],
@@ -1756,7 +1738,7 @@ def apply_leave_shift_sheet_for_record(
             "skipped": "no_d_or_n_cells",
         }
     _put_ose_shift_sheet_cells(
-        token, plan["updates"], values=values, col_dates=plan["col_dates"], sheet_id=LEAVE_SHEET_ID
+        token, plan["updates"], values=values, col_dates=plan["col_dates"], sheet_id=SHEET_ID
     )
     _mark_leave_shift_sheet_applied(rid, snapshot=new_snap)
     return {
@@ -1781,7 +1763,7 @@ def revert_leave_shift_sheet_for_record(record_id: str) -> dict[str, Any]:
         return {"ok": True, "record_id": rid, "skipped": "not_applied"}
     values, err = _get_cached_ose_leave_sheet_values()
     if not values:
-        raise RuntimeError(err or f"Could not load OSE leave sheet {LEAVE_SHEET_ID!r}")
+        raise RuntimeError(err or f"Could not load OSE sheet {SHEET_ID!r}")
     token = get_tenant_access_token()
     _revert_leave_shift_sheet_snapshot(token, snapshot, values=values)
     _unmark_leave_shift_sheet_applied(rid)
@@ -1828,7 +1810,7 @@ def reensure_applied_leave_shift_sheet_styles() -> dict[str, int]:
                 plan["updates"],
                 values=values,
                 col_dates=plan.get("col_dates"),
-                sheet_id=LEAVE_SHEET_ID,
+                sheet_id=SHEET_ID,
             )
             styled += 1
         except Exception as exc:
