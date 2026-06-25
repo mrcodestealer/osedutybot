@@ -973,16 +973,42 @@ def _load_offset_shift_sheet_applied() -> set[str]:
     return set(state.get("record_ids") or [])
 
 
-def _offset_shift_sheet_snapshot_for_row(row: dict[str, Any]) -> dict[str, str]:
+def _offset_shift_sheet_snapshot_for_row(
+    row: dict[str, Any],
+    plan: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
     od = _parse_date_value(row.get("original_date"))
     xd = _parse_date_value(row.get("exchange_date"))
-    return {
+    snap: dict[str, Any] = {
+        "sheet_id": SHEET_ID,
         "request_person": str(row.get("request_person") or ""),
         "exchange_person": str(row.get("exchange_person") or ""),
         "original_date": od.isoformat() if od else "",
         "exchange_date": xd.isoformat() if xd else "",
         "shift_type": str(row.get("shift_type") or "").strip().upper(),
     }
+    if plan:
+        snap["cells"] = [
+            {"row": r, "col": c, "val": v}
+            for r, c, v in (plan.get("updates") or [])
+        ]
+    return snap
+
+
+def _offset_shift_sheet_live_ok(
+    values: list[list[Any]],
+    plan: dict[str, Any],
+) -> bool:
+    """True when every planned cell on the sheet already shows the expected value."""
+    updates = plan.get("updates") or []
+    if not updates:
+        return False
+    for row_idx, col_idx, val in updates:
+        expected = str(val or "").strip().upper()
+        cur = _shift_sheet_cell_value(values, int(row_idx), int(col_idx))
+        if cur != expected:
+            return False
+    return True
 
 
 def _mark_offset_shift_sheet_applied(record_id: str, *, snapshot: Optional[dict[str, str]] = None) -> None:
@@ -1108,28 +1134,59 @@ def apply_approved_offset_shift_sheet_for_record(record_id: str) -> dict[str, An
     rid = (record_id or "").strip()
     if not rid:
         raise ValueError("record_id is required")
-    if offset_shift_sheet_already_applied(rid):
-        return {"ok": True, "record_id": rid, "skipped": "already_applied"}
     row = get_ose_offset_record_admin_row(rid)
     if bool(row.get("pending")):
         return {"ok": False, "record_id": rid, "skipped": "still_pending"}
     status = str(row.get("approval_status") or "").strip().title()
     if status != "Approved":
         return {"ok": False, "record_id": rid, "skipped": f"status={status or 'unknown'}"}
-    od = _parse_date_value(row.get("original_date"))
+    od_d = _parse_date_value(row.get("original_date"))
     xd = _parse_date_value(row.get("exchange_date"))
-    if not od or not xd:
+    if not od_d or not xd:
         raise ValueError("Original Date and Exchange Date are required on the offset row")
-    result = apply_approved_offset_to_shift_sheet(
+    values, err = _get_cached_ose_sheet_values()
+    if not values:
+        raise RuntimeError(err or f"Could not load OSE sheet {SHEET_ID!r}")
+    plan = _compute_offset_shift_sheet_plan(
         request_person=str(row.get("request_person") or ""),
         exchange_person=str(row.get("exchange_person") or ""),
-        original_date=od,
+        original_date=od_d,
         exchange_date=xd,
         shift_type=str(row.get("shift_type") or ""),
+        values=values,
     )
-    snapshot = _offset_shift_sheet_snapshot_for_row(row)
+    state = _load_offset_shift_sheet_state()
+    old_snap = dict((state.get("by_record") or {}).get(rid) or {})
+    if str(old_snap.get("sheet_id") or "") in ("", "3RIBRL", "65p5cn") or old_snap.get("sheet_id") != SHEET_ID:
+        old_snap = {}
+    if (
+        offset_shift_sheet_already_applied(rid)
+        and old_snap
+        and _offset_shift_sheet_live_ok(values, plan)
+    ):
+        return {"ok": True, "record_id": rid, "skipped": "already_applied"}
+    if not plan.get("updates"):
+        return {
+            "ok": True,
+            "record_id": rid,
+            "skipped": "no_cell_updates",
+            "request_person": plan.get("req"),
+        }
+    token = get_tenant_access_token()
+    _put_ose_shift_sheet_cells(token, plan["updates"], values=values, col_dates=plan["col_dates"])
+    snapshot = _offset_shift_sheet_snapshot_for_row(row, plan)
     _mark_offset_shift_sheet_applied(rid, snapshot=snapshot)
-    return {"record_id": rid, **result}
+    return {
+        "record_id": rid,
+        "ok": True,
+        "request_person": plan.get("req"),
+        "exchange_person": plan.get("exc"),
+        "original_date": od_d.isoformat(),
+        "exchange_date": xd.isoformat(),
+        "shift_type": plan.get("st"),
+        "cells_updated": len(plan["updates"]),
+        "myself": plan.get("same_person"),
+    }
 
 
 def revert_approved_offset_from_shift_sheet(
@@ -1309,6 +1366,103 @@ def reensure_applied_offset_shift_sheet_styles_and_notes() -> dict[str, int]:
     return {"scanned": len(applied_ids), "styled": styled, "noted": 0, "errors": errors}
 
 
+def probe_offset_shift_sheet_sync(*, apply: bool = False, json_out: bool = False) -> dict[str, Any]:
+    """Debug approved offset -> sheet cell updates (same as poll, with per-row status)."""
+    values, sheet_err = _get_cached_ose_sheet_values()
+    applied_set = _load_offset_shift_sheet_applied()
+    rows_out: list[dict[str, Any]] = []
+    for row in (get_ose_offset_records_admin() or {}).get("items") or []:
+        if not isinstance(row, dict):
+            continue
+        rid = str(row.get("record_id") or "").strip()
+        pending = bool(row.get("pending"))
+        status = str(row.get("approval_status") or "").strip().title()
+        entry: dict[str, Any] = {
+            "record_id": rid,
+            "request_person": row.get("request_person"),
+            "exchange_person": row.get("exchange_person"),
+            "original_date": row.get("original_date"),
+            "exchange_date": row.get("exchange_date"),
+            "shift_type": row.get("shift_type"),
+            "approval_status": status,
+            "pending": pending,
+            "in_state_file": rid in applied_set,
+        }
+        if pending or status != "Approved":
+            entry["skip"] = "pending" if pending else f"status={status or 'unknown'}"
+        elif not values:
+            entry["skip"] = f"sheet_unavailable:{sheet_err}"
+        else:
+            try:
+                od_d = _parse_date_value(row.get("original_date"))
+                xd = _parse_date_value(row.get("exchange_date"))
+                plan = _compute_offset_shift_sheet_plan(
+                    request_person=str(row.get("request_person") or ""),
+                    exchange_person=str(row.get("exchange_person") or ""),
+                    original_date=od_d,
+                    exchange_date=xd,
+                    shift_type=str(row.get("shift_type") or ""),
+                    values=values,
+                )
+                live_ok = _offset_shift_sheet_live_ok(values, plan)
+                drift = [
+                    {
+                        "cell": f"{col_index_to_letter(c + 1)}{r + 1}",
+                        "current": _shift_sheet_cell_value(values, r, c),
+                        "expected": v,
+                    }
+                    for r, c, v in (plan.get("updates") or [])
+                    if _shift_sheet_cell_value(values, r, c) != str(v or "").strip().upper()
+                ]
+                entry["cells_to_update"] = len(plan.get("updates") or [])
+                entry["live_ok"] = live_ok
+                entry["drift"] = drift
+                if not plan.get("updates"):
+                    entry["skip"] = "no_cell_updates"
+                elif live_ok:
+                    entry["skip"] = "already_on_sheet"
+                elif entry["in_state_file"]:
+                    entry["skip"] = "state_says_applied_but_sheet_drift"
+            except Exception as exc:
+                entry["skip"] = f"plan_error:{exc}"
+        rows_out.append(entry)
+    sync_result: Optional[dict[str, Any]] = None
+    if apply:
+        sync_result = scan_bitable_approved_offsets_for_shift_sheet()
+    out = {
+        "ok": bool(values),
+        "shift_sheet_id": SHEET_ID,
+        "sheet_error": sheet_err,
+        "approved_rows": sum(
+            1 for r in rows_out if not r.get("pending") and r.get("approval_status") == "Approved"
+        ),
+        "needs_apply": sum(
+            1
+            for r in rows_out
+            if not r.get("live_ok") and r.get("cells_to_update") and r.get("approval_status") == "Approved"
+        ),
+        "rows": rows_out,
+        "sync_result": sync_result,
+    }
+    if json_out:
+        print(json.dumps(out, ensure_ascii=False, indent=2, default=str))
+    else:
+        print(f"Offset -> sheet {SHEET_ID} | approved={out['approved_rows']} needs_apply={out['needs_apply']}\n")
+        for r in rows_out:
+            if r.get("pending") or r.get("approval_status") != "Approved":
+                continue
+            skip = r.get("skip") or "will_apply"
+            drift_n = len(r.get("drift") or [])
+            print(
+                f"  {r.get('record_id','')[:14]} | {r.get('request_person')} <-> {r.get('exchange_person')} "
+                f"| {r.get('original_date')} -> {r.get('exchange_date')} {r.get('shift_type')} "
+                f"| {skip} drift={drift_n} state={r.get('in_state_file')}"
+            )
+        if sync_result:
+            print(f"\nApply result: {sync_result}")
+    return out
+
+
 def scan_bitable_approved_offsets_for_shift_sheet() -> dict[str, int]:
     """Apply duty-sheet swaps for offsets approved directly in Base (not via bot card)."""
     global _OFFSET_SHIFT_SHEET_REENSURE_DONE
@@ -1336,11 +1490,12 @@ def scan_bitable_approved_offsets_for_shift_sheet() -> dict[str, int]:
             continue
         if str(row.get("approval_status") or "").strip().title() != "Approved":
             continue
-        if offset_shift_sheet_already_applied(rid):
-            continue
         try:
-            apply_approved_offset_shift_sheet_for_record(rid)
-            applied += 1
+            out = apply_approved_offset_shift_sheet_for_record(rid)
+            if out.get("skipped") == "already_applied":
+                continue
+            if int(out.get("cells_updated") or 0) > 0:
+                applied += 1
         except Exception as exc:
             errors += 1
             print(f"[ose_Duty] shift sheet apply failed for {rid!r}: {exc!r}", flush=True)
@@ -4169,6 +4324,10 @@ if __name__ == "__main__":
     if "--check-open-ids" in sys.argv:
         json_out = "--json" in sys.argv
         audit_person_open_ids(json_out=json_out)
+    elif "--probe-offset-shift" in sys.argv:
+        json_out = "--json" in sys.argv
+        apply = "--apply" in sys.argv
+        probe_offset_shift_sheet_sync(apply=apply, json_out=json_out)
     elif "--probe-leave-shift" in sys.argv:
         json_out = "--json" in sys.argv
         apply = "--apply" in sys.argv

@@ -27,6 +27,8 @@ import os
 import pickle
 import random
 import re
+import shutil
+import subprocess
 import sys
 import traceback
 import urllib.error
@@ -49,6 +51,17 @@ LLM_TIMEOUT_SEC = float(os.getenv("BOT_CHAT_LLM_TIMEOUT", "30"))
 LLM_MAX_TOKENS = int(os.getenv("BOT_CHAT_LLM_MAX_TOKENS", "220"))
 DEFAULT_LLM_MODEL = (os.getenv("BOT_CHAT_MODEL") or "gpt-4o-mini").strip()
 DEFAULT_LLM_BASE = (os.getenv("BOT_CHAT_API_BASE") or "https://api.openai.com/v1").strip().rstrip("/")
+
+# --- Claude Code (subscription/OAuth, no API key) backend -------------------
+# Powers chat via the local `claude` CLI in headless mode (`claude -p`).
+# Auth comes from ~/.claude/.credentials.json (set up once with `claude setup-token`),
+# so NO ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN env var is required.
+# systemd's PATH does not include ~/.local/bin, so we call the binary by absolute
+# path and pin HOME so the CLI can find its stored credentials.
+CLAUDE_BIN = (os.getenv("BOT_CLAUDE_BIN") or "/root/.local/bin/claude").strip()
+CLAUDE_HOME = (os.getenv("BOT_CLAUDE_HOME") or "/root").strip()
+CLAUDE_TIMEOUT_SEC = float(os.getenv("BOT_CLAUDE_TIMEOUT", "120"))
+_claude_failed_logged: bool = False
 
 _SYSTEM_PROMPT = """You are Duty Bot, a friendly workplace assistant on Lark/Feishu for the OSE team.
 Users may casually chat or ask about duty rosters, leave/WFH, holidays, machines, and Jenkins helpers.
@@ -104,6 +117,8 @@ def is_enabled() -> bool:
 
 def backend_mode() -> str:
     mode = (os.getenv("BOT_CHATAGENT_BACKEND") or "auto").strip().lower()
+    if mode in ("claude", "claude-code", "claudecode"):
+        return "claude-code"
     if mode in ("llm", "local-llm", "local", "auto"):
         return mode
     return "auto"
@@ -189,6 +204,57 @@ def _llm_chat(user_text: str) -> Optional[str]:
             print(f"⚠️ Chat LLM request failed: {exc!r}", flush=True)
             _llm_failed_logged = True
         return None
+
+
+def _claude_bin() -> str:
+    """Absolute path to the `claude` CLI (systemd PATH lacks ~/.local/bin)."""
+    if CLAUDE_BIN and os.path.isfile(CLAUDE_BIN) and os.access(CLAUDE_BIN, os.X_OK):
+        return CLAUDE_BIN
+    return shutil.which("claude") or CLAUDE_BIN
+
+
+def claude_code_available() -> bool:
+    p = _claude_bin()
+    return bool(p) and os.path.isfile(p) and os.access(p, os.X_OK)
+
+
+def _claude_code_chat(user_text: str) -> Optional[str]:
+    """Casual chat via the local Claude Code CLI in headless mode. None on failure."""
+    global _claude_failed_logged
+    bin_path = _claude_bin()
+    if not bin_path:
+        return None
+    try:
+        proc = subprocess.run(
+            [
+                bin_path,
+                "-p",
+                user_text,
+                "--output-format",
+                "text",
+                "--append-system-prompt",
+                _SYSTEM_PROMPT,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=CLAUDE_TIMEOUT_SEC,
+            cwd="/tmp",  # don't load the bot repo as project context
+            env={**os.environ, "HOME": CLAUDE_HOME},  # find ~/.claude credentials
+        )
+    except Exception as exc:
+        if not _claude_failed_logged:
+            print(f"⚠️ Chat claude-code request failed: {exc!r}", flush=True)
+            _claude_failed_logged = True
+        return None
+    if proc.returncode != 0:
+        if not _claude_failed_logged:
+            print(
+                f"⚠️ Chat claude-code rc={proc.returncode}: {(proc.stderr or '').strip()[:300]}",
+                flush=True,
+            )
+            _claude_failed_logged = True
+        return None
+    return _sanitize_llm_reply(proc.stdout or "") or None
 
 
 def _local_reply(text: str) -> Optional[str]:
@@ -632,6 +698,17 @@ def startup_status() -> None:
     if not enabled:
         print("[chatagent] Casual chat OFF.", flush=True)
         return
+    if mode == "claude-code" or (mode == "auto" and claude_code_available()):
+        if claude_code_available():
+            print(
+                f"[chatagent] ✅ Claude Code ready ({_claude_bin()}, HOME={CLAUDE_HOME})",
+                flush=True,
+            )
+        elif mode == "claude-code":
+            print(
+                f"[chatagent] ⚠️ backend=claude-code but `claude` not found at {CLAUDE_BIN}",
+                flush=True,
+            )
     if mode in ("llm", "auto") and llm_ok:
         print(f"[chatagent] ✅ API LLM ready ({_llm_model()} @ {_llm_base_url()})", flush=True)
     elif mode == "llm" and not llm_ok:
@@ -780,6 +857,16 @@ def reply_if_enabled(text: str) -> Optional[str]:
         return None
 
     mode = backend_mode()
+
+    if mode == "claude-code" or (mode == "auto" and claude_code_available()):
+        reply = _claude_code_chat(raw)
+        if reply:
+            print(f"[chatagent] Claude Code reply ({len(reply)} chars)", flush=True)
+            return reply
+        if mode == "claude-code":
+            return None
+        # auto: fall through to other backends below
+
     if mode in ("llm", "auto") and llm_available():
         reply = _llm_chat(raw)
         if reply:
