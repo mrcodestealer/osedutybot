@@ -31,9 +31,39 @@ APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
 
 SPREADSHEET_TOKEN = (os.getenv("OSE_SPREADSHEET_TOKEN") or "UjF0saOVuhJSWLtBv9GlaQOkgbe").strip()
-# Single OSE wiki sheet (replaces legacy ``3RIBRL``).
-SHEET_ID = (os.getenv("OSE_SHEET_ID") or "AS33r7").strip()
-LEAVE_SHEET_ID = (os.getenv("OSE_LEAVE_SHEET_ID") or SHEET_ID).strip()
+# Single OSE wiki sheet (replaces legacy ``3RIBRL`` / ``65p5cn``).
+SHEET_ID = (os.getenv("OSE_SHEET_ID") or "AS33r7").strip().replace(" ", "")
+
+_LEGACY_OSE_SHEET_IDS = frozenset({"3RIBRL", "65p5cn"})
+
+
+def _resolve_ose_leave_sheet_id() -> str:
+    """
+    Leave AL/SL writes target the same wiki tab as duty unless a separate workbook is configured.
+    Ignore legacy tab ids (``65p5cn``, ``3RIBRL``) when duty already points at ``AS33r7``.
+    """
+    duty_sid = (os.getenv("OSE_SHEET_ID") or "AS33r7").strip().replace(" ", "")
+    leave_sid = (os.getenv("OSE_LEAVE_SHEET_ID") or duty_sid).strip().replace(" ", "")
+    leave_ss = (
+        (os.getenv("OSE_LEAVE_SPREADSHEET_TOKEN") or "").strip()
+        or SPREADSHEET_TOKEN
+    )
+    if leave_sid in _LEGACY_OSE_SHEET_IDS and duty_sid not in _LEGACY_OSE_SHEET_IDS:
+        print(
+            f"[ose_Duty] OSE_LEAVE_SHEET_ID={leave_sid!r} is legacy; using duty sheet {duty_sid!r} for AL/SL",
+            flush=True,
+        )
+        return duty_sid
+    if leave_ss == SPREADSHEET_TOKEN and leave_sid != duty_sid:
+        print(
+            f"[ose_Duty] same spreadsheet for duty/leave — using {duty_sid!r} (ignore OSE_LEAVE_SHEET_ID={leave_sid!r})",
+            flush=True,
+        )
+        return duty_sid
+    return leave_sid
+
+
+LEAVE_SHEET_ID = _resolve_ose_leave_sheet_id()
 
 # Leave / Offset Bitable (defaults from user-provided URLs).
 OSE_BASE_TOKEN = os.getenv("OSE_BASE_TOKEN", "CpdEbEofwaYyyEsSjlElKNxzgec")
