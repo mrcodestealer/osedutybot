@@ -39,6 +39,22 @@ browser_state.json
 browser_data/
 cookies.json
 user_token.json
+holiday.csv
+allduty.json
+machineencoder.json
+maintenance.json
+webmachine_data.json
+cpms_igo_uat_services.json
+offset_approver_notified.json
+offset_peer_approver_approval_notified.json
+offset_requester_approval_notified.json
+offset_requester_open_id.json
+offset_rows_snapshot.json
+offset_shift_sheet_applied.json
+offset_delete_actors.json
+offset_deletion_notified.json
+leave_shift_sheet_applied.json
+restart_pending.json
 
 # ---- Screenshots / scraped HTML ----
 *.png
@@ -54,8 +70,3 @@ cloudflared.rpm
 miniconda.sh
 *.tar.xz
 wireguard-go-*/
-
-# Tracked for server deploy (do NOT add here):
-# allduty.json, machineencoder.json, webmachine_data.json, maintenance.json,
-# holiday.csv, cpms_igo_uat_services.json, offset_*.json, leave_shift_sheet_applied.json,
-# offset_shift_sheet_applied.json, restart_pending.json
