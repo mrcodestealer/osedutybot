@@ -2256,6 +2256,74 @@ def _mention_includes_duty_bot(mentions: list) -> bool:
     return False
 
 
+SECRET_COMMAND_ALLOWED_OPEN_ID = (
+    os.getenv("SECRET_COMMAND_ALLOWED_OPEN_ID", "").strip()
+    or "ou_5f660c0fb0769d184aca635d02209272"
+)
+
+
+def _secret_command_allowed(sender_open_id: Optional[str]) -> bool:
+    return (sender_open_id or "").strip() == SECRET_COMMAND_ALLOWED_OPEN_ID
+
+
+def _extract_tagged_users_from_message(
+    original_text: str, mentions: list, *, exclude_bot: bool = True
+) -> list[tuple[str, str]]:
+    """Return ``[(display_name, open_id), ...]`` for @-tagged users in a Lark IM message."""
+    results: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    bot_oid = BOT_OPEN_ID if exclude_bot else ""
+
+    for match in re.finditer(
+        r'<at (?:open_id|user_id)="([^"]+)"[^>]*>([^<]*)</at>',
+        original_text or "",
+        re.I,
+    ):
+        open_id = match.group(1).strip()
+        name = (match.group(2) or "user").strip() or "user"
+        if not open_id or open_id in seen:
+            continue
+        if exclude_bot and open_id == bot_oid:
+            continue
+        seen.add(open_id)
+        results.append((name, open_id))
+
+    for m in mentions or []:
+        mention_id = m.get("id", {})
+        if isinstance(mention_id, dict):
+            open_id = (
+                mention_id.get("open_id") or mention_id.get("user_id") or ""
+            ).strip()
+        else:
+            open_id = str(mention_id or "").strip()
+        if not open_id or open_id in seen:
+            continue
+        if exclude_bot and open_id == bot_oid:
+            continue
+        key = m.get("key", "")
+        km = re.search(r"<at[^>]*>(.*?)</at>", key, re.I)
+        name = (km.group(1) if km else m.get("name") or "user").strip() or "user"
+        seen.add(open_id)
+        results.append((name, open_id))
+
+    return results
+
+
+def _format_open_id_lookup_reply(tagged: list[tuple[str, str]]) -> str:
+    lines: list[str] = []
+    for name, open_id in tagged:
+        lines.append(f"Tagged {name} with open_id: {open_id}")
+        lines.append(f'Mention: <at user_id="{open_id}">{name}</at>')
+    return "\n".join(lines)
+
+
+def _handle_secret_open_id_lookup(original_text: str, mentions: list) -> str:
+    tagged = _extract_tagged_users_from_message(original_text, mentions)
+    if not tagged:
+        return "❌ No user mentioned correctly. Use `/secret1 @user` (mention the user)."
+    return _format_open_id_lookup_reply(tagged)
+
+
 def _dispatch_jenkins_duty_command(
     chat_id: str,
     sender_id: str,
@@ -5269,32 +5337,21 @@ def lark_webhook():
         send_message(chat_id, reply)
         return _lark_im_done()
     elif clean_text.lower().startswith('/secret1'):
-        match = re.search(r'<at open_id="([^"]+)"[^>]*>([^<]+)</at>', original_text)
-        if match:
-            open_id = match.group(1)
-            name = match.group(2).strip()
-            reply = f"Tagged {name} with open_id: {open_id}\nMention: <at user_id=\"{open_id}\">{name}</at>"
-        else:
-            target_mention = None
-            for m in mentions:
-                mention_id = m.get("id", {})
-                if isinstance(mention_id, dict):
-                    open_id = mention_id.get("open_id")
-                else:
-                    open_id = mention_id
-                if open_id and open_id != BOT_OPEN_ID:
-                    target_mention = m
-                    break
-            if target_mention:
-                key = target_mention.get("key", "")
-                match = re.search(r'<at[^>]*>(.*?)</at>', key)
-                name = match.group(1) if match else "user"
-                open_id = target_mention.get("id", {}).get("open_id") if isinstance(target_mention.get("id"), dict) else target_mention.get("id")
-                reply = f"Tagged {name} with open_id: {open_id}\nMention: <at user_id=\"{open_id}\">{name}</at>"
-            else:
-                reply = "❌ No user mentioned correctly. Use `/secret1 @user` (mention the user)."
+        if not _secret_command_allowed(sender_id):
+            send_message(chat_id, "❌ You are not allowed to use this command.")
+            return _lark_im_done()
+        reply = _handle_secret_open_id_lookup(original_text, mentions)
         send_message(chat_id, reply)
         return _lark_im_done()
+    elif (
+        _secret_command_allowed(sender_id)
+        and re.search(r'open\s*_?\s*id', clean_text, re.I)
+        and not clean_text.lower().startswith('/secret')
+    ):
+        tagged = _extract_tagged_users_from_message(original_text, mentions)
+        if tagged:
+            send_message(chat_id, _format_open_id_lookup_reply(tagged))
+            return _lark_im_done()
     elif re.match(r"^/al(?:\s+\d{1,2}/\d{1,2})?\s*$", clean_text.lower()):
             # /al or /al DD/MM: run Amount Loss checklog flow in background, return interactive card + TSV.
             parts = clean_text.split()
@@ -5413,6 +5470,9 @@ def lark_webhook():
         send_message(chat_id, reply)
         return _lark_im_done()
     elif clean_text.lower() == '/secret2':
+        if not _secret_command_allowed(sender_id):
+            send_message(chat_id, "❌ You are not allowed to use this command.")
+            return _lark_im_done()
         reply = f"当前群组的 ID 是：{chat_id}"
         result = send_message(chat_id, reply)
         message_id = result.get('data', {}).get('message_id')

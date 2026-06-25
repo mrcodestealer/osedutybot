@@ -773,6 +773,58 @@ def _service_lines_mean_update_all(service_lines: list[str]) -> bool:
     return t0_simple in ("allservice", "allservices", "allsvc", "allsvcs", "全部服务")
 
 
+_SERVICE_EXCLUDE_INTENT_RE = re.compile(
+    r"(?i)\b(?:all\s+)?(?:except|but|excluding|exclude|other\s+than|apart\s+from|besides)\b"
+    r"|除[了]?|除外|之外|其[他余]都|其[他余].*要|不[要包]"
+)
+
+
+def _expand_service_exclusion(
+    service_lines: list[str],
+    *,
+    port_to_id: dict[int, str] | None = None,
+) -> list[str] | None:
+    """
+    Expand an *exclusion* services request to the explicit complement of **ports**.
+
+    Examples (FPMS): ``all except 9000`` / ``除了9000 其他都要选`` / ``all but 9000 9280`` →
+    every FPMS port **except** the excluded one(s), as port strings the normal resolver handles.
+
+    Returns the complement port list, or ``None`` when the text is not an exclusion request.
+    """
+    ports_map = port_to_id if port_to_id else SERVICE_PORT_TO_ID
+    if not ports_map:
+        return None
+    text = " ".join(
+        _normalize_config_colons(s).strip() for s in (service_lines or []) if s and s.strip()
+    ).strip()
+    if not text:
+        return None
+    if not _SERVICE_EXCLUDE_INTENT_RE.search(text):
+        return None
+    # Excluded tokens: explicit ports and/or known service names appearing in the text.
+    excluded_ports: set[int] = set()
+    # Not ``\b\d+\b`` — CJK like "除了9000" has no word boundary before the digit (了/9 are both
+    # \w under Unicode). Use digit look-arounds so ports glued to Chinese still extract.
+    for m in re.finditer(r"(?<!\d)(\d{3,5})(?!\d)", text):
+        try:
+            excluded_ports.add(int(m.group(1)))
+        except ValueError:
+            continue
+    id_to_port = {v.casefold(): k for k, v in ports_map.items()}
+    low = text.casefold()
+    for sid_low, port in id_to_port.items():
+        if sid_low and sid_low in low:
+            excluded_ports.add(port)
+    # Only treat as exclusion when at least one excluded port is recognised (avoids mis-firing on a
+    # stray "except" with no resolvable target).
+    excluded_ports = {p for p in excluded_ports if p in ports_map}
+    if not excluded_ports:
+        return None
+    complement = [str(p) for p in ports_map.keys() if p not in excluded_ports]
+    return complement or None
+
+
 def _looks_like_chat_trailing_line_under_services(line: str) -> bool:
     """
     Ignore common chat trailing lines accidentally pasted under ``services:``.
@@ -2264,9 +2316,29 @@ _CONFIG_KEY_CANON = {
 }
 
 
-def _canonical_config_key(raw: str) -> str:
-    """Map ``Branchhh`` / ``Versio`` / ``Service`` typos to canonical keys."""
-    k = (raw or "").strip().casefold()
+# Targets for fuzzy key typo matching (key word → canonical key).
+_CONFIG_KEY_FUZZY_TARGETS: dict[str, str] = {
+    "environment": "environment",
+    "env": "environment",
+    "branch": "branch",
+    "version": "version",
+    "service": "services",
+    "services": "services",
+}
+
+
+def _fuzzy_config_key(raw: str) -> str | None:
+    """
+    Map a (possibly mistyped) key word to ``environment`` / ``branch`` / ``version`` / ``services``.
+
+    Handles exact, prefix (``branchhh``), and **transposition / wrong-letter typos** the prefix rule
+    misses (``brnach``, ``verison``, ``servoce``, ``enviroment``) via a difflib similarity fallback.
+    Returns ``None`` when the word is not close to any known key (so real non-key lines like
+    ``source:`` or ``command:`` are never hijacked).
+    """
+    k = re.sub(r"[^a-z]", "", (raw or "").strip().casefold())
+    if not k:
+        return None
     if k in _CONFIG_KEY_CANON:
         return _CONFIG_KEY_CANON[k]
     if k.startswith("branch"):
@@ -2275,7 +2347,28 @@ def _canonical_config_key(raw: str) -> str:
         return "version"
     if k.startswith("servic"):
         return "services"
-    return k
+    if k in ("env", "environ") or k.startswith("enviro") or k.startswith("environ"):
+        return "environment"
+    # difflib fallback for transposition / single-wrong-letter typos.
+    if len(k) < 5:
+        return None
+    best_key: str | None = None
+    best_ratio = 0.0
+    for cand, canon in _CONFIG_KEY_FUZZY_TARGETS.items():
+        if len(cand) < 5:
+            continue
+        r = difflib.SequenceMatcher(None, k, cand).ratio()
+        if r > best_ratio:
+            best_ratio, best_key = r, canon
+    return best_key if best_ratio >= 0.72 else None
+
+
+def _canonical_config_key(raw: str) -> str:
+    """Map ``Branchhh`` / ``Versio`` / ``Service`` (and typos like ``brnach``) to canonical keys."""
+    fuzzy = _fuzzy_config_key(raw)
+    if fuzzy:
+        return fuzzy
+    return (raw or "").strip().casefold()
 
 
 def _try_parse_natural_service_line(line: str) -> str | None:
@@ -2334,7 +2427,15 @@ def _match_key_line_fuzzy(line: str):
         plain,
         re.IGNORECASE,
     )
-    return m
+    if m:
+        return m
+    # Final fallback: a single leading word + colon whose word is a *typo* of a real key
+    # (``brnach: master`` / ``verison: v1`` / ``servoce: 9000``). Validated by _fuzzy_config_key so
+    # genuine non-key lines (``source: x``, ``command: y``, service names) are NOT captured.
+    m2 = re.match(r"^(?P<key>[A-Za-z][A-Za-z\-]{2,20})\s*[:：]\s*(?P<rest>.+)$", plain)
+    if m2 and _fuzzy_config_key(m2.group("key")):
+        return m2
+    return None
 
 
 def _clean_key_rest(rest: str) -> str:
@@ -2475,7 +2576,26 @@ def parse_fpms_config_block(
             "Missing services: section or no service payload (ports or names, e.g. 3000 or MGNT_API_server)."
         )
 
-    if _service_lines_mean_update_all(service_lines):
+    _cat = list(service_catalog or FPMS_UAT_BRANCH_SERVICES)
+    _ports = port_to_id
+    if _ports is None:
+        _ports = (
+            SERVICE_PORT_TO_ID
+            if _cat is FPMS_UAT_BRANCH_SERVICES
+            else {}
+        )
+    _excl_complement = _expand_service_exclusion(service_lines, port_to_id=_ports)
+    if _excl_complement is not None:
+        print(
+            "→ Parsed ``services:`` as **exclusion** — selecting all ports except the excluded "
+            f"one(s); {len(_excl_complement)} service(s).\n",
+            flush=True,
+        )
+        services = _service_ids_from_service_block_lines(
+            _excl_complement, service_catalog=_cat, port_to_id=_ports
+        )
+        update_all = False
+    elif _service_lines_mean_update_all(service_lines):
         print(
             "→ Parsed ``services:`` as **update all** (keyword only) — will tick **"
             + _jenkins_update_all_stapler_name()
@@ -2485,14 +2605,6 @@ def parse_fpms_config_block(
         services = []
         update_all = True
     else:
-        _cat = list(service_catalog or FPMS_UAT_BRANCH_SERVICES)
-        _ports = port_to_id
-        if _ports is None:
-            _ports = (
-                SERVICE_PORT_TO_ID
-                if _cat is FPMS_UAT_BRANCH_SERVICES
-                else {}
-            )
         services = _service_ids_from_service_block_lines(
             service_lines, service_catalog=_cat, port_to_id=_ports
         )
@@ -7663,6 +7775,23 @@ def parse_jenkins_update_fpms_bot_block(text: str, *, preserve_branch_case: bool
         raise ValueError("Missing branch: or version: in the block.")
     if not service_lines:
         raise ValueError("Missing services (no lines under Service(s):).")
+
+    # "all except 9000" / "除了9000其他都要选" → explicit complement of FPMS ports (reuses the normal
+    # port→service resolver; no special-casing downstream).
+    _excl_complement = _expand_service_exclusion(service_lines)
+    if _excl_complement is not None:
+        if env is None:
+            env = env_from_banner
+        if env is None:
+            env = normalize_parameter_text(os.environ.get("FPMS_DEFAULT_ENVIRONMENT", "fpms-uat-branch"))
+            if env not in ENVIRONMENTS:
+                env = ENVIRONMENTS[0]
+        return {
+            "environment": env,
+            "branch": branch,
+            "version": version,
+            "service_tokens": _excl_complement,
+        }
 
     if _service_lines_mean_update_all(service_lines):
         if env is None:
