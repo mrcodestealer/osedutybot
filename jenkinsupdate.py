@@ -7345,6 +7345,48 @@ def _jenkins_update_disambiguation_ties(
     return [r for r in ranked if r[1] >= best_sc - band][:cap]
 
 
+def _jenkins_update_prefer_master_or_branch(
+    ties: list[tuple[str, float, str, str]], headline: str
+) -> list[tuple[str, float, str, str]]:
+    """
+    Resolve a Branch-vs-Master tie using an explicit qualifier in the **headline**.
+
+    A bare ``fpms uat`` alias (Branch job) is a substring of ``fpms uat master``, so both score the
+    same and the bot would needlessly ask the user to pick. When the headline clearly says
+    ``master`` (and not ``branch``) keep only the Master job(s), and vice-versa. The headline — not
+    the full body — is used because a ``branch:`` config line would otherwise make every request
+    look ambiguous.
+    """
+    if len(ties) < 2:
+        return ties
+    q = (headline or "").casefold()
+    has_master = bool(re.search(r"\bmaster\b", q))
+    has_branch = bool(re.search(r"\bbranch\b", q))
+    if has_master == has_branch:
+        return ties  # neither or both → cannot disambiguate from the headline
+    want = "master" if has_master else "branch"
+    filtered = [t for t in ties if want in (t[2] or "").casefold()]
+    if filtered and len(filtered) < len(ties):
+        return filtered
+    return ties
+
+
+def _jenkins_update_dedupe_ties(
+    ties: list[tuple[str, float, str, str]],
+) -> list[tuple[str, float, str, str]]:
+    """Collapse ties that resolve to the **same Jenkins job** (same primary URL) so the picker
+    never shows the identical job twice (e.g. aliases ``fpms uat`` and ``fpms uat branch``)."""
+    seen: set[str] = set()
+    out: list[tuple[str, float, str, str]] = []
+    for t in ties:
+        url_key = _jenkins_update_primary_url(t[3]).strip().casefold()
+        if url_key in seen:
+            continue
+        seen.add(url_key)
+        out.append(t)
+    return out
+
+
 def _fpms_lark_normalize_card_action_value(value: object) -> dict[str, object] | None:
     """Feishu may send ``value`` as JSON object or string."""
     if value is None:
@@ -12607,6 +12649,10 @@ def _dispatch_lark_update_command_body(
     else:
         ranked = _rank_jenkins_update_job_matches(body)
         ties = _jenkins_update_disambiguation_ties(ranked, band=0.05)
+    # Explicit "master" / "branch" in the headline breaks a Branch-vs-Master tie (so
+    # "UPDATE FPMS UAT MASTER" goes straight to the Master job instead of asking 1/2).
+    ties = _jenkins_update_prefer_master_or_branch(ties, head_line)
+    ties = _jenkins_update_dedupe_ties(ties)
     if not ties:
         sample = ", ".join(sorted(JENKINS_UPDATE_JOB_REGISTRY.keys())[:14])
         send(
