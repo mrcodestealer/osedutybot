@@ -1,0 +1,12 @@
+# Local PC Duty Bot (webhook handlers + Lark WebSocket long connection + Ollama chat)
+requests
+python-dotenv
+flask
+apscheduler
+lark-oapi>=1.4.0
+pyotp
+qrcode
+pillow
+paramiko
+pymysql
+openpyxl
