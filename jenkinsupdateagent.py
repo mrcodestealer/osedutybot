@@ -249,6 +249,41 @@ def _normalize_kv_separators(line: str) -> str:
     )
 
 
+def _canonical_config_key(raw: str) -> str:
+    ju = _ju()
+    if ju is not None:
+        try:
+            return ju._canonical_config_key(raw)
+        except Exception:
+            pass
+    k = (raw or "").strip().casefold()
+    if k.startswith("branch"):
+        return "branch"
+    if k.startswith("versio") or k.startswith("verion"):
+        return "version"
+    if k.startswith("servic"):
+        return "services"
+    if k in ("env", "environment"):
+        return "environment"
+    return k
+
+
+def _try_parse_natural_service_line(line: str) -> Optional[str]:
+    ju = _ju()
+    if ju is not None:
+        try:
+            return ju._try_parse_natural_service_line(line)
+        except Exception:
+            pass
+    s = _normalize_colons(line).strip()
+    if not re.match(r"(?i)^services?\b", s):
+        return None
+    if re.match(r"(?i)^services?\s*[:\-–—]", s):
+        return None
+    ports = re.findall(r"\b(\d{3,5})\b", s)
+    return ports[0] if ports else None
+
+
 def _key_line_match(line: str):
     """Detect ``environment|branch|version|service(s):`` lines (uses jenkinsupdate when present)."""
     line = _normalize_kv_separators(line)
@@ -265,7 +300,7 @@ def _key_line_match(line: str):
     plain = re.sub(r"[`*_]", "", s).strip()
     return re.match(
         r"^(?:(?:[A-Za-z][A-Za-z0-9/_\-.]{0,24})\s+){0,2}"
-        r"(?P<key>environment|branch|version|services?)\s*[:\-–—]\s*(?P<rest>.*)$",
+        r"(?P<key>environment|env|branch\w*|versio\w*|servic\w*)\s*[:\-–—]\s*(?P<rest>.*)$",
         plain,
         re.IGNORECASE,
     )
@@ -424,9 +459,9 @@ def rule_extract(text: str) -> JenkinsUpdateExtraction:
 
         m = _key_line_match(raw_line)
         if m:
-            key = m.group("key").lower()
+            key = _canonical_config_key(m.group("key"))
             rest = _clean_value(m.group("rest"))
-            if key.startswith("service"):
+            if key == "services":
                 collecting_services = True
                 if rest:
                     service_lines.append(rest)
@@ -438,6 +473,12 @@ def rule_extract(text: str) -> JenkinsUpdateExtraction:
                 res.branch = rest
             elif key == "version":
                 res.version = rest
+            continue
+
+        nat_svc = _try_parse_natural_service_line(raw_line)
+        if nat_svc:
+            collecting_services = True
+            service_lines.append(nat_svc)
             continue
 
         # Email subject line (kept out of services).
@@ -808,7 +849,7 @@ def build_update_body(extraction: JenkinsUpdateExtraction) -> str:
     (UAT2/UAT3/MASTER/…); falls back to the resolved job alias.
     """
     headline = (extraction.environment or extraction.job_alias or "update").strip()
-    parts = [f"/update {headline}"]
+    parts = [f"/jenkinsupdate {headline}"]
     if extraction.branch:
         parts.append(f"Branch: {extraction.branch}")
     if extraction.version:

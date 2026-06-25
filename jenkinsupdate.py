@@ -2252,11 +2252,60 @@ def _service_ids_from_service_block_lines(
     return out
 
 
+_CONFIG_KEY_CANON = {
+    "env": "environment",
+    "environment": "environment",
+    "branch": "branch",
+    "branches": "branch",
+    "version": "version",
+    "versions": "version",
+    "service": "services",
+    "services": "services",
+}
+
+
+def _canonical_config_key(raw: str) -> str:
+    """Map ``Branchhh`` / ``Versio`` / ``Service`` typos to canonical keys."""
+    k = (raw or "").strip().casefold()
+    if k in _CONFIG_KEY_CANON:
+        return _CONFIG_KEY_CANON[k]
+    if k.startswith("branch"):
+        return "branch"
+    if k.startswith("versio") or k.startswith("verion"):
+        return "version"
+    if k.startswith("servic"):
+        return "services"
+    return k
+
+
+def _try_parse_natural_service_line(line: str) -> str | None:
+    """``Service only choose 9000`` → ``9000`` (no ``Service:`` colon form)."""
+    s = _normalize_config_colons(line).strip()
+    if not re.match(r"(?i)^services?\b", s):
+        return None
+    if re.match(r"(?i)^services?\s*[:\-–—]", s):
+        return None
+    ports = re.findall(r"\b(\d{3,5})\b", s)
+    return ports[0] if ports else None
+
+
+def _config_block_has_branch_version_services(text: str) -> tuple[bool, bool, bool]:
+    """Fuzzy detect branch / version / service keys (typo-tolerant)."""
+    raw = text or ""
+    has_branch = bool(re.search(r"\bbranch\w*\s*[:=]", raw, re.I))
+    has_version = bool(re.search(r"\bversio\w*\s*[:=]", raw, re.I))
+    has_svc = bool(re.search(r"\bservic\w*\s*[:=]", raw, re.I)) or bool(
+        re.search(r"(?im)^\s*services?\b[^\n]*\b\d{3,5}\b", raw)
+    )
+    return has_branch, has_version, has_svc
+
+
+_KEY_LINE_KEY = r"(?:environment|env|branch\w*|versio\w*|servic\w*)"
 _KEY_LINE_RE = re.compile(
     r"^(?:[>\-\*\u2022]\s*)*"
     r"(?:`+|\*{1,2})?"
     r"(?:(?:[A-Za-z][A-Za-z0-9/_\-.]{0,24})\s+){0,2}"
-    r"(?P<key>environment|branch|version|services?)"
+    rf"(?P<key>{_KEY_LINE_KEY})"
     r"(?:`+|\*{1,2})?"
     r"\s*:\s*(?P<rest>.*)$",
     re.IGNORECASE,
@@ -2268,6 +2317,8 @@ def _match_key_line_fuzzy(line: str):
     Parse key lines robustly even with rich-text wrappers/bullets, e.g.:
       **Branch:** master
       1. • `Version` : v1.2.3
+      Branchhh: master
+      Versio : v3.2.207
       🔹 Services - risk-analysis-rollout
     """
     s = _normalize_config_colons(line)
@@ -2277,12 +2328,13 @@ def _match_key_line_fuzzy(line: str):
         return m
     # Strip markdown wrappers and retry with flexible separators (: / - / en/em dash)
     plain = re.sub(r"[`*_]", "", s).strip()
-    return re.match(
-        r"^(?:(?:[A-Za-z][A-Za-z0-9/_\-.]{0,24})\s+){0,2}"
-        r"(?P<key>environment|branch|version|services?)\s*[:\-–—]\s*(?P<rest>.*)$",
+    m = re.match(
+        rf"^(?:(?:[A-Za-z][A-Za-z0-9/_\-.]{{0,24}})\s+){{0,2}}"
+        rf"(?P<key>{_KEY_LINE_KEY})\s*[:\-–—]\s*(?P<rest>.*)$",
         plain,
         re.IGNORECASE,
     )
+    return m
 
 
 def _clean_key_rest(rest: str) -> str:
@@ -2355,9 +2407,7 @@ def parse_fpms_config_block(
             )
             break
         if m:
-            key = m.group("key").lower()
-            if key == "service":
-                key = "services"
+            key = _canonical_config_key(m.group("key"))
             rest = _clean_key_rest(m.group("rest") or "")
             last_key = key
 
@@ -7033,9 +7083,7 @@ def parse_venue_uat_bot_block(body: str, jenkins_build_url: str = "") -> dict:
     for line in lines:
         m = _match_key_line_fuzzy(line)
         if m:
-            key = m.group("key").lower()
-            if key == "service":
-                key = "services"
+            key = _canonical_config_key(m.group("key"))
             rest = _clean_key_rest(m.group("rest") or "")
             last_key = key
             if key == "environment":
@@ -7134,14 +7182,17 @@ def parse_venue_uat_run_config_block(
     last_key: str | None = None
     port_head = re.compile(r"^\d{3,5}\b")
     for line in lines[1:]:
+        nat_svc = _try_parse_natural_service_line(line)
+        if nat_svc:
+            service_lines.append(nat_svc)
+            last_key = "services"
+            continue
         m = _match_key_line_fuzzy(line)
         if m is None and re.match(r"^venue\s*[:=]", line, re.I):
             last_key = "venue"
             continue
         if m:
-            key = m.group("key").lower()
-            if key == "service":
-                key = "services"
+            key = _canonical_config_key(m.group("key"))
             rest = _clean_key_rest(m.group("rest") or "")
             last_key = key
             if key == "environment":
@@ -7499,7 +7550,11 @@ def parse_jenkins_update_fpms_bot_block(text: str, *, preserve_branch_case: bool
         raise ValueError("Empty message.")
     head = lines[0]
     if not JENKINS_UPDATE_CMD_RE.search(head):
-        raise ValueError("First line must include `/jenkinsupdate`.")
+        if not (
+            _environment_from_bot_trigger_line(head)
+            or re.search(r"(?i)\b(?:update|deploy)\b", head)
+        ):
+            raise ValueError("First line must include `/jenkinsupdate`.")
 
     env: str | None = _environment_from_bot_trigger_line(head)
     env_from_banner: str | None = None
@@ -7510,11 +7565,14 @@ def parse_jenkins_update_fpms_bot_block(text: str, *, preserve_branch_case: bool
     port_head = re.compile(r"^\d{3,5}\b")
 
     for line in lines[1:]:
+        nat_svc = _try_parse_natural_service_line(line)
+        if nat_svc:
+            service_lines.append(nat_svc)
+            last_key = "services"
+            continue
         m = _match_key_line_fuzzy(line)
         if m:
-            key = m.group("key").lower()
-            if key == "service":
-                key = "services"
+            key = _canonical_config_key(m.group("key"))
             rest = _clean_key_rest(m.group("rest") or "")
             last_key = key
             if key == "environment":
@@ -7622,11 +7680,14 @@ def parse_fnt_rc_uat_master_bot_block(text: str) -> dict:
     port_head = re.compile(r"^\d{3,5}\b")
 
     for line in lines[1:]:
+        nat_svc = _try_parse_natural_service_line(line)
+        if nat_svc:
+            service_lines.append(nat_svc)
+            last_key = "services"
+            continue
         m = _match_key_line_fuzzy(line)
         if m:
-            key = m.group("key").lower()
-            if key == "service":
-                key = "services"
+            key = _canonical_config_key(m.group("key"))
             rest = _clean_key_rest(m.group("rest") or "")
             last_key = key
             if key == "environment":
@@ -7736,11 +7797,14 @@ def parse_fnt_rc_run_config_block(text: str) -> tuple[list[str], str, str, bool]
     last_key: str | None = None
     port_head = re.compile(r"^\d{3,5}\b")
     for line in lines[1:]:
+        nat_svc = _try_parse_natural_service_line(line)
+        if nat_svc:
+            service_lines.append(nat_svc)
+            last_key = "services"
+            continue
         m = _match_key_line_fuzzy(line)
         if m:
-            key = m.group("key").lower()
-            if key == "service":
-                key = "services"
+            key = _canonical_config_key(m.group("key"))
             rest = _clean_key_rest(m.group("rest") or "")
             last_key = key
             if key == "branch":
@@ -7807,11 +7871,14 @@ def parse_sms_uat_update_bot_block(text: str) -> dict:
     port_head = re.compile(r"^\d{3,5}\b")
 
     for line in lines[1:]:
+        nat_svc = _try_parse_natural_service_line(line)
+        if nat_svc:
+            service_lines.append(nat_svc)
+            last_key = "services"
+            continue
         m = _match_key_line_fuzzy(line)
         if m:
-            key = m.group("key").lower()
-            if key == "service":
-                key = "services"
+            key = _canonical_config_key(m.group("key"))
             rest = _clean_key_rest(m.group("rest") or "")
             last_key = key
             if key == "environment":
@@ -8106,9 +8173,14 @@ def parse_fpms_prod_script_run_config_block(text: str) -> tuple[str, str]:
         re.I,
     )
     for line in lines[1:]:
+        nat_svc = _try_parse_natural_service_line(line)
+        if nat_svc:
+            service_lines.append(nat_svc)
+            last_key = "services"
+            continue
         m = _match_key_line_fuzzy(line)
         if m:
-            key = m.group("key").lower()
+            key = _canonical_config_key(m.group("key"))
             rest = _clean_key_rest(m.group("rest") or "")
             if key == "environment":
                 env = normalize_parameter_text(rest) or "fpms-prod"
@@ -8206,11 +8278,14 @@ def parse_sms_uat_run_config_block(text: str) -> tuple[list[str], str, str, bool
     last_key: str | None = None
     port_head = re.compile(r"^\d{3,5}\b")
     for line in lines[1:]:
+        nat_svc = _try_parse_natural_service_line(line)
+        if nat_svc:
+            service_lines.append(nat_svc)
+            last_key = "services"
+            continue
         m = _match_key_line_fuzzy(line)
         if m:
-            key = m.group("key").lower()
-            if key == "service":
-                key = "services"
+            key = _canonical_config_key(m.group("key"))
             rest = _clean_key_rest(m.group("rest") or "")
             last_key = key
             if key == "branch":
@@ -10063,9 +10138,7 @@ def _parse_cpms_igo_uat_request(body: str) -> tuple[list[str], str, str, bool, s
     for line in lines:
         m = _match_key_line_fuzzy(line)
         if m:
-            key = m.group("key").lower()
-            if key == "service":
-                key = "services"
+            key = _canonical_config_key(m.group("key"))
             rest = _clean_key_rest(m.group("rest") or "")
             last_key = key
             if key == "environment":
@@ -10180,11 +10253,14 @@ def parse_cpms_igo_uat_run_config_block(
     service_lines: list[str] = []
     last_key: str | None = None
     for line in lines[1:]:
+        nat_svc = _try_parse_natural_service_line(line)
+        if nat_svc:
+            service_lines.append(nat_svc)
+            last_key = "services"
+            continue
         m = _match_key_line_fuzzy(line)
         if m:
-            key = m.group("key").lower()
-            if key == "service":
-                key = "services"
+            key = _canonical_config_key(m.group("key"))
             rest = _clean_key_rest(m.group("rest") or "")
             last_key = key
             if key == "environment":
@@ -11571,8 +11647,7 @@ def _looks_like_freeform_update_request(text: str) -> bool:
         return True
     if _looks_like_bi_api_update_paste(raw) or _body_requests_bi_script_update(raw):
         return True
-    has_branch = bool(re.search(r"\bbranch\s*[:=]", raw, re.I))
-    has_svc = bool(re.search(r"\bservices?\s*[:=]", raw, re.I))
+    has_branch, has_version, has_svc = _config_block_has_branch_version_services(raw)
     has_update_word = bool(
         re.search(
             r"(?i)(?:please\s+|kindly\s+|help(?:\s+me)?\s+|can you help\s+|i\s+want\s+(?:to\s+)?)?"
@@ -11580,7 +11655,7 @@ def _looks_like_freeform_update_request(text: str) -> bool:
             raw,
         )
     )
-    return has_branch and has_svc and has_update_word
+    return (has_branch or has_version) and (has_svc or has_branch and has_version) and has_update_word
 
 
 def agent_route_free_form_body(raw_text: str) -> str | None:
@@ -11630,9 +11705,7 @@ def _jenkins_message_has_config_block(text: str) -> bool:
     raw = (text or "").replace("\r\n", "\n")
     if not JENKINS_UPDATE_CMD_RE.search(raw):
         return False
-    has_branch = bool(re.search(r"\bbranch\s*:", raw, re.I))
-    has_version = bool(re.search(r"\bversion\s*:", raw, re.I))
-    has_svc = bool(re.search(r"\bservices?\s*:", raw, re.I))
+    has_branch, has_version, has_svc = _config_block_has_branch_version_services(raw)
     return has_branch and has_version and has_svc
 
 
