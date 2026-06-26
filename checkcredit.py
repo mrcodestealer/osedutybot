@@ -789,13 +789,95 @@ def bump_tail_and_execute(page, *, timeout_ms: int) -> None:
 # New player segment marker (lines below belong to that player until the next marker):
 #   - extra1 / extra2 / extra3 + userid (settle/bet flow), e.g. `extra1:userid:111`
 #   - httpaft enter-game flow, e.g. `httpaft:enter_game userid:111`
+#   - httpaft leave-game flow, e.g. `httpaft:leave_game ... userid=userid:111`
 # The AFT enter-game flow does NOT emit an `extra:userid:` marker, so without the
 # `enter_game userid:` branch its lines (target/add_num + `enter game time out`) would
-# be wrongly merged into the previous player's block.
+# be wrongly merged into the previous player's block. Leave-game is the same for
+# transfer-out / OUT CHECK / ``aft interrogation faild``.
 _USERID_START = re.compile(
-    r'(?:extra[123]\s*:\s*["\']?userid|enter_game\s+userid)\s*:\s*(\d+)',
+    r"(?:"
+    r"extra[123]\s*:\s*[\"']?userid\s*:\s*(\d+)"
+    r"|enter_game\s+userid\s*:\s*(\d+)"
+    r"|leave_game\b.*?userid[=:]\s*(?:userid:)?(\d+)"
+    r")",
     re.I,
 )
+_LEAVE_GAME_USERID = re.compile(
+    r"leave_game\b.*?userid[=:]\s*(?:userid:)?(\d+)",
+    re.I,
+)
+def _userid_from_marker_line(line: str) -> str | None:
+    m = _USERID_START.search(line)
+    if not m:
+        return None
+    return next((g for g in m.groups() if g), None)
+
+
+def _userid_from_leave_game_line(line: str) -> str | None:
+    m = _LEAVE_GAME_USERID.search(line)
+    return m.group(1) if m else None
+
+
+def _nearest_leave_game_uid_before(
+    raw: list[str], line_idx: int, *, max_lookback: int = 120
+) -> str | None:
+    """Nearest ``httpaft:leave_game`` userid above an error line."""
+    start = max(0, line_idx - max_lookback)
+    for j in range(line_idx - 1, start - 1, -1):
+        uid = _userid_from_leave_game_line(raw[j])
+        if uid:
+            return uid
+    return None
+
+
+def _is_aft_interrogation_fail_line(err: dict[str, Any]) -> bool:
+    fl = (err.get("full_line") or err.get("snippet") or "").lower()
+    return "aft interrogation faild" in fl or "aft interrogation failed" in fl
+
+
+def _fix_aft_interrogation_error_attribution(
+    raw: list[str], blocks: list[dict[str, Any]]
+) -> None:
+    """
+    ``aft interrogation faild`` is leave/transfer-out — attribute to the nearest preceding
+    ``leave_game`` player, not a later ``enter_game`` block that absorbed the tail lines.
+    """
+    uid_to_blk: dict[str, dict[str, Any]] = {b["user_id"]: b for b in blocks}
+    for blk in blocks:
+        keep: list[dict[str, Any]] = []
+        for err in blk.get("errors") or []:
+            if not _is_aft_interrogation_fail_line(err):
+                keep.append(err)
+                continue
+            li = int(err.get("line_idx", -1))
+            leave_uid = _nearest_leave_game_uid_before(raw, li)
+            if leave_uid and leave_uid != blk["user_id"]:
+                moved = dict(err)
+                moved["attributed_user_id"] = leave_uid
+                moved["user_id"] = leave_uid
+                dest = uid_to_blk.get(leave_uid)
+                if dest is None:
+                    dest = {
+                        "user_id": leave_uid,
+                        "errors": [],
+                        "block_max_line": li,
+                    }
+                    blocks.append(dest)
+                    uid_to_blk[leave_uid] = dest
+                dest["errors"].append(moved)
+                dest["block_max_line"] = max(int(dest.get("block_max_line", -1)), li)
+            else:
+                keep.append(err)
+        blk["errors"] = keep
+
+
+def error_owner_user_id(err: dict[str, Any], row: dict[str, Any]) -> str:
+    """User ID that owns an error line (after leave_game re-attribution)."""
+    return str(
+        err.get("attributed_user_id") or err.get("user_id") or row.get("user_id") or ""
+    ).strip()
+
+
 _ERR_ZERO = re.compile(r"""['\"]error['\"]\s*:\s*0\b""")
 _CUR_COIN = re.compile(r"""['\"]cur_coin['\"]\s*:\s*([\d.]+)""")
 _REDUCE_NUM = re.compile(r"""['\"]reduce_num['\"]\s*:\s*([\d.]+)""")
@@ -975,11 +1057,11 @@ def parse_user_blocks_full(log_text: str) -> list[dict[str, Any]]:
     cur_uid: str | None = None
     cur_lines: list[tuple[int, str]] = []
     for i, line in enumerate(raw):
-        um = _USERID_START.search(line)
-        if um:
+        new_uid = _userid_from_marker_line(line)
+        if new_uid:
             if cur_uid is not None:
                 blocks.append((cur_uid, cur_lines))
-            cur_uid = um.group(1)
+            cur_uid = new_uid
             cur_lines = [(i, line)]
         else:
             if cur_uid is not None:
@@ -1092,6 +1174,7 @@ def parse_user_blocks_full(log_text: str) -> list[dict[str, Any]]:
         if latest_credit:
             row["latest_credit"] = latest_credit
         out.append(row)
+    _fix_aft_interrogation_error_attribution(raw, out)
     return out
 
 
@@ -1737,7 +1820,7 @@ def pick_latest_error_uid(merged: list[dict[str, Any]]) -> tuple[str | None, int
             li = int(e.get("line_idx", -1))
             if li > best_line:
                 best_line = li
-                best_uid = r["user_id"]
+                best_uid = error_owner_user_id(e, r) or None
     return best_uid, best_line
 
 

@@ -220,8 +220,9 @@ def _format_transfer_out_line(transfer: dict[str, Any], *, uid: str | None) -> s
     amt = transfer.get("amount")
     ts = transfer.get("time") or "n/a"
     src = transfer.get("source") or "n/a"
+    show_uid = str(transfer.get("user_id") or uid or "n/a").strip()
     if amt is None:
-        return f"**Last player transfer-out credit:** `n/a` (User `{uid or 'n/a'}` — no credit line parsed)"
+        return f"**Last player transfer-out credit:** `n/a` (User `{show_uid}` — no credit line parsed)"
     src_note = {
         "cur_coin": "successJson cur_coin",
         "reduce_num": "reduce_num",
@@ -230,7 +231,7 @@ def _format_transfer_out_line(transfer: dict[str, Any], *, uid: str | None) -> s
     }.get(str(src), str(src))
     return (
         f"**Last player transfer-out credit:** `{amt}` @ `{ts}` "
-        f"(User `{uid or 'n/a'}`, from `{src_note}`)"
+        f"(User `{show_uid}`, from `{src_note}`)"
     )
 
 
@@ -263,13 +264,46 @@ def _pick_latest_error(merged: list[dict[str, Any]]) -> dict[str, Any] | None:
             li = int(e.get("line_idx", -1))
             if li > best_li:
                 best_li = li
-                best = {**e, "user_id": row.get("user_id")}
+                best = {**e, "user_id": cc.error_owner_user_id(e, row)}
     return best
+
+
+def _transfer_out_for_report(
+    last_player_row: dict[str, Any] | None,
+    last_error: dict[str, Any] | None,
+    *,
+    latest_err_uid: str | None,
+) -> dict[str, Any]:
+    """Transfer-out credit for display / Third Http — prefer aft-fail error line when present."""
+    if last_error and _is_aft_interrogation_fail_error(last_error):
+        fl = last_error.get("full_line") or ""
+        parsed = cc._parse_aft_interrogation_fail_credit(fl)
+        amt: float | None = None
+        ts = (last_error.get("time") or "").strip() or None
+        if parsed:
+            amt, ts2 = parsed
+            if not ts:
+                ts = ts2
+        uid = str(last_error.get("user_id") or latest_err_uid or "").strip() or None
+        return {
+            "amount": amt,
+            "time": ts,
+            "source": "aft_interrogation_faild_amount",
+            "user_id": uid,
+        }
+    return extract_transfer_out(last_player_row)
+
+
+def _is_aft_interrogation_fail_error(err: dict[str, Any]) -> bool:
+    fl = (err.get("full_line") or err.get("snippet") or "").lower()
+    return "aft interrogation faild" in fl or "aft interrogation failed" in fl
 
 
 _LOG_AI_SYSTEM = (
     "You analyze the tail of a casino EGM logic log file.\n"
-    "User blocks start with extra1/extra2/extra3 ... userid: <digits> or enter_game userid: <digits>.\n"
+    "User blocks start with extra1/extra2/extra3 userid, enter_game userid, or leave_game userid.\n"
+    "``aft interrogation faild`` (error 11) is a LEAVE/transfer-out failure — attribute it to the "
+    "player in the nearest preceding httpaft:leave_game line, NOT a later enter_game player.\n"
     "Error lines contain JSON with 'error': N where N is an integer > 0.\n"
     "Reply with ONE JSON object only, no markdown, keys:\n"
     '  "last_player_user_id": string or null — userid of the player block that ends last in this tail\n'
@@ -371,7 +405,8 @@ def _deterministic_log_summary(
     transfer_out: dict[str, Any] | None,
 ) -> str:
     """Rule-based summary when LLM is off or unavailable."""
-    uid = latest_any_uid or latest_err_uid or "n/a"
+    err_uid = str((last_error or {}).get("user_id") or latest_err_uid or "").strip() or None
+    uid = err_uid or latest_any_uid or "n/a"
     xfer = transfer_out or {}
     amt = xfer.get("amount")
     ts = xfer.get("time") or "n/a"
@@ -443,8 +478,18 @@ def format_ai_summary_md(
         ("Error line", "last_error_line"),
     ):
         v = ai_summary.get(key)
+        if key == "last_error_user_id" and latest_err_uid:
+            v = latest_err_uid
+        elif key == "last_player_user_id" and latest_any_uid:
+            v = latest_any_uid
         if v is not None and str(v).strip():
             parts.append(f"- **{label}:** `{v}`")
+    llm_err = str((ai_summary or {}).get("last_error_user_id") or "").strip()
+    if llm_err and latest_err_uid and llm_err != str(latest_err_uid).strip():
+        parts.append(
+            f"- ⚠️ LLM misread error player (`{llm_err}`) — using parser **`{latest_err_uid}`** "
+            f"(AFT leave errors follow ``leave_game``, not a later ``enter_game``)."
+        )
     if not parts:
         parts.append(f"**Analysis:**\n{fallback}")
     elif fallback and not summary:
@@ -464,7 +509,6 @@ def build_checkmachinelog_lark_card(
     last_success: dict[str, Any] | None,
     ai_summary: dict[str, Any] | None,
     header_lines: list[str],
-    *,
     stuck_credit: bool = False,
 ) -> dict[str, Any]:
     dstr = target_date.isoformat()
@@ -801,7 +845,9 @@ def run_check_machine_log(
     la_uid, _ = cc.pick_latest_any_uid(merged)
     last_error = _pick_latest_error(merged)
     last_player_row = _row_for_uid(merged, la_uid)
-    transfer_out = extract_transfer_out(last_player_row)
+    transfer_out = _transfer_out_for_report(
+        last_player_row, last_error, latest_err_uid=le_uid
+    )
     last_success = find_last_success_line(raw_lines, la_uid) if not last_error else None
 
     tail_lines = tail_log_lines(log_body)
