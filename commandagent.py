@@ -1100,6 +1100,24 @@ def detect_identify_issue_command(text: str) -> Optional[str]:
     return None
 
 
+def detect_checkperson_command(text: str) -> Optional[str]:
+    """Map natural language → ``/checkperson`` (AI decides who should check an issue)."""
+    raw = (text or "").strip()
+    if not raw or _looks_like_slash_command(raw):
+        return None
+    # Don't collide with the maintenance / credit / jenkins structured flows.
+    if detect_prod_batch_command(raw) or detect_stuck_credit_command(raw) or detect_checkmachinelog_command(raw) or detect_checkcredit_command(raw):
+        return None
+    try:
+        import checkperson as _cp
+
+        if _cp.looks_like_checkperson_request(raw):
+            return "/checkperson"
+    except Exception:
+        pass
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Argument extraction
 # ---------------------------------------------------------------------------
@@ -1746,6 +1764,9 @@ def _run_deterministic_detectors(text: str) -> dict[str, Any] | None:
     rs = detect_restart_services_command(raw)
     if rs:
         return dict(tag="cmd_restart_services", confidence=1.0, margin=1.0, command=rs, deterministic=True, source="deterministic", route="command")
+    cp = detect_checkperson_command(raw)
+    if cp:
+        return dict(tag="cmd_checkperson", confidence=1.0, margin=1.0, command=cp, deterministic=True, source="deterministic", route="command")
     ii = detect_identify_issue_command(raw)
     if ii:
         return dict(tag="cmd_identifyissue", confidence=1.0, margin=1.0, command=ii, deterministic=True, source="deterministic", route="command")

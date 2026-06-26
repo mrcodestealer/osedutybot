@@ -102,6 +102,11 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
                     "AI: classify a player issue (P0/P1) + bilingual P0 overview",
                     "AI 识别玩家问题（P0/P1）+ 中英文 P0 概览",
                 ),
+                (
+                    "/checkperson <issue>",
+                    "AI: decide Issue/Priority/Department/Check Person from past tickets",
+                    "AI 根据历史工单判断 问题/优先级/部门/跟进人",
+                ),
             ],
         ),
         (

@@ -31,7 +31,7 @@ Env (optional):
 
   NP backend (screenshot_np_recharge_detail — Duty Bot /npthirdhttp):
   NP_BACKEND_BASE (default https://backend-np.osmplay.com), NP_BACKEND_USER, NP_BACKEND_PASSWORD
-  NP_BACKEND_WINDOW_MINUTES (default 10), NP_BACKEND_MAX_PAGES (default 20, table pagination),
+  NP_BACKEND_WINDOW_MINUTES (default 60 — ±1h around log credit/error time), NP_BACKEND_MAX_PAGES (default 20, table pagination),
   NP_BACKEND_AMOUNT_EPS (default 0.05) — max |Request amount − log credit| when matching Detail rows.
   Headless tuning: ``NP_BACKEND_HEADLESS_POST_SEARCH_MS`` (default 5500 after Search),
   ``NP_BACKEND_POST_SEARCH_MS``, ``NP_BACKEND_DIALOG_SETTLE_MS`` (ms wait before reading Detail JSON).
@@ -819,7 +819,7 @@ def _userid_from_leave_game_line(line: str) -> str | None:
 
 
 def _nearest_leave_game_uid_before(
-    raw: list[str], line_idx: int, *, max_lookback: int = 120
+    raw: list[str], line_idx: int, *, max_lookback: int = 500
 ) -> str | None:
     """Nearest ``httpaft:leave_game`` userid above an error line."""
     start = max(0, line_idx - max_lookback)
@@ -828,6 +828,81 @@ def _nearest_leave_game_uid_before(
         if uid:
             return uid
     return None
+
+
+def _nearest_leave_game_time_before(
+    raw: list[str], line_idx: int, *, max_lookback: int = 500
+) -> str | None:
+    """Nearest ``httpaft:leave_game`` line time above *line_idx* (for Third Http recharge match)."""
+    start = max(0, line_idx - max_lookback)
+    for j in range(line_idx - 1, start - 1, -1):
+        if "leave_game" not in raw[j].lower():
+            continue
+        if not _userid_from_leave_game_line(raw[j]):
+            continue
+        ts = _line_time_prefix(raw[j])
+        if ts:
+            return ts
+    return None
+
+
+def third_http_time_candidates(
+    *,
+    raw_lines: list[str] | None = None,
+    uid: str | None = None,
+    last_error: dict[str, Any] | None = None,
+    transfer_out: dict[str, Any] | None = None,
+    player_row: dict[str, Any] | None = None,
+    primary_time: str | None = None,
+) -> list[str]:
+    """
+    Ordered unique log times for Third Http recharge matching.
+
+    For delayed ``aft interrogation faild`` retries, prefer ``leave_game`` and the **first**
+    aft-fail timestamp — the recharge row is usually near those, not the last error line.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(t: str | None) -> None:
+        t = (t or "").strip()
+        if not t or t in seen:
+            return
+        seen.add(t)
+        out.append(t)
+
+    err_li = int((last_error or {}).get("line_idx", -1)) if last_error else -1
+    if raw_lines and err_li >= 0 and last_error and _is_aft_interrogation_fail_line(last_error):
+        _add(_nearest_leave_game_time_before(raw_lines, err_li))
+
+    want_uid = (uid or "").strip()
+    if player_row and want_uid:
+        aft_times: list[str] = []
+        for e in player_row.get("errors") or []:
+            if not _is_aft_interrogation_fail_line(e):
+                continue
+            if str(error_owner_user_id(e, player_row)).strip() != want_uid:
+                continue
+            t = (e.get("time") or "").strip()
+            if t:
+                aft_times.append(t)
+        aft_times.sort()
+        if aft_times:
+            _add(aft_times[0])
+
+    xfer = transfer_out or {}
+    if str(xfer.get("source") or "") != "aft_interrogation_faild_amount":
+        _add(xfer.get("time"))
+
+    if player_row:
+        lc = player_row.get("latest_credit") or {}
+        if str(lc.get("source") or "") != "aft_interrogation_faild_amount":
+            _add(lc.get("time_short"))
+
+    _add(primary_time)
+    if last_error:
+        _add(last_error.get("time"))
+    return out
 
 
 def _is_aft_interrogation_fail_line(err: dict[str, Any]) -> bool:
@@ -2699,7 +2774,8 @@ def run_finderror(
 
 # ----- NP backend — Log Third Http Req (Duty Bot /npthirdhttp) -----
 NP_BACKEND_DEFAULT_BASE = os.environ.get("NP_BACKEND_BASE", "https://backend-np.osmplay.com").rstrip("/")
-NP_BACKEND_WINDOW_MINUTES = int(os.environ.get("NP_BACKEND_WINDOW_MINUTES", "10"))
+# ±minutes around parsed log time (time_short + date) for Log Third Http Search; override via env.
+NP_BACKEND_WINDOW_MINUTES = int(os.environ.get("NP_BACKEND_WINDOW_MINUTES", "60"))
 try:
     NP_BACKEND_MAX_PAGES = max(1, int(os.environ.get("NP_BACKEND_MAX_PAGES", "20").strip() or "20"))
 except ValueError:
@@ -2948,11 +3024,54 @@ def _np_format_element_datetime(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _np_window_strings(date_iso: str, time_short: str) -> tuple[str, str]:
-    mid = _np_combine_date_and_credit_time(date_iso, time_short)
-    lo = mid - timedelta(minutes=NP_BACKEND_WINDOW_MINUTES)
-    hi = mid + timedelta(minutes=NP_BACKEND_WINDOW_MINUTES)
+def _np_dedupe_time_strings(times: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for t in times:
+        t = (t or "").strip()
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+    return out
+
+
+def _np_time_candidates_to_datetimes(date_iso: str, candidates: list[str]) -> list[datetime]:
+    dts: list[datetime] = []
+    for t in candidates:
+        try:
+            dts.append(_np_combine_date_and_credit_time(date_iso, t))
+        except (TypeError, ValueError):
+            continue
+    return dts
+
+
+def _np_window_strings(
+    date_iso: str,
+    time_short: str,
+    *,
+    extra_times: list[str] | None = None,
+) -> tuple[str, str]:
+    candidates = _np_dedupe_time_strings([time_short, *(extra_times or [])])
+    if not candidates:
+        raise ValueError("time_short required for NP Log Third Http date window")
+    dts = _np_time_candidates_to_datetimes(date_iso, candidates)
+    if not dts:
+        raise ValueError("could not parse time_short for NP Log Third Http date window")
+    lo = min(dts) - timedelta(minutes=NP_BACKEND_WINDOW_MINUTES)
+    hi = max(dts) + timedelta(minutes=NP_BACKEND_WINDOW_MINUTES)
     return _np_format_element_datetime(lo), _np_format_element_datetime(hi)
+
+
+def _np_same_minute_boost_useful(date_iso: str, candidates: list[str]) -> bool:
+    """Same-calendar-minute row boost only when all candidate times are within ~2 minutes."""
+    if len(candidates) <= 1:
+        return True
+    dts = _np_time_candidates_to_datetimes(date_iso, candidates)
+    if len(dts) <= 1:
+        return True
+    spread = (max(dts) - min(dts)).total_seconds()
+    return spread < 120.0
 
 
 def _np_parse_cell_datetime(text: str, date_iso: str) -> datetime | None:
@@ -2978,6 +3097,69 @@ def _np_parse_cell_datetime(text: str, date_iso: str) -> datetime | None:
     if m:
         return _np_combine_date_and_credit_time(date_iso, m.group(1))
     return None
+
+
+def _np_wait_third_http_search_results(page, *, timeout_ms: int) -> int:
+    """
+    After Log Third Http **Search**: wait for loading to finish and return data-row count.
+
+    Element UI often leaves ``.el-table__body tbody`` **hidden** when there are zero rows;
+    waiting for ``tbody`` ``visible`` then spins until timeout. Treat empty-block as 0 rows.
+    """
+    import time as _time
+
+    deadline = _time.monotonic() + max(5.0, timeout_ms / 1000.0)
+    poll_ms = 400
+    last_n = 0
+    while _time.monotonic() < deadline:
+        try:
+            page.wait_for_function(
+                """() => {
+                    for (const m of document.querySelectorAll('.el-loading-mask')) {
+                        if (m && m.offsetParent !== null) return false;
+                    }
+                    return true;
+                }""",
+                timeout=min(10_000, timeout_ms),
+            )
+        except Exception:
+            pass
+
+        for sel in (
+            ".el-table__empty-block",
+            ".el-table__empty-text",
+            ".el-table__body-wrapper .el-table__empty-text",
+        ):
+            try:
+                loc = page.locator(sel)
+                if loc.count() > 0 and loc.first.is_visible():
+                    return 0
+            except Exception:
+                pass
+
+        rows = page.locator(".el-table__body tr.el-table__row")
+        last_n = rows.count()
+        if last_n > 0:
+            try:
+                if rows.first.is_visible():
+                    return last_n
+            except Exception:
+                return last_n
+            try:
+                rows.first.wait_for(state="attached", timeout=1_500)
+                return last_n
+            except Exception:
+                pass
+
+        page.wait_for_timeout(poll_ms)
+
+    if last_n > 0:
+        return last_n
+    raise RuntimeError(
+        "Log Third Http results did not load after Search "
+        f"(waited {timeout_ms}ms — table empty or tbody stayed hidden). "
+        "Check UserId, date window, or NP login."
+    )
 
 
 def _np_log_third_http_header_columns(page) -> dict[str, int]:
@@ -3035,11 +3217,23 @@ def _np_row_time_distance_to_target(
     target_dt: datetime,
 ) -> float | None:
     """Smallest |dt - target| among request and response; None if no times."""
+    return _np_row_time_distance_to_targets(req_dt, resp_dt, [target_dt])
+
+
+def _np_row_time_distance_to_targets(
+    req_dt: datetime | None,
+    resp_dt: datetime | None,
+    target_dts: list[datetime],
+) -> float | None:
+    """Smallest |dt - any target| among request and response; None if no times."""
+    if not target_dts:
+        return None
     deltas: list[float] = []
-    if req_dt is not None:
-        deltas.append(abs((req_dt - target_dt).total_seconds()))
-    if resp_dt is not None:
-        deltas.append(abs((resp_dt - target_dt).total_seconds()))
+    for target_dt in target_dts:
+        if req_dt is not None:
+            deltas.append(abs((req_dt - target_dt).total_seconds()))
+        if resp_dt is not None:
+            deltas.append(abs((resp_dt - target_dt).total_seconds()))
     if not deltas:
         return None
     return min(deltas)
@@ -3078,14 +3272,20 @@ def _np_list_recharge_indices_time_ordered(
     n: int,
     date_iso: str,
     time_short: str,
+    *,
+    time_candidates: list[str] | None = None,
 ) -> list[int]:
     """
     All Event Type == recharge rows, ordered by smallest distance from Request/Response time
-    to log credit time (best match first; rows without parseable times last).
+    to any log credit / leave / aft-fail candidate (best match first; rows without parseable
+    times last).
     """
     cols = _np_log_third_http_header_columns(page)
     ev_i = cols.get("event", 2)
-    target_dt = _np_combine_date_and_credit_time(date_iso, time_short)
+    candidates = _np_dedupe_time_strings([time_short, *(time_candidates or [])])
+    target_dts = _np_time_candidates_to_datetimes(date_iso, candidates)
+    if not target_dts:
+        target_dts = [_np_combine_date_and_credit_time(date_iso, time_short)]
 
     scored: list[tuple[float, int]] = []
     no_time_fallback: list[int] = []
@@ -3095,7 +3295,7 @@ def _np_list_recharge_indices_time_ordered(
             continue
         row = rows.nth(i)
         req_dt, resp_dt = _np_row_req_resp_times(row, date_iso, cols)
-        dist = _np_row_time_distance_to_target(req_dt, resp_dt, target_dt)
+        dist = _np_row_time_distance_to_targets(req_dt, resp_dt, target_dts)
         if dist is None:
             no_time_fallback.append(i)
         else:
@@ -3327,9 +3527,14 @@ def _np_indices_table_same_minute(
     ordered_indices: list[int],
     date_iso: str,
     time_short: str,
+    *,
+    time_candidates: list[str] | None = None,
 ) -> list[int]:
-    """Row indices whose table Request/Response time is in the same HH:MM as log credit (closest first)."""
-    target_dt = _np_combine_date_and_credit_time(date_iso, time_short)
+    """Row indices whose table Request/Response time shares HH:MM with any candidate (closest first)."""
+    candidates = _np_dedupe_time_strings([time_short, *(time_candidates or [])])
+    target_dts = _np_time_candidates_to_datetimes(date_iso, candidates)
+    if not target_dts:
+        target_dts = [_np_combine_date_and_credit_time(date_iso, time_short)]
     cols = _np_log_third_http_header_columns(page)
     scored: list[tuple[float, int]] = []
     for i in ordered_indices:
@@ -3337,10 +3542,11 @@ def _np_indices_table_same_minute(
         req_dt, resp_dt = _np_row_req_resp_times(row, date_iso, cols)
         best_dist = float("inf")
         hit = False
-        for dt in (req_dt, resp_dt):
-            if dt is not None and _np_same_calendar_minute(dt, target_dt):
-                hit = True
-                best_dist = min(best_dist, abs((dt - target_dt).total_seconds()))
+        for target_dt in target_dts:
+            for dt in (req_dt, resp_dt):
+                if dt is not None and _np_same_calendar_minute(dt, target_dt):
+                    hit = True
+                    best_dist = min(best_dist, abs((dt - target_dt).total_seconds()))
         if hit:
             scored.append((best_dist, i))
     scored.sort(key=lambda x: (x[0], x[1]))
@@ -3636,6 +3842,19 @@ def _np_truthy_env(*names: str) -> bool:
         if v in ("1", "true", "yes", "on"):
             return True
     return False
+
+
+def _np_machine_only_fallback_enabled(backend_tag: str) -> bool:
+    """
+  When log credit (``reduce_num`` / aft fail ``amount``) ≠ Third Http Detail ``amount``,
+  retry matching ``machineId`` only (default on for NP/NCH/DHS/CP/TBP).
+    """
+    if _np_truthy_env("NP_THIRD_HTTP_NO_MACHINE_ONLY_FALLBACK", "THIRD_HTTP_NO_MACHINE_ONLY_FALLBACK"):
+        return False
+    tag = (backend_tag or "NP").strip().upper()
+    if tag == "TBP":
+        return not _np_truthy_env("TBP_THIRD_HTTP_NO_MACHINE_ONLY_FALLBACK")
+    return True
 
 
 def _np_backend_playwright_headless() -> bool:
@@ -4408,6 +4627,7 @@ def screenshot_np_recharge_detail(
     machine_display: str | None = None,
     headed: bool | None = None,
     pause_for_input: bool = False,
+    time_short_candidates: list[str] | None = None,
 ) -> str:
     """
     Login to NP backend, open Log Third Http Req, set date range ±NP_BACKEND_WINDOW_MINUTES,
@@ -4453,7 +4673,15 @@ def screenshot_np_recharge_detail(
             "(not required for Winford (WF* / NWR8173 alias) — defaults omduty1 unless WF_BACKEND_* is set)."
         )
 
-    start_s, end_s = _np_window_strings(date_iso, time_short)
+    start_s, end_s = _np_window_strings(
+        date_iso,
+        time_short,
+        extra_times=time_short_candidates,
+    )
+    np_time_candidates = _np_dedupe_time_strings(
+        [time_short, *(time_short_candidates or [])]
+    )
+    use_same_minute_boost = _np_same_minute_boost_useful(date_iso, np_time_candidates)
     if _np_use_backend_osmplay_com(machine_display):
         login_url = f"{base}/login?redirect=%2Fegm%2FegmStatusList"
     else:
@@ -4578,15 +4806,34 @@ def screenshot_np_recharge_detail(
                 def _scan_detail_pages(exp_try: float | None) -> bool:
                     _np_pagination_go_first_page(page, timeout_ms=timeout_ms)
                     for _pi in range(NP_BACKEND_MAX_PAGES):
-                        page.locator(".el-table__body tbody").wait_for(state="visible", timeout=timeout_ms)
+                        n = _np_wait_third_http_search_results(page, timeout_ms=timeout_ms)
+                        if n <= 0:
+                            if not _np_pagination_can_go_next(page):
+                                break
+                            _np_click_pagination_next(page, timeout_ms=timeout_ms)
+                            continue
                         rows = page.locator(".el-table__body tr.el-table__row")
-                        n = rows.count()
-                        ordered = _np_list_recharge_indices_time_ordered(page, rows, n, date_iso, time_short)
+                        ordered = _np_list_recharge_indices_time_ordered(
+                            page,
+                            rows,
+                            n,
+                            date_iso,
+                            time_short,
+                            time_candidates=np_time_candidates,
+                        )
                         if ordered:
-                            same_min_rows = _np_indices_table_same_minute(
-                                page, rows, ordered, date_iso, time_short
-                            )
-                            to_scan = _np_merge_same_minute_then_rest(same_min_rows, ordered)
+                            if use_same_minute_boost and not need_detail_match:
+                                same_min_rows = _np_indices_table_same_minute(
+                                    page,
+                                    rows,
+                                    ordered,
+                                    date_iso,
+                                    time_short,
+                                    time_candidates=np_time_candidates,
+                                )
+                                to_scan = _np_merge_same_minute_then_rest(same_min_rows, ordered)
+                            else:
+                                to_scan = ordered
                             ok = _np_try_screenshot_matching_detail(
                                 page,
                                 rows,
@@ -4606,15 +4853,14 @@ def screenshot_np_recharge_detail(
                     return False
 
                 matched = _scan_detail_pages(exp_match)
-                ran_tbp_machine_only = False
+                ran_machine_only = False
                 if (
                     not matched
-                    and _log_http_backend_tag == "TBP"
                     and ms
                     and exp_match is not None
-                    and not _np_truthy_env("TBP_THIRD_HTTP_NO_MACHINE_ONLY_FALLBACK")
+                    and _np_machine_only_fallback_enabled(_log_http_backend_tag)
                 ):
-                    ran_tbp_machine_only = True
+                    ran_machine_only = True
                     matched = _scan_detail_pages(None)
 
                 if not matched:
@@ -4630,18 +4876,32 @@ def screenshot_np_recharge_detail(
                         bits.append(
                             "latest credit was 0 or unset — only `machineId` is matched, not `amount`"
                         )
-                    if ran_tbp_machine_only:
-                        bits.append("TBP machine-only fallback (no log amount match) also found nothing")
+                    if ran_machine_only:
+                        bits.append(
+                            "machine-only fallback (log `reduce_num` / aft amount ≠ Detail `amount`) "
+                            "also found nothing"
+                        )
                     crit = "; ".join(bits) if bits else "expected filters"
                     raise RuntimeError(
                         f"No {_log_http_backend_tag} Detail on pages 1–{NP_BACKEND_MAX_PAGES} with {crit}. "
                         "Increase NP_BACKEND_MAX_PAGES or NP_BACKEND_WINDOW_MINUTES."
                     )
             else:
-                page.locator(".el-table__body tbody").wait_for(state="visible", timeout=timeout_ms)
+                n = _np_wait_third_http_search_results(page, timeout_ms=timeout_ms)
+                if n <= 0:
+                    raise RuntimeError(
+                        f"No Log Third Http rows for UserId `{player_id}` between "
+                        f"`{start_s}` and `{end_s}` (empty table after Search)."
+                    )
                 rows = page.locator(".el-table__body tr.el-table__row")
-                n = rows.count()
-                ordered = _np_list_recharge_indices_time_ordered(page, rows, n, date_iso, time_short)
+                ordered = _np_list_recharge_indices_time_ordered(
+                    page,
+                    rows,
+                    n,
+                    date_iso,
+                    time_short,
+                    time_candidates=np_time_candidates,
+                )
                 if not ordered:
                     raise RuntimeError(
                         'No table row with Event Type "recharge" for this UserId/time window.'

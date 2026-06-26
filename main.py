@@ -692,6 +692,7 @@ def run_check_machine_log_job(
                 machine_display=str(pick.get("machine_display") or "").strip() or None,
                 thread_root=thread_root,
                 success_caption=success_caption,
+                time_short_candidates=pick.get("time_short_candidates"),
             )
     except Exception as e:
         label = "stuck credit" if stuck_credit else "checkmachinelog"
@@ -855,6 +856,7 @@ def _np_run_screenshot_worker(
     machine_display: Optional[str] = None,
     thread_root: Optional[str] = None,
     success_caption: Optional[str] = None,
+    time_short_candidates: Optional[list[str]] = None,
 ) -> None:
     """NP / WF / DHS / NCH / CP / OSM / MDR / TBP Log Third Http → `recharge` Detail screenshot. Always **headless** on server."""
     root = (thread_root or _get_checkcredit_thread_root(chat_id) or "").strip() or None
@@ -891,6 +893,7 @@ def _np_run_screenshot_worker(
             expected_credit=expected_credit,
             machine_display=machine_display,
             headed=False,
+            time_short_candidates=time_short_candidates,
         )
         key = upload_image_lark(path)
         if not key:
@@ -905,13 +908,36 @@ def _np_run_screenshot_worker(
         if r.get("code") != 0:
             _np_send(f"❌ Failed to send image: {r}")
     except Exception as e:
-        tip = (
-            "\n💡 Duty Bot runs this screenshot **headless**. Try raising `NP_BACKEND_MAX_PAGES` / "
-            "`NP_BACKEND_WINDOW_MINUTES`, or widen `NP_BACKEND_AMOUNT_EPS` (default `0.05`) in `.env`. "
-            "For **TBP**, try `TBP_THIRD_HTTP_AMOUNT_SCALE` (e.g. `100` for cents) or "
-            "`TBP_THIRD_HTTP_NO_MACHINE_ONLY_FALLBACK=1` to disable the extra machine-only pass. "
-            "For a **visible** Chromium window, run locally: `python3 checkcredit.py --checkuser ... --pause`."
-        )
+        err_s = str(e)
+        if "No Log Third Http rows" in err_s or "empty table after Search" in err_s:
+            tip = (
+                "\n💡 **No Third Http rows** for this UserId/time window — transfer likely **did not complete** "
+                f"(log error player `{uid}` @ `{time_short}`). "
+                "Widen `NP_BACKEND_WINDOW_MINUTES` if the log time is near the window edge."
+                "\n💡 Third Http **无记录** — 转出可能**未成功**（日志 error 玩家与时间见上）。"
+                " 可调大 `NP_BACKEND_WINDOW_MINUTES`。"
+            )
+        elif "did not load after Search" in err_s or "tbody stayed hidden" in err_s:
+            tip = (
+                "\n💡 Search results never became ready (empty/hidden table or slow UI). "
+                "Retry, or run locally: `python3 checkcredit.py --checkuser ... --pause`."
+                "\n💡 搜索结果未就绪（空表/隐藏 tbody 或页面慢），请重试或用 `--checkuser --pause` 本地查看。"
+            )
+        elif "No " in err_s and " Detail on pages" in err_s:
+            tip = (
+                "\n💡 Rows exist but **no matching recharge Detail** — bot already retries **machineId-only** "
+                "when log `amount` ≠ Detail `amount`. Try `NP_BACKEND_MAX_PAGES` / `NP_BACKEND_WINDOW_MINUTES`. "
+                "Disable machine-only pass: `NP_THIRD_HTTP_NO_MACHINE_ONLY_FALLBACK=1`."
+                "\n💡 有 recharge 行但 Detail 不匹配 — 已自动尝试仅匹配机台；可调页数/时间窗。"
+            )
+        else:
+            tip = (
+                "\n💡 Duty Bot runs this screenshot **headless**. Try raising `NP_BACKEND_MAX_PAGES` / "
+                "`NP_BACKEND_WINDOW_MINUTES`, or widen `NP_BACKEND_AMOUNT_EPS` (default `0.05`) in `.env`. "
+                "For **TBP**, try `TBP_THIRD_HTTP_AMOUNT_SCALE` (e.g. `100` for cents) or "
+                "`TBP_THIRD_HTTP_NO_MACHINE_ONLY_FALLBACK=1` to disable the extra machine-only pass. "
+                "For a **visible** Chromium window, run locally: `python3 checkcredit.py --checkuser ... --pause`."
+            )
         print(
             "[npthirdhttp] screenshot context "
             f"uid={uid!r} date={date_iso!r} time={time_short!r} "
@@ -4931,6 +4957,28 @@ def lark_webhook():
         except Exception as _issue_err:
             print(f"⚠️ identifyissue failed: {_issue_err!r}", flush=True)
             send_message(chat_id, "❌ Could not analyze the issue right now. Please try again.")
+        return _lark_im_done()
+    elif re.match(r"(?i)^/(?:checkperson|check_person|whochecks|findcheckperson)\b", clean_text):
+        try:
+            import checkperson as _checkperson
+
+            _cp_src = (clean_text_multiline or _full_body or clean_text or "").strip()
+            _cp_body = _checkperson.strip_command(_cp_src)
+            if not _cp_body:
+                send_message(chat_id, _checkperson.USAGE)
+            else:
+                _cp_card, _cp_text = _checkperson.build_card(_cp_body)
+                if _cp_card:
+                    _cp_resp = send_message(
+                        chat_id, json.dumps(_cp_card, ensure_ascii=False), msg_type="interactive"
+                    )
+                    if _cp_resp.get("code") != 0:
+                        send_message(chat_id, _cp_text)
+                else:
+                    send_message(chat_id, _cp_text)
+        except Exception as _cp_err:
+            print(f"⚠️ checkperson failed: {_cp_err!r}", flush=True)
+            send_message(chat_id, "❌ Could not find the check person right now. Please try again.")
         return _lark_im_done()
     elif clean_text.lower() == '/fpms':
         reply = fpms_duty.get_fpms_today_duty()

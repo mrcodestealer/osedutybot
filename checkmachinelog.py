@@ -111,11 +111,11 @@ def _split_player_blocks(raw_lines: list[str]) -> list[tuple[str, list[tuple[int
     cur_uid: str | None = None
     cur_lines: list[tuple[int, str]] = []
     for i, line in enumerate(raw_lines):
-        um = cc._USERID_START.search(line)
-        if um:
+        new_uid = cc._userid_from_marker_line(line)
+        if new_uid:
             if cur_uid is not None:
                 blocks.append((cur_uid, cur_lines))
-            cur_uid = um.group(1)
+            cur_uid = new_uid
             cur_lines = [(i, line)]
         elif cur_uid is not None:
             cur_lines.append((i, line))
@@ -273,6 +273,8 @@ def _transfer_out_for_report(
     last_error: dict[str, Any] | None,
     *,
     latest_err_uid: str | None,
+    raw_lines: list[str] | None = None,
+    error_player_row: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Transfer-out credit for display / Third Http — prefer aft-fail error line when present."""
     if last_error and _is_aft_interrogation_fail_error(last_error):
@@ -280,11 +282,21 @@ def _transfer_out_for_report(
         parsed = cc._parse_aft_interrogation_fail_credit(fl)
         amt: float | None = None
         ts = (last_error.get("time") or "").strip() or None
+        uid = str(last_error.get("user_id") or latest_err_uid or "").strip() or None
         if parsed:
             amt, ts2 = parsed
             if not ts:
                 ts = ts2
-        uid = str(last_error.get("user_id") or latest_err_uid or "").strip() or None
+        prow = error_player_row or last_player_row
+        cands = cc.third_http_time_candidates(
+            raw_lines=raw_lines,
+            uid=uid,
+            last_error=last_error,
+            player_row=prow,
+            primary_time=ts,
+        )
+        if cands:
+            ts = cands[0]
         return {
             "amount": amt,
             "time": ts,
@@ -424,6 +436,20 @@ def _deterministic_log_summary(
             lines.append(
                 "玩家离场/转出额度时 **AFT 问询失败** — 机台可能未正常清账，需查 AFT/Third Http。"
             )
+            if (
+                latest_any_uid
+                and latest_err_uid
+                and latest_any_uid != latest_err_uid
+            ):
+                lines.append(
+                    f"Note: error player `{latest_err_uid}` is **not** the last player in the log "
+                    f"(`{latest_any_uid}`) — delayed OUT CHECK / AFT response after `leave_game`, "
+                    f"not the newer `enter_game` session."
+                )
+                lines.append(
+                    f"说明：error 玩家 **`{latest_err_uid}`** 不是日志末位玩家 **`{latest_any_uid}`** — "
+                    f"属前一位玩家离场后 **延迟 OUT CHECK**，不是新进场玩家的问题。"
+                )
         else:
             lines.append(
                 f"Player `{uid}` — last error **{code}** @ `{et}`; transfer-out credit **{amt}** @ `{ts}`."
@@ -436,9 +462,16 @@ def _deterministic_log_summary(
     if latest_any_uid and latest_err_uid and latest_any_uid == latest_err_uid:
         lines.append("Last player in log = last player with error.")
     elif latest_any_uid and latest_err_uid:
-        lines.append(
-            f"Last player in log `{latest_any_uid}` ≠ last error player `{latest_err_uid}`."
+        fl_tail = (
+            (last_error.get("full_line") or last_error.get("snippet") or "").lower()
+            if last_error
+            else ""
         )
+        aft_mismatch = "aft interrogation faild" in fl_tail or "aft interrogation failed" in fl_tail
+        if not aft_mismatch:
+            lines.append(
+                f"Last player in log `{latest_any_uid}` ≠ last error player `{latest_err_uid}`."
+            )
     return "\n".join(lines)
 
 
@@ -774,6 +807,8 @@ def build_third_http_followup(
     last_error: dict[str, Any] | None,
     transfer_out: dict[str, Any] | None,
     allow_without_error: bool = False,
+    raw_lines: list[str] | None = None,
+    error_player_row: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Pick player/time/credit for Third Http screenshot (checkcredit /npthirdhttp path)."""
     if not last_error and not latest_err_uid and not allow_without_error:
@@ -787,6 +822,16 @@ def build_third_http_followup(
     ts = (xfer.get("time") or "").strip()
     if not ts and last_error:
         ts = (last_error.get("time") or "").strip()
+    time_candidates = cc.third_http_time_candidates(
+        raw_lines=raw_lines,
+        uid=uid,
+        last_error=last_error,
+        transfer_out=xfer,
+        player_row=error_player_row,
+        primary_time=ts or None,
+    )
+    if time_candidates:
+        ts = time_candidates[0]
     if not ts:
         return None
     credit_val: float | None = None
@@ -797,9 +842,11 @@ def build_third_http_followup(
         except (TypeError, ValueError):
             credit_val = None
     md = (machine_display or "").strip()
+    extra_cands = [t for t in time_candidates if t != ts]
     return {
         "user_id": uid,
         "time_short": ts,
+        "time_short_candidates": extra_cands,
         "credit_value": credit_val,
         "machine_display": md,
         "target_date_iso": target_date.isoformat(),
@@ -845,8 +892,13 @@ def run_check_machine_log(
     la_uid, _ = cc.pick_latest_any_uid(merged)
     last_error = _pick_latest_error(merged)
     last_player_row = _row_for_uid(merged, la_uid)
+    err_player_row = _row_for_uid(merged, le_uid)
     transfer_out = _transfer_out_for_report(
-        last_player_row, last_error, latest_err_uid=le_uid
+        last_player_row,
+        last_error,
+        latest_err_uid=le_uid,
+        raw_lines=raw_lines,
+        error_player_row=err_player_row,
     )
     last_success = find_last_success_line(raw_lines, la_uid) if not last_error else None
 
@@ -895,6 +947,8 @@ def run_check_machine_log(
         last_error=last_error,
         transfer_out=transfer_out,
         allow_without_error=bool(stuck_credit),
+        raw_lines=raw_lines,
+        error_player_row=err_player_row,
     )
 
     return {

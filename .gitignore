@@ -55,6 +55,7 @@ offset_delete_actors.json
 offset_deletion_notified.json
 leave_shift_sheet_applied.json
 restart_pending.json
+checkperson_data.json
 
 # ---- Screenshots / scraped HTML ----
 *.png
