@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import re
+import threading
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta
 import functools
 import json
 import os
 from datetime import date
+from typing import Any, Optional
 import requests
 from dotenv import load_dotenv
 load_dotenv()
@@ -112,15 +117,23 @@ def normalize_duration_token(duration_raw: str) -> str:
 
 def parse_natural_timer_request(text: str) -> tuple[str, str] | None:
     """
-    Parse natural-language timer requests, e.g. ``add timer 5mins`` or ``set timer 1h30m lunch``.
+    Parse timer requests via LLM (if configured) with regex fallback.
 
-    Returns ``(normalized_duration, message)`` or ``None`` if not a timer request.
+    Returns ``(normalized_duration, message)`` for relative timers, or ``None``.
     """
+    parsed = parse_timer_request(text)
+    if not parsed or parsed.get("kind") != "relative":
+        return None
+    return parsed["duration_str"], parsed["message"]
+
+
+def _parse_timer_request_rules(text: str) -> tuple[str, str] | None:
+    """Regex fallback for timer phrasing like ``add timer 5mins``."""
     t = (text or "").strip()
     if not t:
         return None
     m = re.search(
-        r"(?:^|\b)(?:(?:add|set)(?:\s+a)?\s+timer(?:\s+for)?|timer)\s+(.+)$",
+        r"(?:^|\b)(?:(?:help\s+me\s+)?(?:please\s+)?(?:add|set)(?:\s+a)?\s+timer(?:\s+for)?|timer)\s+(.+)$",
         t,
         re.I,
     )
@@ -144,7 +157,263 @@ def parse_natural_timer_request(text: str) -> tuple[str, str] | None:
     except ValueError:
         return None
     msg = (dm.group("msg") or "").strip() or "Timer"
+    msg = re.sub(r"^(?:reason|message)\s+is\s+", "", msg, flags=re.I).strip() or "Timer"
     return dur_norm, msg
+
+
+_TIMER_GATE_RE = re.compile(
+    r"\b(?:timer|remind(?:er)?|alarm|countdown|ping\s+me|notify\s+me|提醒|计时|定时|闹钟)\b",
+    re.I,
+)
+_TIMER_GATE_SOFT_RE = re.compile(
+    r"(?:set|add|create|start|help\s+me).{0,30}(?:timer|reminder|alarm|提醒)",
+    re.I,
+)
+
+
+def _timer_llm_key() -> str:
+    return (os.getenv("BOT_CHAT_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
+
+
+def _timer_llm_enabled() -> bool:
+    if (os.getenv("BOT_TIMER_LLM") or "").strip().lower() in ("0", "false", "no", "off"):
+        return False
+    return bool(_timer_llm_key())
+
+
+_TIMER_LLM_TIMEOUT = float(
+    (os.getenv("BOT_TIMER_LLM_TIMEOUT") or os.getenv("BOT_CHAT_LLM_TIMEOUT") or "300").strip()
+)
+_timer_llm_failed_logged = False
+
+_TIMER_LLM_SYSTEM = (
+    "You extract a one-off timer/reminder request from a chat message for a duty bot. "
+    "Reply with ONLY a compact JSON object, no prose, no code fences.\n"
+    "Schema:\n"
+    "{\n"
+    '  "is_timer_request": bool,\n'
+    '  "kind": "relative" | "absolute" | null,\n'
+    '  "duration_seconds": int | null,\n'
+    '  "absolute_time": string | null,\n'
+    '  "reminder_message": string | null\n'
+    "}\n"
+    "Rules:\n"
+    "- is_timer_request=true only when the user wants a one-off timer, reminder, alarm, or ping later.\n"
+    "- kind=relative when delay is from now (e.g. 5 minutes, 1 hour); set duration_seconds (positive int).\n"
+    "- kind=absolute when a clock time is given (e.g. 3pm, 20:39); set absolute_time as ISO-8601 local "
+    'datetime like "2026-06-25T15:30".\n'
+    "- reminder_message: short text to remind about. Strip filler like 'reason is', 'message is', 'because'.\n"
+    '  Example: "reason is testing only" -> "testing only". Default to "Timer" if none given.\n'
+    "- If the message is NOT asking to set a timer/reminder, set is_timer_request=false.\n"
+    "- Do NOT invent durations or times."
+)
+
+_TIMER_PARSE_CACHE: dict[str, tuple[float, Optional[dict[str, Any]]]] = {}
+_TIMER_PARSE_CACHE_LOCK = threading.Lock()
+_TIMER_PARSE_CACHE_TTL = 180.0
+
+
+def _timer_llm_parse_json(content: str) -> Optional[dict[str, Any]]:
+    s = (content or "").strip()
+    if not s:
+        return None
+    s = re.sub(r"^```(?:json)?|```$", "", s.strip(), flags=re.I | re.M).strip()
+    a, b = s.find("{"), s.rfind("}")
+    if a == -1 or b == -1 or b < a:
+        return None
+    try:
+        obj = json.loads(s[a : b + 1])
+    except ValueError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _timer_llm_extract(text: str, *, now: datetime) -> Optional[dict[str, Any]]:
+    """Call the configured LLM (Ollama/OpenAI) to extract timer JSON."""
+    global _timer_llm_failed_logged
+    if not _timer_llm_enabled():
+        return None
+    try:
+        import chatagent as ca
+    except Exception:
+        return None
+    if not ca.llm_available():
+        return None
+    api_key = ca._llm_api_key()
+    if not api_key:
+        return None
+
+    model = (os.getenv("BOT_TIMER_LLM_MODEL") or ca._llm_model_for_request(images=False)).strip()
+    base = ca._llm_base_url()
+    user = (
+        f"Current local datetime is {now.strftime('%Y-%m-%dT%H:%M')} ({now.strftime('%A')}). "
+        f"Resolve relative delays and absolute times against it.\n\nMessage:\n{text.strip()}"
+    )
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": _TIMER_LLM_SYSTEM},
+            {"role": "user", "content": user},
+        ],
+        "max_tokens": 200,
+        "temperature": 0,
+    }
+    ca.enrich_ollama_chat_payload(payload, think=False)
+    url = f"{base}/chat/completions"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_TIMER_LLM_TIMEOUT) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        message = ((body.get("choices") or [{}])[0].get("message") or {})
+        content = ca._text_from_llm_message(message)
+        return _timer_llm_parse_json(content)
+    except urllib.error.HTTPError as exc:
+        if not _timer_llm_failed_logged:
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")[:500]
+            except Exception:
+                detail = exc.reason
+            print(
+                f"[timer] LLM HTTP {exc.code} url={url!r} model={model!r}: {detail}",
+                flush=True,
+            )
+            _timer_llm_failed_logged = True
+        return None
+    except Exception as exc:  # noqa: BLE001
+        if not _timer_llm_failed_logged:
+            print(
+                f"[timer] LLM request failed url={url!r} model={model!r}: {exc!r}",
+                flush=True,
+            )
+            _timer_llm_failed_logged = True
+        return None
+
+
+def _seconds_to_duration_str(total: int) -> str:
+    hours, rem = divmod(int(total), 3600)
+    minutes, seconds = divmod(rem, 60)
+    parts: list[str] = []
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if seconds or not parts:
+        parts.append(f"{seconds}s")
+    return "".join(parts)
+
+
+def _parse_iso_local_dt(s: str) -> Optional[datetime]:
+    s = (s or "").strip().replace("Z", "")
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _normalize_llm_timer(raw: dict[str, Any], *, now: datetime) -> Optional[dict[str, Any]]:
+    if not raw.get("is_timer_request"):
+        return None
+    msg = str(raw.get("reminder_message") or "").strip() or "Timer"
+    kind = str(raw.get("kind") or "relative").strip().lower()
+    if kind == "absolute":
+        iso = str(raw.get("absolute_time") or "").strip()
+        run_time = _parse_iso_local_dt(iso)
+        if not run_time or run_time <= now:
+            return None
+        return {
+            "kind": "absolute",
+            "time_str": run_time.strftime("%H:%M"),
+            "run_time": run_time,
+            "message": msg,
+            "source": "llm",
+        }
+    try:
+        secs = int(raw.get("duration_seconds") or 0)
+    except (TypeError, ValueError):
+        return None
+    if secs <= 0:
+        return None
+    dur_str = _seconds_to_duration_str(secs)
+    try:
+        parse_duration(dur_str)
+    except ValueError:
+        return None
+    return {
+        "kind": "relative",
+        "duration_str": dur_str,
+        "duration_seconds": secs,
+        "message": msg,
+        "source": "llm",
+    }
+
+
+def looks_like_timer_request(text: str) -> bool:
+    """Cheap gate before LLM / regex timer parsing."""
+    t = (text or "").strip()
+    if not t or t.lstrip().startswith("/"):
+        return False
+    if _TIMER_GATE_RE.search(t) or _TIMER_GATE_SOFT_RE.search(t):
+        return True
+    if _timer_llm_enabled() and re.search(
+        r"\b(?:help\s+me|please|can\s+you)\b.{0,50}\b(?:minute|minutes|min|hour|hours|second|seconds|sec)\b",
+        t,
+        re.I,
+    ):
+        return True
+    return _parse_timer_request_rules(t) is not None
+
+
+def parse_timer_request(text: str, *, now: datetime | None = None) -> Optional[dict[str, Any]]:
+    """
+    Parse a timer/reminder request from varied phrasing.
+
+    Order: keyword gate → LLM (if enabled) → regex fallback.
+    """
+    body = (text or "").strip()
+    if not looks_like_timer_request(body):
+        return None
+
+    use_cache = now is None
+    real_now = now or datetime.now()
+    if use_cache:
+        with _TIMER_PARSE_CACHE_LOCK:
+            hit = _TIMER_PARSE_CACHE.get(body)
+            if hit and (time.time() - hit[0]) < _TIMER_PARSE_CACHE_TTL:
+                return hit[1]
+
+    result: Optional[dict[str, Any]] = None
+    if _timer_llm_enabled():
+        raw = _timer_llm_extract(body, now=real_now)
+        if isinstance(raw, dict):
+            result = _normalize_llm_timer(raw, now=real_now)
+            if result:
+                print(f"[timer] LLM parsed {body!r} -> {result!r}", flush=True)
+
+    if result is None:
+        rules = _parse_timer_request_rules(body)
+        if rules:
+            dur_str, msg = rules
+            result = {
+                "kind": "relative",
+                "duration_str": dur_str,
+                "message": msg,
+                "source": "rules",
+            }
+            print(f"[timer] rules parsed {body!r} -> {result!r}", flush=True)
+
+    if use_cache:
+        with _TIMER_PARSE_CACHE_LOCK:
+            _TIMER_PARSE_CACHE[body] = (time.time(), result)
+            if len(_TIMER_PARSE_CACHE) > 256:
+                _TIMER_PARSE_CACHE.clear()
+    return result
 
 
 def _format_timer_delay(delay_seconds: int) -> str:
@@ -168,16 +437,38 @@ def schedule_natural_timer(
     send_func,
 ) -> str | None:
     """Schedule a one-off timer from natural language; return confirmation or error, or ``None`` if unmatched."""
-    parsed = parse_natural_timer_request(text)
+    parsed = parse_timer_request(text)
     if not parsed:
         return None
-    duration_str, message = parsed
+    message = parsed["message"]
+    reminder_text = f'<at user_id="{user_id}">you</at> ⏰ Reminder: {message}'
+    if parsed.get("kind") == "absolute":
+        run_time = parsed.get("run_time")
+        if not isinstance(run_time, datetime):
+            time_str = str(parsed.get("time_str") or "").strip()
+            if not time_str:
+                return "❌ Could not parse reminder time."
+            abs_result = schedule_reminder_absolute(
+                chat_id=chat_id,
+                user_id=user_id,
+                time_str=time_str,
+                message=message,
+                scheduler=scheduler,
+                send_func=send_func,
+            )
+            return abs_result if isinstance(abs_result, str) else f"✅ Reminder set. I'll remind you: {message}"
+        scheduler.add_job(
+            func=send_func, trigger="date", run_date=run_time, args=[chat_id, reminder_text]
+        )
+        when = run_time.strftime("%I:%M %p").lstrip("0")
+        return f"✅ Timer set for {when}. I'll remind you: {message}"
+
+    duration_str = parsed.get("duration_str") or ""
     try:
-        delay_seconds = parse_duration(duration_str)
+        delay_seconds = int(parsed.get("duration_seconds") or parse_duration(duration_str))
     except ValueError as e:
         return str(e)
     run_time = datetime.now() + timedelta(seconds=delay_seconds)
-    reminder_text = f'<at user_id="{user_id}">you</at> ⏰ Reminder: {message}'
     scheduler.add_job(
         func=send_func, trigger="date", run_date=run_time, args=[chat_id, reminder_text]
     )

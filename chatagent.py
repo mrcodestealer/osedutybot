@@ -1018,6 +1018,27 @@ def _is_ollama_base() -> bool:
     return "11434" in base or "ollama" in base
 
 
+def enrich_ollama_chat_payload(payload: dict, *, think: Optional[bool] = None) -> dict:
+    """Add Ollama fields (``think``, ``keep_alive``) when ``BOT_CHAT_API_BASE`` points at Ollama."""
+    if not _is_ollama_base():
+        return payload
+    if think is None:
+        think = (os.getenv("BOT_CHAT_LLM_THINK") or "false").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+    payload["think"] = bool(think)
+    keep_alive = (os.getenv("BOT_CHAT_OLLAMA_KEEP_ALIVE") or "-1").strip()
+    if keep_alive.lower() not in ("0", "off", "false", "no"):
+        try:
+            payload["keep_alive"] = int(keep_alive)
+        except ValueError:
+            payload["keep_alive"] = keep_alive
+    return payload
+
+
 def _draft_from_thinking_trace(text: str) -> str:
     """Pull a reply draft from Ollama/qwen thinking traces when content is empty."""
     skip = re.compile(
@@ -1153,14 +1174,7 @@ def _llm_chat(
         "temperature": float(os.getenv("BOT_CHAT_LLM_TEMPERATURE", "0.75")),
     }
     if _is_ollama_base():
-        think = (os.getenv("BOT_CHAT_LLM_THINK") or "false").strip().lower()
-        payload["think"] = think in ("1", "true", "yes", "on")
-        keep_alive = (os.getenv("BOT_CHAT_OLLAMA_KEEP_ALIVE") or "-1").strip()
-        if keep_alive.lower() not in ("0", "off", "false", "no"):
-            try:
-                payload["keep_alive"] = int(keep_alive)
-            except ValueError:
-                payload["keep_alive"] = keep_alive
+        enrich_ollama_chat_payload(payload)
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),

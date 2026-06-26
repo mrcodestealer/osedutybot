@@ -999,6 +999,10 @@ class _VpnWarmBrowser:
         self._context = None
         self._page = None
         self._dirty = True  # form needs a fresh navigate before next fill
+        self._ready = threading.Event()
+
+    def wait_ready(self, timeout: float | None = None) -> bool:
+        return self._ready.wait(timeout)
 
     def start(self) -> None:
         with self._lock:
@@ -1101,6 +1105,7 @@ class _VpnWarmBrowser:
         self._context = None
         self._page = None
         self._p = None
+        self._ready.clear()
 
     def _form_present(self) -> bool:
         try:
@@ -1138,9 +1143,11 @@ class _VpnWarmBrowser:
     def _prewarm_safe(self) -> None:
         try:
             self._ensure_form_ready()
+            self._ready.set()
             print("[vpn-warm] pre-warmed (form ready).", flush=True)
         except Exception as ex:
             print(f"[vpn-warm] prewarm failed: {ex!r}", flush=True)
+            self._ready.clear()
             self._teardown()
 
     def _run_job_safe(self, job: dict) -> None:
@@ -1153,10 +1160,9 @@ class _VpnWarmBrowser:
             _fpms_lark_mark_trigger_message_done(trigger_mid)
             _fpms_lark_finish_jenkins_run_session(sk, cid, run_token=run_token)
         except Exception as ex:
-            print(f"[vpn-warm] job failed, falling back to fresh browser: {ex!r}", flush=True)
+            print(f"[vpn-warm] job failed, falling back to warm retry: {ex!r}", flush=True)
             self._teardown()
             try:
-                # Rebuild the YES/NO gate session so the fresh-browser run has a clean gate.
                 _fpms_lark_sessions_put_chat_key(
                     sk,
                     {
@@ -1167,6 +1173,9 @@ class _VpnWarmBrowser:
                         "lark_trigger_message_id": trigger_mid,
                     },
                 )
+                if _vpn_warm_retry_submit(job):
+                    return
+                print("[vpn-warm] warm retry exhausted; cold browser last resort.", flush=True)
                 _fpms_lark_spawn_run(
                     cid,
                     sk,
@@ -1179,8 +1188,9 @@ class _VpnWarmBrowser:
                     headless=self._headless(),
                     lark_message_id=trigger_mid,
                 )
+                return
             except Exception as ex2:
-                print(f"[vpn-warm] fallback spawn also failed: {ex2!r}", flush=True)
+                print(f"[vpn-warm] warm retry also failed: {ex2!r}", flush=True)
                 _fpms_lark_mark_trigger_message_done(trigger_mid)
                 _fpms_lark_finish_jenkins_run_session(sk, cid, run_token=run_token)
         finally:
@@ -1319,6 +1329,54 @@ def _vpn_warm_prewarm() -> None:
         print(f"[vpn-warm] prewarm dispatch failed: {ex!r}", flush=True)
 
 
+def _jenkins_warm_startup_wait_sec() -> float:
+    try:
+        return max(0.0, float(os.environ.get("JENKINS_WARM_STARTUP_WAIT_SEC", "120")))
+    except ValueError:
+        return 120.0
+
+
+def _jenkins_warm_startup_block() -> bool:
+    return (os.environ.get("JENKINS_WARM_STARTUP_BLOCK", "1") or "").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def prewarm_all_jenkins_browsers_on_startup() -> None:
+    """Pre-warm **all** Jenkins automation browsers (VPN form + /update pool) and optionally
+    block bot startup until they are logged in and ready — avoids first-request cold-start delay."""
+    if not _PLAYWRIGHT_AVAILABLE:
+        return
+    prewarm_vpn_browser_on_startup()
+    prewarm_ju_pool_on_startup()
+    if not _jenkins_warm_startup_block():
+        return
+    wait_sec = _jenkins_warm_startup_wait_sec()
+    if wait_sec <= 0:
+        return
+    deadline = time.monotonic() + wait_sec
+    vpn_ok = True
+    ju_ok = True
+    if _vpn_warm_enabled():
+        vpn_ok = _vpn_warm_get().wait_ready(max(0.0, deadline - time.monotonic()))
+        if vpn_ok:
+            print("[vpn-warm] startup ready.", flush=True)
+        else:
+            print("[vpn-warm] startup wait timed out (will warm on first request).", flush=True)
+    if _ju_warm_pool_enabled():
+        remaining = max(0.0, deadline - time.monotonic())
+        ju_ok = _ju_warm_pool_get().wait_all_ready(remaining)
+        if ju_ok:
+            print(f"[ju-pool] startup ready ({_ju_warm_pool_size()} browser(s)).", flush=True)
+        else:
+            print("[ju-pool] startup wait timed out (will warm on first request).", flush=True)
+    if vpn_ok and ju_ok:
+        print("[jenkins-warm] all Jenkins warm browsers on standby.", flush=True)
+
+
 def prewarm_vpn_browser_on_startup() -> None:
     """Public hook: launch + login + render the VPN form at bot startup so the *first*
     ``create vpn`` is already warm (cold Chromium launch alone is ~20s). Call once from main."""
@@ -1358,9 +1416,9 @@ def _ju_warm_pool_enabled() -> bool:
 
 def _ju_warm_pool_size() -> int:
     try:
-        return max(1, int(os.environ.get("JU_WARM_POOL_SIZE", "2")))
+        return max(1, int(os.environ.get("JU_WARM_POOL_SIZE", "3")))
     except ValueError:
-        return 2
+        return 3
 
 
 def _ju_warm_base_url() -> str:
@@ -1382,6 +1440,7 @@ class _JuWarmWorker:
         self._p = None
         self._context = None
         self._page = None
+        self._ready = threading.Event()
 
     def execute(self, run_kwargs: dict) -> dict:
         done = threading.Event()
@@ -1392,6 +1451,9 @@ class _JuWarmWorker:
 
     def submit_prewarm(self) -> None:
         self._tasks.put({"prewarm": True})
+
+    def wait_ready(self, timeout: float | None = None) -> bool:
+        return self._ready.wait(timeout)
 
     # ---- worker thread ----
     def _loop(self) -> None:
@@ -1474,6 +1536,7 @@ class _JuWarmWorker:
         self._context = None
         self._page = None
         self._p = None
+        self._ready.clear()
 
     def _ensure_ready(self) -> None:
         if not self._healthy():
@@ -1486,6 +1549,9 @@ class _JuWarmWorker:
                 jenkins_login_if_needed(self._page, user, pw)
             except Exception as ex:
                 print(f"[ju-pool#{self.idx}] warm login skipped: {ex!r}", flush=True)
+                self._ready.clear()
+                raise
+        self._ready.set()
 
     def _rewarm(self) -> None:
         # Leave the heavy job page → light base page, keeping the logged-in session warm.
@@ -1503,28 +1569,61 @@ class _JuWarmPool:
         self._idle: "_queue.Queue[_JuWarmWorker]" = _queue.Queue()
         for w in self._workers:
             self._idle.put(w)
+        threading.Thread(
+            target=self._keepalive_loop, name="ju-warm-keepalive", daemon=True
+        ).start()
+
+    def _keepalive_loop(self) -> None:
+        """Re-login idle pool members so Jenkins sessions stay warm between runs."""
+        try:
+            interval = max(60, int(os.environ.get("JU_WARM_KEEPALIVE_SEC", "240")))
+        except ValueError:
+            interval = 240
+        while True:
+            time.sleep(interval)
+            for w in self._workers:
+                try:
+                    if w._tasks.qsize() == 0:
+                        w.submit_prewarm()
+                except Exception as ex:
+                    print(f"[ju-pool] keepalive skipped: {ex!r}", flush=True)
 
     def prewarm_all(self) -> None:
         for w in self._workers:
             w.submit_prewarm()
 
+    def wait_all_ready(self, timeout: float) -> bool:
+        deadline = time.monotonic() + max(0.0, timeout)
+        ok = True
+        for w in self._workers:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not w.wait_ready(remaining):
+                ok = False
+        return ok
+
     def run_blocking(self, run_kwargs: dict) -> None:
         worker = self._idle.get()  # blocks until a member is free (caps concurrency at size)
         try:
             box = worker.execute(run_kwargs)
+            if "pre_error" in box:
+                print(
+                    f"[ju-pool] pre-run warm failed; retrying warm once: {box['pre_error']!r}",
+                    flush=True,
+                )
+                worker.submit_prewarm()
+                wait_sec = float(os.environ.get("JU_WARM_RETRY_WAIT_SEC", "90"))
+                if worker.wait_ready(wait_sec):
+                    box = worker.execute(run_kwargs)
         finally:
             self._idle.put(worker)
         if "pre_error" in box:
-            # Browser/login warm-up failed before any Jenkins action — safe to use fresh browser.
             print(
-                f"[ju-pool] pre-run warm failed; using fresh browser: {box['pre_error']!r}",
+                f"[ju-pool] warm retry failed; using fresh browser: {box['pre_error']!r}",
                 flush=True,
             )
             run(**run_kwargs)
             return
         if "error" in box:
-            # The run itself failed (may have partially acted on Jenkins) — do NOT silently
-            # retry on a fresh browser (could double-trigger a build). Surface the error.
             raise box["error"]
 
 
@@ -12622,6 +12721,29 @@ def _fpms_lark_notify_jenkinsbot_vpn(
         )
 
 
+def _vpn_warm_try_submit(job: dict) -> bool:
+    try:
+        _vpn_warm_get().submit_job(job)
+        return True
+    except Exception as ex:
+        print(f"[vpn-warm] submit failed: {ex!r}", flush=True)
+        return False
+
+
+def _vpn_warm_retry_submit(job: dict) -> bool:
+    """Re-prewarm the VPN browser and retry the queued job once (avoid cold Chromium launch)."""
+    if not _vpn_warm_enabled():
+        return False
+    _vpn_warm_prewarm()
+    try:
+        wait_sec = float(os.environ.get("VPN_WARM_RETRY_WAIT_SEC", "90"))
+    except ValueError:
+        wait_sec = 90.0
+    if not _vpn_warm_get().wait_ready(wait_sec):
+        return False
+    return _vpn_warm_try_submit(job)
+
+
 def _fpms_lark_begin_vpn_run(
     chat_id: str,
     session_key: str,
@@ -12696,27 +12818,29 @@ def _fpms_lark_begin_vpn_run(
         except Exception:
             pass
         try:
-            _vpn_warm_get().submit_job(
-                {
-                    "chat_id": chat_id,
-                    "session_key": session_key,
-                    "send": send,
-                    "vpn_users": vpn_users,
-                    "vpn_location": vpn_location,
-                    "build_url": VPN_CREATION_BUILD_URL,
-                    "timeout_sec": float(os.environ.get("FPMS_BOT_BUILD_WAIT_SEC", "7200")),
-                    "upload_image": upload_image_fn,
-                    "send_image": send_image_fn,
-                    "trigger_mid": trigger_mid,
-                    "run_token": run_token,
-                    "config_block": cfg,
-                    "raw_prompt_body": echo,
-                }
-            )
-            return
+            job = {
+                "chat_id": chat_id,
+                "session_key": session_key,
+                "send": send,
+                "vpn_users": vpn_users,
+                "vpn_location": vpn_location,
+                "build_url": VPN_CREATION_BUILD_URL,
+                "timeout_sec": float(os.environ.get("FPMS_BOT_BUILD_WAIT_SEC", "7200")),
+                "upload_image": upload_image_fn,
+                "send_image": send_image_fn,
+                "trigger_mid": trigger_mid,
+                "run_token": run_token,
+                "config_block": cfg,
+                "raw_prompt_body": echo,
+            }
+            if _vpn_warm_try_submit(job):
+                return
+            if _vpn_warm_retry_submit(job):
+                return
         except Exception as ex:
-            print(f"[vpn-warm] submit failed, using fresh browser: {ex!r}", flush=True)
+            print(f"[vpn-warm] submit failed: {ex!r}", flush=True)
 
+    print("[vpn-warm] VPN_WARM_BROWSER=0 — cold browser (expect ~20s launch delay).", flush=True)
     _fpms_lark_spawn_run(
         chat_id,
         session_key,
@@ -15846,15 +15970,17 @@ Slower / more stable Jenkins UI: ``FPMS_STABLE_FILL=1 %(prog)s …``
                 return 1
 
     try:
-        run(
-            review_seconds=args.review_seconds,
-            headless=args.headless,
-            browser=args.browser,
-            config_block=config_block,
-            user_data_dir=_udd,
-            update_all_services=args.allservice,
-            jenkins_build_url=run_build_url,
-            job_profile=run_job_profile,
+        _ju_dispatch_run(
+            {
+                "review_seconds": args.review_seconds,
+                "headless": args.headless,
+                "browser": args.browser,
+                "config_block": config_block,
+                "user_data_dir": _udd,
+                "update_all_services": args.allservice,
+                "jenkins_build_url": run_build_url,
+                "job_profile": run_job_profile,
+            }
         )
     except Exception as ex:
         print(f"❌ {ex}", file=sys.stderr)

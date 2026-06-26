@@ -5683,7 +5683,7 @@ def lark_webhook():
         return _lark_im_done()
     elif (
         bot_mentioned or chat_type == "p2p"
-    ) and reminder.parse_natural_timer_request(clean_text):
+    ) and reminder.looks_like_timer_request(clean_text):
         reply = reminder.schedule_natural_timer(
             chat_id=chat_id,
             user_id=sender_id,
@@ -6300,8 +6300,7 @@ def _run_main_entry() -> int:
         try:
             import jenkinsupdate as _boot_ju
 
-            _boot_ju.prewarm_vpn_browser_on_startup()
-            _boot_ju.prewarm_ju_pool_on_startup()
+            _boot_ju.prewarm_all_jenkins_browsers_on_startup()
         except Exception as _boot_ju_err:
             print(f"[warm] startup pre-warm skipped: {_boot_ju_err!r}", flush=True)
         try:
