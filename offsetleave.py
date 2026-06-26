@@ -1060,7 +1060,7 @@ def _pending_offsets_for_request_person(request_person: str) -> list[dict[str, A
 
 
 def _non_pending_offsets_all() -> list[dict[str, Any]]:
-    """Approved / rejected rows (for approver edit/delete lists)."""
+    """Approved / rejected rows (for approver edit lists)."""
     data = od.get_ose_offset_records_admin()
     out: list[dict[str, Any]] = []
     for it in (data or {}).get("items") or []:
@@ -1071,6 +1071,26 @@ def _non_pending_offsets_all() -> list[dict[str, Any]]:
         key=lambda r: (r.get("request_date") or "", r.get("record_id") or ""),
         reverse=True,
     )
+    return out
+
+
+def _all_offsets_for_approver_delete() -> list[dict[str, Any]]:
+    """All offset rows approvers may delete (pending + approved + rejected)."""
+    od.invalidate_ose_bitable_cache()
+    data = od.get_ose_offset_records_admin()
+    out: list[dict[str, Any]] = [dict(it) for it in (data or {}).get("items") or []]
+    out.sort(
+        key=lambda r: (
+            0 if bool(r.get("pending")) else 1,
+            str(r.get("request_date") or ""),
+            str(r.get("record_id") or ""),
+        ),
+    )
+    out.sort(
+        key=lambda r: str(r.get("request_date") or ""),
+        reverse=True,
+    )
+    out.sort(key=lambda r: 0 if bool(r.get("pending")) else 1)
     return out
 
 
@@ -1641,8 +1661,11 @@ def build_offset_delete_list_card(
     cap = 15
     sliced = rows[:cap]
     if is_admin:
-        intro = "**Approver** — delete **approved** or **rejected** offsets (removes the Bitable row)."
-        cap_note = "non-pending"
+        intro = (
+            "**Approver** — delete any offset request "
+            "(**pending**, approved, or rejected; removes the Bitable row)."
+        )
+        cap_note = "record(s)"
     else:
         intro = (
             f"**{request_person}** — pending offset requests you can **delete**.\n"
@@ -1663,7 +1686,12 @@ def build_offset_delete_list_card(
             continue
         extra = ""
         if is_admin:
-            extra = f"\n**Requester:** {_short_cell(r.get('request_person'))} · **Status:** {_short_cell(r.get('approval_status'))}"
+            st = _short_cell(r.get("approval_status"))
+            if bool(r.get("pending")) and not st:
+                st = "Pending"
+            extra = (
+                f"\n**Requester:** {_short_cell(r.get('request_person'))} · **Status:** {st}"
+            )
         summary = (
             f"**{i}.** {_short_cell(r.get('exchange_person'))} · **{_short_cell(r.get('shift_type'))}** · "
             f"{_short_cell(r.get('original_date'))} → {_short_cell(r.get('exchange_date'))}\n"
@@ -2043,21 +2071,11 @@ def handle_deleteoffset_command(
     try:
         token = get_token_func()
         if _is_offset_approver_open_id(oid):
-            request_person = try_resolve_request_person(oid, token)
-            own_pending = (
-                _pending_offsets_for_request_person(request_person) if request_person else []
-            )
-            if own_pending:
-                card = build_offset_delete_list_card(oid, request_person, own_pending, is_admin=False)
-            else:
-                rows = _non_pending_offsets_all()
-                if not rows:
-                    send_message(
-                        chat_id,
-                        "No approved or rejected offset records found to delete, and you have no pending requests as requester.",
-                    )
-                    return True
-                card = build_offset_delete_list_card(oid, "", rows, is_admin=True)
+            rows = _all_offsets_for_approver_delete()
+            if not rows:
+                send_message(chat_id, "No offset records found to delete.")
+                return True
+            card = build_offset_delete_list_card(oid, "", rows, is_admin=True)
         else:
             request_person = resolve_request_person(oid, token)
             rows = _pending_offsets_for_request_person(request_person)
@@ -2065,7 +2083,7 @@ def handle_deleteoffset_command(
                 send_message(
                     chat_id,
                     "No offset found that you requested (no pending rows). "
-                    "Already approved or rejected requests are removed with the approver deleteoffset list.",
+                    "Ask an approver if an approved/rejected row must be removed.",
                 )
                 return True
             card = build_offset_delete_list_card(oid, request_person, rows, is_admin=False)
@@ -2662,6 +2680,29 @@ def build_offset_requester_responded_card(
         "schema": "2.0",
         "config": {"width_mode": "fill"},
         "header": {"template": tpl, "title": {"tag": "plain_text", "content": f"OSE offset — {dec}"}},
+        "body": {"elements": [{"tag": "div", "text": {"tag": "lark_md", "content": md}}]},
+    }
+
+
+def build_offset_requester_approver_deleted_card(
+    row: dict[str, Any],
+    *,
+    approver_name: str,
+) -> dict[str, Any]:
+    """Read-only card DM'd to the requester when an approver deletes their pending offset."""
+    an = _lark_md_cell(approver_name)
+    intro = (
+        f"**{an}** deleted your **pending** offset request. "
+        "The row has been removed — submit again with **offset** if you still need a swap."
+    )
+    md = _offset_approval_table_md(row, status="Deleted", intro=intro)
+    return {
+        "schema": "2.0",
+        "config": {"width_mode": "fill"},
+        "header": {
+            "template": "orange",
+            "title": {"tag": "plain_text", "content": "OSE offset — request deleted"},
+        },
         "body": {"elements": [{"tag": "div", "text": {"tag": "lark_md", "content": md}}]},
     }
 
@@ -3472,6 +3513,31 @@ def _notify_offset_approvers_requester_edited(
             print(f"[offsetleave] requester-edit notify failed for {aid!r}: {r!r}", flush=True)
 
 
+def _notify_requester_offset_deleted_by_approver(
+    send_message: Callable[..., Any],
+    row: dict[str, Any],
+    *,
+    approver_name: str,
+) -> None:
+    request_person = str(row.get("request_person") or "").strip()
+    if not request_person:
+        return
+    rid = str(row.get("record_id") or "").strip()
+    oid = _requester_open_id_for_offset_row(request_person, record_id=rid)
+    if not oid:
+        print(
+            f"[offsetleave] could not DM requester {request_person!r} about approver delete "
+            f"(record {rid or '?'})",
+            flush=True,
+        )
+        return
+    card = build_offset_requester_approver_deleted_card(row, approver_name=approver_name)
+    body = json.dumps(card, ensure_ascii=False)
+    r = send_message(oid, body, msg_type="interactive", receive_id_type="open_id")
+    if isinstance(r, dict) and int(r.get("code", -1)) != 0:
+        print(f"[offsetleave] requester approver-delete DM failed: {r!r}", flush=True)
+
+
 def _notify_offset_approvers_requester_deleted(
     send_message: Callable[..., Any],
     row: dict[str, Any],
@@ -3616,7 +3682,7 @@ def _build_offset_delete_approver_empty_patch_card() -> dict[str, Any]:
                     "tag": "div",
                     "text": {
                         "tag": "plain_text",
-                        "content": "No approved or rejected offset records left to delete.",
+                        "content": "No offset records left to delete.",
                     },
                 }
             ]
@@ -3681,7 +3747,7 @@ def _patch_my_offset_list_after_change(
             else _build_offset_edit_approver_empty_patch_card()
         )
     elif m == "delete_admin":
-        rows = _non_pending_offsets_all()
+        rows = _all_offsets_for_approver_delete()
         card = (
             build_offset_delete_list_card(owner_open_id, "", rows, is_admin=True)
             if rows
@@ -3905,12 +3971,9 @@ def _handle_offset_delete_row(
                 "Run **deleteoffset** to refresh the list."
             )
         if is_admin:
-            if bool(row_chk.get("pending")):
-                raise ValueError(
-                    "Cannot delete a pending row from the approver list. "
-                    "The requester should use deleteoffset for pending requests."
-                )
+            was_pending = bool(row_chk.get("pending"))
         else:
+            was_pending = False
             if not bool(row_chk.get("pending")):
                 raise ValueError(
                     "This request is no longer pending (already approved or rejected). "
@@ -3939,7 +4002,7 @@ def _handle_offset_delete_row(
                 raise
         od.invalidate_ose_bitable_cache()
         if is_admin:
-            # Approver deleted it themselves — alert the OTHER approvers (not the actor).
+            # Approver deleted it — alert the OTHER approvers (not the actor).
             try:
                 _notify_offset_approvers_deleted(
                     deleted_snapshot,
@@ -3951,7 +4014,17 @@ def _handle_offset_delete_row(
                 _mark_offset_deletion_notified(rid)
             except Exception as exc:
                 print(f"[offsetleave] approver-delete approver notify failed: {exc!r}", flush=True)
-            rows = _non_pending_offsets_all()
+            if was_pending:
+                try:
+                    _unmark_offset_record_notified(rid)
+                    _notify_requester_offset_deleted_by_approver(
+                        send_message,
+                        deleted_snapshot,
+                        approver_name=actor_name or "Approver",
+                    )
+                except Exception as exc:
+                    print(f"[offsetleave] approver-delete requester notify failed: {exc!r}", flush=True)
+            rows = _all_offsets_for_approver_delete()
             card = (
                 build_offset_delete_list_card(owner, "", rows, is_admin=True)
                 if rows

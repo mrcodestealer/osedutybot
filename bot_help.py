@@ -114,7 +114,7 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
                 ("@bot offset", "Offset form; or “swap my duty shift”", "调休申请表"),
                 ("@bot leave", "Leave form; or “apply for annual leave”", "请假申请表"),
                 ("editoffset", "Edit pending offset; or “change my offset”", "编辑待审调休"),
-                ("deleteoffset", "Delete offset; or “cancel my offset”", "删除调休记录"),
+                ("deleteoffset", "Delete offset; approvers may delete pending too", "删除调休；审批人可删待审"),
                 ("pendingoffset", "Approver queue; or “pending offset approvals”", "审批人待审列表"),
             ],
         ),
