@@ -276,7 +276,7 @@ _LOG_AI_SYSTEM = (
     '  "last_error_user_id": string or null — userid owning the last error>0 line in this tail\n'
     '  "last_error_line": string or null — short quote of that error line (max 200 chars)\n'
     '  "last_error_code": string or null — the error field value\n'
-    '  "summary": one English sentence explaining what happened\n'
+    '  "summary": one sentence in English and one short line in 中文 explaining what happened\n'
 )
 
 
@@ -318,7 +318,7 @@ def ai_summarize_log_tail(
             {"role": "system", "content": _LOG_AI_SYSTEM},
             {"role": "user", "content": user},
         ],
-        "max_tokens": 500,
+        "max_tokens": 600,
         "temperature": 0.0,
     }
     try:
@@ -354,6 +354,204 @@ def ai_summarize_log_tail(
         return obj if isinstance(obj, dict) else {"_error": "LLM JSON not an object"}
     except json.JSONDecodeError:
         return {"summary": content[:800], "_raw": True}
+
+
+def _truncate_for_lark(text: str, limit: int = 2400) -> str:
+    t = (text or "").strip()
+    if len(t) <= limit:
+        return t
+    return t[: limit - 20] + "\n… (truncated)"
+
+
+def _deterministic_log_summary(
+    *,
+    latest_any_uid: str | None,
+    latest_err_uid: str | None,
+    last_error: dict[str, Any] | None,
+    transfer_out: dict[str, Any] | None,
+) -> str:
+    """Rule-based summary when LLM is off or unavailable."""
+    uid = latest_any_uid or latest_err_uid or "n/a"
+    xfer = transfer_out or {}
+    amt = xfer.get("amount")
+    ts = xfer.get("time") or "n/a"
+    lines: list[str] = []
+    if last_error:
+        code = last_error.get("error_count", "?")
+        et = (last_error.get("time") or "").strip() or "n/a"
+        fl = (last_error.get("full_line") or last_error.get("snippet") or "").lower()
+        if "aft interrogation faild" in fl or "aft interrogation failed" in fl:
+            gist = (
+                f"Player `{uid}` tried to leave/transfer **{amt}** credit @ `{ts}`; "
+                f"**AFT interrogation failed** (error **{code}** @ `{et}`)."
+            )
+            lines.append(gist)
+            lines.append(
+                "玩家离场/转出额度时 **AFT 问询失败** — 机台可能未正常清账，需查 AFT/Third Http。"
+            )
+        else:
+            lines.append(
+                f"Player `{uid}` — last error **{code}** @ `{et}`; transfer-out credit **{amt}** @ `{ts}`."
+            )
+    elif amt is not None:
+        lines.append(f"Player `{uid}` — last activity; transfer-out / last credit **{amt}** @ `{ts}` (no error in log).")
+        lines.append(f"玩家 `{uid}` — 末次额度 **{amt}** @ `{ts}`，日志无 error。")
+    else:
+        lines.append(f"Player `{uid}` — no parsed error and no credit line in log tail.")
+    if latest_any_uid and latest_err_uid and latest_any_uid == latest_err_uid:
+        lines.append("Last player in log = last player with error.")
+    elif latest_any_uid and latest_err_uid:
+        lines.append(
+            f"Last player in log `{latest_any_uid}` ≠ last error player `{latest_err_uid}`."
+        )
+    return "\n".join(lines)
+
+
+def format_ai_summary_md(
+    ai_summary: dict[str, Any] | None,
+    *,
+    latest_any_uid: str | None,
+    latest_err_uid: str | None,
+    last_error: dict[str, Any] | None,
+    transfer_out: dict[str, Any] | None,
+) -> str:
+    """Always returns non-empty markdown for the AI section."""
+    fallback = _deterministic_log_summary(
+        latest_any_uid=latest_any_uid,
+        latest_err_uid=latest_err_uid,
+        last_error=last_error,
+        transfer_out=transfer_out,
+    )
+    if not use_ai_summary():
+        return f"ℹ️ AI off (`CHECKMACHINELOG_USE_AI=0`).\n\n{fallback}"
+    if ai_summary is None and not _llm_available():
+        return f"ℹ️ LLM not configured (`BOT_CHAT_API_KEY`).\n\n**Analysis:**\n{fallback}"
+    if not ai_summary:
+        return f"**Analysis:**\n{fallback}"
+    if ai_summary.get("_error"):
+        return f"⚠️ LLM failed: `{ai_summary['_error']}`\n\n**Analysis:**\n{fallback}"
+    parts: list[str] = []
+    summary = (ai_summary.get("summary") or "").strip()
+    if summary:
+        parts.append(f"**Summary:** {summary}")
+    if ai_summary.get("_raw") and not summary:
+        parts.append(f"**Summary:** {str(ai_summary.get('summary') or '').strip()}")
+    for label, key in (
+        ("Last player", "last_player_user_id"),
+        ("Last error player", "last_error_user_id"),
+        ("Error code", "last_error_code"),
+        ("Error line", "last_error_line"),
+    ):
+        v = ai_summary.get(key)
+        if v is not None and str(v).strip():
+            parts.append(f"- **{label}:** `{v}`")
+    if not parts:
+        parts.append(f"**Analysis:**\n{fallback}")
+    elif fallback and not summary:
+        parts.append(f"\n**Analysis:**\n{fallback}")
+    return "\n".join(parts)
+
+
+def build_checkmachinelog_lark_card(
+    *,
+    machine_display: str,
+    target_date: date,
+    opened_basename: str,
+    latest_any_uid: str | None,
+    latest_err_uid: str | None,
+    last_error: dict[str, Any] | None,
+    transfer_out: dict[str, Any] | None,
+    last_success: dict[str, Any] | None,
+    ai_summary: dict[str, Any] | None,
+    header_lines: list[str],
+) -> dict[str, Any]:
+    dstr = target_date.isoformat()
+    xfer = transfer_out or {}
+    amt = xfer.get("amount")
+    xts = xfer.get("time") or "n/a"
+    src = xfer.get("source") or "n/a"
+    same = bool(latest_any_uid and latest_err_uid and latest_any_uid == latest_err_uid)
+
+    elements: list[dict[str, Any]] = []
+    if header_lines:
+        elements.append(
+            {
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": _truncate_for_lark("\n".join(header_lines), 800)},
+            }
+        )
+        elements.append({"tag": "hr"})
+
+    meta = (
+        f"**Machine:** `{machine_display}` · **Date:** `{dstr}`\n"
+        f"**File:** `{opened_basename}`\n\n"
+        f"**Last player:** `{latest_any_uid or 'n/a'}`\n"
+        f"**Last error player:** `{latest_err_uid or 'n/a'}`\n"
+    )
+    if latest_any_uid and latest_err_uid:
+        meta += (
+            "**Same player?** "
+            + ("Yes" if same else "No — different users")
+            + "\n"
+        )
+    if amt is not None:
+        meta += f"\n**Transfer-out credit:** `{amt}` @ `{xts}` (`{src}`)"
+    else:
+        meta += "\n**Transfer-out credit:** `n/a`"
+    elements.append({"tag": "div", "text": {"tag": "lark_md", "content": meta}})
+    elements.append({"tag": "hr"})
+
+    if last_error:
+        uid = str(last_error.get("user_id") or "n/a")
+        code = last_error.get("error_count", "?")
+        t = (last_error.get("time") or "").strip() or "n/a"
+        ctx = last_error.get("context_lines") or []
+        body = "\n".join(ctx) if ctx else (last_error.get("full_line") or "").strip()
+        b, a = ctx_before_lines(), ctx_after_lines()
+        err_md = (
+            f"**Last error** · User `{uid}` · code `{code}` · `{t}`\n"
+            f"Context ({b}+1+{a} lines):\n```\n{_truncate_for_lark(body)}\n```"
+        )
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": err_md}})
+        header_tpl = "orange"
+        title = "checkmachinelog — error"
+    else:
+        succ = last_success or {}
+        uid = latest_any_uid or "n/a"
+        t = (succ.get("time") or "").strip() or "n/a"
+        coin = succ.get("cur_coin")
+        coin_s = "n/a" if coin is None else str(coin)
+        ctx = succ.get("context_lines") or []
+        body = "\n".join(ctx) if ctx else (succ.get("full_line") or "").strip() or "(no successJson)"
+        b, a = ctx_before_lines(), ctx_after_lines()
+        ok_md = (
+            f"**No errors** — last success log · User `{uid}` · cur_coin `{coin_s}` · `{t}`\n"
+            f"```\n{_truncate_for_lark(body)}\n```"
+        )
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": ok_md}})
+        header_tpl = "green"
+        title = "checkmachinelog — OK"
+
+    elements.append({"tag": "hr"})
+    ai_md = format_ai_summary_md(
+        ai_summary,
+        latest_any_uid=latest_any_uid,
+        latest_err_uid=latest_err_uid,
+        last_error=last_error,
+        transfer_out=transfer_out,
+    )
+    elements.append(
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"**AI summary**\n{_truncate_for_lark(ai_md, 1200)}"},
+        }
+    )
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": header_tpl, "title": {"tag": "plain_text", "content": title}},
+        "elements": elements,
+    }
 
 
 def _fetch_logic_log_body(
@@ -498,21 +696,26 @@ def format_report(
         parts.append(format_success_context_block(last_success, uid=latest_any_uid))
     if ai_summary:
         parts.append("**AI summary (tail read):**")
-        if ai_summary.get("_error"):
-            parts.append(f"(LLM failed: {ai_summary['_error']})")
-        elif ai_summary.get("_raw"):
-            parts.append(str(ai_summary.get("summary") or ""))
-        else:
-            for k in (
-                "last_player_user_id",
-                "last_error_user_id",
-                "last_error_code",
-                "last_error_line",
-                "summary",
-            ):
-                v = ai_summary.get(k)
-                if v is not None and str(v).strip():
-                    parts.append(f"- {k}: {v}")
+        parts.append(
+            format_ai_summary_md(
+                ai_summary,
+                latest_any_uid=latest_any_uid,
+                latest_err_uid=latest_err_uid,
+                last_error=last_error,
+                transfer_out=transfer_out,
+            )
+        )
+    else:
+        parts.append("**AI summary:**")
+        parts.append(
+            format_ai_summary_md(
+                None,
+                latest_any_uid=latest_any_uid,
+                latest_err_uid=latest_err_uid,
+                last_error=last_error,
+                transfer_out=transfer_out,
+            )
+        )
     return "\n".join(parts).strip() + "\n"
 
 
@@ -578,9 +781,22 @@ def run_check_machine_log(
         ai_summary=ai_summary,
         header_lines=header_lines,
     )
+    lark_card = build_checkmachinelog_lark_card(
+        machine_display=machine_display,
+        target_date=td,
+        opened_basename=opened_basename,
+        latest_any_uid=la_uid,
+        latest_err_uid=le_uid,
+        last_error=last_error,
+        transfer_out=transfer_out,
+        last_success=last_success,
+        ai_summary=ai_summary,
+        header_lines=header_lines,
+    )
 
     return {
         "text": text,
+        "lark_card": lark_card,
         "machine_display": machine_display,
         "target_date": td,
         "opened_basename": opened_basename,

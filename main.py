@@ -608,12 +608,24 @@ def run_checkcredit_finderror(
         print(f"[{cmd}] error: {e!r}")
 
 
-def run_check_machine_log_job(chat_id: str, machine_query: str, date_str: str) -> None:
-    """OSS/LogNavigator logic log → last player, transfer-out credit, error or success context."""
+def run_check_machine_log_job(
+    chat_id: str,
+    machine_query: str,
+    date_str: str,
+    thread_root_message_id: Optional[str] = None,
+) -> None:
+    """OSS/LogNavigator logic log → threaded Lark card + AI summary."""
+    thread_root = (thread_root_message_id or _get_checkcredit_thread_root(chat_id) or "").strip() or None
+    if thread_root:
+        _set_checkcredit_thread_root(chat_id, thread_root)
+
+    def _cml_send(text, **kwargs):
+        return _checkcredit_send(chat_id, text, thread_root=thread_root, **kwargs)
+
     try:
         import checkmachinelog
     except ImportError as e:
-        send_message(chat_id, f"❌ Cannot load checkmachinelog module: {e}")
+        _cml_send(f"❌ Cannot load checkmachinelog module: {e}")
         return
     try:
         td = datetime.strptime(date_str.strip(), "%Y-%m-%d").date()
@@ -621,13 +633,23 @@ def run_check_machine_log_job(chat_id: str, machine_query: str, date_str: str) -
             str(machine_query).strip(),
             target_date=td,
         )
-        text = (out.get("text") or "").strip()
-        if text:
-            send_message(chat_id, text)
+        card = out.get("lark_card")
+        if isinstance(card, dict):
+            resp = _cml_send(json.dumps(card, ensure_ascii=False), msg_type="interactive")
+            if resp.get("code") != 0:
+                text = (out.get("text") or "").strip()
+                if text:
+                    _cml_send(text)
+                else:
+                    _cml_send(f"❌ checkmachinelog card failed: {resp}")
         else:
-            send_message(chat_id, "✅ checkmachinelog finished (no text output).")
+            text = (out.get("text") or "").strip()
+            if text:
+                _cml_send(text)
+            else:
+                _cml_send("✅ checkmachinelog finished (no output).")
     except Exception as e:
-        send_message(chat_id, f"❌ checkmachinelog failed: {e}")
+        _cml_send(f"❌ checkmachinelog failed: {e}")
         print(f"[checkmachinelog] error: {e!r}")
 
 
@@ -5660,13 +5682,20 @@ def lark_webhook():
             use_oss = checkcredit.checkcredit_use_oss_source()
         except Exception:
             use_oss = True
-        send_message(
-            chat_id,
+        thread_root = _checkcredit_begin_thread(chat_id, message_id)
+        wait_msg = (
             "⏳ Running checkmachinelog via OSS HTTP, please wait..."
             if use_oss
-            else "⏳ Running checkmachinelog (LogNavigator), please wait...",
+            else "⏳ Running checkmachinelog (LogNavigator), please wait..."
         )
-        start_lark_background_thread(run_check_machine_log_job, chat_id, machine_q, date_arg)
+        _checkcredit_send(chat_id, wait_msg, thread_root=thread_root)
+        start_lark_background_thread(
+            run_check_machine_log_job,
+            chat_id,
+            machine_q,
+            date_arg,
+            thread_root,
+        )
         return _lark_im_done()
     elif re.search(r"/(?:checkcreditdate|checkcredit|machineerror)\b", clean_text, re.I):
         # Longer token first in alternation so `/checkcreditdate` is not parsed as `/checkcredit` + `date`.
