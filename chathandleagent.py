@@ -176,6 +176,23 @@ def route(text: str, *, bot_mentioned: bool = True) -> RouteDecision:
         is_none = cmd_tag == "cmd_none"
         cmd_route = cmd_sig.get("route")
 
+        # 2b) Pattern / LLM / model signal (before keyword hijack or chitchat).
+        if cmd_route == "command" and cmd_sig.get("command") and cmd_conf >= ROUTER_MIN_CONF:
+            return RouteDecision(
+                _CMD,
+                reason=f"cmd_{cmd_sig.get('source') or 'signal'}",
+                command=cmd_sig.get("command"),
+                command_conf=cmd_conf,
+                chat_conf=chat_conf,
+            )
+        if cmd_route == "chat" and cmd_conf >= ROUTER_MIN_CONF:
+            return RouteDecision(
+                _CHAT,
+                reason=f"cmd_{cmd_sig.get('source') or 'signal'}",
+                chat_conf=cmd_conf,
+                command_conf=cmd_conf,
+            )
+
         # 3) Strong work signals -> command (unless it's clearly a greeting or math).
         has_kw = bool(_COMMAND_KEYWORDS_RE.search(raw))
         has_machine = bool(_MACHINE_ID_RE.search(raw))
@@ -185,10 +202,18 @@ def route(text: str, *, bot_mentioned: bool = True) -> RouteDecision:
         if _looks_like_math_followup(raw) and not has_kw and not has_search:
             return RouteDecision(_CHAT, reason="math_followup", chat_conf=max(chat_conf, 0.8))
         if (has_kw or has_machine or has_search) and not _looks_like_pure_chitchat(raw):
+            resolved_cmd = cmd_sig.get("command")
+            if not resolved_cmd:
+                try:
+                    import commandagent as _ca
+
+                    resolved_cmd = _ca._resolve_command_for_route(raw, cmd_sig)
+                except Exception:
+                    resolved_cmd = None
             return RouteDecision(
                 _CMD,
                 reason="keyword" if has_kw else ("machine_id" if has_machine else "search"),
-                command=cmd_sig.get("command"),
+                command=resolved_cmd,
                 command_conf=cmd_conf,
                 chat_conf=chat_conf,
             )
@@ -197,19 +222,7 @@ def route(text: str, *, bot_mentioned: bool = True) -> RouteDecision:
         if _looks_like_pure_chitchat(raw) and _word_count(raw) <= 12:
             return RouteDecision(_CHAT, reason="chitchat", chat_conf=chat_conf)
 
-        # 5a) Explicit route from pattern rules / LLM / model abstain.
-        if cmd_route == "chat" and cmd_conf >= ROUTER_MIN_CONF:
-            return RouteDecision(_CHAT, reason=f"cmd_{cmd_sig.get('source') or 'signal'}", chat_conf=cmd_conf, command_conf=cmd_conf)
-        if cmd_route == "command" and cmd_sig.get("command") and cmd_conf >= ROUTER_MIN_CONF:
-            return RouteDecision(
-                _CMD,
-                reason=f"cmd_{cmd_sig.get('source') or 'signal'}",
-                command=cmd_sig.get("command"),
-                command_conf=cmd_conf,
-                chat_conf=chat_conf,
-            )
-
-        # 5b) Fuzzy: trust whichever trained classifier is more confident.
+        # 5) Fuzzy: trust whichever trained classifier is more confident.
         if is_none:
             # Command model explicitly says "not a command".
             if chat_conf >= ROUTER_MIN_CONF:
@@ -228,6 +241,10 @@ def route(text: str, *, bot_mentioned: bool = True) -> RouteDecision:
             )
         if chat_conf >= ROUTER_MIN_CONF and (chat_conf - cmd_conf) > ROUTER_DECISION_MARGIN:
             return RouteDecision(_CHAT, reason="model_chat", chat_conf=chat_conf, command_conf=cmd_conf)
+
+        # No work signal and no command — treat as chat (not unknown).
+        if not has_kw and not has_machine and not has_search:
+            return RouteDecision(_CHAT, reason="no_work_signal", chat_conf=max(chat_conf, 0.4))
 
         return RouteDecision(
             _UNKNOWN,

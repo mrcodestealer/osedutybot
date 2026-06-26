@@ -171,6 +171,9 @@ _DEPT_DUTY_TEMPLATES = (
     "what is {d} duty today",
     "today {d} on call",
     "today {d} on-call",
+    "{d} on call",
+    "{d} on call now",
+    "on call {d}",
     "{d} duty today",
     "{d} on duty",
     "{d} roster today",
@@ -1542,7 +1545,76 @@ def _classify_intent_llm(text: str) -> dict[str, Any] | None:
     return result
 
 
+_NONE_PATTERN_INDEX: list[str] | None = None
+
+
+def _get_none_pattern_norms() -> list[str]:
+    global _NONE_PATTERN_INDEX
+    if _NONE_PATTERN_INDEX is not None:
+        return _NONE_PATTERN_INDEX
+    norms: list[str] = []
+    seen: set[str] = set()
+    for spec in build_intent_catalog():
+        if spec.tag != NONE_TAG:
+            continue
+        for pat in spec.patterns:
+            norm = _normalize_for_match(pat)
+            if norm and norm not in seen:
+                seen.add(norm)
+                norms.append(norm)
+    norms.sort(key=len, reverse=True)
+    _NONE_PATTERN_INDEX = norms
+    return norms
+
+
+def _match_none_by_patterns(text: str) -> bool:
+    """True when ``text`` matches a ``cmd_none`` catalogue pattern (casual chat)."""
+    norm = _normalize_for_match(text)
+    if not norm:
+        return False
+    for pnorm in _get_none_pattern_norms():
+        if _pattern_matches(norm, pnorm):
+            return True
+    return False
+
+
+def _resolve_command_for_route(text: str, cmd_sig: dict[str, Any]) -> Optional[str]:
+    """Best-effort slash command for routing (pattern fill-in when keyword hit lacks one)."""
+    cmd = cmd_sig.get("command")
+    if cmd:
+        return cmd
+    pat_hit = _match_intent_by_patterns(text)
+    if pat_hit:
+        spec, _ = pat_hit
+        built = build_slash_command(spec, text)
+        if built:
+            return built
+        if spec.arg_kind is None and spec.command:
+            return spec.command
+    # Machine prefix + digits (e.g. "lookup nwr 2005") when not in training samples.
+    m = re.search(
+        r"(?i)\b(?:lookup|show|check|get|find|info for|machine)\s+"
+        r"(nch|nwr|wf|winford|tbp|tbr|cp|dhs|mdr)\s*-?\s*(\d{2,})\b",
+        text,
+    )
+    if m:
+        prefix = m.group(1).lower()
+        cmd_base = "/wf" if prefix == "winford" else f"/{prefix}"
+        return f"{cmd_base} {m.group(2)}"
+    m2 = re.search(
+        r"(?i)\b(nch|nwr|wf|winford|tbp|tbr|cp|dhs|mdr)\s*-?\s*(\d{2,})\b",
+        text,
+    )
+    if m2 and re.search(r"(?i)\b(lookup|show|check|machine|asset|info)\b", text):
+        prefix = m2.group(1).lower()
+        cmd_base = "/wf" if prefix == "winford" else f"/{prefix}"
+        return f"{cmd_base} {m2.group(2)}"
+    return None
+
+
 def _looks_like_pure_chitchat(text: str) -> bool:
+    if _match_none_by_patterns(text):
+        return True
     try:
         import chitchat
 
