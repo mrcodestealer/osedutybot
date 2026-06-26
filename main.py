@@ -4763,11 +4763,21 @@ def lark_webhook():
 
             _issue_src = (clean_text_multiline or _full_body or clean_text or "").strip()
             _issue_body = _identifyissue.strip_command(_issue_src)
-            reply = _identifyissue.identify_issue(_issue_body) if _issue_body else _identifyissue.USAGE
+            if not _issue_body:
+                send_message(chat_id, _identifyissue.USAGE)
+            else:
+                _issue_card, _issue_text = _identifyissue.build_card(_issue_body)
+                if _issue_card:
+                    _resp = send_message(
+                        chat_id, json.dumps(_issue_card, ensure_ascii=False), msg_type="interactive"
+                    )
+                    if _resp.get("code") != 0:
+                        send_message(chat_id, _issue_text)
+                else:
+                    send_message(chat_id, _issue_text)
         except Exception as _issue_err:
             print(f"⚠️ identifyissue failed: {_issue_err!r}", flush=True)
-            reply = "❌ Could not analyze the issue right now. Please try again."
-        send_message(chat_id, reply)
+            send_message(chat_id, "❌ Could not analyze the issue right now. Please try again.")
         return _lark_im_done()
     elif clean_text.lower() == '/fpms':
         reply = fpms_duty.get_fpms_today_duty()
@@ -5864,13 +5874,21 @@ def lark_webhook():
                     ).strip()
                     # Fast regex first, then let the AI decide anything it missed.
                     if _identifyissue_fb.is_issue_report(_issue_src):
-                        _issue_reply = _identifyissue_fb.identify_issue(
+                        _issue_card, _issue_text = _identifyissue_fb.build_card(
                             _identifyissue_fb.strip_command(_issue_src)
                         )
-                        if _issue_reply:
-                            send_message(chat_id, _issue_reply)
-                            print(f"🔎 Issue identifier (fallback) reply to chat {chat_id}", flush=True)
-                            _issue_handled = True
+                        if _issue_card:
+                            _resp = send_message(
+                                chat_id,
+                                json.dumps(_issue_card, ensure_ascii=False),
+                                msg_type="interactive",
+                            )
+                            if _resp.get("code") != 0:
+                                send_message(chat_id, _issue_text)
+                        elif _issue_text:
+                            send_message(chat_id, _issue_text)
+                        print(f"🔎 Issue identifier (fallback) card to chat {chat_id}", flush=True)
+                        _issue_handled = True
                 except Exception as _issue_fb_err:
                     print(f"⚠️ Issue identifier fallback skipped: {_issue_fb_err!r}", flush=True)
                 if _issue_handled:

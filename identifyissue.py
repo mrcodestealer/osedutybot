@@ -86,8 +86,12 @@ CASE B — Specific provider only / unsure if the issue is ours:
    - MINOR issue -> Call the on-duty SRE (pick the SRE on duty for the project/category of
      the issue, per the OSE & SRE Duty Shift Document). No response -> escalate to Wei Siong
      & Adrian Chong. At the same time also call Aldan Chan & Miyu.
-   - At the same time call: Emergency Group P0 -> Aldan Chan, Miyu. Game Urgent Group P0 ->
-     Yui Yang + Product Manager + Game Operation (Game Issue Emergency Contact).
+   - At the same time call the Emergency Group P0 -> Aldan Chan, Miyu (this is the GENERAL
+     emergency group, used for ANY P0).
+   - The Game Urgent Group P0 (Yui Yang + Product Manager + Game Operation, the "Game Issue
+     Emergency Contact") is a SEPARATE group — call it ONLY for GAME issues (cannot enter game,
+     game launch/transfer, a specific game provider). Do NOT call Game Urgent for login,
+     withdrawal, deposit, OTP, promotion or other non-game issues.
    - If the issue is clearly confirmed under a specific team (e.g. CPMS), you may call the
      P0-DEV WhatsApp group immediately (P0-CPMS DEV, P0-FPMS DEV, P0-Frontend DEV, P0-PMS DEV).
 3. Coordinate in the meeting and confirm if further support is needed.
@@ -196,7 +200,9 @@ P0 事故概览
 Rules: Use the player count you are given for "Impact scope / 影响范围". If withdrawal/deposit
 hits ALL channels -> P0 Major (Case A); if only one provider/unsure -> P1/minor (Case B). If
 4+ players and not clearly major, still treat as P0 and verify with Aldan Chan & Miyu. Keep the
-overview short and ready to paste into the WhatsApp / Lark group.
+overview short and ready to paste into the WhatsApp / Lark group. ONLY mention the Game Urgent
+Group when the issue is a GAME issue (cannot enter game / game provider) — never for login,
+withdrawal, deposit or OTP.
 """
 
 # ---------------------------------------------------------------------------
@@ -442,16 +448,24 @@ def is_enabled() -> bool:
     return (os.getenv("BOT_USE_IDENTIFYISSUE") or "1").strip().lower() in ("1", "true", "yes", "on")
 
 
-def _llm_complete(
+def show_thinking() -> bool:
+    """Set BOT_ISSUE_SHOW_THINKING=1 to enable the model's reasoning and show it in the card."""
+    return (os.getenv("BOT_ISSUE_SHOW_THINKING") or "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _llm_complete_full(
     system_prompt: str,
     user_text: str,
     *,
     max_tokens: Optional[int] = None,
     timeout: Optional[float] = None,
-) -> Optional[str]:
+    think: Optional[bool] = None,
+) -> tuple[Optional[str], str]:
+    """Call the LLM; return ``(answer, reasoning)``. ``reasoning`` is the model's
+    thinking trace when the backend exposes it (Ollama/qwen ``reasoning``)."""
     api_key = _llm_api_key()
     if not api_key:
-        return None
+        return None, ""
     url = f"{_llm_base_url()}/chat/completions"
     payload = {
         "model": _llm_model(),
@@ -459,40 +473,76 @@ def _llm_complete(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_text},
         ],
-        "max_tokens": int(max_tokens if max_tokens is not None else int(os.getenv("BOT_ISSUE_MAX_TOKENS", "1200"))),
+        "max_tokens": int(max_tokens if max_tokens is not None else int(os.getenv("BOT_ISSUE_MAX_TOKENS", "3000"))),
         "temperature": float(os.getenv("BOT_ISSUE_TEMPERATURE", "0.3")),
     }
     base = _llm_base_url().lower()
     if "11434" in base or "ollama" in base:
-        payload["think"] = (os.getenv("BOT_CHAT_LLM_THINK") or "false").strip().lower() in ("1", "true", "yes", "on")
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-        method="POST",
-    )
-    try:
-        _timeout = timeout if timeout is not None else float(os.getenv("BOT_ISSUE_LLM_TIMEOUT", "45"))
-        with urllib.request.urlopen(req, timeout=_timeout) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-        choices = body.get("choices") or []
-        if not choices:
-            return None
-        message = choices[0].get("message") or {}
-        content = (message.get("content") or "").strip()
-        if not content:
-            content = (message.get("reasoning") or "").strip()
-        return content or None
-    except urllib.error.HTTPError as exc:
+        if think is None:
+            think = (os.getenv("BOT_CHAT_LLM_THINK") or "false").strip().lower() in ("1", "true", "yes", "on")
+        payload["think"] = bool(think)
+        # Keep the model resident so Ollama doesn't unload/reload between calls
+        # (reload churn is what causes the intermittent 500 "connection closed").
+        keep_alive = (os.getenv("BOT_CHAT_OLLAMA_KEEP_ALIVE") or "-1").strip()
+        if keep_alive.lower() not in ("0", "off", "false", "no"):
+            try:
+                payload["keep_alive"] = int(keep_alive)
+            except ValueError:
+                payload["keep_alive"] = keep_alive
+    _timeout = timeout if timeout is not None else float(os.getenv("BOT_ISSUE_LLM_TIMEOUT", "120"))
+    attempts = max(1, int(os.getenv("BOT_ISSUE_LLM_RETRIES", "2")) + 1)
+    last_err = ""
+    for attempt in range(1, attempts + 1):
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+            method="POST",
+        )
         try:
-            detail = exc.read().decode("utf-8", errors="replace")[:300]
-        except Exception:
-            detail = exc.reason
-        print(f"⚠️ identifyissue LLM HTTP {exc.code}: {detail}", flush=True)
-        return None
-    except Exception as exc:
-        print(f"⚠️ identifyissue LLM failed: {exc!r}", flush=True)
-        return None
+            with urllib.request.urlopen(req, timeout=_timeout) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+            choices = body.get("choices") or []
+            if not choices:
+                return None, ""
+            message = choices[0].get("message") or {}
+            content = (message.get("content") or "").strip()
+            reasoning = (message.get("reasoning") or "").strip()
+            if not content and reasoning:
+                content = reasoning
+            return (content or None), reasoning
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")[:300]
+            except Exception:
+                detail = exc.reason
+            last_err = f"HTTP {exc.code}: {detail}"
+            # Only 5xx are worth retrying (model reload / transient); 4xx won't fix itself.
+            if exc.code < 500:
+                print(f"⚠️ identifyissue LLM {last_err}", flush=True)
+                return None, ""
+        except Exception as exc:
+            last_err = repr(exc)
+        if attempt < attempts:
+            print(f"⚠️ identifyissue LLM transient error (attempt {attempt}/{attempts}): {last_err} — retrying", flush=True)
+            import time as _time
+
+            _time.sleep(float(os.getenv("BOT_ISSUE_LLM_RETRY_DELAY", "1.5")))
+    print(f"⚠️ identifyissue LLM failed after {attempts} attempts: {last_err}", flush=True)
+    return None, ""
+
+
+def _llm_complete(
+    system_prompt: str,
+    user_text: str,
+    *,
+    max_tokens: Optional[int] = None,
+    timeout: Optional[float] = None,
+) -> Optional[str]:
+    answer, _ = _llm_complete_full(
+        system_prompt, user_text, max_tokens=max_tokens, timeout=timeout
+    )
+    return answer
 
 
 # ---------------------------------------------------------------------------
@@ -543,6 +593,7 @@ def build_p0_overview(text: str, info: Optional[dict] = None, *, issue_en: str =
 
 def _who_to_call(info: dict) -> list[str]:
     sev = info.get("severity", "")
+    is_game = "enter_game" in (info.get("categories") or [])
     out: list[str] = []
     if info.get("is_otp"):
         out.append("Start a Lark meeting; call Jacob C. 📞 09681199077 (or Zora 📞 09616987232) + SRE Backend Duty to check the SMS server.")
@@ -550,7 +601,9 @@ def _who_to_call(info: dict) -> list[str]:
         return out
     if sev.startswith("P0 Major"):
         out.append("Call P0-OM via WhatsApp (also Bk, Yang, Koo, YC, Wennie, Eden, Jun Meng).")
-        out.append("Emergency Group P0: Aldan Chan, Miyu. Game Urgent: Yui Yang + PM + Game Operation.")
+        out.append("Emergency Group P0 (general): Aldan Chan, Miyu.")
+        if is_game:
+            out.append("Game Urgent Group (game issues only): Yui Yang + PM + Game Operation.")
         out.append("If root cause not found in 5 min: call Greg, Eason, Rock Lim.")
     elif "Minor" in sev or sev.startswith("P1"):
         out.append("Call the on-duty SRE for this category (per OSE & SRE Duty Shift Doc).")
@@ -777,29 +830,206 @@ def identify_issue(text: str) -> str:
     body = (text or "").strip()
     if not body:
         return USAGE
+    info = classify(body)
+    answer, _reasoning, _engine = _analyze(body, info)
+    return answer
+
+
+def _build_user_prompt(body: str, info: dict) -> str:
+    players = info.get("players", 0)
+    return (
+        f"Player report to analyze:\n\"\"\"\n{body}\n\"\"\"\n\n"
+        f"Detected player count (use this for Impact scope / 影响范围): "
+        f"{players if players else 'unknown — say players TBC'}.\n"
+        f"Current incident start time to use: {_now_str()}.\n"
+        "Follow the OUTPUT FORMAT exactly (English then 中文, including the copy-paste P0 overview).\n"
+        "IMPORTANT: Do NOT include any reasoning, planning, analysis notes, or 'Thinking "
+        "Process' text. Start your reply DIRECTLY with the line '🔎 Issue Identified / 问题识别'."
+    )
+
+
+def _clean_ai_answer(content: str) -> str:
+    """qwen 'thinking' models sometimes prepend a reasoning trace to the answer.
+    Trim everything before the first real output marker (🔎 / Issue Identified)."""
+    text = (content or "").strip()
+    if not text:
+        return text
+    idx = text.find("🔎")
+    if idx > 0:
+        return text[idx:].strip()
+    m = re.search(r"(?im)^\s*(?:#+\s*)?(?:\*\*)?\s*Issue\s+Identified\b", text)
+    if m and m.start() > 0:
+        return text[m.start():].strip()
+    # Drop a leading "Thinking Process:" / "Reasoning:" block if the real answer follows.
+    m2 = re.search(r"(?is)\b(thinking process|reasoning|analysis)\s*:.*?\n\s*\n(.+)$", text)
+    if m2 and len(m2.group(2).strip()) > 80:
+        return m2.group(2).strip()
+    return text
+
+
+def _analyze(body: str, info: dict) -> tuple[str, str, str]:
+    """Return ``(analysis_text, reasoning, engine)``.
+
+    engine is the model name when the AI produced it, else "rule-based".
+    """
+    if llm_available():
+        raw_answer, reasoning = _llm_complete_full(
+            SOP_KNOWLEDGE,
+            _build_user_prompt(body, info),
+            think=True if show_thinking() else None,
+        )
+        # qwen 'thinking' models may put the final formatted answer in either the
+        # content OR the reasoning field — salvage whichever actually contains it.
+        for candidate in (raw_answer, reasoning):
+            cleaned = _clean_ai_answer(candidate) if candidate else ""
+            if cleaned and ("🔎" in cleaned or "Issue Identified" in cleaned or "P0 Incident" in cleaned):
+                return cleaned, reasoning, _llm_model()
+    return _deterministic_analysis(body, info), "", "rule-based"
+
+
+# ---------------------------------------------------------------------------
+# Lark interactive card
+# ---------------------------------------------------------------------------
+
+def _severity_template(severity: str) -> str:
+    s = (severity or "").lower()
+    if "major" in s:
+        return "red"
+    if "minor" in s or s.startswith("p1"):
+        return "orange"
+    return "blue"
+
+
+def _div(content: str) -> dict:
+    return {"tag": "div", "text": {"tag": "lark_md", "content": content}}
+
+
+def _note(content: str) -> dict:
+    return {"tag": "note", "elements": [{"tag": "lark_md", "content": content}]}
+
+
+def build_card(text: str) -> tuple[Optional[dict], str]:
+    """Build a Lark interactive card for an issue report.
+
+    Returns ``(card_dict, fallback_text)``. ``card_dict`` is None only if the
+    input is empty. ``fallback_text`` is the plain-text analysis (sent if the
+    card POST fails or for non-card clients).
+    """
+    body = (text or "").strip()
+    if not body:
+        return None, USAGE
 
     info = classify(body)
-    players = info.get("players", 0)
+    analysis, reasoning, engine = _analyze(body, info)
+    severity = info.get("severity", "Other")
+    used_ai = engine != "rule-based"
 
-    if llm_available():
-        user_prompt = (
-            f"Player report to analyze:\n\"\"\"\n{body}\n\"\"\"\n\n"
-            f"Detected player count (use this for Impact scope / 影响范围): "
-            f"{players if players else 'unknown — say players TBC'}.\n"
-            f"Current incident start time to use: {_now_str()}.\n"
-            "Follow the OUTPUT FORMAT exactly (English then 中文, including the copy-paste P0 overview)."
+    elements: list[dict] = []
+
+    if used_ai:
+        # The AI already returns the full structured EN+CN analysis incl. the P0 overview.
+        elements.append(_div(analysis))
+    else:
+        # Render reliable deterministic sections.
+        cats_en = ", ".join(info.get("category_en") or []) or "Unclassified"
+        sys_lines = "\n".join(f"• {b}" for b in _likely_systems(info))
+        special = _special_case_text(info)
+        timer = (
+            "15 min (no call needed)" if severity == "Other"
+            else ("5 min" if severity.startswith("P0 Major") else "10 min")
         )
-        reply = _llm_complete(SOP_KNOWLEDGE, user_prompt)
-        if reply:
-            return reply
-        # LLM configured but failed → fall through to deterministic.
+        elements.append(
+            _div(
+                f"**🔎 Issue Identified / 问题识别**\n"
+                f"- **Summary:** {_one_line(body)}\n"
+                f"- **Category / 类别:** {severity}\n"
+                f"  - EN: {info['reason_en']}\n"
+                f"  - 中: {info['reason_zh']}\n"
+                f"- **Matched:** {cats_en}\n"
+                f"- **Likely system(s):**\n{sys_lines}\n"
+                f"- **Special case:** {special}"
+            )
+        )
+        elements.append({"tag": "hr"})
+        elements.append(
+            _div(
+                "**🛠️ How to handle / 处理步骤**\n"
+                "1. Start a Lark meeting immediately. / 立即开 Lark 会议。\n"
+                "2. Classify (above) and call per category. / 按类别判级并联系。\n"
+                "3. Contact DEV/SRE on duty individually if support is needed "
+                "(FE/FPMS/PMS/CPMS order).\n"
+                f"- **Escalation timer:** {timer} → call Greg, Eason, Rock Lim."
+            )
+        )
+        elements.append({"tag": "hr"})
+        who = "\n".join(f"- {w}" for w in _who_to_call(info))
+        elements.append(_div(f"**📞 Who to call / 需要联系**\n{who}"))
+        elements.append({"tag": "hr"})
+        elements.append(
+            _div("**🚨 P0 Incident Overview (copy-paste)**\n" + build_p0_overview(body, info))
+        )
 
-    return _deterministic_analysis(body, info)
+    if reasoning and show_thinking():
+        think = reasoning.strip()
+        if len(think) > 1500:
+            think = think[:1500].rstrip() + "…"
+        elements.append({"tag": "hr"})
+        elements.append(_div(f"**🧠 AI thinking / AI 思考**\n{think}"))
+
+    footer = (
+        f"🤖 AI: {engine} · {_now_str()}"
+        if used_ai
+        else f"⚙️ rule-based (AI offline) · {_now_str()} — admin: check Ollama at {_llm_base_url()}"
+    )
+    elements.append(_note(footer))
+
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": _severity_template(severity),
+            "title": {"tag": "plain_text", "content": f"🔎 Issue Identified — {severity}"},
+        },
+        "elements": elements,
+    }
+    return card, analysis
+
+
+def _likely_systems(info: dict) -> list[str]:
+    ck = set(info.get("categories") or [])
+    bits: list[str] = []
+    if "login" in ck:
+        bits.append("Login depends on FPMS (player data); page served by FE — check FPMS + frontend with SRE.")
+    if "otp" in ck:
+        bits.append("OTP/SMS goes through the SMS server (SRE Backend + Jacob) before FPMS validates login.")
+    if "enter_game" in ck:
+        bits.append("Enter game flows FPMS → CPMS → provider; launch/transfer failure points to CPMS or provider.")
+    if "deposit" in ck:
+        bits.append("Deposit redirects to PMS (port 8182, GCASH) then records back to FPMS (port 7100).")
+    if "withdrawal" in ck:
+        bits.append("Withdrawal/cash-out handled by PMS to banks/e-wallets, recorded in FPMS — check PMS + channels.")
+    if "promo" in ck:
+        bits.append("Promotion/voucher/rebate/LuckyCoin/balance live in FPMS.")
+    if "frontend" in ck:
+        bits.append("Website/UI/display problems are Frontend (FE) — loop in Frontend SRE.")
+    if not bits:
+        bits.append("Symptom not auto-mapped — confirm Backend (SRE → FPMS/CPMS/PMS) vs Frontend (FE).")
+    return bits
+
+
+def _special_case_text(info: dict) -> str:
+    ck = set(info.get("categories") or [])
+    if info.get("all_channels") and ("deposit" in ck or "withdrawal" in ck):
+        return "Withdrawal/Deposit Case A — ALL channels affected → P0 Major, call P0-OM, full P0 process."
+    if info.get("one_provider") and ("deposit" in ck or "withdrawal" in ck):
+        return "Withdrawal/Deposit Case B — one provider / unsure → P1, call on-duty SRE only."
+    if info.get("is_otp"):
+        return "OTP case — start meeting, call Jacob + SRE Backend, check SMS logs (Scenario 1/2)."
+    return "none"
 
 
 def _cli(text: str) -> None:
     print("=" * 70)
-    print(f"AI available: {llm_available()}  model={_llm_model()!r}")
+    print(f"AI available: {llm_available()}  model={_llm_model()!r}  show_thinking={show_thinking()}")
     print("=" * 70)
     print(identify_issue(text))
 
