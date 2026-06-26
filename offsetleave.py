@@ -8,8 +8,10 @@ import os
 import re
 import threading
 import time
+import urllib.error
+import urllib.request
 from datetime import date, datetime
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional
 
 import requests
 
@@ -620,8 +622,224 @@ def schedule_offset_duty_wiki_sync(
         threading.Thread(target=_run, daemon=True, name="offset-duty-wiki-sync").start()
 
 
+OffsetLeaveAction = Literal[
+    "offset_form",
+    "leave_form",
+    "edit_offset",
+    "delete_offset",
+    "pending_offset",
+    "show_offset",
+]
+
+_OFFSET_LEAVE_ACTIONS: frozenset[str] = frozenset(
+    {
+        "offset_form",
+        "leave_form",
+        "edit_offset",
+        "delete_offset",
+        "pending_offset",
+        "show_offset",
+    }
+)
+
+# Cheap signals — only call the LLM when these appear and rules did not match.
+_OFFSET_LEAVE_SIGNAL_RE = re.compile(
+    r"(?i)\b("
+    r"offset|leave|swap|shift|duty|roster|调休|换班|请假|休假|"
+    r"annual\s+leave|sick\s+leave|compassionate|hospitalisation"
+    r")\b"
+)
+
+# Read-only leave queries (dutyai / ``/leave`` month cards) — not the leave request form.
+_LEAVE_QUERY_RE = re.compile(
+    r"(?i)\b("
+    r"who(?:'s|\s+is|\s+are).{0,40}\bleave\b|"
+    r"\bleave\b.{0,30}\b(?:today|this\s+month|next\s+month|monthly|list)\b|"
+    r"(?:show|list|check|view).{0,20}\bleave\b|"
+    r"anyone\s+on\s+leave|on\s+leave\s+today|today(?:'s)?\s+leave"
+    r")\b"
+)
+
+_OFFSET_FORM_RULE_RE = re.compile(
+    r"(?i)\b("
+    r"调休|换班|"
+    r"swap\s+(?:my\s+)?(?:duty|shift|roster)|"
+    r"exchange\s+(?:my\s+)?(?:duty|shift|roster)|"
+    r"(?:duty|shift|roster)\s+swap|swap\s+(?:duty|shift)|"
+    r"change\s+my\s+(?:duty|shift)\s+day|"
+    r"request\s+(?:a\s+)?(?:duty\s+)?offset|"
+    r"submit\s+(?:an?\s+)?offset|offset\s+request|offset\s+form|"
+    r"need\s+to\s+swap\s+my\s+(?:duty|shift)"
+    r")\b"
+)
+
+_LEAVE_FORM_RULE_RE = re.compile(
+    r"(?i)\b("
+    r"请假|休假申请|我要请假|申请请假|"
+    r"apply\s+(?:for\s+)?(?:annual|sick|compassionate|hospitalisation|marriage|"
+    r"maternity|replacement|non[\s-]?pay)?\s*leave|"
+    r"request\s+(?:annual|sick|compassionate|hospitalisation|marriage|maternity|"
+    r"replacement|non[\s-]?pay)?\s*leave|"
+    r"submit\s+(?:a\s+)?leave|leave\s+request|leave\s+form|"
+    r"take\s+(?:annual|sick)\s+leave|"
+    r"i\s+need\s+(?:annual|sick\s+)?leave|"
+    r"file\s+(?:a\s+)?leave"
+    r")\b"
+)
+
+_EDIT_OFFSET_RULE_RE = re.compile(
+    r"(?i)^(?:edit|editoffset|change|update|modify|amend)\s+"
+    r"(?:my\s+|the\s+|our\s+)?(?:pending\s+)?offsets?(?:\s+request)?\s*$"
+)
+
+_DELETE_OFFSET_RULE_RE = re.compile(
+    r"(?i)^(?:delete|deleteoffset|remove|cancel|drop)\s+"
+    r"(?:my\s+|the\s+|our\s+)?(?:pending\s+)?offsets?(?:\s+request)?\s*$"
+)
+
+_PENDING_OFFSET_RULE_RE = re.compile(
+    r"(?i)^(?:pending|pendingoffset)\s*(?:offset\s+)?(?:requests?|approvals?|queue)?\s*$"
+)
+
+_CLASSIFY_ACTION_CACHE: dict[str, Optional[str]] = {}
+
+_OFFSET_LEAVE_LLM_SYSTEM = (
+    "You classify messages for an OSE workplace bot. The user wants to open a form, "
+    "run an admin queue, or view a calendar — NOT read-only 'who is on leave' queries.\n"
+    "Reply with ONE JSON object only: {\"action\": \"<action>\"}\n"
+    "Valid actions:\n"
+    "- offset_form: submit a NEW duty shift swap / offset request (open offset form)\n"
+    "- leave_form: submit a NEW leave application (open leave form)\n"
+    "- edit_offset: edit or change their pending offset request\n"
+    "- delete_offset: cancel / delete their offset request\n"
+    "- pending_offset: approver views pending offset approvals queue\n"
+    "- show_offset: view the offset calendar / schedule (read-only)\n"
+    "- none: not about OSE offset/leave forms (e.g. who is on leave, monthly leave lists, "
+    "other departments)\n"
+    "Examples:\n"
+    '\"I want to swap my duty with someone\" -> offset_form\n'
+    '\"can I apply for annual leave\" -> leave_form\n'
+    '\"change my offset request\" -> edit_offset\n'
+    '\"cancel my offset\" -> delete_offset\n'
+    '\"show pending offset approvals\" -> pending_offset\n'
+    '\"offset calendar for June\" -> show_offset\n'
+    '\"who is on leave today\" -> none\n'
+    '\"fpms leave this month\" -> none'
+)
+
+
+def _offset_leave_ai_enabled() -> bool:
+    explicit = (os.getenv("BOT_USE_OFFSET_LEAVE_AI") or "").strip().lower()
+    if explicit in ("0", "false", "no", "off"):
+        return False
+    if explicit in ("1", "true", "yes", "on"):
+        return True
+    inherited = (os.getenv("BOT_USE_AI") or "").strip().lower()
+    if inherited in ("0", "false", "no", "off"):
+        return False
+    return True
+
+
+def _offset_leave_llm_available() -> bool:
+    try:
+        import chatagent as ca
+
+        return bool(ca.llm_available())
+    except Exception:
+        return False
+
+
+def _parse_offset_leave_action_rules(text: str) -> Optional[str]:
+    s = (text or "").strip()
+    if not s:
+        return None
+    if _PENDING_OFFSET_RULE_RE.match(s):
+        return "pending_offset"
+    if _DELETE_OFFSET_RULE_RE.match(s):
+        return "delete_offset"
+    if _EDIT_OFFSET_RULE_RE.match(s):
+        return "edit_offset"
+    if od.parse_showoffset_command(s) is not None:
+        return "show_offset"
+    if _LEAVE_QUERY_RE.search(s):
+        return None
+    if _OFFSET_FORM_RULE_RE.search(s):
+        return "offset_form"
+    if _LEAVE_FORM_RULE_RE.search(s):
+        return "leave_form"
+    if re.search(r"\boffset\b", s, re.I):
+        return "offset_form"
+    if re.search(r"\bleave\b", s, re.I) and not _is_month_attendance_slash_command(s):
+        return "leave_form"
+    return None
+
+
+def _parse_offset_leave_action_llm(text: str) -> Optional[str]:
+    if not _offset_leave_ai_enabled() or not _offset_leave_llm_available():
+        return None
+    try:
+        import chatagent as ca
+    except Exception:
+        return None
+    api_key = ca._llm_api_key()
+    if not api_key:
+        return None
+    payload = {
+        "model": ca._llm_model_for_request(images=False),
+        "messages": [
+            {"role": "system", "content": _OFFSET_LEAVE_LLM_SYSTEM},
+            {"role": "user", "content": (text or "").strip()},
+        ],
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+    }
+    req = urllib.request.Request(
+        f"{ca._llm_base_url()}/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=ca._llm_timeout_sec()) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        print(f"[offsetleave] offset/leave LLM classify failed: {exc!r}", flush=True)
+        return None
+    try:
+        content = body["choices"][0]["message"]["content"]
+        obj = json.loads(content) if isinstance(content, str) else {}
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+        return None
+    action = str((obj or {}).get("action") or "").strip().lower()
+    if action == "none" or action not in _OFFSET_LEAVE_ACTIONS:
+        return None
+    return action
+
+
+def parse_offset_leave_action(text: str) -> Optional[str]:
+    """Map natural language → offset/leave bot action (rules first, then optional LLM)."""
+    s = (text or "").strip()
+    if not s or s.startswith("/"):
+        return None
+    cached = _CLASSIFY_ACTION_CACHE.get(s)
+    if s in _CLASSIFY_ACTION_CACHE:
+        return cached
+    action = _parse_offset_leave_action_rules(s)
+    if not action and _OFFSET_LEAVE_SIGNAL_RE.search(s):
+        action = _parse_offset_leave_action_llm(s)
+    _CLASSIFY_ACTION_CACHE[s] = action
+    if len(_CLASSIFY_ACTION_CACHE) > 128:
+        _CLASSIFY_ACTION_CACHE.clear()
+    if action:
+        print(f"[offsetleave] NL action: {s[:100]!r} -> {action}", flush=True)
+    return action
+
+
 def _wants_offset(text: str) -> bool:
-    return bool(re.search(r"\boffset\b", text or "", re.I))
+    return parse_offset_leave_action(text) == "offset_form"
 
 
 def _is_month_attendance_slash_command(text: str) -> bool:
@@ -637,10 +855,7 @@ def _is_month_attendance_slash_command(text: str) -> bool:
 
 
 def _wants_leave(text: str) -> bool:
-    s = (text or "").strip()
-    if _is_month_attendance_slash_command(s):
-        return False
-    return bool(re.search(r"\bleave\b", s, re.I))
+    return parse_offset_leave_action(text) == "leave_form"
 
 
 def _fetch_user_display_name(open_id: str, token: str) -> str:
@@ -713,15 +928,8 @@ def try_resolve_request_person(open_id: str, token: str) -> Optional[str]:
 
 
 def wants_editoffset(text: str) -> bool:
-    """``editoffset`` plus human talk: ``edit offset``, ``change/update my offset``."""
-    s = (text or "").strip()
-    return bool(
-        re.match(
-            r"^(?:edit|editoffset|change|update|modify|amend)\s*(?:my\s+|the\s+|our\s+)?offsets?\s*$",
-            s,
-            re.I,
-        )
-    )
+    """``editoffset`` plus natural talk (rules + optional LLM)."""
+    return parse_offset_leave_action(text) == "edit_offset"
 
 
 def _edit_form_session_key(owner_open_id: str, record_id: str) -> str:
@@ -827,27 +1035,13 @@ def _deliver_requester_offset_edit_menu(
 
 
 def wants_deleteoffset(text: str) -> bool:
-    """``deleteoffset`` plus human talk: ``delete offset``, ``remove my offset``, ``cancel offset``."""
-    s = (text or "").strip()
-    return bool(
-        re.match(
-            r"^(?:delete|deleteoffset|remove|cancel|drop)\s*(?:my\s+|the\s+|our\s+)?offsets?\s*$",
-            s,
-            re.I,
-        )
-    )
+    """``deleteoffset`` plus natural talk (rules + optional LLM)."""
+    return parse_offset_leave_action(text) == "delete_offset"
 
 
 def wants_pendingoffset(text: str) -> bool:
-    """``pendingoffset`` plus human talk: ``pending offset``, ``pending offsets``."""
-    s = (text or "").strip()
-    return bool(
-        re.match(
-            r"^(?:pending|pendingoffset)\s*(?:offsets?)?\s*$",
-            s,
-            re.I,
-        )
-    )
+    """``pendingoffset`` plus natural talk (rules + optional LLM)."""
+    return parse_offset_leave_action(text) == "pending_offset"
 
 
 def _pending_offsets_for_request_person(request_person: str) -> list[dict[str, Any]]:
@@ -1755,6 +1949,9 @@ def handle_showoffset(
     except ValueError as exc:
         send_message(chat_id, f"❌ {exc}")
         return True
+    if target is None and parse_offset_leave_action(clean_text) == "show_offset":
+        today = date.today()
+        target = today.year, today.month
     if target is None:
         return False
     year, month = target
