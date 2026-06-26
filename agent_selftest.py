@@ -65,6 +65,8 @@ CASES: list[tuple[str, str, str | None]] = [
     ("machine winford 8092", "command", "/wf"),
     ("what is nwr 2140", "command", "/nwr"),
     ("check credit NCH1422", "command", "/checkcredit"),
+    ("check machine log DHS3077", "command", "/checkmachinelog"),
+    ("check machine error DHS3077", "command", "/checkmachinelog"),
     # -- search people -------------------------------------------------------
     ("who is David", "command", "/s"),
     ("find Henry in duty list", "command", "/s"),

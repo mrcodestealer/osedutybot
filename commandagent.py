@@ -509,7 +509,7 @@ def build_intent_catalog(*, jenkins_available: bool = True) -> list[IntentSpec]:
     for _m in _cc_machines:
         _me_pats.extend([
             f"machine error {_m}", f"machineerror {_m}",
-            f"machine error for {_m}", f"check machine error {_m}",
+            f"machine error for {_m}",
             f"error only {_m}", f"machine error {_m} 2026-04-27",
         ])
     intents.append(
@@ -517,6 +517,25 @@ def build_intent_catalog(*, jenkins_available: bool = True) -> list[IntentSpec]:
             tag="cmd_machineerror",
             command="/machineerror",
             patterns=_augment_human(_me_pats, max_prefixes=4, max_suffixes=1),
+            arg_kind="machine_id",
+        )
+    )
+
+    _cml_pats: list[str] = [
+        "check machine log", "checkmachinelog", "machine log check",
+        "check machine error", "machine log error",
+    ]
+    for _m in _cc_machines:
+        _cml_pats.extend([
+            f"check machine log {_m}", f"check machine error {_m}",
+            f"checkmachinelog {_m}", f"machine log check {_m}",
+            f"check machine log {_m} 2026-04-27",
+        ])
+    intents.append(
+        IntentSpec(
+            tag="cmd_checkmachinelog",
+            command="/checkmachinelog",
+            patterns=_augment_human(_cml_pats, max_prefixes=4, max_suffixes=1),
             arg_kind="machine_id",
         )
     )
@@ -899,6 +918,8 @@ def detect_checkcredit_command(text: str) -> Optional[str]:
     raw = (text or "").strip()
     if not raw:
         return None
+    if _CML_INTENT_RE.search(raw):
+        return None
     is_error = bool(_CC_ERROR_ONLY_RE.search(raw))
     has_intent = bool(_CC_INTENT_RE.search(raw))
     has_credit = bool(_CC_CREDIT_RE.search(raw))
@@ -915,6 +936,32 @@ def detect_checkcredit_command(text: str) -> Optional[str]:
     base = "/machineerror" if is_error else "/checkcredit"
     dm = _CC_DATE_RE.search(raw)
     return f"{base} {machine} {dm.group(1)}" if dm else f"{base} {machine}"
+
+
+# ---------------------------------------------------------------------------
+# checkmachinelog — machine log / check machine error (±10 context, transfer-out)
+# Runs BEFORE detect_checkcredit_command so "check machine error" maps here,
+# not to /machineerror. Bare "machine error" still → /machineerror.
+# ---------------------------------------------------------------------------
+
+_CML_INTENT_RE = re.compile(
+    r"(?i)\b(?:"
+    r"check\s*machine\s*log|checkmachinelog|machine\s*log\s*check|"
+    r"check\s*machine\s*error|machine\s*log\s*error"
+    r")\b"
+)
+
+
+def detect_checkmachinelog_command(text: str) -> Optional[str]:
+    """e.g. "check machine log DHS3077" -> "/checkmachinelog DHS3077" """
+    raw = (text or "").strip()
+    if not raw or not _CML_INTENT_RE.search(raw):
+        return None
+    machine = _cc_extract_machine(raw)
+    if not machine:
+        return None
+    dm = _CC_DATE_RE.search(raw)
+    return f"/checkmachinelog {machine} {dm.group(1)}" if dm else f"/checkmachinelog {machine}"
 
 
 _SHOW_REMINDER_RE = re.compile(r"(?i)^show reminder\s*[?.!]*$")
@@ -967,7 +1014,7 @@ def detect_identify_issue_command(text: str) -> Optional[str]:
     if not raw or _looks_like_slash_command(raw):
         return None
     # Avoid colliding with the maintenance / credit / jenkins structured flows.
-    if detect_prod_batch_command(raw) or detect_checkcredit_command(raw):
+    if detect_prod_batch_command(raw) or detect_checkmachinelog_command(raw) or detect_checkcredit_command(raw):
         return None
     if _IDENTIFY_ISSUE_RE.search(raw):
         return "/identifyissue"
@@ -1102,6 +1149,12 @@ def build_slash_command(spec: IntentSpec, user_text: str) -> Optional[str]:
         cc = detect_checkcredit_command(user_text)
         if cc:
             return cc
+        machine = _cc_extract_machine(user_text)
+        return f"{base} {machine}" if machine else None
+    if spec.tag == "cmd_checkmachinelog":
+        cml = detect_checkmachinelog_command(user_text)
+        if cml:
+            return cml
         machine = _cc_extract_machine(user_text)
         return f"{base} {machine}" if machine else None
     arg = extract_argument(spec.arg_kind, user_text, spec)
@@ -1277,7 +1330,7 @@ def detect_multi_duty_commands(text: str) -> Optional[list[str]]:
         return None
     if _MULTI_DUTY_SKIP_RE.search(raw):
         return None
-    if detect_prod_batch_command(raw) or detect_checkcredit_command(raw):
+    if detect_prod_batch_command(raw) or detect_checkmachinelog_command(raw) or detect_checkcredit_command(raw):
         return None
     try:
         import jenkinsupdate as _jenkins_gate
@@ -1322,6 +1375,10 @@ def command_signal(text: str) -> dict[str, Any]:
     pb = detect_prod_batch_command(raw)
     if pb:
         out.update(tag="cmd_pb", confidence=1.0, margin=1.0, command=pb, deterministic=True)
+        return out
+    cml = detect_checkmachinelog_command(raw)
+    if cml:
+        out.update(tag="cmd_checkmachinelog", confidence=1.0, margin=1.0, command=cml, deterministic=True)
         return out
     cc = detect_checkcredit_command(raw)
     if cc:
@@ -1373,8 +1430,11 @@ def translate_if_enabled(text: str) -> Optional[str]:
     if pb:
         print(f"[commandagent] Prod-batch map: {raw[:80]!r} → {pb.splitlines()[0]!r}", flush=True)
         return pb
+    cml = detect_checkmachinelog_command(raw)
+    if cml:
+        print(f"[commandagent] Check-machine-log map: {raw[:80]!r} → {cml!r}", flush=True)
+        return cml
     # Deterministic credit-check / machine-error mapping (also runs BEFORE the
-    # fuzzy model, and works even if the model failed to load).
     cc = detect_checkcredit_command(raw)
     if cc:
         print(f"[commandagent] Check-credit map: {raw[:80]!r} → {cc!r}", flush=True)

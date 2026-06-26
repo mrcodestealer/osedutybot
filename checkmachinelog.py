@@ -105,6 +105,156 @@ def enrich_merged_context(raw_lines: list[str], merged: list[dict[str, Any]]) ->
         enrich_error_context(raw_lines, row.get("errors") or [])
 
 
+def _split_player_blocks(raw_lines: list[str]) -> list[tuple[str, list[tuple[int, str]]]]:
+    """Same block boundaries as ``checkcredit.parse_user_blocks_full``."""
+    blocks: list[tuple[str, list[tuple[int, str]]]] = []
+    cur_uid: str | None = None
+    cur_lines: list[tuple[int, str]] = []
+    for i, line in enumerate(raw_lines):
+        um = cc._USERID_START.search(line)
+        if um:
+            if cur_uid is not None:
+                blocks.append((cur_uid, cur_lines))
+            cur_uid = um.group(1)
+            cur_lines = [(i, line)]
+        elif cur_uid is not None:
+            cur_lines.append((i, line))
+    if cur_uid is not None:
+        blocks.append((cur_uid, cur_lines))
+    return blocks
+
+
+def _last_block_lines_for_uid(
+    raw_lines: list[str], uid: str | None
+) -> list[tuple[int, str]]:
+    if not uid:
+        return []
+    want = str(uid).strip()
+    last: list[tuple[int, str]] = []
+    for block_uid, blines in _split_player_blocks(raw_lines):
+        if block_uid == want:
+            last = blines
+    return last
+
+
+def _line_context(
+    raw_lines: list[str],
+    line_idx: int,
+    *,
+    before: int | None = None,
+    after: int | None = None,
+    highlight: bool = True,
+) -> list[str]:
+    b = ctx_before_lines() if before is None else max(0, int(before))
+    a = ctx_after_lines() if after is None else max(0, int(after))
+    start = max(0, line_idx - b)
+    end = min(len(raw_lines), line_idx + a + 1)
+    out: list[str] = []
+    for gi in range(start, end):
+        if highlight:
+            marker = ">>" if gi == line_idx else "  "
+            out.append(f"{marker} {raw_lines[gi]}")
+        else:
+            out.append(raw_lines[gi])
+    return out
+
+
+def extract_transfer_out(row: dict[str, Any] | None) -> dict[str, Any]:
+    """Last resolved credit for a player (cur_coin / reduce_num / enter_game / aft)."""
+    if not row:
+        return {"amount": None, "time": None, "source": None, "line_idx": -1}
+    lc = row.get("latest_credit")
+    if not isinstance(lc, dict):
+        return {"amount": None, "time": None, "source": None, "line_idx": -1}
+    return {
+        "amount": lc.get("value"),
+        "time": (lc.get("time_short") or "").strip() or None,
+        "source": (lc.get("source") or "").strip() or None,
+        "line_idx": int(lc.get("line_idx", -1)),
+    }
+
+
+def find_last_success_line(
+    raw_lines: list[str], uid: str | None
+) -> dict[str, Any] | None:
+    """Last ``successJson`` line with ``error: 0`` in the player's final log block."""
+    blines = _last_block_lines_for_uid(raw_lines, uid)
+    if not blines:
+        return None
+    best: dict[str, Any] | None = None
+    for line_idx, line in blines:
+        if "successJson" not in line:
+            continue
+        if not cc._ERR_ZERO.search(line):
+            continue
+        coin = cc._CUR_COIN.search(line)
+        amount = None
+        if coin:
+            try:
+                amount = float(coin.group(1))
+            except ValueError:
+                amount = None
+        best = {
+            "line_idx": line_idx,
+            "full_line": line.rstrip(),
+            "time": cc._line_time_prefix(line) or None,
+            "cur_coin": amount,
+        }
+    if not best:
+        return None
+    best["context_lines"] = _line_context(raw_lines, int(best["line_idx"]))
+    return best
+
+
+def _row_for_uid(merged: list[dict[str, Any]], uid: str | None) -> dict[str, Any] | None:
+    if not uid:
+        return None
+    want = str(uid).strip()
+    for row in merged:
+        if str(row.get("user_id", "")).strip() == want:
+            return row
+    return None
+
+
+def _format_transfer_out_line(transfer: dict[str, Any], *, uid: str | None) -> str:
+    amt = transfer.get("amount")
+    ts = transfer.get("time") or "n/a"
+    src = transfer.get("source") or "n/a"
+    if amt is None:
+        return f"**Last player transfer-out credit:** `n/a` (User `{uid or 'n/a'}` — no credit line parsed)"
+    src_note = {
+        "cur_coin": "successJson cur_coin",
+        "reduce_num": "reduce_num",
+        "enter_game_target": "enter_game target/add_num",
+        "aft_interrogation_faild_amount": "aft interrogation amount",
+    }.get(str(src), str(src))
+    return (
+        f"**Last player transfer-out credit:** `{amt}` @ `{ts}` "
+        f"(User `{uid or 'n/a'}`, from `{src_note}`)"
+    )
+
+
+def format_success_context_block(success: dict[str, Any] | None, *, uid: str | None) -> str:
+    if not success:
+        return (
+            f"**Success log:** (none parsed for User `{uid or 'n/a'}` — no successJson with error 0)\n"
+        )
+    t = (success.get("time") or "").strip() or "n/a"
+    coin = success.get("cur_coin")
+    coin_s = "n/a" if coin is None else str(coin)
+    ctx = success.get("context_lines") or []
+    body = "\n".join(ctx) if ctx else (success.get("full_line") or "").strip() or "(no line)"
+    b, a = ctx_before_lines(), ctx_after_lines()
+    return (
+        f"**Last success log** (no errors in log)\n"
+        f"- User ID: `{uid or 'n/a'}`\n"
+        f"- Time: `{t}`\n"
+        f"- cur_coin: `{coin_s}`\n"
+        f"- Context ({b} lines above + line + {a} below):\n"
+        f"```\n{body}\n```\n"
+    )
+
+
 def _pick_latest_error(merged: list[dict[str, Any]]) -> dict[str, Any] | None:
     best: dict[str, Any] | None = None
     best_li = -1
@@ -316,6 +466,8 @@ def format_report(
     latest_any_uid: str | None,
     latest_err_uid: str | None,
     last_error: dict[str, Any] | None,
+    transfer_out: dict[str, Any] | None,
+    last_success: dict[str, Any] | None,
     ai_summary: dict[str, Any] | None,
     header_lines: list[str],
 ) -> str:
@@ -337,7 +489,13 @@ def format_report(
             + ("Yes — last activity and last error refer to the same user." if same else "No — different users.")
         )
     parts.append("")
-    parts.append(format_error_context_block(last_error))
+    xfer = transfer_out or {}
+    parts.append(_format_transfer_out_line(xfer, uid=latest_any_uid))
+    parts.append("")
+    if last_error:
+        parts.append(format_error_context_block(last_error))
+    else:
+        parts.append(format_success_context_block(last_success, uid=latest_any_uid))
     if ai_summary:
         parts.append("**AI summary (tail read):**")
         if ai_summary.get("_error"):
@@ -393,6 +551,9 @@ def run_check_machine_log(
     le_uid, _ = cc.pick_latest_error_uid(merged)
     la_uid, _ = cc.pick_latest_any_uid(merged)
     last_error = _pick_latest_error(merged)
+    last_player_row = _row_for_uid(merged, la_uid)
+    transfer_out = extract_transfer_out(last_player_row)
+    last_success = find_last_success_line(raw_lines, la_uid) if not last_error else None
 
     tail_lines = tail_log_lines(log_body)
     tail_text = "\n".join(tail_lines)
@@ -412,6 +573,8 @@ def run_check_machine_log(
         latest_any_uid=la_uid,
         latest_err_uid=le_uid,
         last_error=last_error,
+        transfer_out=transfer_out,
+        last_success=last_success,
         ai_summary=ai_summary,
         header_lines=header_lines,
     )
@@ -424,6 +587,8 @@ def run_check_machine_log(
         "latest_any_uid": la_uid,
         "latest_err_uid": le_uid,
         "last_error": last_error,
+        "transfer_out": transfer_out,
+        "last_success": last_success,
         "ai_summary": ai_summary,
         "merged_players": merged,
         "log_tail_lines": tail_lines,

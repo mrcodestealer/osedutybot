@@ -605,6 +605,29 @@ def run_checkcredit_finderror(
         print(f"[{cmd}] error: {e!r}")
 
 
+def run_check_machine_log_job(chat_id: str, machine_query: str, date_str: str) -> None:
+    """OSS/LogNavigator logic log → last player, transfer-out credit, error or success context."""
+    try:
+        import checkmachinelog
+    except ImportError as e:
+        send_message(chat_id, f"❌ Cannot load checkmachinelog module: {e}")
+        return
+    try:
+        td = datetime.strptime(date_str.strip(), "%Y-%m-%d").date()
+        out = checkmachinelog.run_check_machine_log(
+            str(machine_query).strip(),
+            target_date=td,
+        )
+        text = (out.get("text") or "").strip()
+        if text:
+            send_message(chat_id, text)
+        else:
+            send_message(chat_id, "✅ checkmachinelog finished (no text output).")
+    except Exception as e:
+        send_message(chat_id, f"❌ checkmachinelog failed: {e}")
+        print(f"[checkmachinelog] error: {e!r}")
+
+
 def run_checkcredit_navigator_next_log(chat_id: str) -> None:
     """Open the next same-day logic log (card **check another logs**) — OSS or LogNavigator."""
     pend = _get_checkcredit_np_pending(chat_id)
@@ -5604,6 +5627,42 @@ def lark_webhook():
             send_message(chat_id, json.dumps(card_cp), msg_type="interactive")
         except Exception as e:
             send_message(chat_id, f"❌ checkcredit date card failed: {e}")
+        return _lark_im_done()
+    elif re.search(r"/checkmachinelog\b", clean_text, re.I):
+        m_cml = re.search(
+            r"/checkmachinelog\b\s+(\S+)(?:\s+(\d{4}-\d{2}-\d{2}))?",
+            clean_text,
+            re.I,
+        )
+        if not m_cml:
+            send_message(
+                chat_id,
+                "❌ Usage:\n"
+                "• `/checkmachinelog <machine> [YYYY-MM-DD]` — last player, transfer-out credit, error ±10 lines (or success log)\n"
+                "• Natural language: `check machine log DHS3077` · `check machine error DHS3077`\n"
+                "Examples: `@Duty Bot /checkmachinelog DHS3077` · `check machine log DHS3077 2026-06-26`",
+            )
+            return _lark_im_done()
+        machine_q = m_cml.group(1).strip()
+        date_arg = (m_cml.group(2) or "").strip() or datetime.now().strftime("%Y-%m-%d")
+        try:
+            datetime.strptime(date_arg, "%Y-%m-%d")
+        except ValueError:
+            send_message(chat_id, "❌ Date must be `YYYY-MM-DD`.")
+            return _lark_im_done()
+        try:
+            import checkcredit
+
+            use_oss = checkcredit.checkcredit_use_oss_source()
+        except Exception:
+            use_oss = True
+        send_message(
+            chat_id,
+            "⏳ Running checkmachinelog via OSS HTTP, please wait..."
+            if use_oss
+            else "⏳ Running checkmachinelog (LogNavigator), please wait...",
+        )
+        start_lark_background_thread(run_check_machine_log_job, chat_id, machine_q, date_arg)
         return _lark_im_done()
     elif re.search(r"/(?:checkcreditdate|checkcredit|machineerror)\b", clean_text, re.I):
         # Longer token first in alternation so `/checkcreditdate` is not parsed as `/checkcredit` + `date`.
