@@ -1593,8 +1593,8 @@ ENVIRONMENTS = [
     "fpms-nt-uat-bo",
 ]
 
-# Checkbox ``value`` / label text for **FPMS UAT branch update** job only (same order as Jenkins UI).
-FPMS_UAT_BRANCH_SERVICES = [
+# Per-job Services checkbox catalogs (Jenkins ``value`` ids). Used for service-first job routing.
+FPMS_UAT_BRANCH_ONLY_SERVICES = [
     "check-rest-server",
     "client-apiserver",
     "exrestful-apiserver",
@@ -1622,11 +1622,16 @@ FPMS_UAT_BRANCH_SERVICES = [
     "settlement-report",
     "settlement-schedule",
     "settlement-server",
-    # FPMS_NT_UAT_BO_UPDATE services:
+]
+
+FPMS_NT_UAT_BO_SERVICES = [
     "ccms-web",
     "micro-fe-ccms",
     "micro-web",
-    # FPMS_NT_UAT_MASTER_UPDATE services:
+]
+
+# Shared by **FPMS UAT MASTER UPDATE** and **FPMS NT UAT MASTER UPDATE**.
+FPMS_UAT_MASTER_ROLLOUT_SERVICES = [
     "admin-rollout",
     "auth-rollout",
     "card-rollout",
@@ -1658,10 +1663,24 @@ FPMS_UAT_BRANCH_SERVICES = [
     "user-engagement-scheduler",
 ]
 
+# Union of all FPMS-style checkbox ids (branch + NT BO + master rollout) — fuzzy pick menus.
+FPMS_UAT_BRANCH_SERVICES = (
+    FPMS_UAT_BRANCH_ONLY_SERVICES
+    + FPMS_NT_UAT_BO_SERVICES
+    + FPMS_UAT_MASTER_ROLLOUT_SERVICES
+)
+
 # Backward-compatible name (prefer ``FPMS_UAT_BRANCH_SERVICES`` in new code).
 SERVICES = FPMS_UAT_BRANCH_SERVICES
 
 _FPMS_SERVICE_IDS_CASEFOLD = frozenset(s.casefold() for s in FPMS_UAT_BRANCH_SERVICES)
+_FPMS_UAT_BRANCH_ONLY_IDS_CASEFOLD = frozenset(
+    s.casefold() for s in FPMS_UAT_BRANCH_ONLY_SERVICES
+)
+_FPMS_NT_UAT_BO_IDS_CASEFOLD = frozenset(s.casefold() for s in FPMS_NT_UAT_BO_SERVICES)
+_FPMS_UAT_MASTER_ROLLOUT_IDS_CASEFOLD = frozenset(
+    s.casefold() for s in FPMS_UAT_MASTER_ROLLOUT_SERVICES
+)
 
 
 def _normalize_service_query_key(tok: str) -> str:
@@ -7499,6 +7518,251 @@ def _jenkins_update_dedupe_ties(
     return out
 
 
+# ----- Service-first Jenkins job routing (catalog per URL → filter ties before env/headline) -----
+
+# FPMS ``environment`` dropdown value → Jenkins URL path fragments that expose that env.
+_JENKINS_ENV_URL_FRAGMENTS: dict[str, tuple[str, ...]] = {
+    "fpms-uat-branch": ("/fpms_uat_branch_update/", "/fpms_nt_uat_branch_update/"),
+    "fpms-uat2-branch": ("/fpms_uat_branch_update/", "/fpms_nt_uat_branch_update/"),
+    "fpms-uat3-branch": ("/fpms_uat_branch_update/", "/fpms_nt_uat_branch_update/"),
+    "fpms-uat4-branch": ("/fpms_uat_branch_update/", "/fpms_nt_uat_branch_update/"),
+    "fpms-uat5-branch": ("/fpms_uat_branch_update/", "/fpms_nt_uat_branch_update/"),
+    "fpms-uat-master": ("/fpms_uat_master_update/",),
+    "fpms-uat2-master": ("/fpms_uat_master_update/",),
+    "fpms-uat3-master": ("/fpms_uat_master_update/",),
+    "fpms-nt-uat-master": ("/fpms_nt_uat_master_update/",),
+    "fpms-nt-uat2-master": ("/fpms_nt_uat_master_update/",),
+    "fpms-nt-uat3-master": ("/fpms_nt_uat_master_update/",),
+    "fpms-nt-uat-bo": ("fpms_nt_uat_bo_update",),
+    "pms-uat": ("/pms-uat-update/",),
+}
+
+
+def _jenkins_job_service_catalog_for_url(raw_url: str) -> frozenset[str] | None:
+    """
+    Services checkbox ids for this Jenkins job URL, or ``None`` when the job has **no** Services
+    parameter (VPN, frontend H5, prod script, BI API repository picker, etc.) — those jobs are
+    ignored during service-first routing.
+    """
+    u = _jenkins_update_primary_url(raw_url).replace("\\", "/")
+    ul = u.casefold()
+    prof = _jenkins_update_job_automation_profile(raw_url)
+
+    if prof == "fpms":
+        if "/fpms_uat_branch_update/" in ul or "/fpms_nt_uat_branch_update/" in ul:
+            return _FPMS_UAT_BRANCH_ONLY_IDS_CASEFOLD
+        if "/fpms_uat_master_update/" in ul:
+            return _FPMS_UAT_MASTER_ROLLOUT_IDS_CASEFOLD
+        if "/fpms_nt_uat_master_update/" in ul:
+            return _FPMS_UAT_MASTER_ROLLOUT_IDS_CASEFOLD
+        if "fpms_nt_uat_bo_update" in ul:
+            return _FPMS_NT_UAT_BO_IDS_CASEFOLD
+        return _FPMS_SERVICE_IDS_CASEFOLD
+    if prof == "fnt_rc" and "/rc-uat-update/" in ul:
+        return _FNT_RC_SERVICE_IDS_CASEFOLD
+    if prof == "sms_uat":
+        return _SMS_UAT_SERVICE_IDS_CASEFOLD
+    if prof == "pms_uat":
+        return _PMS_UAT_SERVICE_IDS_CASEFOLD
+    if prof == "bi_script_update":
+        return _BI_SCRIPT_FILE_IDS_CASEFOLD
+    if prof == "cpms_igo_uat":
+        cache = _load_cpms_igo_cache()
+        merged: set[str] = set()
+        for envs in (cache or {}).values():
+            if not isinstance(envs, dict):
+                continue
+            for svcs in envs.values():
+                if isinstance(svcs, list):
+                    merged.update(_normalize_service_query_key(s) for s in svcs if str(s).strip())
+        return frozenset(merged) if merged else None
+    return None
+
+
+def _jenkins_job_service_catalog_list_for_url(raw_url: str) -> list[str] | None:
+    """Human-ordered service list for one URL (agent hints); ``None`` = no Services on this job."""
+    cat = _jenkins_job_service_catalog_for_url(raw_url)
+    if cat is None:
+        return None
+    prof = _jenkins_update_job_automation_profile(raw_url)
+    u = _jenkins_update_primary_url(raw_url).replace("\\", "/").casefold()
+    if prof == "fpms":
+        if "/fpms_uat_branch_update/" in u or "/fpms_nt_uat_branch_update/" in u:
+            return list(FPMS_UAT_BRANCH_ONLY_SERVICES)
+        if "/fpms_uat_master_update/" in u or "/fpms_nt_uat_master_update/" in u:
+            return list(FPMS_UAT_MASTER_ROLLOUT_SERVICES)
+        if "fpms_nt_uat_bo_update" in u:
+            return list(FPMS_NT_UAT_BO_SERVICES)
+    if prof == "fnt_rc" and "/rc-uat-update/" in u:
+        return list(FNT_RC_UAT_MASTER_SERVICES)
+    if prof == "sms_uat":
+        return list(SMS_UAT_UPDATE_SERVICES)
+    if prof == "pms_uat":
+        return list(PMS_UAT_UPDATE_SERVICES)
+    if prof == "bi_script_update":
+        return list(BI_SCRIPT_UPDATE_DEPLOYMENT_FILES)
+    if prof == "cpms_igo_uat":
+        cache = _load_cpms_igo_cache()
+        seen: set[str] = set()
+        ordered: list[str] = []
+        ul_key = u
+        kind = "cpms" if "/cpms-uat-update/" in ul_key else "igo"
+        envs = (cache or {}).get(kind) if isinstance(cache, dict) else None
+        if isinstance(envs, dict):
+            for svcs in envs.values():
+                if not isinstance(svcs, list):
+                    continue
+                for s in svcs:
+                    sid = str(s).strip()
+                    if sid and sid not in seen:
+                        seen.add(sid)
+                        ordered.append(sid)
+        return ordered or None
+    return sorted(cat)
+
+
+def jenkins_update_job_service_index_for_agent() -> dict[str, list[str] | None]:
+    """
+    Job label → service ids (``None`` = no Services checkboxes). Built from
+    :data:`JENKINS_UPDATE_JOB_REGISTRY` for the expert agent / duty AI.
+    """
+    out: dict[str, list[str] | None] = {}
+    seen_urls: set[str] = set()
+    for _alias, (label, url_raw) in JENKINS_UPDATE_JOB_REGISTRY.items():
+        primary = _jenkins_update_primary_url(url_raw).casefold()
+        if primary in seen_urls:
+            continue
+        seen_urls.add(primary)
+        out[label] = _jenkins_job_service_catalog_list_for_url(url_raw)
+    return out
+
+
+def _service_token_matches_catalog(tok: str, catalog: frozenset[str]) -> bool:
+    """True when ``tok`` (port, id, or fuzzy name) resolves to a member of ``catalog``."""
+    raw = (tok or "").strip()
+    if not raw or _is_junk_service_token(raw):
+        return False
+    if re.fullmatch(r"\d{3,5}", raw):
+        sid = SERVICE_PORT_TO_ID.get(int(raw))
+        return bool(sid and _normalize_service_query_key(sid) in catalog)
+    k = _normalize_service_query_key(raw)
+    if k in catalog:
+        return True
+    ranked = _rank_catalog_services_by_query(
+        [s for s in catalog], raw.replace("_", "-"), limit=3
+    )
+    if not ranked:
+        return False
+    best_sc = _service_search_score(raw, ranked[0])
+    return best_sc >= 0.82 and _normalize_service_query_key(ranked[0]) in catalog
+
+
+def _jenkins_job_matches_service_tokens(raw_url: str, tokens: Sequence[str]) -> bool:
+    catalog = _jenkins_job_service_catalog_for_url(raw_url)
+    if catalog is None:
+        return False
+    for tok in tokens:
+        if not _service_token_matches_catalog(tok, catalog):
+            return False
+    return True
+
+
+def _jenkins_job_matches_environment(raw_url: str, environment: str) -> bool:
+    env = normalize_parameter_text(environment or "")
+    frags = _JENKINS_ENV_URL_FRAGMENTS.get(env.casefold())
+    if not frags:
+        return True
+    ul = _jenkins_update_primary_url(raw_url).casefold()
+    return any(f in ul for f in frags)
+
+
+def _peek_environment_from_update_body(body: str) -> str | None:
+    """Best-effort ``environment:`` line or banner hint (no validation)."""
+    raw = (body or "").replace("\r\n", "\n")
+    for line in raw.splitlines():
+        m = _match_key_line_fuzzy(_normalize_config_colons(line).strip())
+        if m and _canonical_config_key(m.group("key")) == "environment":
+            rest = (m.group("rest") or "").strip()
+            if rest:
+                return rest
+    for line in raw.splitlines():
+        t = line.strip()
+        if not t:
+            continue
+        hint = _environment_hint_from_banner(t)
+        if hint:
+            return hint
+    return None
+
+
+def _peek_service_tokens_from_update_body(body: str) -> list[str]:
+    """
+    Best-effort service tokens from ``services:`` / natural ``Service only choose …`` lines.
+    Ports and names are kept as written (ports resolved later per job catalog).
+    """
+    raw = (body or "").replace("\r\n", "\n")
+    tokens: list[str] = []
+    service_lines: list[str] = []
+    last_key: str | None = None
+    port_head = re.compile(r"^\d{3,5}\b")
+
+    for line in raw.splitlines():
+        line_n = _normalize_config_colons(line).strip()
+        if not line_n:
+            continue
+        m = _match_key_line_fuzzy(line_n)
+        if m:
+            key = _canonical_config_key(m.group("key"))
+            rest = (m.group("rest") or "").strip()
+            last_key = key
+            if key == "services" and rest and not _is_junk_service_token(rest):
+                service_lines.append(rest)
+            continue
+        nat = _try_parse_natural_service_line(line_n)
+        if nat:
+            service_lines.append(nat)
+            last_key = "services"
+            continue
+        if last_key == "services":
+            if _looks_like_chat_trailing_line_under_services(line_n):
+                continue
+            if port_head.match(line_n) or (
+                re.search(r"[a-zA-Z_]", line_n) and len(line_n) < 200
+            ):
+                service_lines.append(line_n)
+            continue
+        if _service_lines_mean_update_all([line_n]):
+            return []  # "all services" — no specific token to route on
+
+    excl = _expand_service_exclusion(service_lines) if service_lines else None
+    if excl is not None:
+        return list(excl)
+
+    for sl in service_lines:
+        for part in re.split(r"[,，;]+", sl):
+            t = part.strip()
+            if t and not _is_junk_service_token(t):
+                tokens.append(t)
+    return list(dict.fromkeys(tokens))
+
+
+def _jenkins_update_filter_ties_by_services(
+    ties: list[tuple[str, float, str, str]], service_tokens: Sequence[str]
+) -> list[tuple[str, float, str, str]]:
+    if not service_tokens:
+        return ties
+    return [t for t in ties if _jenkins_job_matches_service_tokens(t[3], service_tokens)]
+
+
+def _jenkins_update_filter_ties_by_environment(
+    ties: list[tuple[str, float, str, str]], environment: str
+) -> list[tuple[str, float, str, str]]:
+    if not (environment or "").strip():
+        return ties
+    filtered = [t for t in ties if _jenkins_job_matches_environment(t[3], environment)]
+    return filtered if filtered else ties
+
+
 def _fpms_lark_normalize_card_action_value(value: object) -> dict[str, object] | None:
     """Feishu may send ``value`` as JSON object or string."""
     if value is None:
@@ -9623,6 +9887,169 @@ def _fpms_lark_mark_trigger_message_done(message_id: str | None = None) -> None:
         print(f"[jenkinsupdate] DONE reaction failed: {ex!r}", flush=True)
 
 
+# ---------------------------------------------------------------------------
+# Recent Jenkins runs (per chat, today) — powers "rebuild" / "rebuild again".
+# ---------------------------------------------------------------------------
+_JU_RUN_HISTORY_LOCK = threading.Lock()
+_JU_RUN_HISTORY: dict[str, list[dict]] = {}
+_JU_RUN_HISTORY_MAX = 40
+_JU_HISTORY_LOADED = False
+
+
+def _ju_history_file_path() -> Path:
+    """Where today's runs persist (survives restart). Override with ``JENKINSUPDATE_HISTORY_FILE``."""
+    custom = (os.environ.get("JENKINSUPDATE_HISTORY_FILE") or "").strip()
+    if custom:
+        return Path(custom)
+    return Path(__file__).resolve().parent / "jenkinsupdate.json"
+
+
+def _ju_load_history_locked() -> None:
+    """Load persisted runs once (caller holds ``_JU_RUN_HISTORY_LOCK``). Keeps only **today**."""
+    global _JU_HISTORY_LOADED
+    if _JU_HISTORY_LOADED:
+        return
+    _JU_HISTORY_LOADED = True
+    path = _ju_history_file_path()
+    try:
+        if not path.is_file():
+            return
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            return
+        import datetime as _dt
+
+        today = _dt.date.today()
+        for cid, lst in raw.items():
+            if not isinstance(lst, list):
+                continue
+            kept: list[dict] = []
+            for rec in lst:
+                if not isinstance(rec, dict):
+                    continue
+                try:
+                    if _dt.date.fromtimestamp(float(rec.get("ts") or 0)) == today:
+                        kept.append(rec)
+                except Exception:
+                    continue
+            if kept:
+                _JU_RUN_HISTORY[str(cid)] = kept[-_JU_RUN_HISTORY_MAX:]
+    except Exception as ex:
+        print(f"[jenkinsupdate] history load failed: {ex!r}", flush=True)
+
+
+def _ju_save_history_locked() -> None:
+    """Atomically persist the in-memory history (caller holds ``_JU_RUN_HISTORY_LOCK``)."""
+    path = _ju_history_file_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(
+            json.dumps(_JU_RUN_HISTORY, ensure_ascii=False, indent=0), encoding="utf-8"
+        )
+        tmp.replace(path)
+    except Exception as ex:
+        print(f"[jenkinsupdate] history save failed: {ex!r}", flush=True)
+
+
+def clear_run_history_file() -> None:
+    """Wipe all recorded runs + the JSON file. Wired to a **midnight (00:00)** cron in main.py."""
+    global _JU_HISTORY_LOADED
+    with _JU_RUN_HISTORY_LOCK:
+        _JU_RUN_HISTORY.clear()
+        _JU_HISTORY_LOADED = True
+        path = _ju_history_file_path()
+        try:
+            if path.is_file():
+                path.unlink()
+        except Exception as ex:
+            print(f"[jenkinsupdate] history file unlink failed: {ex!r}", flush=True)
+    print("[jenkinsupdate] run history cleared (midnight reset).", flush=True)
+
+
+def _ju_run_label(job_profile: str, data: dict) -> str:
+    """Human label for a recorded run, e.g. ``FPMS UAT MASTER`` / ``FNT RC UAT``."""
+    jp = (job_profile or "fpms").strip()
+    env = str((data or {}).get("environment") or "").strip()
+    titles = {
+        "vpn_creation": "VPN CREATION",
+        "fnt_rc": "FNT RC UAT",
+        "sms_uat": "SMS UAT UPDATE",
+        "fpms_prod_script": "FPMS PROD SCRIPT RUN",
+        "bi_api_update": "BI API UPDATE",
+        "qrqm_update": "QRQM UPDATE",
+        "bi_script_update": "BI SCRIPT UPDATE",
+        "venue_uat": "VENUE UAT",
+        "cpms_igo_uat": "CPMS / IGO UAT",
+        "pms_uat": "PMS UAT UPDATE",
+    }
+    base = titles.get(jp, "FPMS UAT")
+    if env and jp in ("fpms", "pms_uat"):
+        return f"{base} ({env})"
+    return base
+
+
+def _ju_build_run_record(
+    *,
+    job_profile: str,
+    data: dict,
+    resolved: list[str],
+    jenkins_build_url: str,
+    raw_prompt_body: str,
+    trigger_message_id: str | None,
+    thread_root_id: str | None,
+) -> dict:
+    """Build a run record (held in the gate session; only persisted once **Build is clicked**)."""
+    return {
+        "ts": time.time(),
+        "job_profile": (job_profile or "fpms").strip() or "fpms",
+        "data": dict(data or {}),
+        "resolved": list(resolved or []),
+        "jenkins_build_url": (jenkins_build_url or "").strip(),
+        "raw_prompt_body": raw_prompt_body or "",
+        "trigger_message_id": (trigger_message_id or "").strip() or None,
+        "thread_root_id": (thread_root_id or "").strip() or None,
+        "label": _ju_run_label(job_profile, data),
+    }
+
+
+def _ju_commit_run_record(chat_id: str, rec: dict) -> None:
+    """Persist a run record to history + ``jenkinsupdate.json`` — called **after Build is clicked**."""
+    cid = (chat_id or "").strip()
+    if not cid or not isinstance(rec, dict):
+        return
+    rec = dict(rec)
+    rec["ts"] = time.time()  # stamp the actual build-click time
+    with _JU_RUN_HISTORY_LOCK:
+        _ju_load_history_locked()
+        lst = _JU_RUN_HISTORY.setdefault(cid, [])
+        lst.append(rec)
+        if len(lst) > _JU_RUN_HISTORY_MAX:
+            del lst[: len(lst) - _JU_RUN_HISTORY_MAX]
+        _ju_save_history_locked()
+
+
+def _ju_today_runs(chat_id: str) -> list[dict]:
+    """Today's recorded runs for ``chat_id``, newest first."""
+    cid = (chat_id or "").strip()
+    if not cid:
+        return []
+    import datetime as _dt
+
+    today = _dt.date.today()
+    out: list[dict] = []
+    with _JU_RUN_HISTORY_LOCK:
+        _ju_load_history_locked()
+        for rec in _JU_RUN_HISTORY.get(cid, []):
+            try:
+                if _dt.date.fromtimestamp(float(rec.get("ts") or 0)) == today:
+                    out.append(rec)
+            except Exception:
+                continue
+    out.reverse()
+    return out
+
+
 def _fpms_lark_begin_jenkins_run(
     chat_id: str,
     session_key: str,
@@ -9634,8 +10061,15 @@ def _fpms_lark_begin_jenkins_run(
     jenkins_build_url: str | None = None,
     job_profile: str = "fpms",
     lark_message_id: str | None = None,
+    auto_build: bool = False,
+    thread_root_id: str | None = None,
 ) -> None:
-    """Install ``jenkins_wait_build`` gate, react **Got It** on the trigger message, spawn Playwright."""
+    """Install ``jenkins_wait_build`` gate, react **Got It** on the trigger message, spawn Playwright.
+
+    ``auto_build`` pre-approves the YES/NO gate so the run clicks **Build** automatically once the
+    page verification passes (used by *rebuild without confirmation*). Verification mismatches still
+    block the click, so it never builds a wrong form.
+    """
     jp = (job_profile or "fpms").strip() or "fpms"
     if jp == "fnt_rc":
         cfg = _fnt_rc_bot_build_config_block(data, resolved)
@@ -9671,7 +10105,7 @@ def _fpms_lark_begin_jenkins_run(
     wait_sess = {
         "state": "jenkins_wait_build",
         "build_gate_event": ev,
-        "approve_build": None,
+        "approve_build": True if auto_build else None,
         "lark_cancel": False,
         "lark_trigger_message_id": trigger_mid,
     }
@@ -9679,6 +10113,28 @@ def _fpms_lark_begin_jenkins_run(
         prev_sess if isinstance(prev_sess, dict) else None, wait_sess
     )
     _fpms_lark_sessions_put_chat_key(session_key, wait_sess)
+    if auto_build:
+        # Pre-approve: run() will click Build as soon as the page verification passes (no human tap).
+        ev.set()
+    # Stash the run record on the gate; it's persisted to jenkinsupdate.json ONLY after Build is
+    # actually clicked (so cancelled / NO / timed-out runs never enter the rebuild history).
+    try:
+        rec_pending = _ju_build_run_record(
+            job_profile=jp,
+            data=data,
+            resolved=resolved,
+            jenkins_build_url=ju,
+            raw_prompt_body=raw_prompt_body,
+            trigger_message_id=trigger_mid,
+            thread_root_id=thread_root_id,
+        )
+        with _fpms_lark_sessions_lock:
+            _gs = _fpms_lark_sessions.get(session_key)
+            if isinstance(_gs, dict):
+                _gs["_ju_pending_record"] = rec_pending
+                _gs["_ju_chat_id"] = chat_id
+    except Exception as _rec_err:
+        print(f"[jenkinsupdate] run-history stash failed: {_rec_err!r}", flush=True)
     update_all = bool(data.get("update_all_services"))
     raw_headless = os.environ.get("JENKINSUPDATE_BOT_HEADLESS", "1").strip().lower()
     bot_headless = raw_headless in ("1", "true", "yes", "on")
@@ -12767,6 +13223,8 @@ def _dispatch_lark_update_command_body(
         )
 
     head_line = _jenkins_update_first_non_empty_line(body)
+    svc_tokens = _peek_service_tokens_from_update_body(body)
+    env_hint = _peek_environment_from_update_body(body)
     ties_h: list[tuple[str, float, str, str]] = []
     if not _jenkins_update_headline_is_config_like(head_line):
         hint_q = _jenkins_update_job_hint_query_for_ranking(body).strip()
@@ -12782,6 +13240,31 @@ def _dispatch_lark_update_command_body(
     # "UPDATE FPMS UAT MASTER" goes straight to the Master job instead of asking 1/2).
     ties = _jenkins_update_prefer_master_or_branch(ties, head_line)
     ties = _jenkins_update_dedupe_ties(ties)
+    # Service-first routing: named services → drop jobs whose catalog cannot host them; then
+    # environment narrows among survivors. No services in the message → headline/env rank only.
+    if svc_tokens:
+        ties = _jenkins_update_filter_ties_by_services(ties, svc_tokens)
+        if not ties:
+            sample_jobs = ", ".join(
+                lbl for _a, _s, lbl, _u in _jenkins_update_disambiguation_ties(
+                    _rank_jenkins_update_job_matches(body), band=0.05
+                )[:4]
+            )
+            send(
+                chat_id,
+                "❌ **No Jenkins job** lists the service(s) you named: "
+                f"**{', '.join(svc_tokens[:8])}**"
+                + (" …" if len(svc_tokens) > 8 else "")
+                + ".\n"
+                "Check the service id / port (e.g. `9000` → **mgnt-apiserver** on **FPMS UAT Branch**; "
+                "`auth-rollout` → **FPMS UAT Master**). "
+                + (f"Headline matches included: {sample_jobs}." if sample_jobs else ""),
+            )
+            return True
+        if env_hint:
+            ties = _jenkins_update_filter_ties_by_environment(ties, env_hint)
+    elif env_hint:
+        ties = _jenkins_update_filter_ties_by_environment(ties, env_hint)
     if not ties:
         sample = ", ".join(sorted(JENKINS_UPDATE_JOB_REGISTRY.keys())[:14])
         send(
@@ -12912,6 +13395,213 @@ def _fpms_lark_release_all_build_waits_in_chat(chat_id: str) -> int:
     return released
 
 
+_JU_REBUILD_INTENT_RE = re.compile(
+    r"(?i)\b(?:re-?build|re-?run|build\s+again|run\s+again|trigger\s+again|build\s+it\s+again)\b"
+    r"|重新(?:构建|建|跑|触发|执行)|再(?:构建|建|跑|执行|来一?次)|重跑|重新\s*build"
+)
+_JU_REBUILD_NOCONFIRM_RE = re.compile(
+    r"(?i)\b(?:no\s*(?:need\s*)?(?:confirm(?:ation)?|confirmation)|without\s+confirm(?:ation)?|"
+    r"don'?t\s+(?:need\s+)?confirm|skip\s+confirm(?:ation)?|directly|straight\s+away|auto\s*build)\b"
+    r"|直接(?:构建|建|build|跑)|不(?:用|需|需要)确认|无需确认|免确认|不用等"
+)
+_JU_REBUILD_CONFIRM_RE = re.compile(
+    r"(?i)\b(?:need\s+confirm(?:ation)?|still\s+(?:need\s+)?confirm|with\s+confirm(?:ation)?|"
+    r"ask\s+(?:me\s+)?(?:first|again)|let\s+me\s+(?:confirm|click))\b"
+    r"|需要确认|要确认|仍(?:然)?(?:需要|要)确认|确认后"
+)
+_JU_REBUILD_LIST_RE = re.compile(
+    r"(?i)\b(?:list|which\s+one|which\s+ones?|show\s+(?:me\s+)?(?:the\s+)?(?:list|updates?)|today'?s?)\b"
+    r"|列出|哪些|哪一个|有哪些|今天.*(?:更新|构建)|列表"
+)
+
+
+def _parse_jenkins_rebuild_request(text: str) -> dict | None:
+    """
+    Detect a *rebuild* request. Returns ``{"no_confirm": bool, "list": bool, "index": int|None}``
+    or ``None`` when the text is not a rebuild request.
+
+    Default is **with confirmation** (refill the form, then YES/NO). ``no_confirm`` only when the
+    user explicitly asks to build directly — and an explicit "still need confirmation" overrides it.
+    """
+    t = (text or "").strip()
+    if not t or not _JU_REBUILD_INTENT_RE.search(t):
+        return None
+    wants_confirm = bool(_JU_REBUILD_CONFIRM_RE.search(t))
+    no_confirm = bool(_JU_REBUILD_NOCONFIRM_RE.search(t)) and not wants_confirm
+    want_list = bool(_JU_REBUILD_LIST_RE.search(t))
+    idx: int | None = None
+    m = re.search(r"(?i)\b(?:no\.?\s*|#\s*|number\s*|第)?(\d{1,2})\b", t)
+    if m:
+        # Only treat a small standalone number as a pick index (avoid version digits etc.).
+        try:
+            v = int(m.group(1))
+            if 1 <= v <= 40:
+                idx = v
+        except ValueError:
+            idx = None
+    return {"no_confirm": no_confirm, "list": want_list, "index": idx}
+
+
+def _ju_rebuild_run_summary(rec: dict) -> str:
+    """One-line summary of a recorded run for the rebuild list."""
+    d = rec.get("data") or {}
+    parts: list[str] = [str(rec.get("label") or "FPMS UAT")]
+    br = str(d.get("branch") or "").strip()
+    ver = str(d.get("version") or "").strip()
+    if br:
+        parts.append(f"branch={br}")
+    if ver:
+        parts.append(f"version={ver}")
+    if d.get("update_all_services"):
+        parts.append("services=ALL")
+    else:
+        toks = rec.get("resolved") or d.get("service_tokens") or []
+        if toks:
+            shown = ", ".join(str(x) for x in list(toks)[:6])
+            more = "" if len(toks) <= 6 else f" +{len(toks) - 6}"
+            parts.append(f"services={shown}{more}")
+    when = ""
+    try:
+        when = time.strftime("%H:%M", time.localtime(float(rec.get("ts") or 0)))
+    except Exception:
+        when = ""
+    head = " · ".join(parts)
+    return f"{head} — built {when}" if when else head
+
+
+def _ju_send_rebuild_list_card(chat_id: str, runs: list[dict], send, *, no_confirm: bool) -> None:
+    """Numbered card of today's runs; each button rebuilds that run."""
+    lines = ["**Rebuild — today's Jenkins updates**", ""]
+    buttons: list[dict] = []
+    for i, rec in enumerate(runs[:10], 1):
+        lines.append(f"{i}. {_ju_rebuild_run_summary(rec)}")
+        buttons.append(
+            _fpms_lark_v2_callback_button(
+                str(i),
+                "primary" if i == 1 else "default",
+                {"k": "ju_rb", "i": str(i), "nc": "1" if no_confirm else "0"},
+                element_id=f"ju_rb_{i}"[:20],
+            )
+        )
+    body_elements: list[dict] = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}},
+        _fpms_lark_v2_column_set_button_row(buttons),
+    ]
+    note = (
+        "Tap a number to **rebuild directly (no confirmation)**."
+        if no_confirm
+        else "Tap a number to rebuild — you'll still get the **YES/NO** confirm card."
+    )
+    body_elements.append({"tag": "div", "text": {"tag": "lark_md", "content": note}})
+    card = {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {"template": "blue", "title": {"tag": "plain_text", "content": "Rebuild Jenkins update"}},
+        "body": {"elements": body_elements},
+    }
+    try:
+        send(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
+    except TypeError:
+        send(chat_id, "\n".join(lines) + "\n\nReply: **rebuild 1** (or 2, 3 …).")
+
+
+def _ju_dispatch_rebuild(
+    chat_id: str,
+    sender_id: str,
+    rec: dict,
+    send,
+    *,
+    no_confirm: bool,
+    lark_message_id: str | None = None,
+) -> bool:
+    """Re-run a recorded job with its stored parameters (confirm by default; auto if ``no_confirm``)."""
+    sk = _fpms_lark_session_key(chat_id, sender_id)
+    with _fpms_lark_sessions_lock:
+        cur = _fpms_lark_sessions.get(sk)
+        busy = isinstance(cur, dict) and cur.get("state") == "jenkins_wait_build"
+    if busy:
+        send(
+            chat_id,
+            "⏳ A Jenkins **Build** confirmation is already pending — tap **YES/NO** (or **cancel**) "
+            "on that card before rebuilding.",
+        )
+        return True
+    label = str(rec.get("label") or "FPMS UAT")
+    mode_txt = "directly (no confirmation)" if no_confirm else "— I'll show the YES/NO confirm card"
+    send(chat_id, f"🔁 Rebuilding **{label}** {mode_txt}…\n{_ju_rebuild_run_summary(rec)}")
+    _fpms_lark_begin_jenkins_run(
+        chat_id,
+        sk,
+        dict(rec.get("data") or {}),
+        list(rec.get("resolved") or []),
+        send,
+        raw_prompt_body=str(rec.get("raw_prompt_body") or ""),
+        jenkins_build_url=str(rec.get("jenkins_build_url") or "") or None,
+        job_profile=str(rec.get("job_profile") or "fpms"),
+        lark_message_id=(lark_message_id or "").strip() or None,
+        auto_build=no_confirm,
+        thread_root_id=str(rec.get("thread_root_id") or "") or None,
+    )
+    return True
+
+
+def handle_lark_jenkins_rebuild_request(
+    chat_id: str,
+    sender_id: str,
+    body: str,
+    send,
+    *,
+    lark_message_id: str | None = None,
+    lark_thread_root_id: str | None = None,
+) -> bool:
+    """
+    Handle "rebuild" / "rebuild again" / "rebuild without confirmation" / "list today's updates".
+
+    Target selection: the run whose thread the user replied in → else a single pick by index →
+    else the most recent run today. With multiple runs and no clear target, show a numbered list.
+    Returns True when consumed.
+    """
+    req = _parse_jenkins_rebuild_request(body)
+    if req is None:
+        return False
+    runs = _ju_today_runs(chat_id)
+    if not runs:
+        send(
+            chat_id,
+            "🔁 I don't have any **Jenkins updates recorded today** to rebuild. "
+            "Start one with e.g. `@Duty Bot update fpms uat master` + branch/version/services.",
+        )
+        return True
+
+    # 1) Replied inside a run's thread → that exact run.
+    root = (lark_thread_root_id or "").strip()
+    if root:
+        for rec in runs:
+            if root and root == (rec.get("trigger_message_id") or rec.get("thread_root_id")):
+                return _ju_dispatch_rebuild(
+                    chat_id, sender_id, rec, send,
+                    no_confirm=req["no_confirm"], lark_message_id=lark_message_id,
+                )
+
+    # 2) Explicit index ("rebuild 2").
+    if req["index"] is not None and 1 <= req["index"] <= len(runs):
+        return _ju_dispatch_rebuild(
+            chat_id, sender_id, runs[req["index"] - 1], send,
+            no_confirm=req["no_confirm"], lark_message_id=lark_message_id,
+        )
+
+    # 3) Explicit "list", or ambiguous (several runs today) → show the numbered list.
+    if req["list"] or len(runs) > 1:
+        _ju_send_rebuild_list_card(chat_id, runs, send, no_confirm=req["no_confirm"])
+        return True
+
+    # 4) Single run today → rebuild it.
+    return _ju_dispatch_rebuild(
+        chat_id, sender_id, runs[0], send,
+        no_confirm=req["no_confirm"], lark_message_id=lark_message_id,
+    )
+
+
 @_fpms_lark_with_sender_union_scope
 def handle_lark_jenkins_update_message(
     chat_id: str,
@@ -12962,6 +13652,27 @@ def handle_lark_jenkins_update_message(
         chat_id, sender_id, clean_text, original_text, send
     ):
         return True
+
+    # "rebuild" / "rebuild again" / "rebuild without confirmation" / "list today's updates".
+    # Re-runs a previously dispatched job with its stored parameters. Skipped while a YES/NO gate is
+    # pending (so it never hijacks a confirmation) and when the message itself is a fresh config block.
+    with _fpms_lark_sessions_lock:
+        _cur_state = _fpms_lark_sessions.get(key)
+    _in_build_wait = isinstance(_cur_state, dict) and _cur_state.get("state") == "jenkins_wait_build"
+    if (
+        not _in_build_wait
+        and _parse_jenkins_rebuild_request(body_early) is not None
+        and not _jenkins_message_has_config_block(body_early)
+    ):
+        if handle_lark_jenkins_rebuild_request(
+            chat_id,
+            sender_id,
+            body_early,
+            send,
+            lark_message_id=lark_message_id,
+            lark_thread_root_id=lark_thread_root_id,
+        ):
+            return True
 
     if low in ("cancel updatemore", "cancel updatemore queue") or re.match(
         r"^cancel\s+updatemore\b", low
@@ -13789,6 +14500,21 @@ def handle_lark_jenkins_card_action(
     if k in ("repo", "repo_can"):
         if _fpms_lark_handle_bi_repo_pick_callbacks(chat_id, sender_id, parsed, send):
             return True
+    if k == "ju_rb":
+        # Rebuild list pick: ``i`` = 1-based index into today's runs, ``nc`` = no-confirm flag.
+        try:
+            idx_rb = int(str(parsed.get("i")).strip())
+        except (TypeError, ValueError):
+            return False
+        no_confirm_rb = str(parsed.get("nc") or "").strip() in ("1", "true", "yes")
+        runs_rb = _ju_today_runs(chat_id)
+        if not (1 <= idx_rb <= len(runs_rb)):
+            send(chat_id, "⚠️ That rebuild option expired — ask **rebuild** again for a fresh list.")
+            return True
+        return _ju_dispatch_rebuild(
+            chat_id, sender_id, runs_rb[idx_rb - 1], send,
+            no_confirm=no_confirm_rb, lark_message_id=lark_message_id,
+        )
     if k == "ju_cancel":
         return handle_lark_jenkins_update_message(
             chat_id,
@@ -14729,6 +15455,27 @@ def run(
                             _click_jenkins_build_button(page)
                             build_clicked = True
                             print("→ **Build** clicked (Lark-approved).")
+                            # Persist to jenkinsupdate.json ONLY now that Build was actually clicked.
+                            try:
+                                with _fpms_lark_sessions_lock:
+                                    _g_rec = _fpms_lark_sessions.get(sk)
+                                    _pend = (
+                                        _g_rec.get("_ju_pending_record")
+                                        if isinstance(_g_rec, dict)
+                                        else None
+                                    )
+                                    _rec_cid = (
+                                        _g_rec.get("_ju_chat_id")
+                                        if isinstance(_g_rec, dict)
+                                        else None
+                                    ) or cid
+                                if _pend:
+                                    _ju_commit_run_record(_rec_cid, _pend)
+                            except Exception as _commit_err:
+                                print(
+                                    f"[jenkinsupdate] run-history commit failed: {_commit_err!r}",
+                                    flush=True,
+                                )
                             if is_vpn:
                                 send(cid, "Creating VPN file. Kindly wait...")
                             else:

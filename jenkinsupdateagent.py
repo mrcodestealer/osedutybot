@@ -533,16 +533,24 @@ def _known_job_aliases() -> list[str]:
         return []
 
 
-def _service_catalog_hints() -> dict[str, list[str]]:
+def _service_catalog_hints() -> dict[str, list[str] | None]:
     ju = _ju()
     if ju is None:
         return {}
-    out: dict[str, list[str]] = {}
+    try:
+        idx = ju.jenkins_update_job_service_index_for_agent()
+        if idx:
+            return dict(idx)
+    except Exception:
+        pass
+    out: dict[str, list[str] | None] = {}
     for name in (
         "FNT_RC_UAT_MASTER_SERVICES",
         "SMS_UAT_UPDATE_SERVICES",
         "PMS_UAT_UPDATE_SERVICES",
-        "FPMS_UAT_BRANCH_SERVICES",
+        "FPMS_UAT_BRANCH_ONLY_SERVICES",
+        "FPMS_UAT_MASTER_ROLLOUT_SERVICES",
+        "FPMS_NT_UAT_BO_SERVICES",
     ):
         try:
             vals = getattr(ju, name, None)
@@ -559,7 +567,10 @@ def _build_llm_prompt(text: str) -> tuple[str, str]:
     alias_block = "\n".join(f"  - {a}" for a in aliases) if aliases else "  (none loaded)"
     cat_lines = []
     for name, vals in catalogs.items():
-        cat_lines.append(f"  {name}: {', '.join(vals)}")
+        if vals is None:
+            cat_lines.append(f"  {name}: (no Services — ignore when routing by service name)")
+        else:
+            cat_lines.append(f"  {name}: {', '.join(vals)}")
     cat_block = "\n".join(cat_lines) if cat_lines else "  (none loaded)"
 
     system = (
@@ -587,7 +598,7 @@ def _build_llm_prompt(text: str) -> tuple[str, str]:
         "Known job aliases (environments):\n"
         f"{alias_block}\n"
         "\n"
-        "Known service catalogs (for reference; do not force a match):\n"
+        "Known Jenkins jobs and their Services catalogs (``null`` / no Services = not a checkbox job):\n"
         f"{cat_block}\n"
     )
     user = f"Extract the Jenkins update parameters from this message:\n\n{text}"

@@ -2141,6 +2141,25 @@ _register_holiday_sync_jobs()
 _add_scheduler_job("morning_reminder", morning_reminder, "cron", hour=7, minute=0)
 _add_scheduler_job("evening_reminder", evening_reminder, "cron", hour=19, minute=0)
 _add_scheduler_job("reminder_sheet_daily_sync", reminder_sheet_daily_sync, "cron", hour=0, minute=5)
+
+
+def _jenkinsupdate_history_midnight_reset() -> None:
+    """Clear jenkinsupdate.json (today's rebuild history) at 00:00."""
+    try:
+        ju = _get_jenkinsupdate()
+        if ju and hasattr(ju, "clear_run_history_file"):
+            ju.clear_run_history_file()
+    except Exception as e:
+        print(f"[jenkinsupdate] midnight history reset failed: {e!r}", flush=True)
+
+
+_add_scheduler_job(
+    "jenkinsupdate_history_midnight_reset",
+    _jenkinsupdate_history_midnight_reset,
+    "cron",
+    hour=0,
+    minute=0,
+)
 _offset_approver_poll_min = int(os.getenv("OSE_OFFSET_APPROVER_POLL_MIN", "3"))
 _add_scheduler_job(
     "poll_offset_approver_notifications",
@@ -4611,6 +4630,35 @@ def lark_webhook():
     except Exception as _math_err:
         print(f"⚠️ Deterministic chat shortcut skipped: {_math_err!r}", flush=True)
 
+    # AI duty/leave assistant (read-only): free-form requests like "i want ose duty
+    # tmmr", "fpms after two days", "fpms and cpms today", "ose next month 16", or
+    # "this week who on leave" → emoji message card(s). The handler has its own strict
+    # keyword/date gate and returns None for anything that isn't a duty/leave query,
+    # so normal command/chat routing below is untouched. Never raises into the hot path.
+    try:
+        import dutyai as _dutyai
+
+        _dutyai_src = (clean_text_multiline or clean_text or "").strip()
+        _dutyai_payloads = _dutyai.handle(_dutyai_src, session_key=_chat_memory_key)
+        if _dutyai_payloads:
+            for _p in _dutyai_payloads:
+                _card = _p.get("lark_card") if isinstance(_p, dict) else None
+                if isinstance(_card, dict):
+                    _resp = send_message(
+                        chat_id, json.dumps(_card, ensure_ascii=False), msg_type="interactive"
+                    )
+                    if isinstance(_resp, dict) and _resp.get("code") not in (0, None) and _p.get("text"):
+                        send_message(chat_id, _p["text"])
+                elif isinstance(_p, dict) and _p.get("text"):
+                    send_message(chat_id, _p["text"])
+            print(
+                f"🗂️ dutyai handled {clean_text!r} → {len(_dutyai_payloads)} card(s)",
+                flush=True,
+            )
+            return _lark_im_done()
+    except Exception as _dutyai_err:
+        print(f"⚠️ dutyai skipped (bot continues normally): {_dutyai_err!r}", flush=True)
+
     if not _skip_commandagent:
         try:
             import commandagent as _commandagent
@@ -6230,6 +6278,12 @@ def _run_main_entry() -> int:
             _boot_codeassist.startup_status()
         except Exception as _boot_code_err:
             print(f"[codeassist] startup check skipped: {_boot_code_err!r}", flush=True)
+        try:
+            import dutyai as _boot_dutyai
+
+            _boot_dutyai.startup_status()
+        except Exception as _boot_dutyai_err:
+            print(f"[dutyai] startup check skipped: {_boot_dutyai_err!r}", flush=True)
         try:
             import jenkinsupdate as _boot_ju
 
