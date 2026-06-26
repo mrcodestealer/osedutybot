@@ -464,6 +464,8 @@ def build_checkmachinelog_lark_card(
     last_success: dict[str, Any] | None,
     ai_summary: dict[str, Any] | None,
     header_lines: list[str],
+    *,
+    stuck_credit: bool = False,
 ) -> dict[str, Any]:
     dstr = target_date.isoformat()
     xfer = transfer_out or {}
@@ -514,7 +516,7 @@ def build_checkmachinelog_lark_card(
         )
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": err_md}})
         header_tpl = "orange"
-        title = "checkmachinelog — error"
+        title = "stuck credit — error in log" if stuck_credit else "checkmachinelog — error"
     else:
         succ = last_success or {}
         uid = latest_any_uid or "n/a"
@@ -529,8 +531,8 @@ def build_checkmachinelog_lark_card(
             f"```\n{_truncate_for_lark(body)}\n```"
         )
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": ok_md}})
-        header_tpl = "green"
-        title = "checkmachinelog — OK"
+        header_tpl = "purple" if stuck_credit else "green"
+        title = f"stuck credit — {machine_display}" if stuck_credit else "checkmachinelog — OK"
 
     elements.append({"tag": "hr"})
     ai_md = format_ai_summary_md(
@@ -727,11 +729,14 @@ def build_third_http_followup(
     latest_any_uid: str | None,
     last_error: dict[str, Any] | None,
     transfer_out: dict[str, Any] | None,
+    allow_without_error: bool = False,
 ) -> dict[str, Any] | None:
-    """When log has error — pick player/time/credit for Third Http screenshot (checkcredit path)."""
-    if not last_error and not latest_err_uid:
+    """Pick player/time/credit for Third Http screenshot (checkcredit /npthirdhttp path)."""
+    if not last_error and not latest_err_uid and not allow_without_error:
         return None
-    uid = str(latest_err_uid or latest_any_uid or "").strip()
+    uid = str((latest_err_uid or latest_any_uid) if (last_error or latest_err_uid) else latest_any_uid or "").strip()
+    if allow_without_error and not uid:
+        uid = str(latest_any_uid or "").strip()
     if not uid:
         return None
     xfer = transfer_out or {}
@@ -767,6 +772,7 @@ def run_check_machine_log(
     source: str | None = None,
     logic_log_basename: str | None = None,
     skip_ai: bool = False,
+    stuck_credit: bool = False,
 ) -> dict[str, Any]:
     """
     Fetch logic log (checkcredit path), parse errors, enrich ±10 context, optional AI on tail.
@@ -832,6 +838,7 @@ def run_check_machine_log(
         last_success=last_success,
         ai_summary=ai_summary,
         header_lines=header_lines,
+        stuck_credit=stuck_credit,
     )
 
     third_http_followup = build_third_http_followup(
@@ -841,6 +848,7 @@ def run_check_machine_log(
         latest_any_uid=la_uid,
         last_error=last_error,
         transfer_out=transfer_out,
+        allow_without_error=bool(stuck_credit),
     )
 
     return {
@@ -859,6 +867,7 @@ def run_check_machine_log(
         "merged_players": merged,
         "log_tail_lines": tail_lines,
         "source": source,
+        "stuck_credit": bool(stuck_credit),
     }
 
 

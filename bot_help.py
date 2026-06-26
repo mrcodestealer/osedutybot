@@ -149,6 +149,7 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
                 ("/checkcreditdate", "Card: machine + player + date", "卡片：机台+玩家+日期"),
                 ("/checkcredit <machine> [date]", "Credit / log check", "额度/日志检查"),
                 ("/checkmachinelog <machine> [date]", "Machine log: last player + error/success", "机台日志：末位玩家+错误/成功"),
+                ("/stuckcredit <machine> [date]", "Stuck credit: log + Third Http transfer-out", "卡机额度：日志+Third Http转出"),
                 ("/machineerror <machine> [date]", "Players with errors only", "仅有错误的玩家"),
                 ("/npthirdhttp …", "NP Third HTTP (async)", "NP Third HTTP"),
                 ("/al [DD/MM]", "Amount Loss CHECKLOG", "Amount Loss 检查"),

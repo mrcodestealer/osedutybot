@@ -738,7 +738,7 @@ def looks_like_issue_report(text: str) -> bool:
     try:
         import commandagent as _ca
 
-        if _ca.detect_prod_batch_command(raw) or _ca.detect_checkmachinelog_command(raw) or _ca.detect_checkcredit_command(raw):
+        if _ca.detect_prod_batch_command(raw) or _ca.detect_stuck_credit_command(raw) or _ca.detect_checkmachinelog_command(raw) or _ca.detect_checkcredit_command(raw):
             return False
     except Exception:
         pass
@@ -792,7 +792,7 @@ def ai_is_issue_report(text: str) -> bool:
     try:
         import commandagent as _ca
 
-        if _ca.detect_prod_batch_command(raw) or _ca.detect_checkmachinelog_command(raw) or _ca.detect_checkcredit_command(raw):
+        if _ca.detect_prod_batch_command(raw) or _ca.detect_stuck_credit_command(raw) or _ca.detect_checkmachinelog_command(raw) or _ca.detect_checkcredit_command(raw):
             return False
     except Exception:
         pass

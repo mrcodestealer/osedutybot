@@ -613,8 +613,10 @@ def run_check_machine_log_job(
     machine_query: str,
     date_str: str,
     thread_root_message_id: Optional[str] = None,
+    *,
+    stuck_credit: bool = False,
 ) -> None:
-    """OSS/LogNavigator logic log → threaded Lark card + AI summary."""
+    """OSS/LogNavigator logic log → threaded Lark card + AI summary (+ Third Http when applicable)."""
     thread_root = (thread_root_message_id or _get_checkcredit_thread_root(chat_id) or "").strip() or None
     if thread_root:
         _set_checkcredit_thread_root(chat_id, thread_root)
@@ -632,6 +634,7 @@ def run_check_machine_log_job(
         out = checkmachinelog.run_check_machine_log(
             str(machine_query).strip(),
             target_date=td,
+            stuck_credit=stuck_credit,
         )
         card = out.get("lark_card")
         if isinstance(card, dict):
@@ -641,13 +644,13 @@ def run_check_machine_log_job(
                 if text:
                     _cml_send(text)
                 else:
-                    _cml_send(f"❌ checkmachinelog card failed: {resp}")
+                    _cml_send(f"❌ {'stuck credit' if stuck_credit else 'checkmachinelog'} card failed: {resp}")
         else:
             text = (out.get("text") or "").strip()
             if text:
                 _cml_send(text)
             else:
-                _cml_send("✅ checkmachinelog finished (no output).")
+                _cml_send(f"✅ {'stuck credit' if stuck_credit else 'checkmachinelog'} finished (no output).")
 
         pick = out.get("third_http_followup")
         if isinstance(pick, dict) and (pick.get("user_id") or "").strip():
@@ -656,11 +659,29 @@ def run_check_machine_log_job(
             cr = pick.get("credit_value")
             cr_s = str(cr) if cr is not None else "n/a"
             ts = str(pick.get("time_short") or "").strip()
-            _cml_send(
-                f"📋 Log shows an **error** for player `{uid}` (credit `{cr_s}` @ `{ts}`).\n"
-                f"**Now checking Third Http ({be})** — did the player **transfer out credit** successfully?\n\n"
-                f"日志有 error — 正在查 **Third Http ({be})** 是否已成功转出额度…"
-            )
+            md = str(pick.get("machine_display") or machine_query).strip()
+            if stuck_credit:
+                _cml_send(
+                    f"📋 **Stuck credit** on `{md}` — last player **`{uid}`** (credit `{cr_s}` @ `{ts}`).\n"
+                    f"**Checking Third Http ({be})** — did the player **transfer out credit**?\n\n"
+                    f"卡机额度 — 正在查 **Third Http ({be})** 玩家 **`{uid}`** 是否已成功转出…"
+                )
+                success_caption = (
+                    f"✅ **Third Http ({be})** — player `{uid}` **transferred out credit** successfully "
+                    f"(Detail matches log amount `{cr_s}` @ `{ts}`).\n"
+                    f"✅ Third Http 有匹配记录 — 玩家 **`{uid}`** 额度应已成功转出（卡机可清）。"
+                )
+            else:
+                _cml_send(
+                    f"📋 Log shows an **error** for player `{uid}` (credit `{cr_s}` @ `{ts}`).\n"
+                    f"**Now checking Third Http ({be})** — did the player **transfer out credit** successfully?\n\n"
+                    f"日志有 error — 正在查 **Third Http ({be})** 是否已成功转出额度…"
+                )
+                success_caption = (
+                    f"✅ **Third Http ({be})** — player `{uid}` **transferred out credit** successfully "
+                    f"(Detail matches log amount `{cr_s}` @ `{ts}`).\n"
+                    f"✅ Third Http 有匹配记录 — 玩家 **`{uid}`** 额度应已成功转出。"
+                )
             _np_run_screenshot_worker(
                 chat_id,
                 uid,
@@ -670,15 +691,12 @@ def run_check_machine_log_job(
                 expected_credit=cr if isinstance(cr, (int, float)) else None,
                 machine_display=str(pick.get("machine_display") or "").strip() or None,
                 thread_root=thread_root,
-                success_caption=(
-                    f"✅ **Third Http ({be})** — player `{uid}` **transferred out credit** successfully "
-                    f"(Detail matches log amount `{cr_s}` @ `{ts}`).\n"
-                    f"✅ Third Http 有匹配记录 — 玩家 **`{uid}`** 额度应已成功转出。"
-                ),
+                success_caption=success_caption,
             )
     except Exception as e:
-        _cml_send(f"❌ checkmachinelog failed: {e}")
-        print(f"[checkmachinelog] error: {e!r}")
+        label = "stuck credit" if stuck_credit else "checkmachinelog"
+        _cml_send(f"❌ {label} failed: {e}")
+        print(f"[{label}] error: {e!r}")
 
 
 def run_checkcredit_navigator_next_log(chat_id: str) -> None:
@@ -5733,6 +5751,50 @@ def lark_webhook():
             machine_q,
             date_arg,
             thread_root,
+        )
+        return _lark_im_done()
+    elif re.search(r"/stuckcredit\b", clean_text, re.I):
+        m_sc = re.search(
+            r"/stuckcredit\b\s+(\S+)(?:\s+(\d{4}-\d{2}-\d{2}))?",
+            clean_text,
+            re.I,
+        )
+        if not m_sc:
+            send_message(
+                chat_id,
+                "❌ Usage:\n"
+                "• `/stuckcredit <machine> [YYYY-MM-DD]` — stuck credit: log + Third Http transfer-out check\n"
+                "• Natural language: `NWR2938 stuck credit` · `stuck credit DHS3077`\n"
+                "Examples: `@Duty Bot /stuckcredit NWR2938` · `NWR2938 stuck credit 2026-06-26`",
+            )
+            return _lark_im_done()
+        machine_q = m_sc.group(1).strip()
+        date_arg = (m_sc.group(2) or "").strip() or datetime.now().strftime("%Y-%m-%d")
+        try:
+            datetime.strptime(date_arg, "%Y-%m-%d")
+        except ValueError:
+            send_message(chat_id, "❌ Date must be `YYYY-MM-DD`.")
+            return _lark_im_done()
+        try:
+            import checkcredit
+
+            use_oss = checkcredit.checkcredit_use_oss_source()
+        except Exception:
+            use_oss = True
+        thread_root = _checkcredit_begin_thread(chat_id, message_id)
+        wait_msg = (
+            "⏳ Stuck credit — reading machine log via OSS HTTP, then Third Http…"
+            if use_oss
+            else "⏳ Stuck credit — reading machine log (LogNavigator), then Third Http…"
+        )
+        _checkcredit_send(chat_id, wait_msg, thread_root=thread_root)
+        start_lark_background_thread(
+            run_check_machine_log_job,
+            chat_id,
+            machine_q,
+            date_arg,
+            thread_root,
+            stuck_credit=True,
         )
         return _lark_im_done()
     elif re.search(r"/(?:checkcreditdate|checkcredit|machineerror)\b", clean_text, re.I):

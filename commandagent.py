@@ -540,6 +540,22 @@ def build_intent_catalog(*, jenkins_available: bool = True) -> list[IntentSpec]:
         )
     )
 
+    _sc_pats: list[str] = ["stuck credit", "credit stuck"]
+    for _m in _cc_machines:
+        _sc_pats.extend([
+            f"{_m} stuck credit", f"stuck credit {_m}",
+            f"{_m} credit stuck", f"credit stuck {_m}",
+            f"stuck credit {_m} 2026-04-27",
+        ])
+    intents.append(
+        IntentSpec(
+            tag="cmd_stuckcredit",
+            command="/stuckcredit",
+            patterns=_augment_human(_sc_pats, max_prefixes=4, max_suffixes=1),
+            arg_kind="machine_id",
+        )
+    )
+
     intents.append(
         IntentSpec(
             tag="cmd_cctv",
@@ -920,6 +936,8 @@ def detect_checkcredit_command(text: str) -> Optional[str]:
         return None
     if _CML_INTENT_RE.search(raw):
         return None
+    if _STUCK_CREDIT_RE.search(raw):
+        return None
     is_error = bool(_CC_ERROR_ONLY_RE.search(raw))
     has_intent = bool(_CC_INTENT_RE.search(raw))
     has_credit = bool(_CC_CREDIT_RE.search(raw))
@@ -962,6 +980,26 @@ def detect_checkmachinelog_command(text: str) -> Optional[str]:
         return None
     dm = _CC_DATE_RE.search(raw)
     return f"/checkmachinelog {machine} {dm.group(1)}" if dm else f"/checkmachinelog {machine}"
+
+
+# ---------------------------------------------------------------------------
+# stuck credit — last player transfer-out via Third Http (always screenshot)
+# Runs BEFORE detect_checkcredit_command ("credit" would false-positive).
+# ---------------------------------------------------------------------------
+
+_STUCK_CREDIT_RE = re.compile(r"(?i)\b(?:stuck\s+credit|credit\s+stuck)\b")
+
+
+def detect_stuck_credit_command(text: str) -> Optional[str]:
+    """e.g. "NWR2938 stuck credit" -> "/stuckcredit NWR2938" """
+    raw = (text or "").strip()
+    if not raw or not _STUCK_CREDIT_RE.search(raw):
+        return None
+    machine = _cc_extract_machine(raw)
+    if not machine:
+        return None
+    dm = _CC_DATE_RE.search(raw)
+    return f"/stuckcredit {machine} {dm.group(1)}" if dm else f"/stuckcredit {machine}"
 
 
 _SHOW_REMINDER_RE = re.compile(r"(?i)^show reminder\s*[?.!]*$")
@@ -1014,7 +1052,7 @@ def detect_identify_issue_command(text: str) -> Optional[str]:
     if not raw or _looks_like_slash_command(raw):
         return None
     # Avoid colliding with the maintenance / credit / jenkins structured flows.
-    if detect_prod_batch_command(raw) or detect_checkmachinelog_command(raw) or detect_checkcredit_command(raw):
+    if detect_prod_batch_command(raw) or detect_stuck_credit_command(raw) or detect_checkmachinelog_command(raw) or detect_checkcredit_command(raw):
         return None
     if _IDENTIFY_ISSUE_RE.search(raw):
         return "/identifyissue"
@@ -1155,6 +1193,12 @@ def build_slash_command(spec: IntentSpec, user_text: str) -> Optional[str]:
         cml = detect_checkmachinelog_command(user_text)
         if cml:
             return cml
+        machine = _cc_extract_machine(user_text)
+        return f"{base} {machine}" if machine else None
+    if spec.tag == "cmd_stuckcredit":
+        sc = detect_stuck_credit_command(user_text)
+        if sc:
+            return sc
         machine = _cc_extract_machine(user_text)
         return f"{base} {machine}" if machine else None
     arg = extract_argument(spec.arg_kind, user_text, spec)
@@ -1330,7 +1374,7 @@ def detect_multi_duty_commands(text: str) -> Optional[list[str]]:
         return None
     if _MULTI_DUTY_SKIP_RE.search(raw):
         return None
-    if detect_prod_batch_command(raw) or detect_checkmachinelog_command(raw) or detect_checkcredit_command(raw):
+    if detect_prod_batch_command(raw) or detect_stuck_credit_command(raw) or detect_checkmachinelog_command(raw) or detect_checkcredit_command(raw):
         return None
     try:
         import jenkinsupdate as _jenkins_gate
@@ -1379,6 +1423,10 @@ def command_signal(text: str) -> dict[str, Any]:
     cml = detect_checkmachinelog_command(raw)
     if cml:
         out.update(tag="cmd_checkmachinelog", confidence=1.0, margin=1.0, command=cml, deterministic=True)
+        return out
+    sc = detect_stuck_credit_command(raw)
+    if sc:
+        out.update(tag="cmd_stuckcredit", confidence=1.0, margin=1.0, command=sc, deterministic=True)
         return out
     cc = detect_checkcredit_command(raw)
     if cc:
@@ -1434,6 +1482,10 @@ def translate_if_enabled(text: str) -> Optional[str]:
     if cml:
         print(f"[commandagent] Check-machine-log map: {raw[:80]!r} → {cml!r}", flush=True)
         return cml
+    sc = detect_stuck_credit_command(raw)
+    if sc:
+        print(f"[commandagent] Stuck-credit map: {raw[:80]!r} → {sc!r}", flush=True)
+        return sc
     # Deterministic credit-check / machine-error mapping (also runs BEFORE the
     cc = detect_checkcredit_command(raw)
     if cc:
