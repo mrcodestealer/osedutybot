@@ -47,6 +47,7 @@ Relevant env vars:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import threading
@@ -56,6 +57,8 @@ import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
+
+logger = logging.getLogger(__name__)
 
 # Fire the reminder this many minutes before the announced action time.
 MAINT_LEAD_MINUTES = 10
@@ -1592,6 +1595,268 @@ def is_maintenance_schedule_message(original_text: str, mention_keys: Sequence[s
     return bool(_ENV_SITE_ALIAS.get(c.get("env_code") or ""))
 
 
+# Max machines for direct set/unset (no confirm card). Larger lists use the confirm flow.
+def _direct_set_unset_max() -> int:
+    try:
+        return max(1, int((os.environ.get("MAINT_DIRECT_SET_UNSET_MAX") or "10").strip()))
+    except ValueError:
+        return 10
+
+
+_DIRECT_DISAMBIG_LLM_SYSTEM = (
+    "You help an EGM duty bot clarify a machine maintenance command.\n"
+    "The user's token matched **zero** or **multiple** machines in webmachine_data.json.\n"
+    "Reply in 1–4 short sentences in the same language as the user (English or 中文).\n"
+    "Ask which machine they meant. List candidate full display names as bullets (•).\n"
+    "If nothing matched, mention that and suggest the closest names if provided.\n"
+    "Do not execute anything — only clarify."
+)
+
+
+def _llm_direct_disambiguation_reply(
+    *,
+    user_text: str,
+    action: str,
+    env_code: str,
+    ambiguous: list[dict[str, Any]],
+    not_found: list[str],
+    suggestions: list[str],
+) -> str | None:
+    """Ask the LLM to phrase a clarification question; ``None`` if LLM unavailable."""
+    if not _maint_llm_enabled():
+        return None
+    action_label = ACTION_LABELS.get(action, action)
+    parts = [
+        f"User message: {user_text.strip()}",
+        f"Intended action: {action_label} ({env_code})",
+    ]
+    if not_found:
+        parts.append("Not found tokens: " + ", ".join(not_found))
+    if suggestions:
+        parts.append("Similar machine names in data: " + "; ".join(suggestions[:12]))
+    for item in ambiguous:
+        tok = item.get("token", "")
+        cands = [c.get("machine", "") for c in (item.get("candidates") or [])]
+        parts.append(f"Token {tok!r} matched multiple: " + "; ".join(cands))
+    user = "\n".join(parts)
+    payload = {
+        "model": _maint_llm_model(),
+        "messages": [
+            {"role": "system", "content": _DIRECT_DISAMBIG_LLM_SYSTEM},
+            {"role": "user", "content": user},
+        ],
+        "max_tokens": 350,
+        "temperature": 0.2,
+    }
+    try:
+        req = urllib.request.Request(
+            f"{_maint_llm_base()}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {_maint_llm_key()}",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=_MAINT_LLM_TIMEOUT) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        content = ((body.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        content = content.strip()
+        return content or None
+    except Exception as exc:
+        logger.warning("direct-set/unset LLM disambiguation failed: %s", exc)
+        return None
+
+
+def _deterministic_disambiguation_reply(
+    *,
+    action: str,
+    env_code: str,
+    ambiguous: list[dict[str, Any]],
+    not_found: list[str],
+    suggestions: list[str],
+) -> str:
+    """Fallback clarification when the LLM is unavailable."""
+    label = ACTION_LABELS.get(action, action)
+    lines = [f"⚠️ Could not run **{label}** directly — please clarify which machine(s):"]
+    for item in ambiguous:
+        tok = item.get("token", "")
+        lines.append("")
+        lines.append(f"**{tok}** matched multiple machines:")
+        for c in item.get("candidates") or []:
+            lines.append(f"• {c.get('belongs', '')} — {c.get('machine', '')}")
+    if not_found:
+        lines.append("")
+        lines.append("**Not found:** " + ", ".join(not_found))
+        if suggestions:
+            lines.append("")
+            lines.append("Did you mean:")
+            for s in suggestions[:8]:
+                lines.append(f"• {s}")
+    lines.append("")
+    lines.append("Reply with the exact machine name or asset id, e.g. `@bot unset NWR2008`.")
+    return "\n".join(lines)
+
+
+def resolve_direct_set_unset_targets(
+    env_code: str,
+    machine_tokens: list[str],
+) -> tuple[list[dict], list[dict[str, Any]], list[str]]:
+    """
+    Resolve shorthand tokens against ``webmachine_data.json``.
+
+    Returns ``(matched, ambiguous, not_found)`` where ``ambiguous`` is
+    ``[{"token": "NWR2008", "candidates": [...]}]``.
+    """
+    import smmachine
+
+    rows = load_webmachine_rows()
+    rows = [r for r in rows if str(r.get("environment") or "PROD").strip().upper() == "PROD"]
+    matched: list[dict] = []
+    ambiguous: list[dict[str, Any]] = []
+    not_found: list[str] = []
+    seen: set[tuple[str, str]] = set()
+
+    for token in machine_tokens:
+        hits = smmachine.resolve_prod_batch_token_hits(env_code, token, rows)
+        if len(hits) == 0:
+            not_found.append(token)
+        elif len(hits) == 1:
+            dedupe = (hits[0]["belongs"].upper(), hits[0]["machine"])
+            if dedupe not in seen:
+                seen.add(dedupe)
+                matched.append(hits[0])
+        else:
+            ambiguous.append({"token": token, "candidates": hits})
+
+    return matched, ambiguous, not_found
+
+
+def _similar_machine_names(env_code: str, token: str, *, limit: int = 8) -> list[str]:
+    """Fuzzy suggestions when a token matches nothing."""
+    import smmachine
+
+    rows = load_webmachine_rows()
+    rows = [r for r in rows if str(r.get("environment") or "PROD").strip().upper() == "PROD"]
+    key = re.sub(r"[^a-z0-9]", "", (token or "").lower())
+    if not key:
+        return []
+    out: list[str] = []
+    for r in rows:
+        if not smmachine._prod_batch_row_matches_env(r, env_code):
+            continue
+        name = _row_display_name(r)
+        if not name:
+            continue
+        hay = re.sub(r"[^a-z0-9]", "", name.lower())
+        if key in hay or hay in key or key[-4:] in hay:
+            out.append(name)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def is_direct_set_unset_message(original_text: str, mention_keys: Sequence[str]) -> bool:
+    """
+    True for short ``set/unset <machine>`` commands that run immediately (no confirm card).
+
+    Bulk lists, group/all scope, and scheduled announcements use the confirm flow instead.
+    """
+    body = _strip_mentions(original_text, mention_keys)
+    if _looks_like_status_check_request(body):
+        return False
+    c = _classify(body)
+    if not c or c.get("action_dt") is not None:
+        return False
+    if _DATE_RE.search(body) and _TIME_IN_TEXT_RE.search(body):
+        return False
+    if c.get("target_kind") != "list":
+        return False
+    machines = c.get("machines") or []
+    if not machines or len(machines) > _direct_set_unset_max():
+        return False
+    env_code = (c.get("env_code") or "").strip().upper()
+    if not env_code:
+        envs = sorted({_normalize_env_code(e) for e in (_env_from_machine_name(m) for m in machines) if e})
+        if len(envs) != 1:
+            return False
+        env_code = envs[0]
+    return bool(_ENV_SITE_ALIAS.get(env_code))
+
+
+def handle_direct_set_unset_message(
+    original_text: str,
+    mention_keys: Sequence[str],
+    *,
+    chat_id: str,
+    send_message: Callable[..., Any],
+    thread_root_message_id: str | None = None,
+) -> tuple[bool, str | None]:
+    """
+    Execute ``set/unset <machine>`` immediately from ``webmachine_data.json``.
+
+    When a token is missing or matches multiple machines, ask the user (LLM phrasing when available).
+    """
+    import smmachine
+
+    body = _strip_mentions(original_text, mention_keys)
+    c = _classify(body)
+    if not c or c.get("action_dt") is not None:
+        return False, None
+
+    action = c["action"]
+    machines_tokens = list(c.get("machines") or [])
+    env_code = (c.get("env_code") or "").strip().upper()
+    if not env_code:
+        envs = sorted({_normalize_env_code(e) for e in (_env_from_machine_name(m) for m in machines_tokens) if e})
+        if len(envs) != 1:
+            return True, "⚠️ Machines span multiple environments — specify one site or use full machine names."
+        env_code = envs[0]
+
+    matched, ambiguous, not_found = resolve_direct_set_unset_targets(env_code, machines_tokens)
+
+    if ambiguous or not_found:
+        suggestions: list[str] = []
+        for tok in not_found:
+            suggestions.extend(_similar_machine_names(env_code, tok))
+        suggestions = list(dict.fromkeys(suggestions))
+        reply = _llm_direct_disambiguation_reply(
+            user_text=body,
+            action=action,
+            env_code=env_code,
+            ambiguous=ambiguous,
+            not_found=not_found,
+            suggestions=suggestions,
+        )
+        if not reply:
+            reply = _deterministic_disambiguation_reply(
+                action=action,
+                env_code=env_code,
+                ambiguous=ambiguous,
+                not_found=not_found,
+                suggestions=suggestions,
+            )
+        send_message(chat_id, reply)
+        return True, None
+
+    if not matched:
+        return True, f"⚠️ No machines matched in webmachine_data.json.\n{_data_path_hint()}"
+
+    print(
+        f"[maintenanceagent] direct {action} env={env_code} machines={len(matched)} "
+        f"data={_last_data_path or 'NOT FOUND'}",
+        flush=True,
+    )
+    smmachine.start_prod_batch_job_direct(
+        chat_id=chat_id,
+        action=action,
+        machines=matched,
+        send_message=send_message,
+        thread_root_message_id=thread_root_message_id,
+    )
+    return True, None
+
+
 def is_short_set_unset_only_message(original_text: str, mention_keys: Sequence[str]) -> bool:
     """
     True when the message is only ``set`` or ``unset`` (maintenance implied) with no machine list.
@@ -1613,6 +1878,8 @@ def short_set_unset_usage_text(original_text: str, mention_keys: Sequence[str]) 
         f"• `@bot {verb} nwr8237`\n"
         f"• `@bot {verb} nwr8237,nwr8238&nwr8239`\n"
         f"• `@bot {verb} maintenance` also works explicitly\n\n"
+        f"Short commands (≤{_direct_set_unset_max()} machines) run **immediately** with no confirm card.\n"
+        f"Larger lists still show Proceed/Cancel.\n\n"
         f"You can also paste machine names on the lines after `{verb}`."
     )
 

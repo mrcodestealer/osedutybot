@@ -3014,7 +3014,85 @@ def resolve_prod_batch_bot_targets(
     return matched, not_found
 
 
-def _prod_batch_format_matched_line(m: dict) -> str:
+def resolve_prod_batch_token_hits(
+    env_code: str,
+    token: str,
+    all_rows: list[dict],
+) -> list[dict]:
+    """All ``webmachine_data.json`` rows matching one user token within ``env_code``."""
+    try:
+        kind, key = _parse_target_line(token)
+    except ValueError:
+        return []
+    hits: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for row in all_rows:
+        if not _prod_batch_row_matches_env(row, env_code):
+            continue
+        machine_name = str(row.get("name") or row.get("machine") or "").strip()
+        if not machine_name:
+            continue
+        if not _row_text_matches(kind, key, machine_name):
+            continue
+        belongs = str(row.get("belongs") or "").strip()
+        dedupe = (belongs.upper(), machine_name)
+        if dedupe in seen:
+            continue
+        seen.add(dedupe)
+        hits.append(
+            {
+                "belongs": belongs,
+                "machine": machine_name,
+                "status": str(row.get("status") or "").strip(),
+                "online": str(row.get("online") or "").strip(),
+                "is_test": bool(row.get("is_test")),
+            }
+        )
+    return hits
+
+
+def start_prod_batch_job_direct(
+    *,
+    chat_id: str,
+    action: str,
+    machines: list[dict],
+    send_message: Callable[..., Any],
+    thread_root_message_id: str | None = None,
+) -> None:
+    """Run set/unset immediately — no Proceed/Cancel confirm card."""
+    from prod_machine_batch import ACTION_LABELS
+
+    if thread_root_message_id:
+        try:
+            import main as _main_mod  # noqa: WPS433
+
+            _main_mod._set_prod_batch_thread_root(chat_id, thread_root_message_id)
+        except Exception:
+            pass
+
+    label = ACTION_LABELS.get(action, action)
+    send_message(
+        chat_id,
+        f"▶️ **{label}** on **{len(machines)}** machine(s) — executing now (no confirmation)…",
+    )
+
+    run_job_id = uuid.uuid4().hex
+    with _PROD_BATCH_JOBS_LOCK:
+        _PROD_BATCH_JOBS[run_job_id] = {
+            "status": "running",
+            "action": action,
+            "machines": machines,
+            "chat_id": chat_id,
+            "thread_root_message_id": (thread_root_message_id or "").strip() or None,
+            "cancel_requested": False,
+            "cancel_summary_sent": False,
+        }
+
+    threading.Thread(
+        target=_run_prod_batch_bot_job_thread,
+        args=(run_job_id, chat_id, action, "", machines, send_message),
+        daemon=True,
+    ).start()
     """One confirm-card bullet — machine name + status | online from webmachine_data.json."""
     head = f"{m.get('belongs', '')} — {m.get('machine', '')}"
     bits: list[str] = []

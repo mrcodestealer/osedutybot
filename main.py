@@ -5353,6 +5353,35 @@ def lark_webhook():
             if st_reply:
                 send_message(chat_id, st_reply)
             return _lark_im_done()
+    elif maintenancemachineagent.is_direct_set_unset_message(original_text, mention_keys):
+        # Short ``set/unset NWR2008`` — execute immediately; LLM asks only when ambiguous/not found.
+        if chat_type == "group" and not bot_mentioned:
+            print("⏭️ direct set/unset ignored (bot not @mentioned in group)", flush=True)
+            return _lark_im_done()
+        if data.get("header", {}).get("event_type") == "im.message.receive_v1":
+            msg_obj = (data.get("event") or {}).get("message") or {}
+            thread_root = _prod_batch_thread_root_from_incoming_message(
+                msg_obj, message_id=message_id
+            )
+        else:
+            thread_root = (message_id or "").strip() or None
+        if thread_root:
+            _set_prod_batch_thread_root(chat_id, thread_root)
+        pb_send = make_prod_batch_thread_send(chat_id, thread_root=thread_root)
+        try:
+            handled_direct, direct_reply = maintenancemachineagent.handle_direct_set_unset_message(
+                original_text,
+                mention_keys,
+                chat_id=chat_id,
+                send_message=pb_send,
+                thread_root_message_id=thread_root,
+            )
+        except Exception as _direct_err:
+            handled_direct, direct_reply = True, f"❌ Direct set/unset failed: {_direct_err}"
+        if handled_direct:
+            if direct_reply:
+                pb_send(chat_id, direct_reply)
+            return _lark_im_done()
     elif maintenancemachineagent.is_short_set_unset_only_message(original_text, mention_keys):
         if chat_type == "group" and not bot_mentioned:
             print("⏭️ set/unset shorthand ignored (bot not @mentioned in group)", flush=True)

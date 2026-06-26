@@ -108,6 +108,8 @@ import sys
 import tempfile
 import threading
 import time
+
+import requests
 from datetime import datetime
 from collections.abc import Sequence
 from pathlib import Path
@@ -559,6 +561,18 @@ _NL_JENKINS_UPDATE_RE = re.compile(
 VPN_CREATE_CMD_RE = re.compile(r"/create\s*vpn\b", re.I)
 _NL_VPN_CREATE_RE = re.compile(
     r"(?i)\b(?:create|make|generate|new|open|add)\s+(?:a\s+|an\s+|new\s+)?vpn\b"
+)
+# Find **existing** VPN ``.conf`` on VPN_CREATION (search only — no new build).
+VPN_FIND_CMD_RE = re.compile(r"/find\s*vpn(?:\s*(?:conf|file))?\b", re.I)
+_NL_VPN_FIND_RE = re.compile(
+    r"(?i)(?:"
+    r"(?:help(?:\s+me)?|please|can you(?:\s+help(?:\s+me)?)?)\s+(?:to\s+)?"
+    r"(?:find|search|get|look\s+for)\s+(?:the\s+)?(?:(?:old\s+)?vpn\s+)?(?:conf(?:ig)?\s+)?files?"
+    r"|(?:find|search|get|look\s+for)\s+(?:the\s+)?(?:old\s+)?vpn\s+(?:conf(?:ig)?\s+)?(?:file\s+)?"
+    r")|(?:"
+    r"(?:请|帮我|帮忙|能否|可以)?(?:帮)?(?:我)?(?:找|查找|搜索|查|要)(?:一下|下)?"
+    r".{0,40}?(?:vpn\s*)?(?:配置)?(?:文件|档)"
+    r")"
 )
 
 FPMS_PROD_SCRIPT_FLAG_RE = re.compile(r"--fpmsprodscript\b", re.I)
@@ -3308,6 +3322,331 @@ def _vpn_location_picker_text() -> str:
         lines.append(f"{i}. {opt}")
     lines.append("\nExample: reply `2` for **PH_41**, or type `PH_41`.")
     return "\n".join(lines)
+
+
+def _vpn_find_extract_query(body: str) -> str:
+    """Pull username/token from ``find vpn file alex`` / ``帮我找vpn配置文件 alex``."""
+    raw = (body or "").replace("\r\n", "\n").strip()
+    raw = re.sub(r"@_user_\d+", "", raw)
+    raw = re.sub(r"<[^>]+>", "", raw).strip()
+    m = re.search(
+        r"(?i)(?:find|search|get|look\s+for)\s+(?:the\s+)?(?:old\s+)?(?:vpn\s+)?"
+        r"(?:conf(?:ig)?\s+)?(?:file\s+)?(?:for\s+)?(\S+)\s*$",
+        raw,
+    )
+    if m:
+        return m.group(1).strip().strip(":,")
+    m_cn = re.search(
+        r"(?:请|帮我|帮忙)?(?:找|查找|搜索|查)(?:一下|下)?(?:旧|老的?|之前)?(?:的)?"
+        r"(?:vpn\s*)?(?:配置)?(?:文件|档)(?:给|for)?\s*(\S+)\s*$",
+        raw,
+        re.I,
+    )
+    if m_cn:
+        return m_cn.group(1).strip().strip(":，,")
+    m_cn_mid = re.search(
+        r"(?:请|帮我|帮忙)?(?:找|查找|搜索|查)(?:一下|下)?\s+(\S+)\s+的\s+(?:vpn\s*)?(?:配置)?(?:文件|档)",
+        raw,
+        re.I,
+    )
+    if m_cn_mid:
+        return m_cn_mid.group(1).strip().strip(":，,")
+    m_cn2 = re.search(
+        r"(\S+)\s*(?:的)?(?:vpn\s*)?(?:配置)?(?:文件|档)\s*$",
+        raw,
+    )
+    if m_cn2 and _NL_VPN_FIND_RE.search(raw):
+        cand = m_cn2.group(1).strip().strip(":，,")
+        if cand.casefold() not in ("vpn", "配置", "文件", "档案"):
+            return cand
+    if VPN_FIND_CMD_RE.search(raw):
+        rest = VPN_FIND_CMD_RE.sub("", raw, count=1).strip()
+        rest = re.sub(r"^(?:conf|file)\s+", "", rest, flags=re.I).strip()
+        if rest:
+            return rest.split()[0].strip().strip(":,")
+    m2 = re.search(r"(?i)(?:vpn[_\s]*users?|user(?:name)?)\s*[:=]\s*(\S+)", raw)
+    if m2:
+        return m2.group(1).strip().strip(":,")
+    m2_cn = re.search(r"(?:(?:用户|用户名|账号)\s*[:：=]\s*)(\S+)", raw)
+    if m2_cn:
+        return m2_cn.group(1).strip().strip(":，,")
+    cleaned = _NL_VPN_FIND_RE.sub("", raw, count=1).strip()
+    cleaned = re.sub(
+        r"(?i)^(?:for|user|username|name|给|用户|用户名|账号)\s*[:：=]?\s*", "", cleaned
+    ).strip()
+    if cleaned:
+        return cleaned.split()[0].strip().strip(":，,")
+    return ""
+
+
+def _jenkinsbot_internal_base_url() -> str:
+    host = (os.environ.get("JENKINS_BOT_HOST") or "127.0.0.1").strip() or "127.0.0.1"
+    port = (os.environ.get("JENKINS_BOT_PORT") or "5000").strip() or "5000"
+    return f"http://{host}:{port}"
+
+
+def _jenkinsbot_internal_headers() -> dict[str, str]:
+    tok = (
+        os.environ.get("JENKINS_INTERNAL_TOKEN") or os.environ.get("DUTY_INTERNAL_TOKEN") or ""
+    ).strip()
+    headers = {"Content-Type": "application/json"}
+    if tok:
+        headers["X-Duty-Internal-Token"] = tok
+    return headers
+
+
+def _jenkinsbot_search_vpn_conf(query: str) -> tuple[list[dict], str | None]:
+    """Ask jenkinsbot (HTTP) to search VPN_CREATION artifacts. Returns ``(matches, error)``."""
+    q = (query or "").strip()
+    if not q:
+        return [], "empty query"
+    url = _jenkinsbot_internal_base_url() + "/internal/vpn-conf-search"
+    try:
+        r = requests.post(
+            url,
+            json={"query": q},
+            headers=_jenkinsbot_internal_headers(),
+            timeout=120,
+        )
+        data = r.json() if r.content else {}
+    except Exception as ex:
+        return [], f"jenkinsbot unreachable ({ex!r})"
+    if r.status_code == 401:
+        return [], "jenkinsbot unauthorized (check JENKINS_INTERNAL_TOKEN / DUTY_INTERNAL_TOKEN)"
+    if not isinstance(data, dict) or not data.get("ok"):
+        err = str((data or {}).get("error") or r.text or r.status_code)[:300]
+        return [], err or f"HTTP {r.status_code}"
+    matches = data.get("matches")
+    return (list(matches) if isinstance(matches, list) else []), None
+
+
+def _jenkinsbot_deliver_vpn_conf(
+    chat_id: str,
+    row: dict,
+    *,
+    reply_message_id: str | None = None,
+) -> tuple[bool, str]:
+    """Ask jenkinsbot to download + send one ``.conf`` into this chat."""
+    url = _jenkinsbot_internal_base_url() + "/internal/vpn-conf-deliver"
+    payload = {
+        "chat_id": chat_id,
+        "build": int(row.get("build") or 0),
+        "relative_path": str(row.get("relative_path") or ""),
+        "file": str(row.get("file") or ""),
+        "job_base": str(row.get("job_base") or ""),
+        "reply_message_id": (reply_message_id or "").strip(),
+    }
+    try:
+        r = requests.post(
+            url, json=payload, headers=_jenkinsbot_internal_headers(), timeout=120
+        )
+        data = r.json() if r.content else {}
+    except Exception as ex:
+        return False, f"jenkinsbot deliver failed ({ex!r})"
+    if isinstance(data, dict) and data.get("ok"):
+        return True, str(data.get("file") or payload["file"])
+    err = str((data or {}).get("error") or r.text or r.status_code)[:300]
+    return False, err or f"HTTP {r.status_code}"
+
+
+def _fpms_lark_ask_jenkinsbot_find_vpn_lark(chat_id: str, query: str, send) -> None:
+    """Fallback when HTTP to jenkinsbot fails — @ jenkinsbot with ``/FindVpnConf``."""
+    jenkins_oid = _fpms_lark_jenkins_bot_open_id()
+    at = f'<at user_id="{jenkins_oid}">jenkinsbot</at> ' if jenkins_oid else ""
+    try:
+        send(chat_id, f"{at}/FindVpnConf {query}".strip())
+    except Exception as ex:
+        print(f"⚠️ VPN find jenkinsbot @ failed: {ex!r}", flush=True)
+
+
+def _fpms_lark_vpn_find_pick_card_json(
+    candidates: list[dict], query: str, *, picker_sid: str
+) -> str:
+    """Card: pick which ``.conf`` to send when several match (e.g. alex → alextai / alexcheng)."""
+    cap = min(10, len(candidates))
+    buttons: list[dict[str, object]] = []
+    for i in range(cap):
+        row = candidates[i]
+        fn = str(row.get("file") or "?")
+        bn = row.get("build")
+        label = f"{i + 1}. {fn}"[:60]
+        buttons.append(
+            _fpms_lark_v2_callback_button(
+                label,
+                "primary" if i == 0 else "default",
+                {"k": "vpn_find", "i": i + 1, "sid": picker_sid},
+                element_id=f"vpnf{i}"[:20],
+            )
+        )
+    body_elements: list[dict[str, object]] = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": (
+                    f"🔍 **{cap}** VPN `.conf` files match **`{query}`** — tap one to download:"
+                ),
+            },
+        }
+    ]
+    for off in range(0, len(buttons), 3):
+        body_elements.append(_fpms_lark_v2_column_set_button_row(buttons[off : off + 3]))
+    body_elements.append({"tag": "hr"})
+    body_elements.append(
+        _fpms_lark_v2_callback_button(
+            "Cancel", "default", {"k": "ju_cancel"}, element_id="vpn_find_can"
+        )
+    )
+    card = {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "body": {"elements": body_elements},
+    }
+    return json.dumps(card, ensure_ascii=False)
+
+
+def _fpms_lark_begin_vpn_find_deliver(
+    chat_id: str,
+    session_key: str,
+    row: dict,
+    send,
+    *,
+    lark_message_id: str | None = None,
+) -> bool:
+    fn = str(row.get("file") or "")
+    bn = row.get("build")
+    ok, msg = _jenkinsbot_deliver_vpn_conf(
+        chat_id, row, reply_message_id=lark_message_id
+    )
+    if ok:
+        send(
+            chat_id,
+            f"✅ Sent VPN config **`{fn}`**.",
+        )
+        return True
+    send(
+        chat_id,
+        f"❌ Could not send `{fn}`: {msg}\n"
+        "Trying `@jenkinsbot` fallback…",
+    )
+    _fpms_lark_ask_jenkinsbot_find_vpn_lark(chat_id, fn.replace(".conf", ""), send)
+    return False
+
+
+def _fpms_lark_dispatch_vpn_find(
+    chat_id: str,
+    session_key: str,
+    query: str,
+    send,
+    *,
+    lark_message_id: str | None = None,
+) -> bool:
+    """Search VPN_CREATION via jenkinsbot; 0 / 1 / many → message or pick card."""
+    q = (query or "").strip()
+    if len(q) < 1:
+        send(
+            chat_id,
+            "⚠️ Who should I search for? Examples:\n"
+            "- `help me find vpn file alex`\n"
+            "- `帮我找vpn配置文件 alex`\n"
+            "- `/findvpn alex`",
+        )
+        return True
+    send(chat_id, f"🔍 Finding VPN `.conf` files matching **`{q}`** — kindly wait…")
+    matches, err = _jenkinsbot_search_vpn_conf(q)
+    if err:
+        send(
+            chat_id,
+            f"❌ VPN search failed: {err}\n"
+            "Falling back to `@jenkinsbot`…",
+        )
+        _fpms_lark_ask_jenkinsbot_find_vpn_lark(chat_id, q, send)
+        return True
+    if not matches:
+        send(
+            chat_id,
+            f"❌ No VPN `.conf` found matching **`{q}`** in recent VPN_CREATION builds.",
+        )
+        return True
+    if len(matches) == 1:
+        parts = session_key.split(":", 1)
+        if len(parts) == 2:
+            _fpms_lark_clear_session(parts[0], parts[1])
+        _fpms_lark_begin_vpn_find_deliver(
+            chat_id, session_key, matches[0], send, lark_message_id=lark_message_id
+        )
+        return True
+    picker_sid = secrets.token_hex(16)
+    chat_id_part, sender_part = session_key.split(":", 1)
+    sk = _fpms_lark_session_key(chat_id_part, sender_part)
+    sess = {
+        "state": "vpn_find_pick",
+        "vpn_find_query": q,
+        "vpn_find_candidates": matches[:10],
+        "picker_sid": picker_sid,
+    }
+    _fpms_lark_register_picker_sid(picker_sid, sk)
+    with _fpms_lark_sessions_lock:
+        _fpms_lark_sessions[sk] = sess
+    card_js = _fpms_lark_vpn_find_pick_card_json(matches, q, picker_sid=picker_sid)
+    try:
+        send(chat_id, card_js, msg_type="interactive")
+    except TypeError:
+        lines = [f"🔍 **{len(matches)}** matches for `{q}` — reply **1–{min(10, len(matches))}**:"]
+        for i, row in enumerate(matches[:10], start=1):
+            lines.append(f"{i}. `{row.get('file')}`")
+        send(chat_id, "\n".join(lines))
+    return True
+
+
+def _fpms_lark_handle_vpn_find_flow(
+    chat_id: str,
+    sender_id: str,
+    session_key: str,
+    clean_text: str,
+    original_text: str,
+    send,
+    *,
+    allow_start: bool,
+    lark_message_id: str | None = None,
+) -> bool:
+    """Find an **existing** VPN ``.conf`` (no new Jenkins build)."""
+    body = (original_text or clean_text or "").replace("\r\n", "\n").strip()
+    with _fpms_lark_sessions_lock:
+        sess = _fpms_lark_sessions.get(session_key)
+    state = sess.get("state") if isinstance(sess, dict) else None
+
+    if state == "vpn_find_pick":
+        idx = _parse_single_menu_index((clean_text or "").strip(), 10)
+        if idx is None:
+            send(chat_id, "Reply **1–10** to pick a file, tap a card button, or **cancel**.")
+            return True
+        candidates = list((sess or {}).get("vpn_find_candidates") or [])
+        if idx < 1 or idx > len(candidates):
+            send(chat_id, "⚠️ That number is out of range — pick again or **cancel**.")
+            return True
+        row = candidates[idx - 1]
+        _fpms_lark_clear_session(chat_id, sender_id)
+        _fpms_lark_begin_vpn_find_deliver(
+            chat_id, session_key, row, send, lark_message_id=lark_message_id
+        )
+        return True
+
+    is_cmd = bool(VPN_FIND_CMD_RE.search(body))
+    is_nl = bool(_NL_VPN_FIND_RE.search(body))
+    if not (is_cmd or is_nl):
+        return False
+    if not allow_start:
+        return False
+    query = _vpn_find_extract_query(body)
+    _fpms_lark_clear_session(chat_id, sender_id)
+    return _fpms_lark_dispatch_vpn_find(
+        chat_id,
+        session_key,
+        query,
+        send,
+        lark_message_id=lark_message_id,
+    )
 
 
 def parse_vpn_creation_config_block(text: str) -> tuple[str, str]:
@@ -13838,6 +14177,19 @@ def handle_lark_jenkins_update_message(
             send(chat_id, "ℹ️ No active `/update` session to cancel.")
         return True
 
+    # Find existing VPN .conf (search only — before create-vpn flow).
+    if _fpms_lark_handle_vpn_find_flow(
+        chat_id,
+        sender_id,
+        key,
+        clean_text,
+        original_text,
+        send,
+        allow_start=allow_start,
+        lark_message_id=lark_message_id,
+    ):
+        return True
+
     # VPN creation — multi-step prompt flow (VPN_USERS text + VPN_LOCATION pick) then Jenkins run.
     if _fpms_lark_handle_vpn_flow(
         chat_id,
@@ -14649,6 +15001,26 @@ def handle_lark_jenkins_card_action(
             allow_start=True,
             lark_sender_union_id=card_union,
         )
+    if k == "vpn_find":
+        try:
+            idx_vf = int(str(parsed.get("i")).strip())
+        except (TypeError, ValueError):
+            return False
+        with _fpms_lark_sessions_lock:
+            sess_vf = _fpms_lark_sessions.get(sk)
+        if not isinstance(sess_vf, dict) or sess_vf.get("state") != "vpn_find_pick":
+            send(chat_id, "⚠️ VPN find session expired — say `find vpn file alex` again.")
+            return True
+        candidates_vf = list(sess_vf.get("vpn_find_candidates") or [])
+        if idx_vf < 1 or idx_vf > len(candidates_vf):
+            send(chat_id, "⚠️ Invalid pick — try again or **cancel**.")
+            return True
+        row_vf = candidates_vf[idx_vf - 1]
+        _fpms_lark_clear_session(chat_id, sender_id)
+        _fpms_lark_begin_vpn_find_deliver(
+            chat_id, sk, row_vf, send, lark_message_id=lark_message_id
+        )
+        return True
     if k == "vpn_loc":
         loc = _vpn_resolve_location(str(parsed.get("loc") or "")) or str(
             parsed.get("loc") or ""
