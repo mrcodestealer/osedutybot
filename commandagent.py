@@ -1,5 +1,13 @@
 """
-Natural-language → slash-command router for the Duty Bot (DistilBERT intent classifier).
+Natural-language → slash-command router for the Duty Bot.
+
+Resolution order (when ``BOT_USE_AI=1``)
+---------------------------------------
+1. **Deterministic rules** — prod-batch maintenance, credit checks, identify-issue, etc.
+2. **Pattern rules** — catalogue paraphrases from ``build_intent_catalog()`` (fast, high precision).
+3. **LLM intent** — OpenAI-compatible API classifies *command vs chat* and picks the intent tag
+   (optional; needs ``BOT_CHAT_API_KEY`` / ``OPENAI_API_KEY``).
+4. **DistilBERT classifier** — local fallback when rules/LLM abstain or are unavailable.
 
 **With AI / without AI**
 - Default (without AI): ``BOT_USE_AI`` unset or ``0`` — bot behaves exactly as before (hardcoded ``/`` commands only).
@@ -9,21 +17,32 @@ Natural-language → slash-command router for the Duty Bot (DistilBERT intent cl
 **Train / test**
     python commandagent.py train [--epochs 8] [--output commandagent_pt]
     python commandagent.py test "who is on fpms duty today"
+    python commandagent.py route "who is on fpms duty today"   # show rule/LLM/model path
     python commandagent.py eval
     python commandagent.py patterns   # print training pattern counts
 
 Model folder default: ``commandagent_pt/`` (legacy ``command_intent_pt/`` still auto-detected).
 Env override: ``BOT_COMMANDAGENT_MODEL_DIR`` or ``BOT_AI_MODEL_DIR``.
+
+LLM env (optional, reuses ``chatagent`` API config):
+- ``BOT_COMMANDAGENT_LLM`` — set ``0`` to skip LLM even when an API key exists.
+- ``BOT_COMMANDAGENT_LLM_MODEL`` — override model (default: ``BOT_CHAT_MODEL``).
+- ``BOT_COMMANDAGENT_LLM_TIMEOUT`` — seconds (default ``15``).
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import pickle
 import re
 import sys
+import threading
+import time
 import traceback
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -52,22 +71,31 @@ def startup_status() -> None:
     enabled = is_enabled()
     path = model_dir()
     has_model = (path / "config.json").is_file()
+    llm_on = _cmd_llm_enabled()
     print(
         f"[commandagent] BOT_USE_AI={os.getenv('BOT_USE_AI')!r} enabled={enabled} "
-        f"model_dir={path} model_exists={has_model}",
+        f"model_dir={path} model_exists={has_model} llm={llm_on}",
         flush=True,
     )
     if not enabled:
         print("[commandagent] Natural language OFF — only `/` commands work.", flush=True)
         return
-    if not has_model:
-        print(f"[commandagent] ⚠️ Model missing at {path} — run: python commandagent.py train", flush=True)
+    if not has_model and not llm_on:
+        print(
+            f"[commandagent] ⚠️ Model missing at {path} and no LLM — "
+            f"run: python commandagent.py train or set BOT_CHAT_API_KEY",
+            flush=True,
+        )
         return
+    if not has_model:
+        print(f"[commandagent] ⚠️ DistilBERT model missing at {path} — pattern rules + LLM only.", flush=True)
     clf = _get_classifier()
-    if clf is None:
-        print("[commandagent] ⚠️ Model present but failed to load — check torch/transformers in service Python.", flush=True)
-    else:
-        print(f"[commandagent] ✅ Ready — natural English → slash commands (threshold={CONFIDENCE_THRESHOLD}).", flush=True)
+    if clf is None and not llm_on:
+        print("[commandagent] ⚠️ Model present but failed to load — check torch/transformers.", flush=True)
+    elif clf is not None:
+        print(f"[commandagent] ✅ Ready — rules + LLM + DistilBERT (threshold={CONFIDENCE_THRESHOLD}).", flush=True)
+    elif llm_on:
+        print("[commandagent] ✅ Ready — pattern rules + LLM intent (no local classifier).", flush=True)
 
 
 def _lazy_torch():
@@ -1214,6 +1242,445 @@ def build_slash_command(spec: IntentSpec, user_text: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Pattern-rule matching (runtime, uses the same catalogue as DistilBERT training)
+# ---------------------------------------------------------------------------
+
+_PATTERN_INDEX_LOCK = threading.Lock()
+_PATTERN_INDEX: list[tuple[int, str, IntentSpec]] | None = None
+_PATTERN_MATCH_CACHE: dict[str, tuple[str, float, IntentSpec] | None] = {}
+_PATTERN_MATCH_CACHE_TTL = 300.0
+_PATTERN_MATCH_CACHE_TS: dict[str, float] = {}
+
+# Cheap gate — call the LLM only when the message could plausibly be a command.
+_COMMAND_LLM_SIGNAL_RE = re.compile(
+    r"(?i)\b("
+    r"duty|roster|on[\s-]?call|leave|wfh|holiday|offset|"
+    r"fpms|pms|bi|fe|cpms|sre|dba|db|liveslot|ote|ft|ose|"
+    r"machine|asset|egm|nch|nwr|winford|tbr|tbp|mdr|dhs|"
+    r"maintenance|maint|test|credit|cctv|jenkins|deploy|update|"
+    r"reminder|help|restart|cashout|sms|pid|provider|"
+    r"who is|find|look ?up|search|phone|contact|check"
+    r")\b|/"
+)
+
+
+def _normalize_for_match(text: str) -> str:
+    s = re.sub(r"\s+", " ", (text or "").strip().lower())
+    return s.strip(" ?!.,")
+
+
+def _pattern_matches(normalized_text: str, pattern: str) -> bool:
+    p = _normalize_for_match(pattern)
+    if not p:
+        return False
+    if normalized_text == p:
+        return True
+    if p.startswith("/") and (normalized_text == p or normalized_text.startswith(p + " ")):
+        return True
+    if len(p) >= 4 and p in normalized_text:
+        return True
+    # Short duty phrases: "fpms duty" inside longer text.
+    if len(p) >= 6 and re.search(rf"(?<!\w){re.escape(p)}(?!\w)", normalized_text):
+        return True
+    return False
+
+
+def _get_pattern_index() -> list[tuple[int, str, IntentSpec]]:
+    """Longest patterns first so specific intents beat generic ones."""
+    global _PATTERN_INDEX
+    with _PATTERN_INDEX_LOCK:
+        if _PATTERN_INDEX is not None:
+            return _PATTERN_INDEX
+        rows: list[tuple[int, str, IntentSpec]] = []
+        seen: set[tuple[str, str]] = set()
+        for spec in build_intent_catalog():
+            if spec.tag == NONE_TAG:
+                continue
+            for pat in spec.patterns:
+                norm = _normalize_for_match(pat)
+                if not norm or (spec.tag, norm) in seen:
+                    continue
+                seen.add((spec.tag, norm))
+                rows.append((len(norm), norm, spec))
+        rows.sort(key=lambda r: r[0], reverse=True)
+        _PATTERN_INDEX = rows
+        return rows
+
+
+def _match_intent_by_patterns(text: str) -> tuple[IntentSpec, float] | None:
+    """Return ``(spec, confidence)`` when a catalogue pattern matches."""
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    now = time.time()
+    cached = _PATTERN_MATCH_CACHE.get(raw)
+    if cached is not None or raw in _PATTERN_MATCH_CACHE:
+        ts = _PATTERN_MATCH_CACHE_TS.get(raw, 0.0)
+        if now - ts < _PATTERN_MATCH_CACHE_TTL:
+            if cached is None:
+                return None
+            spec, conf = cached
+            return spec, conf
+
+    norm = _normalize_for_match(raw)
+    best: tuple[IntentSpec, float] | None = None
+    for plen, _pnorm, spec in _get_pattern_index():
+        for pat in spec.patterns:
+            if _pattern_matches(norm, pat):
+                conf = 1.0 if _normalize_for_match(pat) == norm else min(0.98, 0.85 + plen / 200.0)
+                if best is None or conf > best[1]:
+                    best = (spec, conf)
+                break
+        if best and best[1] >= 0.99:
+            break
+
+    with _PATTERN_INDEX_LOCK:
+        _PATTERN_MATCH_CACHE[raw] = best
+        _PATTERN_MATCH_CACHE_TS[raw] = now
+        if len(_PATTERN_MATCH_CACHE) > 512:
+            _PATTERN_MATCH_CACHE.clear()
+            _PATTERN_MATCH_CACHE_TS.clear()
+    return best
+
+
+def _intents_by_tag() -> dict[str, IntentSpec]:
+    return {spec.tag: spec for spec in build_intent_catalog()}
+
+
+# ---------------------------------------------------------------------------
+# LLM intent classification (command vs chat + intent tag)
+# ---------------------------------------------------------------------------
+
+_CMD_LLM_TIMEOUT = float(os.getenv("BOT_COMMANDAGENT_LLM_TIMEOUT", "15"))
+_cmd_llm_failed_logged = False
+_CMD_LLM_CACHE: dict[str, tuple[float, dict[str, Any] | None]] = {}
+_CMD_LLM_CACHE_LOCK = threading.Lock()
+_CMD_LLM_CACHE_TTL = 180.0
+
+
+def _cmd_llm_enabled() -> bool:
+    if not is_enabled():
+        return False
+    if (os.getenv("BOT_COMMANDAGENT_LLM") or "").strip().lower() in ("0", "false", "no", "off"):
+        return False
+    try:
+        import chatagent as ca
+
+        return bool(ca.llm_available())
+    except Exception:
+        return False
+
+
+def _cmd_llm_model() -> str:
+    explicit = (os.getenv("BOT_COMMANDAGENT_LLM_MODEL") or "").strip()
+    if explicit:
+        return explicit
+    try:
+        import chatagent as ca
+
+        return ca._llm_model_for_request(images=False)
+    except Exception:
+        return (os.getenv("BOT_CHAT_MODEL") or "gpt-4o-mini").strip()
+
+
+def _cmd_llm_base() -> str:
+    try:
+        import chatagent as ca
+
+        return ca._llm_base_url()
+    except Exception:
+        return (os.getenv("BOT_CHAT_API_BASE") or "https://api.openai.com/v1").strip().rstrip("/")
+
+
+def _cmd_llm_api_key() -> str:
+    try:
+        import chatagent as ca
+
+        return ca._llm_api_key()
+    except Exception:
+        return (
+            os.getenv("BOT_CHAT_API_KEY")
+            or os.getenv("OPENAI_API_KEY")
+            or ""
+        ).strip()
+
+
+def _build_llm_intent_catalog() -> str:
+    lines: list[str] = []
+    for spec in build_intent_catalog():
+        if spec.tag == NONE_TAG:
+            continue
+        extra = f" (arg: {spec.arg_kind})" if spec.arg_kind else ""
+        lines.append(f"- {spec.tag}: {spec.command}{extra}")
+    return "\n".join(lines)
+
+
+_CMD_LLM_SYSTEM = (
+    "You classify messages for an OSE duty bot on Lark/Feishu.\n"
+    "Decide: is this a bot COMMAND (work request) or casual CHAT (greeting, thanks, small talk, "
+    "general conversation, math, jokes)?\n"
+    "Reply with ONLY one JSON object:\n"
+    '{"route":"command"|"chat","intent_tag":string|null,"confidence":0.0-1.0}\n'
+    "- route=chat → intent_tag must be null, confidence = how sure it is casual chat.\n"
+    "- route=command → pick the best intent_tag from the catalog below; confidence = how sure.\n"
+    "- If unsure, prefer route=chat with lower confidence rather than guessing a command.\n"
+    "Examples:\n"
+    '"hi" → {"route":"chat","intent_tag":null,"confidence":0.99}\n'
+    '"who is on fpms duty today" → {"route":"command","intent_tag":"cmd_fpms","confidence":0.95}\n'
+    '"check credit NCH1422" → {"route":"command","intent_tag":"cmd_checkcredit","confidence":0.95}\n'
+    '"how are you doing" → {"route":"chat","intent_tag":null,"confidence":0.98}\n'
+    '"nwr set maintenance NWR2113" → {"route":"command","intent_tag":"cmd_pb_setmaintenance","confidence":0.9}\n'
+    "Intent catalog:\n"
+)
+
+
+def _parse_llm_json(content: str) -> dict[str, Any] | None:
+    s = (content or "").strip()
+    if not s:
+        return None
+    s = re.sub(r"^```(?:json)?|```$", "", s.strip(), flags=re.I | re.M).strip()
+    a, b = s.find("{"), s.rfind("}")
+    if a == -1 or b == -1 or b < a:
+        return None
+    try:
+        obj = json.loads(s[a : b + 1])
+    except ValueError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _classify_intent_llm(text: str) -> dict[str, Any] | None:
+    """
+    LLM routing classification. Returns dict with keys:
+    ``route`` (command|chat), ``intent_tag``, ``confidence``, ``source``=llm.
+    """
+    global _cmd_llm_failed_logged
+    raw = (text or "").strip()
+    if not raw or not _cmd_llm_enabled():
+        return None
+
+    with _CMD_LLM_CACHE_LOCK:
+        hit = _CMD_LLM_CACHE.get(raw)
+        if hit and (time.time() - hit[0]) < _CMD_LLM_CACHE_TTL:
+            return hit[1]
+
+    api_key = _cmd_llm_api_key()
+    if not api_key:
+        return None
+
+    system = _CMD_LLM_SYSTEM + _build_llm_intent_catalog()
+    payload = {
+        "model": _cmd_llm_model(),
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": raw},
+        ],
+        "max_tokens": 120,
+        "temperature": 0,
+    }
+    req = urllib.request.Request(
+        f"{_cmd_llm_base()}/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    result: dict[str, Any] | None = None
+    try:
+        with urllib.request.urlopen(req, timeout=_CMD_LLM_TIMEOUT) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        content = ((body.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        obj = _parse_llm_json(content)
+        if not obj:
+            result = None
+        else:
+            route = str(obj.get("route") or "").strip().lower()
+            tag = obj.get("intent_tag")
+            tag_s = str(tag).strip() if tag else ""
+            try:
+                conf = float(obj.get("confidence") or 0.0)
+            except (TypeError, ValueError):
+                conf = 0.0
+            conf = max(0.0, min(1.0, conf))
+            if route not in ("command", "chat"):
+                result = None
+            elif route == "chat":
+                result = {
+                    "route": "chat",
+                    "intent_tag": NONE_TAG,
+                    "confidence": conf,
+                    "source": "llm",
+                }
+            else:
+                spec = _intents_by_tag().get(tag_s)
+                if not spec or tag_s == NONE_TAG:
+                    result = None
+                else:
+                    result = {
+                        "route": "command",
+                        "intent_tag": tag_s,
+                        "confidence": conf,
+                        "source": "llm",
+                        "spec": spec,
+                    }
+    except urllib.error.HTTPError as exc:
+        if not _cmd_llm_failed_logged:
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")[:300]
+            except Exception:
+                detail = exc.reason
+            print(f"⚠️ commandagent LLM HTTP {exc.code}: {detail}", flush=True)
+            _cmd_llm_failed_logged = True
+    except Exception as exc:
+        if not _cmd_llm_failed_logged:
+            print(f"⚠️ commandagent LLM request failed: {exc!r}", flush=True)
+            _cmd_llm_failed_logged = True
+
+    with _CMD_LLM_CACHE_LOCK:
+        _CMD_LLM_CACHE[raw] = (time.time(), result)
+        if len(_CMD_LLM_CACHE) > 256:
+            _CMD_LLM_CACHE.clear()
+    return result
+
+
+def _looks_like_pure_chitchat(text: str) -> bool:
+    try:
+        import chitchat
+
+        return chitchat.looks_like_chitchat(text)
+    except Exception:
+        return False
+
+
+def _resolve_fuzzy_intent(text: str, *, skip_patterns: bool = False) -> dict[str, Any]:
+    """
+    Pattern rules → LLM → DistilBERT. Returns partial signal dict:
+    tag, confidence, margin, command, source, route.
+
+    Set ``skip_patterns=True`` when the caller already ran ``_match_intent_by_patterns``.
+    """
+    out: dict[str, Any] = {
+        "tag": None,
+        "confidence": 0.0,
+        "margin": 0.0,
+        "command": None,
+        "source": None,
+        "route": None,
+    }
+    raw = (text or "").strip()
+    if not raw:
+        return out
+
+    # 1) Pattern catalogue
+    if not skip_patterns:
+        pat_hit = _match_intent_by_patterns(raw)
+        if pat_hit:
+            spec, conf = pat_hit
+            cmd = build_slash_command(spec, raw)
+            if cmd or spec.arg_kind is None:
+                out.update(
+                    tag=spec.tag,
+                    confidence=conf,
+                    margin=conf,
+                    command=cmd,
+                    source="pattern",
+                    route="command" if spec.tag != NONE_TAG else "chat",
+                )
+                if out["route"] == "command" and cmd:
+                    return out
+                if out["route"] == "command" and spec.arg_kind is None:
+                    out["command"] = spec.command
+                    return out
+
+    # 2) LLM (skip obvious chitchat without work signals)
+    llm_ok = _cmd_llm_enabled() and (
+        _COMMAND_LLM_SIGNAL_RE.search(raw) or not _looks_like_pure_chitchat(raw)
+    )
+    if llm_ok:
+        llm = _classify_intent_llm(raw)
+        if llm:
+            route = llm.get("route")
+            conf = float(llm.get("confidence") or 0.0)
+            if route == "chat" and conf >= 0.55:
+                out.update(
+                    tag=NONE_TAG,
+                    confidence=conf,
+                    margin=conf,
+                    command=None,
+                    source="llm",
+                    route="chat",
+                )
+                return out
+            if route == "command" and conf >= 0.50:
+                spec = llm.get("spec") or _intents_by_tag().get(str(llm.get("intent_tag") or ""))
+                if spec:
+                    cmd = build_slash_command(spec, raw)
+                    if cmd or spec.arg_kind is None:
+                        out.update(
+                            tag=spec.tag,
+                            confidence=conf,
+                            margin=conf,
+                            command=cmd or spec.command,
+                            source="llm",
+                            route="command",
+                        )
+                        return out
+
+    # 3) DistilBERT fallback
+    clf = _get_classifier()
+    if clf is None:
+        return out
+    try:
+        tag, conf, margin = clf.predict(raw)
+        out["tag"] = tag
+        out["confidence"] = conf
+        out["margin"] = margin
+        out["source"] = "model"
+        if tag == NONE_TAG:
+            out["route"] = "chat"
+            return out
+        if conf >= CONFIDENCE_THRESHOLD and margin >= CONFIDENCE_MARGIN:
+            spec = clf.intents_by_tag.get(tag)
+            if spec:
+                cmd = build_slash_command(spec, raw)
+                if cmd or spec.arg_kind is None:
+                    out["command"] = cmd or spec.command
+                    out["route"] = "command"
+    except Exception as exc:
+        print(f"⚠️ commandagent fuzzy resolve error: {exc!r}", flush=True)
+    return out
+
+
+def _run_deterministic_detectors(text: str) -> dict[str, Any] | None:
+    """High-precision structured command detectors. Returns signal dict or None."""
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    pb = detect_prod_batch_command(raw)
+    if pb:
+        return dict(tag="cmd_pb", confidence=1.0, margin=1.0, command=pb, deterministic=True, source="deterministic", route="command")
+    cml = detect_checkmachinelog_command(raw)
+    if cml:
+        return dict(tag="cmd_checkmachinelog", confidence=1.0, margin=1.0, command=cml, deterministic=True, source="deterministic", route="command")
+    sc = detect_stuck_credit_command(raw)
+    if sc:
+        return dict(tag="cmd_stuckcredit", confidence=1.0, margin=1.0, command=sc, deterministic=True, source="deterministic", route="command")
+    cc = detect_checkcredit_command(raw)
+    if cc:
+        tag = "cmd_machineerror" if cc.startswith("/machineerror") else "cmd_checkcredit"
+        return dict(tag=tag, confidence=1.0, margin=1.0, command=cc, deterministic=True, source="deterministic", route="command")
+    sr = detect_show_reminder_command(raw)
+    if sr:
+        return dict(tag="cmd_deletereminder", confidence=1.0, margin=1.0, command=sr, deterministic=True, source="deterministic", route="command")
+    rs = detect_restart_services_command(raw)
+    if rs:
+        return dict(tag="cmd_restart_services", confidence=1.0, margin=1.0, command=rs, deterministic=True, source="deterministic", route="command")
+    ii = detect_identify_issue_command(raw)
+    if ii:
+        return dict(tag="cmd_identifyissue", confidence=1.0, margin=1.0, command=ii, deterministic=True, source="deterministic", route="command")
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Classifier
 # ---------------------------------------------------------------------------
 
@@ -1334,8 +1801,8 @@ def _get_classifier() -> Optional[CommandClassifier]:
         return None
     path = model_dir()
     if not (path / "config.json").is_file():
-        print(f"⚠️ AI model not found at {path} — natural-language routing disabled", flush=True)
-        _classifier_failed = True
+        if not _cmd_llm_enabled():
+            print(f"⚠️ AI model not found at {path} — pattern/LLM only", flush=True)
         return None
     try:
         _classifier_singleton = CommandClassifier(path)
@@ -1402,9 +1869,9 @@ def detect_multi_duty_commands(text: str) -> Optional[list[str]]:
 def command_signal(text: str) -> dict[str, Any]:
     """Diagnostic signal for the router (``chathandleagent``).
 
-    Returns ``{"tag", "confidence", "margin", "command", "deterministic"}``.
-    ``command`` is the mapped slash command (or ``None``). ``deterministic`` is
-    True when a hard rule (prod-batch) produced it. Never raises.
+    Returns ``tag``, ``confidence``, ``margin``, ``command``, ``deterministic``,
+    ``source`` (deterministic|pattern|llm|model), and ``route`` (command|chat).
+    Never raises.
     """
     out: dict[str, Any] = {
         "tag": None,
@@ -1412,97 +1879,62 @@ def command_signal(text: str) -> dict[str, Any]:
         "margin": 0.0,
         "command": None,
         "deterministic": False,
+        "source": None,
+        "route": None,
     }
     raw = (text or "").strip()
     if not raw:
         return out
-    pb = detect_prod_batch_command(raw)
-    if pb:
-        out.update(tag="cmd_pb", confidence=1.0, margin=1.0, command=pb, deterministic=True)
+    det = _run_deterministic_detectors(raw)
+    if det:
+        out.update(det)
+        out["deterministic"] = True
         return out
-    cml = detect_checkmachinelog_command(raw)
-    if cml:
-        out.update(tag="cmd_checkmachinelog", confidence=1.0, margin=1.0, command=cml, deterministic=True)
+
+    # Pattern catalogue is cheap — always run for routing diagnostics.
+    pat_hit = _match_intent_by_patterns(raw)
+    if pat_hit:
+        spec, conf = pat_hit
+        cmd = build_slash_command(spec, raw)
+        if cmd or spec.arg_kind is None:
+            out.update(
+                tag=spec.tag,
+                confidence=conf,
+                margin=conf,
+                command=cmd or spec.command,
+                source="pattern",
+                route="command" if spec.tag != NONE_TAG else "chat",
+            )
+            return out
+
+    if not is_enabled():
         return out
-    sc = detect_stuck_credit_command(raw)
-    if sc:
-        out.update(tag="cmd_stuckcredit", confidence=1.0, margin=1.0, command=sc, deterministic=True)
-        return out
-    cc = detect_checkcredit_command(raw)
-    if cc:
-        tag = "cmd_machineerror" if cc.startswith("/machineerror") else "cmd_checkcredit"
-        out.update(tag=tag, confidence=1.0, margin=1.0, command=cc, deterministic=True)
-        return out
-    sr = detect_show_reminder_command(raw)
-    if sr:
-        out.update(tag="cmd_deletereminder", confidence=1.0, margin=1.0, command=sr, deterministic=True)
-        return out
-    rs = detect_restart_services_command(raw)
-    if rs:
-        out.update(tag="cmd_restart_services", confidence=1.0, margin=1.0, command=rs, deterministic=True)
-        return out
-    ii = detect_identify_issue_command(raw)
-    if ii:
-        out.update(tag="cmd_identifyissue", confidence=1.0, margin=1.0, command=ii, deterministic=True)
-        return out
-    clf = _get_classifier()
-    if clf is None:
-        return out
-    try:
-        tag, conf, margin = clf.predict(raw)
-        out["tag"] = tag
-        out["confidence"] = conf
-        out["margin"] = margin
-        if tag != NONE_TAG and conf >= CONFIDENCE_THRESHOLD and margin >= CONFIDENCE_MARGIN:
-            spec = clf.intents_by_tag.get(tag)
-            if spec:
-                out["command"] = build_slash_command(spec, raw)
-    except Exception as exc:
-        print(f"⚠️ command_signal error: {exc!r}", flush=True)
+    fuzzy = _resolve_fuzzy_intent(raw, skip_patterns=True)
+    out.update(fuzzy)
+    out["deterministic"] = False
     return out
 
 
 def translate_if_enabled(text: str) -> Optional[str]:
     """
     Map natural English to a slash command when AI is enabled.
-    Returns ``None`` when disabled, input is already ``/…``, model missing, low confidence, or on error.
+
+    Order: deterministic rules → pattern catalogue → LLM → DistilBERT.
+    Returns ``None`` when disabled, already ``/…``, classified as chat, low confidence, or on error.
     """
     if not is_enabled():
         return None
     raw = (text or "").strip()
     if not raw or _looks_like_slash_command(raw):
         return None
-    # Deterministic prod-batch maintenance mapping runs BEFORE the fuzzy model —
-    # "i want nwr set maintenance ..." -> "/nwrsetmaintenance ...".
-    pb = detect_prod_batch_command(raw)
-    if pb:
-        print(f"[commandagent] Prod-batch map: {raw[:80]!r} → {pb.splitlines()[0]!r}", flush=True)
-        return pb
-    cml = detect_checkmachinelog_command(raw)
-    if cml:
-        print(f"[commandagent] Check-machine-log map: {raw[:80]!r} → {cml!r}", flush=True)
-        return cml
-    sc = detect_stuck_credit_command(raw)
-    if sc:
-        print(f"[commandagent] Stuck-credit map: {raw[:80]!r} → {sc!r}", flush=True)
-        return sc
-    # Deterministic credit-check / machine-error mapping (also runs BEFORE the
-    cc = detect_checkcredit_command(raw)
-    if cc:
-        print(f"[commandagent] Check-credit map: {raw[:80]!r} → {cc!r}", flush=True)
-        return cc
-    sr = detect_show_reminder_command(raw)
-    if sr:
-        print(f"[commandagent] Show-reminder map: {raw[:80]!r} → {sr!r}", flush=True)
-        return sr
-    rs = detect_restart_services_command(raw)
-    if rs:
-        print(f"[commandagent] Restart-services map: {raw[:80]!r} → {rs!r}", flush=True)
-        return rs
-    ii = detect_identify_issue_command(raw)
-    if ii:
-        print(f"[commandagent] Identify-issue map: {raw[:80]!r} → {ii!r}", flush=True)
-        return ii
+
+    det = _run_deterministic_detectors(raw)
+    if det and det.get("command"):
+        src = det.get("source") or "deterministic"
+        cmd = det["command"]
+        print(f"[commandagent] {src} map: {raw[:80]!r} -> {str(cmd).splitlines()[0]!r}", flush=True)
+        return cmd
+
     try:
         import jenkinsupdate as _jenkins_gate
 
@@ -1516,15 +1948,18 @@ def translate_if_enabled(text: str) -> Optional[str]:
             raw,
         ):
             return None
-    clf = _get_classifier()
-    if clf is None:
-        print(f"⚠️ AI enabled but classifier unavailable for {raw!r}", flush=True)
+
+    fuzzy = _resolve_fuzzy_intent(raw)
+    if fuzzy.get("route") == "chat":
         return None
-    try:
-        return clf.resolve(raw)
-    except Exception as exc:
-        print(f"⚠️ AI resolve error: {exc!r}", flush=True)
+    cmd = fuzzy.get("command")
+    if not cmd:
+        if fuzzy.get("source") == "model" and _get_classifier() is None and not _cmd_llm_enabled():
+            print(f"⚠️ AI enabled but no classifier/LLM for {raw!r}", flush=True)
         return None
+    src = fuzzy.get("source") or "fuzzy"
+    print(f"[commandagent] {src} map: {raw[:80]!r} → {str(cmd).splitlines()[0]!r}", flush=True)
+    return cmd
 
 
 # ---------------------------------------------------------------------------
@@ -1679,6 +2114,31 @@ def evaluate_model(model_path: Path) -> None:
     print(f"Train-set accuracy (sanity): {acc:.1%} ({correct}/{len(texts)})")
 
 
+def _cli_route(phrase: str) -> None:
+    """Show full resolution path: deterministic → pattern → LLM → model."""
+    os.environ.setdefault("BOT_USE_AI", "1")
+    det = _run_deterministic_detectors(phrase)
+    if det:
+        print(f"Input:       {phrase!r}")
+        print(f"Source:      deterministic")
+        print(f"Tag:         {det.get('tag')}")
+        print(f"Route:       {det.get('route')}")
+        print(f"Command:     {det.get('command')!r}")
+        return
+    pat = _match_intent_by_patterns(phrase)
+    fuzzy = _resolve_fuzzy_intent(phrase)
+    sig = command_signal(phrase)
+    print(f"Input:       {phrase!r}")
+    if pat:
+        print(f"Pattern:     {pat[0].tag} ({pat[1]:.3f})")
+    else:
+        print("Pattern:     —")
+    print(f"Resolved:    source={sig.get('source')} route={sig.get('route')} tag={sig.get('tag')}")
+    print(f"Confidence:  {sig.get('confidence', 0):.3f}  margin={sig.get('margin', 0):.3f}")
+    print(f"Command:     {sig.get('command')!r}")
+    print(f"Translate:   {translate_if_enabled(phrase)!r}")
+
+
 def _cli_test(phrase: str, model_path: Path) -> None:
     if not (model_path / "config.json").is_file():
         print(f"Model not found at {model_path}. Run: python commandagent.py train")
@@ -1703,9 +2163,12 @@ def main() -> None:
     p_train.add_argument("--output", type=str, default=str(DEFAULT_MODEL_DIR))
     p_train.add_argument("--no-jenkins", action="store_true")
 
-    p_test = sub.add_parser("test", help="Test a phrase")
+    p_test = sub.add_parser("test", help="Test a phrase (DistilBERT only)")
     p_test.add_argument("phrase", type=str)
     p_test.add_argument("--model", type=str, default=str(DEFAULT_MODEL_DIR))
+
+    p_route = sub.add_parser("route", help="Show full rule/LLM/model resolution path")
+    p_route.add_argument("phrase", type=str)
 
     sub.add_parser("eval", help="Evaluate model on training patterns")
     sub.add_parser("patterns", help="Show pattern counts per intent")
@@ -1719,6 +2182,8 @@ def main() -> None:
         )
     elif args.cmd == "test":
         _cli_test(args.phrase, Path(args.model))
+    elif args.cmd == "route":
+        _cli_route(args.phrase)
     elif args.cmd == "eval":
         evaluate_model(model_dir())
     elif args.cmd == "patterns":

@@ -19,9 +19,10 @@ Decision strategy (high precision first, fuzzy last)
 2. Deterministic prod-batch maintenance   -> command (e.g. set maintenance)
 3. Strong work keywords / machine ids      -> command
 4. Pure greeting / thanks / small-talk     -> chat
-5. Otherwise: compare the two trained
-   classifiers' confidence and pick the
-   stronger signal                          -> command / chat / unknown
+5. ``commandagent`` signal (pattern rules → LLM → DistilBERT):
+   explicit ``route=chat`` or ``cmd_none``  -> chat
+   explicit ``route=command`` with command  -> command
+6. Otherwise: compare chat vs command classifier confidence
 
 Everything is wrapped so it can never raise into the bot's hot path; on any
 error it returns ``unknown`` and the caller keeps its previous behaviour.
@@ -173,6 +174,7 @@ def route(text: str, *, bot_mentioned: bool = True) -> RouteDecision:
         chat_conf = float(chat_sig.get("confidence") or 0.0)
         cmd_tag = cmd_sig.get("tag")
         is_none = cmd_tag == "cmd_none"
+        cmd_route = cmd_sig.get("route")
 
         # 3) Strong work signals -> command (unless it's clearly a greeting or math).
         has_kw = bool(_COMMAND_KEYWORDS_RE.search(raw))
@@ -195,7 +197,19 @@ def route(text: str, *, bot_mentioned: bool = True) -> RouteDecision:
         if _looks_like_pure_chitchat(raw) and _word_count(raw) <= 12:
             return RouteDecision(_CHAT, reason="chitchat", chat_conf=chat_conf)
 
-        # 5) Fuzzy: trust whichever trained classifier is more confident.
+        # 5a) Explicit route from pattern rules / LLM / model abstain.
+        if cmd_route == "chat" and cmd_conf >= ROUTER_MIN_CONF:
+            return RouteDecision(_CHAT, reason=f"cmd_{cmd_sig.get('source') or 'signal'}", chat_conf=cmd_conf, command_conf=cmd_conf)
+        if cmd_route == "command" and cmd_sig.get("command") and cmd_conf >= ROUTER_MIN_CONF:
+            return RouteDecision(
+                _CMD,
+                reason=f"cmd_{cmd_sig.get('source') or 'signal'}",
+                command=cmd_sig.get("command"),
+                command_conf=cmd_conf,
+                chat_conf=chat_conf,
+            )
+
+        # 5b) Fuzzy: trust whichever trained classifier is more confident.
         if is_none:
             # Command model explicitly says "not a command".
             if chat_conf >= ROUTER_MIN_CONF:
