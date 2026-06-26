@@ -424,51 +424,164 @@ def _person_for_department(snapshot: dict[str, Any], department: str) -> str:
     return ""
 
 
-def deterministic_suggestion(query: str, snapshot: dict[str, Any]) -> dict[str, str]:
-    """Rule/retrieval based pick used as fallback and to ground the LLM."""
-    matches = retrieve_similar(query, snapshot, k=12)
+def _record_label(r: dict[str, Any]) -> str:
+    return r.get("title") or r.get("summary") or _one_line(r.get("description", ""), max_len=70) or "(untitled)"
 
-    # Department: majority vote among matches.
+
+def deterministic_suggestion(query: str, snapshot: dict[str, Any]) -> dict[str, str]:
+    """Rule/retrieval based pick used as fallback and to ground the LLM.
+
+    Also produces a human-readable ``reason`` that *cites the specific past
+    ticket(s)* the decision is based on, so users can see why the AI chose this
+    department / priority / check person.
+    """
+    matches = retrieve_similar(query, snapshot, k=12)
+    if not matches:
+        return {
+            "issue": _one_line(query, max_len=80),
+            "priority": "P2",
+            "department": "Unknown",
+            "check_person": "CP OM Duty (on-duty)",
+            "reason": (
+                "No similar past ticket was found in the knowledge base, so this is a default routing.\n"
+                "知识库中没有找到相似的历史工单，这是默认分配。"
+            ),
+        }
+
     dept_votes: Counter = Counter()
     prio_votes: Counter = Counter()
-    person_votes: Counter = Counter()
-    best_with_person: dict[str, Any] | None = None
     for score, r in matches:
         if r.get("department"):
             dept_votes[r["department"]] += score
         if r.get("priority"):
             prio_votes[r["priority"]] += score
-        for p in _split_persons(r.get("check_person") or ""):
-            person_votes[p] += score
-            if best_with_person is None:
-                best_with_person = r
 
-    department = dept_votes.most_common(1)[0][0] if dept_votes else ""
-    # Prefer the most similar (top-1) match's priority; fall back to a weighted vote.
-    priority = ""
-    if matches and matches[0][1].get("priority"):
-        priority = matches[0][1]["priority"]
-    elif prio_votes:
-        priority = prio_votes.most_common(1)[0][0]
+    top_score, top_rec = matches[0]
+    department = (top_rec.get("department") or "").strip() or (dept_votes.most_common(1)[0][0] if dept_votes else "")
+    priority = (top_rec.get("priority") or "").strip() or (prio_votes.most_common(1)[0][0] if prio_votes else "")
 
-    # Check person: prefer the person ranked highest for the chosen department,
-    # else the most-voted person across matches.
-    person = _person_for_department(snapshot, department)
-    if not person and person_votes:
-        person = person_votes.most_common(1)[0][0]
+    # Check person: prefer the assignee on the most-similar ticket *in the chosen
+    # department* (traceable), then any most-similar ticket with an assignee,
+    # then the department's most-frequent assignee.
+    person = ""
+    person_source_rec: dict[str, Any] | None = None
+    for _s, r in matches:
+        if department and (r.get("department") or "").strip() != department:
+            continue
+        ppl = _split_persons(r.get("check_person") or "")
+        if ppl:
+            person, person_source_rec = ppl[0], r
+            break
+    if not person:
+        for _s, r in matches:
+            ppl = _split_persons(r.get("check_person") or "")
+            if ppl:
+                person, person_source_rec = ppl[0], r
+                break
+    person_from_mapping = ""
+    if not person:
+        person = _person_for_department(snapshot, department)
+        person_from_mapping = person
 
-    title = ""
-    if matches:
-        title = matches[0][1].get("title") or matches[0][1].get("summary") or ""
-    if not title:
-        title = _one_line(query, max_len=80)
-
-    return {
+    title = _record_label(top_rec)
+    result = {
         "issue": title,
         "priority": priority or "P2",
         "department": department or "Unknown",
         "check_person": person or "CP OM Duty (on-duty)",
     }
+    result["reason"] = _build_reason(
+        snapshot=snapshot,
+        matches=matches,
+        department=result["department"],
+        priority=result["priority"],
+        person=result["check_person"],
+        person_source_rec=person_source_rec,
+        person_from_mapping=person_from_mapping,
+    )
+    return result
+
+
+def _build_reason(
+    *,
+    snapshot: dict[str, Any],
+    matches: list[tuple[float, dict[str, Any]]],
+    department: str,
+    priority: str,
+    person: str,
+    person_source_rec: dict[str, Any] | None,
+    person_from_mapping: str,
+) -> str:
+    """Explain the decision, citing the actual matched ticket(s)."""
+    top_rec = matches[0][1]
+    top_label = _record_label(top_rec)
+
+    # Up to 3 closest *distinct* tickets for the "based on" list.
+    cited: list[str] = []
+    seen_labels: set[str] = set()
+    for _s, r in matches:
+        lab = _record_label(r)
+        key = lab.strip().lower()
+        if key in seen_labels:
+            continue
+        seen_labels.add(key)
+        bits = []
+        if r.get("department"):
+            bits.append(r["department"])
+        if r.get("priority"):
+            bits.append(r["priority"])
+        if _split_persons(r.get("check_person") or ""):
+            bits.append("→ " + _split_persons(r["check_person"])[0])
+        meta = f" ({' · '.join(bits)})" if bits else ""
+        cited.append(f"«{lab}»{meta}")
+        if len(cited) >= 3:
+            break
+
+    dept_map = snapshot.get("department_to_persons") or {}
+    ranked = dept_map.get(department) or []
+    dept_top = ", ".join(f"{p}({c})" for p, c in ranked[:4]) if ranked else ""
+
+    # --- English ---
+    en: list[str] = []
+    en.append(f"I matched this report to the most similar past ticket: {cited[0]}.")
+    if len(cited) > 1:
+        en.append("Other close tickets: " + "; ".join(cited[1:]) + ".")
+    en.append(
+        f"→ Department **{department}**: that ticket (and the closest matches) were handled by **{department}**, "
+        f"so this issue is most likely a {department}-side problem."
+    )
+    if priority:
+        en.append(f"→ Priority **{priority}**: taken from the priority of the most similar past ticket.")
+    if person_source_rec is not None:
+        en.append(
+            f"→ Check Person **{person}**: this is the person who was assigned to the matched ticket "
+            f"«{_record_label(person_source_rec)}», so they have handled this exact type of issue before."
+        )
+    elif person_from_mapping:
+        en.append(
+            f"→ Check Person **{person}**: the matched tickets had no assignee, so I picked the person who "
+            f"handles most **{department}** tickets"
+            + (f" ({dept_top})." if dept_top else ".")
+        )
+    else:
+        en.append(f"→ Check Person **{person}**.")
+
+    # --- 中文 ---
+    zh: list[str] = []
+    zh.append(f"我把这个问题匹配到最相似的历史工单：{cited[0]}。")
+    if len(cited) > 1:
+        zh.append("其他相近工单：" + "；".join(cited[1:]) + "。")
+    zh.append(f"→ 部门 **{department}**：该工单及最相近的工单都是由 **{department}** 跟进的，所以判断这是 {department} 这边的问题。")
+    if priority:
+        zh.append(f"→ 优先级 **{priority}**：取自最相似历史工单的优先级。")
+    if person_source_rec is not None:
+        zh.append(f"→ 跟进人 **{person}**：他正是被分配到匹配工单「{_record_label(person_source_rec)}」的人，处理过同类问题。")
+    elif person_from_mapping:
+        zh.append(f"→ 跟进人 **{person}**：匹配工单没有指派人，因此选择处理 **{department}** 工单最多的人" + (f"（{dept_top}）。" if dept_top else "。"))
+    else:
+        zh.append(f"→ 跟进人 **{person}**。")
+
+    return "\n".join(en) + "\n\n" + "\n".join(zh)
 
 
 # ---------------------------------------------------------------------------
@@ -538,8 +651,16 @@ Priority : <P0|P1|P2|P3>
 Department : <department>
 Check Person : <name>
 
-Reason / 理由: <1 short line in English, then 1 short line in 中文 explaining why —
-cite the similar issue or the department mapping you used.>
+Reason / 理由: Explain WHY, and you MUST cite the exact title of the most similar past
+ticket you relied on. Use this shape (English first, then 中文):
+  - Quote the matched ticket title, e.g. I think this is related to «CP - FPMS Lucky
+    coins Proposal Pending Status Issue 2026/05/02».
+  - Say why that means this Department (what that team owns / why it is their side).
+  - Say why this Priority (from the matched ticket).
+  - Say why this Check Person (assignee of the matched ticket, or the person who
+    handles most tickets for that department).
+Then repeat the same explanation in 中文. Be specific — never just say
+"matched against similar issues".
 """
 
 
@@ -707,14 +828,14 @@ def analyze(query: str, *, refresh: bool = False) -> dict[str, Any]:
             for kf in ("issue", "priority", "department", "check_person"):
                 if not parsed.get(kf) or parsed[kf].lower() in ("", "unknown", "n/a"):
                     parsed[kf] = fallback[kf]
+            # Always fall back to the detailed, ticket-citing reason when the model
+            # gave a short/empty reason, so users always see *why* (which ticket).
+            if not reason or len(reason) < 40:
+                reason = fallback.get("reason", reason)
             parsed.update({"reason": reason, "engine": _llm_model(), "raw": raw})
             return parsed
 
-    fallback.update({
-        "reason": "Matched against the most similar historical issues and the department→assignee mapping.",
-        "engine": "rule-based",
-        "raw": "",
-    })
+    fallback.update({"engine": "rule-based", "raw": ""})
     return fallback
 
 
