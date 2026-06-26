@@ -3093,6 +3093,9 @@ def start_prod_batch_job_direct(
         args=(run_job_id, chat_id, action, "", machines, send_message),
         daemon=True,
     ).start()
+
+
+def _prod_batch_format_matched_line(m: dict) -> str:
     """One confirm-card bullet — machine name + status | online from webmachine_data.json."""
     head = f"{m.get('belongs', '')} — {m.get('machine', '')}"
     bits: list[str] = []

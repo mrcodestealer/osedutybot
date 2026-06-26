@@ -3505,6 +3505,46 @@ def _fpms_lark_vpn_find_pick_card_json(
     return json.dumps(card, ensure_ascii=False)
 
 
+def _fpms_lark_vpn_find_thread_root(
+    session_key: str, lark_message_id: str | None = None
+) -> str | None:
+    """Resolve the user's command message id for VPN-find file threading."""
+    mid = (lark_message_id or "").strip() or None
+    if mid:
+        return mid
+    try:
+        import main as _main_mod
+
+        get_root = getattr(_main_mod, "_get_update_thread_root", None)
+        if callable(get_root):
+            root = (get_root(session_key) or "").strip() or None
+            if root:
+                return root
+    except Exception:
+        pass
+    return None
+
+
+def _fpms_lark_vpn_find_ensure_thread(
+    chat_id: str,
+    session_key: str,
+    summary: str,
+    lark_message_id: str | None,
+    *,
+    lark_thread_root_id: str | None = None,
+) -> str | None:
+    """Bind VPN-find card / status / file replies under the user's command message."""
+    _fpms_lark_begin_update_thread(
+        chat_id,
+        session_key,
+        summary,
+        lark_message_id,
+        lark_thread_root_id=lark_thread_root_id,
+        force_new=True,
+    )
+    return _fpms_lark_vpn_find_thread_root(session_key, lark_message_id)
+
+
 def _fpms_lark_begin_vpn_find_deliver(
     chat_id: str,
     session_key: str,
@@ -3515,8 +3555,9 @@ def _fpms_lark_begin_vpn_find_deliver(
 ) -> bool:
     fn = str(row.get("file") or "")
     bn = row.get("build")
+    thread_root = _fpms_lark_vpn_find_thread_root(session_key, lark_message_id)
     ok, msg = _jenkinsbot_deliver_vpn_conf(
-        chat_id, row, reply_message_id=lark_message_id
+        chat_id, row, reply_message_id=thread_root
     )
     if ok:
         send(
@@ -3540,6 +3581,7 @@ def _fpms_lark_dispatch_vpn_find(
     send,
     *,
     lark_message_id: str | None = None,
+    lark_thread_root_id: str | None = None,
 ) -> bool:
     """Search VPN_CREATION via jenkinsbot; 0 / 1 / many → message or pick card."""
     q = (query or "").strip()
@@ -3552,6 +3594,13 @@ def _fpms_lark_dispatch_vpn_find(
             "- `/findvpn alex`",
         )
         return True
+    thread_root = _fpms_lark_vpn_find_ensure_thread(
+        chat_id,
+        session_key,
+        f"find vpn {q}",
+        lark_message_id,
+        lark_thread_root_id=lark_thread_root_id,
+    )
     send(chat_id, f"🔍 Finding VPN `.conf` files matching **`{q}`** — kindly wait…")
     matches, err = _jenkinsbot_search_vpn_conf(q)
     if err:
@@ -3573,7 +3622,11 @@ def _fpms_lark_dispatch_vpn_find(
         if len(parts) == 2:
             _fpms_lark_clear_session(parts[0], parts[1])
         _fpms_lark_begin_vpn_find_deliver(
-            chat_id, session_key, matches[0], send, lark_message_id=lark_message_id
+            chat_id,
+            session_key,
+            matches[0],
+            send,
+            lark_message_id=thread_root,
         )
         return True
     picker_sid = secrets.token_hex(16)
@@ -3583,19 +3636,20 @@ def _fpms_lark_dispatch_vpn_find(
         "state": "vpn_find_pick",
         "vpn_find_query": q,
         "vpn_find_candidates": matches[:10],
+        "vpn_find_thread_root": thread_root,
         "picker_sid": picker_sid,
     }
     _fpms_lark_register_picker_sid(picker_sid, sk)
     with _fpms_lark_sessions_lock:
         _fpms_lark_sessions[sk] = sess
     card_js = _fpms_lark_vpn_find_pick_card_json(matches, q, picker_sid=picker_sid)
-    try:
-        send(chat_id, card_js, msg_type="interactive")
-    except TypeError:
-        lines = [f"🔍 **{len(matches)}** matches for `{q}` — reply **1–{min(10, len(matches))}**:"]
-        for i, row in enumerate(matches[:10], start=1):
-            lines.append(f"{i}. `{row.get('file')}`")
-        send(chat_id, "\n".join(lines))
+    resp = send(chat_id, card_js, msg_type="interactive")
+    if isinstance(resp, dict) and resp.get("code") not in (None, 0):
+        send(
+            chat_id,
+            "❌ Could not show VPN pick card — try `find vpn file "
+            f"{q}` again.\n`{str(resp.get('msg') or resp)[:200]}`",
+        )
     return True
 
 
@@ -3609,6 +3663,7 @@ def _fpms_lark_handle_vpn_find_flow(
     *,
     allow_start: bool,
     lark_message_id: str | None = None,
+    lark_thread_root_id: str | None = None,
 ) -> bool:
     """Find an **existing** VPN ``.conf`` (no new Jenkins build)."""
     body = (original_text or clean_text or "").replace("\r\n", "\n").strip()
@@ -3617,18 +3672,14 @@ def _fpms_lark_handle_vpn_find_flow(
     state = sess.get("state") if isinstance(sess, dict) else None
 
     if state == "vpn_find_pick":
-        idx = _parse_single_menu_index((clean_text or "").strip(), 10)
-        if idx is None:
-            send(chat_id, "Reply **1–10** to pick a file, tap a card button, or **cancel**.")
+        low = (clean_text or "").strip().casefold()
+        if low in ("cancel", "stop", "quit"):
+            _fpms_lark_clear_session(chat_id, sender_id)
+            send(chat_id, "⏹️ VPN find cancelled.")
             return True
-        candidates = list((sess or {}).get("vpn_find_candidates") or [])
-        if idx < 1 or idx > len(candidates):
-            send(chat_id, "⚠️ That number is out of range — pick again or **cancel**.")
-            return True
-        row = candidates[idx - 1]
-        _fpms_lark_clear_session(chat_id, sender_id)
-        _fpms_lark_begin_vpn_find_deliver(
-            chat_id, session_key, row, send, lark_message_id=lark_message_id
+        send(
+            chat_id,
+            "Use the **buttons on the card** to pick a `.conf`, or tap **Cancel**.",
         )
         return True
 
@@ -3646,6 +3697,7 @@ def _fpms_lark_handle_vpn_find_flow(
         query,
         send,
         lark_message_id=lark_message_id,
+        lark_thread_root_id=lark_thread_root_id,
     )
 
 
@@ -14187,6 +14239,7 @@ def handle_lark_jenkins_update_message(
         send,
         allow_start=allow_start,
         lark_message_id=lark_message_id,
+        lark_thread_root_id=lark_thread_root_id,
     ):
         return True
 
@@ -15016,9 +15069,14 @@ def handle_lark_jenkins_card_action(
             send(chat_id, "⚠️ Invalid pick — try again or **cancel**.")
             return True
         row_vf = candidates_vf[idx_vf - 1]
+        thread_root_vf = str(sess_vf.get("vpn_find_thread_root") or "").strip() or None
         _fpms_lark_clear_session(chat_id, sender_id)
         _fpms_lark_begin_vpn_find_deliver(
-            chat_id, sk, row_vf, send, lark_message_id=lark_message_id
+            chat_id,
+            sk,
+            row_vf,
+            send,
+            lark_message_id=thread_root_vf or lark_message_id,
         )
         return True
     if k == "vpn_loc":
