@@ -1981,15 +1981,45 @@ def handle_editoffset_command(
     try:
         token = get_token_func()
         _clear_edit_forms_for_owner(oid)
-        request_person = resolve_request_person(oid, token)
-        _deliver_requester_offset_edit_menu(
-            owner_open_id=oid,
-            request_person=request_person,
-            group_chat_id=chat_id,
-            chat_type=chat_type,
-            send_message=send_message,
-            token=token,
-        )
+        if _is_offset_approver_open_id(oid):
+            request_person = try_resolve_request_person(oid, token)
+            if request_person and _pending_offsets_for_request_person(request_person):
+                _deliver_requester_offset_edit_menu(
+                    owner_open_id=oid,
+                    request_person=request_person,
+                    group_chat_id=chat_id,
+                    chat_type=chat_type,
+                    send_message=send_message,
+                    token=token,
+                )
+                return True
+            rows = _non_pending_offsets_all()
+            if not rows:
+                send_message(
+                    chat_id,
+                    "No approved or rejected offset records found to edit, "
+                    "and you have no pending requests as requester.",
+                )
+                return True
+            card = build_offset_edit_list_card(oid, "", rows, is_admin=True)
+            _deliver_private_card(
+                owner_open_id=oid,
+                group_chat_id=chat_id,
+                chat_type=chat_type,
+                card=card,
+                send_message=send_message,
+                token=token,
+            )
+        else:
+            request_person = resolve_request_person(oid, token)
+            _deliver_requester_offset_edit_menu(
+                owner_open_id=oid,
+                request_person=request_person,
+                group_chat_id=chat_id,
+                chat_type=chat_type,
+                send_message=send_message,
+                token=token,
+            )
     except Exception as e:
         send_message(chat_id, f"❌ editoffset: {e}")
     return True
@@ -2013,8 +2043,10 @@ def handle_deleteoffset_command(
     try:
         token = get_token_func()
         if _is_offset_approver_open_id(oid):
-            request_person = resolve_request_person(oid, token)
-            own_pending = _pending_offsets_for_request_person(request_person)
+            request_person = try_resolve_request_person(oid, token)
+            own_pending = (
+                _pending_offsets_for_request_person(request_person) if request_person else []
+            )
             if own_pending:
                 card = build_offset_delete_list_card(oid, request_person, own_pending, is_admin=False)
             else:

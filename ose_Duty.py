@@ -263,6 +263,7 @@ _OSE_PERSON_OPEN_ID_DEFAULTS: dict[str, str] = {
     "Lynette Enriquez": "ou_3cb64233d3ee01b306eebd1b2878329c",
     "Jun Chen": "ou_5f660c0fb0769d184aca635d02209272",
     "Jun Chen (Jc)": "ou_5f660c0fb0769d184aca635d02209272",
+    "Yuxuan": "ou_c4346ace5927c14f51a89b2394b55338",
     "Jan Rei": "ou_25dd43efc70ab656c8c3f98b97ecade2",
     "Ronnel Dagatan": "ou_f72f7c06f274d5000c752ac60a7b1bd0",
     "Rizaldy Valdez Jr.": "ou_99b8cdde1f0f00b245254ed514dc10d8",
