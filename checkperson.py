@@ -553,9 +553,11 @@ def _build_reason(
     if priority:
         en.append(f"→ Priority **{priority}**: taken from the priority of the most similar past ticket.")
     if person_source_rec is not None:
+        same_as_top = _record_label(person_source_rec).strip().lower() == top_label.strip().lower()
+        which = "the matched ticket" if same_as_top else f"a similar {department} ticket"
         en.append(
-            f"→ Check Person **{person}**: this is the person who was assigned to the matched ticket "
-            f"«{_record_label(person_source_rec)}», so they have handled this exact type of issue before."
+            f"→ Check Person **{person}**: this is the person assigned to {which} "
+            f"«{_record_label(person_source_rec)}», so they have handled this type of issue before."
         )
     elif person_from_mapping:
         en.append(
@@ -575,7 +577,9 @@ def _build_reason(
     if priority:
         zh.append(f"→ 优先级 **{priority}**：取自最相似历史工单的优先级。")
     if person_source_rec is not None:
-        zh.append(f"→ 跟进人 **{person}**：他正是被分配到匹配工单「{_record_label(person_source_rec)}」的人，处理过同类问题。")
+        same_as_top = _record_label(person_source_rec).strip().lower() == top_label.strip().lower()
+        which_zh = "匹配工单" if same_as_top else f"一张相似的 {department} 工单"
+        zh.append(f"→ 跟进人 **{person}**：他正是被分配到{which_zh}「{_record_label(person_source_rec)}」的人，处理过同类问题。")
     elif person_from_mapping:
         zh.append(f"→ 跟进人 **{person}**：匹配工单没有指派人，因此选择处理 **{department}** 工单最多的人" + (f"（{dept_top}）。" if dept_top else "。"))
     else:
@@ -773,35 +777,69 @@ def _build_llm_context(query: str, snapshot: dict[str, Any], *, k: int = 8) -> s
     return "\n".join(lines)
 
 
-_OUT_RE = re.compile(
-    r"(?is)Issue\s*[:：]\s*(?P<issue>.*?)\s*"
-    r"Priority\s*[:：]\s*(?P<priority>.*?)\s*"
-    r"Department\s*[:：]\s*(?P<department>.*?)\s*"
-    r"Check\s*Person\s*[:：]\s*(?P<person>.*?)\s*(?:\n\s*\n|Reason|理由|$)"
+# A complete 4-line answer block. We scan for ALL of them and take the LAST valid
+# one, because "thinking" models often write their reasoning (which contains lines
+# like "Determine Department:") BEFORE the real, final answer.
+_BLOCK_RE = re.compile(
+    r"(?im)^[\s>*`-]*Issue\s*[:：]\s*(?P<issue>.+?)\s*$"
+    r"[\s\S]{0,60}?^[\s>*`-]*Priority\s*[:：]\s*(?P<priority>.+?)\s*$"
+    r"[\s\S]{0,60}?^[\s>*`-]*Department\s*[:：]\s*(?P<department>.+?)\s*$"
+    r"[\s\S]{0,60}?^[\s>*`-]*Check\s*Person\s*[:：]\s*(?P<person>.+?)\s*$"
 )
 
 
+def _strip_think(text: str) -> str:
+    """Remove a model's <think> channel and obvious reasoning prefaces."""
+    if not text:
+        return ""
+    t = re.sub(r"(?is)<think>.*?</think>", "", text)
+    t = re.sub(r"(?is)<think>.*$", "", t)  # unclosed think block
+    return t.strip()
+
+
+def _clean_field(v: str) -> str:
+    v = (v or "").strip()
+    for _ in range(2):
+        v = v.strip("`*").strip()
+    return v
+
+
+_PLACEHOLDER_RE = re.compile(r"\.\.\.|…|<[^>]*>|^\W*$")
+
+
+def _field_ok(v: str) -> bool:
+    v = (v or "").strip()
+    if not v:
+        return False
+    if _PLACEHOLDER_RE.search(v):
+        return False
+    if v.lower() in ("unknown", "n/a", "na", "none", "tbd", "-", "—"):
+        return False
+    return True
+
+
 def _parse_llm_output(text: str) -> Optional[dict[str, str]]:
+    text = _strip_think(text)
     if not text:
         return None
-    m = _OUT_RE.search(text)
-    if not m:
-        return None
-    issue = _one_line(m.group("issue"))
-    priority = (m.group("priority") or "").strip().splitlines()[0].strip()
-    department = (m.group("department") or "").strip().splitlines()[0].strip()
-    person = (m.group("person") or "").strip().splitlines()[0].strip()
-    if not (issue or department or person):
-        return None
-    pm = re.search(r"(?i)p\s*([0-3])", priority)
-    if pm:
-        priority = f"P{pm.group(1)}"
-    return {
-        "issue": issue,
-        "priority": priority or "P2",
-        "department": department or "Unknown",
-        "check_person": person or "CP OM Duty (on-duty)",
-    }
+    best: Optional[dict[str, str]] = None
+    for m in _BLOCK_RE.finditer(text):
+        issue = _one_line(_clean_field(m.group("issue") or ""))
+        priority = _clean_field((m.group("priority") or "").splitlines()[0])
+        department = _clean_field(m.group("department") or "")
+        person = _clean_field(m.group("person") or "")
+        # The real (final) answer must have a usable department AND check person.
+        if not (_field_ok(department) and _field_ok(person)):
+            continue
+        pm = re.search(r"(?i)p\s*([0-3])", priority)
+        priority = f"P{pm.group(1)}" if pm else (priority if re.match(r"(?i)^p[0-3]\b", priority) else "")
+        best = {
+            "issue": issue,
+            "priority": priority,
+            "department": department,
+            "check_person": person,
+        }
+    return best
 
 
 def analyze(query: str, *, refresh: bool = False) -> dict[str, Any]:
@@ -814,29 +852,59 @@ def analyze(query: str, *, refresh: bool = False) -> dict[str, Any]:
         user_text = (
             f"{context}\n\n"
             f"=== New issue to route ===\n\"\"\"\n{query.strip()}\n\"\"\"\n\n"
-            "Decide the Issue, Priority, Department and Check Person using the data above. "
-            "Reply EXACTLY in the required output format."
+            "Decide the Issue, Priority, Department and Check Person using the data above.\n"
+            "IMPORTANT: Do NOT show your step-by-step analysis, numbered planning, or repeat "
+            "these instructions. Output ONLY the four answer lines (Issue/Priority/Department/"
+            "Check Person) and then the Reason. Start your reply directly with 'Issue :'."
         )
         raw = _llm_complete(_SYSTEM_PROMPT, user_text)
         parsed = _parse_llm_output(raw or "")
         if parsed:
-            reason = ""
-            rm = re.search(r"(?is)(?:Reason|理由)\s*[:：]?\s*(.+)$", raw or "")
-            if rm:
-                reason = rm.group(1).strip()
-            # If the model left a field blank, backfill from the deterministic pick.
+            reason = _extract_reason(raw or "")
+            # If the model left a field blank/invalid, backfill from the deterministic pick.
             for kf in ("issue", "priority", "department", "check_person"):
-                if not parsed.get(kf) or parsed[kf].lower() in ("", "unknown", "n/a"):
+                if not _field_ok(parsed.get(kf, "")):
                     parsed[kf] = fallback[kf]
-            # Always fall back to the detailed, ticket-citing reason when the model
-            # gave a short/empty reason, so users always see *why* (which ticket).
-            if not reason or len(reason) < 40:
+            # Use the detailed, ticket-citing deterministic reason whenever the model's
+            # reason is missing, too short, or looks like leaked step-by-step "thinking".
+            if not _reason_looks_clean(reason):
                 reason = fallback.get("reason", reason)
             parsed.update({"reason": reason, "engine": _llm_model(), "raw": raw})
             return parsed
 
     fallback.update({"engine": "rule-based", "raw": ""})
     return fallback
+
+
+# Markers that mean the captured "reason" is actually the model's internal planning.
+_THINKING_MARKERS_RE = re.compile(
+    r"(?i)(match\s+with\s+past|determine\s+department|analyze\s+the\s+new|output\s+format|"
+    r"adherence|strict\s+adherence|step\s*\d|issue\s*#\d|best\s+match\s*:|<one\s+line>|"
+    r"why\?|semantic\s+match|\bissues?\s*\d\s*-\s*\d)"
+)
+
+
+_REASON_LABEL_RE = re.compile(r"(?im)^[\s>*`#-]*(?:Reason\s*/?\s*理由|Reason|理由)\s*[:：]\s*")
+
+
+def _extract_reason(raw: str) -> str:
+    """Grab the reason after a line-start ``Reason:`` / ``理由:`` label (NOT the verb
+    "reason" inside reasoning text). Take the LAST such label to end of text so the
+    full bilingual explanation is kept."""
+    text = _strip_think(raw or "")
+    labels = list(_REASON_LABEL_RE.finditer(text))
+    if not labels:
+        return ""
+    return text[labels[-1].end():].strip()
+
+
+def _reason_looks_clean(reason: str) -> bool:
+    r = (reason or "").strip()
+    if len(r) < 40:
+        return False
+    if _THINKING_MARKERS_RE.search(r):
+        return False
+    return True
 
 
 def format_text(result: dict[str, Any]) -> str:
