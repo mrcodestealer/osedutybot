@@ -3670,6 +3670,7 @@ def lark_webhook():
             }
             payload["checklist_cn"] = [
                 "开发者后台 → 事件与回调：请求地址必须是公网 HTTPS，路径与本服务一致（含 nginx 转发）。",
+                "若使用「长连接 / persistent connection」：须运行 run_local_bot.py（lark_longconn 已注册 card.action.trigger 并修补 SDK CARD 帧；否则按钮会 code:undefined）。",
                 "优先订阅新版「卡片回传交互」card.action.trigger（请求体含 header.token = Verification Token）。",
                 "若仍订阅旧版 card.action.trigger_v1（扁平 JSON，token 为卡片凭证 c-…）：误把该 token 当 Verification Token 会 403；本仓库已忽略 c- 前缀。若 JSON 内仍无 Verification Token，可设 LARK_LEGACY_CARD_V1_ALLOW_MISSING_VERIFICATION_TOKEN=1（仅信任链路时使用）。",
                 "环境变量 VERIFICATION_TOKEN 与后台「Verification Token」完全一致（无多空格）。",

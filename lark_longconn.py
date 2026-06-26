@@ -5,9 +5,17 @@ Use on a PC with no public IP. Set LARK_EVENT_MODE=websocket in .env and run
 ``python run_local_bot.py`` (or start main.py + this module separately).
 
 Requires: pip install lark-oapi
+
+**Card buttons (checkcredit, Jenkins, reminders, …):**
+Subscribe **Card callback interaction** ``card.action.trigger`` in the developer
+console when using **persistent connection**. This module registers
+``register_p2_card_action_trigger`` and patches a known ``lark-oapi`` bug where
+``MessageType.CARD`` frames were dropped (Lark client shows ``code: undefined``).
 """
 from __future__ import annotations
 
+import base64
+import http
 import json
 import os
 import sys
@@ -26,6 +34,7 @@ VERIFICATION_TOKEN = (os.getenv("VERIFICATION_TOKEN") or "").strip()
 LOCAL_WEBHOOK = (
     os.getenv("LARK_LOCAL_WEBHOOK_URL") or "http://127.0.0.1:5000/webhook/event"
 ).strip()
+CARD_CALLBACK_TIMEOUT_SEC = float(os.getenv("LARK_CARD_CALLBACK_TIMEOUT_SEC", "2.8"))
 
 
 def _wait_for_webhook(timeout_sec: float = 60.0) -> bool:
@@ -64,6 +73,27 @@ def _ensure_inbound_message_id(payload: dict) -> dict:
     return payload
 
 
+def _ensure_card_webhook_payload(payload: dict) -> dict:
+    """Schema 2.0 card callback shape for ``main.lark_webhook`` (token + open_chat_id)."""
+    out = dict(payload)
+    out.setdefault("schema", "2.0")
+    hdr = dict(out.get("header") or {})
+    hdr.setdefault("event_type", "card.action.trigger")
+    hdr.setdefault("event_id", hdr.get("event_id") or str(uuid.uuid4()))
+    if VERIFICATION_TOKEN and not str(hdr.get("token") or "").strip():
+        hdr["token"] = VERIFICATION_TOKEN
+    out["header"] = hdr
+    ev = out.get("event")
+    if isinstance(ev, dict):
+        ctx = ev.get("context") if isinstance(ev.get("context"), dict) else {}
+        if not ev.get("open_chat_id") and ctx.get("open_chat_id"):
+            ev["open_chat_id"] = str(ctx["open_chat_id"]).strip()
+        if not ev.get("chat_id") and ctx.get("chat_id"):
+            ev["chat_id"] = str(ctx["chat_id"]).strip()
+        out["event"] = ev
+    return out
+
+
 def _to_webhook_payload(data) -> dict:
     import lark_oapi as lark
 
@@ -84,7 +114,6 @@ def _to_webhook_payload(data) -> dict:
             "event": inner,
         }
 
-    # WebSocket events often omit header.token; local webhook still validates it.
     if VERIFICATION_TOKEN:
         hdr = payload.setdefault("header", {})
         if not str(hdr.get("token") or "").strip():
@@ -100,13 +129,131 @@ def _to_webhook_payload(data) -> dict:
     return payload
 
 
+def _post_webhook(payload: dict, *, timeout_sec: float) -> tuple[int, dict]:
+    r = requests.post(LOCAL_WEBHOOK, json=payload, timeout=timeout_sec)
+    body: dict = {}
+    if r.content:
+        try:
+            parsed = r.json()
+            if isinstance(parsed, dict):
+                body = parsed
+        except ValueError:
+            body = {}
+    return r.status_code, body
+
+
 def _on_message(data) -> None:
     try:
         payload = _to_webhook_payload(data)
         r = requests.post(LOCAL_WEBHOOK, json=payload, timeout=300)
-        print(f"[lark-ws] forwarded → {LOCAL_WEBHOOK} status={r.status_code}", flush=True)
+        print(f"[lark-ws] im.message → {LOCAL_WEBHOOK} status={r.status_code}", flush=True)
     except Exception as exc:
-        print(f"[lark-ws] forward failed: {exc!r}", flush=True)
+        print(f"[lark-ws] im forward failed: {exc!r}", flush=True)
+
+
+def _on_card_action(data):
+    """
+    ``card.action.trigger`` over WebSocket — must return within ~3s or Lark shows ``code: undefined``.
+    Forwards to local Flask webhook (same handlers as HTTPS mode) and returns its JSON body.
+    """
+    from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
+
+    import lark_oapi as lark
+
+    try:
+        payload = _ensure_card_webhook_payload(json.loads(lark.JSON.marshal(data)))
+        status, body = _post_webhook(payload, timeout_sec=CARD_CALLBACK_TIMEOUT_SEC)
+        print(
+            f"[lark-ws] card.action.trigger → {LOCAL_WEBHOOK} status={status} "
+            f"resp_keys={list(body.keys())!r}",
+            flush=True,
+        )
+        if status == 200 and isinstance(body, dict):
+            return P2CardActionTriggerResponse(body)
+        if status == 403:
+            print(
+                "[lark-ws] card callback 403 — check VERIFICATION_TOKEN matches developer console",
+                flush=True,
+            )
+    except Exception as exc:
+        print(f"[lark-ws] card callback failed: {exc!r}", flush=True)
+    return P2CardActionTriggerResponse({})
+
+
+def _apply_lark_ws_card_frame_patch() -> None:
+    """
+    ``lark-oapi`` ws client (through 1.6.x) returns early on ``MessageType.CARD`` without ACK.
+    That breaks every interactive card button in persistent-connection mode.
+    """
+    try:
+        from lark_oapi.core.const import UTF_8
+        from lark_oapi.core.json import JSON
+        from lark_oapi.ws.client import Client, _get_by_key
+        from lark_oapi.ws.const import (
+            HEADER_BIZ_RT,
+            HEADER_MESSAGE_ID,
+            HEADER_SEQ,
+            HEADER_SUM,
+            HEADER_TRACE_ID,
+            HEADER_TYPE,
+        )
+        from lark_oapi.ws.enum import MessageType
+        from lark_oapi.ws.model import Response
+    except ImportError:
+        print("[lark-ws] lark-oapi ws imports missing — card patch skipped", flush=True)
+        return
+
+    if getattr(Client, "_osedutybot_card_patch", False):
+        return
+
+    async def _handle_data_frame_patched(self, frame):
+        hs = frame.headers
+        msg_id = _get_by_key(hs, HEADER_MESSAGE_ID)
+        trace_id = _get_by_key(hs, HEADER_TRACE_ID)
+        sum_ = _get_by_key(hs, HEADER_SUM)
+        seq = _get_by_key(hs, HEADER_SEQ)
+        type_ = _get_by_key(hs, HEADER_TYPE)
+
+        pl = frame.payload
+        if int(sum_) > 1:
+            pl = self._combine(msg_id, int(sum_), int(seq), pl)
+            if pl is None:
+                return
+
+        message_type = MessageType(type_)
+        resp = Response(code=http.HTTPStatus.OK)
+        try:
+            start = int(round(time.time() * 1000))
+            if message_type in (MessageType.EVENT, MessageType.CARD):
+                result = self._event_handler._do_without_validation(pl)
+            else:
+                return
+            end = int(round(time.time() * 1000))
+            header = hs.add()
+            header.key = HEADER_BIZ_RT
+            header.value = str(end - start)
+            if result is not None:
+                resp.data = base64.b64encode(JSON.marshal(result).encode(UTF_8))
+        except Exception as e:
+            from lark_oapi.core.log import logger
+
+            logger.error(
+                self._fmt_log(
+                    "handle message failed, message_type: {}, message_id: {}, trace_id: {}, err: {}",
+                    message_type.value,
+                    msg_id,
+                    trace_id,
+                    e,
+                )
+            )
+            resp = Response(code=http.HTTPStatus.INTERNAL_SERVER_ERROR)
+
+        frame.payload = JSON.marshal(resp).encode(UTF_8)
+        await self._write_message(frame.SerializeToString())
+
+    Client._handle_data_frame = _handle_data_frame_patched
+    Client._osedutybot_card_patch = True
+    print("[lark-ws] patched ws Client._handle_data_frame for CARD callbacks", flush=True)
 
 
 def run_forever() -> None:
@@ -123,9 +270,12 @@ def run_forever() -> None:
         )
         sys.exit(1)
 
+    _apply_lark_ws_card_frame_patch()
+
     handler = (
         lark.EventDispatcherHandler.builder("", "")
         .register_p2_im_message_receive_v1(_on_message)
+        .register_p2_card_action_trigger(_on_card_action)
         .build()
     )
     domain_name = (os.getenv("LARK_DOMAIN") or "lark").strip().lower()
@@ -138,7 +288,11 @@ def run_forever() -> None:
         log_level=lark.LogLevel.INFO,
         domain=domain,
     )
-    print(f"[lark-ws] Long connection active → {LOCAL_WEBHOOK}", flush=True)
+    print(
+        f"[lark-ws] Long connection active → {LOCAL_WEBHOOK} "
+        "(im.message + card.action.trigger)",
+        flush=True,
+    )
     cli.start()
 
 
