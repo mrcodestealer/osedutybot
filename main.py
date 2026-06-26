@@ -1,8 +1,11 @@
+import base64
 import contextvars
+import http
 import json
 import re
 import sys
 import threading
+import uuid
 from typing import Any, Optional
 import requests
 import time
@@ -3670,7 +3673,7 @@ def lark_webhook():
             }
             payload["checklist_cn"] = [
                 "开发者后台 → 事件与回调：请求地址必须是公网 HTTPS，路径与本服务一致（含 nginx 转发）。",
-                "若使用「长连接 / persistent connection」：须运行 run_local_bot.py（lark_longconn 已注册 card.action.trigger 并修补 SDK CARD 帧；否则按钮会 code:undefined）。",
+                "若使用「长连接 / persistent connection」：设 LARK_EVENT_MODE=websocket 并运行 python main.py（已注册 card.action.trigger 并修补 SDK CARD 帧；否则按钮会 code:undefined）。",
                 "优先订阅新版「卡片回传交互」card.action.trigger（请求体含 header.token = Verification Token）。",
                 "若仍订阅旧版 card.action.trigger_v1（扁平 JSON，token 为卡片凭证 c-…）：误把该 token 当 Verification Token 会 403；本仓库已忽略 c- 前缀。若 JSON 内仍无 Verification Token，可设 LARK_LEGACY_CARD_V1_ALLOW_MISSING_VERIFICATION_TOKEN=1（仅信任链路时使用）。",
                 "环境变量 VERIFICATION_TOKEN 与后台「Verification Token」完全一致（无多空格）。",
@@ -4450,7 +4453,7 @@ def lark_webhook():
             "Install Playwright so the bot can fill the form and show **Confirm / Cancel** "
             "(it will **not** auto-build without your click):\n"
             "```\npip install playwright\nplaywright install chromium\n```\n"
-            "Then restart `python run_local_bot.py`.\n"
+            "Then restart `python main.py` (with LARK_EVENT_MODE=websocket if using long connection).\n"
             "Or paste: `@Duty Bot /jenkinsupdate rc uat master` + Branch/Version/Services block.",
         )
         return _lark_im_done()
@@ -6333,12 +6336,252 @@ try:
 except Exception as _mail_e:
     print(f"⚠️ Maintenance mail watcher failed to start: {_mail_e!r}", flush=True)
 
+def _lark_event_mode() -> str:
+    """``http`` (default) = public Request URL only; ``websocket`` = persistent connection + local Flask."""
+    return (os.getenv("LARK_EVENT_MODE") or "http").strip().lower()
+
+
+def _lark_ws_uses_persistent_connection() -> bool:
+    return _lark_event_mode() in ("websocket", "ws", "longconn", "persistent", "long_connection")
+
+
+def _lark_ws_ensure_inbound_message_id(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        return payload
+    ev = payload.get("event")
+    if not isinstance(ev, dict):
+        return payload
+    msg = ev.get("message")
+    if not isinstance(msg, dict):
+        return payload
+    if (msg.get("message_id") or "").strip():
+        return payload
+    for alt in (
+        ev.get("message_id"),
+        (ev.get("message") or {}).get("message_id") if isinstance(ev.get("message"), dict) else None,
+    ):
+        mid = str(alt or "").strip()
+        if mid:
+            msg["message_id"] = mid
+            break
+    return payload
+
+
+def _lark_ws_ensure_card_webhook_payload(payload: dict) -> dict:
+    out = dict(payload)
+    out.setdefault("schema", "2.0")
+    hdr = dict(out.get("header") or {})
+    hdr.setdefault("event_type", "card.action.trigger")
+    hdr.setdefault("event_id", hdr.get("event_id") or str(uuid.uuid4()))
+    if VERIFICATION_TOKEN and not str(hdr.get("token") or "").strip():
+        hdr["token"] = VERIFICATION_TOKEN
+    out["header"] = hdr
+    ev = out.get("event")
+    if isinstance(ev, dict):
+        ctx = ev.get("context") if isinstance(ev.get("context"), dict) else {}
+        if not ev.get("open_chat_id") and ctx.get("open_chat_id"):
+            ev["open_chat_id"] = str(ctx["open_chat_id"]).strip()
+        if not ev.get("chat_id") and ctx.get("chat_id"):
+            ev["chat_id"] = str(ctx["chat_id"]).strip()
+        out["event"] = ev
+    return out
+
+
+def _lark_ws_to_webhook_payload(data) -> dict:
+    import lark_oapi as lark
+
+    raw = json.loads(lark.JSON.marshal(data))
+    if isinstance(raw, dict) and "header" in raw and "event" in raw:
+        payload = dict(raw)
+        hdr = dict(payload.get("header") or {})
+        payload["header"] = hdr
+    else:
+        inner = raw.get("event", raw) if isinstance(raw, dict) else raw
+        payload = {
+            "schema": "2.0",
+            "header": {
+                "event_id": str(uuid.uuid4()),
+                "event_type": "im.message.receive_v1",
+                "create_time": str(int(time.time() * 1000)),
+            },
+            "event": inner,
+        }
+    if VERIFICATION_TOKEN:
+        hdr = payload.setdefault("header", {})
+        if not str(hdr.get("token") or "").strip():
+            hdr["token"] = VERIFICATION_TOKEN
+    payload = _lark_ws_ensure_inbound_message_id(payload)
+    mid = (
+        ((payload.get("event") or {}).get("message") or {}).get("message_id")
+        if isinstance(payload.get("event"), dict)
+        else None
+    )
+    if not str(mid or "").strip():
+        print("[lark-ws] warning: payload missing event.message.message_id", flush=True)
+    return payload
+
+
+def _lark_ws_dispatch_payload(payload: dict) -> tuple[int, dict]:
+    """In-process POST to ``lark_webhook`` (same handlers as HTTPS Request URL mode)."""
+    with app.test_client() as client:
+        rv = client.post("/webhook/event", json=payload)
+    body: dict = {}
+    if rv.data:
+        try:
+            parsed = json.loads(rv.get_data(as_text=True))
+            if isinstance(parsed, dict):
+                body = parsed
+        except (ValueError, TypeError):
+            body = {}
+    return int(rv.status_code), body
+
+
+def _lark_ws_on_message(data) -> None:
+    try:
+        payload = _lark_ws_to_webhook_payload(data)
+        status, _ = _lark_ws_dispatch_payload(payload)
+        print(f"[lark-ws] im.message.receive_v1 dispatched status={status}", flush=True)
+    except Exception as exc:
+        print(f"[lark-ws] im.message dispatch failed: {exc!r}", flush=True)
+
+
+def _lark_ws_on_card_action(data):
+    from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
+
+    import lark_oapi as lark
+
+    try:
+        payload = _lark_ws_ensure_card_webhook_payload(json.loads(lark.JSON.marshal(data)))
+        status, body = _lark_ws_dispatch_payload(payload)
+        print(
+            f"[lark-ws] card.action.trigger dispatched status={status} resp_keys={list(body.keys())!r}",
+            flush=True,
+        )
+        if status == 200 and isinstance(body, dict):
+            return P2CardActionTriggerResponse(body)
+        if status == 403:
+            print(
+                "[lark-ws] card callback 403 — check VERIFICATION_TOKEN matches developer console",
+                flush=True,
+            )
+    except Exception as exc:
+        print(f"[lark-ws] card callback failed: {exc!r}", flush=True)
+    return P2CardActionTriggerResponse({})
+
+
+def _lark_ws_apply_card_frame_patch() -> None:
+    """lark-oapi ws client drops MessageType.CARD without ACK → Lark shows code: undefined."""
+    try:
+        from lark_oapi.core.const import UTF_8
+        from lark_oapi.core.json import JSON
+        from lark_oapi.ws.client import Client, _get_by_key
+        from lark_oapi.ws.const import (
+            HEADER_BIZ_RT,
+            HEADER_MESSAGE_ID,
+            HEADER_SEQ,
+            HEADER_SUM,
+            HEADER_TRACE_ID,
+            HEADER_TYPE,
+        )
+        from lark_oapi.ws.enum import MessageType
+        from lark_oapi.ws.model import Response
+    except ImportError:
+        print("[lark-ws] pip install lark-oapi for persistent connection mode", flush=True)
+        raise
+
+    if getattr(Client, "_osedutybot_card_patch", False):
+        return
+
+    async def _handle_data_frame_patched(self, frame):
+        hs = frame.headers
+        msg_id = _get_by_key(hs, HEADER_MESSAGE_ID)
+        trace_id = _get_by_key(hs, HEADER_TRACE_ID)
+        sum_ = _get_by_key(hs, HEADER_SUM)
+        seq = _get_by_key(hs, HEADER_SEQ)
+        type_ = _get_by_key(hs, HEADER_TYPE)
+
+        pl = frame.payload
+        if int(sum_) > 1:
+            pl = self._combine(msg_id, int(sum_), int(seq), pl)
+            if pl is None:
+                return
+
+        message_type = MessageType(type_)
+        resp = Response(code=http.HTTPStatus.OK)
+        try:
+            start = int(round(time.time() * 1000))
+            if message_type in (MessageType.EVENT, MessageType.CARD):
+                result = self._event_handler._do_without_validation(pl)
+            else:
+                return
+            end = int(round(time.time() * 1000))
+            header = hs.add()
+            header.key = HEADER_BIZ_RT
+            header.value = str(end - start)
+            if result is not None:
+                resp.data = base64.b64encode(JSON.marshal(result).encode(UTF_8))
+        except Exception as e:
+            from lark_oapi.core.log import logger
+
+            logger.error(
+                self._fmt_log(
+                    "handle message failed, message_type: {}, message_id: {}, trace_id: {}, err: {}",
+                    message_type.value,
+                    msg_id,
+                    trace_id,
+                    e,
+                )
+            )
+            resp = Response(code=http.HTTPStatus.INTERNAL_SERVER_ERROR)
+
+        frame.payload = JSON.marshal(resp).encode(UTF_8)
+        await self._write_message(frame.SerializeToString())
+
+    Client._handle_data_frame = _handle_data_frame_patched
+    Client._osedutybot_card_patch = True
+    print("[lark-ws] patched lark-oapi ws Client for CARD callbacks", flush=True)
+
+
+def _run_lark_ws_forever() -> None:
+    """Block on Lark persistent connection (im.message + card.action.trigger)."""
+    import lark_oapi as lark
+
+    if not (APP_ID and APP_SECRET):
+        raise RuntimeError("Set APP_ID and APP_SECRET in .env for LARK_EVENT_MODE=websocket")
+
+    _lark_ws_apply_card_frame_patch()
+    handler = (
+        lark.EventDispatcherHandler.builder("", "")
+        .register_p2_im_message_receive_v1(_lark_ws_on_message)
+        .register_p2_card_action_trigger(_lark_ws_on_card_action)
+        .build()
+    )
+    domain_name = (os.getenv("LARK_DOMAIN") or "lark").strip().lower()
+    domain = lark.FEISHU_DOMAIN if domain_name == "feishu" else lark.LARK_DOMAIN
+    cli = lark.ws.Client(
+        str(APP_ID).strip(),
+        str(APP_SECRET).strip(),
+        event_handler=handler,
+        log_level=lark.LogLevel.INFO,
+        domain=domain,
+    )
+    print(
+        "[lark-ws] Persistent connection active (im.message + card.action.trigger). "
+        "Developer console: Subscription mode → Receive callbacks through persistent connection.",
+        flush=True,
+    )
+    cli.start()
+
+
 def _run_main_entry() -> int:
     """
     Same startup guard style as legacy ``run_larkbot.py``:
     - force cwd to project root
     - ensure root is on sys.path
     - print full traceback to stderr on any startup/runtime crash
+
+    ``LARK_EVENT_MODE=websocket`` — Flask in background + Lark persistent connection (main thread).
+    Default ``http`` — Flask only (public HTTPS Request URL forwards to /webhook/event).
     """
     import traceback
 
@@ -6398,6 +6641,20 @@ def _run_main_entry() -> int:
             _boot_pmb.prewarm_prod_env_pool_on_startup()
         except Exception as _boot_pmb_err:
             print(f"[prod-warm] startup pre-warm skipped: {_boot_pmb_err!r}", flush=True)
+        if _lark_ws_uses_persistent_connection():
+            def _flask_bg() -> None:
+                app.run(host="127.0.0.1", port=port, debug=False, threaded=True, use_reloader=False)
+
+            threading.Thread(target=_flask_bg, daemon=True, name="larkbot-flask").start()
+            print(
+                "[lark] LARK_EVENT_MODE=websocket — Flask on http://127.0.0.1:%d (diag); "
+                "events via persistent connection." % port,
+                flush=True,
+            )
+            time.sleep(1.0)
+            _run_lark_ws_forever()
+            return 0
+
         print(
             "[lark] Listening http://0.0.0.0:%d (threaded=True). "
             "Feishu Request URL must be HTTPS and reachable from the internet; reverse-proxy to this port."

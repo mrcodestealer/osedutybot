@@ -10,7 +10,7 @@ WorkingDirectory=/root/osedutybot
 EnvironmentFile=/root/osedutybot/.env
 Environment=LARK_EVENT_MODE=websocket
 Environment=PORT=5000
-ExecStart=/root/miniconda3/bin/python run_local_bot.py
+ExecStart=/root/miniconda3/bin/python main.py
 Restart=always
 RestartSec=10
 
