@@ -6469,6 +6469,54 @@ def _lark_ws_on_card_action(data):
     return P2CardActionTriggerResponse({})
 
 
+def _lark_ws_handler_dispatch(handler, payload: bytes) -> Any:
+    """
+    Dispatch a WebSocket frame through ``EventDispatcherHandler``.
+
+    Older ``lark-oapi`` on some servers only expose ``do_without_validation`` (no leading underscore).
+    """
+    for name in ("_do_without_validation", "do_without_validation"):
+        fn = getattr(handler, name, None)
+        if callable(fn):
+            return fn(payload)
+    return _lark_ws_handler_dispatch_manual(handler, payload)
+
+
+def _lark_ws_handler_dispatch_manual(handler, payload: bytes) -> Any:
+    """Last resort when installed lark-oapi predates ``do_without_validation``."""
+    from lark_oapi.core.const import UTF_8
+    from lark_oapi.core.json import JSON
+    from lark_oapi.core.utils import Strings
+    from lark_oapi.event.context import EventContext
+    from lark_oapi.core.exception import EventException
+
+    pl = payload.decode(UTF_8)
+    context = JSON.unmarshal(pl, EventContext)
+    if Strings.is_not_empty(context.schema):
+        context.schema = "p2"
+        context.type = context.header.event_type
+    elif Strings.is_not_empty(context.uuid):
+        context.schema = "p1"
+        context.type = context.event.get("type")
+
+    event_key = f"{context.schema}.{context.type}"
+    cb_map = getattr(handler, "_callback_processor_map", None) or {}
+    if event_key in cb_map:
+        processor = cb_map.get(event_key)
+        if processor is None:
+            raise EventException(f"callback processor not found, type: {context.type}")
+        data = JSON.unmarshal(pl, processor.type())
+        return processor.do(data)
+
+    proc_map = getattr(handler, "_processorMap", None) or {}
+    processor = proc_map.get(event_key)
+    if processor is None:
+        raise EventException(f"processor not found, type: {context.type}")
+    data = JSON.unmarshal(pl, processor.type())
+    processor.do(data)
+    return None
+
+
 def _lark_ws_apply_card_frame_patch() -> None:
     """lark-oapi ws client drops MessageType.CARD without ACK → Lark shows code: undefined."""
     try:
@@ -6511,7 +6559,7 @@ def _lark_ws_apply_card_frame_patch() -> None:
         try:
             start = int(round(time.time() * 1000))
             if message_type in (MessageType.EVENT, MessageType.CARD):
-                result = self._event_handler._do_without_validation(pl)
+                result = _lark_ws_handler_dispatch(self._event_handler, pl)
             else:
                 return
             end = int(round(time.time() * 1000))
@@ -6555,6 +6603,12 @@ def _run_lark_ws_forever() -> None:
         .register_p2_im_message_receive_v1(_lark_ws_on_message)
         .register_p2_card_action_trigger(_lark_ws_on_card_action)
         .build()
+    )
+    _probe = getattr(handler, "_do_without_validation", None) or getattr(handler, "do_without_validation", None)
+    print(
+        "[lark-ws] EventDispatcherHandler dispatch="
+        + (getattr(_probe, "__name__", "manual_fallback") if callable(_probe) else "manual_fallback"),
+        flush=True,
     )
     domain_name = (os.getenv("LARK_DOMAIN") or "lark").strip().lower()
     domain = lark.FEISHU_DOMAIN if domain_name == "feishu" else lark.LARK_DOMAIN

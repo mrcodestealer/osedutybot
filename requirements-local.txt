@@ -3,7 +3,7 @@ requests
 python-dotenv
 flask
 apscheduler
-lark-oapi>=1.4.0
+lark-oapi>=1.4.0,<2
 pyotp
 qrcode
 pillow
