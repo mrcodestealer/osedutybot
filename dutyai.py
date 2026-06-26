@@ -632,6 +632,37 @@ def _md_div(content: str) -> dict:
     return {"tag": "div", "text": {"tag": "lark_md", "content": content}}
 
 
+def _date_range_label(start: date, end: date) -> str:
+    """A human label for one day or a day-span (used as a section header)."""
+    if start == end:
+        return start.strftime("%A, %d %b %Y")
+    if start.year == end.year and start.month == end.month:
+        return f"{start.strftime('%a %d')} – {end.strftime('%a %d %b %Y')}"
+    return f"{start.strftime('%a, %d %b')} – {end.strftime('%a, %d %b %Y')}"
+
+
+def _group_consecutive_same(
+    day_bodies: list[tuple[date, str]]
+) -> list[tuple[date, date, str]]:
+    """Merge consecutive calendar days that share the same roster body.
+
+    e.g. a Mon–Fri week where it's the same person every day collapses into a
+    single ``(Mon, Fri, body)`` group instead of five identical rows.
+    """
+    groups: list[tuple[date, date, str]] = []
+    for d, body in day_bodies:
+        if (
+            groups
+            and groups[-1][2] == body
+            and groups[-1][1] + timedelta(days=1) == d
+        ):
+            s, _e, b = groups[-1]
+            groups[-1] = (s, d, b)
+        else:
+            groups.append((d, d, body))
+    return groups
+
+
 def _build_card(*, title: str, colour: str, elements: list[dict]) -> dict:
     return {
         "schema": "2.0",
@@ -659,21 +690,25 @@ def _dept_card_payload(dept: str, dates: list[date]) -> dict:
         except Exception as exc:
             print(f"⚠️ dutyai OSE native card failed: {exc!r}", flush=True)
 
-    elements: list[dict] = []
-    text_lines: list[str] = []
-    for i, d in enumerate(dates):
-        if i > 0:
-            elements.append({"tag": "hr"})
-        sub = f"📅 **{d.strftime('%A, %d %b %Y')}**"
+    # Look up each day's roster, then collapse consecutive days with the SAME
+    # roster into one range (so a Mon–Fri week with one person shows once).
+    day_bodies: list[tuple[date, str]] = []
+    for d in dates:
         try:
             body = _dept_text_for_date(dept, d)
         except Exception as exc:
             body = None
             print(f"⚠️ dutyai {dept} {d} lookup failed: {exc!r}", flush=True)
-        if not body:
-            body = "• No duty assigned"
-        elements.append(_md_div(f"{sub}\n{body}"))
-        text_lines.append(f"{d.strftime('%A, %d %b %Y')}\n{body}")
+        day_bodies.append((d, body or "• No duty assigned"))
+
+    elements: list[dict] = []
+    text_lines: list[str] = []
+    for i, (start, end, body) in enumerate(_group_consecutive_same(day_bodies)):
+        if i > 0:
+            elements.append({"tag": "hr"})
+        label = _date_range_label(start, end)
+        elements.append(_md_div(f"📅 **{label}**\n{body}"))
+        text_lines.append(f"{label}\n{body}")
 
     if len(dates) == 1:
         title = f"{emoji} {display} DUTY · {dates[0].strftime('%d/%m/%Y')}"
@@ -731,17 +766,13 @@ def _leave_payload(dates: list[date]) -> Optional[dict]:
                     seen.add(key)
                     rows.append(r)
 
-        elements: list[dict] = []
-        text_lines: list[str] = []
         any_leave = False
-        for i, d in enumerate(dates):
+        day_bodies: list[tuple[date, str]] = []
+        for d in dates:
             try:
                 day_rows = lw.rows_on_leave_date(rows, d)
             except Exception:
                 day_rows = []
-            if i > 0:
-                elements.append({"tag": "hr"})
-            head = f"📅 **{d.strftime('%a, %d %b')}**"
             if day_rows:
                 any_leave = True
                 body = "\n".join(
@@ -749,8 +780,17 @@ def _leave_payload(dates: list[date]) -> Optional[dict]:
                 )
             else:
                 body = "• Nobody on leave"
-            elements.append(_md_div(f"{head}\n{body}"))
-            text_lines.append(f"{d.strftime('%a, %d %b')}\n{body}")
+            day_bodies.append((d, body))
+
+        # Collapse consecutive days with the identical leave list into one range.
+        elements: list[dict] = []
+        text_lines: list[str] = []
+        for i, (start, end, body) in enumerate(_group_consecutive_same(day_bodies)):
+            if i > 0:
+                elements.append({"tag": "hr"})
+            label = _date_range_label(start, end)
+            elements.append(_md_div(f"📅 **{label}**\n{body}"))
+            text_lines.append(f"{label}\n{body}")
 
         if not any_leave:
             elements.append(_md_div("🎉 Nobody is on leave during this period."))
