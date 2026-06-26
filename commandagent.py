@@ -971,6 +971,16 @@ def detect_identify_issue_command(text: str) -> Optional[str]:
         return None
     if _IDENTIFY_ISSUE_RE.search(raw):
         return "/identifyissue"
+    # Auto-detect a player issue/incident report (e.g. "please help check this
+    # player account 12345, unable to withdraw ...") even without the literal
+    # phrase "identify issue" — let the AI explain it.
+    try:
+        import identifyissue as _ii
+
+        if _ii.looks_like_issue_report(raw):
+            return "/identifyissue"
+    except Exception:
+        pass
     return None
 
 

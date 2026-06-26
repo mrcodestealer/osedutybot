@@ -40,6 +40,13 @@ from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+try:  # so BOT_CHAT_* / BOT_ISSUE_* resolve when run standalone (main.py already loads .env)
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except Exception:
+    pass
+
 # ---------------------------------------------------------------------------
 # SOP / runbook knowledge base (the AI reasons strictly from this).
 # Transcribed from the CP OM Duty P0 SOP guide + system architecture diagrams.
@@ -435,7 +442,13 @@ def is_enabled() -> bool:
     return (os.getenv("BOT_USE_IDENTIFYISSUE") or "1").strip().lower() in ("1", "true", "yes", "on")
 
 
-def _llm_complete(system_prompt: str, user_text: str) -> Optional[str]:
+def _llm_complete(
+    system_prompt: str,
+    user_text: str,
+    *,
+    max_tokens: Optional[int] = None,
+    timeout: Optional[float] = None,
+) -> Optional[str]:
     api_key = _llm_api_key()
     if not api_key:
         return None
@@ -446,7 +459,7 @@ def _llm_complete(system_prompt: str, user_text: str) -> Optional[str]:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_text},
         ],
-        "max_tokens": int(os.getenv("BOT_ISSUE_MAX_TOKENS", "1200")),
+        "max_tokens": int(max_tokens if max_tokens is not None else int(os.getenv("BOT_ISSUE_MAX_TOKENS", "1200"))),
         "temperature": float(os.getenv("BOT_ISSUE_TEMPERATURE", "0.3")),
     }
     base = _llm_base_url().lower()
@@ -459,7 +472,8 @@ def _llm_complete(system_prompt: str, user_text: str) -> Optional[str]:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=float(os.getenv("BOT_ISSUE_LLM_TIMEOUT", "45"))) as resp:
+        _timeout = timeout if timeout is not None else float(os.getenv("BOT_ISSUE_LLM_TIMEOUT", "45"))
+        with urllib.request.urlopen(req, timeout=_timeout) as resp:
             body = json.loads(resp.read().decode("utf-8"))
         choices = body.get("choices") or []
         if not choices:
@@ -628,6 +642,123 @@ USAGE = (
     "/identifyissue Players cannot login to the PC version via password, error prompt.\n"
     "Account ID: 1043930439\n1037672785\n1049901322"
 )
+
+
+# Problem / report-phrasing signals used to auto-detect an issue report even when
+# the user never says the words "identify issue".
+_PROBLEM_RE = re.compile(
+    r"(?i)\b("
+    r"unable\s+to|can'?t|cannot|could\s*n'?t|not\s+able\s+to|"
+    r"error|errors|failed|failing|fail|stuck|"
+    r"not\s+working|doesn'?t\s+work|don'?t\s+work|no\s+response|"
+    r"prompt(?:ing|ed)?|pending\s+transaction|missing|"
+    r"issue|problem|incident|bug|abnormal|"
+    r"无法|不能|不可以|失败|报错|错误|卡住|异常|问题|故障"
+    r")\b"
+)
+_REPORT_PHRASE_RE = re.compile(
+    r"(?i)("
+    r"please\s+(?:help\s+)?check|kindly\s+(?:help\s+)?check|help\s+(?:us|me)\s+check|"
+    r"help\s+check|pls\s+check|reach(?:ed)?\s+out|reported|reporting|complain(?:ed|ing|t)?|"
+    r"player\s+(?:said|reported|reached|cannot|can'?t|is\s+unable)|"
+    r"encountered|experienc(?:e|ed|ing)|"
+    r"玩家(?:反馈|反映|表示|无法|不能|说)|反馈|反映|协助查|帮.{0,4}查"
+    r")"
+)
+_PLAYER_CTX_RE = re.compile(
+    r"(?i)\b(player|players|account|accounts|user|users|uid|account\s*id)\b|玩家|账号|帳號|用户"
+)
+
+
+def looks_like_issue_report(text: str) -> bool:
+    """Heuristic: is this a player issue/incident report we should auto-analyze?
+
+    Designed for @bot messages. High precision so normal duty/chat is not hijacked:
+    a strong report needs a player-account context PLUS a symptom or problem phrasing.
+    """
+    raw = (text or "").strip()
+    if not raw or raw.lstrip().startswith("/"):
+        return False
+    if not is_enabled():
+        return False
+    # Don't steal the structured maintenance / credit-check flows.
+    try:
+        import commandagent as _ca
+
+        if _ca.detect_prod_batch_command(raw) or _ca.detect_checkcredit_command(raw):
+            return False
+    except Exception:
+        pass
+
+    info = classify(raw)
+    has_symptom = bool(info.get("categories"))
+    has_account_id = bool(extract_account_ids(raw))
+    has_player_ctx = has_account_id or bool(_PLAYER_CTX_RE.search(raw))
+    has_problem = bool(_PROBLEM_RE.search(raw))
+    has_report_phrase = bool(_REPORT_PHRASE_RE.search(raw))
+
+    # 1) Account id + (a symptom or any problem/report wording) → almost certainly a report.
+    if has_account_id and (has_symptom or has_problem or has_report_phrase):
+        return True
+    # 2) No id, but clear player context + a category symptom + problem/report wording.
+    if has_player_ctx and has_symptom and (has_problem or has_report_phrase):
+        return True
+    return False
+
+
+# --- AI-driven routing (let the model decide, not just regex) --------------
+
+_AI_ROUTER_SYSTEM = (
+    "You are the intent router for the CP OM Duty operations bot. Decide whether the user's "
+    "message is a PLAYER ISSUE / INCIDENT REPORT that operations should analyze — for example a "
+    "player who cannot log in, cannot withdraw or deposit, cannot enter a game, an OTP/SMS "
+    "problem, a stuck/pending transaction, an error prompt, or any service problem affecting "
+    "players (often with an account id). "
+    "Answer NO for casual chat/greetings, thanks, questions about the bot, and for duty/leave/"
+    "holiday/machine/jenkins lookups or other slash-command requests. "
+    "Reply with ONLY one word: YES or NO."
+)
+
+
+def ai_router_enabled() -> bool:
+    """Toggle the LLM intent router (set BOT_ISSUE_AI_ROUTER=0 to use regex only)."""
+    return (os.getenv("BOT_ISSUE_AI_ROUTER") or "1").strip().lower() in ("1", "true", "yes", "on")
+
+
+def ai_is_issue_report(text: str) -> bool:
+    """Ask the LLM to decide if this is a player issue report (used for cases regex misses).
+
+    Returns False if AI is unavailable/disabled or on any error — the regex
+    ``looks_like_issue_report`` remains the fast, deterministic path.
+    """
+    raw = (text or "").strip()
+    if not raw or raw.lstrip().startswith("/"):
+        return False
+    if not (is_enabled() and ai_router_enabled() and llm_available()):
+        return False
+    try:
+        import commandagent as _ca
+
+        if _ca.detect_prod_batch_command(raw) or _ca.detect_checkcredit_command(raw):
+            return False
+    except Exception:
+        pass
+    reply = _llm_complete(
+        _AI_ROUTER_SYSTEM,
+        f'Message:\n"""\n{raw}\n"""\nIs this a player issue/incident report? Answer YES or NO.',
+        max_tokens=int(os.getenv("BOT_ISSUE_ROUTER_MAX_TOKENS", "5")),
+        timeout=float(os.getenv("BOT_ISSUE_ROUTER_TIMEOUT", "15")),
+    )
+    if not reply:
+        return False
+    decision = bool(re.search(r"(?i)\byes\b", reply.strip()[:16]))
+    print(f"[identifyissue] AI router decision={decision} for {raw[:80]!r} (raw={reply.strip()[:20]!r})", flush=True)
+    return decision
+
+
+def is_issue_report(text: str) -> bool:
+    """Combined decision: fast regex first, then let the AI decide the rest."""
+    return looks_like_issue_report(text) or ai_is_issue_report(text)
 
 
 def strip_command(text: str) -> str:

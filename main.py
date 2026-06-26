@@ -5852,6 +5852,29 @@ def lark_webhook():
                     )
                     print(f"💬 Friendly chat fallback to chat {chat_id}", flush=True)
             else:
+                # Last-resort: if the message reads like a player issue/incident
+                # report, analyze it with the AI issue identifier instead of the
+                # generic "could not map" message.
+                _issue_handled = False
+                try:
+                    import identifyissue as _identifyissue_fb
+
+                    _issue_src = (
+                        clean_text_multiline or _full_body or _chat_source or clean_text or ""
+                    ).strip()
+                    # Fast regex first, then let the AI decide anything it missed.
+                    if _identifyissue_fb.is_issue_report(_issue_src):
+                        _issue_reply = _identifyissue_fb.identify_issue(
+                            _identifyissue_fb.strip_command(_issue_src)
+                        )
+                        if _issue_reply:
+                            send_message(chat_id, _issue_reply)
+                            print(f"🔎 Issue identifier (fallback) reply to chat {chat_id}", flush=True)
+                            _issue_handled = True
+                except Exception as _issue_fb_err:
+                    print(f"⚠️ Issue identifier fallback skipped: {_issue_fb_err!r}", flush=True)
+                if _issue_handled:
+                    return _lark_im_done()
                 try:
                     import commandagent as _commandagent
 
