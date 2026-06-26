@@ -5681,10 +5681,23 @@ def lark_webhook():
             job = scheduler.add_job(func=recall_message, trigger='date', run_date=run_date, args=[message_id])
             game.set_game_job(sender_id, job.id)
         return _lark_im_done()
+    elif (
+        bot_mentioned or chat_type == "p2p"
+    ) and reminder.parse_natural_timer_request(clean_text):
+        reply = reminder.schedule_natural_timer(
+            chat_id=chat_id,
+            user_id=sender_id,
+            text=clean_text,
+            scheduler=scheduler,
+            send_func=send_message,
+        )
+        if reply:
+            send_message(chat_id, reply)
+            return _lark_im_done()
     elif clean_text.lower().startswith('/reminder'):
         parts = clean_text.split()
         if len(parts) < 3:
-            reply = "❌ Usage: `/reminder [at] <time|duration> <message>`\nExamples:\n  `/reminder 1h30m Team meeting`\n  `/reminder 8:39PM Lunch`\n  `/reminder at 2039 Break`"
+            reply = "❌ Usage: `/reminder [at] <time|duration> <message>`\nExamples:\n  `/reminder 1h30m Team meeting`\n  `/reminder 8:39PM Lunch`\n  `/reminder at 2039 Break`\nNatural language: `@Duty Bot add timer 5mins` or `add timer 1h30m lunch`"
         else:
             time_or_duration = None
             msg_start_idx = None

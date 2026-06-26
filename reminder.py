@@ -83,6 +83,108 @@ def parse_absolute_time(time_str):
 
     raise ValueError(f"Unsupported time format: {time_str}. Use e.g., 8:39PM, 2039, 8pm, 20:39")
 
+
+def normalize_duration_token(duration_raw: str) -> str:
+    """Convert human-friendly duration (``5mins``, ``1 hour 30 minutes``) to ``parse_duration`` form."""
+    s = (duration_raw or "").strip().lower()
+    if not s:
+        raise ValueError("Duration must be positive")
+    compact = re.sub(r"\s+", "", s)
+    if re.fullmatch(r"(?:(?:\d+)h)?(?:(?:\d+)m)?(?:(?:\d+)s)?", compact, re.I):
+        return compact
+    parts: list[str] = []
+    for m in re.finditer(
+        r"(\d+)\s*(hours?|hrs?|h|minutes?|mins?|min|m|seconds?|secs?|sec|s)\b",
+        s,
+        re.I,
+    ):
+        n, unit = m.group(1), m.group(2).lower()
+        if unit.startswith("h"):
+            parts.append(f"{n}h")
+        elif unit.startswith("m"):
+            parts.append(f"{n}m")
+        else:
+            parts.append(f"{n}s")
+    if not parts:
+        raise ValueError(f"Invalid duration format: {duration_raw}")
+    return "".join(parts)
+
+
+def parse_natural_timer_request(text: str) -> tuple[str, str] | None:
+    """
+    Parse natural-language timer requests, e.g. ``add timer 5mins`` or ``set timer 1h30m lunch``.
+
+    Returns ``(normalized_duration, message)`` or ``None`` if not a timer request.
+    """
+    t = (text or "").strip()
+    if not t:
+        return None
+    m = re.search(
+        r"(?:^|\b)(?:(?:add|set)(?:\s+a)?\s+timer(?:\s+for)?|timer)\s+(.+)$",
+        t,
+        re.I,
+    )
+    if not m:
+        return None
+    rest = m.group(1).strip()
+    dm = re.match(
+        r"^(?P<dur>(?:\d+\s*(?:hours?|hrs?|h)\s*)?"
+        r"(?:\d+\s*(?:minutes?|mins?|min|m)\s*)?"
+        r"(?:\d+\s*(?:seconds?|secs?|sec|s)\s*)?"
+        r"|\d+h\d*m?\d*s?)"
+        r"(?:\s+(?P<msg>.+))?$",
+        rest,
+        re.I,
+    )
+    if not dm or not (dm.group("dur") or "").strip():
+        return None
+    try:
+        dur_norm = normalize_duration_token(dm.group("dur").strip())
+        parse_duration(dur_norm)
+    except ValueError:
+        return None
+    msg = (dm.group("msg") or "").strip() or "Timer"
+    return dur_norm, msg
+
+
+def _format_timer_delay(delay_seconds: int) -> str:
+    hours, rem = divmod(delay_seconds, 3600)
+    minutes, seconds = divmod(rem, 60)
+    chunks: list[str] = []
+    if hours:
+        chunks.append(f"{hours}h")
+    if minutes:
+        chunks.append(f"{minutes}m")
+    if seconds or not chunks:
+        chunks.append(f"{seconds}s")
+    return " ".join(chunks)
+
+
+def schedule_natural_timer(
+    chat_id: str,
+    user_id: str,
+    text: str,
+    scheduler,
+    send_func,
+) -> str | None:
+    """Schedule a one-off timer from natural language; return confirmation or error, or ``None`` if unmatched."""
+    parsed = parse_natural_timer_request(text)
+    if not parsed:
+        return None
+    duration_str, message = parsed
+    try:
+        delay_seconds = parse_duration(duration_str)
+    except ValueError as e:
+        return str(e)
+    run_time = datetime.now() + timedelta(seconds=delay_seconds)
+    reminder_text = f'<at user_id="{user_id}">you</at> ⏰ Reminder: {message}'
+    scheduler.add_job(
+        func=send_func, trigger="date", run_date=run_time, args=[chat_id, reminder_text]
+    )
+    when = _format_timer_delay(delay_seconds)
+    return f"✅ Timer set for {when}. I'll remind you: {message}"
+
+
 def schedule_reminder(chat_id, user_id, duration_str, message, scheduler, send_func):
     try:
         delay_seconds = parse_duration(duration_str)
