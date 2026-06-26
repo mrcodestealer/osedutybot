@@ -648,6 +648,34 @@ def run_check_machine_log_job(
                 _cml_send(text)
             else:
                 _cml_send("✅ checkmachinelog finished (no output).")
+
+        pick = out.get("third_http_followup")
+        if isinstance(pick, dict) and (pick.get("user_id") or "").strip():
+            be = str(pick.get("third_http_backend") or "NP").strip().upper()
+            uid = str(pick["user_id"]).strip()
+            cr = pick.get("credit_value")
+            cr_s = str(cr) if cr is not None else "n/a"
+            ts = str(pick.get("time_short") or "").strip()
+            _cml_send(
+                f"📋 Log shows an **error** for player `{uid}` (credit `{cr_s}` @ `{ts}`).\n"
+                f"**Now checking Third Http ({be})** — did the player **transfer out credit** successfully?\n\n"
+                f"日志有 error — 正在查 **Third Http ({be})** 是否已成功转出额度…"
+            )
+            _np_run_screenshot_worker(
+                chat_id,
+                uid,
+                str(pick.get("target_date_iso") or date_str).strip(),
+                ts,
+                machine_substr=pick.get("machine_match_substr"),
+                expected_credit=cr if isinstance(cr, (int, float)) else None,
+                machine_display=str(pick.get("machine_display") or "").strip() or None,
+                thread_root=thread_root,
+                success_caption=(
+                    f"✅ **Third Http ({be})** — player `{uid}` **transferred out credit** successfully "
+                    f"(Detail matches log amount `{cr_s}` @ `{ts}`).\n"
+                    f"✅ Third Http 有匹配记录 — 玩家 **`{uid}`** 额度应已成功转出。"
+                ),
+            )
     except Exception as e:
         _cml_send(f"❌ checkmachinelog failed: {e}")
         print(f"[checkmachinelog] error: {e!r}")
@@ -807,26 +835,31 @@ def _np_run_screenshot_worker(
     machine_substr: Optional[str] = None,
     expected_credit: Optional[float] = None,
     machine_display: Optional[str] = None,
+    thread_root: Optional[str] = None,
+    success_caption: Optional[str] = None,
 ) -> None:
     """NP / WF / DHS / NCH / CP / OSM / MDR / TBP Log Third Http → `recharge` Detail screenshot. Always **headless** on server."""
+    root = (thread_root or _get_checkcredit_thread_root(chat_id) or "").strip() or None
+
+    def _np_send(text, **kwargs):
+        return _checkcredit_send(chat_id, text, thread_root=root, **kwargs)
+
     try:
         import checkcredit
 
         screenshot_np_recharge_detail = checkcredit.screenshot_np_recharge_detail
     except ImportError as e:
-        _checkcredit_send(chat_id, f"❌ Cannot load checkcredit module: {e}")
+        _np_send(f"❌ Cannot load checkcredit module: {e}")
         return
     except AttributeError:
-        _checkcredit_send(
-            chat_id,
+        _np_send(
             "❌ checkcredit.screenshot_np_recharge_detail missing — deploy the latest `checkcredit.py`.",
         )
         return
     backend_tag = getattr(checkcredit, "_np_log_backend_tag", lambda _: "NP")(
         (machine_display or "").strip() or None
     )
-    _checkcredit_send(
-        chat_id,
+    _np_send(
         f"⏳ {backend_tag} backend (Playwright): login → Log Third Http Req → recharge → Detail screenshot…",
     )
     path = None
@@ -843,11 +876,16 @@ def _np_run_screenshot_worker(
         )
         key = upload_image_lark(path)
         if not key:
-            _checkcredit_send(chat_id, "❌ Failed to upload screenshot to Lark.")
+            _np_send("❌ Failed to upload screenshot to Lark.")
             return
-        r = _checkcredit_send_image(chat_id, key)
+        if (success_caption or "").strip():
+            _np_send(success_caption.strip())
+        if root:
+            r = reply_message_in_thread(root, key, msg_type="image")
+        else:
+            r = send_image_message(chat_id, key)
         if r.get("code") != 0:
-            _checkcredit_send(chat_id, f"❌ Failed to send image: {r}")
+            _np_send(f"❌ Failed to send image: {r}")
     except Exception as e:
         tip = (
             "\n💡 Duty Bot runs this screenshot **headless**. Try raising `NP_BACKEND_MAX_PAGES` / "
@@ -863,7 +901,7 @@ def _np_run_screenshot_worker(
             f"machine_display={machine_display!r}",
             flush=True,
         )
-        _checkcredit_send(chat_id, f"❌ {backend_tag} third-http screenshot failed: {e}{tip}")
+        _np_send(f"❌ {backend_tag} third-http screenshot failed: {e}{tip}")
         print(f"[npthirdhttp] error: {e!r}")
     finally:
         if path and os.path.isfile(path):

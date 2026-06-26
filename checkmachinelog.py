@@ -719,6 +719,46 @@ def format_report(
     return "\n".join(parts).strip() + "\n"
 
 
+def build_third_http_followup(
+    *,
+    machine_display: str,
+    target_date: date,
+    latest_err_uid: str | None,
+    latest_any_uid: str | None,
+    last_error: dict[str, Any] | None,
+    transfer_out: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """When log has error — pick player/time/credit for Third Http screenshot (checkcredit path)."""
+    if not last_error and not latest_err_uid:
+        return None
+    uid = str(latest_err_uid or latest_any_uid or "").strip()
+    if not uid:
+        return None
+    xfer = transfer_out or {}
+    ts = (xfer.get("time") or "").strip()
+    if not ts and last_error:
+        ts = (last_error.get("time") or "").strip()
+    if not ts:
+        return None
+    credit_val: float | None = None
+    amt = xfer.get("amount")
+    if amt is not None:
+        try:
+            credit_val = float(amt)
+        except (TypeError, ValueError):
+            credit_val = None
+    md = (machine_display or "").strip()
+    return {
+        "user_id": uid,
+        "time_short": ts,
+        "credit_value": credit_val,
+        "machine_display": md,
+        "target_date_iso": target_date.isoformat(),
+        "machine_match_substr": cc.machine_match_substr_from_display(md) or None,
+        "third_http_backend": cc._np_log_backend_tag(md),
+    }
+
+
 def run_check_machine_log(
     machine_query: str,
     *,
@@ -794,9 +834,19 @@ def run_check_machine_log(
         header_lines=header_lines,
     )
 
+    third_http_followup = build_third_http_followup(
+        machine_display=machine_display,
+        target_date=td,
+        latest_err_uid=le_uid,
+        latest_any_uid=la_uid,
+        last_error=last_error,
+        transfer_out=transfer_out,
+    )
+
     return {
         "text": text,
         "lark_card": lark_card,
+        "third_http_followup": third_http_followup,
         "machine_display": machine_display,
         "target_date": td,
         "opened_basename": opened_basename,
