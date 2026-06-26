@@ -683,7 +683,10 @@ def _llm_complete(system_prompt: str, user_text: str, *, max_tokens: int = 700, 
         "temperature": float(os.getenv("BOT_CHECKPERSON_TEMPERATURE", "0.2")),
     }
     if _is_ollama_base():
-        payload["think"] = (os.getenv("BOT_CHAT_LLM_THINK") or "false").strip().lower() in ("1", "true", "yes", "on")
+        # checkperson is a structured-output task: keep "thinking" OFF by default so the
+        # answer is clean & fast, INDEPENDENT of the global BOT_CHAT_LLM_THINK setting.
+        # Override with BOT_CHECKPERSON_THINK=1 only if you want the reasoning channel.
+        payload["think"] = (os.getenv("BOT_CHECKPERSON_THINK") or "false").strip().lower() in ("1", "true", "yes", "on")
         keep_alive = (os.getenv("BOT_CHAT_OLLAMA_KEEP_ALIVE") or "-1").strip()
         try:
             payload["keep_alive"] = int(keep_alive)
@@ -734,7 +737,16 @@ def _one_line(text: str, *, max_len: int = 120) -> str:
     return one if len(one) <= max_len else one[: max_len - 1] + "…"
 
 
-def _build_llm_context(query: str, snapshot: dict[str, Any], *, k: int = 8) -> str:
+def _top_k() -> int:
+    """How many most-similar past issues to feed the model for deep reasoning."""
+    try:
+        return max(3, int(os.getenv("BOT_CHECKPERSON_TOPK", "12")))
+    except ValueError:
+        return 12
+
+
+def _build_llm_context(query: str, snapshot: dict[str, Any], *, k: Optional[int] = None) -> str:
+    k = k or _top_k()
     matches = retrieve_similar(query, snapshot, k=k)
 
     # Department mapping limited to departments that appear in the matches (plus
@@ -774,7 +786,44 @@ def _build_llm_context(query: str, snapshot: dict[str, Any], *, k: int = 8) -> s
             f"   Department: {r.get('department') or '—'} | Priority: {r.get('priority') or '—'} | Check Person: {person}\n"
             f"   About: {detail}"
         )
+
+    # Optional: a one-line-per-issue index of EVERY issue, so the model can scan the
+    # whole dataset (not just the top matches) before deciding. Opt-in because it
+    # makes the prompt much longer/slower. Enable with BOT_CHECKPERSON_FULL_INDEX=1.
+    if _full_index_enabled():
+        index = _full_compact_index(snapshot)
+        if index:
+            lines.append("")
+            lines.append("=== Full issue index (ALL past issues — title | department | priority | check person) ===")
+            lines.append(index)
+
     return "\n".join(lines)
+
+
+def _full_index_enabled() -> bool:
+    return (os.getenv("BOT_CHECKPERSON_FULL_INDEX") or "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _full_compact_index(snapshot: dict[str, Any], *, max_lines: int = 2000) -> str:
+    """One compact line per distinct issue across all sheets (deduped)."""
+    records = snapshot.get("records") or []
+    out: list[str] = []
+    seen: set[str] = set()
+    for r in records:
+        title = (r.get("title") or r.get("summary") or _one_line(r.get("description", ""), max_len=80)).strip()
+        if not title:
+            continue
+        dept = (r.get("department") or "—").strip()
+        prio = (r.get("priority") or "—").strip()
+        person = (r.get("check_person") or "—").strip()
+        key = f"{title.lower()}|{dept.lower()}|{person.lower()}"
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(f"- {title} | {dept} | {prio} | {person}")
+        if len(out) >= max_lines:
+            break
+    return "\n".join(out)
 
 
 # A complete 4-line answer block. We scan for ALL of them and take the LAST valid
