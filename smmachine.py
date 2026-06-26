@@ -3268,6 +3268,17 @@ def _prod_batch_send_machine_screenshots_background(
     ).start()
 
 
+def send_machine_row_screenshots_for_chat(
+    chat_id: str,
+    machines: list[dict],
+    send_message: Callable[..., Any],
+) -> None:
+    """Background EGM status-table row PNGs for machine dicts (``belongs`` + ``machine``)."""
+    if not machines:
+        return
+    _prod_batch_send_machine_screenshots_background(chat_id, machines, None, send_message)
+
+
 def _prod_batch_send_machine_screenshots(
     chat_id: str,
     machines: list[dict],

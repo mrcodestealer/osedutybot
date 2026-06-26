@@ -1573,6 +1573,23 @@ def handle_machine_status_check_message(
     )
     reply = build_status_report(matched, not_found, env_code=env_code, note=note)
     send_message(chat_id, reply)
+    if matched:
+        try:
+            import smmachine
+            from prod_machine_batch import prod_batch_screenshots_enabled
+
+            if prod_batch_screenshots_enabled():
+                cap = _direct_set_unset_max()
+                to_shot = matched[:cap]
+                smmachine.send_machine_row_screenshots_for_chat(chat_id, to_shot, send_message)
+                if len(matched) > cap:
+                    send_message(
+                        chat_id,
+                        f"ℹ️ EGM row screenshots: first **{cap}** of **{len(matched)}** machines "
+                        f"(raise `MAINT_DIRECT_SET_UNSET_MAX` for more).",
+                    )
+        except Exception as exc:
+            print(f"[maintenanceagent] status-check screenshots failed: {exc!r}", flush=True)
     return True, None
 
 
