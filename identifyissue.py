@@ -488,7 +488,9 @@ def _llm_complete(system_prompt: str, user_text: str) -> Optional[str]:
 def _impact_scope_text(info: dict, *, zh: bool) -> str:
     players = info.get("players", 0)
     if players > 0:
-        return (f"{players}名玩家，QA，CS" if zh else f"{players} players, QA, CS")
+        if zh:
+            return f"{players}名玩家，QA，CS"
+        return f"{players} player{'s' if players != 1 else ''}, QA, CS"
     return ("玩家数待确认，QA，CS" if zh else "players TBC, QA, CS")
 
 

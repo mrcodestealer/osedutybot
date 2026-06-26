@@ -882,10 +882,26 @@ def _save_memory_turn(
         _memory_append_turn(session_key, user_text, assistant_text)
 
 
+_DATETIME_LIKE_RE = re.compile(
+    r"\d{4}\s*[/-]\s*\d{1,2}\s*[/-]\s*\d{1,2}"  # 2026/01/01 or 2026-06-03
+    r"|\d{1,2}\s*[/-]\s*\d{1,2}\s*[/-]\s*\d{2,4}"  # 01/01/2026
+    r"|\d{1,2}:\d{2}(?::\d{2})?"  # 00:00 / 00:00:00
+)
+
+
+def _looks_like_datetime_blob(text: str) -> bool:
+    """Date/time strings (records, ranges, timestamps) are NOT arithmetic."""
+    return bool(_DATETIME_LIKE_RE.search(text or ""))
+
+
 def looks_like_math_question(text: str) -> bool:
     """Simple arithmetic / 除法 style questions (not machine-id lookups)."""
     raw = _normalize_math_operators(_strip_lark_mention_noise(text))
     if not raw or not re.search(r"\d", raw):
+        return False
+    # A date range / timestamp ("2026/01/01 00:00:00 - 2026/06/03") superficially
+    # looks like arithmetic (/, -, :) — never treat such reports as a calculation.
+    if _looks_like_datetime_blob(raw):
         return False
     return bool(_MATH_QUESTION_RE.search(raw))
 

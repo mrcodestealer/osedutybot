@@ -4543,11 +4543,19 @@ def lark_webhook():
         except Exception:
             pass
 
+    # Respect the router: if it already decided this is a COMMAND (e.g. /identifyissue,
+    # a maintenance paste, a credit check), do NOT let the math/chat shortcut below
+    # hijack it. A pasted report can contain dates/amounts that superficially look like
+    # arithmetic ("2026/01/01 00:00:00 - 2026/06/03"), which previously produced a
+    # bogus "couldn't parse that calculation" reply instead of running the command.
+    _is_routed_command = bool(
+        _router_decision is not None and getattr(_router_decision, "is_command", False)
+    )
     try:
         import chatagent as _math_agent
 
         _math_src = (clean_text_multiline or clean_text or "").strip()
-        if _math_src:
+        if _math_src and not _is_routed_command:
             if _math_agent.looks_like_math_question(_math_src):
                 _math_reply = _math_agent.resolve_math_from_context(
                     _math_src, session_key=_chat_memory_key
