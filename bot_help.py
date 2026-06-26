@@ -97,6 +97,11 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
                 ("/ecsre [<game>]", "EC SRE game owner", "EC SRE 游戏负责人"),
                 ("/ec [<game>]", "Emergency contacts", "紧急联系人"),
                 ("/otpp0", "OTP P0 guide", "OTP P0 指引"),
+                (
+                    "/identifyissue <report>",
+                    "AI: classify a player issue (P0/P1) + bilingual P0 overview",
+                    "AI 识别玩家问题（P0/P1）+ 中英文 P0 概览",
+                ),
             ],
         ),
         (

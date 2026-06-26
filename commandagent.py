@@ -349,6 +349,13 @@ def build_intent_catalog(*, jenkins_available: bool = True) -> list[IntentSpec]:
     )
     intents.append(
         _simple_intent(
+            "cmd_restart_services",
+            "/restartservices",
+            "restart services|restart all services|restart webapp|restart larkbot and webapp|reboot services",
+        )
+    )
+    intents.append(
+        _simple_intent(
             "cmd_cancelp1",
             "/cancelp1",
             "cancel p1 reminder|stop p1 escalation|cancel p1 alert",
@@ -921,6 +928,52 @@ def detect_show_reminder_command(text: str) -> Optional[str]:
     return None
 
 
+_RESTART_SERVICES_RE = re.compile(
+    r"(?i)(?:^|\s)(?:restart|reboot)\s+(?:all\s+)?services(?:\s|$|[.!?])"
+    r"|(?:^|\s)restart\s+(?:the\s+)?(?:webapp|web\s+app)(?:\s+and\s+(?:larkbot|bot|duty\s+bot))?(?:\s|$|[.!?])"
+)
+
+
+def detect_restart_services_command(text: str) -> Optional[str]:
+    """Map natural language → ``/restartservices`` (webapp :8765 + larkbot systemd)."""
+    raw = (text or "").strip()
+    if not raw or _looks_like_slash_command(raw):
+        return None
+    if _RESTART_SERVICES_RE.search(raw):
+        return "/restartservices"
+    return None
+
+
+# "check this issue" / "identify this issue" / "help us check this" / "what is this
+# issue" → /identifyissue. The full report (incl. account ids) is read separately by
+# main.py from the multiline body, so we only need to detect the *intent* here.
+_IDENTIFY_ISSUE_RE = re.compile(
+    r"(?i)("
+    r"(?:identify|check|explain|analy[sz]e|classify|diagnose|what\s+is|what's|whats|"
+    r"tell\s+me\s+about|help\s+(?:us|me)\s+(?:to\s+)?(?:check|identify|analy[sz]e))\s+"
+    r"(?:this|the|that|out|us\s+with)?\s*(?:issue|problem|incident|error|case|bug|report)"
+    r"|help\s+(?:us|me)\s+check\s+this(?:\s+(?:one|out))?"
+    r"|check\s+this\s+(?:one|out|issue|problem|incident)"
+    r"|identify\s+(?:this\s+)?(?:issue|problem|incident)"
+    r"|(?:这是?|帮.{0,6}看看?|分析|判断).{0,6}(?:什么)?(?:问题|事故|issue)"
+    r"|是什么问题"
+    r")"
+)
+
+
+def detect_identify_issue_command(text: str) -> Optional[str]:
+    """Map natural language → ``/identifyissue`` (AI explains/classifies the issue)."""
+    raw = (text or "").strip()
+    if not raw or _looks_like_slash_command(raw):
+        return None
+    # Avoid colliding with the maintenance / credit / jenkins structured flows.
+    if detect_prod_batch_command(raw) or detect_checkcredit_command(raw):
+        return None
+    if _IDENTIFY_ISSUE_RE.search(raw):
+        return "/identifyissue"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Argument extraction
 # ---------------------------------------------------------------------------
@@ -1269,6 +1322,14 @@ def command_signal(text: str) -> dict[str, Any]:
     if sr:
         out.update(tag="cmd_deletereminder", confidence=1.0, margin=1.0, command=sr, deterministic=True)
         return out
+    rs = detect_restart_services_command(raw)
+    if rs:
+        out.update(tag="cmd_restart_services", confidence=1.0, margin=1.0, command=rs, deterministic=True)
+        return out
+    ii = detect_identify_issue_command(raw)
+    if ii:
+        out.update(tag="cmd_identifyissue", confidence=1.0, margin=1.0, command=ii, deterministic=True)
+        return out
     clf = _get_classifier()
     if clf is None:
         return out
@@ -1312,6 +1373,14 @@ def translate_if_enabled(text: str) -> Optional[str]:
     if sr:
         print(f"[commandagent] Show-reminder map: {raw[:80]!r} → {sr!r}", flush=True)
         return sr
+    rs = detect_restart_services_command(raw)
+    if rs:
+        print(f"[commandagent] Restart-services map: {raw[:80]!r} → {rs!r}", flush=True)
+        return rs
+    ii = detect_identify_issue_command(raw)
+    if ii:
+        print(f"[commandagent] Identify-issue map: {raw[:80]!r} → {ii!r}", flush=True)
+        return ii
     try:
         import jenkinsupdate as _jenkins_gate
 

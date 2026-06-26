@@ -2167,17 +2167,6 @@ _add_scheduler_job("clean_pending_p1_confirmations", clean_pending_p1_confirmati
 
 PENDING_RESTART_FILE = "restart_pending.json"
 
-def write_restart_pending(chat_id):
-    data = {
-        "chat_id": chat_id,
-        "timestamp": datetime.now().isoformat()
-    }
-    try:
-        with open(PENDING_RESTART_FILE, "w") as f:
-            json.dump(data, f)
-    except Exception as e:
-        print(f"❌ Failed to write restart pending file: {e}")
-
 def send_restart_ready():
     if not os.path.exists(PENDING_RESTART_FILE):
         return
@@ -2186,10 +2175,11 @@ def send_restart_ready():
             data = json.load(f)
         chat_id = data.get("chat_id")
         timestamp_str = data.get("timestamp")
+        ready_msg = (data.get("message") or "✅ Bot is ready.").strip() or "✅ Bot is ready."
         if chat_id and timestamp_str:
             timestamp = datetime.fromisoformat(timestamp_str)
             if (datetime.now() - timestamp).total_seconds() < 60:
-                send_message(chat_id, "✅ Bot is ready.")
+                send_message(chat_id, ready_msg)
         os.remove(PENDING_RESTART_FILE)
     except Exception as e:
         print(f"❌ Failed to send restart ready: {e}")
@@ -2197,6 +2187,89 @@ def send_restart_ready():
             os.remove(PENDING_RESTART_FILE)
         except:
             pass
+
+
+def write_restart_pending(chat_id, *, message: str | None = None):
+    data = {
+        "chat_id": chat_id,
+        "timestamp": datetime.now().isoformat(),
+    }
+    if message:
+        data["message"] = message
+    try:
+        with open(PENDING_RESTART_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"❌ Failed to write restart pending file: {e}")
+
+
+def _restart_standalone_webapp() -> tuple[bool, str]:
+    """Restart ``python3 webapp.py`` on the public dashboard port (default 8765)."""
+    import subprocess
+
+    root = _CHBOX_DIR
+    port = int((os.getenv("WEBAPP_STANDALONE_PORT") or "8765").strip() or "8765")
+    py = (os.getenv("WEBAPP_PYTHON") or "/root/miniconda3/bin/python3").strip()
+    tmux_session = (os.getenv("WEBAPP_TMUX_SESSION") or "webapp").strip() or "webapp"
+    log_path = os.path.join(root, "webapp.run.log")
+
+    subprocess.run(
+        ["fuser", "-k", f"{port}/tcp"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    time.sleep(1)
+    subprocess.run(
+        ["tmux", "kill-session", "-t", tmux_session],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    shell_cmd = f"cd {root} && {py} webapp.py >> {log_path} 2>&1"
+    proc = subprocess.run(
+        ["tmux", "new", "-d", "-s", tmux_session, shell_cmd],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        return False, f"webapp tmux start failed ({err or proc.returncode})"
+
+    time.sleep(5)
+    listen = subprocess.run(["ss", "-lntp"], capture_output=True, text=True)
+    if f":{port}" not in (listen.stdout or ""):
+        return False, f"webapp not listening on :{port} (see {log_path})"
+    return True, f"webapp restarted on :{port}"
+
+
+def _schedule_larkbot_systemctl_restart(*, delay_sec: float = 2.0) -> None:
+    """Restart ``larkbot.service`` after a short delay (current process will exit)."""
+    import subprocess
+
+    unit = (os.getenv("LARKBOT_SYSTEMD_UNIT") or "larkbot.service").strip() or "larkbot.service"
+    delay = max(0.5, float(delay_sec))
+    subprocess.Popen(
+        ["bash", "-c", f"sleep {delay} && systemctl restart {unit}"],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _handle_restart_services(chat_id: str) -> None:
+    ok, webapp_msg = _restart_standalone_webapp()
+    lines = ["🔄 Restarting duty services…"]
+    lines.append(f"✅ {webapp_msg}" if ok else f"⚠️ {webapp_msg}")
+    lines.append("🔄 Restarting larkbot.service…")
+    send_message(chat_id, "\n".join(lines))
+    write_restart_pending(
+        chat_id,
+        message="✅ larkbot + webapp are ready.",
+    )
+    try:
+        scheduler.shutdown(wait=False)
+    except Exception:
+        pass
+    _schedule_larkbot_systemctl_restart()
 
 def get_bot_open_id():
     """Duty/Lark **bot** open_id via ``GET /open-apis/bot/v3/info`` (not ``users/me``)."""
@@ -4262,6 +4335,29 @@ def lark_webhook():
     except Exception:
         pass
 
+    # "Show your thinking" — when the user asks a question AND wants to see the
+    # AI's reasoning (e.g. "... also i want to know what ai thinking"), reply with
+    # a two-part "What im thinking / What is my answer" message. Guarded so any
+    # failure falls through to normal handling.
+    try:
+        import aithinking as _aithinking
+
+        _ait_src = (clean_text_multiline or clean_text or "").strip()
+        if (
+            (chat_type == "p2p" or bot_mentioned)
+            and _ait_src
+            and _aithinking.wants_ai_thinking(_ait_src)
+        ):
+            _ait_reply = _aithinking.answer_with_thinking(
+                _ait_src, session_key=_chat_memory_key
+            )
+            if _ait_reply:
+                send_message(chat_id, _ait_reply)
+                print(f"🧠 AI-thinking reply to chat {chat_id}", flush=True)
+                return _lark_im_done()
+    except Exception as _ait_err:
+        print(f"⚠️ AI-thinking skipped: {_ait_err!r}", flush=True)
+
     if _try_missing_credit_inquiry(
         chat_id,
         _full_body,
@@ -4653,6 +4749,18 @@ def lark_webhook():
         reply = fpms_duty.fpmsp0()
     elif clean_text.lower() == '/otpp0':
         reply = otpp1.get_otp_p0_guide()
+    elif re.match(r"(?i)^/(?:identifyissue|identify_issue|checkissue|check_issue|issue|whatissue)\b", clean_text):
+        try:
+            import identifyissue as _identifyissue
+
+            _issue_src = (clean_text_multiline or _full_body or clean_text or "").strip()
+            _issue_body = _identifyissue.strip_command(_issue_src)
+            reply = _identifyissue.identify_issue(_issue_body) if _issue_body else _identifyissue.USAGE
+        except Exception as _issue_err:
+            print(f"⚠️ identifyissue failed: {_issue_err!r}", flush=True)
+            reply = "❌ Could not analyze the issue right now. Please try again."
+        send_message(chat_id, reply)
+        return _lark_im_done()
     elif clean_text.lower() == '/fpms':
         reply = fpms_duty.get_fpms_today_duty()
     elif clean_text.lower().startswith('/fpmscheck'):
@@ -5616,6 +5724,9 @@ def lark_webhook():
             os._exit(0)
         threading.Thread(target=delayed_exit).start()
         return _lark_im_done()
+    elif clean_text.lower() in ("/restartservices", "/restservices"):
+        _handle_restart_services(chat_id)
+        return _lark_im_done()
 
     # 如果前面没有任何命令匹配，并且 reply 为空，则忽略
     if reply:
@@ -6058,6 +6169,12 @@ def _run_main_entry() -> int:
             _boot_router.startup_status()
         except Exception as _boot_router_err:
             print(f"[chathandleagent] startup check skipped: {_boot_router_err!r}", flush=True)
+        try:
+            import aithinking as _boot_aithinking
+
+            _boot_aithinking.startup_status()
+        except Exception as _boot_aithinking_err:
+            print(f"[aithinking] startup check skipped: {_boot_aithinking_err!r}", flush=True)
         try:
             import codeassist as _boot_codeassist
 
