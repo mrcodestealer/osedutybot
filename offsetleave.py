@@ -2154,6 +2154,8 @@ def handle_deleteoffset_command(
     get_token_func: Callable[[], str],
     force: bool = False,
     month_target: Optional[tuple[int, int]] = None,
+    person_filter: Optional[str] = None,
+    status_filter: Optional[str] = None,
 ) -> bool:
     if not force and not wants_deleteoffset(clean_text):
         return False
@@ -2166,24 +2168,57 @@ def handle_deleteoffset_command(
     month_label = (
         _month_filter_label(month_target[0], month_target[1]) if month_target else None
     )
+    filter_note = ""
+    if person_filter or status_filter:
+        bits = []
+        if person_filter:
+            bits.append(str(person_filter))
+        if status_filter:
+            bits.append(str(status_filter))
+        filter_note = " · ".join(bits)
     try:
         token = get_token_func()
         if _is_offset_approver_open_id(oid):
             rows = _all_offsets_for_approver_delete()
             if month_target:
                 rows = _filter_offsets_by_month(rows, *month_target)
+            if person_filter or status_filter:
+                import offsetai as oai
+
+                rows = oai.filter_offset_rows(
+                    rows,
+                    clean_text,
+                    person_filter=person_filter,
+                    status_filter=status_filter,
+                    month_target=month_target,
+                )
             if not rows:
                 hint = f" for **{month_label}**" if month_label else ""
+                if filter_note:
+                    hint = f" matching **{filter_note}**" + hint
                 send_message(chat_id, f"No offset records found to delete{hint}.")
                 return True
+            intro_filter = f"\n_Filter: {filter_note}_" if filter_note else ""
             card = build_offset_delete_list_card(
                 oid, "", rows, is_admin=True, month_label=month_label
             )
+            if intro_filter and card.get("body", {}).get("elements"):
+                card["body"]["elements"][0]["text"]["content"] += intro_filter
         else:
             request_person = resolve_request_person(oid, token)
             rows = _pending_offsets_for_request_person(request_person)
             if month_target:
                 rows = _filter_offsets_by_month(rows, *month_target)
+            if person_filter or status_filter:
+                import offsetai as oai
+
+                rows = oai.filter_offset_rows(
+                    rows,
+                    clean_text,
+                    person_filter=person_filter,
+                    status_filter=status_filter,
+                    month_target=month_target,
+                )
             if not rows:
                 if month_label:
                     send_message(
@@ -2259,6 +2294,8 @@ def execute_offset_action(
     clean_text: str = "",
     month_target: Optional[tuple[int, int]] = None,
     llm_reply: Optional[str] = None,
+    person_filter: Optional[str] = None,
+    status_filter: Optional[str] = None,
     sender_open_id: str,
     chat_id: str,
     chat_type: Optional[str],
@@ -2270,14 +2307,15 @@ def execute_offset_action(
     oid = (sender_open_id or "").strip()
 
     if act == "query":
-        reply = (llm_reply or "").strip()
-        if not reply:
-            try:
-                import offsetai as oai
+        reply = ""
+        try:
+            import offsetai as oai
 
-                reply = oai.build_query_reply(clean_text)
-            except Exception:
-                reply = ""
+            reply = oai.build_query_reply(clean_text)
+        except Exception:
+            reply = ""
+        if not reply:
+            reply = (llm_reply or "").strip()
         if not reply:
             today = date.today()
             y, m = month_target or (today.year, today.month)
@@ -2330,6 +2368,20 @@ def execute_offset_action(
         except Exception as e:
             send_message(chat_id, f"❌ Could not open offset form: {e}")
         return True
+
+    if act in ("delete_pick",):
+        return handle_deleteoffset_command(
+            clean_text,
+            sender_open_id=sender_open_id,
+            chat_id=chat_id,
+            chat_type=chat_type,
+            send_message=send_message,
+            get_token_func=get_token_func,
+            force=True,
+            month_target=month_target,
+            person_filter=person_filter,
+            status_filter=status_filter,
+        )
 
     if act == "delete":
         return handle_deleteoffset_command(

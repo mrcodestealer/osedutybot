@@ -4595,6 +4595,7 @@ def lark_webhook():
             chat_type=chat_type,
             send_message=send_message,
             get_token_func=get_tenant_access_token,
+            session_key=_chat_memory_key,
         ):
             return _lark_im_done()
     except Exception as _offsetai_err:
