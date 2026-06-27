@@ -768,15 +768,20 @@ def _parse_offset_leave_action_rules(text: str) -> Optional[str]:
     if _LEAVE_FORM_RULE_RE.search(s):
         return "leave_form"
     if re.search(r"\boffset\b", s, re.I):
-        # A bare mention of "offset" used to always open the NEW offset form, so
-        # "i want to delete offset" wrongly showed the add form. Honour the verb:
-        # delete/cancel → delete, edit/change → edit, otherwise a new request.
         if re.search(r"(?i)\b(delete|remove|cancel|drop|withdraw|取消|删除)\b", s):
             return "delete_offset"
         if re.search(r"(?i)\b(edit|change|update|modify|amend|修改|更改)\b", s):
             return "edit_offset"
         if re.search(r"(?i)\b(pending|approvals?)\b", s):
             return "pending_offset"
+        # Lookups (show / who / approved / person name) — not a new request
+        if re.search(
+            r"(?i)\b(show\s+me|show|who|which|what|list|check|view|see|approved|rejected)\b",
+            s,
+        ):
+            return "query_offset"
+        if _OFFSET_FORM_RULE_RE.search(s):
+            return "offset_form"
         return "offset_form"
     if re.search(r"\bleave\b", s, re.I) and not _is_month_attendance_slash_command(s):
         return "leave_form"
@@ -2267,6 +2272,13 @@ def execute_offset_action(
     if act == "query":
         reply = (llm_reply or "").strip()
         if not reply:
+            try:
+                import offsetai as oai
+
+                reply = oai.build_query_reply(clean_text)
+            except Exception:
+                reply = ""
+        if not reply:
             today = date.today()
             y, m = month_target or (today.year, today.month)
             summary = od._collect_offset_month_summary(y, m)
@@ -2371,8 +2383,11 @@ def handle_mention(
     try:
         import offsetai
 
-        if offsetai.is_enabled() and want_offset:
-            want_offset = False
+        if offsetai.is_enabled():
+            if offsetai.looks_like_offset_topic(text):
+                return False
+            if want_offset:
+                want_offset = False
     except Exception:
         pass
     if not want_offset and not want_leave:
