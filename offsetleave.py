@@ -1615,6 +1615,47 @@ def _short_cell(s: Any) -> str:
     return t or "—"
 
 
+def _offset_shift_labels(shift_type: Any) -> tuple[str, str]:
+    """Return (short D/N, long Day Shift / Night Shift)."""
+    code = str(shift_type or "").strip().upper()
+    if code == "D":
+        return "D", "Day Shift"
+    if code == "N":
+        return "N", "Night Shift"
+    return code or "—", code or "—"
+
+
+def _format_offset_delete_row_summary(
+    index: int,
+    row: dict[str, Any],
+    *,
+    is_admin: bool,
+) -> str:
+    """Human-readable swap line for the delete picker card."""
+    req = _short_cell(row.get("request_person"))
+    exc = _short_cell(row.get("exchange_person"))
+    orig = _short_cell(row.get("original_date"))
+    exch = _short_cell(row.get("exchange_date"))
+    shift_short, shift_long = _offset_shift_labels(row.get("shift_type"))
+    reason = _short_cell(row.get("reason"))
+    self_swap = od._names_same_person(
+        str(row.get("request_person") or ""),
+        str(row.get("exchange_person") or ""),
+    )
+    if self_swap:
+        headline = f"**{index}.** {req} changed himself · {shift_short} · {orig} → {exch}"
+        lines = [headline, f"**Reason:** {reason}"]
+    else:
+        headline = f"**{index}.** {req} changed his {orig} → {exc} {exch}"
+        lines = [headline, shift_long, f"**Reason:** {reason}"]
+    if is_admin:
+        st = _short_cell(row.get("approval_status"))
+        if bool(row.get("pending")) and not st:
+            st = "Pending"
+        lines.append(f"**Requester:** {req} · **Status:** {st}")
+    return "\n".join(lines)
+
+
 def _callback_payload_edit_submit(
     *,
     owner_open_id: str,
@@ -1768,20 +1809,7 @@ def build_offset_delete_list_card(
         rid = str(r.get("record_id") or "").strip()
         if not rid:
             continue
-        extra = ""
-        if is_admin:
-            st = _short_cell(r.get("approval_status"))
-            if bool(r.get("pending")) and not st:
-                st = "Pending"
-            extra = (
-                f"\n**Requester:** {_short_cell(r.get('request_person'))} · **Status:** {st}"
-            )
-        summary = (
-            f"**{i}.** {_short_cell(r.get('request_person'))} → "
-            f"{_short_cell(r.get('exchange_person'))} · **{_short_cell(r.get('shift_type'))}** · "
-            f"{_short_cell(r.get('original_date'))} → {_short_cell(r.get('exchange_date'))}\n"
-            f"**Reason:** {_short_cell(r.get('reason'))}{extra}"
-        )
+        summary = _format_offset_delete_row_summary(i, r, is_admin=is_admin)
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": summary}})
         elements.append(
             {
