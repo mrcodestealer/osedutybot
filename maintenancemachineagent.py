@@ -527,8 +527,20 @@ def extract_machine_lines(text: str) -> list[str]:
             for t in tokens:
                 _add(t)
         elif _MACHINE_LINE_RE.search(line):
-            # Clean pasted machine line — keep the full display name.
-            _add(line)
+            line_compact = re.sub(r"[^A-Za-z0-9]", "", line).upper()
+            token_compact = "".join(t.upper() for t in tokens)
+            # Status / command noise on the same line (e.g. ``nwr2197 machine status``) — asset only.
+            if _STATUS_CHECK_RE.search(line) or (
+                tokens
+                and token_compact
+                and token_compact in line_compact
+                and line_compact != token_compact
+            ):
+                for t in tokens:
+                    _add(t)
+            else:
+                # Clean pasted machine line — keep the full display name.
+                _add(line)
         else:
             for t in tokens:
                 _add(t)

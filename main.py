@@ -2571,6 +2571,72 @@ def _handle_secret_open_id_lookup(original_text: str, mentions: list) -> str:
     return _format_open_id_lookup_reply(tagged)
 
 
+_GIT_PULL_RESTART_RE = re.compile(
+    r"(?i)(?:"
+    r"git\s+pull(?:\s+and|\s*[,，]?\s*then)?\s+(?:restart|reboot)\s+(?:the\s+)?(?:service|services|bot|larkbot|duty\s+bot|webapp)"
+    r"|git\s+pull\s+and\s+restart\b"
+    r"|(?:deploy|update)\s+(?:the\s+)?(?:bot|code|server|osedutybot)\b"
+    r"|拉代码.*重启|部署.*重启"
+    r")"
+)
+
+
+def looks_like_git_pull_restart(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    if t.lower() in ("/deploy", "/gitpullrestart"):
+        return True
+    return bool(_GIT_PULL_RESTART_RE.search(t))
+
+
+def _git_pull_deploy_script() -> str:
+    root = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(root, "deploy", "git-pull-keep-local-json.sh")
+
+
+def _run_git_pull_and_restart(chat_id: str) -> None:
+    import subprocess
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    script = _git_pull_deploy_script()
+    if not os.path.isfile(script):
+        send_message(chat_id, f"❌ Deploy script not found: `{script}`")
+        return
+    try:
+        proc = subprocess.run(
+            ["bash", script, root],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        send_message(chat_id, "❌ git pull timed out after 10 minutes.")
+        return
+    except Exception as exc:
+        send_message(chat_id, f"❌ git pull failed: {exc!r}")
+        return
+
+    combined = "\n".join(x for x in (proc.stdout, proc.stderr) if x).strip()
+    tail = combined[-1200:] if len(combined) > 1200 else combined
+    if proc.returncode != 0:
+        send_message(
+            chat_id,
+            f"❌ git pull failed (exit {proc.returncode}).\n```\n{tail}\n```",
+        )
+        return
+
+    summary = tail[-600:] if tail else "done"
+    send_message(chat_id, f"✅ git pull OK.\n```\n{summary}\n```\n🔄 Restarting services…")
+    _handle_restart_services(chat_id)
+
+
+def _handle_git_pull_restart_deploy(chat_id: str) -> None:
+    send_message(chat_id, "⏳ git pull + restart started (keeps local .env & JSON)…")
+    start_lark_background_thread(_run_git_pull_and_restart, chat_id)
+
+
 def _dispatch_jenkins_duty_command(
     chat_id: str,
     sender_id: str,
@@ -5785,6 +5851,19 @@ def lark_webhook():
         if tagged:
             send_message(chat_id, _format_open_id_lookup_reply(tagged))
             return _lark_im_done()
+    elif clean_text.lower() in ("/deploy", "/gitpullrestart"):
+        if not _secret_command_allowed(sender_id):
+            send_message(chat_id, "❌ You are not allowed to use this command.")
+            return _lark_im_done()
+        _handle_git_pull_restart_deploy(chat_id)
+        return _lark_im_done()
+    elif (
+        (bot_mentioned or chat_type == "p2p")
+        and _secret_command_allowed(sender_id)
+        and looks_like_git_pull_restart(clean_text)
+    ):
+        _handle_git_pull_restart_deploy(chat_id)
+        return _lark_im_done()
     elif re.match(r"^/al(?:\s+\d{1,2}/\d{1,2})?\s*$", clean_text.lower()):
             # /al or /al DD/MM: run Amount Loss checklog flow in background, return interactive card + TSV.
             parts = clean_text.split()
