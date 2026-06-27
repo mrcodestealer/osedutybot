@@ -768,6 +768,15 @@ def _parse_offset_leave_action_rules(text: str) -> Optional[str]:
     if _LEAVE_FORM_RULE_RE.search(s):
         return "leave_form"
     if re.search(r"\boffset\b", s, re.I):
+        # A bare mention of "offset" used to always open the NEW offset form, so
+        # "i want to delete offset" wrongly showed the add form. Honour the verb:
+        # delete/cancel → delete, edit/change → edit, otherwise a new request.
+        if re.search(r"(?i)\b(delete|remove|cancel|drop|withdraw|取消|删除)\b", s):
+            return "delete_offset"
+        if re.search(r"(?i)\b(edit|change|update|modify|amend|修改|更改)\b", s):
+            return "edit_offset"
+        if re.search(r"(?i)\b(pending|approvals?)\b", s):
+            return "pending_offset"
         return "offset_form"
     if re.search(r"\bleave\b", s, re.I) and not _is_month_attendance_slash_command(s):
         return "leave_form"
