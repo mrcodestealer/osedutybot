@@ -783,6 +783,72 @@ def _parse_offset_leave_action_rules(text: str) -> Optional[str]:
     return None
 
 
+def _shift_calendar_month(year: int, month: int, delta: int) -> tuple[int, int]:
+    idx = year * 12 + (month - 1) + delta
+    return idx // 12, (idx % 12) + 1
+
+
+def _parse_offset_month_filter(text: str) -> Optional[tuple[int, int]]:
+    """Extract ``(year, month)`` from phrases like ``for this month`` / ``in June``."""
+    s = (text or "").strip()
+    if not s:
+        return None
+    low = s.lower()
+    today = date.today()
+
+    if re.search(r"(?i)\b(?:for|in)\s+(?:this|current)\s+month\b", low) or re.search(
+        r"(?i)\bthis\s+month\b", low
+    ):
+        return today.year, today.month
+    if re.search(r"(?i)\b(?:for|in)\s+next\s+month\b", low) or re.search(
+        r"(?i)\bnext\s+month\b", low
+    ):
+        return _shift_calendar_month(today.year, today.month, 1)
+    if re.search(r"(?i)\b(?:for|in)\s+last\s+month\b", low) or re.search(
+        r"(?i)\blast\s+month\b", low
+    ):
+        return _shift_calendar_month(today.year, today.month, -1)
+
+    m = re.search(r"(?i)\b(?:for|in)\s+(\d{1,2})\b", s)
+    if m:
+        month = int(m.group(1))
+        if 1 <= month <= 12:
+            return today.year, month
+
+    m = re.search(
+        r"(?i)\b(?:for|in)\s+(january|february|march|april|may|june|july|august|"
+        r"september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\b",
+        s,
+    )
+    if m:
+        token = m.group(1)
+        for name, num in od.MONTH_MAP.items():
+            if name.lower() == token.lower():
+                return today.year, num
+    return None
+
+
+def _month_filter_label(year: int, month: int) -> str:
+    try:
+        return date(year, month, 1).strftime("%B %Y")
+    except ValueError:
+        return f"{month}/{year}"
+
+
+def _offset_row_touches_month(row: dict[str, Any], year: int, month: int) -> bool:
+    for key in ("original_date", "exchange_date", "request_date"):
+        d = od._parse_date_value(row.get(key))
+        if d and d.year == year and d.month == month:
+            return True
+    return False
+
+
+def _filter_offsets_by_month(
+    rows: list[dict[str, Any]], year: int, month: int
+) -> list[dict[str, Any]]:
+    return [r for r in rows if _offset_row_touches_month(r, year, month)]
+
+
 def _parse_offset_leave_action_llm(text: str) -> Optional[str]:
     if not _offset_leave_ai_enabled() or not _offset_leave_llm_available():
         return None
@@ -1666,18 +1732,20 @@ def build_offset_delete_list_card(
     rows: list[dict[str, Any]],
     *,
     is_admin: bool = False,
+    month_label: Optional[str] = None,
 ) -> dict[str, Any]:
     cap = 15
     sliced = rows[:cap]
+    month_note = f" ({month_label})" if month_label else ""
     if is_admin:
         intro = (
-            "**Approver** — delete any offset request "
+            f"**Approver** — delete offset requests{month_note} "
             "(**pending**, approved, or rejected; removes the Bitable row)."
         )
         cap_note = "record(s)"
     else:
         intro = (
-            f"**{request_person}** — pending offset requests you can **delete**.\n"
+            f"**{request_person}** — pending offset requests{month_note} you can **delete**.\n"
             "Approved / rejected rows are not listed."
         )
         cap_note = "pending"
@@ -2077,25 +2145,45 @@ def handle_deleteoffset_command(
     if not oid:
         send_message(chat_id, "❌ Could not identify your Lark user.")
         return True
+    month_target = _parse_offset_month_filter(clean_text)
+    month_label = (
+        _month_filter_label(month_target[0], month_target[1]) if month_target else None
+    )
     try:
         token = get_token_func()
         if _is_offset_approver_open_id(oid):
             rows = _all_offsets_for_approver_delete()
+            if month_target:
+                rows = _filter_offsets_by_month(rows, *month_target)
             if not rows:
-                send_message(chat_id, "No offset records found to delete.")
+                hint = f" for **{month_label}**" if month_label else ""
+                send_message(chat_id, f"No offset records found to delete{hint}.")
                 return True
-            card = build_offset_delete_list_card(oid, "", rows, is_admin=True)
+            card = build_offset_delete_list_card(
+                oid, "", rows, is_admin=True, month_label=month_label
+            )
         else:
             request_person = resolve_request_person(oid, token)
             rows = _pending_offsets_for_request_person(request_person)
+            if month_target:
+                rows = _filter_offsets_by_month(rows, *month_target)
             if not rows:
-                send_message(
-                    chat_id,
-                    "No offset found that you requested (no pending rows). "
-                    "Ask an approver if an approved/rejected row must be removed.",
-                )
+                if month_label:
+                    send_message(
+                        chat_id,
+                        f"No **pending** offset requests for **{month_label}** that you can delete. "
+                        "Approved / rejected rows must be removed by an approver.",
+                    )
+                else:
+                    send_message(
+                        chat_id,
+                        "No offset found that you requested (no pending rows). "
+                        "Ask an approver if an approved/rejected row must be removed.",
+                    )
                 return True
-            card = build_offset_delete_list_card(oid, request_person, rows, is_admin=False)
+            card = build_offset_delete_list_card(
+                oid, request_person, rows, is_admin=False, month_label=month_label
+            )
         _deliver_private_card(
             owner_open_id=oid,
             group_chat_id=chat_id,

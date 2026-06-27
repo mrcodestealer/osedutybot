@@ -3776,8 +3776,19 @@ def parse_showoffset_command(text: str) -> Optional[tuple[int, int]]:
     arg = (m.group(1) or "").strip()
     # Drop trailing decorations like "calendar"/"schedule"/"list".
     arg = re.sub(r"\b(?:calendar|schedule|list|summary|sheet|table)\b", "", arg, flags=re.I).strip()
+    # Strip leading "for"/"in" (e.g. "for this month", "in June").
+    arg = re.sub(r"^(?:for|in)\s+", "", arg, flags=re.I).strip()
     if not arg:
         return today.year, today.month
+    arg_low = arg.lower()
+    if arg_low in ("this month", "current month"):
+        return today.year, today.month
+    if arg_low == "next month":
+        idx = today.year * 12 + (today.month - 1) + 1
+        return idx // 12, (idx % 12) + 1
+    if arg_low == "last month":
+        idx = today.year * 12 + (today.month - 1) - 1
+        return idx // 12, (idx % 12) + 1
     if re.fullmatch(r"\d{1,2}", arg):
         month = int(arg)
         if month < 1 or month > 12:
