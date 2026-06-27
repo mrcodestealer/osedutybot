@@ -60,8 +60,12 @@ _AGENT_SYSTEM = (
     "5. To submit a new offset: gather fields from conversation; if anything missing, "
     "send_chat_reply asking ONE question; when complete call submit_offset_record.\n"
     "6. If the message is clearly NOT about OSE offset/swap, call pass_not_offset.\n"
-    "7. Approvers can delete any status; requesters only delete their own pending rows "
-    "(the delete picker enforces this).\n"
+    "7. Approvers can delete any status; requesters only delete their own pending rows.\n"
+    "8. inferred_filters in context are AI-extracted from the user message — "
+    "you MUST pass them to list_offset_records / show_delete_picker "
+    "(person, status, person_role, year, month).\n"
+    "9. When user names someone (e.g. Man Chung) use person_role=requester unless they "
+    "ask about swap partner.\n"
     "Roster names: use exact names from exchange_roster when submitting.\n"
     "Shift type: D (day) or N (night).\n"
     "Dates: YYYY-MM-DD.\n"
@@ -89,7 +93,12 @@ _TOOL_SPECS: list[dict[str, Any]] = [
                 "properties": {
                     "person": {
                         "type": "string",
-                        "description": "Roster name, e.g. Man Chung (matches requester or exchange person)",
+                        "description": "Roster name, e.g. Man Chung",
+                    },
+                    "person_role": {
+                        "type": "string",
+                        "enum": ["requester", "any"],
+                        "description": "requester=only their requests; any=also when they are exchange person",
                     },
                     "status": {
                         "type": "string",
@@ -127,6 +136,10 @@ _TOOL_SPECS: list[dict[str, Any]] = [
                 "type": "object",
                 "properties": {
                     "person": {"type": "string"},
+                    "person_role": {
+                        "type": "string",
+                        "enum": ["requester", "any"],
+                    },
                     "status": {
                         "type": "string",
                         "enum": ["approved", "pending", "rejected"],
@@ -327,11 +340,19 @@ def _same_person(a: str, b: str) -> bool:
     return bool(ak and bk and od._names_same_person(ak, bk))
 
 
-def _row_matches_person(row: dict[str, Any], person_filters: list[str]) -> bool:
+def _row_matches_person(
+    row: dict[str, Any],
+    person_filters: list[str],
+    *,
+    person_role: str = "any",
+) -> bool:
     if not person_filters:
         return True
     req = str(row.get("request_person") or "")
     exc = str(row.get("exchange_person") or "")
+    role = (person_role or "any").strip().lower()
+    if role == "requester":
+        return any(_same_person(req, pf) for pf in person_filters)
     return any(
         _same_person(req, pf) or _same_person(exc, pf) for pf in person_filters
     )
@@ -344,12 +365,16 @@ def filter_rows_by_args(
     status: Optional[str] = None,
     year: Optional[int] = None,
     month: Optional[int] = None,
+    person_role: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """Filter sheet rows using explicit arguments (from LLM tools, not regex)."""
     status_f = (status or "").strip().lower() or None
     if status_f not in ("approved", "rejected", "pending"):
         status_f = None
     person_filters = _resolve_person_filter(person)
+    role = (person_role or "any").strip().lower()
+    if role not in ("requester", "any"):
+        role = "any"
     filtered: list[dict[str, Any]] = []
     for row in rows:
         if status_f and _row_status_bucket(row) != status_f:
@@ -362,7 +387,9 @@ def filter_rows_by_args(
                 for key in ("original_date", "exchange_date", "request_date")
             ):
                 continue
-        if person_filters and not _row_matches_person(row, person_filters):
+        if person_filters and not _row_matches_person(
+            row, person_filters, person_role=role
+        ):
             continue
         filtered.append(row)
     return filtered
@@ -407,12 +434,12 @@ def _slim_rows(rows: list[dict[str, Any]], *, limit: int = 30) -> list[dict[str,
 
 def _format_rows_markdown(rows: list[dict[str, Any]], *, title: str = "OSE offset") -> str:
     if not rows:
-        return f"No offset records found."
+        return "No offset records found."
     lines = [f"**{title}**\n"]
     for r in rows[:20]:
         st = _row_status_bucket(r)
         lines.append(
-            f"• **{r.get('request_person') or '?'}** <-> {r.get('exchange_person') or '?'} "
+            f"• **{r.get('request_person') or '?'}** → {r.get('exchange_person') or '?'} "
             f"({r.get('shift_type') or ''}): "
             f"{r.get('original_date') or '?'} → {r.get('exchange_date') or '?'} "
             f"[{st}]"
@@ -430,7 +457,7 @@ def build_query_reply(
     status_filter: Optional[str] = None,
     month_target: Optional[tuple[int, int]] = None,
 ) -> str:
-    """Legacy helper — prefer agent tools; uses explicit filters when provided."""
+    """Legacy helper — prefer agent tools."""
     rows = rows if rows is not None else _admin_rows()
     y, m = (month_target[0], month_target[1]) if month_target else (None, None)
     filtered = filter_rows_by_args(
@@ -439,8 +466,86 @@ def build_query_reply(
         status=status_filter,
         year=y,
         month=m,
+        person_role="requester" if person_filter else "any",
     )
     return _format_rows_markdown(filtered)
+
+
+_FILTER_INFER_SYSTEM = (
+    "Extract offset lookup filters from the user message.\n"
+    "Use exact roster names when possible.\n"
+    "Return ONE JSON object only:\n"
+    '{"person":"roster name or null","status":"approved|pending|rejected|null",'
+    '"year":int|null,"month":1-12|null,"person_role":"requester|any"}\n'
+    "person_role=requester when user asks about someone's offsets (default for 'X offset').\n"
+    "person_role=any only when user asks who swapped with X or exchange side.\n"
+)
+
+
+def _llm_infer_filters(user_text: str) -> dict[str, Any]:
+    """AI reads the user message and returns filter args for tools (not regex routing)."""
+    try:
+        import chatagent as ca
+    except Exception:
+        return {}
+    if not ca.llm_available():
+        return {}
+    api_key = ca._llm_api_key()
+    if not api_key:
+        return {}
+    today = date.today()
+    roster = list(od.OSE_LEAVE_FORM_NAMES)[:60]
+    user = (
+        f"today: {today.isoformat()}\n"
+        f"roster: {json.dumps(roster, ensure_ascii=False)}\n"
+        f"user_message: {user_text.strip()}"
+    )
+    payload = {
+        "model": ca._llm_model_for_request(images=False),
+        "messages": [
+            {"role": "system", "content": _FILTER_INFER_SYSTEM},
+            {"role": "user", "content": user},
+        ],
+        "max_tokens": 200,
+        "temperature": 0.0,
+    }
+    url = f"{ca._llm_base_url()}/chat/completions"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=ca._llm_timeout_sec()) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        content = ((body.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        obj = _parse_llm_json(content) or {}
+        out: dict[str, Any] = {}
+        p = str(obj.get("person") or "").strip()
+        if p:
+            key = od._resolve_ose_roster_key(p)
+            out["person"] = key or od._title_name(p)
+        st = str(obj.get("status") or "").strip().lower()
+        if st in ("approved", "pending", "rejected"):
+            out["status"] = st
+        pr = str(obj.get("person_role") or "requester").strip().lower()
+        out["person_role"] = pr if pr in ("requester", "any") else "requester"
+        try:
+            y, m = obj.get("year"), obj.get("month")
+            if y is not None and m is not None:
+                out["year"] = int(y)
+                out["month"] = int(m)
+        except (TypeError, ValueError):
+            pass
+        print(f"[offsetai] inferred_filters={out!r}", flush=True)
+        return out
+    except Exception as exc:
+        print(f"[offsetai] filter infer failed: {exc!r}", flush=True)
+        return {}
 
 
 def _parse_llm_json(content: str) -> Optional[dict[str, Any]]:
@@ -483,6 +588,7 @@ class _AgentCtx:
     request_person: str = ""
     is_approver: bool = False
     exchange_roster: list[str] = field(default_factory=list)
+    inferred_filters: dict[str, Any] = field(default_factory=dict)
     dry_run: bool = False
     tool_trace: list[str] = field(default_factory=list)
 
@@ -497,6 +603,39 @@ def _month_target_from_args(args: dict[str, Any]) -> Optional[tuple[int, int]]:
     return None
 
 
+def _merge_tool_args(ctx: _AgentCtx, args: dict[str, Any]) -> dict[str, Any]:
+    """Fill missing tool args from AI-inferred filters (not regex)."""
+    out = dict(args)
+    inf = ctx.inferred_filters or {}
+    for key in ("person", "status", "year", "month", "person_role"):
+        if out.get(key) in (None, "") and inf.get(key) not in (None, ""):
+            out[key] = inf[key]
+    if not out.get("person_role"):
+        out["person_role"] = "requester" if out.get("person") else "any"
+    return out
+
+
+def _filter_label_from_args(args: dict[str, Any]) -> str:
+    bits: list[str] = []
+    if args.get("person"):
+        bits.append(str(args["person"]))
+    if args.get("status"):
+        bits.append(str(args["status"]))
+    if args.get("year") and args.get("month"):
+        bits.append(f"{args['year']}-{int(args['month']):02d}")
+    return " · ".join(bits)
+
+
+def _filter_kwargs(args: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "person": args.get("person"),
+        "status": args.get("status"),
+        "year": args.get("year"),
+        "month": args.get("month"),
+        "person_role": args.get("person_role") or "requester",
+    }
+
+
 def _execute_tool(ctx: _AgentCtx, name: str, args: dict[str, Any]) -> tuple[str, Optional[bool]]:
     """
     Run one tool. Returns (json_result_for_llm, terminal_handle_result).
@@ -505,21 +644,16 @@ def _execute_tool(ctx: _AgentCtx, name: str, args: dict[str, Any]) -> tuple[str,
     import offsetleave as ol
 
     name = (name or "").strip()
-    args = args if isinstance(args, dict) else {}
-    ctx.tool_trace.append(f"{name}({json.dumps(args, ensure_ascii=False)[:200]})")
+    args = _merge_tool_args(ctx, args if isinstance(args, dict) else {})
+    ctx.tool_trace.append(f"{name}({json.dumps(args, ensure_ascii=False)[:240]})")
+    fk = _filter_kwargs(args)
 
     if name == "pass_not_offset":
         return json.dumps({"ok": True, "pass": True}), False
 
     if name == "list_offset_records":
-        rows = filter_rows_by_args(
-            _admin_rows(),
-            person=args.get("person"),
-            status=args.get("status"),
-            year=args.get("year"),
-            month=args.get("month"),
-        )
-        payload = {"count": len(rows), "rows": _slim_rows(rows)}
+        rows = filter_rows_by_args(_admin_rows(), **fk)
+        payload = {"count": len(rows), "rows": _slim_rows(rows), "filters_applied": fk}
         return json.dumps(payload, ensure_ascii=False), None
 
     if name == "send_chat_reply":
@@ -532,28 +666,37 @@ def _execute_tool(ctx: _AgentCtx, name: str, args: dict[str, Any]) -> tuple[str,
 
     if name == "show_delete_picker":
         mt = _month_target_from_args(args)
-        month_label = (
-            ol._month_filter_label(mt[0], mt[1]) if mt else None
-        )
+        month_label = ol._month_filter_label(mt[0], mt[1]) if mt else None
+        filter_label = _filter_label_from_args(args)
         oid = ctx.sender_open_id
+
+        if not fk.get("person") and not fk.get("status"):
+            return json.dumps({
+                "ok": False,
+                "error": (
+                    "Refusing to show full delete list — call show_delete_picker with "
+                    "person and/or status from inferred_filters or user message."
+                ),
+                "inferred_filters": ctx.inferred_filters,
+            }), None
+
         if ol._is_offset_approver_open_id(oid):
             rows = ol._all_offsets_for_approver_delete()
             if mt:
                 rows = ol._filter_offsets_by_month(rows, *mt)
-            rows = filter_rows_by_args(
-                rows,
-                person=args.get("person"),
-                status=args.get("status"),
-                year=args.get("year"),
-                month=args.get("month"),
-            )
+            rows = filter_rows_by_args(rows, **fk)
             if not rows:
-                msg = "No offset records match those filters to delete."
+                msg = f"No offset records match filter: **{filter_label or 'none'}**."
                 if not ctx.dry_run:
                     ctx.send_message(ctx.chat_id, msg)
                 return json.dumps({"ok": False, "error": msg}), True
             card = ol.build_offset_delete_list_card(
-                oid, "", rows, is_admin=True, month_label=month_label
+                oid,
+                "",
+                rows,
+                is_admin=True,
+                month_label=month_label,
+                filter_label=filter_label,
             )
         else:
             rp = ctx.request_person or ol.resolve_request_person(
@@ -562,20 +705,19 @@ def _execute_tool(ctx: _AgentCtx, name: str, args: dict[str, Any]) -> tuple[str,
             rows = ol._pending_offsets_for_request_person(rp)
             if mt:
                 rows = ol._filter_offsets_by_month(rows, *mt)
-            rows = filter_rows_by_args(
-                rows,
-                person=args.get("person"),
-                status=args.get("status"),
-                year=args.get("year"),
-                month=args.get("month"),
-            )
+            rows = filter_rows_by_args(rows, **fk)
             if not rows:
-                msg = "No pending offset rows you can delete for that filter."
+                msg = f"No pending rows match filter: **{filter_label or 'none'}**."
                 if not ctx.dry_run:
                     ctx.send_message(ctx.chat_id, msg)
                 return json.dumps({"ok": False, "error": msg}), True
             card = ol.build_offset_delete_list_card(
-                oid, rp, rows, is_admin=False, month_label=month_label
+                oid,
+                rp,
+                rows,
+                is_admin=False,
+                month_label=month_label,
+                filter_label=filter_label,
             )
         if not ctx.dry_run:
             ol._deliver_private_card(
@@ -586,7 +728,7 @@ def _execute_tool(ctx: _AgentCtx, name: str, args: dict[str, Any]) -> tuple[str,
                 send_message=ctx.send_message,
                 token=ctx.get_token_func(),
             )
-        return json.dumps({"ok": True, "picker": True, "count": len(rows)}), True
+        return json.dumps({"ok": True, "picker": True, "count": len(rows), "filters": fk}), True
 
     if name == "show_offset_calendar":
         today = date.today()
@@ -787,6 +929,7 @@ def _build_context_block(ctx: _AgentCtx) -> str:
         f"today: {today.isoformat()} ({today.strftime('%A')})",
         f"request_person: {ctx.request_person or 'unknown'}",
         f"is_approver: {ctx.is_approver}",
+        f"inferred_filters: {json.dumps(ctx.inferred_filters, ensure_ascii=False)}",
         f"exchange_roster: {json.dumps(ctx.exchange_roster[:40], ensure_ascii=False)}",
         f"offset_sheet_snapshot ({len(rows)} rows):",
         json.dumps(rows, ensure_ascii=False),
@@ -797,6 +940,8 @@ def _build_context_block(ctx: _AgentCtx) -> str:
 
 def _run_agent(ctx: _AgentCtx) -> bool:
     import offsetleave as ol
+
+    ctx.inferred_filters = _llm_infer_filters(ctx.user_text)
 
     try:
         token = ctx.get_token_func()

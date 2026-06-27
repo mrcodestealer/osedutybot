@@ -1738,14 +1738,16 @@ def build_offset_delete_list_card(
     *,
     is_admin: bool = False,
     month_label: Optional[str] = None,
+    filter_label: Optional[str] = None,
 ) -> dict[str, Any]:
     cap = 15
     sliced = rows[:cap]
     month_note = f" ({month_label})" if month_label else ""
+    filter_note = f"\n_Filter: **{filter_label}**_" if filter_label else ""
     if is_admin:
         intro = (
-            f"**Approver** — delete offset requests{month_note} "
-            "(**pending**, approved, or rejected; removes the Bitable row)."
+            f"**Approver** — pick an offset to **delete**{month_note}{filter_note}\n"
+            "(pending, approved, or rejected — removes the Bitable row)."
         )
         cap_note = "record(s)"
     else:
@@ -1775,7 +1777,8 @@ def build_offset_delete_list_card(
                 f"\n**Requester:** {_short_cell(r.get('request_person'))} · **Status:** {st}"
             )
         summary = (
-            f"**{i}.** {_short_cell(r.get('exchange_person'))} · **{_short_cell(r.get('shift_type'))}** · "
+            f"**{i}.** {_short_cell(r.get('request_person'))} → "
+            f"{_short_cell(r.get('exchange_person'))} · **{_short_cell(r.get('shift_type'))}** · "
             f"{_short_cell(r.get('original_date'))} → {_short_cell(r.get('exchange_date'))}\n"
             f"**Reason:** {_short_cell(r.get('reason'))}{extra}"
         )
