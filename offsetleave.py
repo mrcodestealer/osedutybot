@@ -2054,9 +2054,17 @@ def handle_showoffset(
     except ValueError as exc:
         send_message(chat_id, f"❌ {exc}")
         return True
-    if target is None and parse_offset_leave_action(clean_text) == "show_offset":
-        today = date.today()
-        target = today.year, today.month
+    if target is None:
+        try:
+            import offsetai
+
+            if offsetai.is_enabled():
+                return False
+        except Exception:
+            pass
+        if parse_offset_leave_action(clean_text) == "show_offset":
+            today = date.today()
+            target = today.year, today.month
     if target is None:
         return False
     year, month = target
@@ -2076,8 +2084,9 @@ def handle_editoffset_command(
     chat_type: Optional[str],
     send_message: Callable[..., dict[str, Any]],
     get_token_func: Callable[[], str],
+    force: bool = False,
 ) -> bool:
-    if not wants_editoffset(clean_text):
+    if not force and not wants_editoffset(clean_text):
         return False
     oid = (sender_open_id or "").strip()
     if not oid:
@@ -2138,14 +2147,17 @@ def handle_deleteoffset_command(
     chat_type: Optional[str],
     send_message: Callable[..., dict[str, Any]],
     get_token_func: Callable[[], str],
+    force: bool = False,
+    month_target: Optional[tuple[int, int]] = None,
 ) -> bool:
-    if not wants_deleteoffset(clean_text):
+    if not force and not wants_deleteoffset(clean_text):
         return False
     oid = (sender_open_id or "").strip()
     if not oid:
         send_message(chat_id, "❌ Could not identify your Lark user.")
         return True
-    month_target = _parse_offset_month_filter(clean_text)
+    if month_target is None:
+        month_target = _parse_offset_month_filter(clean_text)
     month_label = (
         _month_filter_label(month_target[0], month_target[1]) if month_target else None
     )
@@ -2205,8 +2217,9 @@ def handle_pendingoffset_command(
     chat_type: Optional[str],
     send_message: Callable[..., dict[str, Any]],
     get_token_func: Callable[[], str],
+    force: bool = False,
 ) -> bool:
-    if not wants_pendingoffset(clean_text):
+    if not force and not wants_pendingoffset(clean_text):
         return False
     oid = (sender_open_id or "").strip()
     if not oid:
@@ -2235,6 +2248,114 @@ def handle_pendingoffset_command(
     return True
 
 
+def execute_offset_action(
+    action: str,
+    *,
+    clean_text: str = "",
+    month_target: Optional[tuple[int, int]] = None,
+    llm_reply: Optional[str] = None,
+    sender_open_id: str,
+    chat_id: str,
+    chat_type: Optional[str],
+    send_message: Callable[..., dict[str, Any]],
+    get_token_func: Callable[[], str],
+) -> bool:
+    """Run an offset action decided by ``offsetai`` (no command / NL classifier)."""
+    act = (action or "").strip().lower()
+    oid = (sender_open_id or "").strip()
+
+    if act == "query":
+        reply = (llm_reply or "").strip()
+        if not reply:
+            today = date.today()
+            y, m = month_target or (today.year, today.month)
+            summary = od._collect_offset_month_summary(y, m)
+            label = _month_filter_label(y, m)
+            if not summary:
+                reply = f"No offset requests for **{label}**."
+            else:
+                lines = [f"**OSE offset — {label}**\n"]
+                for person in od.OSE_SHOWOFFSET_NAMES:
+                    if person not in summary:
+                        continue
+                    orig_days, exc_days = summary[person]
+                    lines.append(
+                        f"• {person}: {', '.join(str(d) for d in orig_days)} → "
+                        f"{', '.join(str(d) for d in exc_days)}"
+                    )
+                reply = "\n".join(lines)
+        send_message(chat_id, reply)
+        return True
+
+    if act == "show_calendar":
+        today = date.today()
+        y, m = month_target or (today.year, today.month)
+        try:
+            card = od.build_ose_showoffset_card(y, m)
+            send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
+        except Exception as exc:
+            send_message(chat_id, f"❌ show offset failed: {exc}")
+        return True
+
+    if act == "add":
+        if not oid:
+            send_message(chat_id, "❌ Could not identify your Lark user for a private form.")
+            return True
+        try:
+            token = get_token_func()
+            request_person = resolve_request_person(oid, token)
+            _deliver_private_card(
+                owner_open_id=oid,
+                group_chat_id=chat_id,
+                chat_type=chat_type,
+                card=build_offset_form_card(
+                    owner_open_id=oid,
+                    request_person=request_person,
+                ),
+                send_message=send_message,
+                token=token,
+            )
+        except Exception as e:
+            send_message(chat_id, f"❌ Could not open offset form: {e}")
+        return True
+
+    if act == "delete":
+        return handle_deleteoffset_command(
+            clean_text,
+            sender_open_id=sender_open_id,
+            chat_id=chat_id,
+            chat_type=chat_type,
+            send_message=send_message,
+            get_token_func=get_token_func,
+            force=True,
+            month_target=month_target,
+        )
+
+    if act == "edit":
+        return handle_editoffset_command(
+            clean_text,
+            sender_open_id=sender_open_id,
+            chat_id=chat_id,
+            chat_type=chat_type,
+            send_message=send_message,
+            get_token_func=get_token_func,
+            force=True,
+        )
+
+    if act == "pending":
+        return handle_pendingoffset_command(
+            clean_text,
+            sender_open_id=sender_open_id,
+            chat_id=chat_id,
+            chat_type=chat_type,
+            send_message=send_message,
+            get_token_func=get_token_func,
+            force=True,
+        )
+
+    return False
+
+
 def handle_mention(
     clean_text: str,
     *,
@@ -2247,6 +2368,13 @@ def handle_mention(
     text = (clean_text or "").strip()
     want_offset = _wants_offset(text)
     want_leave = _wants_leave(text)
+    try:
+        import offsetai
+
+        if offsetai.is_enabled() and want_offset:
+            want_offset = False
+    except Exception:
+        pass
     if not want_offset and not want_leave:
         return False
     oid = (sender_open_id or "").strip()

@@ -4586,7 +4586,30 @@ def lark_webhook():
     
 
     try:
+        import offsetai as _offsetai
+
+        if _offsetai.handle(
+            clean_text,
+            sender_open_id=sender_id or "",
+            chat_id=chat_id,
+            chat_type=chat_type,
+            send_message=send_message,
+            get_token_func=get_tenant_access_token,
+        ):
+            return _lark_im_done()
+    except Exception as _offsetai_err:
+        print(f"⚠️ offsetai skipped: {_offsetai_err!r}", flush=True)
+
+    try:
         import offsetleave as _offsetleave
+
+        _offsetai_nl_off = False
+        try:
+            import offsetai as _offsetai_gate
+
+            _offsetai_nl_off = _offsetai_gate.is_enabled()
+        except Exception:
+            pass
 
         if _offsetleave.handle_showoffset(
             clean_text,
@@ -4595,7 +4618,7 @@ def lark_webhook():
         ):
             return _lark_im_done()
 
-        if _offsetleave.handle_editoffset_command(
+        if not _offsetai_nl_off and _offsetleave.handle_editoffset_command(
             clean_text,
             sender_open_id=sender_id or "",
             chat_id=chat_id,
@@ -4605,7 +4628,7 @@ def lark_webhook():
         ):
             return _lark_im_done()
 
-        if _offsetleave.handle_deleteoffset_command(
+        if not _offsetai_nl_off and _offsetleave.handle_deleteoffset_command(
             clean_text,
             sender_open_id=sender_id or "",
             chat_id=chat_id,
@@ -4615,7 +4638,7 @@ def lark_webhook():
         ):
             return _lark_im_done()
 
-        if _offsetleave.handle_pendingoffset_command(
+        if not _offsetai_nl_off and _offsetleave.handle_pendingoffset_command(
             clean_text,
             sender_open_id=sender_id or "",
             chat_id=chat_id,
@@ -6860,6 +6883,12 @@ def _run_main_entry() -> int:
             _boot_dutyai.startup_status()
         except Exception as _boot_dutyai_err:
             print(f"[dutyai] startup check skipped: {_boot_dutyai_err!r}", flush=True)
+        try:
+            import offsetai as _boot_offsetai
+
+            _boot_offsetai.startup_status()
+        except Exception as _boot_offsetai_err:
+            print(f"[offsetai] startup check skipped: {_boot_offsetai_err!r}", flush=True)
         try:
             import jenkinsupdate as _boot_ju
 

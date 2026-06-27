@@ -575,13 +575,7 @@ def build_intent_catalog(*, jenkins_available: bool = True) -> list[IntentSpec]:
         )
     )
 
-    intents.append(
-        IntentSpec(
-            tag="cmd_showoffset",
-            command="showoffset",
-            patterns=["show offset calendar", "offset schedule", "monthly offset", "showoffset"],
-        )
-    )
+    # OSE offset NL is handled by offsetai (reads sheet + LLM) — not commandagent.
 
     intents.append(
         IntentSpec(
