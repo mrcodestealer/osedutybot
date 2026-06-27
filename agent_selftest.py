@@ -132,19 +132,14 @@ def run_tests(*, show_pass: bool = False) -> tuple[int, int]:
 
 
 def train_all(epochs: int) -> None:
-    print(f"\n>>> Training commandagent ({epochs} epochs)…")
-    import commandagent
-
-    commandagent.train_model(commandagent.DEFAULT_MODEL_DIR, epochs=epochs)
-    print(f"\n>>> Training chatagent classifier ({epochs} epochs)…")
-    import chatagent
-
-    chatagent.train_model(chatagent.DEFAULT_MODEL_DIR, epochs=epochs)
-    # Reset cached singletons so fresh models are used.
-    commandagent._classifier_singleton = None
-    commandagent._classifier_failed = False
-    chatagent._classifier_singleton = None
-    chatagent._classifier_failed = False
+    # The DistilBERT classifiers were removed — command/chat routing is now a
+    # direct LLM decision, so there is nothing to train. Kept as a no-op so the
+    # ``--train`` / ``--loop`` flags still work.
+    print(
+        "\n>>> Nothing to train — commandagent/chatagent now use a direct LLM "
+        "decision (no local classifier).",
+        flush=True,
+    )
 
 
 def main() -> None:

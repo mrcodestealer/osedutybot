@@ -710,6 +710,104 @@ def _status_is_maintenance(status_text: str) -> bool:
     return "MAINTAIN" in su or "METERCHECK" in su
 
 
+def _status_is_occupy(status_text: str) -> bool:
+    su = (status_text or "").upper()
+    return "OCCUPY" in su or "TIMEOUT" in su
+
+
+def _failure_is_game_running(error: str, live: dict[str, Any] | None = None) -> bool:
+    """True when set maintenance failed because a player/game is still on the machine."""
+    if "game currently running" in (error or "").lower():
+        return True
+    if live and _status_is_occupy(str(live.get("status") or "")):
+        return True
+    err = (error or "").lower()
+    return "occupy" in err or ("game" in err and "running" in err)
+
+
+def _set_maint_verify_poll_sec() -> float:
+    try:
+        return max(3.0, float((os.environ.get("PROD_SET_MAINT_VERIFY_POLL_SEC") or "18").strip()))
+    except ValueError:
+        return 18.0
+
+
+def _row_state_indicates_maintenance(
+    page,
+    row,
+    *,
+    timeout_ms: int,
+    check_toolbar: bool = False,
+) -> bool:
+    """True when the EGM row is in maintenance (status text, row HTML, or toolbar buttons)."""
+    _mn, _is_test, _gt, status, _online = _row_report_fields(row, timeout_ms=timeout_ms)
+    if _status_is_maintenance(status):
+        return True
+    try:
+        row_text = row.inner_text(timeout=min(8_000, timeout_ms)) or ""
+        if _status_is_maintenance(row_text):
+            return True
+    except Exception:
+        pass
+    try:
+        cells = row.locator("td.el-table__cell")
+        if cells.count() >= 7:
+            html = (cells.nth(6).inner_html(timeout=min(8_000, timeout_ms)) or "").lower()
+            if "maintain" in html or "metercheck" in html or "pill-maint" in html:
+                return True
+    except Exception:
+        pass
+    if check_toolbar:
+        return _toolbar_row_in_maintenance(page, row, timeout_ms=timeout_ms)
+    return False
+
+
+def _toolbar_row_in_maintenance(page, row, *, timeout_ms: int) -> bool:
+    """
+    With the row selected: BatchStart Using enabled and BatchMaintenance disabled
+    means maintenance mode is active even when the Status pill still reads ``occupy``.
+    """
+    _ensure_row_checkbox_checked(page, row, timeout_ms=timeout_ms)
+    _wait_batch_toolbar_ready(page, "BatchStart Using", timeout_ms=timeout_ms, wait_ms=8_000)
+    start_btn = _locate_batch_toolbar_button(page, "BatchStart Using")
+    maint_btn = _locate_batch_toolbar_button(page, "BatchMaintenance")
+    return (
+        _batch_toolbar_button_actionable(start_btn)
+        and not _batch_toolbar_button_actionable(maint_btn)
+    )
+
+
+def _verify_set_maint_applied(
+    page,
+    machine_name: str,
+    live: dict[str, Any] | None,
+    *,
+    timeout_ms: int,
+    max_pages: int,
+) -> bool:
+    """Poll live EGM after BatchMaintenance — occupy rows may lag or only show via toolbar."""
+    if live and _verify_live_state(live, "set_maint"):
+        return True
+
+    deadline = time.monotonic() + _set_maint_verify_poll_sec()
+    while time.monotonic() < deadline:
+        row = _find_machine_row_live(
+            page, machine_name, timeout_ms=timeout_ms, max_pages=max_pages
+        )
+        if row is not None and _row_state_indicates_maintenance(
+            page, row, timeout_ms=timeout_ms, check_toolbar=True
+        ):
+            return True
+        _page_pause(page, 1200)
+        _refresh_egm_table(page, timeout_ms=timeout_ms, max_pages=max_pages)
+        live = _read_live_row_state(
+            page, machine_name, timeout_ms=timeout_ms, max_pages=max_pages
+        )
+        if live and _verify_live_state(live, "set_maint"):
+            return True
+    return False
+
+
 def _verify_live_state(state: dict[str, Any], action: str) -> bool:
     is_maint = _status_is_maintenance(state.get("status", ""))
     is_test = bool(state.get("test"))
@@ -1493,17 +1591,31 @@ def _process_env_batch(
         if not name:
             continue
         live = post_states.get(name)
-        if live and _verify_live_state(live, verify_action):
+        verified = bool(live and _verify_live_state(live, verify_action))
+        if not verified and verify_action == "set_maint":
+            verified = _verify_set_maint_applied(
+                page,
+                name,
+                live,
+                timeout_ms=timeout_ms,
+                max_pages=max_pages,
+            )
+        if verified:
             ok_list.append({"belongs": m.get("belongs", belongs), "machine": name})
         else:
-            detail = ""
-            if live:
-                detail = f" (live status={live.get('status')!r}, test={live.get('test')})"
+            if verify_action == "set_maint" and live and _status_is_occupy(str(live.get("status") or "")):
+                err = "game currently running"
+            else:
+                detail = ""
+                if live:
+                    detail = f" (live status={live.get('status')!r}, test={live.get('test')})"
+                err = f"status not as expected on EGM page{detail}"
             fail_list.append(
                 {
                     "belongs": m.get("belongs", belongs),
                     "machine": name,
-                    "error": f"status not as expected on EGM page{detail}",
+                    "error": err,
+                    "live": live,
                 }
             )
 
@@ -1688,17 +1800,31 @@ def _run_phased_env(
         if not name:
             continue
         live = final_states.get(name)
-        if live and _verify_live_state(live, parent_action):
+        verified = bool(live and _verify_live_state(live, parent_action))
+        if not verified and parent_action == "set_maint":
+            verified = _verify_set_maint_applied(
+                page,
+                name,
+                live,
+                timeout_ms=timeout_ms,
+                max_pages=max_pages,
+            )
+        if verified:
             all_ok.append({"belongs": m.get("belongs", belongs), "machine": name})
         else:
-            detail = ""
-            if live:
-                detail = f" (live status={live.get('status')!r}, test={live.get('test')})"
+            if parent_action == "set_maint" and live and _status_is_occupy(str(live.get("status") or "")):
+                err = "game currently running"
+            else:
+                detail = ""
+                if live:
+                    detail = f" (live status={live.get('status')!r}, test={live.get('test')})"
+                err = f"final EGM check failed{detail}"
             all_fail.append(
                 {
                     "belongs": m.get("belongs", belongs),
                     "machine": name,
-                    "error": f"final EGM check failed{detail}",
+                    "error": err,
+                    "live": live,
                 }
             )
 

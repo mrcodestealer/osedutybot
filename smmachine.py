@@ -3389,6 +3389,7 @@ def _run_prod_batch_bot_job_thread(
     from prod_machine_batch import ACTION_LABELS, run_prod_batch_job
 
     with _PROD_BATCH_JOBS_LOCK:
+        job = _PROD_BATCH_JOBS.get(job_id) or {}
         if job_id not in _PROD_BATCH_JOBS:
             _PROD_BATCH_JOBS[job_id] = {
                 "status": "running",
@@ -3400,6 +3401,8 @@ def _run_prod_batch_bot_job_thread(
             }
         else:
             _PROD_BATCH_JOBS[job_id]["status"] = "running"
+        thread_root = (job.get("thread_root_message_id") or "").strip() or None
+    _prod_batch_sm_refresh_thread_root(chat_id, thread_root)
 
     def cancel_check() -> bool:
         with _PROD_BATCH_JOBS_LOCK:
@@ -3425,13 +3428,37 @@ def _run_prod_batch_bot_job_thread(
         )
 
     def on_phase_retry(step_verify: str, attempt: int, failed: list) -> None:
-        from prod_machine_batch import PHASE_LABELS
+        from prod_machine_batch import (
+            PHASE_LABELS,
+            _failure_is_game_running,
+            _max_phase_retries,
+        )
+
+        max_r = _max_phase_retries()
+        game_running = bool(failed) and all(
+            _failure_is_game_running(str(m.get("error") or ""), m.get("live"))
+            for m in failed
+        )
+
+        if step_verify == "set_maint" and game_running:
+            names = [
+                f"• {m.get('belongs', '')} — {m.get('machine') or m.get('name') or ''}"
+                for m in failed[:20]
+            ]
+            extra = f"\n... and {len(failed) - 20} more" if len(failed) > 20 else ""
+            send_message(
+                chat_id,
+                "⚠️ **Game currently running** error occurred — will retry **set maintenance** again.\n"
+                f"Attempt **{attempt}** / **{max_r}**.\n\n"
+                + "\n".join(names)
+                + extra,
+            )
+            return
 
         label = PHASE_LABELS.get(step_verify, step_verify)
         lines = [
             f"**{label} — failed ({len(failed)} machine(s))**",
-            "Occupy / game is currently running — will retry when the row allows batch action.",
-            f"Will retry automatically (attempt {attempt}) unless you tap **Cancel** below.",
+            f"Will retry automatically (attempt {attempt}/{max_r}) unless you tap **Cancel** below.",
             "",
         ]
         for m in failed[:30]:
@@ -3475,6 +3502,34 @@ def _run_prod_batch_bot_job_thread(
 
         ok_n = len(summary.get("success") or [])
         fail_n = len(summary.get("failed") or [])
+        failed = list(summary.get("failed") or [])
+        from prod_machine_batch import _failure_is_game_running, _max_phase_retries
+
+        max_r = _max_phase_retries()
+        all_game_running = bool(failed) and all(
+            _failure_is_game_running(str(m.get("error") or ""), m.get("live")) for m in failed
+        )
+
+        if fail_n and action == "set_maint" and all_game_running:
+            lines = [
+                f"❌ **Set maintenance** failed after **{max_r}** attempts.",
+                f"All **{max_r}** attempts were **game currently running**.",
+                "",
+            ]
+            for m in failed[:30]:
+                lines.append(f"• {m.get('belongs')} — {m.get('machine')}")
+            if fail_n > 30:
+                lines.append(f"... and {fail_n - 30} more")
+            _prod_batch_send_lark_md(
+                chat_id,
+                "Failed — game currently running",
+                "\n".join(lines),
+                send_message,
+                header_template="red",
+            )
+            _prod_batch_send_machine_screenshots_background(chat_id, machines, summary, send_message)
+            return
+
         lines = [
             f"**SUMMARY — {ACTION_LABELS.get(action, action)}**",
             f"Success: {ok_n}",
