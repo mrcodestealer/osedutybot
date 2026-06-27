@@ -3,7 +3,7 @@
 set -euo pipefail
 
 OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
-MODEL="${BOT_CHAT_MODEL:-qwen3.5:35b-a3b}"
+MODEL="${BOT_CHAT_MODEL:-qwen3.6:35b-a3b}"
 MAX_WAIT="${OLLAMA_WARMUP_WAIT_SEC:-600}"
 
 if [[ -f /root/osedutybot/.env ]]; then

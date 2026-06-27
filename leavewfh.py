@@ -2459,6 +2459,33 @@ def _tier_department_markdowns(
     return blocks
 
 
+def filter_dutylist_leave_wfh_excluding_people(
+    data: dict[str, Any],
+    exclude_names: list[str],
+) -> dict[str, Any]:
+    """
+    Drop HRMS leave rows for people already shown in the OSE shift roster Leave section
+    (same person, different label e.g. Augustine Si yew vs Augustine Si Yew).
+    """
+    if not exclude_names or not data:
+        return data
+
+    def _already_listed(row: dict[str, Any]) -> bool:
+        nm = str(row.get("name") or "").strip()
+        if not nm:
+            return False
+        return any(ex and od._names_same_person(nm, ex) for ex in exclude_names)
+
+    def _filter(key: str) -> list[dict[str, Any]]:
+        return [r for r in list(data.get(key) or []) if not _already_listed(r)]
+
+    return {
+        **data,
+        "ose_leave": _filter("ose_leave"),
+        "other_leave": _filter("other_leave"),
+    }
+
+
 def build_dutylist_leave_wfh_elements(
     data: dict[str, Any],
     on_date: date,

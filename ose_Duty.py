@@ -2571,10 +2571,42 @@ def _extract_ose_shift_roster_leave_for_date(
 
 def _person_listed_on_leave(name: str, leave_entries: list[dict[str, Any]]) -> bool:
     for r in leave_entries:
-        ln = str(r.get("name") or "").strip()
-        if ln and _names_same_person(name, ln):
-            return True
+        for key in ("name", "display_name"):
+            ln = str(r.get(key) or "").strip()
+            if ln and _names_same_person(name, ln):
+                return True
     return False
+
+
+def _dedupe_leave_entries_by_person(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per person — avoids duplicate names in the Leave section."""
+    out: list[dict[str, Any]] = []
+    for row in entries:
+        nm = str(row.get("name") or row.get("display_name") or "").strip()
+        if nm and any(
+            _names_same_person(nm, str(r.get("name") or r.get("display_name") or ""))
+            for r in out
+        ):
+            continue
+        out.append(row)
+    return out
+
+
+def _leave_entry_names_for_dedupe(leave_entries: list[dict[str, Any]]) -> list[str]:
+    """Roster / display names already listed in the OSE Leave section."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for row in leave_entries:
+        for key in ("name", "display_name"):
+            nm = str(row.get(key) or "").strip()
+            if not nm:
+                continue
+            nk = _name_key(nm)
+            if nk in seen:
+                continue
+            seen.add(nk)
+            names.append(nm)
+    return names
 
 
 def _extract_leave_entries_for_date(
@@ -2706,6 +2738,7 @@ def _build_ose_context_once(
         # 7pm, /ose, /osedate — both sections use today's leave list only.
         rest_names = [n for n in rest_names if not _person_listed_on_leave(n, leave_entries)]
         luck_names = [n for n in luck_names if not _person_listed_on_leave(n, leave_entries)]
+    leave_entries = _dedupe_leave_entries_by_person(leave_entries)
     return sorted(rest_names), sorted(luck_names), offset_lines, leave_entries, None
 
 
@@ -2813,6 +2846,11 @@ def get_ose_payload_for_date(target_date: date, mode: str = "date", *, include_t
         import leavewfh as lw
 
         dutylist_attendance = lw.get_dutylist_leave_wfh_for_date(target_date)
+        if leave_entries:
+            dutylist_attendance = lw.filter_dutylist_leave_wfh_excluding_people(
+                dutylist_attendance,
+                _leave_entry_names_for_dedupe(leave_entries),
+            )
     except Exception:
         dutylist_attendance = {}
 
