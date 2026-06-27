@@ -1529,8 +1529,6 @@ def build_status_report(
     if note:
         lines.append("")
         lines.append(note)
-    lines.append("")
-    lines.append(f"_(Source: webmachine_data.json — {_data_path_hint()})_")
     return "\n".join(lines)
 
 
