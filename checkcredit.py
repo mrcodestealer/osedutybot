@@ -38,6 +38,8 @@ Env (optional):
   NP_BACKEND_HEADLESS / NP_BACKEND_HEADED (or **WF_THIRD_HTTP_HEADED** / **THIRD_HTTP_PLAYWRIGHT_HEADED**
   — visible Chromium when ``headed=None``). **Duty Bot** calls ``screenshot_np_recharge_detail(..., headed=False)``
   so server screenshots are always headless; use CLI ``--checkuser`` / ``--pause`` for a visible window.
+  **THIRD_HTTP_WARM_POOL=1** (default) — keep one logged-in browser per backend tag (NP/NCH/…); set ``0`` for cold login each run.
+  ``THIRD_HTTP_WARM_ENVS`` — comma list (default NP,NCH,DHS,CP,TBP,WF). ``THIRD_HTTP_WARM_PREWARM_ON_STARTUP=1``.
   ``NP_CHECKUSER_PAUSE_OPEN_SEC`` (default ``90``): when ``--pause`` but stdin is not a TTY, seconds to keep
   Chromium open before ``browser.close()`` (avoids instant close on ``input()`` EOF).
   If **Machine** looks Winford (folder / label **starts with ``WF``** … or ``NWR8173`` OSS alias),
@@ -3004,6 +3006,32 @@ def _np_resolve_backend(machine_display: str | None) -> tuple[str, str, str]:
     return NP_BACKEND_DEFAULT_BASE, *_np_backend_env_cred()
 
 
+_TAG_SAMPLE_MACHINE: dict[str, str] = {
+    "NP": "NWR2074",
+    "NCH": "NCH1422",
+    "DHS": "DHS3077",
+    "CP": "CP0231",
+    "OSM": "OSM0231",
+    "MDR": "MDR7178",
+    "TBR": "TBR1234",
+    "TBP": "TBP8641",
+    "WF": "WF8123",
+}
+
+
+def _np_sample_machine_for_tag(tag: str) -> str:
+    return _TAG_SAMPLE_MACHINE.get((tag or "").strip().upper(), "NWR2074")
+
+
+def _np_resolve_backend_for_tag(tag: str) -> tuple[str, str, str]:
+    return _np_resolve_backend(_np_sample_machine_for_tag(tag))
+
+
+def _np_backend_has_credentials(tag: str) -> bool:
+    _base, user, pw = _np_resolve_backend_for_tag(tag)
+    return bool(user and pw)
+
+
 def _np_combine_date_and_credit_time(date_iso: str, time_short: str) -> datetime:
     """date_iso YYYY-MM-DD; time_short like 23:55:12.092 or 23:55:12."""
     t = (time_short or "").strip()
@@ -3637,7 +3665,13 @@ def _np_dialog_text_layers_for_match(dlg) -> str:
     except Exception:
         pass
     try:
-        subs = dlg.locator("pre, textarea, code")
+        html = dlg.evaluate("el => el.innerHTML") or ""
+        if html.strip():
+            chunks.append(html)
+    except Exception:
+        pass
+    try:
+        subs = dlg.locator("pre, textarea, code, .hljs, .json-viewer, [class*='request']")
         for i in range(min(subs.count(), 40)):
             t = subs.nth(i).inner_text() or ""
             if t.strip():
@@ -3715,6 +3749,8 @@ def _np_try_screenshot_matching_detail(
     timeout_ms: int,
     dialog_settle_ms: int = 900,
     amount_scale: float = 1.0,
+    soft_expected_credit: float | None = None,
+    scan_stats: dict[str, Any] | None = None,
 ) -> bool:
     """
     For each candidate row: accept when Request JSON ``machineId`` contains the machine digits and
@@ -3749,6 +3785,9 @@ def _np_try_screenshot_matching_detail(
         full_txt = dlg_sel.inner_text() or ""
         layers = _np_dialog_text_layers_for_match(dlg_sel)
         blob = _np_detail_request_section(full_txt)
+        mid_p, amt_p = _np_parse_machine_amount_from_request_blob(blob or layers or full_txt)
+        if scan_stats is not None and len(scan_stats.get("sample_mids") or []) < 8:
+            scan_stats.setdefault("sample_mids", []).append((mid_p, amt_p))
         ok = _np_detail_matches_credit_and_machine_id(
             blob,
             machine_substr,
@@ -3784,6 +3823,10 @@ def _np_try_screenshot_matching_detail(
                 expected_credit,
                 amount_scale=amount_scale,
             )
+        if ok and expected_credit is None and soft_expected_credit is not None:
+            _, det_amt = _np_parse_machine_amount_from_request_blob(blob or layers or full_txt)
+            if not _np_amount_plausible_for_soft_match(soft_expected_credit, det_amt):
+                ok = False
         if ok:
             _np_capture_detail_dialog_screenshot(
                 page,
@@ -3796,6 +3839,23 @@ def _np_try_screenshot_matching_detail(
         _np_close_np_detail_dialog(page, dlg_sel)
 
     return False
+
+
+def _np_amount_plausible_for_soft_match(expected: float | None, detail_amt: float | None) -> bool:
+    """Reject machine-only picks where Detail amount is wildly unlike log credit (e.g. 2 vs 77099)."""
+    if expected is None or detail_amt is None:
+        return True
+    try:
+        exp = float(expected)
+        amt = float(detail_amt)
+    except (TypeError, ValueError):
+        return True
+    if exp <= 0:
+        return amt > 0
+    ratio = amt / exp
+    if ratio > 5.0 or ratio < 0.2:
+        return False
+    return True
 
 
 def _np_capture_detail_dialog_screenshot(
@@ -4673,38 +4733,40 @@ def screenshot_np_recharge_detail(
             "(not required for Winford (WF* / NWR8173 alias) — defaults omduty1 unless WF_BACKEND_* is set)."
         )
 
-    start_s, end_s = _np_window_strings(
-        date_iso,
-        time_short,
-        extra_times=time_short_candidates,
-    )
-    np_time_candidates = _np_dedupe_time_strings(
-        [time_short, *(time_short_candidates or [])]
-    )
-    use_same_minute_boost = _np_same_minute_boost_useful(date_iso, np_time_candidates)
-    if _np_use_backend_osmplay_com(machine_display):
-        login_url = f"{base}/login?redirect=%2Fegm%2FegmStatusList"
-    else:
-        login_url = f"{base}/login?redirect=%2Flog%2FlogThirdHttpReq"
-    log_url = f"{base}/log/logThirdHttpReq"
-
-    from playwright.sync_api import sync_playwright
-
     if headed is True:
         headless = False
     elif headed is False:
         headless = True
     else:
         headless = _np_backend_playwright_headless()
-    post_search_ms = int(os.environ.get("NP_BACKEND_POST_SEARCH_MS", "2500").strip() or "2500")
-    if headless:
-        post_search_ms = max(
-            post_search_ms,
-            int(os.environ.get("NP_BACKEND_HEADLESS_POST_SEARCH_MS", "5500").strip() or "5500"),
+
+    try:
+        from third_http_warm_pool import third_http_warm_pool, third_http_warm_pool_enabled
+
+        if third_http_warm_pool_enabled() and headed is not True and not pause_for_input:
+            return third_http_warm_pool().screenshot(
+                _log_http_backend_tag,
+                player_id=player_id,
+                date_iso=date_iso,
+                time_short=time_short,
+                time_short_candidates=time_short_candidates,
+                machine_substr=machine_substr,
+                expected_credit=expected_credit,
+                machine_display=machine_display,
+                timeout_ms=timeout_ms,
+            )
+    except Exception as ex:
+        print(
+            f"[third-http-warm:{_log_http_backend_tag}] {ex!r} — cold browser retry",
+            flush=True,
         )
-    dialog_settle_ms = int(os.environ.get("NP_BACKEND_DIALOG_SETTLE_MS", "0").strip() or "0")
-    if dialog_settle_ms <= 0:
-        dialog_settle_ms = 1500 if headless else 900
+
+    from np_third_http_page import (
+        np_third_http_login_and_open_log_page,
+        np_third_http_run_search_and_screenshot,
+    )
+    from playwright.sync_api import sync_playwright
+
     out_fd, out_path = tempfile.mkstemp(suffix=".png", prefix="np_third_http_")
     os.close(out_fd)
 
@@ -4717,211 +4779,27 @@ def screenshot_np_recharge_detail(
             )
             page = context.new_page()
             page.set_default_timeout(timeout_ms)
-
-            page.goto(login_url, wait_until="domcontentloaded")
-            page.wait_for_timeout(800)
-
-            pwd_box = page.locator('input[type="password"]').first
-            pwd_box.wait_for(state="visible", timeout=min(30_000, timeout_ms))
-            form = pwd_box.locator("xpath=ancestor::form[1]")
-            if form.count():
-                tin = form.locator(
-                    'input[type="text"], input:not([type]), input[type="tel"], input[type="email"]'
-                ).first
-                tin.fill(user)
-            else:
-                page.locator('input[type="text"]').first.fill(user)
-            pwd_box.fill(pw)
-
-            login_btn = page.get_by_role("button", name=re.compile(r"login|sign in|log in", re.I))
-            if login_btn.count():
-                login_btn.first.click()
-            else:
-                page.locator('button[type="submit"], button.el-button--primary').first.click()
-
-            page.wait_for_timeout(2000)
-            if "/log/logThirdHttpReq" not in (page.url or ""):
-                page.goto(log_url, wait_until="domcontentloaded")
-
-            page.wait_for_selector(".filter-container", timeout=timeout_ms)
-
-            dinputs = page.locator(".filter-container .data-content .ssdate input.el-input__inner")
-            if dinputs.count() >= 2:
-                dinputs.nth(0).click()
-                dinputs.nth(0).fill("")
-                dinputs.nth(0).fill(start_s)
-                page.keyboard.press("Enter")
-                dinputs.nth(1).click()
-                dinputs.nth(1).fill("")
-                dinputs.nth(1).fill(end_s)
-                page.keyboard.press("Enter")
-            else:
-                raise RuntimeError("Could not find date range inputs on Log Third Http Req page.")
-
-            uid_in = page.locator(".filter-container .el-form-item").filter(has_text="UserId").locator(
-                "input.el-input__inner"
-            ).first
-            uid_in.fill("")
-            uid_in.fill(str(player_id).strip())
-            page.wait_for_timeout(400)
-
-            # Search label varies (EN / CN / Element Plus inner span); strict "^Search$" often fails.
-            def _click_np_search() -> None:
-                attempts = [
-                    page.locator(".filter-container button, .filter-container .el-button").filter(
-                        has_text=re.compile(r"Search|查询", re.I)
-                    ),
-                    page.get_by_role("button", name=re.compile(r"search|查询", re.I)),
-                    page.locator('button.el-button--primary').filter(
-                        has_text=re.compile(r"Search|查询|search", re.I)
-                    ),
-                    page.locator("button").filter(has_text=re.compile(r"^Search$")),
-                ]
-                last_err: Exception | None = None
-                for loc in attempts:
-                    try:
-                        if loc.count() == 0:
-                            continue
-                        btn = loc.first
-                        btn.wait_for(state="visible", timeout=min(30_000, timeout_ms))
-                        btn.click(timeout=min(60_000, timeout_ms))
-                        return
-                    except Exception as e:
-                        last_err = e
-                        continue
-                raise RuntimeError(
-                    "Could not find or click the Search button on Log Third Http Req "
-                    f"(UI may have changed). Last error: {last_err!r}"
-                )
-
-            _click_np_search()
-            page.wait_for_timeout(post_search_ms)
-
-            ms = (machine_substr or "").strip()
-            exp_match = _np_expected_credit_for_match(expected_credit)
-            need_detail_match = bool(ms) or exp_match is not None
-            amt_scale = _np_tbp_amount_scale() if _np_use_tbp_log_backend(machine_display) else 1.0
-
-            if need_detail_match:
-                def _scan_detail_pages(exp_try: float | None) -> bool:
-                    _np_pagination_go_first_page(page, timeout_ms=timeout_ms)
-                    for _pi in range(NP_BACKEND_MAX_PAGES):
-                        n = _np_wait_third_http_search_results(page, timeout_ms=timeout_ms)
-                        if n <= 0:
-                            if not _np_pagination_can_go_next(page):
-                                break
-                            _np_click_pagination_next(page, timeout_ms=timeout_ms)
-                            continue
-                        rows = page.locator(".el-table__body tr.el-table__row")
-                        ordered = _np_list_recharge_indices_time_ordered(
-                            page,
-                            rows,
-                            n,
-                            date_iso,
-                            time_short,
-                            time_candidates=np_time_candidates,
-                        )
-                        if ordered:
-                            if use_same_minute_boost and not need_detail_match:
-                                same_min_rows = _np_indices_table_same_minute(
-                                    page,
-                                    rows,
-                                    ordered,
-                                    date_iso,
-                                    time_short,
-                                    time_candidates=np_time_candidates,
-                                )
-                                to_scan = _np_merge_same_minute_then_rest(same_min_rows, ordered)
-                            else:
-                                to_scan = ordered
-                            ok = _np_try_screenshot_matching_detail(
-                                page,
-                                rows,
-                                to_scan,
-                                machine_substr=machine_substr,
-                                expected_credit=exp_try,
-                                out_path=out_path,
-                                timeout_ms=timeout_ms,
-                                dialog_settle_ms=dialog_settle_ms,
-                                amount_scale=amt_scale,
-                            )
-                            if ok:
-                                return True
-                        if not _np_pagination_can_go_next(page):
-                            break
-                        _np_click_pagination_next(page, timeout_ms=timeout_ms)
-                    return False
-
-                matched = _scan_detail_pages(exp_match)
-                ran_machine_only = False
-                if (
-                    not matched
-                    and ms
-                    and exp_match is not None
-                    and _np_machine_only_fallback_enabled(_log_http_backend_tag)
-                ):
-                    ran_machine_only = True
-                    matched = _scan_detail_pages(None)
-
-                if not matched:
-                    bits: list[str] = []
-                    if ms:
-                        bits.append(f"`machineId` containing `{ms}`")
-                    if exp_match is not None:
-                        bits.append(
-                            f"`amount` within {_np_amount_match_eps()} of `{exp_match}`"
-                            + (f" (÷ `{amt_scale}` scale)" if amt_scale != 1.0 else "")
-                        )
-                    elif ms:
-                        bits.append(
-                            "latest credit was 0 or unset — only `machineId` is matched, not `amount`"
-                        )
-                    if ran_machine_only:
-                        bits.append(
-                            "machine-only fallback (log `reduce_num` / aft amount ≠ Detail `amount`) "
-                            "also found nothing"
-                        )
-                    crit = "; ".join(bits) if bits else "expected filters"
-                    raise RuntimeError(
-                        f"No {_log_http_backend_tag} Detail on pages 1–{NP_BACKEND_MAX_PAGES} with {crit}. "
-                        "Increase NP_BACKEND_MAX_PAGES or NP_BACKEND_WINDOW_MINUTES."
-                    )
-            else:
-                n = _np_wait_third_http_search_results(page, timeout_ms=timeout_ms)
-                if n <= 0:
-                    raise RuntimeError(
-                        f"No Log Third Http rows for UserId `{player_id}` between "
-                        f"`{start_s}` and `{end_s}` (empty table after Search)."
-                    )
-                rows = page.locator(".el-table__body tr.el-table__row")
-                ordered = _np_list_recharge_indices_time_ordered(
-                    page,
-                    rows,
-                    n,
-                    date_iso,
-                    time_short,
-                    time_candidates=np_time_candidates,
-                )
-                if not ordered:
-                    raise RuntimeError(
-                        'No table row with Event Type "recharge" for this UserId/time window.'
-                    )
-
-                pick_i = ordered[0]
-                row = rows.nth(pick_i)
-                _np_click_row_show_details_link(row, timeout_ms=timeout_ms)
-
-                dlg = page.locator(
-                    ".el-dialog.details-dialog, div[role='dialog'].details-dialog"
-                ).last
-                dlg.wait_for(state="visible", timeout=timeout_ms)
-                _np_capture_detail_dialog_screenshot(
-                    page,
-                    dlg,
-                    out_path,
-                    timeout_ms=timeout_ms,
-                    settle_ms=600,
-                )
+            np_third_http_login_and_open_log_page(
+                page,
+                base=base,
+                user=user,
+                pw=pw,
+                machine_display=machine_display,
+                timeout_ms=timeout_ms,
+            )
+            np_third_http_run_search_and_screenshot(
+                page,
+                player_id=player_id,
+                date_iso=date_iso,
+                time_short=time_short,
+                time_short_candidates=time_short_candidates,
+                machine_substr=machine_substr,
+                expected_credit=expected_credit,
+                machine_display=machine_display,
+                timeout_ms=timeout_ms,
+                headless=headless,
+                out_path=out_path,
+            )
         finally:
             if pause_for_input:
                 if sys.stdin.isatty():

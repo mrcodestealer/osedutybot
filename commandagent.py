@@ -743,14 +743,16 @@ def _looks_like_slash_command(text: str) -> bool:
 _PB_SITE_RE = re.compile(
     r"(?i)\b(nwr|np|nch|nc|tbr|tbp|mdr|dhs|winford|wf|osm|cp)\b"
 )
-_PB_MAINT_RE = re.compile(r"(?i)\b(maintenance|maint|mtn)\b")
-_PB_TEST_RE = re.compile(r"(?i)\btest\b")
+_PB_MAINT_RE = re.compile(r"(?i)\b(maintenance|maint|mtn)\b|维护|維護")
+_PB_TEST_RE = re.compile(r"(?i)\btest\b|测试|測試")
 _PB_UNSET_RE = re.compile(
     r"(?i)\b(unset|disable|deactivate|remove|clear|cancel|lift|unmark|"
     r"turn\s+off|switch\s+off|take\s+off|take\s+out)\b"
+    r"|取消|解除|关闭|關閉|撤销|撤銷|移除|结束|結束|退出"
 )
 _PB_SET_RE = re.compile(
     r"(?i)\b(set|enable|activate|put|apply|mark|flag|turn\s+on|switch\s+on)\b"
+    r"|设置|設置|设定|設定|开启|開啟|启用|啟用|进入|進入|加入"
 )
 # A machine token: optional site prefix + 3+ digits, or a display name containing one.
 _PB_MACHINE_TOKEN_RE = re.compile(
@@ -853,10 +855,15 @@ _CC_INTENT_RE = re.compile(
     r"credit\s*log|player\s*credit|credit\s*for\s*machine|credit\s*on\s*machine|"
     r"machine\s*error|machineerror|error\s*log"
     r")\b"
+    r"|查信用|信用查询|信用查詢|检查信用|檢查信用|查额度|查額度|额度查询|額度查詢|"
+    r"查机台信用|查機台信用|信用记录|信用記錄|信用日志|信用日誌"
 )
-_CC_CREDIT_RE = re.compile(r"(?i)\bcredit\b")
+_CC_CREDIT_RE = re.compile(r"(?i)\bcredit\b|信用|额度|額度")
 # "machine error" / "machineerror" / "error only" -> /machineerror (latest 2 error players)
-_CC_ERROR_ONLY_RE = re.compile(r"(?i)\bmachine\s*error\b|\bmachineerror\b|\berror\s*only\b")
+_CC_ERROR_ONLY_RE = re.compile(
+    r"(?i)\bmachine\s*error\b|\bmachineerror\b|\berror\s*only\b"
+    r"|机台错误|機台錯誤|机器错误|機器錯誤|机台报错|機台報錯|机器报错|機器報錯"
+)
 _CC_DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 # A machine token WITH a site prefix (kept verbatim, spaces/dashes removed).
 _CC_PREFIXED_MACHINE_RE = re.compile(
@@ -928,6 +935,8 @@ _CML_INTENT_RE = re.compile(
     r"check\s*machine\s*log|checkmachinelog|machine\s*log\s*check|"
     r"check\s*machine\s*error|machine\s*log\s*error"
     r")\b"
+    r"|查机台日志|查機台日誌|机台日志|機台日誌|机器日志|機器日誌|"
+    r"检查机台日志|檢查機台日誌|机台错误日志|機台錯誤日誌|机台日志检查|機台日誌檢查"
 )
 
 
@@ -948,7 +957,10 @@ def detect_checkmachinelog_command(text: str) -> Optional[str]:
 # Runs BEFORE detect_checkcredit_command ("credit" would false-positive).
 # ---------------------------------------------------------------------------
 
-_STUCK_CREDIT_RE = re.compile(r"(?i)\b(?:stuck\s+credit|credit\s+stuck)\b")
+_STUCK_CREDIT_RE = re.compile(
+    r"(?i)\b(?:stuck\s+credit|credit\s+stuck)\b"
+    r"|卡额度|卡額度|额度卡住|額度卡住|卡信用|信用卡住|卡币|卡幣|卡分"
+)
 
 
 def detect_stuck_credit_command(text: str) -> Optional[str]:
@@ -977,6 +989,8 @@ def detect_show_reminder_command(text: str) -> Optional[str]:
 _RESTART_SERVICES_RE = re.compile(
     r"(?i)(?:^|\s)(?:restart|reboot)\s+(?:all\s+)?services(?:\s|$|[.!?])"
     r"|(?:^|\s)restart\s+(?:the\s+)?(?:webapp|web\s+app)(?:\s+and\s+(?:larkbot|bot|duty\s+bot))?(?:\s|$|[.!?])"
+    r"|重启(?:所有|全部)?服务|重啟(?:所有|全部)?服務|重新启动(?:所有|全部)?服务|重新啟動(?:所有|全部)?服務"
+    r"|重启\s*(?:webapp|web\s*app|网页|網頁|机器人|機器人|bot|duty\s*bot)|重啟\s*(?:webapp|web\s*app|网页|網頁|机器人|機器人|bot|duty\s*bot)"
 )
 
 

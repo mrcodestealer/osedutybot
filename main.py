@@ -672,16 +672,31 @@ def run_check_machine_log_job(
                     f"✅ Third Http 有匹配记录 — 玩家 **`{uid}`** 额度应已成功转出（卡机可清）。"
                 )
             else:
-                _cml_send(
-                    f"📋 Log shows an **error** for player `{uid}` (credit `{cr_s}` @ `{ts}`).\n"
-                    f"**Now checking Third Http ({be})** — did the player **transfer out credit** successfully?\n\n"
-                    f"日志有 error — 正在查 **Third Http ({be})** 是否已成功转出额度…"
-                )
-                success_caption = (
-                    f"✅ **Third Http ({be})** — player `{uid}` **transferred out credit** successfully "
-                    f"(Detail matches log amount `{cr_s}` @ `{ts}`).\n"
-                    f"✅ Third Http 有匹配记录 — 玩家 **`{uid}`** 额度应已成功转出。"
-                )
+                err_p = str(pick.get("error_player_id") or "").strip()
+                kind = str(pick.get("verify_kind") or "").strip()
+                if kind == "transfer_out" and err_p and err_p != uid:
+                    _cml_send(
+                        f"📋 Log **error** player `{err_p}` · card **transfer-out** "
+                        f"`{cr_s}` @ `{ts}` → player **`{uid}`**.\n"
+                        f"**Checking Third Http ({be})** for **`{uid}`** (not error player).\n\n"
+                        f"日志 error 玩家 `{err_p}` ≠ 转出玩家 **`{uid}`** — 查 Third Http 转出记录…"
+                    )
+                    success_caption = (
+                        f"✅ **Third Http ({be})** — player **`{uid}`** **transferred out credit** "
+                        f"(Detail `{cr_s}` @ `{ts}`, machine `{md}`).\n"
+                        f"✅ Third Http — 玩家 **`{uid}`** 转出成功（非 error 玩家 `{err_p}`）。"
+                    )
+                else:
+                    _cml_send(
+                        f"📋 Log shows an **error** for player `{uid}` (credit `{cr_s}` @ `{ts}`).\n"
+                        f"**Now checking Third Http ({be})** — did the player **transfer out credit** successfully?\n\n"
+                        f"日志有 error — 正在查 **Third Http ({be})** 是否已成功转出额度…"
+                    )
+                    success_caption = (
+                        f"✅ **Third Http ({be})** — player `{uid}` **transferred out credit** successfully "
+                        f"(Detail matches log amount `{cr_s}` @ `{ts}`).\n"
+                        f"✅ Third Http 有匹配记录 — 玩家 **`{uid}`** 额度应已成功转出。"
+                    )
             _np_run_screenshot_worker(
                 chat_id,
                 uid,
@@ -845,6 +860,15 @@ def run_cctv_screenshot_job(chat_id: str, machine_query: str) -> None:
                 pass
 
 
+def _third_http_warm_enabled_for_bot() -> bool:
+    try:
+        from third_http_warm_pool import third_http_warm_pool_enabled
+
+        return bool(third_http_warm_pool_enabled())
+    except Exception:
+        return False
+
+
 def _np_run_screenshot_worker(
     chat_id: str,
     uid: str,
@@ -880,7 +904,8 @@ def _np_run_screenshot_worker(
         (machine_display or "").strip() or None
     )
     _np_send(
-        f"⏳ {backend_tag} backend (Playwright): login → Log Third Http Req → recharge → Detail screenshot…",
+        f"⏳ {backend_tag} backend (Playwright): Log Third Http → recharge Detail"
+        f"{' (warm browser)' if _third_http_warm_enabled_for_bot() else ''}…",
     )
     path = None
     try:
@@ -4619,6 +4644,16 @@ def lark_webhook():
         ):
             return _lark_im_done()
 
+        if _offsetleave.handle_offset_query(
+            clean_text,
+            sender_open_id=sender_id or "",
+            chat_id=chat_id,
+            chat_type=chat_type,
+            send_message=send_message,
+            get_token_func=get_tenant_access_token,
+        ):
+            return _lark_im_done()
+
         if not _offsetai_nl_off and _offsetleave.handle_editoffset_command(
             clean_text,
             sender_open_id=sender_id or "",
@@ -6902,6 +6937,18 @@ def _run_main_entry() -> int:
             _boot_pmb.prewarm_prod_env_pool_on_startup()
         except Exception as _boot_pmb_err:
             print(f"[prod-warm] startup pre-warm skipped: {_boot_pmb_err!r}", flush=True)
+        try:
+            import smmachine as _boot_wm
+
+            _boot_wm.prewarm_webmachine_scrape_pool_on_startup()
+        except Exception as _boot_wm_err:
+            print(f"[wm-warm] startup pre-warm skipped: {_boot_wm_err!r}", flush=True)
+        try:
+            from third_http_warm_pool import prewarm_third_http_pool_on_startup
+
+            prewarm_third_http_pool_on_startup()
+        except Exception as _boot_th_err:
+            print(f"[third-http-warm] startup pre-warm skipped: {_boot_th_err!r}", flush=True)
         if _lark_ws_uses_persistent_connection():
             def _flask_bg() -> None:
                 app.run(host="127.0.0.1", port=port, debug=False, threaded=True, use_reloader=False)

@@ -115,7 +115,7 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
             _SECTION_ICONS["ose"],
             "green",
             [
-                ("showoffset [month]", "Monthly offset calendar; or “show offset calendar”", "月度调休日历"),
+                ("showoffset [month]", "Monthly offset calendar; e.g. 五月有谁offset", "月度调休；如「五月有谁offset」"),
                 ("@bot offset", "Offset form; or “swap my duty shift”", "调休申请表"),
                 ("@bot leave", "Leave form; or “apply for annual leave”", "请假申请表"),
                 ("editoffset", "Edit pending offset; or “change my offset”", "编辑待审调休"),

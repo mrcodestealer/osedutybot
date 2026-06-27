@@ -154,6 +154,119 @@ MONTH_MAP = {
     "Dec": 12,
 }
 
+_CJK_MONTH_NAMES: dict[str, int] = {
+    "一月": 1,
+    "二月": 2,
+    "三月": 3,
+    "四月": 4,
+    "五月": 5,
+    "六月": 6,
+    "七月": 7,
+    "八月": 8,
+    "九月": 9,
+    "十月": 10,
+    "十一月": 11,
+    "十二月": 12,
+}
+
+_OFFSET_LOOKUP_QUERY_RE = re.compile(
+    r"(?i)(?:"
+    r"谁.{0,12}(?:offset|调休|换班)|"
+    r"(?:offset|调休|换班).{0,16}谁|"
+    r"who(?:'s|\s+is|\s+are|\s+has|\s+had).{0,40}offset|"
+    r"who\s+offset|"
+    r"(?:show|list|check|view|see|display).{0,24}offset|"
+    r"offset.{0,24}(?:calendar|schedule|list|month|who)"
+    r")"
+)
+
+
+def parse_offset_month_from_text(
+    text: str,
+    *,
+    default_year: Optional[int] = None,
+) -> Optional[tuple[int, int]]:
+    """Extract ``(year, month)`` from offset lookup phrasing (English + 中文)."""
+    s = (text or "").strip()
+    if not s:
+        return None
+    today = date.today()
+    year = int(default_year) if default_year is not None else today.year
+
+    m = re.search(r"(\d{4})\s*年?\s*(\d{1,2})\s*月", s)
+    if m:
+        y, mo = int(m.group(1)), int(m.group(2))
+        if 1 <= mo <= 12:
+            return y, mo
+
+    for name, num in _CJK_MONTH_NAMES.items():
+        if name in s:
+            return year, num
+
+    m = re.search(r"(\d{1,2})\s*月", s)
+    if m:
+        mo = int(m.group(1))
+        if 1 <= mo <= 12:
+            return year, mo
+
+    low = s.lower()
+    if re.search(r"(?i)\b(?:this|current)\s+month\b", low) or "这个月" in s or "本月" in s:
+        return today.year, today.month
+    if re.search(r"(?i)\bnext\s+month\b", low) or "下个月" in s:
+        idx = today.year * 12 + (today.month - 1) + 1
+        return idx // 12, (idx % 12) + 1
+    if re.search(r"(?i)\blast\s+month\b", low) or "上个月" in s:
+        idx = today.year * 12 + (today.month - 1) - 1
+        return idx // 12, (idx % 12) + 1
+
+    m = re.search(r"(?i)\b(?:for|in)\s+(\d{1,2})\b", s)
+    if m:
+        mo = int(m.group(1))
+        if 1 <= mo <= 12:
+            return year, mo
+    if re.fullmatch(r"\d{1,2}", s.strip()):
+        mo = int(s.strip())
+        if 1 <= mo <= 12:
+            return year, mo
+
+    m = re.search(
+        r"(?i)\b(?:for|in)\s+(january|february|march|april|may|june|july|august|"
+        r"september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\b",
+        s,
+    )
+    if m:
+        token = m.group(1)
+        for name, num in MONTH_MAP.items():
+            if name.lower() == token.lower():
+                return year, num
+
+    for name, num in MONTH_MAP.items():
+        if re.search(rf"(?i)\b{re.escape(name)}\b", s):
+            return year, num
+
+    return None
+
+
+def _text_mentions_offset(s: str) -> bool:
+    """``offset`` / 调休 / 换班 — no ``\\b`` (CJK text can touch ``offset``)."""
+    return bool(re.search(r"(?i)offset|调休|换班", s or ""))
+
+
+def looks_like_offset_lookup_query(text: str) -> bool:
+    """Read-only offset lookup (who / which month), not submit/edit/delete."""
+    s = (text or "").strip()
+    if not s or s.lstrip().startswith("/"):
+        return False
+    if not _text_mentions_offset(s):
+        return False
+    if _OFFSET_LOOKUP_QUERY_RE.search(s):
+        return True
+    if parse_offset_month_from_text(s) and not re.search(
+        r"(?i)\b(apply|submit|request|swap|delete|edit|cancel|申请|删除|修改|取消)\b", s
+    ):
+        return True
+    return False
+
 OSE_SHOWOFFSET_NAMES: tuple[str, ...] = (
     "Bryan Peh",
     "Augustine Si yew",

@@ -35,7 +35,7 @@ Adding ``ngrok-skip-browser-warning`` in **Flask** does **not** fix the **first*
 
 Data sources:
 
-1. **Live scrape** (default **on**) — background thread calls ``smmachine.smachine_collect_machines_multi_sites``; disable with ``WEBMACHINE_SCRAPE=0``.
+1. **Live scrape** (default **on**) — background thread calls ``smmachine.smachine_collect_machines_all_deployments``; disable with ``WEBMACHINE_SCRAPE=0``. With ``WEBMACHINE_WARM_POOL=1`` (default), one **headed** browser per backend stays open and is re-used each interval.
 2. **JSON file** — default ``webmachine_data.json`` next to this module (or ``WEBMACHINE_DATA_PATH``). If missing, an empty ``[]`` file is **created**; after each successful scrape, results are **written back** to that file (skipped when ``WEBMACHINE_JSON`` inline is set).
 3. **Inline JSON** — ``WEBMACHINE_JSON='[...]'`` overrides file for fallback display only (no auto-create / no persist).
 

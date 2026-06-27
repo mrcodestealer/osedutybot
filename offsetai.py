@@ -257,6 +257,8 @@ def looks_like_offset_topic(text: str) -> bool:
         return False
     if _SLASH_OFFSET_RE.match(raw):
         return False
+    if od.looks_like_offset_lookup_query(raw):
+        return True
     if not _OFFSET_TOPIC_RE.search(raw):
         return False
     try:
@@ -1067,7 +1069,11 @@ def handle(
         )
         if not handled:
             if any(t.startswith("pass_not_offset") for t in ctx.tool_trace):
+                if _rule_fallback_handle_lookup(ctx):
+                    return True
                 return False
+            if _rule_fallback_handle_lookup(ctx):
+                return True
             send_message(
                 chat_id,
                 "⚠️ Offset assistant could not reach the AI. "
@@ -1079,6 +1085,30 @@ def handle(
         print(f"[offsetai] agent error: {exc!r}", flush=True)
         send_message(chat_id, f"❌ Offset assistant error: {exc}")
         return True
+
+
+def _rule_fallback_handle_lookup(ctx: _AgentCtx) -> bool:
+    """When the LLM agent passes or fails, still answer obvious month/who offset lookups."""
+    if not od.looks_like_offset_lookup_query(ctx.user_text):
+        return False
+    import offsetleave as ol
+
+    month = od.parse_offset_month_from_text(ctx.user_text) or (
+        date.today().year,
+        date.today().month,
+    )
+    if ctx.dry_run:
+        return True
+    return ol.execute_offset_action(
+        "show_calendar",
+        clean_text=ctx.user_text,
+        month_target=month,
+        sender_open_id=ctx.sender_open_id,
+        chat_id=ctx.chat_id,
+        chat_type=ctx.chat_type,
+        send_message=ctx.send_message,
+        get_token_func=ctx.get_token_func,
+    )
 
 
 def parse_request(text: str) -> dict[str, Any]:

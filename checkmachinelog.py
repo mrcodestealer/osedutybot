@@ -171,6 +171,7 @@ def extract_transfer_out(row: dict[str, Any] | None) -> dict[str, Any]:
         "time": (lc.get("time_short") or "").strip() or None,
         "source": (lc.get("source") or "").strip() or None,
         "line_idx": int(lc.get("line_idx", -1)),
+        "user_id": str(row.get("user_id") or "").strip() or None,
     }
 
 
@@ -809,25 +810,48 @@ def build_third_http_followup(
     allow_without_error: bool = False,
     raw_lines: list[str] | None = None,
     error_player_row: dict[str, Any] | None = None,
+    last_player_row: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Pick player/time/credit for Third Http screenshot (checkcredit /npthirdhttp path)."""
     if not last_error and not latest_err_uid and not allow_without_error:
         return None
-    uid = str((latest_err_uid or latest_any_uid) if (last_error or latest_err_uid) else latest_any_uid or "").strip()
-    if allow_without_error and not uid:
-        uid = str(latest_any_uid or "").strip()
+
+    xfer = transfer_out or {}
+    err_uid = str(latest_err_uid or "").strip()
+    any_uid = str(latest_any_uid or "").strip()
+    xfer_uid = str(xfer.get("user_id") or "").strip()
+    if not xfer_uid and last_player_row:
+        xfer_uid = str(last_player_row.get("user_id") or "").strip()
+
+    is_aft_fail = bool(last_error and _is_aft_interrogation_fail_error(last_error))
+    has_xfer = xfer.get("amount") is not None and (xfer.get("time") or "").strip()
+
+    if allow_without_error and not last_error:
+        uid = any_uid or xfer_uid
+        prow = last_player_row
+    elif is_aft_fail:
+        uid = str(last_error.get("user_id") or err_uid or any_uid).strip()
+        prow = error_player_row
+    elif has_xfer:
+        # Card transfer-out line — verify THAT player (often last player ≠ error player).
+        uid = xfer_uid or any_uid or err_uid
+        prow = last_player_row if uid == any_uid else error_player_row
+    else:
+        uid = err_uid or any_uid
+        prow = error_player_row
+
     if not uid:
         return None
-    xfer = transfer_out or {}
+
     ts = (xfer.get("time") or "").strip()
     if not ts and last_error:
         ts = (last_error.get("time") or "").strip()
     time_candidates = cc.third_http_time_candidates(
         raw_lines=raw_lines,
         uid=uid,
-        last_error=last_error,
-        transfer_out=xfer,
-        player_row=error_player_row,
+        last_error=last_error if uid == err_uid or is_aft_fail else None,
+        transfer_out=xfer if has_xfer else None,
+        player_row=prow,
         primary_time=ts or None,
     )
     if time_candidates:
@@ -852,6 +876,8 @@ def build_third_http_followup(
         "target_date_iso": target_date.isoformat(),
         "machine_match_substr": cc.machine_match_substr_from_display(md) or None,
         "third_http_backend": cc._np_log_backend_tag(md),
+        "verify_kind": "aft_fail" if is_aft_fail else ("transfer_out" if has_xfer else "error"),
+        "error_player_id": err_uid or None,
     }
 
 
@@ -949,6 +975,7 @@ def run_check_machine_log(
         allow_without_error=bool(stuck_credit),
         raw_lines=raw_lines,
         error_player_row=err_player_row,
+        last_player_row=last_player_row,
     )
 
     return {

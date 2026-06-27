@@ -91,6 +91,7 @@ _TODAY_ONLY_DEPTS = {"bi", "fe", "ft"}
 _DUTY_SIGNAL_RE = re.compile(
     r"(?i)\b(duty|on[\s-]?call|oncall|roster|shift|schedule|who\s+is\s+on|"
     r"who'?s\s+on|cover(?:ing|s)?|standby|stand\s*by)\b"
+    r"|值班|當班|当班|排班|轮值|輪值|当值|當值|谁\s*值班|誰\s*值班|on\s*duty"
 )
 # Leave intent signals.
 _LEAVE_SIGNAL_RE = re.compile(
@@ -162,8 +163,17 @@ def _find_departments(text: str) -> list[str]:
     return found
 
 
+_CJK_DATE_HINT_RE = re.compile(
+    r"今天|今日|今晚|明天|明日|后天|昨天|昨日|"
+    r"这(?:个|一)?(?:星期|礼拜|周)|本(?:星期|周)|"
+    r"下(?:个|一)?(?:星期|礼拜|周)|上(?:个|一)?(?:星期|礼拜|周)|"
+    r"(?:星期|周|週|礼拜|禮拜)\s*[一二三四五六日天]"
+)
+
+
 def _has_date_hint(text: str) -> bool:
-    return bool(_DATE_HINT_RE.search(text or ""))
+    t = text or ""
+    return bool(_DATE_HINT_RE.search(t) or _CJK_DATE_HINT_RE.search(t))
 
 
 # --------------------------------------------------------------------------- #
@@ -189,6 +199,24 @@ _NUM_WORDS = {
 def _week_range(anchor: date) -> list[date]:
     monday = anchor - timedelta(days=anchor.weekday())
     return [monday + timedelta(days=i) for i in range(7)]
+
+
+# Relative-week tokens in English AND Chinese (下个星期 / 下周 / 这周 / 上星期 …).
+_NEXT_WEEK_RE = re.compile(r"(?i)\bnext\s+week\b|下(?:个|一)?(?:星期|礼拜|周)")
+_THIS_WEEK_RE = re.compile(r"(?i)\bthis\s+week\b|这(?:个|一)?(?:星期|礼拜|周)|本(?:星期|周)")
+_LAST_WEEK_RE = re.compile(r"(?i)\blast\s+week\b|上(?:个|一)?(?:星期|礼拜|周)")
+
+
+def _week_offset(text: str) -> Optional[int]:
+    """Return -1/0/1 for last/this/next week (English or Chinese), else None."""
+    raw = text or ""
+    if _NEXT_WEEK_RE.search(raw):
+        return 1
+    if _LAST_WEEK_RE.search(raw):
+        return -1
+    if _THIS_WEEK_RE.search(raw):
+        return 0
+    return None
 
 
 def _safe_day(year: int, month: int, day: int) -> Optional[date]:
@@ -217,12 +245,10 @@ def regex_parse_dates(text: str, *, today: Optional[date] = None) -> list[date]:
         if d and d not in dates:
             dates.append(d)
 
-    # this/next week → 7-day range
-    if re.search(r"\bthis\s+week\b", raw):
-        for d in _week_range(today):
-            push(d)
-    if re.search(r"\bnext\s+week\b", raw):
-        for d in _week_range(today + timedelta(days=7)):
+    # this/next/last week → 7-day range (English or Chinese)
+    wk = _week_offset(raw)
+    if wk is not None:
+        for d in _week_range(today + timedelta(days=7 * wk)):
             push(d)
 
     # "after N days" / "in N days" / "N days later" (numeric or word)
@@ -239,17 +265,17 @@ def regex_parse_dates(text: str, *, today: Optional[date] = None) -> list[date]:
         if n is not None and 0 < n < 400:
             push(today + timedelta(days=n))
 
-    # day after tomorrow
-    if re.search(r"\bday\s+after\s+tomorrow\b", raw):
+    # day after tomorrow / 后天
+    if re.search(r"\bday\s+after\s+tomorrow\b", raw) or "后天" in raw:
         push(today + timedelta(days=2))
-    # tomorrow / tmr / tmrw / tmmr / tomo
-    if re.search(r"\b(tomorrow|tmr|tmrw|tmmr|tomo|tmw)\b", raw):
+    # tomorrow / tmr / tmrw / tmmr / tomo / 明天 / 明日
+    if re.search(r"\b(tomorrow|tmr|tmrw|tmmr|tomo|tmw)\b", raw) or re.search(r"明天|明日", raw):
         push(today + timedelta(days=1))
-    # yesterday
-    if re.search(r"\byesterday\b", raw):
+    # yesterday / 昨天 / 昨日
+    if re.search(r"\byesterday\b", raw) or re.search(r"昨天|昨日", raw):
         push(today - timedelta(days=1))
-    # today / tonight / now
-    if re.search(r"\b(today|tonight|now)\b", raw):
+    # today / tonight / now / 今天 / 今日 / 今晚
+    if re.search(r"\b(today|tonight|now)\b", raw) or re.search(r"今天|今日|今晚", raw):
         push(today)
 
     # "next month 16" / "16 next month" / "16th of next month"
@@ -296,6 +322,14 @@ def regex_parse_dates(text: str, *, today: Optional[date] = None) -> list[date]:
             delta = (wd - today.weekday()) % 7
             push(today + timedelta(days=delta))
 
+    # Chinese weekdays: 星期一/周一/礼拜一 … 星期日|天/周日|天 (一..六 → 0..5, 日|天 → 6).
+    for m in re.finditer(r"(?:星期|周|週|礼拜|禮拜)\s*([一二三四五六日天])", raw):
+        ch = m.group(1)
+        wd = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}.get(ch)
+        if wd is not None:
+            delta = (wd - today.weekday()) % 7
+            push(today + timedelta(days=delta))
+
     # Dedup + sort + cap.
     uniq = sorted(set(dates))
     return uniq[:_MAX_DATES]
@@ -325,9 +359,11 @@ _PARSE_SYSTEM_PROMPT = (
     '  "departments": array of department keys (empty for leave/none).\n'
     '  "dates": array of "YYYY-MM-DD" strings.\n'
     "Rules:\n"
-    "- 'this week' -> the 7 dates Monday..Sunday of the week containing today.\n"
-    "- 'next week' -> Monday..Sunday of next week.\n"
-    "- 'tomorrow'/'tmr'/'tmmr' -> today + 1 day. 'after two days' -> today + 2 days.\n"
+    "- 'this week' / 这周 / 这个星期 / 本周 -> the 7 dates Monday..Sunday of this week.\n"
+    "- 'next week' / 下周 / 下个星期 / 下星期 / 下礼拜 -> the 7 dates Monday..Sunday of NEXT week.\n"
+    "- 'last week' / 上周 / 上个星期 -> Monday..Sunday of last week.\n"
+    "- 'tomorrow'/'tmr'/'tmmr'/明天 -> today + 1 day. 'after two days'/后天 -> +2 days. 今天 -> today.\n"
+    "- Chinese weekdays: 星期一/周一 -> Monday … 星期日/周日/星期天 -> Sunday (upcoming occurrence).\n"
     "- 'next month 16' -> the 16th of next month.\n"
     "- If it asks about leave / who is off / vacation, kind='leave' (default dates = [today]).\n"
     "- If it is NOT about duty or leave, kind='none' with empty arrays.\n"
@@ -455,6 +491,11 @@ def parse_request(text: str, *, session_key: Optional[str] = None) -> dict:
             kind = "none"
         depts = _normalise_depts(obj.get("departments"))
         dates = _normalise_dates(obj.get("dates"))
+        # A this/next/last week request (English OR Chinese e.g. 下个星期) ALWAYS means
+        # the full 7-day range — override the LLM if it collapsed it to a single day.
+        wk = _week_offset(raw)
+        if wk is not None and kind in ("duty", "leave"):
+            dates = _week_range(today + timedelta(days=7 * wk))
         if kind == "duty" and not dates:
             dates = [today]
         if kind == "leave" and not dates:

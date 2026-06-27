@@ -767,17 +767,21 @@ def _parse_offset_leave_action_rules(text: str) -> Optional[str]:
         return "offset_form"
     if _LEAVE_FORM_RULE_RE.search(s):
         return "leave_form"
-    if re.search(r"\boffset\b", s, re.I):
+    if od._text_mentions_offset(s):
         if re.search(r"(?i)\b(delete|remove|cancel|drop|withdraw|取消|删除)\b", s):
             return "delete_offset"
         if re.search(r"(?i)\b(edit|change|update|modify|amend|修改|更改)\b", s):
             return "edit_offset"
         if re.search(r"(?i)\b(pending|approvals?)\b", s):
             return "pending_offset"
-        # Lookups (show / who / approved / person name) — not a new request
+        # Lookups (show / who / 谁 / month) — not a new request
         if re.search(
             r"(?i)\b(show\s+me|show|who|which|what|list|check|view|see|approved|rejected)\b",
             s,
+        ) or re.search(r"谁|有谁|哪位", s):
+            return "query_offset"
+        if od.parse_offset_month_from_text(s) and not re.search(
+            r"(?i)\b(apply|submit|request|swap|delete|edit|cancel|申请|删除|修改|取消)\b", s
         ):
             return "query_offset"
         if _OFFSET_FORM_RULE_RE.search(s):
@@ -2090,17 +2094,11 @@ def handle_showoffset(
     except ValueError as exc:
         send_message(chat_id, f"❌ {exc}")
         return True
-    if target is None:
-        try:
-            import offsetai
-
-            if offsetai.is_enabled():
-                return False
-        except Exception:
-            pass
-        if parse_offset_leave_action(clean_text) == "show_offset":
-            today = date.today()
-            target = today.year, today.month
+    if target is None and parse_offset_leave_action(clean_text) == "show_offset":
+        target = od.parse_offset_month_from_text(clean_text) or (
+            date.today().year,
+            date.today().month,
+        )
     if target is None:
         return False
     year, month = target
@@ -2110,6 +2108,34 @@ def handle_showoffset(
     except Exception as exc:
         send_message(chat_id, f"❌ showoffset failed: {exc}")
     return True
+
+
+def handle_offset_query(
+    clean_text: str,
+    *,
+    sender_open_id: str,
+    chat_id: str,
+    chat_type: Optional[str],
+    send_message: Callable[..., dict[str, Any]],
+    get_token_func: Callable[[], str],
+) -> bool:
+    """Natural-language offset lookups, e.g. 五月有谁offset / who has offset in May."""
+    act = parse_offset_leave_action(clean_text)
+    if act not in ("query_offset",) and not od.looks_like_offset_lookup_query(clean_text):
+        return False
+    month = od.parse_offset_month_from_text(clean_text)
+    if not month:
+        month = (date.today().year, date.today().month)
+    return execute_offset_action(
+        "show_calendar",
+        clean_text=clean_text,
+        month_target=month,
+        sender_open_id=sender_open_id,
+        chat_id=chat_id,
+        chat_type=chat_type,
+        send_message=send_message,
+        get_token_func=get_token_func,
+    )
 
 
 def handle_editoffset_command(

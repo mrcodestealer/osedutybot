@@ -64,6 +64,7 @@ Programmatic read-only export (for dashboards / ``webapp``):
 
 - ``smachine_collect_all_machine_rows(site, …)`` — one backend, all table pages (read-only); returns ``(rows, truncation_warning)``.
 - ``smachine_collect_machines_multi_sites()`` — all default backends (deduped by EGM URL); ``WEBMACHINE_SITES`` overrides.
+- ``WEBMACHINE_WARM_POOL=1`` (default) — keep one **headed** browser open per backend for ``webmachine_data.json`` refresh; set ``WEBMACHINE_WARM_POOL=0`` for one-shot launch/close scrapes.
 """
 
 from __future__ import annotations
@@ -71,8 +72,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue as _queue
 import re
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -377,6 +380,154 @@ def _resolve_collect_page_limit(max_pages: int | None) -> int:
     return max(1, int(max_pages))
 
 
+def _smachine_egm_urls(
+    base_url: str,
+    list_path: str = "/egm/egmStatusList",
+    login_path: str = "/login",
+) -> tuple[str, str, str]:
+    base = (base_url or "").strip().rstrip("/")
+    path = (list_path or "/egm/egmStatusList").strip() or "/egm/egmStatusList"
+    if not path.startswith("/"):
+        path = "/" + path
+    login = (login_path or "/login").strip() or "/login"
+    if not login.startswith("/"):
+        login = "/" + login
+    login_url = f"{base}{login}?redirect={quote(path, safe='')}"
+    list_url = f"{base}{path}"
+    return base, login_url, list_url
+
+
+def _smachine_login_and_open_egm_list(
+    page,
+    *,
+    base_url: str,
+    username: str,
+    password: str,
+    list_path: str = "/egm/egmStatusList",
+    login_path: str = "/login",
+    dismiss_warning_dialog: bool = False,
+    timeout_ms: int = 120_000,
+    stall_check: Callable[[], bool] | None = None,
+) -> str:
+    """Log in and navigate to the EGM status table; returns ``list_url``."""
+    _base, login_url, list_url = _smachine_egm_urls(base_url, list_path, login_path)
+    path = list_url.split(_base, 1)[-1] if _base else "/egm/egmStatusList"
+
+    def _maybe_stall(where: str) -> None:
+        if stall_check and stall_check():
+            raise RuntimeError(f"EGM scrape stalled ({where}; no progress detected)")
+
+    page.goto(login_url, wait_until="domcontentloaded")
+    page.wait_for_timeout(900)
+    _maybe_stall("login page")
+
+    pwd_box = page.locator('input[type="password"]').first
+    pwd_box.wait_for(state="visible", timeout=min(30_000, timeout_ms))
+    _maybe_stall("login form")
+    form = pwd_box.locator("xpath=ancestor::form[1]")
+    user = (username or "").strip()
+    pw = (password or "").strip()
+    if form.count():
+        tin = form.locator(
+            'input[type="text"], input:not([type]), input[type="tel"], input[type="email"]'
+        ).first
+        tin.fill(user)
+    else:
+        page.locator('input[type="text"]').first.fill(user)
+    pwd_box.fill(pw)
+    lb = page.get_by_role("button", name=re.compile(r"login|sign in|log in", re.I))
+    if lb.count():
+        lb.first.click()
+    else:
+        page.locator('button[type="submit"], button.el-button--primary').first.click()
+
+    page.wait_for_timeout(1800)
+    _maybe_stall("after login")
+    if dismiss_warning_dialog:
+        _dismiss_warning_dialog(page, timeout_ms)
+    if path not in (page.url or ""):
+        page.goto(list_url, wait_until="domcontentloaded")
+    if dismiss_warning_dialog:
+        _dismiss_warning_dialog(page, timeout_ms)
+
+    page.wait_for_selector(".app-container, .filter-container, .el-table", timeout=timeout_ms)
+    _wait_table_idle(page, timeout_ms)
+    _maybe_stall("machine table")
+    return list_url
+
+
+def _smachine_collect_rows_on_egm_page(
+    page,
+    *,
+    belongs: str,
+    deployment: str,
+    max_pages: int | None = None,
+    timeout_ms: int = 120_000,
+    stall_check: Callable[[], bool] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> tuple[list[dict], str | None]:
+    """Walk the EGM table on an already-logged-in page (read-only)."""
+    limit = _resolve_collect_page_limit(max_pages)
+    dep_label = (deployment or "PROD").strip().upper() or "PROD"
+    belong_label = (belongs or "—").strip() or "—"
+    collected: list[dict] = []
+    trunc_msg: str | None = None
+
+    def _tick(pages: int, rows: int) -> None:
+        if on_progress:
+            on_progress(pages, rows)
+
+    def _maybe_stall(where: str) -> None:
+        if stall_check and stall_check():
+            raise RuntimeError(f"EGM scrape stalled ({where}; no progress detected)")
+
+    _tick(0, 0)
+    _go_first_page(page, timeout_ms=timeout_ms, max_steps=limit)
+    _wait_table_idle(page, timeout_ms)
+    expected_total = _pagination_total_entries(page)
+
+    next_clicks = 0
+    while True:
+        _maybe_stall("pagination")
+        for mn, test, game_type, st, onl in _collect_visible_table_machine_rows(page, timeout_ms=timeout_ms):
+            collected.append(
+                {
+                    "environment": dep_label,
+                    "belongs": belong_label,
+                    "name": mn,
+                    "game_type": game_type,
+                    "status": st,
+                    "online": onl,
+                    "is_test": test,
+                }
+            )
+
+        _tick(next_clicks + 1, len(collected))
+
+        if not _can_pagination_next(page):
+            break
+        if next_clicks >= limit:
+            try:
+                if _can_pagination_next(page):
+                    trunc_msg = (
+                        f"pagination stopped after {limit} page(s); more data exists — "
+                        "raise SM_MACHINE_COLLECT_MAX_PAGES or set SM_MACHINE_MAX_PAGES"
+                    )
+            except Exception:
+                trunc_msg = f"pagination stopped after {limit} page(s) (could not verify Next)"
+            break
+        _click_pagination_next(page, timeout_ms=timeout_ms)
+        next_clicks += 1
+        _wait_table_idle(page, timeout_ms)
+    if expected_total is not None and len(collected) < expected_total:
+        note = (
+            f"table reports {expected_total} entries but collected {len(collected)} "
+            f"for {belong_label} @ {dep_label}"
+        )
+        trunc_msg = f"{trunc_msg}; {note}" if trunc_msg else note
+    return collected, trunc_msg
+
+
 def smachine_collect_rows_at_backend(
     *,
     base_url: str,
@@ -410,32 +561,14 @@ def smachine_collect_rows_at_backend(
     if not user or not pw:
         raise RuntimeError(f"missing credentials for {belongs!r} @ {deployment}")
 
-    path = (list_path or "/egm/egmStatusList").strip() or "/egm/egmStatusList"
-    if not path.startswith("/"):
-        path = "/" + path
-    login = (login_path or "/login").strip() or "/login"
-    if not login.startswith("/"):
-        login = "/" + login
-    login_url = f"{base}{login}?redirect={quote(path, safe='')}"
-    list_url = f"{base}{path}"
-
-    limit = _resolve_collect_page_limit(max_pages)
     hl = _smachine_resolve_headless(headless)
-    dep_label = (deployment or "PROD").strip().upper() or "PROD"
-    belong_label = (belongs or "—").strip() or "—"
-    collected: list[dict] = []
-    trunc_msg: str | None = None
-    expected_total: int | None = None
-
-    def _tick(pages: int, rows: int) -> None:
-        if on_progress:
-            on_progress(pages, rows)
 
     def _maybe_stall(where: str) -> None:
         if stall_check and stall_check():
             raise RuntimeError(f"EGM scrape stalled ({where}; no progress detected)")
 
-    _tick(0, 0)
+    if on_progress:
+        on_progress(0, 0)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=hl)
@@ -447,91 +580,28 @@ def smachine_collect_rows_at_backend(
             page = context.new_page()
             page.set_default_timeout(timeout_ms)
 
-            page.goto(login_url, wait_until="domcontentloaded")
-            page.wait_for_timeout(900)
-            _maybe_stall("login page")
-
-            pwd_box = page.locator('input[type="password"]').first
-            pwd_box.wait_for(state="visible", timeout=min(30_000, timeout_ms))
-            _tick(0, 0)
-            _maybe_stall("login form")
-            form = pwd_box.locator("xpath=ancestor::form[1]")
-            if form.count():
-                tin = form.locator(
-                    'input[type="text"], input:not([type]), input[type="tel"], input[type="email"]'
-                ).first
-                tin.fill(user)
-            else:
-                page.locator('input[type="text"]').first.fill(user)
-            pwd_box.fill(pw)
-            lb = page.get_by_role("button", name=re.compile(r"login|sign in|log in", re.I))
-            if lb.count():
-                lb.first.click()
-            else:
-                page.locator('button[type="submit"], button.el-button--primary').first.click()
-
-            page.wait_for_timeout(1800)
-            _tick(0, 0)
-            _maybe_stall("after login")
-            if dismiss_warning_dialog:
-                _dismiss_warning_dialog(page, timeout_ms)
-            if path not in (page.url or ""):
-                page.goto(list_url, wait_until="domcontentloaded")
-            if dismiss_warning_dialog:
-                _dismiss_warning_dialog(page, timeout_ms)
-
-            page.wait_for_selector(".app-container, .filter-container, .el-table", timeout=timeout_ms)
-            _wait_table_idle(page, timeout_ms)
-            _tick(0, 0)
-            _maybe_stall("machine table")
-
-            _go_first_page(page, timeout_ms=timeout_ms, max_steps=limit)
-            _wait_table_idle(page, timeout_ms)
-            expected_total = _pagination_total_entries(page)
-
-            next_clicks = 0
-            while True:
-                _maybe_stall("pagination")
-                for mn, test, game_type, st, onl in _collect_visible_table_machine_rows(page, timeout_ms=timeout_ms):
-                    collected.append(
-                        {
-                            "environment": dep_label,
-                            "belongs": belong_label,
-                            "name": mn,
-                            "game_type": game_type,
-                            "status": st,
-                            "online": onl,
-                            "is_test": test,
-                        }
-                    )
-
-                _tick(next_clicks + 1, len(collected))
-
-                if not _can_pagination_next(page):
-                    break
-                if next_clicks >= limit:
-                    try:
-                        if _can_pagination_next(page):
-                            trunc_msg = (
-                                f"pagination stopped after {limit} page(s); more data exists — "
-                                "raise SM_MACHINE_COLLECT_MAX_PAGES or set SM_MACHINE_MAX_PAGES"
-                            )
-                    except Exception:
-                        trunc_msg = f"pagination stopped after {limit} page(s) (could not verify Next)"
-                    break
-                _click_pagination_next(page, timeout_ms=timeout_ms)
-                next_clicks += 1
-                _wait_table_idle(page, timeout_ms)
-            if expected_total is not None and len(collected) < expected_total:
-                note = (
-                    f"table reports {expected_total} entries but collected {len(collected)} "
-                    f"for {belong_label} @ {dep_label}"
-                )
-                trunc_msg = f"{trunc_msg}; {note}" if trunc_msg else note
+            _smachine_login_and_open_egm_list(
+                page,
+                base_url=base,
+                username=user,
+                password=pw,
+                list_path=list_path,
+                login_path=login_path,
+                dismiss_warning_dialog=dismiss_warning_dialog,
+                timeout_ms=timeout_ms,
+                stall_check=stall_check,
+            )
+            return _smachine_collect_rows_on_egm_page(
+                page,
+                belongs=belongs,
+                deployment=deployment,
+                max_pages=max_pages,
+                timeout_ms=timeout_ms,
+                stall_check=stall_check,
+                on_progress=on_progress,
+            )
         finally:
             browser.close()
-
-    return collected, trunc_msg
 
 
 def _machine_name_alnum_upper(text: str) -> str:
@@ -1530,6 +1600,366 @@ def smachine_collect_nonprod_deployment(
     return rows, errs
 
 
+# ---------------------------------------------------------------------------
+# Webmachine warm browser pool (keep EGM browsers open for webmachine_data.json)
+# ---------------------------------------------------------------------------
+# One persistent, headed Chromium per backend (PROD site + QAT/UAT host). Browsers stay open
+# between scrapes; the background webapp thread re-walks tables and writes webmachine_data.json.
+# Disable with ``WEBMACHINE_WARM_POOL=0``. Headed by default when warm pool is on
+# (``WEBMACHINE_WARM_HEADLESS=1`` to hide windows).
+
+BackendScrapeSpec = dict[str, Any]
+_WEBMACHINE_WARM_KEEPALIVE_SEC = 240.0
+
+
+def _webmachine_warm_pool_enabled() -> bool:
+    return (os.environ.get("WEBMACHINE_WARM_POOL", "1") or "").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
+def _webmachine_warm_prewarm_on_startup() -> bool:
+    return (os.environ.get("WEBMACHINE_WARM_PREWARM_ON_STARTUP", "1") or "").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
+def _webmachine_warm_headless() -> bool:
+    if _truthy_env("WEBMACHINE_WARM_HEADLESS"):
+        return True
+    if _truthy_env("WEBMACHINE_WARM_HEADED") or _truthy_env("SM_MACHINE_HEADED"):
+        return False
+    if _webmachine_warm_pool_enabled():
+        return False
+    return _smachine_resolve_headless(None)
+
+
+def _wm_warm_profile_dir(label: str) -> Path:
+    safe = re.sub(r"[^a-zA-Z0-9._-]+", "_", (label or "backend").strip())[:48]
+    return Path(tempfile.gettempdir()) / f"wm_warm_profile_{safe}"
+
+
+def _prod_backend_spec_for_site(site: str) -> BackendScrapeSpec:
+    from checkcredit import _np_resolve_backend  # noqa: WPS433
+
+    site_key = _site_routing_key(site or "")
+    synth = _site_synthetic_machine(site)
+    base, user, pw = _np_resolve_backend(synth)
+    path = (os.environ.get("SM_MACHINE_PATH") or "/egm/egmStatusList").strip() or "/egm/egmStatusList"
+    return {
+        "base_url": base,
+        "username": user,
+        "password": pw,
+        "belongs": _site_belongs_label(site_key),
+        "deployment": "PROD",
+        "list_path": path,
+        "login_path": "/login",
+        "dismiss_warning_dialog": False,
+    }
+
+
+def _nonprod_backend_spec(spec: dict[str, Any]) -> BackendScrapeSpec:
+    return {
+        "base_url": str(spec["base"]),
+        "username": str(spec["user"]),
+        "password": str(spec["password"]),
+        "belongs": str(spec["belongs"]),
+        "deployment": str(spec["deployment"]),
+        "list_path": str(spec["list_path"]),
+        "login_path": str(spec["login_path"]),
+        "dismiss_warning_dialog": bool(spec["dismiss_warning_dialog"]),
+    }
+
+
+def _all_deployment_backend_specs(**kwargs: Any) -> tuple[list[tuple[str, BackendScrapeSpec]], dict[str, str]]:
+    """Backend login specs for every configured deployment (same scope as full scrape)."""
+    raw = (os.environ.get("WEBMACHINE_DEPLOYMENTS") or "prod,qat,uat").strip()
+    deployments = [d.strip().upper() for d in raw.split(",") if d.strip()]
+    if not deployments:
+        deployments = ["PROD"]
+
+    specs: list[tuple[str, BackendScrapeSpec]] = []
+    errs: dict[str, str] = {}
+    for dep in deployments:
+        if dep == "PROD":
+            raw_env = (os.environ.get("WEBMACHINE_SITES") or "").strip()
+            if raw_env:
+                use = [s.strip().lower() for s in raw_env.split(",") if s.strip()]
+            else:
+                use = list(DEFAULT_WEBMACHINE_SITES)
+            use, skipped = _dedupe_site_keys_by_resolved_backend(use)
+            errs.update(skipped)
+            for sk in use:
+                try:
+                    specs.append((sk, _prod_backend_spec_for_site(sk)))
+                except Exception as e:  # noqa: BLE001
+                    errs[sk] = str(e)
+        elif dep in ("QAT", "UAT"):
+            for spec in _nonprod_backend_specs(dep):
+                key = f"{dep}:{spec['belongs']}"
+                specs.append((key, _nonprod_backend_spec(spec)))
+        else:
+            errs[dep] = f"unknown deployment {dep!r}"
+    return specs, errs
+
+
+class _WebmachineScrapeWarm:
+    """One long-lived EGM browser for a single backend (read-only scrape for webmachine_data.json)."""
+
+    def __init__(self, label: str, spec: BackendScrapeSpec) -> None:
+        self.label = label
+        self.spec = dict(spec)
+        self._tasks: _queue.Queue[dict] = _queue.Queue()
+        self._p = None
+        self._context = None
+        self._page = None
+        self._list_url = ""
+        self._thread = threading.Thread(
+            target=self._loop, name=f"wm-warm-{label}", daemon=True
+        )
+        self._thread.start()
+
+    def submit_prewarm(self) -> None:
+        self._tasks.put({"kind": "prewarm"})
+
+    def submit_keepalive(self) -> None:
+        self._tasks.put({"kind": "keepalive"})
+
+    def collect(self, **kwargs: Any) -> tuple[list[dict], str | None]:
+        done = threading.Event()
+        box: dict[str, Any] = {}
+        self._tasks.put({"kind": "collect", "kwargs": kwargs, "done": done, "box": box})
+        done.wait()
+        if box.get("error"):
+            raise RuntimeError(str(box["error"]))
+        return list(box.get("rows") or []), box.get("warn")
+
+    def _loop(self) -> None:
+        while True:
+            task = self._tasks.get()
+            kind = task.get("kind")
+            if kind == "prewarm":
+                try:
+                    self._ensure_ready(task.get("timeout_ms") or 120_000)
+                    print(f"[wm-warm:{self.label}] pre-warmed (browser stays open).", flush=True)
+                except Exception as ex:
+                    print(f"[wm-warm:{self.label}] prewarm failed: {ex!r}", flush=True)
+                    self._teardown()
+                continue
+            if kind == "keepalive":
+                try:
+                    if self._healthy():
+                        self._refresh_table(task.get("timeout_ms") or 120_000)
+                except Exception:
+                    self._teardown()
+                continue
+            if kind == "collect":
+                box = task["box"]
+                try:
+                    timeout_ms = int(task["kwargs"].get("timeout_ms") or 120_000)
+                    self._ensure_ready(timeout_ms)
+                    self._refresh_table(timeout_ms)
+                    rows, warn = _smachine_collect_rows_on_egm_page(
+                        self._page,
+                        belongs=str(self.spec.get("belongs") or "—"),
+                        deployment=str(self.spec.get("deployment") or "PROD"),
+                        max_pages=task["kwargs"].get("max_pages"),
+                        timeout_ms=timeout_ms,
+                        stall_check=task["kwargs"].get("stall_check"),
+                        on_progress=task["kwargs"].get("on_progress"),
+                    )
+                    box["rows"] = rows
+                    box["warn"] = warn
+                except Exception as ex:
+                    box["error"] = ex
+                    self._teardown()
+                finally:
+                    task["done"].set()
+
+    def _healthy(self) -> bool:
+        try:
+            return self._page is not None and not self._page.is_closed()
+        except Exception:
+            return False
+
+    def _launch(self) -> None:
+        from playwright.sync_api import sync_playwright
+
+        self._teardown()
+        self._p = sync_playwright().start()
+        profile = _wm_warm_profile_dir(self.label)
+        profile.mkdir(parents=True, exist_ok=True)
+        self._context = self._p.chromium.launch_persistent_context(
+            user_data_dir=str(profile),
+            headless=_webmachine_warm_headless(),
+            viewport={"width": 1600, "height": 900},
+            ignore_https_errors=True,
+        )
+        self._page = (
+            self._context.pages[0] if self._context.pages else self._context.new_page()
+        )
+        print(f"[wm-warm:{self.label}] browser launched (kept open).", flush=True)
+
+    def _teardown(self) -> None:
+        for closer in (
+            lambda: self._context.close() if self._context else None,
+            lambda: self._p.stop() if self._p else None,
+        ):
+            try:
+                closer()
+            except Exception:
+                pass
+        self._context = None
+        self._page = None
+        self._p = None
+        self._list_url = ""
+
+    def _ensure_ready(self, timeout_ms: int) -> None:
+        if not self._healthy():
+            self._launch()
+            self._page.set_default_timeout(timeout_ms)
+            self._list_url = _smachine_login_and_open_egm_list(
+                self._page,
+                base_url=str(self.spec["base_url"]),
+                username=str(self.spec["username"]),
+                password=str(self.spec["password"]),
+                list_path=str(self.spec.get("list_path") or "/egm/egmStatusList"),
+                login_path=str(self.spec.get("login_path") or "/login"),
+                dismiss_warning_dialog=bool(self.spec.get("dismiss_warning_dialog")),
+                timeout_ms=timeout_ms,
+            )
+
+    def _refresh_table(self, timeout_ms: int) -> None:
+        if not self._healthy():
+            return
+        try:
+            if self._list_url:
+                self._page.goto(self._list_url, wait_until="domcontentloaded", timeout=timeout_ms)
+            if self.spec.get("dismiss_warning_dialog"):
+                _dismiss_warning_dialog(self._page, timeout_ms)
+            limit = _resolve_collect_page_limit(None)
+            _go_first_page(self._page, timeout_ms=timeout_ms, max_steps=limit)
+            _wait_table_idle(self._page, timeout_ms)
+        except Exception:
+            pass
+
+
+class _WebmachineWarmPool:
+    def __init__(self) -> None:
+        self._workers: dict[str, _WebmachineScrapeWarm] = {}
+        self._lock = threading.Lock()
+        self._keepalive = threading.Thread(
+            target=self._keepalive_loop, name="wm-warm-keepalive", daemon=True
+        )
+        self._keepalive.start()
+
+    def _get(self, label: str, spec: BackendScrapeSpec) -> _WebmachineScrapeWarm:
+        with self._lock:
+            w = self._workers.get(label)
+            if w is None:
+                w = _WebmachineScrapeWarm(label, spec)
+                self._workers[label] = w
+            return w
+
+    def prewarm_specs(self, specs: list[tuple[str, BackendScrapeSpec]]) -> None:
+        for label, spec in specs:
+            self._get(label, spec).submit_prewarm()
+
+    def collect_specs(
+        self, specs: list[tuple[str, BackendScrapeSpec]], **kwargs: Any
+    ) -> tuple[list[dict], dict[str, str]]:
+        errs: dict[str, str] = {}
+        all_rows: list[dict] = []
+        workers_n = _scrape_concurrency(len(specs))
+
+        def _one(label: str, spec: BackendScrapeSpec) -> tuple[str, list[dict], str | None, Exception | None]:
+            try:
+                rows, warn = self._get(label, spec).collect(**kwargs)
+                return label, rows, warn, None
+            except Exception as e:  # noqa: BLE001
+                return label, [], None, e
+
+        if workers_n <= 1 or len(specs) <= 1:
+            for label, spec in specs:
+                _label, rows, warn, err = _one(label, spec)
+                if err is not None:
+                    errs[label] = str(err)
+                    continue
+                all_rows.extend(rows)
+                if warn:
+                    errs[label] = warn
+            return all_rows, errs
+
+        results: dict[str, tuple[list[dict], str | None, Exception | None]] = {}
+        with ThreadPoolExecutor(max_workers=workers_n, thread_name_prefix="wm-warm-collect") as ex:
+            futs = {ex.submit(_one, label, spec): label for label, spec in specs}
+            for fut in as_completed(futs):
+                label, rows, warn, err = fut.result()
+                results[label] = (rows, warn, err)
+        for label, _spec in specs:
+            rows, warn, err = results.get(label, ([], None, None))
+            if err is not None:
+                errs[label] = str(err)
+                continue
+            all_rows.extend(rows)
+            if warn:
+                errs[label] = warn
+        return all_rows, errs
+
+    def _keepalive_loop(self) -> None:
+        while True:
+            time.sleep(_WEBMACHINE_WARM_KEEPALIVE_SEC)
+            with self._lock:
+                workers = list(self._workers.values())
+            for w in workers:
+                w.submit_keepalive()
+
+
+_webmachine_warm_pool_singleton: _WebmachineWarmPool | None = None
+_webmachine_warm_pool_lock = threading.Lock()
+
+
+def _webmachine_warm_pool() -> _WebmachineWarmPool:
+    global _webmachine_warm_pool_singleton
+    with _webmachine_warm_pool_lock:
+        if _webmachine_warm_pool_singleton is None:
+            _webmachine_warm_pool_singleton = _WebmachineWarmPool()
+        return _webmachine_warm_pool_singleton
+
+
+def prewarm_webmachine_scrape_pool_on_startup() -> None:
+    """Launch + EGM-login one persistent browser per backend for webmachine_data.json (stays open)."""
+    if not _webmachine_warm_pool_enabled():
+        print("[wm-warm] disabled (WEBMACHINE_WARM_POOL=0).", flush=True)
+        return
+    if not _webmachine_warm_prewarm_on_startup():
+        print("[wm-warm] startup pre-warm skipped (WEBMACHINE_WARM_PREWARM_ON_STARTUP=0).", flush=True)
+        return
+    try:
+        from playwright.sync_api import sync_playwright  # noqa: F401
+    except ImportError:
+        print(
+            "[wm-warm] startup pre-warm skipped — playwright not installed "
+            "(pip install playwright && playwright install chromium). "
+            "Set WEBMACHINE_WARM_POOL=0 to silence.",
+            flush=True,
+        )
+        return
+    specs, skipped = _all_deployment_backend_specs()
+    if skipped:
+        for k, v in skipped.items():
+            print(f"[wm-warm] note {k}: {v}", flush=True)
+    if not specs:
+        print("[wm-warm] no backends configured — nothing to pre-warm.", flush=True)
+        return
+    labels = ", ".join(lbl for lbl, _ in specs)
+    print(f"[wm-warm] startup pre-warm ({len(specs)} browser(s), kept open): {labels}", flush=True)
+    try:
+        _webmachine_warm_pool().prewarm_specs(specs)
+    except Exception as ex:
+        print(f"[wm-warm] startup pre-warm failed: {ex!r}", flush=True)
+
+
 def smachine_collect_machines_all_deployments(
     **kwargs: Any,
 ) -> tuple[list[dict], dict[str, str]]:
@@ -1539,7 +1969,16 @@ def smachine_collect_machines_all_deployments(
     All backends across **all** deployments are loaded in a **single shared thread pool**, so
     PROD/QAT/UAT pages open at the same time (subject to ``WEBMACHINE_SCRAPE_CONCURRENCY``; set it
     to ``0`` for truly unlimited / everything at once). This minimises the staleness window.
+
+    When ``WEBMACHINE_WARM_POOL=1`` (default), each backend uses a **persistent headed browser**
+    that stays open between scrapes (for ``webmachine_data.json`` background refresh).
     """
+    if _webmachine_warm_pool_enabled():
+        specs, errs = _all_deployment_backend_specs(**kwargs)
+        rows, scrape_errs = _webmachine_warm_pool().collect_specs(specs, **kwargs)
+        errs.update(scrape_errs)
+        return rows, errs
+
     raw = (os.environ.get("WEBMACHINE_DEPLOYMENTS") or "prod,qat,uat").strip()
     deployments = [d.strip().upper() for d in raw.split(",") if d.strip()]
     if not deployments:
