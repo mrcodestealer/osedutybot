@@ -483,7 +483,16 @@ def parse_request(text: str, *, session_key: Optional[str] = None) -> dict:
 
     today = _today()
 
-    # 1) LLM path.
+    # 1) Deterministic path first — avoids a 35b LLM round-trip for common phrasing.
+    depts = _find_departments(raw)
+    dates = regex_parse_dates(raw, today=today)
+    if has_leave and not has_dept:
+        if dates or _LEAVE_SIGNAL_RE.search(raw):
+            return {"kind": "leave", "departments": depts, "dates": dates or [today]}
+    if depts and (dates or has_duty_word or has_date):
+        return {"kind": "duty", "departments": depts, "dates": dates or [today]}
+
+    # 2) LLM only when regex/keywords could not resolve dept + date.
     obj = _llm_parse(raw, today=today, session_key=session_key) if _llm_available() else None
     if obj:
         kind = str(obj.get("kind") or "none").strip().lower()
@@ -506,7 +515,7 @@ def parse_request(text: str, *, session_key: Optional[str] = None) -> dict:
         if kind != "none" and (depts or kind == "leave"):
             return {"kind": kind, "departments": depts, "dates": dates[:_MAX_DATES]}
 
-    # 2) Deterministic fallback.
+    # 3) Last-resort keyword scan (partial phrases the LLM might also miss).
     depts = _find_departments(raw)
     dates = regex_parse_dates(raw, today=today)
     if has_leave:
@@ -514,6 +523,24 @@ def parse_request(text: str, *, session_key: Optional[str] = None) -> dict:
     if depts:
         return {"kind": "duty", "departments": depts, "dates": dates or [today]}
     return out
+
+
+def message_needs_dutyai_cards(text: str) -> bool:
+    """True when dutyai adds value beyond a bare ``/fpms``-style slash mapping."""
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    if _week_offset(raw) is not None:
+        return True
+    if len(_find_departments(raw)) > 1:
+        return True
+    if re.search(r"(?i)\b(after|in)\s+\d+\s+days?\b|\b\d+\s+days?\s+later\b", raw):
+        return True
+    if re.search(r"(?i)\b(tmmr|tmrw|tomo|tomorrow|yesterday|day\s+after\s+tomorrow)\b", raw):
+        return True
+    if re.search(r"明天|后天|昨天|今日|今天", raw):
+        return True
+    return False
 
 
 def _normalise_depts(value: Any) -> list[str]:

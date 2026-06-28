@@ -4963,7 +4963,15 @@ def lark_webhook():
         import dutyai as _dutyai
 
         _dutyai_src = (clean_text_multiline or clean_text or "").strip()
-        _dutyai_payloads = _dutyai.handle(_dutyai_src, session_key=_chat_memory_key)
+        _run_dutyai = bool(_dutyai_src)
+        if _run_dutyai and (clean_text or "").strip().startswith("/") and _is_routed_command:
+            if not _dutyai.message_needs_dutyai_cards(_dutyai_src):
+                _run_dutyai = False
+                print(
+                    f"⏭️ dutyai skipped — already mapped to {clean_text.splitlines()[0]!r}",
+                    flush=True,
+                )
+        _dutyai_payloads = _dutyai.handle(_dutyai_src, session_key=_chat_memory_key) if _run_dutyai else None
         if _dutyai_payloads:
             for _p in _dutyai_payloads:
                 _card = _p.get("lark_card") if isinstance(_p, dict) else None

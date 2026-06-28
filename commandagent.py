@@ -1608,7 +1608,7 @@ def _classify_intent_llm_ollama_native(
         "stream": False,
         "think": False,
         "format": "json",
-        "options": {"temperature": 0, "num_predict": 128},
+        "options": {"temperature": 0, "num_predict": 64},
         "keep_alive": -1,
     }
     req = urllib.request.Request(
@@ -2269,6 +2269,94 @@ def _cli_route(phrase: str) -> None:
     print(f"Translate:   {translate_if_enabled(phrase)!r}")
 
 
+def _ollama_ps_models() -> list[dict[str, Any]]:
+    if not _cmd_llm_is_ollama():
+        return []
+    try:
+        with urllib.request.urlopen(f"{_ollama_native_base()}/api/ps", timeout=10) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        return list(body.get("models") or [])
+    except Exception:
+        return []
+
+
+def _cli_diagnose(phrase: str = "") -> None:
+    """Explain command latency: rules vs LLM, loaded models, warm classify timing."""
+    _load_cli_env()
+    os.environ.setdefault("BOT_USE_AI", "1")
+    os.environ.setdefault("BOT_CHAT_API_BASE", "http://127.0.0.1:11434/v1")
+    os.environ.setdefault("BOT_CHAT_API_KEY", "ollama")
+
+    cmd_model = _cmd_llm_model()
+    chat_model = (os.getenv("BOT_CHAT_MODEL") or "gpt-4o-mini").strip()
+    samples = [
+        phrase.strip() if phrase.strip() else "",
+        "who is on fpms duty today",
+        "next week sre duty",
+        "hello",
+    ]
+    samples = [s for s in samples if s]
+
+    print("=== Command LLM diagnose ===")
+    print(f"Command model:  {cmd_model!r}  (BOT_COMMANDAGENT_LLM_MODEL)")
+    print(f"Chat model:     {chat_model!r}  (BOT_CHAT_MODEL — dutyai/offsetai/chat)")
+    print(f"Ollama base:    {_cmd_llm_base()!r}")
+    print(f"LLM enabled:    {_cmd_llm_enabled()}")
+    print(f"Timeout:        {_CMD_LLM_TIMEOUT}s")
+    print(f"System prompt:  ~{len(_CMD_LLM_SYSTEM + _build_llm_intent_catalog()) // 4} tokens (catalog slows cold starts)")
+    print("")
+
+    loaded = _ollama_ps_models()
+    if loaded:
+        print("Loaded Ollama models (ollama ps):")
+        for m in loaded:
+            name = m.get("name") or m.get("model") or "?"
+            size_gb = (m.get("size_vram") or m.get("size") or 0) / (1024**3)
+            expires = m.get("expires_at") or m.get("expires") or "—"
+            print(f"  - {name}  ({size_gb:.1f} GB)  expires={expires}")
+        names = {str(m.get("name") or m.get("model") or "") for m in loaded}
+        if cmd_model not in names and not any(cmd_model in n for n in names):
+            print(f"  WARN: {cmd_model!r} NOT loaded — first command LLM call pays reload cost (often 10-30s on CPU)")
+        if chat_model != cmd_model and chat_model not in names and not any(chat_model in n for n in names):
+            print(f"  WARN: {chat_model!r} NOT loaded — dutyai/offsetai may reload 35b before you see a reply")
+    else:
+        print("Loaded models:  (Ollama /api/ps unavailable — is Ollama running?)")
+    print("")
+
+    print("Rule coverage (pattern match = 0ms command LLM):")
+    for s in samples:
+        pat = _match_intent_by_patterns(s)
+        tag = pat[0].tag if pat else None
+        needs = "NO — instant rules" if pat else "YES — needs 2b LLM"
+        print(f"  {s!r}")
+        print(f"    pattern={tag}  command_llm={needs}")
+    print("")
+
+    print("Common slow paths (NOT the 2b command model):")
+    print("  - dutyai used to call 35b BEFORE slash handler (fixed: regex-first + skip when mapped)")
+    print("  - offsetleave LLM classify uses 35b when message contains 'duty'")
+    print("  - Swapping 2b <-> 35b in RAM unloads the other model (keep both warm: bash deploy/warmup-ollama.sh)")
+    print("")
+
+    if not _cmd_llm_enabled():
+        print("Skip live LLM timing — command LLM not enabled.")
+        return
+    test = phrase.strip() or "hello"
+    print(f"Live classify timing for {test!r} (warm, cache cleared once):")
+    with _CMD_LLM_CACHE_LOCK:
+        _CMD_LLM_CACHE.pop(test, None)
+    t0 = time.perf_counter()
+    result = _classify_intent_llm(test)
+    ms = (time.perf_counter() - t0) * 1000
+    print(f"  {ms:.0f} ms  route={(result or {}).get('route')} tag={(result or {}).get('intent_tag')}")
+    if ms > 3000:
+        print("  SLOW (>3s): likely model cold start or CPU overload — run: ollama ps")
+    elif ms > 800:
+        print("  OK-ish for CPU; GPU usually <500ms when model stays loaded")
+    else:
+        print("  Fast — model was warm")
+
+
 def _cli_bench(phrase: str, *, runs: int = 3, model_override: str = "") -> None:
     """Benchmark command LLM latency (bypasses pattern rules; hits model every run)."""
     _load_cli_env()
@@ -2514,6 +2602,9 @@ def main() -> None:
     p_route = sub.add_parser("route", help="Show rule/LLM resolution path for a phrase")
     p_route.add_argument("phrase", type=str)
 
+    p_diag = sub.add_parser("diagnose", help="Explain command LLM slowness (rules vs LLM, ollama ps)")
+    p_diag.add_argument("phrase", nargs="?", default="", type=str)
+
     p_bench = sub.add_parser("bench", help="Benchmark command LLM latency (ms)")
     p_bench.add_argument("phrase", type=str)
     p_bench.add_argument("-n", "--runs", type=int, default=3, help="number of runs (default 3)")
@@ -2556,6 +2647,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.cmd == "route":
         _cli_route(args.phrase)
+    elif args.cmd == "diagnose":
+        _cli_diagnose(str(getattr(args, "phrase", "") or ""))
     elif args.cmd == "bench":
         _cli_bench(
             args.phrase,
