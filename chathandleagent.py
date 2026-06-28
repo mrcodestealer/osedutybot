@@ -41,7 +41,7 @@ _COMMAND_KEYWORDS_RE = re.compile(
     r"duty|roster|on[\s-]?call|oncall|"
     r"fpms|pms|bi|fe|cpms|sre|dba|db|liveslot|ote|ft|"
     r"leave|wfh|work from home|holiday|offset|"
-    r"jenkins|deploy|build|update|"
+    r"jenkins|deploy|build|update|git|pull|"
     r"machine|asset|egm|nch|nwr|winford|tbr|tbp|mdr|dhs|"
     r"maintenance|maint|"
     r"checkcredit|credit|cctv|sms|otp|reminder|provider id|pid|"

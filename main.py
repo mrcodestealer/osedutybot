@@ -2574,7 +2574,8 @@ def _handle_secret_open_id_lookup(original_text: str, mentions: list) -> str:
 _GIT_PULL_RESTART_RE = re.compile(
     r"(?i)(?:"
     r"git\s+pull(?:\s+and|\s*[,，]?\s*then)?\s+(?:restart|reboot)\s+(?:the\s+)?(?:service|services|bot|larkbot|duty\s+bot|webapp)"
-    r"|git\s+pull\s+and\s+restart\b"
+    r"|git\s+pull\s+(?:and\s+)?(?:restart|reboot)\b"
+    r"|(?:pull|update)\s+(?:code|repo|git)\s+(?:and\s+)?(?:restart|reboot)\s+(?:the\s+)?(?:service|services|bot|larkbot|webapp)"
     r"|(?:deploy|update)\s+(?:the\s+)?(?:bot|code|server|osedutybot)\b"
     r"|拉代码.*重启|部署.*重启"
     r")"
@@ -2587,7 +2588,12 @@ def looks_like_git_pull_restart(text: str) -> bool:
         return False
     if t.lower() in ("/deploy", "/gitpullrestart"):
         return True
-    return bool(_GIT_PULL_RESTART_RE.search(t))
+    try:
+        import commandagent as _ca
+
+        return _ca.looks_like_git_pull_restart(t)
+    except Exception:
+        return bool(_GIT_PULL_RESTART_RE.search(t))
 
 
 def _git_pull_deploy_script() -> str:
@@ -4661,6 +4667,20 @@ def lark_webhook():
     ):
         return _lark_im_done()
 
+    # Admin deploy/restart — rule match only, before router/LLM/chat.
+    if (bot_mentioned or chat_type == "p2p") and _secret_command_allowed(sender_id):
+        try:
+            import commandagent as _ops_ca
+
+            if _ops_ca.detect_git_pull_restart_command(clean_text):
+                _handle_git_pull_restart_deploy(chat_id)
+                return _lark_im_done()
+            if _ops_ca.detect_restart_services_command(clean_text):
+                _handle_restart_services(chat_id)
+                return _lark_im_done()
+        except Exception as _ops_err:
+            print(f"⚠️ Admin ops (early) skipped: {_ops_err!r}", flush=True)
+
     # 初始化回复变量
     reply = ""
     if game.has_active_game(sender_id):
@@ -4962,7 +4982,7 @@ def lark_webhook():
         print(f"⚠️ dutyai skipped (bot continues normally): {_dutyai_err!r}", flush=True)
 
     # 命令处理
-    elif clean_text.lower() == "/test":
+    if clean_text.lower() == "/test":
         send_message(chat_id, _lark_test_card_json(), msg_type="interactive")
         return _lark_im_done()
 
@@ -4983,7 +5003,7 @@ def lark_webhook():
             send_message(chat_id, f"❌ Offset form failed: {_offset_cmd_err}")
             return _lark_im_done()
 
-    if clean_text.lower() == '/cancelp1':
+    elif clean_text.lower() == '/cancelp1':
         with _active_p1_reminders_lock:
             job_id = active_p1_reminders.get(sender_id)
         if job_id:

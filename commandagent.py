@@ -987,17 +987,49 @@ def detect_show_reminder_command(text: str) -> Optional[str]:
 
 
 _RESTART_SERVICES_RE = re.compile(
-    r"(?i)(?:^|\s)(?:restart|reboot)\s+(?:all\s+)?services(?:\s|$|[.!?])"
+    r"(?i)(?:^|\s)(?:restart|reboot)\s+(?:all\s+)?services?(?:\s|$|[.!?])"
     r"|(?:^|\s)restart\s+(?:the\s+)?(?:webapp|web\s+app)(?:\s+and\s+(?:larkbot|bot|duty\s+bot))?(?:\s|$|[.!?])"
     r"|重启(?:所有|全部)?服务|重啟(?:所有|全部)?服務|重新启动(?:所有|全部)?服务|重新啟動(?:所有|全部)?服務"
     r"|重启\s*(?:webapp|web\s*app|网页|網頁|机器人|機器人|bot|duty\s*bot)|重啟\s*(?:webapp|web\s*app|网页|網頁|机器人|機器人|bot|duty\s*bot)"
 )
+
+_GIT_PULL_RESTART_RE = re.compile(
+    r"(?i)(?:"
+    r"git\s+pull(?:\s+and|\s*[,，]?\s*then)?\s+(?:restart|reboot)\s+(?:the\s+)?(?:service|services|bot|larkbot|duty\s+bot|webapp)"
+    r"|git\s+pull\s+(?:and\s+)?(?:restart|reboot)\b"
+    r"|(?:pull|update)\s+(?:code|repo|git)\s+(?:and\s+)?(?:restart|reboot)\s+(?:the\s+)?(?:service|services|bot|larkbot|webapp)"
+    r"|(?:deploy|update)\s+(?:the\s+)?(?:bot|code|server|osedutybot)\b"
+    r"|拉代码.*重启|部署.*重启"
+    r")"
+)
+
+
+def looks_like_git_pull_restart(text: str) -> bool:
+    """True for ``/deploy``, ``git pull and restart service``, etc."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if t.lower() in ("/deploy", "/gitpullrestart"):
+        return True
+    return bool(_GIT_PULL_RESTART_RE.search(t))
+
+
+def detect_git_pull_restart_command(text: str) -> Optional[str]:
+    """Map deploy phrases → ``/gitpullrestart`` (no LLM)."""
+    if looks_like_git_pull_restart(text):
+        t = (text or "").strip().lower()
+        if t in ("/deploy", "/gitpullrestart"):
+            return t if t.startswith("/") else "/gitpullrestart"
+        return "/gitpullrestart"
+    return None
 
 
 def detect_restart_services_command(text: str) -> Optional[str]:
     """Map natural language → ``/restartservices`` (webapp :8765 + larkbot systemd)."""
     raw = (text or "").strip()
     if not raw or _looks_like_slash_command(raw):
+        return None
+    if looks_like_git_pull_restart(raw):
         return None
     if _RESTART_SERVICES_RE.search(raw):
         return "/restartservices"
@@ -1719,6 +1751,9 @@ def _run_deterministic_detectors(text: str) -> dict[str, Any] | None:
     sr = detect_show_reminder_command(raw)
     if sr:
         return dict(tag="cmd_deletereminder", confidence=1.0, margin=1.0, command=sr, deterministic=True, source="deterministic", route="command")
+    gp = detect_git_pull_restart_command(raw)
+    if gp:
+        return dict(tag="cmd_gitpullrestart", confidence=1.0, margin=1.0, command=gp, deterministic=True, source="deterministic", route="command")
     rs = detect_restart_services_command(raw)
     if rs:
         return dict(tag="cmd_restart_services", confidence=1.0, margin=1.0, command=rs, deterministic=True, source="deterministic", route="command")
