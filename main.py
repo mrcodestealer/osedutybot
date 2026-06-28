@@ -4722,6 +4722,8 @@ def lark_webhook():
             clean_text,
             chat_id=chat_id,
             send_message=send_message,
+            sender_open_id=sender_id or "",
+            get_token_func=get_tenant_access_token,
         ):
             return _lark_im_done()
 

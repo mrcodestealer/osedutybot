@@ -2203,8 +2203,32 @@ def handle_offset_slash_commands(
             force=True,
         )
     if _SHOW_OFFSET_SLASH_RE.match(text) or text.lower().startswith("/showoffset"):
-        return handle_showoffset(text, chat_id=chat_id, send_message=send_message)
+        return handle_showoffset(
+            text,
+            chat_id=chat_id,
+            send_message=send_message,
+            sender_open_id=sender_open_id,
+            get_token_func=get_token_func,
+        )
     return False
+
+
+def _showoffset_request_person_filter(
+    sender_open_id: str,
+    get_token_func: Optional[Callable[[], str]],
+) -> Optional[str]:
+    """Approvers see everyone; requesters only their own offset rows."""
+    oid = (sender_open_id or "").strip()
+    if not oid:
+        return None
+    if _is_offset_approver_open_id(oid):
+        return None
+    if not get_token_func:
+        return None
+    try:
+        return try_resolve_request_person(oid, get_token_func())
+    except Exception:
+        return None
 
 
 def handle_showoffset(
@@ -2212,6 +2236,8 @@ def handle_showoffset(
     *,
     chat_id: str,
     send_message: Callable[..., dict[str, Any]],
+    sender_open_id: str = "",
+    get_token_func: Optional[Callable[[], str]] = None,
 ) -> bool:
     text = (clean_text or "").strip()
     if text.lower().startswith("/showoffset"):
@@ -2230,7 +2256,10 @@ def handle_showoffset(
         return False
     year, month = target
     try:
-        card = od.build_ose_showoffset_card(year, month)
+        person_filter = _showoffset_request_person_filter(sender_open_id, get_token_func)
+        card = od.build_ose_showoffset_card(
+            year, month, request_person_only=person_filter
+        )
         send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
     except Exception as exc:
         send_message(chat_id, f"❌ showoffset failed: {exc}")
@@ -2503,20 +2532,19 @@ def execute_offset_action(
         if not reply:
             today = date.today()
             y, m = month_target or (today.year, today.month)
-            summary = od._collect_offset_month_summary(y, m)
+            person_filter = _showoffset_request_person_filter(sender_open_id, get_token_func)
+            pair_lines = od._collect_offset_month_pair_lines(
+                y, m, request_person_only=person_filter
+            )
             label = _month_filter_label(y, m)
-            if not summary:
-                reply = f"No offset requests for **{label}**."
+            if not pair_lines:
+                if person_filter:
+                    reply = f"No offset requests for **{label}** (your rows only)."
+                else:
+                    reply = f"No offset requests for **{label}**."
             else:
                 lines = [f"**OSE offset — {label}**\n"]
-                for person in od.OSE_SHOWOFFSET_NAMES:
-                    if person not in summary:
-                        continue
-                    orig_days, exc_days = summary[person]
-                    lines.append(
-                        f"• {person}: {', '.join(str(d) for d in orig_days)} → "
-                        f"{', '.join(str(d) for d in exc_days)}"
-                    )
+                lines.extend(f"• {line}" for line in pair_lines)
                 reply = "\n".join(lines)
         send_message(chat_id, reply)
         return True
@@ -2525,7 +2553,10 @@ def execute_offset_action(
         today = date.today()
         y, m = month_target or (today.year, today.month)
         try:
-            card = od.build_ose_showoffset_card(y, m)
+            person_filter = _showoffset_request_person_filter(sender_open_id, get_token_func)
+            card = od.build_ose_showoffset_card(
+                y, m, request_person_only=person_filter
+            )
             send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
         except Exception as exc:
             send_message(chat_id, f"❌ show offset failed: {exc}")

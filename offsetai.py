@@ -740,7 +740,14 @@ def _execute_tool(ctx: _AgentCtx, name: str, args: dict[str, Any]) -> tuple[str,
         except (TypeError, ValueError):
             y, m = today.year, today.month
         if not ctx.dry_run:
-            card = od.build_ose_showoffset_card(y, m)
+            person_filter = None
+            if not ol._is_offset_approver_open_id(ctx.sender_open_id):
+                person_filter = ctx.request_person or ol.try_resolve_request_person(
+                    ctx.sender_open_id, ctx.get_token_func()
+                )
+            card = od.build_ose_showoffset_card(
+                y, m, request_person_only=person_filter
+            )
             ctx.send_message(
                 ctx.chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive"
             )

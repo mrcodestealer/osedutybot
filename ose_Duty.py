@@ -3972,6 +3972,69 @@ def _add_showoffset_days(
     slot["exc"].add(exc_day)
 
 
+def _showoffset_display_name(name: str) -> str:
+    canon = _showoffset_canonical_name(name)
+    return canon or _title_name(name)
+
+
+def _showoffset_pair_sort_key(req: str, exc: str) -> tuple[Any, ...]:
+    def _idx(n: str) -> int:
+        for i, allowed in enumerate(OSE_SHOWOFFSET_NAMES):
+            if _names_same_person(allowed, n):
+                return i
+        return 999
+
+    return (_idx(req), _idx(exc), req.lower(), exc.lower())
+
+
+def _collect_offset_month_pair_lines(
+    year: int,
+    month: int,
+    *,
+    items: Optional[list[dict[str, Any]]] = None,
+    request_person_only: Optional[str] = None,
+) -> list[str]:
+    """Build display lines: ``Man Chung 20, 21 --> Si Yew 15, 17`` (per swap pair)."""
+    if month < 1 or month > 12:
+        raise ValueError("month must be 1–12")
+    if items is None:
+        token = get_tenant_access_token()
+        _, items = _get_bitable_raw_pair(token)
+    filter_person = _showoffset_canonical_name(request_person_only or "") if request_person_only else None
+    pairs: dict[tuple[str, str], dict[str, set[int]]] = {}
+    for it in items:
+        f = it.get("fields") or {}
+        req = _title_name(
+            _field_text(_get_field_by_aliases(f, ["Request Person", "Requester", "Requester Person", "Name"]))
+        )
+        exc = _title_name(
+            _field_text(_get_field_by_aliases(f, ["Exchange Person", "Replacement", "Swap Person"]))
+        )
+        od = _parse_date_value(_get_field_by_aliases(f, ["Original Date", "Date"]))
+        xd = _parse_date_value(_get_field_by_aliases(f, ["Exchange Date", "Swap Date", "Target Date"]))
+        if not od or not xd:
+            continue
+        if od.year != year or od.month != month:
+            continue
+        req_person = _showoffset_canonical_name(req)
+        exc_person = _showoffset_canonical_name(exc)
+        if not req_person or not exc_person:
+            continue
+        if filter_person and not _names_same_person(req_person, filter_person):
+            continue
+        key = (req_person, exc_person)
+        slot = pairs.setdefault(key, {"orig": set(), "exc": set()})
+        slot["orig"].add(od.day)
+        slot["exc"].add(xd.day)
+
+    lines: list[str] = []
+    for (req_p, exc_p), days in sorted(pairs.items(), key=lambda kv: _showoffset_pair_sort_key(kv[0][0], kv[0][1])):
+        orig_s = ", ".join(str(d) for d in sorted(days["orig"]))
+        exc_s = ", ".join(str(d) for d in sorted(days["exc"]))
+        lines.append(f"{_showoffset_display_name(req_p)} {orig_s} --> {_showoffset_display_name(exc_p)} {exc_s}")
+    return lines
+
+
 def _collect_offset_month_summary(
     year: int,
     month: int,
@@ -4010,27 +4073,37 @@ def _collect_offset_month_summary(
     return out
 
 
-def build_ose_showoffset_card(year: int, month: int) -> dict[str, Any]:
-    summary = _collect_offset_month_summary(year, month)
+def build_ose_showoffset_card(
+    year: int,
+    month: int,
+    *,
+    request_person_only: Optional[str] = None,
+) -> dict[str, Any]:
+    """Offset calendar card. Approvers see all pairs; requesters only their own rows."""
+    pair_lines = _collect_offset_month_pair_lines(
+        year, month, request_person_only=request_person_only
+    )
     month_label = date(year, month, 1).strftime("%B")
     lines = [f"**{month_label}**", ""]
-    if not summary:
-        lines.append("No offset requests this month.")
+    if not pair_lines:
+        if request_person_only:
+            lines.append("No offset requests this month for you.")
+        else:
+            lines.append("No offset requests this month.")
     else:
-        for person in OSE_SHOWOFFSET_NAMES:
-            if person not in summary:
-                continue
-            orig_days, exc_days = summary[person]
-            orig_s = ", ".join(str(d) for d in orig_days)
-            exc_s = ", ".join(str(d) for d in exc_days)
-            lines.append(f"{person} {orig_s} --> {exc_s}")
+        lines.extend(pair_lines)
     content = "\n".join(lines).strip()
+    title = f"OSE offset — {month_label} {year}"
+    if request_person_only:
+        who = _showoffset_display_name(request_person_only)
+        if who:
+            title = f"OSE offset — {who} — {month_label} {year}"
     return {
         "schema": "2.0",
         "config": {"update_multi": True, "width_mode": "fill"},
         "header": {
             "template": "blue",
-            "title": {"tag": "plain_text", "content": f"OSE offset — {month_label} {year}"},
+            "title": {"tag": "plain_text", "content": title},
         },
         "body": {
             "elements": [
