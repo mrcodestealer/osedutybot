@@ -697,10 +697,34 @@ _DELETE_OFFSET_RULE_RE = re.compile(
     r"|^(?:delete|remove|cancel|drop)\s+(?:my\s+|the\s+|our\s+)?(?:pending\s+)?offsets?(?:\s+request)?\s*$"
 )
 
-_EDIT_OFFSET_SLASH_RE = re.compile(r"^/editoffset\b", re.I)
-_DELETE_OFFSET_SLASH_RE = re.compile(r"^/deleteoffset\b", re.I)
-_PENDING_OFFSET_SLASH_RE = re.compile(r"^/pendingoffset\b", re.I)
-_SHOW_OFFSET_SLASH_RE = re.compile(r"^/showoffset\b", re.I)
+_OFFSET_COMMAND_WORDS = frozenset(
+    {"offset", "deleteoffset", "editoffset", "pendingoffset", "showoffset"}
+)
+
+
+def normalize_offset_command_text(text: str) -> str:
+    """Accept ``/showoffset`` or ``showoffset`` — return unprefixed command text."""
+    s = (text or "").strip()
+    if not s.startswith("/"):
+        return s
+    rest = s[1:].lstrip()
+    word = (rest.split()[0] if rest else "").lower()
+    if word in _OFFSET_COMMAND_WORDS:
+        return rest
+    return s
+
+
+def is_offset_command_text(text: str) -> bool:
+    s = normalize_offset_command_text(text)
+    word = (s.split()[0] if s else "").lower()
+    return word in _OFFSET_COMMAND_WORDS
+
+
+_OFFSET_FORM_SLASH_RE = re.compile(r"^(?:/)?offset\s*$", re.I)
+_EDIT_OFFSET_SLASH_RE = re.compile(r"^(?:/)?editoffset\b", re.I)
+_DELETE_OFFSET_SLASH_RE = re.compile(r"^(?:/)?deleteoffset\b", re.I)
+_PENDING_OFFSET_SLASH_RE = re.compile(r"^(?:/)?pendingoffset\b", re.I)
+_SHOW_OFFSET_SLASH_RE = re.compile(r"^(?:/)?showoffset\b", re.I)
 
 _PENDING_OFFSET_RULE_RE = re.compile(
     r"(?i)^(?:/)?pendingoffset\s*$"
@@ -756,9 +780,11 @@ def _offset_leave_llm_available() -> bool:
 
 
 def _parse_offset_leave_action_rules(text: str) -> Optional[str]:
-    s = (text or "").strip()
+    s = normalize_offset_command_text(text)
     if not s:
         return None
+    if re.fullmatch(r"offset\s*", s, re.I):
+        return "offset_form"
     if _PENDING_OFFSET_RULE_RE.match(s):
         return "pending_offset"
     if _DELETE_OFFSET_RULE_RE.match(s):
@@ -911,8 +937,10 @@ def _parse_offset_leave_action_llm(text: str) -> Optional[str]:
 
 def parse_offset_leave_action(text: str) -> Optional[str]:
     """Map natural language → offset/leave bot action (rules first, then optional LLM)."""
-    s = (text or "").strip()
-    if not s or s.startswith("/"):
+    s = normalize_offset_command_text(text)
+    if not s:
+        return None
+    if (text or "").strip().startswith("/") and not is_offset_command_text(text):
         return None
     cached = _CLASSIFY_ACTION_CACHE.get(s)
     if s in _CLASSIFY_ACTION_CACHE:
@@ -2089,9 +2117,6 @@ def wants_offset_request(text: str) -> bool:
     return _wants_offset(text)
 
 
-_OFFSET_FORM_SLASH_RE = re.compile(r"^/offset\s*$", re.I)
-
-
 def _open_offset_form(
     *,
     sender_open_id: str,
@@ -2139,7 +2164,8 @@ def handle_offset_form_command(
     get_token_func: Callable[[], str],
 ) -> bool:
     """Handle ``/offset`` — open the shift-swap form (not chat, not dept ``/leave``)."""
-    if not _OFFSET_FORM_SLASH_RE.match((clean_text or "").strip()):
+    text = normalize_offset_command_text(clean_text)
+    if not _OFFSET_FORM_SLASH_RE.match(text):
         return False
     return _open_offset_form(
         sender_open_id=sender_open_id,
@@ -2160,8 +2186,8 @@ def handle_offset_slash_commands(
     get_token_func: Callable[[], str],
 ) -> bool:
     """Handle ``/offset``, ``/deleteoffset``, ``/editoffset``, etc. — rules only, never LLM."""
-    text = (clean_text or "").strip()
-    if not text.startswith("/"):
+    text = normalize_offset_command_text(clean_text)
+    if not is_offset_command_text(clean_text):
         return False
     if _OFFSET_FORM_SLASH_RE.match(text):
         return handle_offset_form_command(
@@ -2202,7 +2228,7 @@ def handle_offset_slash_commands(
             get_token_func=get_token_func,
             force=True,
         )
-    if _SHOW_OFFSET_SLASH_RE.match(text) or text.lower().startswith("/showoffset"):
+    if _SHOW_OFFSET_SLASH_RE.match(text):
         return handle_showoffset(
             text,
             chat_id=chat_id,
@@ -2251,9 +2277,7 @@ def handle_showoffset(
     sender_open_id: str = "",
     get_token_func: Optional[Callable[[], str]] = None,
 ) -> bool:
-    text = (clean_text or "").strip()
-    if text.lower().startswith("/showoffset"):
-        text = text[1:].lstrip() or "showoffset"
+    text = normalize_offset_command_text(clean_text)
     try:
         target = od.parse_showoffset_command(text)
     except ValueError as exc:

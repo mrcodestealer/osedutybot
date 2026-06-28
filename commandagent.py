@@ -22,7 +22,7 @@ command-vs-chat decision directly.
 
 LLM env (optional, reuses ``chatagent`` API config):
 - ``BOT_COMMANDAGENT_LLM`` — set ``0`` to skip LLM even when an API key exists.
-- ``BOT_COMMANDAGENT_LLM_MODEL`` — override model (default: ``BOT_CHAT_MODEL``).
+- ``BOT_COMMANDAGENT_LLM_MODEL`` — command-routing model (default: ``qwen3.5:4b``).
 - ``BOT_COMMANDAGENT_LLM_TIMEOUT`` — seconds (default ``15``).
 """
 
@@ -1369,15 +1369,7 @@ def _cmd_llm_enabled() -> bool:
 
 
 def _cmd_llm_model() -> str:
-    explicit = (os.getenv("BOT_COMMANDAGENT_LLM_MODEL") or "").strip()
-    if explicit:
-        return explicit
-    try:
-        import chatagent as ca
-
-        return ca._llm_model_for_request(images=False)
-    except Exception:
-        return (os.getenv("BOT_CHAT_MODEL") or "gpt-4o-mini").strip()
+    return (os.getenv("BOT_COMMANDAGENT_LLM_MODEL") or "qwen3.5:4b").strip()
 
 
 def _cmd_llm_base() -> str:
@@ -1700,20 +1692,22 @@ def _detect_offset_leave_rule_command(text: str) -> dict[str, Any] | None:
     if not raw:
         return None
     slash_map = {
-        "/offset": "offset_form",
-        "/deleteoffset": "delete_offset",
-        "/editoffset": "edit_offset",
-        "/pendingoffset": "pending_offset",
-        "/showoffset": "show_offset",
+        "offset": "offset_form",
+        "deleteoffset": "delete_offset",
+        "editoffset": "edit_offset",
+        "pendingoffset": "pending_offset",
+        "showoffset": "show_offset",
     }
     token = raw.lower().split()[0]
+    if token.startswith("/"):
+        token = token[1:]
     if token in slash_map:
         action = slash_map[token]
         return dict(
             tag=f"cmd_{action}",
             confidence=1.0,
             margin=1.0,
-            command=token,
+            command=f"/{token}",
             deterministic=True,
             source="offset_rule",
             route="command",

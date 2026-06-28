@@ -3916,6 +3916,8 @@ def parse_showoffset_command(text: str) -> Optional[tuple[int, int]]:
     ``calendar``/``schedule`` (``show offset calendar``).
     """
     s = (text or "").strip()
+    if s.startswith("/"):
+        s = s[1:].lstrip()
     m = re.match(
         r"^(?:show|showoffset|view|check|see|display)\s*(?:me\s+)?(?:my\s+|the\s+|our\s+)?offsets?(?:\s+(.+?))?\s*$",
         s,

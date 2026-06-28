@@ -1056,15 +1056,14 @@ def handle(
     if not raw or send_message is None or get_token_func is None:
         return False
     # Slash / rule-based offset commands are handled by offsetleave first — never LLM.
-    if raw.lstrip().startswith("/") or _SLASH_OFFSET_RE.match(raw.lstrip().lstrip("/")):
-        return False
     try:
         import offsetleave as _ol
 
-        if _ol._parse_offset_leave_action_rules(raw):
+        if _ol.is_offset_command_text(raw) or _ol._parse_offset_leave_action_rules(raw):
             return False
     except Exception:
-        pass
+        if raw.lstrip().startswith("/") or _SLASH_OFFSET_RE.match(raw.lstrip().lstrip("/")):
+            return False
     sk = (session_key or "").strip() or f"{chat_id}:{sender_open_id}"
     # Active agent session or loose topic gate
     if not looks_like_offset_topic(raw) and not _agent_history_get(sk):

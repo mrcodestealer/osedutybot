@@ -4988,7 +4988,7 @@ def lark_webhook():
         send_message(chat_id, _lark_test_card_json(), msg_type="interactive")
         return _lark_im_done()
 
-    elif re.match(r"^/offset\s*$", clean_text, re.I):
+    elif re.match(r"^(?:/)?offset\s*$", clean_text, re.I):
         try:
             import offsetleave as _offsetleave_cmd
 
@@ -5005,7 +5005,7 @@ def lark_webhook():
             send_message(chat_id, f"❌ Offset command failed: {_offset_cmd_err}")
             return _lark_im_done()
 
-    elif re.match(r"^/(?:deleteoffset|editoffset|pendingoffset|showoffset)\b", clean_text, re.I):
+    elif re.match(r"^(?:/)?(?:deleteoffset|editoffset|pendingoffset|showoffset)\b", clean_text, re.I):
         try:
             import offsetleave as _offsetleave_cmd
 
