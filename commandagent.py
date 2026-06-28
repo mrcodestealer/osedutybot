@@ -1467,6 +1467,7 @@ def _classify_intent_llm(text: str) -> dict[str, Any] | None:
         "max_tokens": 120,
         "temperature": 0,
     }
+    model_name = payload["model"]
     req = urllib.request.Request(
         f"{_cmd_llm_base()}/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
@@ -1475,6 +1476,10 @@ def _classify_intent_llm(text: str) -> dict[str, Any] | None:
     )
     result: dict[str, Any] | None = None
     try:
+        print(
+            f"[commandagent] LLM classify: model={model_name!r} text={raw[:80]!r}",
+            flush=True,
+        )
         with urllib.request.urlopen(req, timeout=_CMD_LLM_TIMEOUT) as resp:
             body = json.loads(resp.read().decode("utf-8"))
         content = ((body.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
@@ -1952,10 +1957,70 @@ def resolve_command_rules_only(text: str) -> Optional[str]:
 # CLI
 # ---------------------------------------------------------------------------
 
+_CLI_ENV_KEYS = (
+    "BOT_USE_AI",
+    "BOT_CHAT_API_BASE",
+    "BOT_CHAT_API_KEY",
+    "BOT_CHAT_MODEL",
+    "BOT_COMMANDAGENT_LLM_MODEL",
+    "BOT_COMMANDAGENT_LLM",
+    "OPENAI_API_KEY",
+)
+
+
+def _read_dotenv_key(key: str, env_file: Path) -> Optional[str]:
+    if not env_file.is_file():
+        return None
+    try:
+        lines = env_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    prefix = f"{key}="
+    for line in reversed(lines):
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if s.startswith("export "):
+            s = s[7:].strip()
+        if not s.startswith(prefix):
+            continue
+        val = s[len(prefix) :].strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            val = val[1:-1]
+        return val
+    return None
+
+
+def _load_cli_env() -> None:
+    """Load LLM-related keys from repo ``.env`` without ``source`` (safe on broken files)."""
+    env_file = _CHBOX_DIR / ".env"
+    for key in _CLI_ENV_KEYS:
+        if os.environ.get(key):
+            continue
+        val = _read_dotenv_key(key, env_file)
+        if val:
+            os.environ[key] = val
+
 
 def _cli_route(phrase: str) -> None:
     """Show full resolution path: deterministic → pattern → direct LLM."""
+    _load_cli_env()
     os.environ.setdefault("BOT_USE_AI", "1")
+    os.environ.setdefault("BOT_CHAT_API_BASE", "http://127.0.0.1:11434/v1")
+    os.environ.setdefault("BOT_CHAT_API_KEY", "ollama")
+
+    llm_on = _cmd_llm_enabled()
+    cmd_model = _cmd_llm_model()
+    api_base = _cmd_llm_base()
+    print(f"Config:      BOT_USE_AI={os.getenv('BOT_USE_AI')!r} llm_enabled={llm_on}")
+    print(f"Command LLM: model={cmd_model!r} base={api_base!r}")
+    if not llm_on:
+        print(
+            "Hint:        set BOT_CHAT_API_KEY=ollama and run Ollama, "
+            "or fix .env / export vars before testing LLM routing.",
+            flush=True,
+        )
+
     det = _run_deterministic_detectors(phrase)
     if det:
         print(f"Input:       {phrase!r}")
@@ -1975,6 +2040,12 @@ def _cli_route(phrase: str) -> None:
     print(f"Resolved:    source={sig.get('source')} route={sig.get('route')} tag={sig.get('tag')}")
     print(f"Confidence:  {sig.get('confidence', 0):.3f}  margin={sig.get('margin', 0):.3f}")
     print(f"Command:     {sig.get('command')!r}")
+    if sig.get("source") == "llm":
+        print(f"LLM model:   {cmd_model!r} (command routing only)")
+    elif not sig.get("source") and llm_on:
+        print("LLM:         called but returned no match (check Ollama: ollama ps / curl API)")
+    elif not sig.get("source") and not llm_on:
+        print("LLM:         skipped (not enabled / no API key)")
     print(f"Translate:   {translate_if_enabled(phrase)!r}")
 
 
