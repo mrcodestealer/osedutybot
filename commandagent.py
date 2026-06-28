@@ -66,6 +66,17 @@ def startup_status() -> None:
             "Set BOT_CHAT_API_KEY / OPENAI_API_KEY to enable AI command/chat routing.",
             flush=True,
         )
+    if enabled:
+        try:
+            t0 = time.perf_counter()
+            rows = _get_pattern_index()
+            ms = (time.perf_counter() - t0) * 1000
+            print(
+                f"[commandagent] pattern index warmed: {len(rows)} rows in {ms:.0f}ms",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[commandagent] pattern index warmup skipped: {exc!r}", flush=True)
 
 
 def is_enabled() -> bool:

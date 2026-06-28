@@ -4798,9 +4798,14 @@ def lark_webhook():
     try:
         import chathandleagent as _router
 
+        _rt0 = time.perf_counter()
         _router_decision = _router.route(
             _full_body or clean_text_multiline or clean_text,
             bot_mentioned=bot_mentioned,
+        )
+        _pipeline_mark(
+            f"router done ({(time.perf_counter() - _rt0) * 1000:.0f}ms, "
+            f"reason={getattr(_router_decision, 'reason', '?')})"
         )
         print(
             f"🧭 Router: {clean_text!r} → {_router_decision.kind} "

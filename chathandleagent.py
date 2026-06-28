@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -236,6 +237,14 @@ def startup_status() -> None:
         f"[chathandleagent] enabled={is_enabled()} decision=rules-first-then-LLM",
         flush=True,
     )
+    if is_enabled():
+        try:
+            t0 = time.perf_counter()
+            route("who is on fpms duty today")
+            ms = (time.perf_counter() - t0) * 1000
+            print(f"[chathandleagent] route warmup done in {ms:.0f}ms", flush=True)
+        except Exception as exc:
+            print(f"[chathandleagent] route warmup skipped: {exc!r}", flush=True)
 
 
 def _cli(text: str) -> None:
