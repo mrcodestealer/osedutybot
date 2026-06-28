@@ -256,31 +256,30 @@ def _get_duty_names_for_date(target_date, values):
 
     return checked
 
-# ---------- 对外接口 ----------
-def get_sre_duty(target_date):
-    """返回指定日期的值班信息（格式化字符串）"""
+def _load_sre_sheet_values() -> tuple[list | None, str | None]:
+    """Fetch SRE sheet once. Returns ``(values, error)`` — error set when values is None."""
     try:
         token = get_tenant_access_token()
     except Exception as e:
-        return f"❌ Failed to get access token: {e}"
+        return None, f"Failed to get access token: {e}"
 
     props = get_sheet_metadata(token, SPREADSHEET_TOKEN, SHEET_ID)
     if not props:
-        return "❌ Cannot retrieve sheet metadata"
+        return None, "Cannot retrieve sheet metadata"
     max_row = props.get("rowCount", 200)
     scan_range = f"A1:ZZ{max_row}"
     values = get_range_values(token, SPREADSHEET_TOKEN, SHEET_ID, scan_range)
     if values is None:
-        return "❌ Failed to read sheet data"
+        return None, "Failed to read sheet data"
     if len(values) < 2:
-        return "Sheet has fewer than 2 rows."
+        return None, "Sheet has fewer than 2 rows."
+    return values, None
 
-    checked = _get_duty_names_for_date(target_date, values)
+
+def _format_sre_duty_body(target_date, checked: list[str]) -> str:
     if not checked:
         return f"📅 {target_date.strftime('%d/%m/%Y')} – no SRE duty assigned."
-
-    # 按姓名排序
-    checked.sort()
+    checked = sorted(checked)
     lines = [f"📅 SRE Duty – {target_date.strftime('%d/%m/%Y')}"]
     for name in checked:
         csv_name = TABLE_TO_CSV.get(name, name)
@@ -291,6 +290,34 @@ def get_sre_duty(target_date):
         else:
             lines.append(f"• {name} 📞{phone}")
     return "\n".join(lines)
+
+
+def get_sre_duty_bulk(dates: list) -> dict:
+    """One sheet read for many dates (dutyai week cards — avoids N× Lark API)."""
+    from datetime import date as date_cls
+
+    unique = sorted({d for d in dates if isinstance(d, date_cls)})
+    if not unique:
+        return {}
+    values, err = _load_sre_sheet_values()
+    if values is None:
+        msg = f"❌ {err or 'Failed to read sheet data'}"
+        return {d: msg for d in unique}
+    out: dict = {}
+    for d in unique:
+        checked = _get_duty_names_for_date(d, values)
+        out[d] = _format_sre_duty_body(d, checked)
+    return out
+
+
+# ---------- 对外接口 ----------
+def get_sre_duty(target_date):
+    """返回指定日期的值班信息（格式化字符串）"""
+    values, err = _load_sre_sheet_values()
+    if values is None:
+        return f"❌ {err or 'Failed to read sheet data'}"
+    checked = _get_duty_names_for_date(target_date, values)
+    return _format_sre_duty_body(target_date, checked)
 
 def get_sre_week_duty():
     """返回本周和下周的值班汇总信息（去重），每人显示一次并附带项目信息"""

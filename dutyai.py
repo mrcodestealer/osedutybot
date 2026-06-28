@@ -761,9 +761,22 @@ def _dept_card_payload(dept: str, dates: list[date]) -> dict:
     # Look up each day's roster, then collapse consecutive days with the SAME
     # roster into one range (so a Mon–Fri week with one person shows once).
     day_bodies: list[tuple[date, str]] = []
+    sre_bulk: dict[date, str] | None = None
+    if dept == "sre" and len(dates) > 1:
+        try:
+            import sre_Duty
+
+            sre_bulk = sre_Duty.get_sre_duty_bulk(dates)
+        except Exception as exc:
+            print(f"⚠️ dutyai SRE bulk fetch failed: {exc!r}", flush=True)
+            sre_bulk = None
     for d in dates:
         try:
-            body = _dept_text_for_date(dept, d)
+            if sre_bulk is not None:
+                raw_body = sre_bulk.get(d) or "• No duty assigned"
+                body = _clean_body(raw_body)
+            else:
+                body = _dept_text_for_date(dept, d)
         except Exception as exc:
             body = None
             print(f"⚠️ dutyai {dept} {d} lookup failed: {exc!r}", flush=True)
