@@ -688,17 +688,23 @@ _LEAVE_FORM_RULE_RE = re.compile(
 )
 
 _EDIT_OFFSET_RULE_RE = re.compile(
-    r"(?i)^(?:edit|editoffset|change|update|modify|amend)\s+"
-    r"(?:my\s+|the\s+|our\s+)?(?:pending\s+)?offsets?(?:\s+request)?\s*$"
+    r"(?i)^(?:/)?editoffset\s*$"
+    r"|^(?:edit|change|update|modify|amend)\s+(?:my\s+|the\s+|our\s+)?(?:pending\s+)?offsets?(?:\s+request)?\s*$"
 )
 
 _DELETE_OFFSET_RULE_RE = re.compile(
-    r"(?i)^(?:delete|deleteoffset|remove|cancel|drop)\s+"
-    r"(?:my\s+|the\s+|our\s+)?(?:pending\s+)?offsets?(?:\s+request)?\s*$"
+    r"(?i)^(?:/)?deleteoffset\s*$"
+    r"|^(?:delete|remove|cancel|drop)\s+(?:my\s+|the\s+|our\s+)?(?:pending\s+)?offsets?(?:\s+request)?\s*$"
 )
 
+_EDIT_OFFSET_SLASH_RE = re.compile(r"^/editoffset\b", re.I)
+_DELETE_OFFSET_SLASH_RE = re.compile(r"^/deleteoffset\b", re.I)
+_PENDING_OFFSET_SLASH_RE = re.compile(r"^/pendingoffset\b", re.I)
+_SHOW_OFFSET_SLASH_RE = re.compile(r"^/showoffset\b", re.I)
+
 _PENDING_OFFSET_RULE_RE = re.compile(
-    r"(?i)^(?:pending|pendingoffset)\s*(?:offset\s+)?(?:requests?|approvals?|queue)?\s*$"
+    r"(?i)^(?:/)?pendingoffset\s*$"
+    r"|^(?:pending|pendingoffset)\s*(?:offset\s+)?(?:requests?|approvals?|queue)?\s*$"
 )
 
 _CLASSIFY_ACTION_CACHE: dict[str, Optional[str]] = {}
@@ -2144,14 +2150,74 @@ def handle_offset_form_command(
     )
 
 
+def handle_offset_slash_commands(
+    clean_text: str,
+    *,
+    sender_open_id: str,
+    chat_id: str,
+    chat_type: Optional[str],
+    send_message: Callable[..., dict[str, Any]],
+    get_token_func: Callable[[], str],
+) -> bool:
+    """Handle ``/offset``, ``/deleteoffset``, ``/editoffset``, etc. — rules only, never LLM."""
+    text = (clean_text or "").strip()
+    if not text.startswith("/"):
+        return False
+    if _OFFSET_FORM_SLASH_RE.match(text):
+        return handle_offset_form_command(
+            text,
+            sender_open_id=sender_open_id,
+            chat_id=chat_id,
+            chat_type=chat_type,
+            send_message=send_message,
+            get_token_func=get_token_func,
+        )
+    if _DELETE_OFFSET_SLASH_RE.match(text):
+        return handle_deleteoffset_command(
+            text,
+            sender_open_id=sender_open_id,
+            chat_id=chat_id,
+            chat_type=chat_type,
+            send_message=send_message,
+            get_token_func=get_token_func,
+            force=True,
+        )
+    if _EDIT_OFFSET_SLASH_RE.match(text):
+        return handle_editoffset_command(
+            text,
+            sender_open_id=sender_open_id,
+            chat_id=chat_id,
+            chat_type=chat_type,
+            send_message=send_message,
+            get_token_func=get_token_func,
+            force=True,
+        )
+    if _PENDING_OFFSET_SLASH_RE.match(text):
+        return handle_pendingoffset_command(
+            text,
+            sender_open_id=sender_open_id,
+            chat_id=chat_id,
+            chat_type=chat_type,
+            send_message=send_message,
+            get_token_func=get_token_func,
+            force=True,
+        )
+    if _SHOW_OFFSET_SLASH_RE.match(text) or text.lower().startswith("/showoffset"):
+        return handle_showoffset(text, chat_id=chat_id, send_message=send_message)
+    return False
+
+
 def handle_showoffset(
     clean_text: str,
     *,
     chat_id: str,
     send_message: Callable[..., dict[str, Any]],
 ) -> bool:
+    text = (clean_text or "").strip()
+    if text.lower().startswith("/showoffset"):
+        text = text[1:].lstrip() or "showoffset"
     try:
-        target = od.parse_showoffset_command(clean_text)
+        target = od.parse_showoffset_command(text)
     except ValueError as exc:
         send_message(chat_id, f"❌ {exc}")
         return True

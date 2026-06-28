@@ -4708,7 +4708,7 @@ def lark_webhook():
         except Exception:
             pass
 
-        if _offsetleave.handle_offset_form_command(
+        if _offsetleave.handle_offset_slash_commands(
             clean_text,
             sender_open_id=sender_id or "",
             chat_id=chat_id,
@@ -4990,7 +4990,7 @@ def lark_webhook():
         try:
             import offsetleave as _offsetleave_cmd
 
-            if _offsetleave_cmd.handle_offset_form_command(
+            if _offsetleave_cmd.handle_offset_slash_commands(
                 clean_text,
                 sender_open_id=sender_id or "",
                 chat_id=chat_id,
@@ -5000,7 +5000,24 @@ def lark_webhook():
             ):
                 return _lark_im_done()
         except Exception as _offset_cmd_err:
-            send_message(chat_id, f"❌ Offset form failed: {_offset_cmd_err}")
+            send_message(chat_id, f"❌ Offset command failed: {_offset_cmd_err}")
+            return _lark_im_done()
+
+    elif re.match(r"^/(?:deleteoffset|editoffset|pendingoffset|showoffset)\b", clean_text, re.I):
+        try:
+            import offsetleave as _offsetleave_cmd
+
+            if _offsetleave_cmd.handle_offset_slash_commands(
+                clean_text,
+                sender_open_id=sender_id or "",
+                chat_id=chat_id,
+                chat_type=chat_type,
+                send_message=send_message,
+                get_token_func=get_tenant_access_token,
+            ):
+                return _lark_im_done()
+        except Exception as _offset_cmd_err:
+            send_message(chat_id, f"❌ Offset command failed: {_offset_cmd_err}")
             return _lark_im_done()
 
     elif clean_text.lower() == '/cancelp1':

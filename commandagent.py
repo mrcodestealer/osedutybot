@@ -1697,7 +1697,28 @@ def _resolve_fuzzy_intent(text: str, *, skip_patterns: bool = False) -> dict[str
 def _detect_offset_leave_rule_command(text: str) -> dict[str, Any] | None:
     """Map offset/leave rule phrases to slash-style commands (no LLM)."""
     raw = (text or "").strip()
-    if not raw or _looks_like_slash_command(raw):
+    if not raw:
+        return None
+    slash_map = {
+        "/offset": "offset_form",
+        "/deleteoffset": "delete_offset",
+        "/editoffset": "edit_offset",
+        "/pendingoffset": "pending_offset",
+        "/showoffset": "show_offset",
+    }
+    token = raw.lower().split()[0]
+    if token in slash_map:
+        action = slash_map[token]
+        return dict(
+            tag=f"cmd_{action}",
+            confidence=1.0,
+            margin=1.0,
+            command=token,
+            deterministic=True,
+            source="offset_rule",
+            route="command",
+        )
+    if _looks_like_slash_command(raw):
         return None
     try:
         import offsetleave as ol
