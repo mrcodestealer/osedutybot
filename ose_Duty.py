@@ -3992,6 +3992,7 @@ def _collect_offset_month_pair_lines(
     month: int,
     *,
     items: Optional[list[dict[str, Any]]] = None,
+    involved_person: Optional[str] = None,
     request_person_only: Optional[str] = None,
 ) -> list[str]:
     """Build display lines: ``Man Chung 20, 21 --> Si Yew 15, 17`` (per swap pair)."""
@@ -4000,7 +4001,8 @@ def _collect_offset_month_pair_lines(
     if items is None:
         token = get_tenant_access_token()
         _, items = _get_bitable_raw_pair(token)
-    filter_person = _showoffset_canonical_name(request_person_only or "") if request_person_only else None
+    person_raw = involved_person or request_person_only
+    filter_person = _showoffset_canonical_name(person_raw or "") if person_raw else None
     pairs: dict[tuple[str, str], dict[str, set[int]]] = {}
     for it in items:
         f = it.get("fields") or {}
@@ -4020,7 +4022,10 @@ def _collect_offset_month_pair_lines(
         exc_person = _showoffset_canonical_name(exc)
         if not req_person or not exc_person:
             continue
-        if filter_person and not _names_same_person(req_person, filter_person):
+        if filter_person and not (
+            _names_same_person(req_person, filter_person)
+            or _names_same_person(exc_person, filter_person)
+        ):
             continue
         key = (req_person, exc_person)
         slot = pairs.setdefault(key, {"orig": set(), "exc": set()})
@@ -4077,25 +4082,56 @@ def build_ose_showoffset_card(
     year: int,
     month: int,
     *,
+    involved_person: Optional[str] = None,
+    include_all_team: bool = False,
     request_person_only: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Offset calendar card. Approvers see all pairs; requesters only their own rows."""
-    pair_lines = _collect_offset_month_pair_lines(
-        year, month, request_person_only=request_person_only
-    )
+    """
+    Offset calendar card.
+
+    - Approver only → all team rows
+    - Requester only → rows where they are requester **or** exchange person
+    - Both roles → **Your offsets** section + **All offsets** section
+    """
+    person = involved_person or request_person_only
     month_label = date(year, month, 1).strftime("%B")
     lines = [f"**{month_label}**", ""]
-    if not pair_lines:
-        if request_person_only:
-            lines.append("No offset requests this month for you.")
+
+    if include_all_team and person:
+        mine = _collect_offset_month_pair_lines(year, month, involved_person=person)
+        all_lines = _collect_offset_month_pair_lines(year, month)
+        who = _showoffset_display_name(person)
+        lines.append(f"**Your offsets** ({who})")
+        lines.append("")
+        if mine:
+            lines.extend(mine)
         else:
-            lines.append("No offset requests this month.")
+            lines.append("_No offset requests involving you this month._")
+        lines.extend(["", "**All offsets**", ""])
+        if all_lines:
+            lines.extend(all_lines)
+        else:
+            lines.append("_No offset requests this month._")
     else:
-        lines.extend(pair_lines)
+        pair_lines = _collect_offset_month_pair_lines(
+            year, month, involved_person=person
+        )
+        if not pair_lines:
+            if person:
+                lines.append("No offset requests this month involving you.")
+            else:
+                lines.append("No offset requests this month.")
+        else:
+            lines.extend(pair_lines)
+
     content = "\n".join(lines).strip()
     title = f"OSE offset — {month_label} {year}"
-    if request_person_only:
-        who = _showoffset_display_name(request_person_only)
+    if include_all_team and person:
+        who = _showoffset_display_name(person)
+        if who:
+            title = f"OSE offset — {who} (yours + all) — {month_label} {year}"
+    elif person:
+        who = _showoffset_display_name(person)
         if who:
             title = f"OSE offset — {who} — {month_label} {year}"
     return {
