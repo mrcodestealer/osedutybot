@@ -118,6 +118,9 @@ _DEPT_DUTY_TEMPLATES = (
     "list {d} duty",
     "tell me {d} duty",
     "who covers {d} today",
+    "who is covering {d} shift tonight",
+    "who is covering {d} shift",
+    "who covers {d} shift",
     "{d} shift today",
     "current {d} duty",
 )
@@ -1419,6 +1422,7 @@ _CMD_LLM_SYSTEM = (
     "Examples:\n"
     '"hi" → {"route":"chat","intent_tag":null,"confidence":0.99}\n'
     '"who is on fpms duty today" → {"route":"command","intent_tag":"cmd_fpms","confidence":0.95}\n'
+    '"who is covering fpms shift tonight" → {"route":"command","intent_tag":"cmd_fpms","confidence":0.95}\n'
     '"check credit NCH1422" → {"route":"command","intent_tag":"cmd_checkcredit","confidence":0.95}\n'
     '"how are you doing" → {"route":"chat","intent_tag":null,"confidence":0.98}\n'
     '"nwr set maintenance NWR2113" → {"route":"command","intent_tag":"cmd_pb_setmaintenance","confidence":0.9}\n'
@@ -1557,7 +1561,42 @@ def _llm_route_obj_to_result(obj: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _classify_intent_llm_ollama_native(raw: str, system: str, model: str) -> dict[str, Any] | None:
+def _correct_llm_duty_misroute(raw: str, result: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """Fix common small-model swaps (p0/check) on plain duty roster questions."""
+    if not result or result.get("route") != "command":
+        return result
+    m = re.search(r"(?i)\b(fpms|pms|bi|fe|cpms|sre|db|dba|liveslot|ote|ft)\b", raw or "")
+    dept = (m.group(1).lower() if m else "") or ""
+    if dept == "dba":
+        dept = "db"
+    duty_q = bool(
+        re.search(
+            r"(?i)\b(who is on|who covers|who is covering|on duty|on call|"
+            r"shift tonight|shift today|duty today|roster)\b",
+            raw or "",
+        )
+    )
+    check_q = bool(re.search(r"(?i)\b(check|missing|attendance|verify)\b", raw or ""))
+    tag = str(result.get("intent_tag") or "")
+    if not duty_q or check_q:
+        return result
+    if tag.endswith("p0") and not re.search(r"(?i)\bp0\b|emergency contact", raw or ""):
+        fix_tag = f"cmd_{dept}" if dept else "cmd_fpms"
+    elif tag.endswith("check"):
+        fix_tag = f"cmd_{dept}" if dept else tag.replace("check", "").rstrip("_") or tag
+        if not _intents_by_tag().get(fix_tag):
+            fix_tag = f"cmd_{dept}" if dept else "cmd_fpms"
+    else:
+        return result
+    spec = _intents_by_tag().get(fix_tag)
+    if not spec:
+        return result
+    return {**result, "intent_tag": fix_tag, "spec": spec}
+
+
+def _classify_intent_llm_ollama_native(
+    raw: str, system: str, model: str, *, timeout: Optional[float] = None
+) -> dict[str, Any] | None:
     """Ollama ``/api/chat`` with ``think=false`` + ``format=json`` (fast, reliable JSON)."""
     url = f"{_ollama_native_base()}/api/chat"
     payload = {
@@ -1578,7 +1617,7 @@ def _classify_intent_llm_ollama_native(raw: str, system: str, model: str) -> dic
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=_CMD_LLM_TIMEOUT) as resp:
+    with urllib.request.urlopen(req, timeout=timeout or _CMD_LLM_TIMEOUT) as resp:
         body = json.loads(resp.read().decode("utf-8"))
     obj = _extract_route_json_from_llm_body(body)
     if not obj:
@@ -1588,7 +1627,7 @@ def _classify_intent_llm_ollama_native(raw: str, system: str, model: str) -> dic
             flush=True,
         )
         return None
-    return _llm_route_obj_to_result(obj)
+    return _correct_llm_duty_misroute(raw, _llm_route_obj_to_result(obj))
 
 
 def _classify_intent_llm_openai_compat(
@@ -1622,7 +1661,7 @@ def _classify_intent_llm_openai_compat(
             flush=True,
         )
         return None
-    return _llm_route_obj_to_result(obj)
+    return _correct_llm_duty_misroute(raw, _llm_route_obj_to_result(obj))
 
 
 def _llm_message_text(body: dict[str, Any]) -> str:
@@ -2303,9 +2342,34 @@ def _ollama_installed_models() -> list[str]:
         return list(_DEFAULT_BENCH_MODELS)
 
 
-def _bench_classify_once(raw: str, model: str, system: str) -> tuple[float, Optional[dict[str, Any]]]:
+def _preload_ollama_model(model: str) -> None:
+    """Load one model into RAM before benchmarking (avoids 8s swap timeouts)."""
+    if not _cmd_llm_is_ollama():
+        return
+    url = f"{_ollama_native_base()}/api/generate"
+    payload = {
+        "model": model,
+        "prompt": "hi",
+        "stream": False,
+        "keep_alive": -1,
+        "options": {"num_predict": 1},
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    bench_timeout = float(os.getenv("BOT_COMMANDAGENT_BENCH_TIMEOUT", "120"))
+    with urllib.request.urlopen(req, timeout=bench_timeout) as resp:
+        resp.read()
+
+
+def _bench_classify_once(
+    raw: str, model: str, system: str, *, timeout: Optional[float] = None
+) -> tuple[float, Optional[dict[str, Any]]]:
     t0 = time.perf_counter()
-    result = _classify_intent_llm_ollama_native(raw, system, model)
+    result = _classify_intent_llm_ollama_native(raw, system, model, timeout=timeout)
     return (time.perf_counter() - t0) * 1000, result
 
 
@@ -2357,19 +2421,27 @@ def _cli_bench_all(
 
     system = _CMD_LLM_SYSTEM + _build_llm_intent_catalog()
     runs = max(1, runs)
+    bench_timeout = float(os.getenv("BOT_COMMANDAGENT_BENCH_TIMEOUT", "120"))
 
     print(f"Benchmark-all: {raw!r}")
     print(f"API:           Ollama /api/chat (think=false, format=json)")
     print(f"Runs/model:    {runs}" + (" + 1 warmup (discarded)" if warmup else ""))
+    print(f"Timeout/run:   {bench_timeout:.0f}s")
     print(f"Models:        {len(model_list)}")
     print("")
 
     rows: list[dict[str, Any]] = []
     for model in model_list:
         print(f"=== {model} ===", flush=True)
+        try:
+            t_pre = time.perf_counter()
+            _preload_ollama_model(model)
+            print(f"  preload: {(time.perf_counter() - t_pre) * 1000:.0f} ms", flush=True)
+        except Exception as exc:
+            print(f"  preload warn: {exc!r}", flush=True)
         if warmup:
             try:
-                w_ms, _ = _bench_classify_once(raw, model, system)
+                w_ms, _ = _bench_classify_once(raw, model, system, timeout=bench_timeout)
                 print(f"  warmup: {w_ms:.0f} ms (discarded)", flush=True)
             except Exception as exc:
                 print(f"  warmup failed: {exc!r}", flush=True)
@@ -2380,7 +2452,9 @@ def _cli_bench_all(
         err = ""
         for i in range(runs):
             try:
-                elapsed_ms, result = _bench_classify_once(raw, model, system)
+                elapsed_ms, result = _bench_classify_once(
+                    raw, model, system, timeout=bench_timeout
+                )
                 times_ms.append(elapsed_ms)
                 route_s = (result or {}).get("route") or "none"
                 tag_s = (result or {}).get("intent_tag") or "—"
