@@ -75,6 +75,14 @@ def startup_status() -> None:
                 f"[commandagent] pattern index warmed: {len(rows)} rows in {ms:.0f}ms",
                 flush=True,
             )
+            for phrase in (
+                "who is on fpms duty today",
+                "show me sre duty next week",
+                "who is on cpms duty",
+                "check credit NCH1422",
+            ):
+                _match_intent_by_patterns(phrase)
+            print("[commandagent] common phrase pattern cache warmed", flush=True)
         except Exception as exc:
             print(f"[commandagent] pattern index warmup skipped: {exc!r}", flush=True)
 
@@ -1320,6 +1328,23 @@ def _get_pattern_index() -> list[tuple[int, str, IntentSpec]]:
         return rows
 
 
+def _match_dept_duty_fast(norm: str) -> tuple[IntentSpec, float] | None:
+    """Fast path: ``show me sre duty next week`` → ``cmd_sre`` without scanning the full catalogue."""
+    if not norm or "duty" not in norm:
+        return None
+    by_tag = _intents_by_tag()
+    for dept in _DEPTS:
+        if dept == "dba":
+            continue
+        tag = "cmd_db" if dept == "db" else f"cmd_{dept}"
+        spec = by_tag.get(tag)
+        if not spec:
+            continue
+        if re.search(rf"(?<!\w){re.escape(dept)}(?!\w)", norm):
+            return spec, 0.98
+    return None
+
+
 def _match_intent_by_patterns(text: str) -> tuple[IntentSpec, float] | None:
     """Return ``(spec, confidence)`` when a catalogue pattern matches."""
     raw = (text or "").strip()
@@ -1335,17 +1360,28 @@ def _match_intent_by_patterns(text: str) -> tuple[IntentSpec, float] | None:
             spec, conf = cached
             return spec, conf
 
+    t0 = time.perf_counter()
     norm = _normalize_for_match(raw)
-    best: tuple[IntentSpec, float] | None = None
-    for plen, _pnorm, spec in _get_pattern_index():
-        for pat in spec.patterns:
-            if _pattern_matches(norm, pat):
-                conf = 1.0 if _normalize_for_match(pat) == norm else min(0.98, 0.85 + plen / 200.0)
+    fast = _match_dept_duty_fast(norm)
+    if fast:
+        best = fast
+    else:
+        best: tuple[IntentSpec, float] | None = None
+        for plen, pnorm, spec in _get_pattern_index():
+            if _pattern_matches(norm, pnorm):
+                conf = 1.0 if pnorm == norm else min(0.98, 0.85 + plen / 200.0)
                 if best is None or conf > best[1]:
                     best = (spec, conf)
-                break
-        if best and best[1] >= 0.99:
-            break
+                if conf >= 0.99:
+                    break
+
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    if elapsed_ms > 200:
+        print(
+            f"[commandagent] pattern match {elapsed_ms:.0f}ms "
+            f"hit={best[0].tag if best else None} cache_miss text={raw[:60]!r}",
+            flush=True,
+        )
 
     with _PATTERN_INDEX_LOCK:
         _PATTERN_MATCH_CACHE[raw] = best
