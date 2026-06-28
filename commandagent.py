@@ -1406,9 +1406,10 @@ def _build_llm_intent_catalog() -> str:
 
 _CMD_LLM_SYSTEM = (
     "You classify messages for an OSE duty bot on Lark/Feishu.\n"
+    "CRITICAL: Do NOT think out loud. Output ONLY one JSON object — no markdown, no explanation.\n"
     "Decide: is this a bot COMMAND (work request) or casual CHAT (greeting, thanks, small talk, "
     "general conversation, math, jokes)?\n"
-    "Reply with ONLY one JSON object:\n"
+    "JSON schema:\n"
     '{"route":"command"|"chat","intent_tag":string|null,"confidence":0.0-1.0}\n'
     "- route=chat → intent_tag must be null, confidence = how sure it is casual chat.\n"
     "- route=command → pick the best intent_tag from the catalog below; confidence = how sure.\n"
@@ -1443,6 +1444,150 @@ def _resolve_llm_intent_tag(tag_s: str) -> Optional[str]:
         if spec.command.lower() == slash.lower():
             return spec.tag
     return None
+
+
+def _cmd_llm_is_ollama() -> bool:
+    base = _cmd_llm_base().lower()
+    return "11434" in base or "ollama" in base
+
+
+def _ollama_native_base() -> str:
+    base = _cmd_llm_base().rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3]
+    return base.rstrip("/")
+
+
+def _extract_route_json_from_llm_body(body: dict[str, Any]) -> dict[str, Any] | None:
+    """Parse route JSON from OpenAI-style or Ollama native chat responses."""
+    message: dict[str, Any] = {}
+    if "choices" in body:
+        message = ((body.get("choices") or [{}])[0].get("message") or {})
+    elif isinstance(body.get("message"), dict):
+        message = body["message"]
+
+    chunks: list[str] = []
+    for key in ("content", "reasoning"):
+        val = (message.get(key) or "").strip()
+        if val:
+            chunks.append(val)
+    if not chunks:
+        return None
+
+    seen: set[str] = set()
+    candidates = chunks + ["\n".join(chunks)]
+    for text in candidates:
+        if text in seen:
+            continue
+        seen.add(text)
+        obj = _parse_llm_json(text)
+        if obj and str(obj.get("route") or "").lower() in ("command", "chat"):
+            return obj
+
+    combined = candidates[-1]
+    best: dict[str, Any] | None = None
+    pos = 0
+    while True:
+        a = combined.find("{", pos)
+        if a == -1:
+            break
+        obj = _parse_llm_json(combined[a:])
+        if obj and str(obj.get("route") or "").lower() in ("command", "chat"):
+            best = obj
+        pos = a + 1
+    return best
+
+
+def _apply_ollama_cmd_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if not _cmd_llm_is_ollama():
+        return payload
+    payload["think"] = False
+    payload["format"] = "json"
+    try:
+        import chatagent as ca
+
+        payload = ca.enrich_ollama_chat_payload(payload, think=False)
+    except Exception:
+        pass
+    payload["think"] = False
+    payload["format"] = "json"
+    return payload
+
+
+def _llm_route_obj_to_result(obj: dict[str, Any]) -> dict[str, Any] | None:
+    route = str(obj.get("route") or "").strip().lower()
+    tag = obj.get("intent_tag")
+    tag_s = (
+        str(tag).strip()
+        if tag is not None and str(tag).strip().lower() not in ("null", "none")
+        else ""
+    )
+    try:
+        conf = float(obj.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    conf = max(0.0, min(1.0, conf))
+    if route not in ("command", "chat"):
+        print(f"[commandagent] LLM bad route={route!r} obj={obj!r}", flush=True)
+        return None
+    if route == "chat":
+        return {
+            "route": "chat",
+            "intent_tag": NONE_TAG,
+            "confidence": conf,
+            "source": "llm",
+        }
+    resolved_tag = _resolve_llm_intent_tag(tag_s)
+    spec = _intents_by_tag().get(resolved_tag or "")
+    if not spec or resolved_tag == NONE_TAG:
+        print(
+            f"[commandagent] LLM unknown intent_tag={tag_s!r} "
+            f"resolved={resolved_tag!r} obj={obj!r}",
+            flush=True,
+        )
+        return None
+    return {
+        "route": "command",
+        "intent_tag": resolved_tag,
+        "confidence": conf,
+        "source": "llm",
+        "spec": spec,
+    }
+
+
+def _classify_intent_llm_ollama_native(raw: str, system: str, model: str) -> dict[str, Any] | None:
+    """Fallback when OpenAI-compat API returns thinking-only output."""
+    url = f"{_ollama_native_base()}/api/chat"
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": raw},
+        ],
+        "stream": False,
+        "think": False,
+        "format": "json",
+        "options": {"temperature": 0, "num_predict": 256},
+        "keep_alive": -1,
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=_CMD_LLM_TIMEOUT) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+    obj = _extract_route_json_from_llm_body(body)
+    if not obj:
+        msg = body.get("message") or {}
+        print(
+            f"[commandagent] Ollama native parse failed content={(msg.get('content') or '')[:160]!r}",
+            flush=True,
+        )
+        return None
+    print("[commandagent] LLM classify via Ollama /api/chat (think=false, format=json)", flush=True)
+    return _llm_route_obj_to_result(obj)
 
 
 def _llm_message_text(body: dict[str, Any]) -> str:
@@ -1499,15 +1644,10 @@ def _classify_intent_llm(text: str) -> dict[str, Any] | None:
             {"role": "system", "content": system},
             {"role": "user", "content": raw},
         ],
-        "max_tokens": 256,
+        "max_tokens": 512,
         "temperature": 0,
     }
-    try:
-        import chatagent as ca
-
-        payload = ca.enrich_ollama_chat_payload(payload, think=False)
-    except Exception:
-        pass
+    payload = _apply_ollama_cmd_payload(payload)
     model_name = payload["model"]
     req = urllib.request.Request(
         f"{_cmd_llm_base()}/chat/completions",
@@ -1523,55 +1663,26 @@ def _classify_intent_llm(text: str) -> dict[str, Any] | None:
         )
         with urllib.request.urlopen(req, timeout=_CMD_LLM_TIMEOUT) as resp:
             body = json.loads(resp.read().decode("utf-8"))
-        content = _llm_message_text(body)
-        obj = _parse_llm_json(content)
-        if not obj:
+        obj = _extract_route_json_from_llm_body(body)
+        if obj:
+            result = _llm_route_obj_to_result(obj)
+        if result is None and _cmd_llm_is_ollama():
             msg = ((body.get("choices") or [{}])[0].get("message") or {})
             raw_content = (msg.get("content") or "")[:160]
             raw_reason = (msg.get("reasoning") or "")[:160]
             print(
-                f"[commandagent] LLM parse failed content={raw_content!r} "
-                f"reasoning={raw_reason!r}",
+                f"[commandagent] OpenAI-compat parse failed content={raw_content!r} "
+                f"reasoning={raw_reason!r} — trying Ollama /api/chat",
                 flush=True,
             )
-            result = None
-        else:
-            route = str(obj.get("route") or "").strip().lower()
-            tag = obj.get("intent_tag")
-            tag_s = str(tag).strip() if tag is not None and str(tag).strip().lower() not in ("null", "none") else ""
-            try:
-                conf = float(obj.get("confidence") or 0.0)
-            except (TypeError, ValueError):
-                conf = 0.0
-            conf = max(0.0, min(1.0, conf))
-            if route not in ("command", "chat"):
-                print(f"[commandagent] LLM bad route={route!r} obj={obj!r}", flush=True)
-                result = None
-            elif route == "chat":
-                result = {
-                    "route": "chat",
-                    "intent_tag": NONE_TAG,
-                    "confidence": conf,
-                    "source": "llm",
-                }
-            else:
-                resolved_tag = _resolve_llm_intent_tag(tag_s)
-                spec = _intents_by_tag().get(resolved_tag or "")
-                if not spec or resolved_tag == NONE_TAG:
-                    print(
-                        f"[commandagent] LLM unknown intent_tag={tag_s!r} "
-                        f"resolved={resolved_tag!r} obj={obj!r}",
-                        flush=True,
-                    )
-                    result = None
-                else:
-                    result = {
-                        "route": "command",
-                        "intent_tag": resolved_tag,
-                        "confidence": conf,
-                        "source": "llm",
-                        "spec": spec,
-                    }
+            result = _classify_intent_llm_ollama_native(raw, system, model_name)
+        elif result is None:
+            msg = ((body.get("choices") or [{}])[0].get("message") or {})
+            print(
+                f"[commandagent] LLM parse failed content={(msg.get('content') or '')[:160]!r} "
+                f"reasoning={(msg.get('reasoning') or '')[:160]!r}",
+                flush=True,
+            )
     except urllib.error.HTTPError as exc:
         if not _cmd_llm_failed_logged:
             try:
