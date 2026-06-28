@@ -1662,11 +1662,47 @@ def _resolve_fuzzy_intent(text: str, *, skip_patterns: bool = False) -> dict[str
     return out
 
 
+def _detect_offset_leave_rule_command(text: str) -> dict[str, Any] | None:
+    """Map offset/leave rule phrases to slash-style commands (no LLM)."""
+    raw = (text or "").strip()
+    if not raw or _looks_like_slash_command(raw):
+        return None
+    try:
+        import offsetleave as ol
+
+        action = ol._parse_offset_leave_action_rules(raw)
+    except Exception:
+        return None
+    cmd_by_action = {
+        "offset_form": "/offset",
+        "leave_form": "/leave",
+        "edit_offset": "/editoffset",
+        "delete_offset": "/deleteoffset",
+        "pending_offset": "/pendingoffset",
+        "show_offset": "/showoffset",
+    }
+    cmd = cmd_by_action.get(action or "")
+    if not cmd:
+        return None
+    return dict(
+        tag=f"cmd_{action}",
+        confidence=1.0,
+        margin=1.0,
+        command=cmd,
+        deterministic=True,
+        source="offset_rule",
+        route="command",
+    )
+
+
 def _run_deterministic_detectors(text: str) -> dict[str, Any] | None:
     """High-precision structured command detectors. Returns signal dict or None."""
     raw = (text or "").strip()
     if not raw:
         return None
+    ol_cmd = _detect_offset_leave_rule_command(raw)
+    if ol_cmd:
+        return ol_cmd
     pb = detect_prod_batch_command(raw)
     if pb:
         return dict(tag="cmd_pb", confidence=1.0, margin=1.0, command=pb, deterministic=True, source="deterministic", route="command")
@@ -1746,11 +1782,13 @@ def detect_multi_duty_commands(text: str) -> Optional[list[str]]:
     return [f"/{d}" for d in found_depts]
 
 
-def command_signal(text: str) -> dict[str, Any]:
+def command_signal(text: str, *, allow_llm: bool = True) -> dict[str, Any]:
     """Diagnostic signal for the router (``chathandleagent``).
 
     Returns ``tag``, ``confidence``, ``margin``, ``command``, ``deterministic``,
-    ``source`` (deterministic|pattern|llm), and ``route`` (command|chat).
+    ``source`` (deterministic|pattern|offset_rule|llm), and ``route`` (command|chat).
+
+    When ``allow_llm=False``, stops after deterministic + pattern rules (no LLM).
     Never raises.
     """
     out: dict[str, Any] = {
@@ -1787,7 +1825,7 @@ def command_signal(text: str) -> dict[str, Any]:
             )
             return out
 
-    if not is_enabled():
+    if not is_enabled() or not allow_llm:
         return out
     fuzzy = _resolve_fuzzy_intent(raw, skip_patterns=True)
     out.update(fuzzy)
@@ -1807,6 +1845,11 @@ def translate_if_enabled(text: str) -> Optional[str]:
     raw = (text or "").strip()
     if not raw or _looks_like_slash_command(raw):
         return None
+
+    rules_cmd = resolve_command_rules_only(raw)
+    if rules_cmd:
+        print(f"[commandagent] rules map: {raw[:80]!r} -> {str(rules_cmd).splitlines()[0]!r}", flush=True)
+        return rules_cmd
 
     det = _run_deterministic_detectors(raw)
     if det and det.get("command"):
@@ -1840,6 +1883,19 @@ def translate_if_enabled(text: str) -> Optional[str]:
     src = fuzzy.get("source") or "fuzzy"
     print(f"[commandagent] {src} map: {raw[:80]!r} -> {str(cmd).splitlines()[0]!r}", flush=True)
     return cmd
+
+
+def resolve_command_rules_only(text: str) -> Optional[str]:
+    """Map natural language to a slash command using rules only (no LLM)."""
+    if not is_enabled():
+        return None
+    raw = (text or "").strip()
+    if not raw or _looks_like_slash_command(raw):
+        return None
+    sig = command_signal(raw, allow_llm=False)
+    if sig.get("route") == "command" and sig.get("command"):
+        return sig["command"]
+    return None
 
 
 # ---------------------------------------------------------------------------

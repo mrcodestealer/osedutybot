@@ -16,16 +16,10 @@ This module is that single place. It looks like a human triage desk:
 Decision strategy (high precision first, AI last)
 -------------------------------------------------
 1. Already a ``/slash`` command            -> command (let main.py handle it)
-2. Deterministic prod-batch maintenance    -> command (e.g. set maintenance)
+2. Deterministic + pattern + offset rules  -> command or chat (no LLM)
 3. Cheap chat fast-paths (math / pure small-talk) -> chat (skip an LLM call)
-4. **AI decides** — ``commandagent.command_signal`` resolves the message through
-   pattern rules → a single direct LLM call that answers "is this a COMMAND or
-   CHAT?" (and, for commands, which one). We simply trust that decision.
-5. Fallback (only when the LLM is unavailable): strong work keywords / machine
-   ids → command, otherwise chat.
-
-There is no longer a local DistilBERT classifier or a chat-vs-command
-confidence comparison — the language model makes the call directly.
+4. **LLM only when rules abstain** — ``commandagent.command_signal(allow_llm=True)``
+5. Fallback (LLM unavailable): keyword heuristics → command, else chat
 
 Everything is wrapped so it can never raise into the bot's hot path; on any
 error it returns ``unknown`` and the caller keeps its previous behaviour.
@@ -107,11 +101,11 @@ def _looks_like_pure_chitchat(text: str) -> bool:
         return False
 
 
-def _command_signal(text: str) -> dict:
+def _command_signal(text: str, *, allow_llm: bool = False) -> dict:
     try:
         import commandagent
 
-        return commandagent.command_signal(text)
+        return commandagent.command_signal(text, allow_llm=allow_llm)
     except Exception:
         return {"tag": None, "confidence": 0.0, "margin": 0.0, "command": None, "deterministic": False}
 
@@ -151,11 +145,27 @@ def route(text: str, *, bot_mentioned: bool = True) -> RouteDecision:
         if re.search(r"(?i)(?:type\s*:\s*)?missing\s+credit", raw):
             return RouteDecision(_CMD, reason="missing_credit", command="/checkcreditdate")
 
-        # 2) Deterministic prod-batch maintenance (highest precision).
-        cmd_sig = _command_signal(raw)
+        # 2) Rule-based command signal (deterministic + pattern + offset — no LLM).
+        cmd_sig = _command_signal(raw, allow_llm=False)
         if cmd_sig.get("deterministic") and cmd_sig.get("command"):
             return RouteDecision(
-                _CMD, reason="prod_batch", command=cmd_sig["command"], command_conf=1.0
+                _CMD,
+                reason=str(cmd_sig.get("source") or "deterministic"),
+                command=cmd_sig["command"],
+                command_conf=1.0,
+            )
+        if cmd_sig.get("route") == "command" and cmd_sig.get("command"):
+            return RouteDecision(
+                _CMD,
+                reason=f"rule_{cmd_sig.get('source') or 'signal'}",
+                command=cmd_sig.get("command"),
+                command_conf=float(cmd_sig.get("confidence") or 1.0),
+            )
+        if cmd_sig.get("route") == "chat":
+            return RouteDecision(
+                _CHAT,
+                reason=f"rule_{cmd_sig.get('source') or 'signal'}",
+                chat_conf=float(cmd_sig.get("confidence") or 0.9),
             )
 
         cmd_conf = float(cmd_sig.get("confidence") or 0.0)
@@ -172,19 +182,21 @@ def route(text: str, *, bot_mentioned: bool = True) -> RouteDecision:
         if _looks_like_math_followup(raw) and not has_kw and not has_search:
             return RouteDecision(_CHAT, reason="math_followup", chat_conf=0.8)
 
-        # 4) AI decides. ``command_signal`` runs pattern rules → a direct LLM call
-        #    that answers "COMMAND or CHAT?" (and which command). Trust it.
-        if cmd_route == "command" and cmd_sig.get("command"):
+        # 4) LLM only when rules did not decide.
+        llm_sig = _command_signal(raw, allow_llm=True)
+        cmd_conf = float(llm_sig.get("confidence") or cmd_conf)
+        cmd_route = llm_sig.get("route") or cmd_route
+        if llm_sig.get("route") == "command" and llm_sig.get("command"):
             return RouteDecision(
                 _CMD,
-                reason=f"ai_{cmd_sig.get('source') or 'signal'}",
-                command=cmd_sig.get("command"),
+                reason=f"ai_{llm_sig.get('source') or 'signal'}",
+                command=llm_sig.get("command"),
                 command_conf=cmd_conf,
             )
-        if cmd_route == "chat":
+        if llm_sig.get("route") == "chat":
             return RouteDecision(
                 _CHAT,
-                reason=f"ai_{cmd_sig.get('source') or 'signal'}",
+                reason=f"ai_{llm_sig.get('source') or 'signal'}",
                 chat_conf=cmd_conf,
             )
 
@@ -221,7 +233,7 @@ def classify(text: str, *, bot_mentioned: bool = True) -> str:
 
 def startup_status() -> None:
     print(
-        f"[chathandleagent] enabled={is_enabled()} decision=direct-LLM (commandagent)",
+        f"[chathandleagent] enabled={is_enabled()} decision=rules-first-then-LLM",
         flush=True,
     )
 

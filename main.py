@@ -4676,22 +4676,7 @@ def lark_webhook():
     
     
 
-    try:
-        import offsetai as _offsetai
-
-        if _offsetai.handle(
-            clean_text,
-            sender_open_id=sender_id or "",
-            chat_id=chat_id,
-            chat_type=chat_type,
-            send_message=send_message,
-            get_token_func=get_tenant_access_token,
-            session_key=_chat_memory_key,
-        ):
-            return _lark_im_done()
-    except Exception as _offsetai_err:
-        print(f"⚠️ offsetai skipped: {_offsetai_err!r}", flush=True)
-
+    # Offset/leave slash + rule commands run BEFORE any LLM (offsetai / chatagent).
     try:
         import offsetleave as _offsetleave
 
@@ -4763,33 +4748,7 @@ def lark_webhook():
         send_message(chat_id, f"❌ Offset/leave form failed: {e}")
         return _lark_im_done()
 
-    # Auto-detect EVO Service Desk batch paste even WITHOUT the `/m` command.
-    # Only fires on the distinctive ``※SD-xxxxx※`` multi-block format, so normal
-    # messages and other commands are never intercepted. We rebuild the source from
-    # ``original_text`` (preserving newlines, which ``clean_text`` collapses) and strip
-    # an optional leading ``/m`` so an explicit command still works here too.
-    try:
-        _evo_src = original_text or ""
-        for _mk in mention_keys:
-            _evo_src = _evo_src.replace(_mk, "")
-        _evo_src = re.sub(r"@_user_\d+", "", _evo_src)
-        _evo_src = re.sub(r"<[^>]+>", "", _evo_src)
-        _evo_cmd = re.search(r"(?:^|\s)/m\s+", _evo_src, re.IGNORECASE)
-        if _evo_cmd:
-            _evo_src = _evo_src[_evo_cmd.end():]
-        _evo_src = _evo_src.strip()
-        if _evo_src.startswith('"') and _evo_src.endswith('"'):
-            _evo_src = _evo_src[1:-1].strip()
-        if _evo_src and maintenance.is_evo_sd_batch_paste(_evo_src):
-            _process_evo_sd_batch_paste(chat_id, _evo_src)
-            return _lark_im_done()
-    except Exception as _evo_auto_err:
-        print(f"⚠️ EVO batch auto-detect skipped: {_evo_auto_err!r}", flush=True)
-
-    # Natural English → slash command (optional; BOT_USE_AI=1). Failures keep hardcoded-only behavior.
-    # The router (chathandleagent) decides COMMAND vs CHAT so a real work request is never
-    # silently answered as small talk (and vice versa). Everything is guarded — on any
-    # error we fall back to the previous chitchat-gate behaviour.
+    # Natural English → slash command (rules first, LLM only if rules abstain).
     _skip_commandagent = False
     _router_decision = None
     try:
@@ -4818,14 +4777,91 @@ def lark_webhook():
         except Exception:
             pass
 
+    _is_routed_command = bool(
+        _router_decision is not None and getattr(_router_decision, "is_command", False)
+    )
+
+    if not _skip_commandagent:
+        try:
+            import commandagent as _commandagent
+
+            _multi_cmds = _commandagent.detect_multi_duty_commands(clean_text)
+            if _multi_cmds:
+                _multi_reply = _build_multi_duty_reply(_multi_cmds)
+                if _multi_reply:
+                    send_message(chat_id, _multi_reply)
+                    print(
+                        f"✅ Multi-duty reply ({len(_multi_cmds)} depts): {_multi_cmds}",
+                        flush=True,
+                    )
+                    return _lark_im_done()
+                print(
+                    f"⚠️ Multi-duty detected {_multi_cmds} but no handler output — fallback",
+                    flush=True,
+                )
+
+            ai_command = None
+            if (
+                _commandagent.is_enabled()
+                and _router_decision is not None
+                and getattr(_router_decision, "command", None)
+            ):
+                cand = _router_decision.command
+                if cand and cand != clean_text:
+                    ai_command = cand
+            if not ai_command:
+                ai_command = _commandagent.translate_if_enabled(clean_text)
+            if ai_command:
+                print(f"🤖 Command agent map: {clean_text!r} → {ai_command.splitlines()[0]!r}", flush=True)
+                clean_text = ai_command
+        except Exception as _commandagent_err:
+            print(f"⚠️ Command agent skipped (bot continues without AI): {_commandagent_err!r}", flush=True)
+
+    # Offset LLM agent — only after slash/rule command handlers above.
+    try:
+        import offsetai as _offsetai
+
+        if _offsetai.handle(
+            clean_text,
+            sender_open_id=sender_id or "",
+            chat_id=chat_id,
+            chat_type=chat_type,
+            send_message=send_message,
+            get_token_func=get_tenant_access_token,
+            session_key=_chat_memory_key,
+        ):
+            return _lark_im_done()
+    except Exception as _offsetai_err:
+        print(f"⚠️ offsetai skipped: {_offsetai_err!r}", flush=True)
+
+    # Auto-detect EVO Service Desk batch paste even WITHOUT the `/m` command.
+    # Only fires on the distinctive ``※SD-xxxxx※`` multi-block format, so normal
+    # messages and other commands are never intercepted. We rebuild the source from
+    # ``original_text`` (preserving newlines, which ``clean_text`` collapses) and strip
+    # an optional leading ``/m`` so an explicit command still works here too.
+    try:
+        _evo_src = original_text or ""
+        for _mk in mention_keys:
+            _evo_src = _evo_src.replace(_mk, "")
+        _evo_src = re.sub(r"@_user_\d+", "", _evo_src)
+        _evo_src = re.sub(r"<[^>]+>", "", _evo_src)
+        _evo_cmd = re.search(r"(?:^|\s)/m\s+", _evo_src, re.IGNORECASE)
+        if _evo_cmd:
+            _evo_src = _evo_src[_evo_cmd.end():]
+        _evo_src = _evo_src.strip()
+        if _evo_src.startswith('"') and _evo_src.endswith('"'):
+            _evo_src = _evo_src[1:-1].strip()
+        if _evo_src and maintenance.is_evo_sd_batch_paste(_evo_src):
+            _process_evo_sd_batch_paste(chat_id, _evo_src)
+            return _lark_im_done()
+    except Exception as _evo_auto_err:
+        print(f"⚠️ EVO batch auto-detect skipped: {_evo_auto_err!r}", flush=True)
+
     # Respect the router: if it already decided this is a COMMAND (e.g. /identifyissue,
     # a maintenance paste, a credit check), do NOT let the math/chat shortcut below
     # hijack it. A pasted report can contain dates/amounts that superficially look like
     # arithmetic ("2026/01/01 00:00:00 - 2026/06/03"), which previously produced a
     # bogus "couldn't parse that calculation" reply instead of running the command.
-    _is_routed_command = bool(
-        _router_decision is not None and getattr(_router_decision, "is_command", False)
-    )
     try:
         import chatagent as _math_agent
 
@@ -4914,44 +4950,6 @@ def lark_webhook():
             return _lark_im_done()
     except Exception as _dutyai_err:
         print(f"⚠️ dutyai skipped (bot continues normally): {_dutyai_err!r}", flush=True)
-
-    if not _skip_commandagent:
-        try:
-            import commandagent as _commandagent
-
-            _multi_cmds = _commandagent.detect_multi_duty_commands(clean_text)
-            if _multi_cmds:
-                _multi_reply = _build_multi_duty_reply(_multi_cmds)
-                if _multi_reply:
-                    send_message(chat_id, _multi_reply)
-                    print(
-                        f"✅ Multi-duty reply ({len(_multi_cmds)} depts): {_multi_cmds}",
-                        flush=True,
-                    )
-                    return _lark_im_done()
-                print(
-                    f"⚠️ Multi-duty detected {_multi_cmds} but no handler output — fallback",
-                    flush=True,
-                )
-
-            ai_command = None
-            # Router may have already produced the mapped command (e.g. prod-batch).
-            # Only adopt it when AI is enabled and it differs from the original text.
-            if (
-                _commandagent.is_enabled()
-                and _router_decision is not None
-                and getattr(_router_decision, "command", None)
-            ):
-                cand = _router_decision.command
-                if cand and cand != clean_text:
-                    ai_command = cand
-            if not ai_command:
-                ai_command = _commandagent.translate_if_enabled(clean_text)
-            if ai_command:
-                print(f"🤖 Command agent map: {clean_text!r} → {ai_command.splitlines()[0]!r}", flush=True)
-                clean_text = ai_command
-        except Exception as _commandagent_err:
-            print(f"⚠️ Command agent skipped (bot continues without AI): {_commandagent_err!r}", flush=True)
 
     # 命令处理
     if clean_text.lower() == "/test":
