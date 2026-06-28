@@ -1423,6 +1423,41 @@ _CMD_LLM_SYSTEM = (
 )
 
 
+def _resolve_llm_intent_tag(tag_s: str) -> Optional[str]:
+    """Map LLM tag variants (``fpms``, ``/fpms``) to catalogue tags (``cmd_fpms``)."""
+    raw = (tag_s or "").strip()
+    if not raw or raw.lower() in ("null", "none"):
+        return None
+    by_tag = _intents_by_tag()
+    if raw in by_tag:
+        return raw
+    low = raw.lower()
+    if low in by_tag:
+        return low
+    if not low.startswith("cmd_"):
+        cand = f"cmd_{low.lstrip('/')}"
+        if cand in by_tag:
+            return cand
+    slash = raw if raw.startswith("/") else f"/{raw.lstrip('/')}"
+    for spec in by_tag.values():
+        if spec.command.lower() == slash.lower():
+            return spec.tag
+    return None
+
+
+def _llm_message_text(body: dict[str, Any]) -> str:
+    """Extract assistant text; qwen thinking models may leave ``content`` empty."""
+    message = ((body.get("choices") or [{}])[0].get("message") or {})
+    try:
+        import chatagent as ca
+
+        return ca._text_from_llm_message(message)
+    except Exception:
+        content = (message.get("content") or "").strip()
+        reasoning = (message.get("reasoning") or "").strip()
+        return content or reasoning
+
+
 def _parse_llm_json(content: str) -> dict[str, Any] | None:
     s = (content or "").strip()
     if not s:
@@ -1458,15 +1493,21 @@ def _classify_intent_llm(text: str) -> dict[str, Any] | None:
         return None
 
     system = _CMD_LLM_SYSTEM + _build_llm_intent_catalog()
-    payload = {
+    payload: dict[str, Any] = {
         "model": _cmd_llm_model(),
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": raw},
         ],
-        "max_tokens": 120,
+        "max_tokens": 256,
         "temperature": 0,
     }
+    try:
+        import chatagent as ca
+
+        payload = ca.enrich_ollama_chat_payload(payload, think=False)
+    except Exception:
+        pass
     model_name = payload["model"]
     req = urllib.request.Request(
         f"{_cmd_llm_base()}/chat/completions",
@@ -1482,20 +1523,29 @@ def _classify_intent_llm(text: str) -> dict[str, Any] | None:
         )
         with urllib.request.urlopen(req, timeout=_CMD_LLM_TIMEOUT) as resp:
             body = json.loads(resp.read().decode("utf-8"))
-        content = ((body.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        content = _llm_message_text(body)
         obj = _parse_llm_json(content)
         if not obj:
+            msg = ((body.get("choices") or [{}])[0].get("message") or {})
+            raw_content = (msg.get("content") or "")[:160]
+            raw_reason = (msg.get("reasoning") or "")[:160]
+            print(
+                f"[commandagent] LLM parse failed content={raw_content!r} "
+                f"reasoning={raw_reason!r}",
+                flush=True,
+            )
             result = None
         else:
             route = str(obj.get("route") or "").strip().lower()
             tag = obj.get("intent_tag")
-            tag_s = str(tag).strip() if tag else ""
+            tag_s = str(tag).strip() if tag is not None and str(tag).strip().lower() not in ("null", "none") else ""
             try:
                 conf = float(obj.get("confidence") or 0.0)
             except (TypeError, ValueError):
                 conf = 0.0
             conf = max(0.0, min(1.0, conf))
             if route not in ("command", "chat"):
+                print(f"[commandagent] LLM bad route={route!r} obj={obj!r}", flush=True)
                 result = None
             elif route == "chat":
                 result = {
@@ -1505,13 +1555,19 @@ def _classify_intent_llm(text: str) -> dict[str, Any] | None:
                     "source": "llm",
                 }
             else:
-                spec = _intents_by_tag().get(tag_s)
-                if not spec or tag_s == NONE_TAG:
+                resolved_tag = _resolve_llm_intent_tag(tag_s)
+                spec = _intents_by_tag().get(resolved_tag or "")
+                if not spec or resolved_tag == NONE_TAG:
+                    print(
+                        f"[commandagent] LLM unknown intent_tag={tag_s!r} "
+                        f"resolved={resolved_tag!r} obj={obj!r}",
+                        flush=True,
+                    )
                     result = None
                 else:
                     result = {
                         "route": "command",
-                        "intent_tag": tag_s,
+                        "intent_tag": resolved_tag,
                         "confidence": conf,
                         "source": "llm",
                         "spec": spec,
