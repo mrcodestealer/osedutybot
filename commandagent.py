@@ -23,7 +23,7 @@ command-vs-chat decision directly.
 
 LLM env (optional, reuses ``chatagent`` API config):
 - ``BOT_COMMANDAGENT_LLM`` — set ``0`` to skip LLM even when an API key exists.
-- ``BOT_COMMANDAGENT_LLM_MODEL`` — command-routing model (default: ``qwen3.5:4b``).
+- ``BOT_COMMANDAGENT_LLM_MODEL`` — command-routing model (default: ``qwen3.5:2b``).
 - ``BOT_COMMANDAGENT_LLM_TIMEOUT`` — seconds (default ``15``).
 """
 
@@ -1370,7 +1370,7 @@ def _cmd_llm_enabled() -> bool:
 
 
 def _cmd_llm_model() -> str:
-    return (os.getenv("BOT_COMMANDAGENT_LLM_MODEL") or "qwen3.5:4b").strip()
+    return (os.getenv("BOT_COMMANDAGENT_LLM_MODEL") or "qwen3.5:2b").strip()
 
 
 def _cmd_llm_base() -> str:
@@ -2237,12 +2237,14 @@ def _cli_route(phrase: str) -> None:
     print(f"Translate:   {translate_if_enabled(phrase)!r}")
 
 
-def _cli_bench(phrase: str, *, runs: int = 3) -> None:
+def _cli_bench(phrase: str, *, runs: int = 3, model_override: str = "") -> None:
     """Benchmark command LLM latency (bypasses pattern rules; hits model every run)."""
     _load_cli_env()
     os.environ.setdefault("BOT_USE_AI", "1")
     os.environ.setdefault("BOT_CHAT_API_BASE", "http://127.0.0.1:11434/v1")
     os.environ.setdefault("BOT_CHAT_API_KEY", "ollama")
+    if (model_override or "").strip():
+        os.environ["BOT_COMMANDAGENT_LLM_MODEL"] = model_override.strip()
 
     cmd_model = _cmd_llm_model()
     if not _cmd_llm_enabled():
@@ -2298,6 +2300,13 @@ def main() -> None:
     p_bench = sub.add_parser("bench", help="Benchmark command LLM latency (ms)")
     p_bench.add_argument("phrase", type=str)
     p_bench.add_argument("-n", "--runs", type=int, default=3, help="number of runs (default 3)")
+    p_bench.add_argument(
+        "-m",
+        "--model",
+        type=str,
+        default="",
+        help="override BOT_COMMANDAGENT_LLM_MODEL (e.g. qwen3.5:2b)",
+    )
 
     sub.add_parser("patterns", help="Show pattern counts per intent")
 
@@ -2305,7 +2314,11 @@ def main() -> None:
     if args.cmd == "route":
         _cli_route(args.phrase)
     elif args.cmd == "bench":
-        _cli_bench(args.phrase, runs=max(1, int(args.runs or 3)))
+        _cli_bench(
+            args.phrase,
+            runs=max(1, int(args.runs or 3)),
+            model_override=str(getattr(args, "model", "") or ""),
+        )
     elif args.cmd == "patterns":
         intents = build_intent_catalog()
         total = 0
