@@ -4407,6 +4407,16 @@ def lark_webhook():
     clean_text = re.sub(r'\s+', ' ', clean_text_multiline).strip()
     print(f"🧹 Cleaned text (repr): {repr(clean_text)}")
 
+    _pipeline_t0 = time.perf_counter()
+
+    def _pipeline_mark(stage: str) -> None:
+        print(
+            f"[pipeline] +{(time.perf_counter() - _pipeline_t0) * 1000:.0f}ms {stage}",
+            flush=True,
+        )
+
+    _pipeline_mark(f"msg {clean_text[:60]!r}")
+
     jenkins_bot_oid = _jenkins_bot_open_id()
     is_jenkins_bot_sender = bool(
         sender_id and jenkins_bot_oid and sender_id == jenkins_bot_oid
@@ -4780,6 +4790,8 @@ def lark_webhook():
         send_message(chat_id, f"❌ Offset/leave form failed: {e}")
         return _lark_im_done()
 
+    _pipeline_mark("offset block done")
+
     # Natural English → slash command (rules first, LLM only if rules abstain).
     _skip_commandagent = False
     _router_decision = None
@@ -4849,6 +4861,8 @@ def lark_webhook():
         except Exception as _commandagent_err:
             print(f"⚠️ Command agent skipped (bot continues without AI): {_commandagent_err!r}", flush=True)
 
+    _pipeline_mark("commandagent done")
+
     # Offset LLM agent — only after slash/rule command handlers above.
     try:
         import offsetai as _offsetai
@@ -4865,6 +4879,8 @@ def lark_webhook():
             return _lark_im_done()
     except Exception as _offsetai_err:
         print(f"⚠️ offsetai skipped: {_offsetai_err!r}", flush=True)
+
+    _pipeline_mark("offsetai done")
 
     # Auto-detect EVO Service Desk batch paste even WITHOUT the `/m` command.
     # Only fires on the distinctive ``※SD-xxxxx※`` multi-block format, so normal
@@ -4990,6 +5006,8 @@ def lark_webhook():
             return _lark_im_done()
     except Exception as _dutyai_err:
         print(f"⚠️ dutyai skipped (bot continues normally): {_dutyai_err!r}", flush=True)
+
+    _pipeline_mark("dutyai done")
 
     # 命令处理
     if clean_text.lower() == "/test":

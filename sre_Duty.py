@@ -13,6 +13,7 @@ import re
 import sys
 import csv
 import os
+import time
 import requests
 from datetime import datetime, timedelta
 from calendar import monthrange
@@ -24,6 +25,11 @@ APP_SECRET = os.getenv("APP_SECRET")
 SPREADSHEET_TOKEN = os.getenv("OSE_SPREADSHEET_TOKEN")
 SHEET_ID = os.getenv("OSE_SHEET_ID")
 DUTY_LIST_PATH = "dutyList.csv"
+
+_SRE_TOKEN_CACHE: dict[str, object] = {"token": None, "expires_at": 0.0}
+_SRE_SHEET_CACHE: dict[str, object] = {"mono": 0.0, "values": None}
+_SRE_SHEET_CACHE_TTL_SEC = int(os.getenv("SRE_SHEET_CACHE_SEC", os.getenv("OSE_SHEET_CACHE_SEC", "120")))
+_SRE_SHEET_SCAN_RANGE = (os.getenv("SRE_SHEET_SCAN_RANGE") or "A1:ZZ200").strip()
 
 # Target names as they appear in column A (case‑insensitive start‑match)
 TARGET_NAMES = [
@@ -88,19 +94,31 @@ def col_index_to_letter(col_index):
     return letters
 
 def get_tenant_access_token():
+    now = time.time()
+    tok = _SRE_TOKEN_CACHE.get("token")
+    exp = float(_SRE_TOKEN_CACHE.get("expires_at") or 0.0)
+    if tok and now < exp:
+        return tok  # type: ignore[return-value]
     url = "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal"
     headers = {"Content-Type": "application/json"}
     data = {"app_id": APP_ID, "app_secret": APP_SECRET}
-    resp = requests.post(url, headers=headers, json=data)
+    resp = requests.post(url, headers=headers, json=data, timeout=15)
     result = resp.json()
     if result.get("code") != 0:
         raise Exception(f"Failed to get token: {result}")
-    return result["tenant_access_token"]
+    token = result["tenant_access_token"]
+    try:
+        expire_sec = int(result.get("expire") or 7200)
+    except (TypeError, ValueError):
+        expire_sec = 7200
+    _SRE_TOKEN_CACHE["token"] = token
+    _SRE_TOKEN_CACHE["expires_at"] = time.time() + max(60, expire_sec - 120)
+    return token
 
 def get_sheet_metadata(token, spreadsheet_token, sheet_id):
     url = f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/metainfo"
     headers = {"Authorization": f"Bearer {token}"}
-    resp = requests.get(url, headers=headers)
+    resp = requests.get(url, headers=headers, timeout=20)
     result = resp.json()
     if result.get("code") != 0:
         return None
@@ -117,7 +135,7 @@ def get_range_values(token, spreadsheet_token, sheet_id, range_str):
     # Use valueRenderOption=FormattedValue to get computed numbers, not formulas
     url = f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values/{sheet_id}!{range_str}?valueRenderOption=FormattedValue"
     headers = {"Authorization": f"Bearer {token}"}
-    resp = requests.get(url, headers=headers)
+    resp = requests.get(url, headers=headers, timeout=30)
     result = resp.json()
     if result.get("code") != 0:
         return None
@@ -256,24 +274,38 @@ def _get_duty_names_for_date(target_date, values):
 
     return checked
 
-def _load_sre_sheet_values() -> tuple[list | None, str | None]:
-    """Fetch SRE sheet once. Returns ``(values, error)`` — error set when values is None."""
+def _load_sre_sheet_values() -> tuple[list | None, str | None, bool]:
+    """Fetch SRE sheet; returns ``(values, error, cache_hit)``."""
+    now = time.monotonic()
+    cached = _SRE_SHEET_CACHE.get("values")
+    if (
+        _SRE_SHEET_CACHE_TTL_SEC > 0
+        and isinstance(cached, list)
+        and now - float(_SRE_SHEET_CACHE.get("mono") or 0.0) < _SRE_SHEET_CACHE_TTL_SEC
+    ):
+        return cached, None, True
+
     try:
         token = get_tenant_access_token()
     except Exception as e:
-        return None, f"Failed to get access token: {e}"
+        return None, f"Failed to get access token: {e}", False
 
-    props = get_sheet_metadata(token, SPREADSHEET_TOKEN, SHEET_ID)
-    if not props:
-        return None, "Cannot retrieve sheet metadata"
-    max_row = props.get("rowCount", 200)
-    scan_range = f"A1:ZZ{max_row}"
+    scan_range = _SRE_SHEET_SCAN_RANGE
+    if not scan_range.upper().startswith("A1:"):
+        props = get_sheet_metadata(token, SPREADSHEET_TOKEN, SHEET_ID)
+        if not props:
+            return None, "Cannot retrieve sheet metadata", False
+        max_row = props.get("rowCount", 200)
+        scan_range = f"A1:ZZ{max_row}"
+
     values = get_range_values(token, SPREADSHEET_TOKEN, SHEET_ID, scan_range)
     if values is None:
-        return None, "Failed to read sheet data"
+        return None, "Failed to read sheet data", False
     if len(values) < 2:
-        return None, "Sheet has fewer than 2 rows."
-    return values, None
+        return None, "Sheet has fewer than 2 rows.", False
+    _SRE_SHEET_CACHE["values"] = values
+    _SRE_SHEET_CACHE["mono"] = now
+    return values, None, False
 
 
 def _format_sre_duty_body(target_date, checked: list[str]) -> str:
@@ -296,10 +328,11 @@ def get_sre_duty_bulk(dates: list) -> dict:
     """One sheet read for many dates (dutyai week cards — avoids N× Lark API)."""
     from datetime import date as date_cls
 
+    t0 = time.perf_counter()
     unique = sorted({d for d in dates if isinstance(d, date_cls)})
     if not unique:
         return {}
-    values, err = _load_sre_sheet_values()
+    values, err, cache_hit = _load_sre_sheet_values()
     if values is None:
         msg = f"❌ {err or 'Failed to read sheet data'}"
         return {d: msg for d in unique}
@@ -307,13 +340,19 @@ def get_sre_duty_bulk(dates: list) -> dict:
     for d in unique:
         checked = _get_duty_names_for_date(d, values)
         out[d] = _format_sre_duty_body(d, checked)
+    ms = (time.perf_counter() - t0) * 1000
+    print(
+        f"[sre_Duty] bulk lookup {len(unique)} day(s) in {ms:.0f}ms "
+        f"(cache={'hit' if cache_hit else 'miss'})",
+        flush=True,
+    )
     return out
 
 
 # ---------- 对外接口 ----------
 def get_sre_duty(target_date):
     """返回指定日期的值班信息（格式化字符串）"""
-    values, err = _load_sre_sheet_values()
+    values, err, _cache_hit = _load_sre_sheet_values()
     if values is None:
         return f"❌ {err or 'Failed to read sheet data'}"
     checked = _get_duty_names_for_date(target_date, values)

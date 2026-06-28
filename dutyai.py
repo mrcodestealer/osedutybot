@@ -42,6 +42,7 @@ import calendar
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from datetime import date, datetime, timedelta
@@ -413,13 +414,20 @@ def _llm_parse(text: str, *, today: date, session_key: Optional[str] = None) -> 
         method="POST",
     )
     try:
+        print(f"[dutyai] LLM parse start: {text[:80]!r}", flush=True)
+        t0 = time.perf_counter()
         with urllib.request.urlopen(req, timeout=ca._llm_timeout_sec()) as resp:
             body = json.loads(resp.read().decode("utf-8"))
         choices = body.get("choices") or []
         if not choices:
             return None
         content = (choices[0].get("message") or {}).get("content") or ""
-        return _parse_json_obj(content)
+        parsed = _parse_json_obj(content)
+        print(
+            f"[dutyai] LLM parse done: {(time.perf_counter() - t0) * 1000:.0f}ms",
+            flush=True,
+        )
+        return parsed
     except Exception as exc:
         print(f"⚠️ dutyai LLM parse failed: {exc!r}", flush=True)
         return None
@@ -490,10 +498,19 @@ def parse_request(text: str, *, session_key: Optional[str] = None) -> dict:
         if dates or _LEAVE_SIGNAL_RE.search(raw):
             return {"kind": "leave", "departments": depts, "dates": dates or [today]}
     if depts and (dates or has_duty_word or has_date):
+        print(f"[dutyai] regex parse (no LLM): {raw[:80]!r} → {depts} {len(dates)} date(s)", flush=True)
         return {"kind": "duty", "departments": depts, "dates": dates or [today]}
 
     # 2) LLM only when regex/keywords could not resolve dept + date.
-    obj = _llm_parse(raw, today=today, session_key=session_key) if _llm_available() else None
+    if _llm_available() and (os.getenv("BOT_DUTYAI_USE_LLM") or "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    ):
+        obj = _llm_parse(raw, today=today, session_key=session_key)
+    else:
+        obj = None
     if obj:
         kind = str(obj.get("kind") or "none").strip().lower()
         if kind not in ("duty", "leave", "none"):
@@ -762,7 +779,7 @@ def _dept_card_payload(dept: str, dates: list[date]) -> dict:
     # roster into one range (so a Mon–Fri week with one person shows once).
     day_bodies: list[tuple[date, str]] = []
     sre_bulk: dict[date, str] | None = None
-    if dept == "sre" and len(dates) > 1:
+    if dept == "sre" and len(dates) >= 1:
         try:
             import sre_Duty
 
