@@ -660,6 +660,34 @@ _LEAVE_QUERY_RE = re.compile(
     r")\b"
 )
 
+# Department duty roster lookups — commandagent / dutyai / ``/sre`` etc., not offset.
+_DUTY_DEPT_RE = (
+    r"fpms|pms|bi|fe|cpms|sre|db|dba|liveslot|ote|ft|ose|cpa|fpms0"
+)
+_DUTY_ROSTER_QUERY_RE = re.compile(
+    r"(?i)\b("
+    rf"(?:{_DUTY_DEPT_RE})\b.{{0,40}}\bduty\b|"
+    rf"\bduty\b.{{0,40}}\b(?:{_DUTY_DEPT_RE})\b|"
+    r"(?:next|this|last)\s+week.{0,40}\bduty\b|"
+    r"\bduty\b.{0,30}\b(?:next|this|last)\s+week\b|"
+    r"who(?:'s|\s+is|\s+are).{0,40}\bduty\b|"
+    r"(?:show|list|check|view).{0,24}\bduty\b|"
+    r"on[\s-]?call"
+    r")\b"
+)
+
+
+def looks_like_duty_roster_query(text: str) -> bool:
+    """Roster/on-call lookup — must not be classified as offset/leave."""
+    s = normalize_offset_command_text(text)
+    if not s:
+        return False
+    if od._text_mentions_offset(s):
+        return False
+    if _LEAVE_QUERY_RE.search(s):
+        return False
+    return bool(_DUTY_ROSTER_QUERY_RE.search(s))
+
 _OFFSET_FORM_RULE_RE = re.compile(
     r"(?i)\b("
     r"调休|换班|"
@@ -939,6 +967,8 @@ def parse_offset_leave_action(text: str) -> Optional[str]:
     """Map natural language → offset/leave bot action (rules first, then optional LLM)."""
     s = normalize_offset_command_text(text)
     if not s:
+        return None
+    if looks_like_duty_roster_query(s):
         return None
     if (text or "").strip().startswith("/") and not is_offset_command_text(text):
         return None

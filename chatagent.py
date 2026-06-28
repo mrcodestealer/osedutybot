@@ -138,17 +138,40 @@ def _llm_api_key() -> str:
     ).strip()
 
 
-def _llm_model() -> str:
-    return (os.getenv("BOT_CHAT_MODEL") or DEFAULT_LLM_MODEL).strip()
+def _command_llm_model() -> str:
+    return (os.getenv("BOT_COMMANDAGENT_LLM_MODEL") or "qwen3.5:2b").strip()
 
 
-def _llm_model_for_request(*, images: bool = False) -> str:
-    """Text chat uses BOT_CHAT_MODEL; vision needs a multimodal model (e.g. qwen3.5:9b)."""
+def _use_command_model_only() -> bool:
+    # Temporary default ON — set BOT_USE_COMMAND_MODEL_ONLY=0 to restore dual-model setup.
+    return (os.getenv("BOT_USE_COMMAND_MODEL_ONLY") or "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def shared_llm_model(*, images: bool = False, module_override: Optional[str] = None) -> str:
+    """Central model picker for all bot LLM callers."""
+    if _use_command_model_only():
+        return _command_llm_model()
+    if (module_override or "").strip():
+        return module_override.strip()
     if images:
         vision_model = (os.getenv("BOT_CHAT_VISION_MODEL") or "").strip()
         if vision_model:
             return vision_model
-    return _llm_model()
+    return (os.getenv("BOT_CHAT_MODEL") or DEFAULT_LLM_MODEL).strip()
+
+
+def _llm_model() -> str:
+    return shared_llm_model()
+
+
+def _llm_model_for_request(*, images: bool = False) -> str:
+    """Text chat uses BOT_CHAT_MODEL; vision needs a multimodal model (e.g. qwen3.5:9b)."""
+    return shared_llm_model(images=images)
 
 
 def _llm_base_url() -> str:
@@ -1641,6 +1664,7 @@ def startup_status() -> None:
     print(
         f"[chatagent] BOT_USE_CHATAGENT={os.getenv('BOT_USE_CHATAGENT')!r} enabled={enabled} "
         f"backend={mode} api_key={'yes' if llm_ok else 'no'} api_model={_llm_model()!r} "
+        f"command_only={_use_command_model_only()} "
         f"generative_dir={gen_path} generative_exists={has_generative}",
         flush=True,
     )

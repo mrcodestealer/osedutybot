@@ -35,6 +35,10 @@ if [[ -f "$ENV_FILE" ]]; then
   if v="$(_read_env_key BOT_COMMANDAGENT_LLM_MODEL "$ENV_FILE")" && [[ -n "$v" ]]; then
     CMD_MODEL="$v"
   fi
+  USE_CMD_ONLY=1
+  if v="$(_read_env_key BOT_USE_COMMAND_MODEL_ONLY "$ENV_FILE")" && [[ -n "$v" ]]; then
+    USE_CMD_ONLY="$v"
+  fi
   if ! bash -n "$ENV_FILE" 2>/dev/null; then
     echo "[warmup-ollama] WARN: $ENV_FILE has bash syntax errors — using parsed model keys only." >&2
     echo "[warmup-ollama] WARN: fix with: bash -n $ENV_FILE" >&2
@@ -66,10 +70,21 @@ until curl -sf "${OLLAMA_HOST}/api/tags" >/dev/null; do
 done
 
 warm_model "$CMD_MODEL"
-if [[ "$CMD_MODEL" != "$CHAT_MODEL" ]]; then
-  warm_model "$CHAT_MODEL"
-fi
+case "${USE_CMD_ONLY,,}" in
+  1|true|yes|on)
+    echo "[warmup-ollama] BOT_USE_COMMAND_MODEL_ONLY=1 — skipping separate chat model preload"
+    ;;
+  *)
+    if [[ "$CMD_MODEL" != "$CHAT_MODEL" ]]; then
+      warm_model "$CHAT_MODEL"
+    fi
+    ;;
+esac
 
 echo "[warmup-ollama] OK — models should stay loaded (keep_alive=-1)"
 echo "[warmup-ollama]   command: $CMD_MODEL"
-echo "[warmup-ollama]   chat:    $CHAT_MODEL"
+if [[ "${USE_CMD_ONLY,,}" =~ ^(1|true|yes|on)$ ]]; then
+  echo "[warmup-ollama]   chat:    (same as command — single-model mode)"
+else
+  echo "[warmup-ollama]   chat:    $CHAT_MODEL"
+fi

@@ -934,7 +934,12 @@ def _maint_llm_enabled() -> bool:
 
 
 def _maint_llm_model() -> str:
-    return (os.getenv("BOT_MAINT_AGENT_MODEL") or os.getenv("BOT_CHAT_MODEL") or "gpt-4o-mini").strip()
+    try:
+        import chatagent as ca
+
+        return ca.shared_llm_model(module_override=os.getenv("BOT_MAINT_AGENT_MODEL"))
+    except Exception:
+        return (os.getenv("BOT_MAINT_AGENT_MODEL") or os.getenv("BOT_CHAT_MODEL") or "gpt-4o-mini").strip()
 
 
 def _maint_llm_base() -> str:

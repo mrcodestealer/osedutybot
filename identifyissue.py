@@ -436,7 +436,12 @@ def _llm_base_url() -> str:
 
 
 def _llm_model() -> str:
-    return (os.getenv("BOT_ISSUE_MODEL") or os.getenv("BOT_CHAT_MODEL") or "gpt-4o-mini").strip()
+    try:
+        import chatagent as ca
+
+        return ca.shared_llm_model(module_override=os.getenv("BOT_ISSUE_MODEL"))
+    except Exception:
+        return (os.getenv("BOT_ISSUE_MODEL") or os.getenv("BOT_CHAT_MODEL") or "gpt-4o-mini").strip()
 
 
 def llm_available() -> bool:
