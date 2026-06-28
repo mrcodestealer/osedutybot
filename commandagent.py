@@ -24,7 +24,7 @@ command-vs-chat decision directly.
 
 LLM env (optional, reuses ``chatagent`` API config):
 - ``BOT_COMMANDAGENT_LLM`` — set ``0`` to skip LLM even when an API key exists.
-- ``BOT_COMMANDAGENT_LLM_MODEL`` — command-routing model (default: ``qwen3.5:2b``).
+- ``BOT_COMMANDAGENT_LLM_MODEL`` — command-routing model (default: ``qwen2.5:0.5b``).
 - ``BOT_COMMANDAGENT_LLM_TIMEOUT`` — seconds (default ``15``).
 """
 
@@ -1374,7 +1374,7 @@ def _cmd_llm_enabled() -> bool:
 
 
 def _cmd_llm_model() -> str:
-    return (os.getenv("BOT_COMMANDAGENT_LLM_MODEL") or "qwen3.5:2b").strip()
+    return (os.getenv("BOT_COMMANDAGENT_LLM_MODEL") or "qwen2.5:0.5b").strip()
 
 
 def _cmd_llm_base() -> str:
@@ -2411,6 +2411,7 @@ def _cli_bench(phrase: str, *, runs: int = 3, model_override: str = "") -> None:
 
 
 _DEFAULT_BENCH_MODELS: tuple[str, ...] = (
+    "qwen2.5:0.5b",
     "qwen3.5:2b",
     "qwen3.5:4b",
     "qwen3.5:9b",
@@ -2613,7 +2614,7 @@ def main() -> None:
         "--model",
         type=str,
         default="",
-        help="override BOT_COMMANDAGENT_LLM_MODEL (e.g. qwen3.5:2b)",
+        help="override BOT_COMMANDAGENT_LLM_MODEL (e.g. qwen2.5:0.5b)",
     )
 
     p_bench_all = sub.add_parser("bench-all", help="Compare command LLM latency across Ollama models")

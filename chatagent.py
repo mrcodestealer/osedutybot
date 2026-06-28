@@ -139,7 +139,7 @@ def _llm_api_key() -> str:
 
 
 def _command_llm_model() -> str:
-    return (os.getenv("BOT_COMMANDAGENT_LLM_MODEL") or "qwen3.5:2b").strip()
+    return (os.getenv("BOT_COMMANDAGENT_LLM_MODEL") or "qwen2.5:0.5b").strip()
 
 
 def _use_command_model_only() -> bool:

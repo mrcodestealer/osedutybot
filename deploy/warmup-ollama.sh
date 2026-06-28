@@ -6,7 +6,7 @@ REPO_DIR="${REPO_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 ENV_FILE="${ENV_FILE:-$REPO_DIR/.env}"
 OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
 CHAT_MODEL="${BOT_CHAT_MODEL:-qwen3.6:35b-a3b}"
-CMD_MODEL="${BOT_COMMANDAGENT_LLM_MODEL:-qwen3.5:2b}"
+CMD_MODEL="${BOT_COMMANDAGENT_LLM_MODEL:-qwen2.5:0.5b}"
 MAX_WAIT="${OLLAMA_WARMUP_WAIT_SEC:-600}"
 
 # Read only the keys we need — do not `source` the whole .env (may have bash syntax issues).
