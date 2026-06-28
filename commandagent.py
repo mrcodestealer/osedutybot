@@ -19,6 +19,7 @@ command-vs-chat decision directly.
 **Inspect**
     python commandagent.py route "who is on fpms duty today"   # show rule/LLM resolution path
     python commandagent.py bench "who is covering fpms shift tonight" -n 5   # LLM latency (ms)
+    python commandagent.py bench-all -n 3   # compare all Ollama models (command classify)
     python commandagent.py patterns   # print pattern counts per intent
 
 LLM env (optional, reuses ``chatagent`` API config):
@@ -1349,7 +1350,7 @@ def _intents_by_tag() -> dict[str, IntentSpec]:
 # LLM intent classification (command vs chat + intent tag)
 # ---------------------------------------------------------------------------
 
-_CMD_LLM_TIMEOUT = float(os.getenv("BOT_COMMANDAGENT_LLM_TIMEOUT", "15"))
+_CMD_LLM_TIMEOUT = float(os.getenv("BOT_COMMANDAGENT_LLM_TIMEOUT", "8"))
 _cmd_llm_failed_logged = False
 _CMD_LLM_CACHE: dict[str, tuple[float, dict[str, Any] | None]] = {}
 _CMD_LLM_CACHE_LOCK = threading.Lock()
@@ -1557,7 +1558,7 @@ def _llm_route_obj_to_result(obj: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _classify_intent_llm_ollama_native(raw: str, system: str, model: str) -> dict[str, Any] | None:
-    """Fallback when OpenAI-compat API returns thinking-only output."""
+    """Ollama ``/api/chat`` with ``think=false`` + ``format=json`` (fast, reliable JSON)."""
     url = f"{_ollama_native_base()}/api/chat"
     payload = {
         "model": model,
@@ -1568,7 +1569,7 @@ def _classify_intent_llm_ollama_native(raw: str, system: str, model: str) -> dic
         "stream": False,
         "think": False,
         "format": "json",
-        "options": {"temperature": 0, "num_predict": 256},
+        "options": {"temperature": 0, "num_predict": 128},
         "keep_alive": -1,
     }
     req = urllib.request.Request(
@@ -1587,7 +1588,40 @@ def _classify_intent_llm_ollama_native(raw: str, system: str, model: str) -> dic
             flush=True,
         )
         return None
-    print("[commandagent] LLM classify via Ollama /api/chat (think=false, format=json)", flush=True)
+    return _llm_route_obj_to_result(obj)
+
+
+def _classify_intent_llm_openai_compat(
+    raw: str, system: str, model_name: str, api_key: str
+) -> dict[str, Any] | None:
+    """OpenAI-compatible API (non-Ollama backends)."""
+    payload: dict[str, Any] = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": raw},
+        ],
+        "max_tokens": 256,
+        "temperature": 0,
+    }
+    payload = _apply_ollama_cmd_payload(payload)
+    req = urllib.request.Request(
+        f"{_cmd_llm_base()}/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=_CMD_LLM_TIMEOUT) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+    obj = _extract_route_json_from_llm_body(body)
+    if not obj:
+        msg = ((body.get("choices") or [{}])[0].get("message") or {})
+        print(
+            f"[commandagent] OpenAI-compat parse failed content={(msg.get('content') or '')[:160]!r} "
+            f"reasoning={(msg.get('reasoning') or '')[:160]!r}",
+            flush=True,
+        )
+        return None
     return _llm_route_obj_to_result(obj)
 
 
@@ -1639,60 +1673,19 @@ def _classify_intent_llm(text: str) -> dict[str, Any] | None:
         return None
 
     system = _CMD_LLM_SYSTEM + _build_llm_intent_catalog()
-    payload: dict[str, Any] = {
-        "model": _cmd_llm_model(),
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": raw},
-        ],
-        "max_tokens": 512,
-        "temperature": 0,
-    }
-    payload = _apply_ollama_cmd_payload(payload)
-    model_name = payload["model"]
-    req = urllib.request.Request(
-        f"{_cmd_llm_base()}/chat/completions",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-        method="POST",
-    )
+    model_name = _cmd_llm_model()
     result: dict[str, Any] | None = None
     t0 = time.perf_counter()
-    api_used = "openai_compat"
+    api_used = "ollama_native" if _cmd_llm_is_ollama() else "openai_compat"
     try:
         print(
-            f"[commandagent] LLM classify: model={model_name!r} text={raw[:80]!r}",
+            f"[commandagent] LLM classify: model={model_name!r} api={api_used} text={raw[:80]!r}",
             flush=True,
         )
-        with urllib.request.urlopen(req, timeout=_CMD_LLM_TIMEOUT) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-        obj = _extract_route_json_from_llm_body(body)
-        if obj:
-            result = _llm_route_obj_to_result(obj)
-        if result is None and _cmd_llm_is_ollama():
-            msg = ((body.get("choices") or [{}])[0].get("message") or {})
-            raw_content = (msg.get("content") or "")[:160]
-            raw_reason = (msg.get("reasoning") or "")[:160]
-            print(
-                f"[commandagent] OpenAI-compat parse failed content={raw_content!r} "
-                f"reasoning={raw_reason!r} — trying Ollama /api/chat",
-                flush=True,
-            )
-            api_used = "ollama_native"
-            t_native = time.perf_counter()
+        if _cmd_llm_is_ollama():
             result = _classify_intent_llm_ollama_native(raw, system, model_name)
-            native_ms = (time.perf_counter() - t_native) * 1000
-            print(
-                f"[commandagent] LLM native fallback: {native_ms:.0f}ms model={model_name!r}",
-                flush=True,
-            )
-        elif result is None:
-            msg = ((body.get("choices") or [{}])[0].get("message") or {})
-            print(
-                f"[commandagent] LLM parse failed content={(msg.get('content') or '')[:160]!r} "
-                f"reasoning={(msg.get('reasoning') or '')[:160]!r}",
-                flush=True,
-            )
+        else:
+            result = _classify_intent_llm_openai_compat(raw, system, model_name, api_key)
         elapsed_ms = (time.perf_counter() - t0) * 1000
         route_s = (result or {}).get("route") or "none"
         print(
@@ -2290,6 +2283,156 @@ def _cli_bench(phrase: str, *, runs: int = 3, model_override: str = "") -> None:
     print(f"  routes:  {routes}")
 
 
+_DEFAULT_BENCH_MODELS: tuple[str, ...] = (
+    "qwen3.5:2b",
+    "qwen3.5:4b",
+    "qwen3.5:9b",
+    "qwen2.5:14b-instruct",
+    "qwen3.6:35b-a3b",
+)
+
+
+def _ollama_installed_models() -> list[str]:
+    try:
+        with urllib.request.urlopen(f"{_ollama_native_base()}/api/tags", timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        names = [str(m.get("name") or "").strip() for m in (data.get("models") or [])]
+        return [n for n in names if n]
+    except Exception as exc:
+        print(f"WARN: could not list Ollama models: {exc!r}", flush=True)
+        return list(_DEFAULT_BENCH_MODELS)
+
+
+def _bench_classify_once(raw: str, model: str, system: str) -> tuple[float, Optional[dict[str, Any]]]:
+    t0 = time.perf_counter()
+    result = _classify_intent_llm_ollama_native(raw, system, model)
+    return (time.perf_counter() - t0) * 1000, result
+
+
+def _bench_stats(times_ms: list[float]) -> dict[str, float]:
+    if not times_ms:
+        return {}
+    ordered = sorted(times_ms)
+    return {
+        "min": ordered[0],
+        "median": ordered[len(ordered) // 2],
+        "max": ordered[-1],
+        "avg": sum(ordered) / len(ordered),
+    }
+
+
+def _cli_bench_all(
+    phrase: str,
+    *,
+    runs: int = 3,
+    models: Optional[list[str]] = None,
+    from_ollama: bool = False,
+    warmup: bool = True,
+) -> None:
+    """Compare command-classify latency across multiple Ollama models."""
+    _load_cli_env()
+    os.environ.setdefault("BOT_USE_AI", "1")
+    os.environ.setdefault("BOT_CHAT_API_BASE", "http://127.0.0.1:11434/v1")
+    os.environ.setdefault("BOT_CHAT_API_KEY", "ollama")
+
+    if not _cmd_llm_is_ollama():
+        print("ERROR: bench-all requires Ollama (BOT_CHAT_API_BASE with port 11434).", flush=True)
+        return
+
+    raw = (phrase or "").strip()
+    if not raw:
+        print("ERROR: empty phrase", flush=True)
+        return
+
+    if from_ollama:
+        model_list = _ollama_installed_models()
+    elif models:
+        model_list = models
+    else:
+        model_list = list(_DEFAULT_BENCH_MODELS)
+
+    if not model_list:
+        print("ERROR: no models to benchmark.", flush=True)
+        return
+
+    system = _CMD_LLM_SYSTEM + _build_llm_intent_catalog()
+    runs = max(1, runs)
+
+    print(f"Benchmark-all: {raw!r}")
+    print(f"API:           Ollama /api/chat (think=false, format=json)")
+    print(f"Runs/model:    {runs}" + (" + 1 warmup (discarded)" if warmup else ""))
+    print(f"Models:        {len(model_list)}")
+    print("")
+
+    rows: list[dict[str, Any]] = []
+    for model in model_list:
+        print(f"=== {model} ===", flush=True)
+        if warmup:
+            try:
+                w_ms, _ = _bench_classify_once(raw, model, system)
+                print(f"  warmup: {w_ms:.0f} ms (discarded)", flush=True)
+            except Exception as exc:
+                print(f"  warmup failed: {exc!r}", flush=True)
+
+        times_ms: list[float] = []
+        route_s = "none"
+        tag_s = "—"
+        err = ""
+        for i in range(runs):
+            try:
+                elapsed_ms, result = _bench_classify_once(raw, model, system)
+                times_ms.append(elapsed_ms)
+                route_s = (result or {}).get("route") or "none"
+                tag_s = (result or {}).get("intent_tag") or "—"
+                print(
+                    f"  run {i + 1}/{runs}: {elapsed_ms:6.0f} ms  route={route_s} tag={tag_s}",
+                    flush=True,
+                )
+            except Exception as exc:
+                err = str(exc)
+                print(f"  run {i + 1}/{runs}: ERROR {exc!r}", flush=True)
+
+        stats = _bench_stats(times_ms)
+        rows.append(
+            {
+                "model": model,
+                "stats": stats,
+                "route": route_s,
+                "tag": tag_s,
+                "error": err,
+                "ok": bool(stats),
+            }
+        )
+        print("", flush=True)
+
+    ok_rows = [r for r in rows if r.get("ok")]
+    ok_rows.sort(key=lambda r: float((r.get("stats") or {}).get("median") or 1e18))
+
+    print("=" * 72)
+    print(f"{'Model':<24} {'min':>7} {'median':>7} {'max':>7} {'avg':>7}  route/tag")
+    print("-" * 72)
+    for r in rows:
+        st = r.get("stats") or {}
+        if st:
+            print(
+                f"{r['model']:<24} {st['min']:7.0f} {st['median']:7.0f} "
+                f"{st['max']:7.0f} {st['avg']:7.0f}  {r.get('route')}/{r.get('tag')}"
+            )
+        else:
+            print(f"{r['model']:<24} {'—':>7} {'—':>7} {'—':>7} {'—':>7}  ERROR {r.get('error')}")
+    print("-" * 72)
+    if ok_rows:
+        best = ok_rows[0]
+        st = best["stats"]
+        print(
+            f"Fastest (median): {best['model']} — {st['median']:.0f} ms "
+            f"(recommended for BOT_COMMANDAGENT_LLM_MODEL)"
+        )
+    print("")
+    print("Note: large models (35b) are for BOT_CHAT_MODEL, not command routing.")
+    print("      Unload other models (ollama ps) for fairest CPU comparison.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Duty Bot command agent (natural language → slash commands)")
     sub = parser.add_subparsers(dest="cmd")
@@ -2308,6 +2451,32 @@ def main() -> None:
         help="override BOT_COMMANDAGENT_LLM_MODEL (e.g. qwen3.5:2b)",
     )
 
+    p_bench_all = sub.add_parser("bench-all", help="Compare command LLM latency across Ollama models")
+    p_bench_all.add_argument(
+        "phrase",
+        nargs="?",
+        default="who is covering fpms shift tonight",
+        help="test phrase (default: who is covering fpms shift tonight)",
+    )
+    p_bench_all.add_argument("-n", "--runs", type=int, default=3, help="timed runs per model (default 3)")
+    p_bench_all.add_argument(
+        "-m",
+        "--models",
+        type=str,
+        default="",
+        help="comma-separated model names (default: built-in list)",
+    )
+    p_bench_all.add_argument(
+        "--from-ollama",
+        action="store_true",
+        help="benchmark every model returned by ollama list",
+    )
+    p_bench_all.add_argument(
+        "--no-warmup",
+        action="store_true",
+        help="skip discarded warmup run per model",
+    )
+
     sub.add_parser("patterns", help="Show pattern counts per intent")
 
     args = parser.parse_args()
@@ -2318,6 +2487,16 @@ def main() -> None:
             args.phrase,
             runs=max(1, int(args.runs or 3)),
             model_override=str(getattr(args, "model", "") or ""),
+        )
+    elif args.cmd == "bench-all":
+        models_arg = str(getattr(args, "models", "") or "").strip()
+        model_list = [m.strip() for m in models_arg.split(",") if m.strip()] if models_arg else None
+        _cli_bench_all(
+            str(getattr(args, "phrase", "") or ""),
+            runs=max(1, int(getattr(args, "runs", 3) or 3)),
+            models=model_list,
+            from_ollama=bool(getattr(args, "from_ollama", False)),
+            warmup=not bool(getattr(args, "no_warmup", False)),
         )
     elif args.cmd == "patterns":
         intents = build_intent_catalog()
