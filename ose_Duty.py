@@ -3987,6 +3987,20 @@ def _showoffset_pair_sort_key(req: str, exc: str) -> tuple[Any, ...]:
     return (_idx(req), _idx(exc), req.lower(), exc.lower())
 
 
+def _offset_row_touches_month(od: date, xd: date, year: int, month: int) -> bool:
+    """True when original or exchange date falls in the requested month."""
+    return (od.year, od.month) == (year, month) or (xd.year, xd.month) == (year, month)
+
+
+def _showoffset_person_key(name: str) -> Optional[str]:
+    """Prefer roster canonical name; keep unknown names instead of dropping rows."""
+    canon = _showoffset_canonical_name(name)
+    if canon:
+        return canon
+    nm = _title_name(name)
+    return nm or None
+
+
 def _collect_offset_month_pair_lines(
     year: int,
     month: int,
@@ -4002,7 +4016,7 @@ def _collect_offset_month_pair_lines(
         token = get_tenant_access_token()
         _, items = _get_bitable_raw_pair(token)
     person_raw = involved_person or request_person_only
-    filter_person = _showoffset_canonical_name(person_raw or "") if person_raw else None
+    filter_person = _showoffset_person_key(person_raw or "") if person_raw else None
     pairs: dict[tuple[str, str], dict[str, set[int]]] = {}
     for it in items:
         f = it.get("fields") or {}
@@ -4016,10 +4030,10 @@ def _collect_offset_month_pair_lines(
         xd = _parse_date_value(_get_field_by_aliases(f, ["Exchange Date", "Swap Date", "Target Date"]))
         if not od or not xd:
             continue
-        if od.year != year or od.month != month:
+        if not _offset_row_touches_month(od, xd, year, month):
             continue
-        req_person = _showoffset_canonical_name(req)
-        exc_person = _showoffset_canonical_name(exc)
+        req_person = _showoffset_person_key(req)
+        exc_person = _showoffset_person_key(exc)
         if not req_person or not exc_person:
             continue
         if filter_person and not (
@@ -4064,12 +4078,12 @@ def _collect_offset_month_summary(
         xd = _parse_date_value(_get_field_by_aliases(f, ["Exchange Date", "Swap Date", "Target Date"]))
         if not od or not xd:
             continue
-        if od.year != year or od.month != month:
+        if not _offset_row_touches_month(od, xd, year, month):
             continue
-        req_person = _showoffset_canonical_name(req)
+        req_person = _showoffset_person_key(req)
         if req_person:
             _add_showoffset_days(by_person, req_person, od.day, xd.day)
-        exc_person = _showoffset_canonical_name(exc)
+        exc_person = _showoffset_person_key(exc)
         if exc_person:
             _add_showoffset_days(by_person, exc_person, xd.day, od.day)
     out: dict[str, tuple[list[int], list[int]]] = {}
