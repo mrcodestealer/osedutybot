@@ -2083,6 +2083,67 @@ def wants_offset_request(text: str) -> bool:
     return _wants_offset(text)
 
 
+_OFFSET_FORM_SLASH_RE = re.compile(r"^/offset\s*$", re.I)
+
+
+def _open_offset_form(
+    *,
+    sender_open_id: str,
+    chat_id: str,
+    chat_type: Optional[str],
+    send_message: Callable[..., dict[str, Any]],
+    get_token_func: Callable[[], str],
+) -> bool:
+    """Open the OSE duty offset (shift swap) form card for the sender."""
+    oid = (sender_open_id or "").strip()
+    if not oid:
+        send_message(chat_id, "❌ Could not identify your Lark user for a private form.")
+        return True
+    try:
+        token = get_token_func()
+    except Exception as e:
+        send_message(chat_id, f"❌ {e}")
+        return True
+    try:
+        offset_request_person = resolve_request_person(oid, token)
+    except ValueError as e:
+        send_message(chat_id, f"❌ {e}")
+        return True
+    _deliver_private_card(
+        owner_open_id=oid,
+        group_chat_id=chat_id,
+        chat_type=chat_type,
+        card=build_offset_form_card(
+            owner_open_id=oid,
+            request_person=offset_request_person,
+        ),
+        send_message=send_message,
+        token=token,
+    )
+    return True
+
+
+def handle_offset_form_command(
+    clean_text: str,
+    *,
+    sender_open_id: str,
+    chat_id: str,
+    chat_type: Optional[str],
+    send_message: Callable[..., dict[str, Any]],
+    get_token_func: Callable[[], str],
+) -> bool:
+    """Handle ``/offset`` — open the shift-swap form (not chat, not dept ``/leave``)."""
+    if not _OFFSET_FORM_SLASH_RE.match((clean_text or "").strip()):
+        return False
+    return _open_offset_form(
+        sender_open_id=sender_open_id,
+        chat_id=chat_id,
+        chat_type=chat_type,
+        send_message=send_message,
+        get_token_func=get_token_func,
+    )
+
+
 def handle_showoffset(
     clean_text: str,
     *,
@@ -2512,21 +2573,12 @@ def handle_mention(
         return True
     try:
         if want_offset:
-            try:
-                offset_request_person = resolve_request_person(oid, token)
-            except ValueError as e:
-                send_message(chat_id, f"❌ {e}")
-                return True
-            _deliver_private_card(
-                owner_open_id=oid,
-                group_chat_id=chat_id,
+            _open_offset_form(
+                sender_open_id=oid,
+                chat_id=chat_id,
                 chat_type=chat_type,
-                card=build_offset_form_card(
-                    owner_open_id=oid,
-                    request_person=offset_request_person,
-                ),
                 send_message=send_message,
-                token=token,
+                get_token_func=get_token_func,
             )
         if want_leave:
             request_person = try_resolve_request_person(oid, token)

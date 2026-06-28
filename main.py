@@ -4688,6 +4688,16 @@ def lark_webhook():
         except Exception:
             pass
 
+        if _offsetleave.handle_offset_form_command(
+            clean_text,
+            sender_open_id=sender_id or "",
+            chat_id=chat_id,
+            chat_type=chat_type,
+            send_message=send_message,
+            get_token_func=get_tenant_access_token,
+        ):
+            return _lark_im_done()
+
         if _offsetleave.handle_showoffset(
             clean_text,
             chat_id=chat_id,
@@ -4952,9 +4962,26 @@ def lark_webhook():
         print(f"⚠️ dutyai skipped (bot continues normally): {_dutyai_err!r}", flush=True)
 
     # 命令处理
-    if clean_text.lower() == "/test":
+    elif clean_text.lower() == "/test":
         send_message(chat_id, _lark_test_card_json(), msg_type="interactive")
         return _lark_im_done()
+
+    elif re.match(r"^/offset\s*$", clean_text, re.I):
+        try:
+            import offsetleave as _offsetleave_cmd
+
+            if _offsetleave_cmd.handle_offset_form_command(
+                clean_text,
+                sender_open_id=sender_id or "",
+                chat_id=chat_id,
+                chat_type=chat_type,
+                send_message=send_message,
+                get_token_func=get_tenant_access_token,
+            ):
+                return _lark_im_done()
+        except Exception as _offset_cmd_err:
+            send_message(chat_id, f"❌ Offset form failed: {_offset_cmd_err}")
+            return _lark_im_done()
 
     if clean_text.lower() == '/cancelp1':
         with _active_p1_reminders_lock:

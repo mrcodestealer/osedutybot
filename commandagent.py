@@ -1675,7 +1675,7 @@ def _detect_offset_leave_rule_command(text: str) -> dict[str, Any] | None:
         return None
     cmd_by_action = {
         "offset_form": "/offset",
-        "leave_form": "/leave",
+        "leave_form": "/oseleave",
         "edit_offset": "/editoffset",
         "delete_offset": "/deleteoffset",
         "pending_offset": "/pendingoffset",
