@@ -18,6 +18,7 @@ command-vs-chat decision directly.
 
 **Inspect**
     python commandagent.py route "who is on fpms duty today"   # show rule/LLM resolution path
+    python commandagent.py bench "who is covering fpms shift tonight" -n 5   # LLM latency (ms)
     python commandagent.py patterns   # print pattern counts per intent
 
 LLM env (optional, reuses ``chatagent`` API config):
@@ -1656,6 +1657,8 @@ def _classify_intent_llm(text: str) -> dict[str, Any] | None:
         method="POST",
     )
     result: dict[str, Any] | None = None
+    t0 = time.perf_counter()
+    api_used = "openai_compat"
     try:
         print(
             f"[commandagent] LLM classify: model={model_name!r} text={raw[:80]!r}",
@@ -1675,7 +1678,14 @@ def _classify_intent_llm(text: str) -> dict[str, Any] | None:
                 f"reasoning={raw_reason!r} — trying Ollama /api/chat",
                 flush=True,
             )
+            api_used = "ollama_native"
+            t_native = time.perf_counter()
             result = _classify_intent_llm_ollama_native(raw, system, model_name)
+            native_ms = (time.perf_counter() - t_native) * 1000
+            print(
+                f"[commandagent] LLM native fallback: {native_ms:.0f}ms model={model_name!r}",
+                flush=True,
+            )
         elif result is None:
             msg = ((body.get("choices") or [{}])[0].get("message") or {})
             print(
@@ -1683,7 +1693,16 @@ def _classify_intent_llm(text: str) -> dict[str, Any] | None:
                 f"reasoning={(msg.get('reasoning') or '')[:160]!r}",
                 flush=True,
             )
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        route_s = (result or {}).get("route") or "none"
+        print(
+            f"[commandagent] LLM classify done: {elapsed_ms:.0f}ms api={api_used} "
+            f"model={model_name!r} route={route_s}",
+            flush=True,
+        )
     except urllib.error.HTTPError as exc:
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        print(f"[commandagent] LLM classify failed after {elapsed_ms:.0f}ms", flush=True)
         if not _cmd_llm_failed_logged:
             try:
                 detail = exc.read().decode("utf-8", errors="replace")[:300]
@@ -1692,6 +1711,8 @@ def _classify_intent_llm(text: str) -> dict[str, Any] | None:
             print(f"⚠️ commandagent LLM HTTP {exc.code}: {detail}", flush=True)
             _cmd_llm_failed_logged = True
     except Exception as exc:
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        print(f"[commandagent] LLM classify failed after {elapsed_ms:.0f}ms", flush=True)
         if not _cmd_llm_failed_logged:
             print(f"⚠️ commandagent LLM request failed: {exc!r}", flush=True)
             _cmd_llm_failed_logged = True
@@ -2216,6 +2237,57 @@ def _cli_route(phrase: str) -> None:
     print(f"Translate:   {translate_if_enabled(phrase)!r}")
 
 
+def _cli_bench(phrase: str, *, runs: int = 3) -> None:
+    """Benchmark command LLM latency (bypasses pattern rules; hits model every run)."""
+    _load_cli_env()
+    os.environ.setdefault("BOT_USE_AI", "1")
+    os.environ.setdefault("BOT_CHAT_API_BASE", "http://127.0.0.1:11434/v1")
+    os.environ.setdefault("BOT_CHAT_API_KEY", "ollama")
+
+    cmd_model = _cmd_llm_model()
+    if not _cmd_llm_enabled():
+        print("ERROR: LLM not enabled — set BOT_CHAT_API_KEY=ollama and start Ollama.", flush=True)
+        return
+
+    raw = (phrase or "").strip()
+    if not raw:
+        print("ERROR: empty phrase", flush=True)
+        return
+
+    print(f"Benchmark:   {raw!r}")
+    print(f"Model:       {cmd_model!r}")
+    print(f"Runs:        {runs} (cache cleared each run)")
+    print("Note:        bypasses pattern rules — measures LLM classify only.")
+    print("")
+
+    times_ms: list[float] = []
+    routes: list[str] = []
+    for i in range(max(1, runs)):
+        with _CMD_LLM_CACHE_LOCK:
+            _CMD_LLM_CACHE.pop(raw, None)
+        t0 = time.perf_counter()
+        result = _classify_intent_llm(raw)
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        times_ms.append(elapsed_ms)
+        route_s = (result or {}).get("route") or "none"
+        tag_s = (result or {}).get("intent_tag") or "—"
+        routes.append(route_s)
+        print(f"  run {i + 1}/{runs}: {elapsed_ms:6.0f} ms  route={route_s} tag={tag_s}")
+
+    if not times_ms:
+        return
+    times_ms.sort()
+    avg = sum(times_ms) / len(times_ms)
+    mid = times_ms[len(times_ms) // 2]
+    print("")
+    print(f"Summary ({len(times_ms)} runs):")
+    print(f"  min:     {times_ms[0]:.0f} ms")
+    print(f"  median:  {mid:.0f} ms")
+    print(f"  max:     {times_ms[-1]:.0f} ms")
+    print(f"  avg:     {avg:.0f} ms")
+    print(f"  routes:  {routes}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Duty Bot command agent (natural language → slash commands)")
     sub = parser.add_subparsers(dest="cmd")
@@ -2223,11 +2295,17 @@ def main() -> None:
     p_route = sub.add_parser("route", help="Show rule/LLM resolution path for a phrase")
     p_route.add_argument("phrase", type=str)
 
+    p_bench = sub.add_parser("bench", help="Benchmark command LLM latency (ms)")
+    p_bench.add_argument("phrase", type=str)
+    p_bench.add_argument("-n", "--runs", type=int, default=3, help="number of runs (default 3)")
+
     sub.add_parser("patterns", help="Show pattern counts per intent")
 
     args = parser.parse_args()
     if args.cmd == "route":
         _cli_route(args.phrase)
+    elif args.cmd == "bench":
+        _cli_bench(args.phrase, runs=max(1, int(args.runs or 3)))
     elif args.cmd == "patterns":
         intents = build_intent_catalog()
         total = 0
