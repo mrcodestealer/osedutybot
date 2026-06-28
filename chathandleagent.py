@@ -156,6 +156,11 @@ def route(text: str, *, bot_mentioned: bool = True) -> RouteDecision:
                 command_conf=1.0,
             )
         if cmd_sig.get("route") == "command" and cmd_sig.get("command"):
+            print(
+                f"[chathandleagent] rules only → {cmd_sig.get('command')!r} "
+                f"(tag={cmd_sig.get('tag')}, conf={float(cmd_sig.get('confidence') or 0):.2f}, no LLM)",
+                flush=True,
+            )
             return RouteDecision(
                 _CMD,
                 reason=f"rule_{cmd_sig.get('source') or 'signal'}",
@@ -188,6 +193,11 @@ def route(text: str, *, bot_mentioned: bool = True) -> RouteDecision:
         cmd_conf = float(llm_sig.get("confidence") or cmd_conf)
         cmd_route = llm_sig.get("route") or cmd_route
         if llm_sig.get("route") == "command" and llm_sig.get("command"):
+            print(
+                f"[chathandleagent] command LLM → {llm_sig.get('command')!r} "
+                f"(tag={llm_sig.get('tag')}, conf={cmd_conf:.2f})",
+                flush=True,
+            )
             return RouteDecision(
                 _CMD,
                 reason=f"ai_{llm_sig.get('source') or 'signal'}",
@@ -195,6 +205,11 @@ def route(text: str, *, bot_mentioned: bool = True) -> RouteDecision:
                 command_conf=cmd_conf,
             )
         if llm_sig.get("route") == "chat":
+            print(
+                f"[chathandleagent] chat LLM (conf={cmd_conf:.2f}) — "
+                f"downstream uses BOT_CHAT_MODEL",
+                flush=True,
+            )
             return RouteDecision(
                 _CHAT,
                 reason=f"ai_{llm_sig.get('source') or 'signal'}",

@@ -928,8 +928,13 @@ def _parse_offset_leave_action_llm(text: str) -> Optional[str]:
     api_key = ca._llm_api_key()
     if not api_key:
         return None
+    model = ca._llm_model_for_request(images=False)
+    print(
+        f"[offsetleave] LLM classify start model={model!r} text={(text or '')[:80]!r}",
+        flush=True,
+    )
     payload = {
-        "model": ca._llm_model_for_request(images=False),
+        "model": model,
         "messages": [
             {"role": "system", "content": _OFFSET_LEAVE_LLM_SYSTEM},
             {"role": "user", "content": (text or "").strip()},

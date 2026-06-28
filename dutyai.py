@@ -414,7 +414,7 @@ def _llm_parse(text: str, *, today: date, session_key: Optional[str] = None) -> 
         method="POST",
     )
     try:
-        print(f"[dutyai] LLM parse start: {text[:80]!r}", flush=True)
+        print(f"[dutyai] LLM parse start model={payload['model']!r} text={text[:80]!r}", flush=True)
         t0 = time.perf_counter()
         with urllib.request.urlopen(req, timeout=ca._llm_timeout_sec()) as resp:
             body = json.loads(resp.read().decode("utf-8"))
