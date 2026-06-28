@@ -143,8 +143,7 @@ def _command_llm_model() -> str:
 
 
 def _use_command_model_only() -> bool:
-    # Temporary default ON — set BOT_USE_COMMAND_MODEL_ONLY=0 to restore dual-model setup.
-    return (os.getenv("BOT_USE_COMMAND_MODEL_ONLY") or "1").strip().lower() in (
+    return (os.getenv("BOT_USE_COMMAND_MODEL_ONLY") or "0").strip().lower() in (
         "1",
         "true",
         "yes",

@@ -35,7 +35,7 @@ if [[ -f "$ENV_FILE" ]]; then
   if v="$(_read_env_key BOT_COMMANDAGENT_LLM_MODEL "$ENV_FILE")" && [[ -n "$v" ]]; then
     CMD_MODEL="$v"
   fi
-  USE_CMD_ONLY=1
+  USE_CMD_ONLY=0
   if v="$(_read_env_key BOT_USE_COMMAND_MODEL_ONLY "$ENV_FILE")" && [[ -n "$v" ]]; then
     USE_CMD_ONLY="$v"
   fi
