@@ -100,7 +100,64 @@ try:
 except ImportError:
     pass
 
-DEFAULT_BASE = os.environ.get("LOG_NAVIGATOR_BASE", "https://lognavigator.cliveslot.com").rstrip("/")
+_PROJECT_TMP_DIR = os.path.join(_ROOT_DIR, ".tmp")
+_WRITABLE_TEMP_DIR: str | None = None
+
+
+def _ensure_writable_temp_dir() -> str:
+    """Return a directory where ``tempfile.mkstemp`` can create PNG scratch files.
+
+    On some Duty Bot hosts ``/tmp`` is missing or not writable; Python then fails with
+    ``No usable temporary directory found in [...]`` before Third Http screenshot runs.
+    Falls back to ``<repo>/.tmp`` (created if needed).
+    """
+    global _WRITABLE_TEMP_DIR
+    if _WRITABLE_TEMP_DIR:
+        return _WRITABLE_TEMP_DIR
+
+    candidates: list[str] = []
+    for name in ("TMPDIR", "TEMP", "TMP"):
+        v = (os.environ.get(name) or "").strip()
+        if v:
+            candidates.append(v)
+    candidates.extend(["/tmp", "/var/tmp", "/usr/tmp", _PROJECT_TMP_DIR, _ROOT_DIR])
+
+    seen: set[str] = set()
+    for cand in candidates:
+        path = os.path.abspath(cand)
+        if path in seen:
+            continue
+        seen.add(path)
+        try:
+            os.makedirs(path, exist_ok=True)
+            fd, probe = tempfile.mkstemp(prefix=".tmp_probe_", dir=path)
+            os.close(fd)
+            os.unlink(probe)
+            _WRITABLE_TEMP_DIR = path
+            if path == _PROJECT_TMP_DIR:
+                print(f"[checkcredit] using project temp dir {_PROJECT_TMP_DIR}", flush=True)
+            return path
+        except OSError:
+            continue
+
+    raise RuntimeError(
+        "No writable temporary directory for screenshots "
+        f"(tried {sorted(seen)!r}). "
+        f"On the server run: mkdir -p {_PROJECT_TMP_DIR} && chmod 700 {_PROJECT_TMP_DIR} "
+        f"and set TMPDIR={_PROJECT_TMP_DIR} in .env, then restart Duty Bot."
+    )
+
+
+def _temp_png_path(prefix: str) -> str:
+    """Create an empty PNG scratch file in a writable temp directory."""
+    out_fd, out_path = tempfile.mkstemp(
+        suffix=".png",
+        prefix=prefix,
+        dir=_ensure_writable_temp_dir(),
+    )
+    os.close(out_fd)
+    return out_path
+
 DEFAULT_USER = os.environ.get("CHECKCREDIT_USER", "osm")
 DEFAULT_PASS = os.environ.get("CHECKCREDIT_PASSWORD", "osm123")
 
@@ -2526,7 +2583,7 @@ def build_error_context_screenshots(
         )
         title = f"User {uid} error #{idx} ({lines_before_after}+1+{lines_before_after} lines)"
         path = os.path.join(
-            tempfile.gettempdir(),
+            _ensure_writable_temp_dir(),
             f"checkcredit_errctx_{uid}_{idx}_{uuid.uuid4().hex[:8]}.png",
         )
         ok = _render_text_lines_png(compact_ctx, title=title, output_path=path)
@@ -4207,8 +4264,7 @@ def screenshot_egm_status_window(
     else:
         headless = _np_backend_playwright_headless()
 
-    out_fd, out_path = tempfile.mkstemp(suffix=".png", prefix="np_egm_status_")
-    os.close(out_fd)
+    out_path = _temp_png_path("np_egm_status_")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
@@ -4357,8 +4413,7 @@ def screenshot_egm_cctv_window(
     else:
         headless = _np_backend_playwright_headless()
 
-    out_fd, out_path = tempfile.mkstemp(suffix=".png", prefix="np_egm_cctv_")
-    os.close(out_fd)
+    out_path = _temp_png_path("np_egm_cctv_")
     cctv_re = re.compile(r"CCTV", re.I)
 
     try:
@@ -4767,8 +4822,7 @@ def screenshot_np_recharge_detail(
     )
     from playwright.sync_api import sync_playwright
 
-    out_fd, out_path = tempfile.mkstemp(suffix=".png", prefix="np_third_http_")
-    os.close(out_fd)
+    out_path = _temp_png_path("np_third_http_")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)

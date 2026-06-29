@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 import queue
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -61,8 +60,10 @@ def _third_http_warm_headless() -> bool:
 
 
 def _warm_profile_dir(tag: str) -> Path:
+    import checkcredit as cc
+
     safe = "".join(c if c.isalnum() else "_" for c in tag.lower())
-    return Path(tempfile.gettempdir()) / f"third_http_warm_{safe}"
+    return Path(cc._ensure_writable_temp_dir()) / f"third_http_warm_{safe}"
 
 
 class _ThirdHttpWarmWorker:
@@ -129,8 +130,7 @@ class _ThirdHttpWarmWorker:
         kw = task.get("kwargs") or {}
         timeout_ms = int(kw.get("timeout_ms") or 120_000)
         self._last_active = time.monotonic()
-        out_fd, out_path = tempfile.mkstemp(suffix=".png", prefix="np_third_http_")
-        os.close(out_fd)
+        out_path = cc._temp_png_path("np_third_http_")
         try:
             self._ensure_ready(timeout_ms=timeout_ms)
             headless = _third_http_warm_headless()

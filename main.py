@@ -955,6 +955,14 @@ def _np_run_screenshot_worker(
                 "Disable machine-only pass: `NP_THIRD_HTTP_NO_MACHINE_ONLY_FALLBACK=1`."
                 "\n💡 有 recharge 行但 Detail 不匹配 — 已自动尝试仅匹配机台；可调页数/时间窗。"
             )
+        elif "No usable temporary directory" in err_s or "writable temporary directory" in err_s:
+            tip = (
+                "\n💡 **Server has no writable `/tmp`** — screenshot never started (not an NP search miss). "
+                "On the bot host: `mkdir -p /root/osedutybot/.tmp && chmod 700 /root/osedutybot/.tmp`, "
+                "add `TMPDIR=/root/osedutybot/.tmp` to `.env`, restart Duty Bot, then retry stuck credit."
+                "\n💡 服务器 **没有可写临时目录**，截图步骤未执行（不是 Third Http 搜不到）。"
+                " 在主机创建 `.tmp` 并设置 `TMPDIR`，重启后再试。"
+            )
         else:
             tip = (
                 "\n💡 Duty Bot runs this screenshot **headless**. Try raising `NP_BACKEND_MAX_PAGES` / "
@@ -7174,6 +7182,12 @@ def _run_main_entry() -> int:
             _boot_wm.prewarm_webmachine_scrape_pool_on_startup()
         except Exception as _boot_wm_err:
             print(f"[wm-warm] startup pre-warm skipped: {_boot_wm_err!r}", flush=True)
+        try:
+            import checkcredit as _boot_cc
+
+            _boot_cc._ensure_writable_temp_dir()
+        except Exception as _boot_tmp_err:
+            print(f"[checkcredit] temp dir init failed: {_boot_tmp_err!r}", flush=True)
         try:
             from third_http_warm_pool import prewarm_third_http_pool_on_startup
 

@@ -29,6 +29,7 @@ chatagent_llm_pt/
 *.log
 
 # ---- Runtime-only (regenerated on server; do not deploy) ----
+.tmp/
 .code_rag_cache/
 .all_leave_calendar_sync_state.json
 .leave_calendar_sync_state.json
