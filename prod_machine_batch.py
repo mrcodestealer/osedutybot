@@ -712,16 +712,24 @@ def _status_is_maintenance(status_text: str) -> bool:
 
 def _status_is_occupy(status_text: str) -> bool:
     su = (status_text or "").upper()
-    return "OCCUPY" in su or "TIMEOUT" in su
+    return "OCCUPY" in su
+
+
+def _status_is_timeout(status_text: str) -> bool:
+    return "TIMEOUT" in (status_text or "").upper()
 
 
 def _failure_is_game_running(error: str, live: dict[str, Any] | None = None) -> bool:
     """True when set maintenance failed because a player/game is still on the machine."""
+    if live and _status_is_timeout(str(live.get("status") or "")):
+        return False
     if "game currently running" in (error or "").lower():
         return True
     if live and _status_is_occupy(str(live.get("status") or "")):
         return True
     err = (error or "").lower()
+    if "timeout" in err:
+        return False
     return "occupy" in err or ("game" in err and "running" in err)
 
 
@@ -775,6 +783,186 @@ def _toolbar_row_in_maintenance(page, row, *, timeout_ms: int) -> bool:
         _batch_toolbar_button_actionable(start_btn)
         and not _batch_toolbar_button_actionable(maint_btn)
     )
+
+
+_ROW_MAINT_BTN_PAT = re.compile(r"Maintenance|维护", re.I)
+
+
+def _egm_row_button_actionable(btn) -> bool:
+    try:
+        if btn.count() == 0:
+            return False
+        cls = btn.get_attribute("class") or ""
+        if "is-disabled" in cls:
+            return False
+        aria_d = (btn.get_attribute("aria-disabled") or "").strip().lower()
+        if aria_d == "true":
+            return False
+        dis = btn.get_attribute("disabled")
+        if dis is not None:
+            dsl = str(dis).strip().lower()
+            if dsl and dsl not in ("false", "0"):
+                return False
+        return bool(btn.is_enabled())
+    except Exception:
+        return False
+
+
+def _row_operation_cell(row):
+    cell = row.locator("td.el-table__cell").last
+    if cell.count():
+        return cell
+    return row.locator("td").last
+
+
+def _locate_row_maintenance_button(row):
+    """Per-row **Maintenance** button (last column) — required when status is ``timeout``."""
+    op_cell = _row_operation_cell(row)
+    btns = op_cell.locator("button")
+    try:
+        n = btns.count()
+    except Exception:
+        n = 0
+    for i in range(n):
+        b = btns.nth(i)
+        try:
+            if not _egm_row_button_actionable(b):
+                continue
+            tx = (b.inner_text() or "").strip()
+            if _ROW_MAINT_BTN_PAT.search(tx):
+                return b
+            title = f"{b.get_attribute('title') or ''} {b.get_attribute('aria-label') or ''}"
+            if _ROW_MAINT_BTN_PAT.search(title):
+                return b
+        except Exception:
+            continue
+    return None
+
+
+def _submit_row_maintenance_action(
+    page, row, remark: str, *, timeout_ms: int
+) -> tuple[bool, str]:
+    """Click the row-level Maintenance button (not BatchMaintenance toolbar)."""
+    btn = _locate_row_maintenance_button(row)
+    if btn is None:
+        return False, (
+            "row Maintenance button not found or disabled "
+            "(timeout machines cannot use BatchMaintenance)"
+        )
+    try:
+        row.scroll_into_view_if_needed(timeout=min(15_000, timeout_ms))
+        btn.click(timeout=min(30_000, timeout_ms))
+    except Exception:
+        try:
+            btn.click(force=True, timeout=min(30_000, timeout_ms))
+        except Exception as ex2:
+            return False, f"row Maintenance click failed: {ex2!r}"
+    _page_pause(page, 500)
+    if _visible_confirm_layer(page) is not None:
+        try:
+            _click_save_confirm(page, remark, timeout_ms=timeout_ms)
+            _wait_batch_done(page, timeout_ms=timeout_ms)
+        except Exception as e:
+            return False, f"confirm/save failed: {e}"
+    else:
+        _page_pause(page, 800)
+        if _visible_confirm_layer(page) is not None:
+            try:
+                _click_save_confirm(page, remark, timeout_ms=timeout_ms)
+                _wait_batch_done(page, timeout_ms=timeout_ms)
+            except Exception as e:
+                return False, f"confirm/save failed: {e}"
+        else:
+            _wait_batch_done(page, timeout_ms=timeout_ms)
+    return True, ""
+
+
+def _split_still_need_by_timeout(
+    still_need: list[dict], live_states: dict[str, dict[str, Any] | None]
+) -> tuple[list[dict], list[dict]]:
+    timeout_rows: list[dict] = []
+    batch_rows: list[dict] = []
+    for m in still_need:
+        name = _machine_display_name(m)
+        live = live_states.get(name) or {}
+        if _status_is_timeout(str(live.get("status") or "")):
+            timeout_rows.append(m)
+        else:
+            batch_rows.append(m)
+    return timeout_rows, batch_rows
+
+
+def _process_timeout_set_maint_rows(
+    page,
+    machines: list[dict],
+    belongs: str,
+    remark: str,
+    live_states: dict[str, dict[str, Any] | None],
+    verify_action: str,
+    cancel_check: Callable[[], bool],
+    manual_stop_check: Callable[[], bool],
+    *,
+    timeout_ms: int,
+    max_pages: int,
+    ok_list: list[dict],
+    fail_list: list[dict],
+) -> None:
+    """``timeout`` rows must use per-row Maintenance — BatchMaintenance is disabled for them."""
+    _clear_table_row_selection(page, timeout_ms=timeout_ms)
+    for m in machines:
+        if cancel_check() or manual_stop_check():
+            break
+        name = _machine_display_name(m)
+        if not name:
+            continue
+        live = live_states.get(name)
+        if live and _verify_live_state(live, verify_action):
+            ok_list.append({"belongs": m.get("belongs", belongs), "machine": name})
+            continue
+        row = _find_machine_row_live(page, name, timeout_ms=timeout_ms, max_pages=max_pages)
+        if row is None:
+            fail_list.append(
+                {
+                    "belongs": m.get("belongs", belongs),
+                    "machine": name,
+                    "error": "machine not found on EGM page",
+                    "live": live,
+                }
+            )
+            continue
+        clicked, why = _submit_row_maintenance_action(
+            page, row, remark, timeout_ms=timeout_ms
+        )
+        if not clicked:
+            fail_list.append(
+                {
+                    "belongs": m.get("belongs", belongs),
+                    "machine": name,
+                    "error": why or "row Maintenance failed",
+                    "live": live,
+                }
+            )
+            continue
+        _refresh_egm_table(page, timeout_ms=timeout_ms, max_pages=max_pages)
+        post_live = _read_live_row_state(
+            page, name, timeout_ms=timeout_ms, max_pages=max_pages
+        )
+        verified = bool(post_live and _verify_live_state(post_live, verify_action))
+        if not verified and verify_action == "set_maint":
+            verified = _verify_set_maint_applied(
+                page, name, post_live, timeout_ms=timeout_ms, max_pages=max_pages
+            )
+        if verified:
+            ok_list.append({"belongs": m.get("belongs", belongs), "machine": name})
+        else:
+            fail_list.append(
+                {
+                    "belongs": m.get("belongs", belongs),
+                    "machine": name,
+                    "error": "timeout row Maintenance — status not as expected after click",
+                    "live": post_live,
+                }
+            )
 
 
 def _verify_set_maint_applied(
@@ -1437,10 +1625,14 @@ def _batch_disabled_error(
             hints.append(f"{name}: already in maintenance (status={st!r})")
         elif btn == "BatchTest" and is_test:
             hints.append(f"{name}: already in test mode")
-        elif "OCCUPY" in su or "TIMEOUT" in su:
+        elif "OCCUPY" in su:
             hints.append(
                 f"{name}: status {st!r} — BatchMaintenance should be clickable when row is "
                 f"selected; check checkbox selection (online={ol!r})"
+            )
+        elif "TIMEOUT" in su:
+            hints.append(
+                f"{name}: status timeout — use row Maintenance button (BatchMaintenance disabled)"
             )
         elif "OFFLINE" in ou:
             hints.append(f"{name}: offline ({ol!r}) — batch maintenance usually blocked")
@@ -1514,31 +1706,51 @@ def _process_env_batch(
     if cancel_check() or manual_stop_check() or not still_need:
         return ok_list, fail_list
 
-    # Only re-select when some machines were already correct (selection set changed). When every
-    # selected machine still needs the action, the checkboxes from the pass above are still valid.
-    if len(still_need) != len(selected):
-        _clear_table_row_selection(page, timeout_ms=timeout_ms)
-        try:
-            reselected, reselect_fail, _ = _batch_select_machines_on_live_page(
-                page, still_need, timeout_ms=timeout_ms, max_pages=max_pages
-            )
-            fail_list.extend(reselect_fail)
-        except Exception as exc:
-            for m in still_need:
-                fail_list.append(
-                    {
-                        "belongs": m.get("belongs", belongs),
-                        "machine": _machine_display_name(m),
-                        "error": str(exc),
-                    }
-                )
-            return ok_list, fail_list
+    timeout_need: list[dict] = []
+    batch_need = list(still_need)
+    if verify_action in ("set_maint", "set_both"):
+        timeout_need, batch_need = _split_still_need_by_timeout(still_need, live_states)
 
-        if cancel_check() or manual_stop_check() or not reselected:
-            return ok_list, fail_list
-        selected = reselected
-    else:
-        selected = still_need
+    if timeout_need and verify_action in ("set_maint", "set_both"):
+        _process_timeout_set_maint_rows(
+            page,
+            timeout_need,
+            belongs,
+            remark,
+            live_states,
+            verify_action,
+            cancel_check,
+            manual_stop_check,
+            timeout_ms=timeout_ms,
+            max_pages=max_pages,
+            ok_list=ok_list,
+            fail_list=fail_list,
+        )
+
+    still_need = batch_need
+    if cancel_check() or manual_stop_check() or not still_need:
+        return ok_list, fail_list
+
+    _clear_table_row_selection(page, timeout_ms=timeout_ms)
+    try:
+        selected, reselect_fail, live_states2 = _batch_select_machines_on_live_page(
+            page, still_need, timeout_ms=timeout_ms, max_pages=max_pages, read_states=True
+        )
+        fail_list.extend(reselect_fail)
+        live_states.update(live_states2)
+    except Exception as exc:
+        for m in still_need:
+            fail_list.append(
+                {
+                    "belongs": m.get("belongs", belongs),
+                    "machine": _machine_display_name(m),
+                    "error": str(exc),
+                }
+            )
+        return ok_list, fail_list
+
+    if cancel_check() or manual_stop_check() or not selected:
+        return ok_list, fail_list
 
     for btn in buttons:
         _wait_batch_toolbar_ready(page, btn, timeout_ms=timeout_ms)
