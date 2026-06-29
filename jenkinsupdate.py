@@ -1189,18 +1189,26 @@ class _VpnWarmBrowser:
                 )
                 if _vpn_warm_retry_submit(job):
                     return
-                print("[vpn-warm] warm retry exhausted; cold browser last resort.", flush=True)
-                _fpms_lark_spawn_run(
+                if _vpn_warm_allow_cold_fallback():
+                    print("[vpn-warm] warm retry exhausted; cold browser last resort.", flush=True)
+                    _fpms_lark_spawn_run(
+                        cid,
+                        sk,
+                        job["config_block"],
+                        job["send"],
+                        raw_prompt_body=job.get("raw_prompt_body", ""),
+                        jenkins_build_url=job["build_url"],
+                        job_profile="vpn_creation",
+                        update_all_services=False,
+                        headless=self._headless(),
+                        lark_message_id=trigger_mid,
+                    )
+                    return
+                print("[vpn-warm] warm retry exhausted; cold fallback disabled.", flush=True)
+                job["send"](
                     cid,
-                    sk,
-                    job["config_block"],
-                    job["send"],
-                    raw_prompt_body=job.get("raw_prompt_body", ""),
-                    jenkins_build_url=job["build_url"],
-                    job_profile="vpn_creation",
-                    update_all_services=False,
-                    headless=self._headless(),
-                    lark_message_id=trigger_mid,
+                    "❌ VPN warm browser failed after retries. "
+                    "Check VPN_WARM_BROWSER=1 and Jenkins login; not starting a cold browser.",
                 )
                 return
             except Exception as ex2:
@@ -1384,7 +1392,7 @@ def prewarm_all_jenkins_browsers_on_startup() -> None:
         remaining = max(0.0, deadline - time.monotonic())
         ju_ok = _ju_warm_pool_get().wait_all_ready(remaining)
         if ju_ok:
-            print(f"[ju-pool] startup ready ({_ju_warm_pool_size()} browser(s)).", flush=True)
+            print(f"[ju-pool] startup ready ({len(_ju_warm_urls())} browser(s)).", flush=True)
         else:
             print("[ju-pool] startup wait timed out (will warm on first request).", flush=True)
     if vpn_ok and ju_ok:
@@ -1411,12 +1419,35 @@ def prewarm_vpn_browser_on_startup() -> None:
 
 
 # ===================== Warm browser POOL for (non-VPN) Jenkins updates =====================
-# Keeps a small set of pre-launched, logged-in browsers so a /update only pays page-load + fill
-# (no per-run Chromium cold start + login). Parallelism is preserved up to the pool size: each
-# pool member is a dedicated thread owning its own Playwright objects (sync Playwright is
-# thread-bound). The form is NOT pre-rendered (FPMS/RC forms depend on the Environment picked
-# each run) — every run re-navigates fresh, so it is exactly as reliable as a fresh browser,
-# just without the launch/login cost. Disable with ``JU_WARM_POOL=0``.
+# One pre-launched, logged-in Chromium **per Jenkins job URL** (``jenkins.client8.me`` automation
+# jobs). Each browser stays on its job's build-with-parameters page between runs. Disable with
+# ``JU_WARM_POOL=0``. Override the URL list with ``JU_WARM_URLS`` (comma-separated) on dev PCs.
+
+
+def _ju_warm_allow_cold_fallback() -> bool:
+    """When false (default), failed warm pool never launches a fresh browser + login."""
+    return (os.environ.get("JU_WARM_ALLOW_COLD_FALLBACK") or "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _vpn_warm_allow_cold_fallback() -> bool:
+    return (os.environ.get("VPN_WARM_ALLOW_COLD_FALLBACK") or "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _ju_warm_retry_attempts() -> int:
+    try:
+        return max(1, int(os.environ.get("JU_WARM_RETRY_ATTEMPTS", "3")))
+    except ValueError:
+        return 3
 
 
 def _ju_warm_pool_enabled() -> bool:
@@ -1428,27 +1459,114 @@ def _ju_warm_pool_enabled() -> bool:
     )
 
 
-def _ju_warm_pool_size() -> int:
-    try:
-        return max(1, int(os.environ.get("JU_WARM_POOL_SIZE", "3")))
-    except ValueError:
-        return 3
-
-
 def _ju_warm_base_url() -> str:
     parsed = urlparse(BUILD_URL)
     base = f"{parsed.scheme or 'https'}://{parsed.netloc}"
     return (os.environ.get("JU_WARM_BASE_URL") or (base + "/login")).strip()
 
 
-class _JuWarmWorker:
-    """One pre-launched, logged-in browser in its own thread; runs one job at a time."""
+def _ju_warm_canonical_build_url(raw: str) -> str:
+    """Normalize a Jenkins job URL to ``…/build?delay=0sec`` for pool identity."""
+    folder = _jenkins_job_folder_url(raw)
+    if not folder.strip():
+        return (raw or "").strip().splitlines()[0].strip()
+    return folder.rstrip("/") + "/build?delay=0sec"
 
-    def __init__(self, idx: int) -> None:
-        self.idx = idx
+
+def _ju_warm_url_key(raw: str) -> str:
+    return _jenkins_job_folder_url(raw).casefold()
+
+
+def _ju_warm_url_slug(raw: str) -> str:
+    folder = _jenkins_job_folder_url(raw).rstrip("/")
+    tail = folder.split("/")[-1] if folder else "jenkins"
+    slug = re.sub(r"[^\w.-]+", "-", tail).strip("-")[:48] or "jenkins"
+    return slug
+
+
+def _ju_warm_profile_dir(warm_url: str) -> Path:
+    key = _ju_warm_url_key(warm_url)
+    safe = re.sub(r"[^\w.-]+", "_", key[-96:])
+    return Path(tempfile.gettempdir()) / f"ju_warm_{safe}"
+
+
+def _ju_warm_urls() -> list[str]:
+    """Unique client8 Jenkins build URLs — one warm browser each."""
+    override = (os.environ.get("JU_WARM_URLS") or "").strip()
+    if override:
+        out: list[str] = []
+        seen: set[str] = set()
+        for part in override.split(","):
+            u = (part or "").strip()
+            if not u:
+                continue
+            canon = _ju_warm_canonical_build_url(u)
+            key = _ju_warm_url_key(canon)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(canon)
+        return out
+
+    seen: set[str] = set()
+    out = []
+
+    def _add(raw: str) -> None:
+        u = (raw or "").strip()
+        if not u:
+            return
+        ul = u.casefold()
+        if "/job/frontend/" in ul:
+            return
+        if "jenkins.client8.me" not in ul:
+            return
+        canon = _ju_warm_canonical_build_url(u)
+        key = _ju_warm_url_key(canon)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(canon)
+
+    for _alias, (_label, url_raw) in JENKINS_UPDATE_JOB_REGISTRY.items():
+        for line in (url_raw or "").splitlines():
+            _add(line.strip())
+    for u in (
+        BUILD_URL,
+        BI_API_UPDATE_BUILD_URL,
+        QRQM_UPDATE_BUILD_URL,
+        FPMS_NT_UAT_BO_UPDATE_URL,
+        PMS_UAT_UPDATE_URL,
+        CPMS_UAT_UPDATE_URL,
+        IGO_UAT_UPDATE_URL,
+        IGO_PROD_SCRIPT_RUN_URL,
+        BRAZIL_UAT_BUILD_URL,
+        NEWPORT_UAT_BUILD_URL,
+        BI_SCRIPT_UPDATE_BUILD_URL,
+        FPMS_PROD_SCRIPT_BUILD_URL,
+    ):
+        _add(u)
+    return sorted(out, key=_ju_warm_url_key)
+
+
+def _ju_warm_url_from_run_kwargs(run_kwargs: dict) -> str:
+    gate = run_kwargs.get("bot_lark_gate") or {}
+    raw = (
+        run_kwargs.get("jenkins_build_url")
+        or gate.get("build_url")
+        or BUILD_URL
+    )
+    return _ju_warm_canonical_build_url(str(raw or ""))
+
+
+class _JuWarmWorker:
+    """One logged-in browser dedicated to a single Jenkins job URL."""
+
+    def __init__(self, warm_url: str) -> None:
+        self.warm_url = _ju_warm_canonical_build_url(warm_url)
+        self.slug = _ju_warm_url_slug(self.warm_url)
         self._tasks: "_queue.Queue[dict]" = _queue.Queue()
         self._thread = threading.Thread(
-            target=self._loop, name=f"ju-warm-{idx}", daemon=True
+            target=self._loop, name=f"ju-warm-{self.slug}", daemon=True
         )
         self._thread.start()
         self._p = None
@@ -1469,24 +1587,39 @@ class _JuWarmWorker:
     def wait_ready(self, timeout: float | None = None) -> bool:
         return self._ready.wait(timeout)
 
-    # ---- worker thread ----
     def _loop(self) -> None:
         while True:
             task = self._tasks.get()
             if task.get("prewarm"):
                 try:
                     self._ensure_ready()
-                    print(f"[ju-pool#{self.idx}] pre-warmed.", flush=True)
+                    print(f"[ju-pool:{self.slug}] pre-warmed.", flush=True)
                 except Exception as ex:
-                    print(f"[ju-pool#{self.idx}] prewarm failed: {ex!r}", flush=True)
+                    print(f"[ju-pool:{self.slug}] prewarm failed: {ex!r}", flush=True)
                     self._teardown()
+                continue
+            if task.get("page_fn"):
+                fn = task["page_fn"]
+                box = task["box"]
+                try:
+                    self._ensure_ready()
+                    box["result"] = fn(self._page)
+                except Exception as ex:
+                    box["error"] = ex
+                    self._teardown()
+                finally:
+                    if self._healthy():
+                        try:
+                            self._rewarm()
+                        except Exception:
+                            self._teardown()
+                    task["done"].set()
                 continue
             box = task["box"]
             try:
                 try:
                     self._ensure_ready()
                 except Exception as ex:
-                    # Nothing has touched Jenkins yet → safe for caller to use a fresh browser.
                     box["pre_error"] = ex
                     self._teardown()
                     continue
@@ -1519,9 +1652,7 @@ class _JuWarmWorker:
     def _launch(self) -> None:
         self._teardown()
         self._p = sync_playwright().start()
-        profile = Path(
-            os.path.join(tempfile.gettempdir(), f"ju_warm_pool_profile_{self.idx}")
-        )
+        profile = _ju_warm_profile_dir(self.warm_url)
         profile.mkdir(parents=True, exist_ok=True)
         pc_kw: dict = {
             "user_data_dir": str(profile),
@@ -1536,7 +1667,7 @@ class _JuWarmWorker:
         self._page = (
             self._context.pages[0] if self._context.pages else self._context.new_page()
         )
-        print(f"[ju-pool#{self.idx}] browser launched.", flush=True)
+        print(f"[ju-pool:{self.slug}] browser launched.", flush=True)
 
     def _teardown(self) -> None:
         for closer in (
@@ -1552,50 +1683,89 @@ class _JuWarmWorker:
         self._p = None
         self._ready.clear()
 
+    def _goto_job_page(self) -> None:
+        self._page.goto(
+            self.warm_url, wait_until="domcontentloaded", timeout=90_000
+        )
+        jenkins_login_if_needed(self._page, *_credentials())
+
     def _ensure_ready(self) -> None:
         if not self._healthy():
             self._launch()
-            user, pw = _credentials()
             try:
                 self._page.goto(
                     _ju_warm_base_url(), wait_until="domcontentloaded", timeout=90_000
                 )
-                jenkins_login_if_needed(self._page, user, pw)
+                jenkins_login_if_needed(self._page, *_credentials())
+                self._goto_job_page()
             except Exception as ex:
-                print(f"[ju-pool#{self.idx}] warm login skipped: {ex!r}", flush=True)
+                print(f"[ju-pool:{self.slug}] warm login failed: {ex!r}", flush=True)
+                self._ready.clear()
+                raise
+        else:
+            try:
+                self._goto_job_page()
+            except Exception as ex:
+                print(f"[ju-pool:{self.slug}] job page refresh failed: {ex!r}", flush=True)
                 self._ready.clear()
                 raise
         self._ready.set()
 
     def _rewarm(self) -> None:
-        # Leave the heavy job page → light base page, keeping the logged-in session warm.
         try:
-            self._page.goto(
-                _ju_warm_base_url(), wait_until="domcontentloaded", timeout=60_000
-            )
+            self._goto_job_page()
         except Exception:
             pass
 
+    def run_with_page(self, fn):
+        done = threading.Event()
+        box: dict = {}
+        self._tasks.put({"page_fn": fn, "done": done, "box": box})
+        done.wait()
+        if "error" in box:
+            raise box["error"]
+        return box.get("result")
+
 
 class _JuWarmPool:
-    def __init__(self, size: int) -> None:
-        self._workers = [_JuWarmWorker(i) for i in range(size)]
-        self._idle: "_queue.Queue[_JuWarmWorker]" = _queue.Queue()
-        for w in self._workers:
-            self._idle.put(w)
+    """One ``_JuWarmWorker`` per Jenkins job URL."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._workers: dict[str, _JuWarmWorker] = {}
+        for url in _ju_warm_urls():
+            key = _ju_warm_url_key(url)
+            self._workers[key] = _JuWarmWorker(url)
         threading.Thread(
             target=self._keepalive_loop, name="ju-warm-keepalive", daemon=True
         ).start()
 
+    def _worker_for_url(self, raw_url: str) -> _JuWarmWorker:
+        canon = _ju_warm_canonical_build_url(raw_url)
+        key = _ju_warm_url_key(canon)
+        with self._lock:
+            worker = self._workers.get(key)
+            if worker is None:
+                print(
+                    f"[ju-pool] lazy warm browser for {_ju_warm_url_slug(canon)}.",
+                    flush=True,
+                )
+                worker = _JuWarmWorker(canon)
+                self._workers[key] = worker
+            return worker
+
+    def _all_workers(self) -> list[_JuWarmWorker]:
+        with self._lock:
+            return list(self._workers.values())
+
     def _keepalive_loop(self) -> None:
-        """Re-login idle pool members so Jenkins sessions stay warm between runs."""
         try:
             interval = max(60, int(os.environ.get("JU_WARM_KEEPALIVE_SEC", "240")))
         except ValueError:
             interval = 240
         while True:
             time.sleep(interval)
-            for w in self._workers:
+            for w in self._all_workers():
                 try:
                     if w._tasks.qsize() == 0:
                         w.submit_prewarm()
@@ -1603,42 +1773,55 @@ class _JuWarmPool:
                     print(f"[ju-pool] keepalive skipped: {ex!r}", flush=True)
 
     def prewarm_all(self) -> None:
-        for w in self._workers:
+        for w in self._all_workers():
             w.submit_prewarm()
 
     def wait_all_ready(self, timeout: float) -> bool:
         deadline = time.monotonic() + max(0.0, timeout)
         ok = True
-        for w in self._workers:
+        for w in self._all_workers():
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not w.wait_ready(remaining):
                 ok = False
         return ok
 
     def run_blocking(self, run_kwargs: dict) -> None:
-        worker = self._idle.get()  # blocks until a member is free (caps concurrency at size)
-        try:
+        worker = self._worker_for_url(_ju_warm_url_from_run_kwargs(run_kwargs))
+        attempts = _ju_warm_retry_attempts()
+        last_pre_error: Exception | None = None
+        box: dict = {}
+        for attempt in range(1, attempts + 1):
             box = worker.execute(run_kwargs)
-            if "pre_error" in box:
-                print(
-                    f"[ju-pool] pre-run warm failed; retrying warm once: {box['pre_error']!r}",
-                    flush=True,
-                )
-                worker.submit_prewarm()
-                wait_sec = float(os.environ.get("JU_WARM_RETRY_WAIT_SEC", "90"))
-                if worker.wait_ready(wait_sec):
-                    box = worker.execute(run_kwargs)
-        finally:
-            self._idle.put(worker)
-        if "pre_error" in box:
+            if "pre_error" not in box:
+                break
+            last_pre_error = box["pre_error"]
             print(
-                f"[ju-pool] warm retry failed; using fresh browser: {box['pre_error']!r}",
+                f"[ju-pool:{worker.slug}] warm pre-run failed ({attempt}/{attempts}): "
+                f"{last_pre_error!r}",
                 flush=True,
             )
-            run(**run_kwargs)
-            return
+            worker.submit_prewarm()
+            wait_sec = float(os.environ.get("JU_WARM_RETRY_WAIT_SEC", "90"))
+            worker.wait_ready(wait_sec)
+        if "pre_error" in box:
+            if _ju_warm_allow_cold_fallback():
+                print(
+                    f"[ju-pool:{worker.slug}] warm exhausted; cold browser fallback: "
+                    f"{box['pre_error']!r}",
+                    flush=True,
+                )
+                run(**run_kwargs)
+                return
+            raise RuntimeError(
+                f"JU warm pool failed after {attempts} attempt(s) "
+                f"(set JU_WARM_ALLOW_COLD_FALLBACK=1 to allow cold browser): {last_pre_error!r}"
+            )
         if "error" in box:
             raise box["error"]
+
+    def run_with_page_blocking(self, fn, *, build_url: str):
+        worker = self._worker_for_url(build_url)
+        return worker.run_with_page(fn)
 
 
 _ju_warm_pool_singleton: "_JuWarmPool | None" = None
@@ -1649,17 +1832,30 @@ def _ju_warm_pool_get() -> "_JuWarmPool":
     global _ju_warm_pool_singleton
     with _ju_warm_pool_lock:
         if _ju_warm_pool_singleton is None:
-            _ju_warm_pool_singleton = _JuWarmPool(_ju_warm_pool_size())
+            urls = _ju_warm_urls()
+            print(
+                f"[ju-pool] one browser per URL ({len(urls)} job URL(s)).",
+                flush=True,
+            )
+            _ju_warm_pool_singleton = _JuWarmPool()
         return _ju_warm_pool_singleton
 
 
 def _ju_dispatch_run(run_kwargs: dict) -> None:
-    """Run a Jenkins update via the warm pool (non-VPN) or a fresh browser."""
-    jp = (run_kwargs.get("job_profile") or "").strip()
-    if jp and jp != "vpn_creation" and _ju_warm_pool_enabled():
+    """Run a Jenkins update via the warm pool (non-VPN). Cold browser only if explicitly allowed."""
+    jp = (run_kwargs.get("job_profile") or "fpms").strip() or "fpms"
+    if jp == "vpn_creation":
+        run(**run_kwargs)
+        return
+    if _ju_warm_pool_enabled():
         _ju_warm_pool_get().run_blocking(run_kwargs)
         return
-    run(**run_kwargs)
+    if _ju_warm_allow_cold_fallback():
+        run(**run_kwargs)
+        return
+    raise RuntimeError(
+        "JU_WARM_POOL=0 and cold fallback disabled — enable JU_WARM_POOL=1 on the duty-bot server."
+    )
 
 
 def prewarm_ju_pool_on_startup() -> None:
@@ -1677,7 +1873,8 @@ def prewarm_ju_pool_on_startup() -> None:
     ):
         return
     try:
-        print(f"[ju-pool] startup pre-warm ({_ju_warm_pool_size()} browsers).", flush=True)
+        n = len(_ju_warm_urls())
+        print(f"[ju-pool] startup pre-warm ({n} URL(s), one browser each).", flush=True)
         _ju_warm_pool_get().prewarm_all()
     except Exception as ex:
         print(f"[ju-pool] startup pre-warm failed: {ex!r}", flush=True)
@@ -7407,6 +7604,95 @@ def discover_cpms_igo_env_services(
     want = [k for k in (kinds or ("cpms", "igo")) if k in CPMS_IGO_UAT_URL_BY_KIND]
     user, pw = _credentials()
     cache = _load_cpms_igo_cache()
+
+    def _discover_kind_on_page(page, *, kind: str) -> dict[str, list[str]]:
+        url = CPMS_IGO_UAT_URL_BY_KIND[kind]
+        try:
+            open_fpms_build_with_login(
+                page, user, pw, first_visit=False, warmup=False, build_url=url
+            )
+            page.wait_for_selector("div.jenkins-form-item", timeout=60_000)
+            _safe_page_wait(page, _MS_FORM_READY)
+            _safe_page_wait(page, _MS_POST_LOGIN_BEFORE_FORM)
+            env_options = [ov for ov, _ot in _read_select_options(page, "Environment")]
+            env_map: dict[str, list[str]] = {}
+            for env in env_options:
+                try:
+                    select_environment(page, env)
+                    _safe_page_wait(page, max(300, _MS_ENV_SETTLE))
+                    svcs = read_all_service_values(page)
+                    env_map[env] = svcs
+                    print(
+                        f"[cpms_igo] {kind} env={env!r}: {len(svcs)} services",
+                        flush=True,
+                    )
+                except Exception as env_ex:
+                    print(
+                        f"[cpms_igo] {kind} env={env!r} read failed: {env_ex!r}",
+                        flush=True,
+                    )
+            return env_map
+        except Exception as kind_ex:
+            print(f"[cpms_igo] discover {kind} failed: {kind_ex!r}", flush=True)
+            return {}
+
+    def _discover_on_page(page) -> dict:
+        out_cache = dict(cache)
+        first = True
+        for kind in want:
+            url = CPMS_IGO_UAT_URL_BY_KIND[kind]
+            try:
+                open_fpms_build_with_login(
+                    page, user, pw, first_visit=first, warmup=False, build_url=url
+                )
+                first = False
+                page.wait_for_selector("div.jenkins-form-item", timeout=60_000)
+                _safe_page_wait(page, _MS_FORM_READY)
+                _safe_page_wait(page, _MS_POST_LOGIN_BEFORE_FORM)
+                env_options = [ov for ov, _ot in _read_select_options(page, "Environment")]
+                env_map: dict[str, list[str]] = {}
+                for env in env_options:
+                    try:
+                        select_environment(page, env)
+                        _safe_page_wait(page, max(300, _MS_ENV_SETTLE))
+                        svcs = read_all_service_values(page)
+                        env_map[env] = svcs
+                        print(
+                            f"[cpms_igo] {kind} env={env!r}: {len(svcs)} services",
+                            flush=True,
+                        )
+                    except Exception as env_ex:
+                        print(
+                            f"[cpms_igo] {kind} env={env!r} read failed: {env_ex!r}",
+                            flush=True,
+                        )
+                if env_map:
+                    out_cache[kind] = env_map
+            except Exception as kind_ex:
+                print(f"[cpms_igo] discover {kind} failed: {kind_ex!r}", flush=True)
+        return out_cache
+
+    if _ju_warm_pool_enabled():
+        try:
+            print("[cpms_igo] discover via JU warm pool (one browser per job URL).", flush=True)
+            out_cache = dict(cache)
+            pool = _ju_warm_pool_get()
+            for kind in want:
+                url = CPMS_IGO_UAT_URL_BY_KIND[kind]
+                env_map = pool.run_with_page_blocking(
+                    lambda page, _kind=kind: _discover_kind_on_page(page, kind=_kind),
+                    build_url=url,
+                )
+                if env_map:
+                    out_cache[kind] = env_map
+            cache = out_cache
+            _save_cpms_igo_cache(cache)
+            return cache
+        except Exception as ex:
+            print(f"[cpms_igo] warm-pool discover failed: {ex!r}", flush=True)
+            if not _ju_warm_allow_cold_fallback():
+                return cache
+
     bname = (os.environ.get("FPMS_PLAYWRIGHT_BROWSER") or "chromium").strip().lower()
     if bname not in ("chromium", "firefox"):
         bname = "chromium"
@@ -7415,38 +7701,7 @@ def discover_cpms_igo_env_services(
             p, browser_name=bname, headless=headless, slow_mo=0, user_data_dir=None
         )
         try:
-            first = True
-            for kind in want:
-                url = CPMS_IGO_UAT_URL_BY_KIND[kind]
-                try:
-                    open_fpms_build_with_login(
-                        page, user, pw, first_visit=first, warmup=False, build_url=url
-                    )
-                    first = False
-                    page.wait_for_selector("div.jenkins-form-item", timeout=60_000)
-                    _safe_page_wait(page, _MS_FORM_READY)
-                    _safe_page_wait(page, _MS_POST_LOGIN_BEFORE_FORM)
-                    env_options = [ov for ov, _ot in _read_select_options(page, "Environment")]
-                    env_map: dict[str, list[str]] = {}
-                    for env in env_options:
-                        try:
-                            select_environment(page, env)
-                            _safe_page_wait(page, max(300, _MS_ENV_SETTLE))
-                            svcs = read_all_service_values(page)
-                            env_map[env] = svcs
-                            print(
-                                f"[cpms_igo] {kind} env={env!r}: {len(svcs)} services",
-                                flush=True,
-                            )
-                        except Exception as env_ex:
-                            print(
-                                f"[cpms_igo] {kind} env={env!r} read failed: {env_ex!r}",
-                                flush=True,
-                            )
-                    if env_map:
-                        cache[kind] = env_map
-                except Exception as kind_ex:
-                    print(f"[cpms_igo] discover {kind} failed: {kind_ex!r}", flush=True)
+            cache = _discover_on_page(page)
         finally:
             try:
                 context.close()
@@ -15636,8 +15891,19 @@ def run(
             )
         try:
             ju = ju_for_env
-            print("\n→ Single browser session (post-login warm-up reload: **off**).")
-            open_fpms_build_with_login(page, user, pw, first_visit=True, warmup=False, build_url=ju)
+            warm_page = external_page is not None
+            if warm_page:
+                print("\n→ Reusing warm browser session (already logged in).")
+            else:
+                print("\n→ Single browser session (post-login warm-up reload: **off**).")
+            open_fpms_build_with_login(
+                page,
+                user,
+                pw,
+                first_visit=not warm_page,
+                warmup=False,
+                build_url=ju,
+            )
             page.wait_for_selector("div.jenkins-form-item", timeout=60_000)
             _safe_page_wait(page, _MS_FORM_READY)
             if is_vpn:
