@@ -276,6 +276,13 @@ def match_roster_name_in_text(text: str) -> Optional[str]:
         if len(tokens) == 1 and len(tokens[0]) >= 3:
             if re.search(rf"\b{re.escape(tokens[0])}\b", low):
                 hits.append((canon, len(tokens[0])))
+    for nick, canon in OSE_ROSTER_NICKNAMES.items():
+        if re.search(rf"\b{re.escape(nick.lower())}\b", low):
+            resolved = _title_name(canon)
+            if _resolve_ose_roster_key(resolved) or resolved in {
+                _title_name(r) for r in OSE_LEAVE_FORM_NAMES
+            }:
+                hits.append((resolved, len(nick)))
     if not hits:
         return None
     hits.sort(key=lambda item: -item[1])
@@ -310,6 +317,66 @@ OSE_SHOWOFFSET_NAMES: tuple[str, ...] = (
     "Kheng Kwan",
     "Kris Ng",
 )
+
+# Short names / chat nicknames → OSE roster key (word-boundary match in NL).
+OSE_ROSTER_NICKNAMES: dict[str, str] = {
+    # Jun Chen
+    "jc": "Jun Chen",
+    "jchen": "Jun Chen",
+    "junchen": "Jun Chen",
+    # Man Chung
+    "mc": "Man Chung",
+    "manchung": "Man Chung",
+    # Chun Chee
+    "cc": "Chun Chee",
+    "chunchee": "Chun Chee",
+    # Bryan Peh
+    "bp": "Bryan Peh",
+    "bryan": "Bryan Peh",
+    "bryanpeh": "Bryan Peh",
+    # Augustine Si yew
+    "asy": "Augustine Si yew",
+    "siyew": "Augustine Si yew",
+    "augustine": "Augustine Si yew",
+    "augustinesiyew": "Augustine Si yew",
+    # Kheng Kwan / Kris Ng
+    "kk": "Kheng Kwan",
+    "kheng": "Kheng Kwan",
+    "khengkwan": "Kheng Kwan",
+    "kn": "Kris Ng",
+    "kris": "Kris Ng",
+    "krisng": "Kris Ng",
+    # Kenneth (single-name roster)
+    "ken": "Kenneth",
+    "kenneth": "Kenneth",
+    # Katleen / Lynette / Jewel
+    "kat": "Katleen",
+    "katleen": "Katleen",
+    "lynette": "Lynette",
+    "jewel": "Jewel",
+    # Jan Rei
+    "janrei": "Jan Rei",
+    "jan": "Jan Rei",
+    # Eduard James
+    "eduard": "Eduard James",
+    "eduardjames": "Eduard James",
+    "ej": "Eduard James",
+    # Dexter / Leonard / Nad
+    "dexter": "Dexter Ortiz",
+    "leonard": "Leonard Arguelles",
+    "nad": "Nad Kyro Bechayda",
+    # Mark / Eldrick / Leandro / Christian
+    "mark": "Mark Ginber Natal",
+    "eldrick": "Eldrick Dion Marasigan",
+    "leandro": "Leandro Lacson Jr.",
+    "christian": "Christian Rjie Reyes",
+    "chrisjay": "Chris Jay Montecalvo",
+    # Reuben / Alexandra / Clint / Sarah
+    "reuben": "Reuben Jherico Silerio",
+    "alexandra": "Alexandra Del Rosario",
+    "clint": "Clint Nathan Calumpad",
+    "sarah": "Sarah Jean Sulit",
+}
 
 DEBUG = False
 

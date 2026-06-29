@@ -2358,10 +2358,16 @@ def handle_offset_query(
     month = od.parse_offset_month_from_text(clean_text)
     if not month:
         month = (date.today().year, date.today().month)
+    person = od.match_roster_name_in_text(clean_text)
+    if not person:
+        person, _, inferred_month = _resolve_nl_offset_filters(clean_text, month_target=month)
+        if inferred_month:
+            month = inferred_month
     return execute_offset_action(
         "show_calendar",
         clean_text=clean_text,
         month_target=month,
+        person_filter=person,
         sender_open_id=sender_open_id,
         chat_id=chat_id,
         chat_type=chat_type,
@@ -2685,10 +2691,28 @@ def execute_offset_action(
         today = date.today()
         y, m = month_target or (today.year, today.month)
         try:
-            involved, show_all = _showoffset_view_for_sender(sender_open_id, get_token_func)
-            card = od.build_ose_showoffset_card(
-                y, m, involved_person=involved, include_all_team=show_all
+            query_person = (person_filter or "").strip() or od.match_roster_name_in_text(
+                clean_text
             )
+            if query_person:
+                print(
+                    f"[offsetleave] show_calendar person={query_person!r} "
+                    f"month={y}-{m:02d} text={clean_text[:80]!r}",
+                    flush=True,
+                )
+                card = od.build_ose_showoffset_card(
+                    y,
+                    m,
+                    involved_person=query_person,
+                    include_all_team=False,
+                )
+            else:
+                involved, show_all = _showoffset_view_for_sender(
+                    sender_open_id, get_token_func
+                )
+                card = od.build_ose_showoffset_card(
+                    y, m, involved_person=involved, include_all_team=show_all
+                )
             send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
         except Exception as exc:
             send_message(chat_id, f"❌ show offset failed: {exc}")
