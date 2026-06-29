@@ -2437,6 +2437,20 @@ def _schedule_larkbot_systemctl_restart(*, delay_sec: float = 2.0) -> None:
     )
 
 
+def _restart_larkbot_service(chat_id: str) -> None:
+    """Restart ``larkbot.service`` only (no webapp)."""
+    send_message(chat_id, "🔄 Restarting larkbot.service…")
+    write_restart_pending(
+        chat_id,
+        message="✅ larkbot is ready.",
+    )
+    try:
+        scheduler.shutdown(wait=False)
+    except Exception:
+        pass
+    _schedule_larkbot_systemctl_restart()
+
+
 def _handle_restart_services(chat_id: str) -> None:
     ok, webapp_msg = _restart_standalone_webapp()
     lines = ["🔄 Restarting duty services…"]
@@ -2642,12 +2656,12 @@ def _run_git_pull_and_restart(chat_id: str) -> None:
         return
 
     summary = tail[-600:] if tail else "done"
-    send_message(chat_id, f"✅ git pull OK.\n```\n{summary}\n```\n🔄 Restarting services…")
-    _handle_restart_services(chat_id)
+    send_message(chat_id, f"✅ git pull OK.\n```\n{summary}\n```")
+    _restart_larkbot_service(chat_id)
 
 
 def _handle_git_pull_restart_deploy(chat_id: str) -> None:
-    send_message(chat_id, "⏳ git pull + restart started (keeps local .env & JSON)…")
+    send_message(chat_id, "⏳ git pull origin main + restart larkbot…")
     start_lark_background_thread(_run_git_pull_and_restart, chat_id)
 
 
