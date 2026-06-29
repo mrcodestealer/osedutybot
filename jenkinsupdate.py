@@ -1516,8 +1516,6 @@ def _ju_warm_urls() -> list[str]:
         if not u:
             return
         ul = u.casefold()
-        if "/job/frontend/" in ul:
-            return
         if "jenkins.client8.me" not in ul:
             return
         canon = _ju_warm_canonical_build_url(u)
@@ -7391,8 +7389,16 @@ def _jenkins_update_job_automation_profile(raw_urls: str) -> str | None:
         return "fpms"
     if "fpms_nt_uat_bo_update" in ul:
         return "fpms"
+    if "/job/fpms_nt/view/all/job/fpms_nt_uat_branch_update/" in ul:
+        return "fpms"
     if "/job/fnt/job/fnt_uat_script_run/" in ul or "/job/fnt/job/rc-uat-update/" in ul:
         return "fnt_rc"
+    if "/job/fnt/job/telesales-uat-update/" in ul:
+        return "fnt_rc"
+    if "/job/igo/job/uat/job/igo-uat-script-run/" in ul:
+        return "fnt_rc"
+    if "/job/frontend/" in ul:
+        return "frontend"
     if "/job/sms/job/uat/job/sms-uat-update/" in ul:
         return "sms_uat"
     if "/job/pms/job/uat/job/pms-uat-update/" in ul:
@@ -8286,7 +8292,7 @@ _JENKINS_ENV_URL_FRAGMENTS: dict[str, tuple[str, ...]] = {
 def _jenkins_job_service_catalog_for_url(raw_url: str) -> frozenset[str] | None:
     """
     Services checkbox ids for this Jenkins job URL, or ``None`` when the job has **no** Services
-    parameter (VPN, frontend H5, prod script, BI API repository picker, etc.) — those jobs are
+    parameter (VPN, prod script, BI API repository picker, etc.) — those jobs are
     ignored during service-first routing.
     """
     u = _jenkins_update_primary_url(raw_url).replace("\\", "/")
@@ -8959,6 +8965,105 @@ def _fnt_rc_bot_build_config_block(data: dict, resolved_ids: list[str]) -> str:
         f"version: {data['version']}\n"
         f"services:\n{svc_lines}\n"
     )
+
+
+def parse_frontend_bot_block(text: str) -> dict:
+    """Frontend H5/WEB UAT jobs — ``Branch:`` required, ``Version:`` optional."""
+    raw_lines = [_normalize_config_colons(L) for L in (text or "").splitlines()]
+    lines = [L.strip() for L in raw_lines if L.strip() != ""]
+    if not lines:
+        raise ValueError("Empty message.")
+    head = lines[0]
+    if not JENKINS_UPDATE_CMD_RE.search(head):
+        if not re.search(r"(?i)\b(?:update|deploy|frontend|h5|web)\b", head):
+            raise ValueError("First line must include `/jenkinsupdate`.")
+    branch: str | None = None
+    version: str = ""
+    for line in lines[1:]:
+        m = _match_key_line_fuzzy(line)
+        if not m:
+            continue
+        key = _canonical_config_key(m.group("key"))
+        rest = _clean_key_rest(m.group("rest") or "")
+        if key == "branch":
+            branch = _branch_from_config_block(rest, preserve_case=True)
+            if not branch:
+                raise ValueError("branch: is empty.")
+        elif key == "version":
+            version = _version_from_config_block(rest) or ""
+    if branch is None:
+        raise ValueError("Missing branch: in the block.")
+    return {
+        "branch": branch,
+        "version": version,
+        "service_tokens": [],
+        "update_all_services": False,
+    }
+
+
+def _frontend_bot_build_config_block(data: dict) -> str:
+    return (
+        "FRONTEND_UAT_V1\n"
+        f"branch: {data['branch']}\n"
+        f"version: {data.get('version') or ''}\n"
+    )
+
+
+def parse_frontend_run_config_block(text: str) -> tuple[str, str]:
+    raw_lines = [_normalize_config_colons(L) for L in (text or "").splitlines()]
+    lines = [L.strip() for L in raw_lines if L.strip() != ""]
+    if not lines or not lines[0].upper().startswith("FRONTEND_UAT_V1"):
+        raise ConfigBlockError("Internal frontend config must start with FRONTEND_UAT_V1.")
+    branch: str | None = None
+    version: str = ""
+    for line in lines[1:]:
+        m = _match_key_line_fuzzy(line)
+        if not m:
+            continue
+        key = _canonical_config_key(m.group("key"))
+        rest = _clean_key_rest(m.group("rest") or "")
+        if key == "branch":
+            branch = _branch_from_config_block(rest, preserve_case=True)
+            if not branch:
+                raise ConfigBlockError("branch: is empty.")
+        elif key == "version":
+            version = _version_from_config_block(rest) or ""
+    if branch is None:
+        raise ConfigBlockError("Missing branch: in FRONTEND_UAT_V1 block.")
+    return branch, version
+
+
+def verify_frontend_parameters_display(
+    page, branch_expected: str, version_expected: str = ""
+) -> tuple[bool, list[str]]:
+    want_br = normalize_parameter_text(branch_expected)
+    want_ver = normalize_parameter_text(version_expected)
+    lines: list[str] = []
+    ok_all = True
+    try:
+        got_br = read_text_parameter_value(page, "Branch")
+    except Exception as ex:
+        got_br = f"(read failed: {ex})"
+        br_ok = False
+    else:
+        br_ok = normalize_parameter_text(got_br) == want_br
+    ok_all = ok_all and br_ok
+    lines.append(
+        f"{'✅' if br_ok else '❌'} Branch — page: {got_br!r} | expected: {want_br!r}"
+    )
+    if want_ver:
+        try:
+            got_ver = read_text_parameter_value(page, "Version")
+        except Exception as ex:
+            got_ver = f"(read failed: {ex})"
+            ver_ok = False
+        else:
+            ver_ok = normalize_parameter_text(got_ver) == want_ver
+        ok_all = ok_all and ver_ok
+        lines.append(
+            f"{'✅' if ver_ok else '❌'} Version — page: {got_ver!r} | expected: {want_ver!r}"
+        )
+    return ok_all, lines
 
 
 def parse_fnt_rc_run_config_block(text: str) -> tuple[list[str], str, str, bool]:
@@ -9944,7 +10049,7 @@ def _jenkins_filled_env_branch_for_display(
             normalize_parameter_text(environment) or dash,
             normalize_parameter_text(command) or dash,
         )
-    if jp in ("fnt_rc", "sms_uat"):
+    if jp in ("fnt_rc", "sms_uat", "frontend"):
         return dash, normalize_parameter_text(branch) or dash
     env_out = normalize_parameter_text(environment) or dash
     branch_out = normalize_parameter_text(branch) or dash
@@ -10156,6 +10261,8 @@ def _jenkins_parameter_labels_for_profile(job_profile: str) -> list[str]:
         return ["DEPLOYMENT_FILE_NAME", "ENVIRONMENT", "SOURCE_BRANCH"]
     if jp in ("fnt_rc", "sms_uat"):
         return ["Branch", "Version", "Services"]
+    if jp == "frontend":
+        return ["Branch", "Version"]
     if jp == "venue_uat":
         return ["Environment", "Services", "Branch"]
     return ["Environment", "Services", "Branch", "Version"]
@@ -10175,6 +10282,7 @@ def _jenkins_job_profile_display(job_profile: str) -> str:
         "vpn_creation": "VPN CREATION",
         "venue_uat": "VENUE UAT",
         "cpms_igo_uat": "CPMS / IGO UAT",
+        "frontend": "FRONTEND UAT",
     }.get(jp, jp.upper().replace("_", " "))
 
 
@@ -10832,6 +10940,8 @@ def _fpms_lark_begin_jenkins_run(
         cfg = _venue_uat_bot_build_config_block(data, resolved)
     elif jp == "cpms_igo_uat":
         cfg = _cpms_igo_uat_bot_build_config_block(data, resolved)
+    elif jp == "frontend":
+        cfg = _frontend_bot_build_config_block(data)
     else:
         cfg = _fpms_bot_build_config_block(data, resolved)
     ev = threading.Event()
@@ -11014,25 +11124,14 @@ def _fpms_lark_dispatch_job_row(
     *,
     lark_message_id: str | None = None,
 ) -> bool:
-    """After a Jenkins job alias is chosen: link-only jobs vs automated parameter jobs."""
+    """After a Jenkins job alias is chosen: route to the matching automated parameter flow."""
     alias, _sc, label, url_raw = row
     prof = _jenkins_update_job_automation_profile(url_raw)
-    if prof is None:
-        lines = [
-            f"✅ **Job:** {label}",
-            f"**Matched:** `{alias}`",
-            "",
-            "**Jenkins URL(s):**",
-        ]
-        for i, uu in enumerate([u.strip() for u in url_raw.splitlines() if u.strip()], 1):
-            lines.append(f"{i}. {uu}")
-        lines.append(
-            "\n_Only **FPMS/PMS UAT update**, **FPMS NT UAT master update**, **FPMS PROD SCRIPT RUN**, **FNT RC** / **FNT script** ECP jobs, and **SMS UAT update** "
-            "are auto-filled by this bot; use the links for other jobs._"
-        )
-        send(chat_id, "\n".join(lines))
-        return True
     ju = _jenkins_update_primary_url(url_raw)
+    if prof == "frontend":
+        return _fpms_lark_dispatch_frontend_parameter_flow(
+            chat_id, session_key, body, ju, send, lark_message_id=lark_message_id
+        )
     if prof == "fnt_rc":
         return _fpms_lark_dispatch_fnt_rc_parameter_flow(
             chat_id, session_key, body, ju, send, lark_message_id=lark_message_id
@@ -11216,6 +11315,51 @@ def _fpms_lark_dispatch_fpms_prod_script_parameter_flow(
         raw_prompt_body=body,
         jenkins_build_url=jenkins_build_url,
         job_profile="fpms_prod_script",
+        lark_message_id=lark_message_id,
+    )
+    return True
+
+
+def _fpms_lark_dispatch_frontend_parameter_flow(
+    chat_id: str,
+    session_key: str,
+    body: str,
+    jenkins_build_url: str,
+    send,
+    *,
+    lark_message_id: str | None = None,
+) -> bool:
+    """Parse Frontend H5/WEB block (branch only) and run via warm browser + YES/NO gate."""
+    try:
+        data = parse_frontend_bot_block(body)
+    except Exception as ex:
+        send(
+            chat_id,
+            "❌ Could not parse Frontend update block. Need `/jenkinsupdate` (or **frontend uat*h5** headline) "
+            f"then `branch:` (optional `version:`).\n```\n{ex}\n```\n"
+            "Example:\n"
+            "/update frontend uat1 h5\n"
+            "branch: release/1.2.3",
+        )
+        return True
+    with _fpms_lark_sessions_lock:
+        prev = _fpms_lark_sessions.get(session_key)
+        if isinstance(prev, dict) and prev.get("state") == "jenkins_wait_build":
+            send(
+                chat_id,
+                "⏳ A Jenkins **Build** confirmation is already waiting for you in this chat. "
+                "**Tap YES/NO** on that card (or type **yes** / **no**), or say **cancel** before starting a new run.",
+            )
+            return True
+    _fpms_lark_begin_jenkins_run(
+        chat_id,
+        session_key,
+        data,
+        [],
+        send,
+        raw_prompt_body=body,
+        jenkins_build_url=jenkins_build_url,
+        job_profile="frontend",
         lark_message_id=lark_message_id,
     )
     return True
@@ -15612,6 +15756,7 @@ def run(
     is_bi_script_update = jp == "bi_script_update"
     is_vpn = jp == "vpn_creation"
     is_venue = jp == "venue_uat"
+    is_frontend = jp == "frontend"
     if is_vpn:
         _ensure_vpn_fast_fill_mode()
 
@@ -15672,6 +15817,15 @@ def run(
                 f"    deployment_files ({len(services)}): {', '.join(services)}\n"
                 f"    environment: {environment!r}\n"
                 f"    source_branch: {branch!r}\n"
+            )
+        elif cl.upper().startswith("FRONTEND_UAT_V1"):
+            branch, version = parse_frontend_run_config_block(config_block)
+            environment = ""
+            services = []
+            print(
+                "\n→ Parsed FRONTEND UAT config block:\n"
+                f"    branch:  {branch!r}\n"
+                f"    version: {version!r}\n"
             )
         elif cl.upper().startswith("FNT_RC_UAT_MASTER_V1"):
             services, branch, version, parsed_update_all = parse_fnt_rc_run_config_block(config_block)
@@ -15922,6 +16076,8 @@ def run(
                         if is_qrqm_update
                         else "Services / Branch / Version…"
                         if skip_env
+                        else "Branch / Version…"
+                        if is_frontend
                         else "Environment / Services / Branch…"
                     )
                 )
@@ -15980,6 +16136,16 @@ def run(
                 select_environment_by_value(page, environment)
                 command = normalize_fpms_prod_script_command(command)
                 fill_text_parameter(page, "Command", command)
+            elif is_frontend:
+                fill_text_parameter(page, "Branch", branch)
+                if version:
+                    try:
+                        fill_text_parameter(page, "Version", version)
+                    except Exception as _ver_ex:
+                        print(
+                            f"→ Frontend: optional Version fill skipped ({_ver_ex!r}).",
+                            flush=True,
+                        )
             else:
                 try:
                     if not skip_env:
@@ -16069,6 +16235,10 @@ def run(
                     ok_first, lines_first = verify_fpms_prod_script_parameters_display(
                         page, environment, command
                     )
+                elif is_frontend:
+                    ok_first, lines_first = verify_frontend_parameters_display(
+                        page, branch, version
+                    )
                 elif skip_env:
                     ok_first, lines_first = verify_fnt_rc_parameters_display(
                         page,
@@ -16116,6 +16286,10 @@ def run(
                         ok_second, verify_lines = verify_fpms_prod_script_parameters_display(
                             page, environment, command
                         )
+                    elif is_frontend:
+                        ok_second, verify_lines = verify_frontend_parameters_display(
+                            page, branch, version
+                        )
                     elif skip_env:
                         ok_second, verify_lines = verify_fnt_rc_parameters_display(
                             page,
@@ -16159,6 +16333,10 @@ def run(
                 elif is_prod_script:
                     ok_all, verify_lines = verify_fpms_prod_script_parameters_display(
                         page, environment, command
+                    )
+                elif is_frontend:
+                    ok_all, verify_lines = verify_frontend_parameters_display(
+                        page, branch, version
                     )
                 elif skip_env:
                     ok_all, verify_lines = verify_fnt_rc_parameters_display(
