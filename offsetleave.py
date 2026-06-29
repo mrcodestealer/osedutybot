@@ -928,7 +928,7 @@ def _parse_offset_leave_action_llm(text: str) -> Optional[str]:
     api_key = ca._llm_api_key()
     if not api_key:
         return None
-    model = ca._llm_model_for_request(images=False)
+    model = ca.routing_llm_model()
     print(
         f"[offsetleave] LLM classify start model={model!r} text={(text or '')[:80]!r}",
         flush=True,

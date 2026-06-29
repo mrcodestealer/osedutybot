@@ -142,6 +142,14 @@ def _command_llm_model() -> str:
     return (os.getenv("BOT_COMMANDAGENT_LLM_MODEL") or "qwen2.5:0.5b").strip()
 
 
+def routing_llm_model() -> str:
+    """Fast model for NL → slash command / offset-leave action classification."""
+    override = (os.getenv("BOT_OFFSET_LLM_MODEL") or "").strip()
+    if override:
+        return override
+    return _command_llm_model()
+
+
 def _use_command_model_only() -> bool:
     return (os.getenv("BOT_USE_COMMAND_MODEL_ONLY") or "0").strip().lower() in (
         "1",
