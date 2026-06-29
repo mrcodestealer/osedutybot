@@ -1323,7 +1323,9 @@ def build_offset_form_card(*, owner_open_id: str, request_person: str) -> dict[s
     intro = (
         f"**Request person:** {req}\n"
         "Pick **Exchange person** and the other fields below, then tap **Submit**.\n"
-        "_**Myself**: Original date = your duty day (D/N); Exchange date = your rest day._"
+        "_**Myself**: Original date = your duty day (D/N); Exchange date = your rest day._\n"
+        "_**Shift** must match your duty on **Original date** (N night / D day); "
+        "two-person swaps must also match exchange person's duty on **Exchange date**._"
     )
     form_elements: list[dict[str, Any]] = []
     form_elements.extend(

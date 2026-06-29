@@ -3320,16 +3320,20 @@ def validate_offset_swap_duty_dates(
     *,
     request_person: str,
     exchange_person: str,
+    shift_type: str,
     original_date: date,
     exchange_date: date,
 ) -> None:
     """
-    Two-person swap: Original Date must be requester's D/N day; Exchange Date must be
-    exchange person's D/N day.
+    Two-person swap: Original Date must be requester's duty day with the selected shift;
+    Exchange Date must be exchange person's duty day with the same shift.
 
-    Exchange with self (``Myself``): Original Date must be the requester's duty day;
+    Exchange with self (``Myself``): Original Date must match the selected shift;
     Exchange Date must be the requester's rest day (blank or ``*``, not leave).
     """
+    st = (shift_type or "").strip().upper()
+    if st not in OSE_SHIFT_TYPES:
+        raise ValueError("Shift Type must be N or D")
     values, err = _get_cached_ose_sheet_values()
     if not values:
         raise RuntimeError(err or "Could not load OSE shift sheet")
@@ -3337,11 +3341,16 @@ def validate_offset_swap_duty_dates(
     if not req:
         raise ValueError("Request person is required")
     exc = _title_name(exchange_person) or req
-    orig_ok = _person_shift_code_on_date(values, req, original_date) in OSE_SHIFT_TYPES
+    req_orig = _person_shift_code_on_date(values, req, original_date)
     same_person = _names_same_person(req, exc)
+    footer = _OFFSET_DUTY_DATE_ERROR_FOOTER
     if same_person:
-        footer = _OFFSET_DUTY_DATE_ERROR_FOOTER
-        if not orig_ok:
+        if req_orig != st:
+            if req_orig in OSE_SHIFT_TYPES:
+                raise ValueError(
+                    f"As checked the selected shift ({st}) does not match your {req_orig} duty "
+                    f"on the original date. {footer}"
+                )
             raise ValueError(f"As checked the requested date is not your duty date. {footer}")
         exc_code = _person_shift_code_on_date(values, req, exchange_date)
         if exc_code in _OSE_SHIFT_SHEET_LEAVE_CODES:
@@ -3352,17 +3361,33 @@ def validate_offset_swap_duty_dates(
         if not _person_is_rest_day_on_date(values, req, exchange_date):
             raise ValueError(f"As checked the exchange date is not your rest day. {footer}")
         return
-    exc_ok = _person_shift_code_on_date(values, exc, exchange_date) in OSE_SHIFT_TYPES
-    if orig_ok and exc_ok:
+    exc_code = _person_shift_code_on_date(values, exc, exchange_date)
+    orig_shift_ok = req_orig == st
+    exc_shift_ok = exc_code == st
+    if orig_shift_ok and exc_shift_ok:
         return
-    footer = _OFFSET_DUTY_DATE_ERROR_FOOTER
-    if not orig_ok and not exc_ok:
+    if not orig_shift_ok and not exc_shift_ok:
+        if req_orig in OSE_SHIFT_TYPES and exc_code in OSE_SHIFT_TYPES:
+            raise ValueError(
+                f"As checked the selected shift ({st}) does not match duty on the original date "
+                f"({req_orig}) or exchange date ({exc_code}). {footer}"
+            )
         raise ValueError(
             "As checked the requested date is not your duty date and exchange date is not exchange person duty date. "
             f"{footer}"
         )
-    if not orig_ok:
+    if not orig_shift_ok:
+        if req_orig in OSE_SHIFT_TYPES:
+            raise ValueError(
+                f"As checked the selected shift ({st}) does not match your {req_orig} duty "
+                f"on the original date. {footer}"
+            )
         raise ValueError(f"As checked the requested date is not your duty date. {footer}")
+    if exc_code in OSE_SHIFT_TYPES:
+        raise ValueError(
+            f"As checked the selected shift ({st}) does not match exchange person's {exc_code} duty "
+            f"on the exchange date. {footer}"
+        )
     raise ValueError(f"As checked the exchange date is not exchange person duty date. {footer}")
 
 
@@ -4464,6 +4489,7 @@ def submit_ose_offset(
     validate_offset_swap_duty_dates(
         request_person=req,
         exchange_person=exc,
+        shift_type=st,
         original_date=original_date,
         exchange_date=exchange_date,
     )
@@ -4646,6 +4672,7 @@ def update_ose_offset_request(
     validate_offset_swap_duty_dates(
         request_person=req,
         exchange_person=exc,
+        shift_type=st,
         original_date=original_date,
         exchange_date=exchange_date,
     )
