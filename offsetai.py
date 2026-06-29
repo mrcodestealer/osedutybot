@@ -853,10 +853,9 @@ def _execute_tool(ctx: _AgentCtx, name: str, args: dict[str, Any]) -> tuple[str,
         oid = ctx.sender_open_id
         mt = _month_target_from_args(args)
         if ol._is_offset_approver_open_id(oid):
-            rows = ol._all_offsets_for_approver_delete()
+            rows = ol._non_pending_offsets_all()
             if mt:
                 rows = ol._filter_offsets_by_month(rows, *mt)
-            rows = [r for r in rows if bool(r.get("pending"))]
             rows = filter_rows_by_args(
                 rows,
                 person=args.get("person"),

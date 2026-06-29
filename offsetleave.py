@@ -2442,6 +2442,14 @@ def handle_editoffset_command(
         _clear_edit_forms_for_owner(oid)
         if _is_offset_approver_open_id(oid):
             request_person = try_resolve_request_person(oid, token)
+            if status_filter == "pending":
+                send_message(
+                    chat_id,
+                    "Pending offset requests: use **pendingoffset** to review, or **editoffset** "
+                    "as the requester to change your own pending row.\n"
+                    "Approver **editoffset** lists **approved** or **rejected** rows only.",
+                )
+                return True
             if (
                 not has_nl_filter
                 and request_person
@@ -2562,6 +2570,23 @@ def handle_editoffset_command(
     return True
 
 
+def _text_explicitly_mentions_offset_status(text: str) -> bool:
+    return bool(
+        re.search(
+            r"(?i)\b(pending|approved|rejected|待审|已批|已拒)\b",
+            text or "",
+        )
+    )
+
+
+def _text_explicitly_mentions_offset_month(text: str) -> bool:
+    t = text or ""
+    return (
+        _parse_offset_month_filter(t) is not None
+        or od.parse_offset_month_from_text(t) is not None
+    )
+
+
 def _resolve_nl_offset_filters(
     clean_text: str,
     *,
@@ -2589,6 +2614,10 @@ def _resolve_nl_offset_filters(
                 pass
     except Exception:
         pass
+    if not _text_explicitly_mentions_offset_status(clean_text):
+        status = None
+    if not _text_explicitly_mentions_offset_month(clean_text):
+        month = None
     if person:
         print(
             f"[offsetleave] NL person filter: {person!r} from {clean_text[:80]!r}",
