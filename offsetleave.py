@@ -75,6 +75,10 @@ OFFSET_APPROVER_OPEN_IDS: frozenset[str] = frozenset(
     }
 )
 
+# Lark bot custom menu — Push event ``event_key`` (Developer Console → Bot → Custom menu).
+BOT_MENU_EVENT_KEY_OFFSET_FORM = "187236871623876123"
+BOT_MENU_EVENT_KEYS_OFFSET_FORM: frozenset[str] = frozenset({BOT_MENU_EVENT_KEY_OFFSET_FORM})
+
 OFFSET_APPROVAL_CALLBACK_KEYS = frozenset({_OFFSET_APPR_PICK_KEY, _OFFSET_APPR_CONFIRM_KEY})
 
 _OFFSET_EDIT_PICK_KEY = "offsetleave_offset_edit_pick"
@@ -2175,6 +2179,64 @@ def _deliver_private_card(
 
 def wants_offset_request(text: str) -> bool:
     return _wants_offset(text)
+
+
+def _bot_menu_operator_open_id(data: dict[str, Any]) -> str:
+    ev = data.get("event") if isinstance(data.get("event"), dict) else {}
+    op = ev.get("operator") if isinstance(ev.get("operator"), dict) else {}
+    oid_wrap = op.get("operator_id") if isinstance(op.get("operator_id"), dict) else {}
+    return str(oid_wrap.get("open_id") or "").strip()
+
+
+def _bot_menu_event_key(data: dict[str, Any]) -> str:
+    ev = data.get("event") if isinstance(data.get("event"), dict) else {}
+    return str(ev.get("event_key") or "").strip()
+
+
+def handle_bot_menu_event(
+    data: dict[str, Any],
+    *,
+    send_message: Callable[..., dict[str, Any]],
+    get_token_func: Callable[[], str],
+) -> bool:
+    """
+    Handle ``application.bot.menu_v6`` push events.
+
+    Returns True when the payload was a bot-menu event (handled or logged); False if not menu-shaped.
+    """
+    if not isinstance(data, dict) or not isinstance(data.get("event"), dict):
+        return False
+    event_key = _bot_menu_event_key(data)
+    if not event_key:
+        print("[offsetleave] bot menu: missing event_key", flush=True)
+        return True
+    oid = _bot_menu_operator_open_id(data)
+    if not oid:
+        print(f"[offsetleave] bot menu {event_key!r}: missing operator open_id", flush=True)
+        return True
+
+    def _send_open_id(_chat_id: str, text: str, **kwargs: Any) -> dict[str, Any]:
+        return send_message(
+            oid,
+            text,
+            receive_id_type="open_id",
+            msg_type=str(kwargs.get("msg_type") or "text"),
+            mentions=kwargs.get("mentions"),
+        )
+
+    if event_key in BOT_MENU_EVENT_KEYS_OFFSET_FORM:
+        print(f"[offsetleave] bot menu {event_key!r} → offset form for {oid}", flush=True)
+        _open_offset_form(
+            sender_open_id=oid,
+            chat_id=oid,
+            chat_type="p2p",
+            send_message=_send_open_id,
+            get_token_func=get_token_func,
+        )
+        return True
+
+    print(f"[offsetleave] bot menu: unhandled event_key={event_key!r}", flush=True)
+    return True
 
 
 def _open_offset_form(

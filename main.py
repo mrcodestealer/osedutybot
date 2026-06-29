@@ -3962,7 +3962,26 @@ def lark_webhook():
     # Bot footer menu « Push event » — ``application.bot.menu_v6`` (Lark docs). **Not** ``card.action.trigger``;
     # client expects ``{"success": true}``, **not** empty ``{}`` (card ACK).
     if hdr_et in ("application.bot.menu_v6", "application.bot.menu"):
-        print("[lark] bot menu event — ACK success=True", flush=True)
+        menu_payload = dict(data) if isinstance(data, dict) else {}
+
+        def _bot_menu_worker() -> None:
+            try:
+                import offsetleave as _ol
+
+                _ol.handle_bot_menu_event(
+                    menu_payload,
+                    send_message=send_message,
+                    get_token_func=get_tenant_access_token,
+                )
+            except Exception as exc:
+                print(f"[lark] bot menu worker failed: {exc!r}", flush=True)
+
+        threading.Thread(
+            target=_bot_menu_worker,
+            daemon=True,
+            name="lark-bot-menu",
+        ).start()
+        print("[lark] bot menu event — ACK success=True (worker started)", flush=True)
         return jsonify({"success": True})
 
     # ``card.action.trigger``: MUST respond within **3s** with HTTP 200 and body ``{}`` or ``toast``/``card``.
@@ -6838,6 +6857,44 @@ def _lark_ws_dispatch_payload(payload: dict) -> tuple[int, dict]:
     return int(rv.status_code), body
 
 
+def _lark_ws_to_menu_webhook_payload(data) -> dict:
+    import lark_oapi as lark
+
+    raw = json.loads(lark.JSON.marshal(data))
+    if isinstance(raw, dict) and "header" in raw and "event" in raw:
+        payload = dict(raw)
+    else:
+        inner = raw.get("event", raw) if isinstance(raw, dict) else raw
+        payload = {
+            "schema": "2.0",
+            "header": {
+                "event_id": str(uuid.uuid4()),
+                "event_type": "application.bot.menu_v6",
+                "create_time": str(int(time.time() * 1000)),
+            },
+            "event": inner,
+        }
+    if VERIFICATION_TOKEN:
+        hdr = payload.setdefault("header", {})
+        if not str(hdr.get("token") or "").strip():
+            hdr["token"] = VERIFICATION_TOKEN
+    hdr = payload.setdefault("header", {})
+    hdr.setdefault("event_type", "application.bot.menu_v6")
+    return payload
+
+
+def _lark_ws_on_bot_menu(data) -> None:
+    try:
+        payload = _lark_ws_to_menu_webhook_payload(data)
+        status, _ = _lark_ws_dispatch_payload(payload)
+        print(
+            f"[lark-ws] application.bot.menu_v6 dispatched status={status}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"[lark-ws] bot menu dispatch failed: {exc!r}", flush=True)
+
+
 def _lark_ws_on_message(data) -> None:
     try:
         payload = _lark_ws_to_webhook_payload(data)
@@ -7000,12 +7057,20 @@ def _run_lark_ws_forever() -> None:
         raise RuntimeError("Set APP_ID and APP_SECRET in .env for LARK_EVENT_MODE=websocket")
 
     _lark_ws_apply_card_frame_patch()
-    handler = (
+    builder = (
         lark.EventDispatcherHandler.builder("", "")
         .register_p2_im_message_receive_v1(_lark_ws_on_message)
         .register_p2_card_action_trigger(_lark_ws_on_card_action)
-        .build()
     )
+    if hasattr(builder, "register_p2_application_bot_menu_v6"):
+        builder = builder.register_p2_application_bot_menu_v6(_lark_ws_on_bot_menu)
+    else:
+        print(
+            "[lark-ws] lark-oapi has no register_p2_application_bot_menu_v6 — "
+            "bot menu needs HTTP webhook or upgrade lark-oapi",
+            flush=True,
+        )
+    handler = builder.build()
     _probe = getattr(handler, "_do_without_validation", None) or getattr(handler, "do_without_validation", None)
     print(
         "[lark-ws] EventDispatcherHandler dispatch="
@@ -7022,7 +7087,7 @@ def _run_lark_ws_forever() -> None:
         domain=domain,
     )
     print(
-        "[lark-ws] Persistent connection active (im.message + card.action.trigger). "
+        "[lark-ws] Persistent connection active (im.message + card.action.trigger + bot menu). "
         "Developer console: Subscription mode → Receive callbacks through persistent connection.",
         flush=True,
     )
