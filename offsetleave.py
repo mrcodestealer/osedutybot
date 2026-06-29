@@ -1322,7 +1322,8 @@ def build_offset_form_card(*, owner_open_id: str, request_person: str) -> dict[s
     exchange_names = list(od.ose_offset_form_exchange_names(exclude_person=req))
     intro = (
         f"**Request person:** {req}\n"
-        "Pick **Exchange person** and the other fields below, then tap **Submit**."
+        "Pick **Exchange person** and the other fields below, then tap **Submit**.\n"
+        "_**Myself**: Original date = your duty day (D/N); Exchange date = your rest day._"
     )
     form_elements: list[dict[str, Any]] = []
     form_elements.extend(

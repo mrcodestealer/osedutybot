@@ -3297,6 +3297,20 @@ def _person_shift_code_on_date(
     return _field_text(row[col]).strip().upper()
 
 
+def _person_is_rest_day_on_date(
+    values: list[list[Any]],
+    person: str,
+    target_date: date,
+) -> bool:
+    """True when the person is not on D/N duty and the day can receive a swap (empty or ``*``)."""
+    code = _person_shift_code_on_date(values, person, target_date)
+    if code in OSE_SHIFT_TYPES:
+        return False
+    if code in _OSE_SHIFT_SHEET_LEAVE_CODES:
+        return False
+    return code in ("", "*")
+
+
 _OFFSET_DUTY_DATE_ERROR_FOOTER = (
     "Kindly check again. If have any issue kindly let Jun Chen know. Thanks."
 )
@@ -3313,8 +3327,8 @@ def validate_offset_swap_duty_dates(
     Two-person swap: Original Date must be requester's D/N day; Exchange Date must be
     exchange person's D/N day.
 
-    Exchange with self (``Myself``): only Original Date must be the requester's duty day;
-    Exchange Date is where duty moves to on approval (need not already be a duty day).
+    Exchange with self (``Myself``): Original Date must be the requester's duty day;
+    Exchange Date must be the requester's rest day (blank or ``*``, not leave).
     """
     values, err = _get_cached_ose_sheet_values()
     if not values:
@@ -3326,10 +3340,18 @@ def validate_offset_swap_duty_dates(
     orig_ok = _person_shift_code_on_date(values, req, original_date) in OSE_SHIFT_TYPES
     same_person = _names_same_person(req, exc)
     if same_person:
-        if orig_ok:
-            return
         footer = _OFFSET_DUTY_DATE_ERROR_FOOTER
-        raise ValueError(f"As checked the requested date is not your duty date. {footer}")
+        if not orig_ok:
+            raise ValueError(f"As checked the requested date is not your duty date. {footer}")
+        exc_code = _person_shift_code_on_date(values, req, exchange_date)
+        if exc_code in _OSE_SHIFT_SHEET_LEAVE_CODES:
+            raise ValueError(
+                "As checked the exchange date is a leave day — pick a rest day instead. "
+                f"{footer}"
+            )
+        if not _person_is_rest_day_on_date(values, req, exchange_date):
+            raise ValueError(f"As checked the exchange date is not your rest day. {footer}")
+        return
     exc_ok = _person_shift_code_on_date(values, exc, exchange_date) in OSE_SHIFT_TYPES
     if orig_ok and exc_ok:
         return
