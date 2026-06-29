@@ -343,6 +343,7 @@ OSE_ROSTER_NICKNAMES: dict[str, str] = {
     "kk": "Kheng Kwan",
     "kheng": "Kheng Kwan",
     "khengkwan": "Kheng Kwan",
+    "kwan": "Kheng Kwan",
     "kn": "Kris Ng",
     "kris": "Kris Ng",
     "krisng": "Kris Ng",
@@ -353,6 +354,7 @@ OSE_ROSTER_NICKNAMES: dict[str, str] = {
     "kat": "Katleen",
     "katleen": "Katleen",
     "lynette": "Lynette",
+    "lyn": "Lynette",
     "jewel": "Jewel",
     # Jan Rei
     "janrei": "Jan Rei",
