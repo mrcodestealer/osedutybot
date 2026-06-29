@@ -78,6 +78,12 @@ OFFSET_APPROVER_OPEN_IDS: frozenset[str] = frozenset(
 # Lark bot custom menu — Push event ``event_key`` (Developer Console → Bot → Custom menu).
 BOT_MENU_EVENT_KEY_OFFSET_FORM = "187236871623876123"
 BOT_MENU_EVENT_KEYS_OFFSET_FORM: frozenset[str] = frozenset({BOT_MENU_EVENT_KEY_OFFSET_FORM})
+BOT_MENU_EVENT_KEY_OFFSET_DELETE = "1786248761248618414124"
+BOT_MENU_EVENT_KEYS_OFFSET_DELETE: frozenset[str] = frozenset({BOT_MENU_EVENT_KEY_OFFSET_DELETE})
+BOT_MENU_EVENT_KEY_SHOW_OFFSET = "6543761547615237517625312"
+BOT_MENU_EVENT_KEYS_SHOW_OFFSET: frozenset[str] = frozenset({BOT_MENU_EVENT_KEY_SHOW_OFFSET})
+BOT_MENU_EVENT_KEY_OFFSET_EDIT = "16246751235716253765123123"
+BOT_MENU_EVENT_KEYS_OFFSET_EDIT: frozenset[str] = frozenset({BOT_MENU_EVENT_KEY_OFFSET_EDIT})
 
 OFFSET_APPROVAL_CALLBACK_KEYS = frozenset({_OFFSET_APPR_PICK_KEY, _OFFSET_APPR_CONFIRM_KEY})
 
@@ -2235,8 +2241,101 @@ def handle_bot_menu_event(
         )
         return True
 
+    if event_key in BOT_MENU_EVENT_KEYS_OFFSET_DELETE:
+        print(f"[offsetleave] bot menu {event_key!r} → delete offset for {oid}", flush=True)
+        _open_offset_delete_picker(
+            sender_open_id=oid,
+            chat_id=oid,
+            chat_type="p2p",
+            send_message=_send_open_id,
+            get_token_func=get_token_func,
+        )
+        return True
+
+    if event_key in BOT_MENU_EVENT_KEYS_SHOW_OFFSET:
+        print(f"[offsetleave] bot menu {event_key!r} → show offset for {oid}", flush=True)
+        _open_show_offset_calendar(
+            sender_open_id=oid,
+            chat_id=oid,
+            send_message=_send_open_id,
+            get_token_func=get_token_func,
+        )
+        return True
+
+    if event_key in BOT_MENU_EVENT_KEYS_OFFSET_EDIT:
+        print(f"[offsetleave] bot menu {event_key!r} → edit offset for {oid}", flush=True)
+        _open_offset_edit_picker(
+            sender_open_id=oid,
+            chat_id=oid,
+            chat_type="p2p",
+            send_message=_send_open_id,
+            get_token_func=get_token_func,
+        )
+        return True
+
     print(f"[offsetleave] bot menu: unhandled event_key={event_key!r}", flush=True)
     return True
+
+
+def _open_offset_delete_picker(
+    *,
+    sender_open_id: str,
+    chat_id: str,
+    chat_type: Optional[str],
+    send_message: Callable[..., dict[str, Any]],
+    get_token_func: Callable[[], str],
+) -> bool:
+    """Open the offset delete list card (same as ``deleteoffset`` without NL filters)."""
+    return handle_deleteoffset_command(
+        "deleteoffset",
+        sender_open_id=sender_open_id,
+        chat_id=chat_id,
+        chat_type=chat_type,
+        send_message=send_message,
+        get_token_func=get_token_func,
+        force=True,
+        person_filter="",
+        status_filter="",
+    )
+
+
+def _open_offset_edit_picker(
+    *,
+    sender_open_id: str,
+    chat_id: str,
+    chat_type: Optional[str],
+    send_message: Callable[..., dict[str, Any]],
+    get_token_func: Callable[[], str],
+) -> bool:
+    """Open the offset edit list card (same as ``editoffset`` without NL filters)."""
+    return handle_editoffset_command(
+        "editoffset",
+        sender_open_id=sender_open_id,
+        chat_id=chat_id,
+        chat_type=chat_type,
+        send_message=send_message,
+        get_token_func=get_token_func,
+        force=True,
+        person_filter="",
+        status_filter="",
+    )
+
+
+def _open_show_offset_calendar(
+    *,
+    sender_open_id: str,
+    chat_id: str,
+    send_message: Callable[..., dict[str, Any]],
+    get_token_func: Callable[[], str],
+) -> bool:
+    """Show offset calendar for the current month (same as bare ``showoffset``)."""
+    return handle_showoffset(
+        "showoffset",
+        chat_id=chat_id,
+        send_message=send_message,
+        sender_open_id=sender_open_id,
+        get_token_func=get_token_func,
+    )
 
 
 def _open_offset_form(
