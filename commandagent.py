@@ -2381,7 +2381,7 @@ def _cli_diagnose(phrase: str = "") -> None:
 
     print("Common slow paths (NOT the 2b command model):")
     print("  - dutyai used to call 35b BEFORE slash handler (fixed: regex-first + skip when mapped)")
-    print("  - offsetleave LLM classify uses 35b when message contains 'duty'")
+    print("  - offsetleave + offsetai LLM use routing_llm_model() (default: BOT_COMMANDAGENT_LLM_MODEL / 0.5b)")
     print("  - Swapping 2b <-> 35b in RAM unloads the other model (keep both warm: bash deploy/warmup-ollama.sh)")
     print("")
 

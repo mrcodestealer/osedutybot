@@ -4710,14 +4710,6 @@ def lark_webhook():
     try:
         import offsetleave as _offsetleave
 
-        _offsetai_nl_off = False
-        try:
-            import offsetai as _offsetai_gate
-
-            _offsetai_nl_off = _offsetai_gate.is_enabled()
-        except Exception:
-            pass
-
         if _offsetleave.handle_offset_slash_commands(
             clean_text,
             sender_open_id=sender_id or "",
@@ -4747,7 +4739,7 @@ def lark_webhook():
         ):
             return _lark_im_done()
 
-        if not _offsetai_nl_off and _offsetleave.handle_editoffset_command(
+        if _offsetleave.handle_editoffset_command(
             clean_text,
             sender_open_id=sender_id or "",
             chat_id=chat_id,
@@ -4757,7 +4749,7 @@ def lark_webhook():
         ):
             return _lark_im_done()
 
-        if not _offsetai_nl_off and _offsetleave.handle_deleteoffset_command(
+        if _offsetleave.handle_deleteoffset_command(
             clean_text,
             sender_open_id=sender_id or "",
             chat_id=chat_id,
@@ -4767,7 +4759,7 @@ def lark_webhook():
         ):
             return _lark_im_done()
 
-        if not _offsetai_nl_off and _offsetleave.handle_pendingoffset_command(
+        if _offsetleave.handle_pendingoffset_command(
             clean_text,
             sender_open_id=sender_id or "",
             chat_id=chat_id,

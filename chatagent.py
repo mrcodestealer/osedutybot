@@ -143,7 +143,7 @@ def _command_llm_model() -> str:
 
 
 def routing_llm_model() -> str:
-    """Fast model for NL → slash command / offset-leave action classification."""
+    """Fast model for all offset NL: offsetleave classify + offsetai agent/tools."""
     override = (os.getenv("BOT_OFFSET_LLM_MODEL") or "").strip()
     if override:
         return override

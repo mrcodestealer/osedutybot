@@ -231,6 +231,15 @@ _TOOL_SPECS: list[dict[str, Any]] = [
 ]
 
 
+def _offset_model() -> str:
+    try:
+        import chatagent as ca
+
+        return ca.routing_llm_model()
+    except Exception:
+        return "qwen2.5:0.5b"
+
+
 def is_enabled() -> bool:
     explicit = (os.getenv("BOT_USE_OFFSETAI") or "").strip().lower()
     if explicit in ("0", "false", "no", "off"):
@@ -503,7 +512,7 @@ def _llm_infer_filters(user_text: str) -> dict[str, Any]:
         f"user_message: {user_text.strip()}"
     )
     payload = {
-        "model": ca._llm_model_for_request(images=False),
+        "model": ca.routing_llm_model(),
         "messages": [
             {"role": "system", "content": _FILTER_INFER_SYSTEM},
             {"role": "user", "content": user},
@@ -511,6 +520,10 @@ def _llm_infer_filters(user_text: str) -> dict[str, Any]:
         "max_tokens": 200,
         "temperature": 0.0,
     }
+    print(
+        f"[offsetai] filter infer model={payload['model']!r} text={user_text[:80]!r}",
+        flush=True,
+    )
     url = f"{ca._llm_base_url()}/chat/completions"
     req = urllib.request.Request(
         url,
@@ -888,14 +901,16 @@ def _llm_chat_with_tools(messages: list[dict[str, Any]]) -> Optional[dict[str, A
     api_key = ca._llm_api_key()
     if not api_key:
         return None
+    model = ca.routing_llm_model()
     payload: dict[str, Any] = {
-        "model": ca._llm_model_for_request(images=False),
+        "model": model,
         "messages": messages,
         "tools": _TOOL_SPECS,
         "tool_choice": "auto",
         "max_tokens": int(os.getenv("OSE_OFFSET_AGENT_MAX_TOKENS", "900")),
         "temperature": 0.0,
     }
+    print(f"[offsetai] agent LLM call model={model!r}", flush=True)
     try:
         if ca._is_ollama_base():
             payload["think"] = False
@@ -1160,7 +1175,7 @@ def startup_status() -> None:
     print(
         f"[offsetai] BOT_USE_OFFSETAI={os.getenv('BOT_USE_OFFSETAI')!r} "
         f"enabled={is_enabled()} llm={'yes' if _llm_available() else 'no'} "
-        f"mode=agent_tools",
+        f"model={_offset_model()!r} mode=agent_tools",
         flush=True,
     )
     if is_enabled() and _llm_available():

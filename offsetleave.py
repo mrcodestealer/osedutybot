@@ -2351,6 +2351,8 @@ def handle_offset_query(
 ) -> bool:
     """Natural-language offset lookups, e.g. 五月有谁offset / who has offset in May."""
     act = parse_offset_leave_action(clean_text)
+    if act in ("delete_offset", "edit_offset", "pending_offset", "offset_form", "leave_form", "show_offset"):
+        return False
     if act not in ("query_offset",) and not od.looks_like_offset_lookup_query(clean_text):
         return False
     month = od.parse_offset_month_from_text(clean_text)
