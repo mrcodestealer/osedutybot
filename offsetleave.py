@@ -1784,15 +1784,23 @@ def build_offset_edit_list_card(
     rows: list[dict[str, Any]],
     *,
     is_admin: bool = False,
+    month_label: Optional[str] = None,
+    filter_label: Optional[str] = None,
 ) -> dict[str, Any]:
     cap = 15
     sliced = rows[:cap]
+    month_note = f" ({month_label})" if month_label else ""
+    filter_note = f"\n_Filter: **{filter_label}**_" if filter_label else ""
     if is_admin:
-        intro = "**Approver** — edit **approved** or **rejected** offsets (all requesters)."
+        intro = (
+            f"**Approver** — edit **approved** or **rejected** offsets (all requesters)"
+            f"{month_note}{filter_note}."
+        )
         cap_note = "non-pending"
     else:
         intro = (
-            f"**{request_person}** — pending offset requests you can **edit**.\n"
+            f"**{request_person}** — pending offset requests you can **edit**"
+            f"{month_note}{filter_note}.\n"
             "Approved / rejected rows are not listed."
         )
         cap_note = "pending"
@@ -1990,6 +1998,8 @@ def build_offset_edit_form_card(
         exc_on_row = od.OFFSET_EXCHANGE_MYSELF_LABEL
     o_ini = _row_datepicker_initial(row.get("original_date"))
     x_ini = _row_datepicker_initial(row.get("exchange_date"))
+    shift_on_row = str(row.get("shift_type") or "").strip().upper()
+    reason_on_row = str(row.get("reason") or "").strip()
     original_dp: dict[str, Any] = {
         "tag": "date_picker",
         "name": "original_date",
@@ -2009,6 +2019,12 @@ def build_offset_edit_form_card(
     status_line = ""
     if is_admin:
         status_line = f"\n**Status:** {_short_cell(row.get('approval_status'))}"
+    date_lines = ""
+    if row.get("original_date") or row.get("exchange_date"):
+        date_lines = (
+            f"\n**Original date:** {_short_cell(row.get('original_date'))}"
+            f"\n**Exchange date:** {_short_cell(row.get('exchange_date'))}"
+        )
     return {
         "schema": "2.0",
         "config": {"update_multi": True, "width_mode": "fill"},
@@ -2024,7 +2040,7 @@ def build_offset_edit_form_card(
                         "tag": "lark_md",
                         "content": (
                             f"**Request person:** {req_on_row}\n"
-                            f"**Record:** `{_short_cell(rid)}`{status_line}\n"
+                            f"**Record:** `{_short_cell(rid)}`{status_line}{date_lines}\n"
                             "Update the fields below, then tap **Save**."
                         ),
                     },
@@ -2055,6 +2071,11 @@ def build_offset_edit_form_card(
                             "placeholder": {"tag": "plain_text", "content": "N or D"},
                             "options": _select_options(od.OSE_SHIFT_TYPES),
                             "required": True,
+                            **(
+                                {"initial_option": shift_on_row}
+                                if shift_on_row in od.OSE_SHIFT_TYPES
+                                else {}
+                            ),
                         },
                         {
                             "tag": "div",
@@ -2078,6 +2099,7 @@ def build_offset_edit_form_card(
                             "placeholder": {"tag": "plain_text", "content": "Reason for offset"},
                             "required": True,
                             "max_length": 1000,
+                            **({"value": reason_on_row} if reason_on_row else {}),
                         },
                         {
                             "tag": "button",
@@ -2385,6 +2407,9 @@ def handle_editoffset_command(
     send_message: Callable[..., dict[str, Any]],
     get_token_func: Callable[[], str],
     force: bool = False,
+    month_target: Optional[tuple[int, int]] = None,
+    person_filter: Optional[str] = None,
+    status_filter: Optional[str] = None,
 ) -> bool:
     if not force and not wants_editoffset(clean_text):
         return False
@@ -2392,12 +2417,36 @@ def handle_editoffset_command(
     if not oid:
         send_message(chat_id, "❌ Could not identify your Lark user.")
         return True
+    if person_filter is None and status_filter is None:
+        person_filter, status_filter, inferred_month = _resolve_nl_offset_filters(
+            clean_text, month_target=month_target
+        )
+        if month_target is None:
+            month_target = inferred_month
+    if month_target is None:
+        month_target = _parse_offset_month_filter(clean_text)
+    month_label = (
+        _month_filter_label(month_target[0], month_target[1]) if month_target else None
+    )
+    filter_note = ""
+    if person_filter or status_filter:
+        bits = []
+        if person_filter:
+            bits.append(str(person_filter))
+        if status_filter:
+            bits.append(str(status_filter))
+        filter_note = " · ".join(bits)
+    has_nl_filter = bool(person_filter or status_filter or month_target)
     try:
         token = get_token_func()
         _clear_edit_forms_for_owner(oid)
         if _is_offset_approver_open_id(oid):
             request_person = try_resolve_request_person(oid, token)
-            if request_person and _pending_offsets_for_request_person(request_person):
+            if (
+                not has_nl_filter
+                and request_person
+                and _pending_offsets_for_request_person(request_person)
+            ):
                 _deliver_requester_offset_edit_menu(
                     owner_open_id=oid,
                     request_person=request_person,
@@ -2408,14 +2457,32 @@ def handle_editoffset_command(
                 )
                 return True
             rows = _non_pending_offsets_all()
-            if not rows:
-                send_message(
-                    chat_id,
-                    "No approved or rejected offset records found to edit, "
-                    "and you have no pending requests as requester.",
+            if month_target:
+                rows = _filter_offsets_by_month(rows, *month_target)
+            if person_filter or status_filter:
+                import offsetai as oai
+
+                rows = oai.filter_offset_rows(
+                    rows,
+                    clean_text,
+                    person_filter=person_filter,
+                    status_filter=status_filter,
+                    month_target=month_target,
                 )
+            if not rows:
+                hint = f" for **{month_label}**" if month_label else ""
+                if filter_note:
+                    hint = f" matching **{filter_note}**" + hint
+                send_message(chat_id, f"No offset records found to edit{hint}.")
                 return True
-            card = build_offset_edit_list_card(oid, "", rows, is_admin=True)
+            card = build_offset_edit_list_card(
+                oid,
+                "",
+                rows,
+                is_admin=True,
+                month_label=month_label,
+                filter_label=filter_note or None,
+            )
             _deliver_private_card(
                 owner_open_id=oid,
                 group_chat_id=chat_id,
@@ -2426,14 +2493,70 @@ def handle_editoffset_command(
             )
         else:
             request_person = resolve_request_person(oid, token)
-            _deliver_requester_offset_edit_menu(
-                owner_open_id=oid,
-                request_person=request_person,
-                group_chat_id=chat_id,
-                chat_type=chat_type,
-                send_message=send_message,
-                token=token,
-            )
+            rows = _pending_offsets_for_request_person(request_person)
+            if month_target:
+                rows = _filter_offsets_by_month(rows, *month_target)
+            if person_filter or status_filter:
+                import offsetai as oai
+
+                rows = oai.filter_offset_rows(
+                    rows,
+                    clean_text,
+                    person_filter=person_filter,
+                    status_filter=status_filter,
+                    month_target=month_target,
+                )
+            if not rows:
+                if month_label or filter_note:
+                    hint = f" for **{month_label}**" if month_label else ""
+                    if filter_note:
+                        hint = f" matching **{filter_note}**" + hint
+                    send_message(
+                        chat_id,
+                        f"No **pending** offset requests found to edit{hint}.",
+                    )
+                else:
+                    send_message(
+                        chat_id,
+                        f"No pending offset found for **{request_person}**. "
+                        "Approved or rejected requests cannot be edited with editoffset.",
+                    )
+                return True
+            if len(rows) == 1 and not has_nl_filter:
+                card = build_offset_edit_form_card(
+                    owner_open_id=oid,
+                    request_person=request_person,
+                    row=rows[0],
+                    is_admin=False,
+                )
+                _deliver_private_card(
+                    owner_open_id=oid,
+                    group_chat_id=chat_id,
+                    chat_type=chat_type,
+                    card=card,
+                    send_message=send_message,
+                    token=token,
+                )
+                rid = str(rows[0].get("record_id") or "").strip()
+                if rid:
+                    _mark_edit_form_open(oid, rid)
+            else:
+                card = build_offset_edit_list_card(
+                    oid,
+                    request_person,
+                    rows,
+                    is_admin=False,
+                    month_label=month_label,
+                    filter_label=filter_note or None,
+                )
+                _deliver_private_card(
+                    owner_open_id=oid,
+                    group_chat_id=chat_id,
+                    chat_type=chat_type,
+                    card=card,
+                    send_message=send_message,
+                    token=token,
+                )
     except Exception as e:
         send_message(chat_id, f"❌ editoffset: {e}")
     return True
@@ -2775,6 +2898,9 @@ def execute_offset_action(
             send_message=send_message,
             get_token_func=get_token_func,
             force=True,
+            month_target=month_target,
+            person_filter=person_filter,
+            status_filter=status_filter,
         )
 
     if act == "pending":

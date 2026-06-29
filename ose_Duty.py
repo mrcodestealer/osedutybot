@@ -695,6 +695,23 @@ def _get_field_by_aliases(fields: dict[str, Any], aliases: list[str]) -> Any:
     return None
 
 
+def _bitable_field_original_date(fields: dict[str, Any]) -> Optional[date]:
+    """Original swap-from date — never use bare ``Date`` (matches Exchange / Request Date)."""
+    return _parse_date_value(_get_field_by_aliases(fields, ["Original Date", "Orig Date"]))
+
+
+def _bitable_field_exchange_date(fields: dict[str, Any]) -> Optional[date]:
+    return _parse_date_value(
+        _get_field_by_aliases(fields, ["Exchange Date", "Swap Date", "Target Date"])
+    )
+
+
+def _bitable_field_request_date(fields: dict[str, Any]) -> Optional[date]:
+    return _parse_date_value(
+        _get_field_by_aliases(fields, ["Request Date", "Submitted Date", "Created Date"])
+    )
+
+
 def _parse_date_value(v: Any) -> Optional[date]:
     if v is None or v == "":
         return None
@@ -2750,36 +2767,73 @@ def _is_ose_dutylist_leave_name(name: str) -> bool:
     return dlm.is_ose_dutylist_name(name)
 
 
+def _resolve_ose_leave_display_person(name: str) -> tuple[str, str]:
+    """
+    Canonical key + Leave-section display label for the daily OSE card.
+
+    Includes the 31-person shift roster **and** dutyList.csv OSE departments
+    (e.g. OSE Manager) who are not on the shift sheet.
+    """
+    raw = (name or "").strip()
+    if not raw:
+        return "", ""
+    roster_key = _resolve_ose_leave_roster_key(raw)
+    if roster_key:
+        display = ose_roster_sheet_label(roster_key) or _title_name(roster_key)
+        return roster_key, display
+    entry = dlm.match_duty_entry(raw)
+    if entry and dlm.is_ose_department(entry["department"]):
+        canon = entry["name"]
+        dept = (entry.get("department") or "").strip()
+        if dept and dept.upper() != "OSE":
+            display = f"{canon} ({dept})"
+        else:
+            display = canon
+        return canon, display
+    return "", ""
+
+
 def _extract_ose_shift_roster_leave_for_date(
     target_date: date,
     token: str,
     *,
     items: Optional[list[dict[str, Any]]] = None,
 ) -> list[dict[str, Any]]:
-    """Approved leaveose rows for the 15-person duty roster on ``target_date``."""
+    """Approved leaveose rows for OSE shift roster + dutyList OSE on ``target_date``."""
     if items is None:
         items = _get_leave_display_raw(token)
     out: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, str]] = set()
     for it in items:
-        parsed = _parse_ose_leave_bitable_item(it)
-        if not parsed:
+        rid = str(it.get("record_id") or "").strip()
+        if not rid:
             continue
-        if not (parsed["start"] <= target_date <= parsed["end"]):
+        f = it.get("fields") or {}
+        if not _leave_row_is_approved(f):
             continue
-        person = parsed["person"]
-        lt = str(parsed.get("leave_type") or "Leave")
-        key = (person, parsed["start"].isoformat(), parsed["end"].isoformat(), lt.lower())
+        person_key, display_name = _resolve_ose_leave_display_person(
+            _leave_row_person_name(f)
+        )
+        if not person_key:
+            continue
+        st = _parse_date_value(_get_field_by_aliases(f, ["Start Date", "Leave Start Date", "From"]))
+        ed = _parse_date_value(_get_field_by_aliases(f, ["End Date", "Leave End Date", "To"]))
+        if not st or not ed:
+            continue
+        if not (st <= target_date <= ed):
+            continue
+        lt = _field_text(_get_field_by_aliases(f, ["Leave Type", "Type"])) or "Leave"
+        key = (person_key, st.isoformat(), ed.isoformat(), lt.lower())
         if key in seen:
             continue
         seen.add(key)
         out.append(
             {
-                "name": person,
-                "display_name": ose_roster_sheet_label(person) or _title_name(person),
+                "name": person_key,
+                "display_name": display_name,
                 "leave_type": lt,
-                "start": parsed["start"],
-                "end": parsed["end"],
+                "start": st,
+                "end": ed,
             }
         )
     return sorted(out, key=lambda x: str(x.get("name") or "").lower())
@@ -2882,8 +2936,8 @@ def _extract_offset_lines_for_date(
         exc = _title_name(
             _field_text(_get_field_by_aliases(f, ["Exchange Person", "Replacement", "Swap Person"]))
         )
-        od = _parse_date_value(_get_field_by_aliases(f, ["Original Date", "Request Date", "Date"]))
-        xd = _parse_date_value(_get_field_by_aliases(f, ["Exchange Date", "Swap Date", "Target Date"]))
+        od = _bitable_field_original_date(f)
+        xd = _bitable_field_exchange_date(f)
         if not req or not exc or not od or not xd:
             continue
         if target_date != od and target_date != xd:
@@ -3802,9 +3856,9 @@ def get_ose_offset_records_admin() -> dict[str, Any]:
         exc = _title_name(
             _field_text(_get_field_by_aliases(f, ["Exchange Person", "Replacement", "Swap Person"]))
         )
-        od = _parse_date_value(_get_field_by_aliases(f, ["Original Date", "Date"]))
-        xd = _parse_date_value(_get_field_by_aliases(f, ["Exchange Date", "Swap Date", "Target Date"]))
-        rd = _parse_date_value(_get_field_by_aliases(f, ["Request Date", "Submitted Date", "Created Date"]))
+        od = _bitable_field_original_date(f)
+        xd = _bitable_field_exchange_date(f)
+        rd = _bitable_field_request_date(f)
         approval = _record_approval_fields(f)
         rows.append(
             {
@@ -3979,9 +4033,9 @@ def get_ose_offset_records_list() -> dict[str, Any]:
         exc = _title_name(
             _field_text(_get_field_by_aliases(f, ["Exchange Person", "Replacement", "Swap Person"]))
         )
-        od = _parse_date_value(_get_field_by_aliases(f, ["Original Date", "Date"]))
-        xd = _parse_date_value(_get_field_by_aliases(f, ["Exchange Date", "Swap Date", "Target Date"]))
-        rd = _parse_date_value(_get_field_by_aliases(f, ["Request Date", "Submitted Date", "Created Date"]))
+        od = _bitable_field_original_date(f)
+        xd = _bitable_field_exchange_date(f)
+        rd = _bitable_field_request_date(f)
         approval = _record_approval_fields(f)
         rows.append(
             {
@@ -4131,8 +4185,8 @@ def _collect_offset_month_pair_lines(
         exc = _title_name(
             _field_text(_get_field_by_aliases(f, ["Exchange Person", "Replacement", "Swap Person"]))
         )
-        od = _parse_date_value(_get_field_by_aliases(f, ["Original Date", "Date"]))
-        xd = _parse_date_value(_get_field_by_aliases(f, ["Exchange Date", "Swap Date", "Target Date"]))
+        od = _bitable_field_original_date(f)
+        xd = _bitable_field_exchange_date(f)
         if not od or not xd:
             continue
         if not _offset_row_touches_month(od, xd, year, month):
@@ -4179,8 +4233,8 @@ def _collect_offset_month_summary(
         exc = _title_name(
             _field_text(_get_field_by_aliases(f, ["Exchange Person", "Replacement", "Swap Person"]))
         )
-        od = _parse_date_value(_get_field_by_aliases(f, ["Original Date", "Date"]))
-        xd = _parse_date_value(_get_field_by_aliases(f, ["Exchange Date", "Swap Date", "Target Date"]))
+        od = _bitable_field_original_date(f)
+        xd = _bitable_field_exchange_date(f)
         if not od or not xd:
             continue
         if not _offset_row_touches_month(od, xd, year, month):
@@ -4491,8 +4545,8 @@ def _offset_row_original_exchange_dates(fields: dict[str, Any]) -> tuple[Optiona
     and would skip purging old March swaps while the row still displays correctly).
     """
     f = fields or {}
-    od = _parse_date_value(_get_field_by_aliases(f, ["Original Date", "Date"]))
-    xd = _parse_date_value(_get_field_by_aliases(f, ["Exchange Date", "Swap Date", "Target Date"]))
+    od = _bitable_field_original_date(f)
+    xd = _bitable_field_exchange_date(f)
     return od, xd
 
 
@@ -4614,12 +4668,6 @@ def update_ose_offset_record_fields(
     reason_s = (reason or "").strip()
     if not reason_s:
         raise ValueError("Reason is required")
-    validate_offset_swap_duty_dates(
-        request_person=req,
-        exchange_person=exc,
-        original_date=original_date,
-        exchange_date=exchange_date,
-    )
     token = get_tenant_access_token()
     fields: dict[str, Any] = {
         "Exchange Person": _offset_person_field_value(exc, token=token),
