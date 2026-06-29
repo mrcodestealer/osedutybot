@@ -1518,6 +1518,65 @@ def _revert_shift_sheet_from_snapshot(snapshot: dict[str, str]) -> dict[str, Any
     )
 
 
+def _revert_shift_sheet_from_admin_row(row: dict[str, Any]) -> dict[str, Any]:
+    od = _parse_date_value(row.get("original_date"))
+    xd = _parse_date_value(row.get("exchange_date"))
+    if not od or not xd:
+        raise ValueError("offset row missing Original Date or Exchange Date")
+    return revert_approved_offset_from_shift_sheet(
+        request_person=str(row.get("request_person") or ""),
+        exchange_person=str(row.get("exchange_person") or ""),
+        original_date=od,
+        exchange_date=xd,
+        shift_type=str(row.get("shift_type") or ""),
+    )
+
+
+def _stored_offset_shift_snapshot(record_id: str) -> dict[str, Any]:
+    rid = (record_id or "").strip()
+    if not rid:
+        return {}
+    state = _load_offset_shift_sheet_state()
+    return dict((state.get("by_record") or {}).get(rid) or {})
+
+
+def resync_approved_offset_shift_sheet_after_edit(
+    record_id: str,
+    *,
+    old_row: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    After an approver edits an approved offset row: undo the previous sheet swap,
+    then apply the updated dates/people/shift when still Approved.
+    """
+    rid = (record_id or "").strip()
+    if not rid:
+        raise ValueError("record_id is required")
+    old_status = str(old_row.get("approval_status") or "").strip().title()
+    revert_out: dict[str, Any] = {"skipped": "was_not_approved"}
+    if old_status == "Approved":
+        stored = _stored_offset_shift_snapshot(rid)
+        try:
+            if stored.get("original_date") and stored.get("exchange_date"):
+                revert_out = _revert_shift_sheet_from_snapshot(stored)
+            else:
+                revert_out = _revert_shift_sheet_from_admin_row(old_row)
+            _unmark_offset_shift_sheet_applied(rid)
+            _invalidate_ose_sheet_cache()
+        except Exception as exc:
+            revert_out = {"ok": False, "error": str(exc)}
+            print(
+                f"[ose_Duty] offset shift revert before edit failed for {rid!r}: {exc!r}",
+                flush=True,
+            )
+            raise
+    apply_out: dict[str, Any] = {"skipped": "not_approved"}
+    fresh = get_ose_offset_record_admin_row(rid)
+    if str(fresh.get("approval_status") or "").strip().title() == "Approved":
+        apply_out = apply_approved_offset_shift_sheet_for_record(rid)
+    return {"record_id": rid, "revert": revert_out, "apply": apply_out}
+
+
 def revert_approved_offset_shift_sheet_for_record(record_id: str) -> dict[str, Any]:
     """Restore duty-sheet cells when an approved offset row (already applied) is deleted."""
     rid = (record_id or "").strip()
@@ -1525,23 +1584,24 @@ def revert_approved_offset_shift_sheet_for_record(record_id: str) -> dict[str, A
         raise ValueError("record_id is required")
     if not offset_shift_sheet_already_applied(rid):
         return {"ok": True, "record_id": rid, "skipped": "not_applied"}
-    state = _load_offset_shift_sheet_state()
-    stored = dict((state.get("by_record") or {}).get(rid) or {})
-    snapshot: dict[str, Any] = stored
-    row: Optional[dict[str, Any]] = None
-    try:
-        row = get_ose_offset_record_admin_row(rid)
-    except KeyError:
-        row = None
-    if row is not None:
-        if bool(row.get("pending")):
-            return {"ok": False, "record_id": rid, "skipped": "still_pending"}
-        status = str(row.get("approval_status") or "").strip().title()
-        if status != "Approved":
-            return {"ok": False, "record_id": rid, "skipped": f"status={status or 'unknown'}"}
-        snapshot = _offset_shift_sheet_snapshot_for_row(row)
-    elif not snapshot.get("original_date") or not snapshot.get("exchange_date"):
-        return {"ok": False, "record_id": rid, "skipped": "missing_snapshot"}
+    stored = _stored_offset_shift_snapshot(rid)
+    snapshot: Optional[dict[str, Any]] = None
+    if stored.get("original_date") and stored.get("exchange_date"):
+        snapshot = stored
+    else:
+        try:
+            row = get_ose_offset_record_admin_row(rid)
+        except KeyError:
+            row = None
+        if row is not None:
+            if bool(row.get("pending")):
+                return {"ok": False, "record_id": rid, "skipped": "still_pending"}
+            status = str(row.get("approval_status") or "").strip().title()
+            if status != "Approved":
+                return {"ok": False, "record_id": rid, "skipped": f"status={status or 'unknown'}"}
+            snapshot = _offset_shift_sheet_snapshot_for_row(row)
+    if not snapshot or not snapshot.get("original_date") or not snapshot.get("exchange_date"):
+        return {"ok": True, "record_id": rid, "skipped": "missing_snapshot"}
     result = _revert_shift_sheet_from_snapshot(snapshot)
     _unmark_offset_shift_sheet_applied(rid)
     return {"record_id": rid, **result}
@@ -4708,8 +4768,9 @@ def update_ose_offset_record_fields(
     rid = (record_id or "").strip()
     if not rid:
         raise ValueError("record_id is required")
-    row = get_ose_offset_record_admin_row(rid)
-    req = _title_name(str(row.get("request_person") or ""))
+    old_row = get_ose_offset_record_admin_row(rid)
+    old_status = str(old_row.get("approval_status") or "").strip().title()
+    req = _title_name(str(old_row.get("request_person") or ""))
     exc = resolve_offset_exchange_person(exchange_person, request_person=req)
     st = (shift_type or "").strip().upper()
     if st not in OSE_SHIFT_TYPES:
@@ -4727,8 +4788,11 @@ def update_ose_offset_record_fields(
     }
     _bitable_update_record(token, OSE_OFFSET_TABLE_ID, rid, fields)
     invalidate_ose_bitable_cache()
+    sheet_out: dict[str, Any] = {}
+    if old_status == "Approved":
+        sheet_out = resync_approved_offset_shift_sheet_after_edit(rid, old_row=old_row)
     _schedule_offset_duty_wiki_sync(record_id=rid)
-    return {"ok": True, "record_id": rid}
+    return {"ok": True, "record_id": rid, "shift_sheet": sheet_out}
 
 
 def audit_person_open_ids(*, json_out: bool = False) -> dict[str, Any]:
