@@ -3384,6 +3384,28 @@ def build_offset_requester_deleted_notify_card(
     }
 
 
+def build_offset_deleted_actor_confirm_card(row: dict[str, Any]) -> dict[str, Any]:
+    """Confirmation DM for the approver who deleted the row (same record details as peer alert)."""
+    status_was = str(row.get("approval_status") or "").strip().title()
+    if bool(row.get("pending")) and not status_was:
+        status_was = "Pending"
+    intro = (
+        "✅ **You deleted** this offset record successfully. "
+        "The row has been removed from the table and other approvers have been notified."
+    )
+    status_cell = f"Deleted (was {status_was})" if status_was else "Deleted"
+    md = _offset_approval_table_md(row, status=status_cell, intro=intro)
+    return {
+        "schema": "2.0",
+        "config": {"width_mode": "fill"},
+        "header": {
+            "template": "green",
+            "title": {"tag": "plain_text", "content": "OSE offset — record deleted"},
+        },
+        "body": {"elements": [{"tag": "div", "text": {"tag": "lark_md", "content": md}}]},
+    }
+
+
 def build_offset_deleted_notify_card(
     row: dict[str, Any],
     *,
@@ -4243,6 +4265,23 @@ def _notify_offset_approvers_deleted(
     return all_ok
 
 
+def _notify_offset_deleter_confirm(
+    send_message: Callable[..., Any],
+    row: dict[str, Any],
+    *,
+    deleter_open_id: str,
+) -> None:
+    """DM the approver who deleted the row — peers get the alert card; actor gets this confirm."""
+    oid = (deleter_open_id or "").strip()
+    if not oid:
+        return
+    card = build_offset_deleted_actor_confirm_card(row)
+    body = json.dumps(card, ensure_ascii=False)
+    r = send_message(oid, body, msg_type="interactive", receive_id_type="open_id")
+    if isinstance(r, dict) and int(r.get("code", -1)) != 0:
+        print(f"[offsetleave] deleter confirm DM failed for {oid!r}: {r!r}", flush=True)
+
+
 def _notify_other_offset_approvers_responded(
     send_message: Callable[..., Any],
     row: dict[str, Any],
@@ -4656,7 +4695,7 @@ def _handle_offset_delete_row(
                 raise
         od.invalidate_ose_bitable_cache()
         if is_admin:
-            # Approver deleted it — alert the OTHER approvers (not the actor).
+            # Approver deleted it — alert OTHER approvers (not the actor), then confirm to actor.
             try:
                 _notify_offset_approvers_deleted(
                     deleted_snapshot,
@@ -4667,7 +4706,15 @@ def _handle_offset_delete_row(
                 )
                 _mark_offset_deletion_notified(rid)
             except Exception as exc:
-                print(f"[offsetleave] approver-delete approver notify failed: {exc!r}", flush=True)
+                print(f"[offsetleave] approver-delete peer notify failed: {exc!r}", flush=True)
+            try:
+                _notify_offset_deleter_confirm(
+                    send_message,
+                    deleted_snapshot,
+                    deleter_open_id=owner,
+                )
+            except Exception as exc:
+                print(f"[offsetleave] approver-delete deleter confirm failed: {exc!r}", flush=True)
             if was_pending:
                 try:
                     _unmark_offset_record_notified(rid)
