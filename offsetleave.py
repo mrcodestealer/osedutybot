@@ -2433,6 +2433,41 @@ def handle_editoffset_command(
     return True
 
 
+def _resolve_nl_offset_filters(
+    clean_text: str,
+    *,
+    month_target: Optional[tuple[int, int]] = None,
+) -> tuple[Optional[str], Optional[str], Optional[tuple[int, int]]]:
+    """Person / status / month from NL (roster token match, then optional 0.5b)."""
+    person: Optional[str] = od.match_roster_name_in_text(clean_text)
+    status: Optional[str] = None
+    month = month_target
+    try:
+        import offsetai as oai
+
+        inferred = oai.infer_offset_filters(clean_text)
+        if not person:
+            person = (inferred.get("person") or "").strip() or None
+        st = str(inferred.get("status") or "").strip().lower()
+        if st in ("approved", "pending", "rejected"):
+            status = st
+        if month is None:
+            try:
+                y, m = inferred.get("year"), inferred.get("month")
+                if y is not None and m is not None:
+                    month = (int(y), int(m))
+            except (TypeError, ValueError):
+                pass
+    except Exception:
+        pass
+    if person:
+        print(
+            f"[offsetleave] NL person filter: {person!r} from {clean_text[:80]!r}",
+            flush=True,
+        )
+    return person, status, month
+
+
 def handle_deleteoffset_command(
     clean_text: str,
     *,
@@ -2452,6 +2487,12 @@ def handle_deleteoffset_command(
     if not oid:
         send_message(chat_id, "❌ Could not identify your Lark user.")
         return True
+    if person_filter is None and status_filter is None:
+        person_filter, status_filter, inferred_month = _resolve_nl_offset_filters(
+            clean_text, month_target=month_target
+        )
+        if month_target is None:
+            month_target = inferred_month
     if month_target is None:
         month_target = _parse_offset_month_filter(clean_text)
     month_label = (

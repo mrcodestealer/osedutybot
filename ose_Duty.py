@@ -252,6 +252,40 @@ def _text_mentions_offset(s: str) -> bool:
     return bool(re.search(r"(?i)offset|调休|换班", s or ""))
 
 
+def match_roster_name_in_text(text: str) -> Optional[str]:
+    """Find an OSE roster name mentioned in free text (longest unambiguous match)."""
+    s = (text or "").strip()
+    if not s:
+        return None
+    low = s.lower()
+    hits: list[tuple[str, int]] = []
+    for roster in OSE_LEAVE_FORM_NAMES:
+        canon = _title_name(roster)
+        phrase = canon.lower()
+        if len(phrase) < 2:
+            continue
+        idx = low.find(phrase)
+        if idx >= 0:
+            before_ok = idx == 0 or not low[idx - 1].isalnum()
+            after_idx = idx + len(phrase)
+            after_ok = after_idx >= len(low) or not low[after_idx].isalnum()
+            if before_ok and after_ok:
+                hits.append((canon, len(phrase)))
+                continue
+        tokens = _word_tokens(roster)
+        if len(tokens) == 1 and len(tokens[0]) >= 3:
+            if re.search(rf"\b{re.escape(tokens[0])}\b", low):
+                hits.append((canon, len(tokens[0])))
+    if not hits:
+        return None
+    hits.sort(key=lambda item: -item[1])
+    best_len = hits[0][1]
+    top = [name for name, ln in hits if ln == best_len]
+    if len(set(top)) != 1:
+        return None
+    return top[0]
+
+
 def looks_like_offset_lookup_query(text: str) -> bool:
     """Read-only offset lookup (who / which month), not submit/edit/delete."""
     s = (text or "").strip()

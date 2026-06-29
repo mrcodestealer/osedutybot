@@ -422,7 +422,22 @@ def filter_offset_rows(
         status=status_filter,
         year=y,
         month=m,
+        person_role="requester" if person_filter else "any",
     )
+
+
+def infer_offset_filters(user_text: str) -> dict[str, Any]:
+    """Rules first, then 0.5b — person / status / month for offset delete or lookup."""
+    out: dict[str, Any] = {}
+    person = od.match_roster_name_in_text(user_text)
+    if person:
+        out["person"] = person
+        out["person_role"] = "requester"
+    llm: dict[str, Any] = {} if person else _llm_infer_filters(user_text)
+    for key in ("person", "status", "year", "month", "person_role"):
+        if key not in out and llm.get(key) not in (None, ""):
+            out[key] = llm[key]
+    return out
 
 
 def _slim_rows(rows: list[dict[str, Any]], *, limit: int = 30) -> list[dict[str, Any]]:
