@@ -1860,7 +1860,14 @@ def prewarm_ju_pool_on_startup() -> None:
     """Public hook: pre-launch + login the Jenkins-update browser pool at bot startup."""
     if not _PLAYWRIGHT_AVAILABLE:
         return
-    if not _ju_warm_pool_enabled():
+    raw_pool = os.environ.get("JU_WARM_POOL", "<unset>")
+    pool_on = _ju_warm_pool_enabled()
+    print(
+        f"[ju-pool] JU_WARM_POOL={raw_pool!r} enabled={pool_on} "
+        f"cold_fallback={_ju_warm_allow_cold_fallback()}",
+        flush=True,
+    )
+    if not pool_on:
         print("[ju-pool] disabled (JU_WARM_POOL=0).", flush=True)
         return
     if (os.environ.get("JU_WARM_PREWARM_ON_STARTUP", "1") or "").strip().lower() in (

@@ -24,7 +24,34 @@ if __name__ == "__main__":
     sys.modules.setdefault("main", sys.modules["__main__"])
 
 # Load .env from the project directory (works under systemd when CWD is not the app folder)
-load_dotenv(os.path.join(_CHBOX_DIR, ".env"))
+_ENV_PATH = os.path.join(_CHBOX_DIR, ".env")
+load_dotenv(_ENV_PATH)
+
+
+def _apply_warm_pool_env_from_dotenv() -> None:
+    """Repo ``.env`` wins over systemd ``EnvironmentFile`` for Jenkins warm-pool keys."""
+    if not os.path.isfile(_ENV_PATH):
+        return
+    keys = (
+        "JU_WARM_POOL",
+        "JU_WARM_ALLOW_COLD_FALLBACK",
+        "JU_WARM_PREWARM_ON_STARTUP",
+        "JENKINS_WARM_STARTUP_WAIT_SEC",
+        "JENKINS_WARM_STARTUP_BLOCK",
+    )
+    try:
+        from dotenv import dotenv_values
+
+        vals = dotenv_values(_ENV_PATH)
+    except Exception:
+        return
+    for key in keys:
+        raw = vals.get(key)
+        if raw is not None and str(raw).strip() != "":
+            os.environ[key] = str(raw).strip()
+
+
+_apply_warm_pool_env_from_dotenv()
 
 from flask import Flask, request, jsonify, Response
 from datetime import datetime, timedelta
