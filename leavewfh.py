@@ -10,7 +10,7 @@ Monthly leave calendar sync (OSE tracking Bitable):
   - Fallback: Leave2026 spreadsheet / OSE sheet markers, and leave Bitable rows.
   - Build who is on leave this calendar month
   - Write to TRACK_LEAVE_BASE_ID / TRACK_LEAVE_TABLE_ID (defaults = OSE leave table URL)
-  - Scheduled bot sync keeps **this month + next month** in each tracking table (older months pruned)
+  - Scheduled bot sync keeps **current month and all future months** (past months pruned)
   - Per-month refresh: update rows overlapping that month only (does not wipe other months)
   - During the month: **add** new leave rows when they appear; remove auto-synced rows that were cancelled
   - Tracking table: HRMS → OSE leave display Bitable (``TRACK_LEAVE_*`` / tblvoXE0hsPjgb0j)
@@ -240,8 +240,139 @@ def _shift_calendar_month(year: int, month: int, delta: int = 1) -> tuple[int, i
     return idx // 12, (idx % 12) + 1
 
 
-# Bot scheduler syncs current month plus this many future months (1 = next month).
-LEAVE_WFH_SYNC_EXTRA_MONTHS = max(0, int(os.getenv("LEAVE_WFH_SYNC_EXTRA_MONTHS", "1")))
+# Scheduled sync: from current month through all future HRMS events (capped for safety).
+LEAVE_WFH_SYNC_MAX_FUTURE_MONTHS = max(1, int(os.getenv("LEAVE_WFH_SYNC_MAX_FUTURE_MONTHS", "36")))
+LEAVE_WFH_SYNC_MIN_FUTURE_MONTHS = max(1, int(os.getenv("LEAVE_WFH_SYNC_MIN_FUTURE_MONTHS", "3")))
+
+
+def _months_through(start: tuple[int, int], end: tuple[int, int]) -> list[tuple[int, int]]:
+    sy, sm = start
+    ey, em = end
+    out: list[tuple[int, int]] = []
+    y, m = sy, sm
+    while (y, m) <= (ey, em):
+        out.append((y, m))
+        y, m = _shift_calendar_month(y, m, 1)
+    return out
+
+
+def _month_tuple_on_or_after(d: date, ref: tuple[int, int]) -> tuple[int, int]:
+    t = (d.year, d.month)
+    return t if t >= ref else ref
+
+
+def _calendar_events_for_range(
+    token: str,
+    calendar_id: str,
+    start: date,
+    end: date,
+    *,
+    page_size: int = 100,
+) -> list[dict[str, Any]]:
+    """Events on ``calendar_id`` overlapping ``start``..``end`` (inclusive)."""
+    if end < start:
+        return []
+    start_ts = int(datetime.combine(start, datetime.min.time()).timestamp())
+    end_ts = int(datetime.combine(end, datetime.max.time()).timestamp())
+    url = f"{_open_api_base()}/calendar/v4/calendars/{calendar_id}/events"
+    items: list[dict[str, Any]] = []
+    page_token = ""
+    while True:
+        params: dict[str, str] = {
+            "start_time": str(start_ts),
+            "end_time": str(end_ts),
+            "page_size": str(page_size),
+        }
+        if page_token:
+            params["page_token"] = page_token
+        res = _calendar_get_json(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            params=params,
+            method="get",
+        )
+        data = res.get("data") or {}
+        items.extend(data.get("items") or [])
+        if not data.get("has_more"):
+            break
+        page_token = str(data.get("page_token") or "").strip()
+        if not page_token:
+            break
+    return items
+
+
+def _discover_hrms_sync_months(token: str, ref_date: Optional[date] = None) -> list[tuple[int, int]]:
+    """
+    Months to sync: current calendar month through latest future HRMS leave/WFH event,
+    at least ``LEAVE_WFH_SYNC_MIN_FUTURE_MONTHS``, capped at ``LEAVE_WFH_SYNC_MAX_FUTURE_MONTHS``.
+    """
+    ref = ref_date or date.today()
+    start_month = (ref.year, ref.month)
+    min_end = _shift_calendar_month(ref.year, ref.month, LEAVE_WFH_SYNC_MIN_FUTURE_MONTHS - 1)
+    cap_end = _shift_calendar_month(ref.year, ref.month, LEAVE_WFH_SYNC_MAX_FUTURE_MONTHS - 1)
+    latest_end = min_end
+    month_start = date(ref.year, ref.month, 1)
+    _, cap_last_day = calendar.monthrange(cap_end[0], cap_end[1])
+    scan_end = date(cap_end[0], cap_end[1], cap_last_day)
+
+    def _bump_latest(end_d: Optional[date]) -> None:
+        nonlocal latest_end
+        if not end_d or end_d < month_start:
+            return
+        cand = _month_tuple_on_or_after(end_d, start_month)
+        if cand > latest_end:
+            latest_end = cand
+
+    try:
+        leave_cal_id, _ = _resolve_company_leave_calendar_id(token)
+        if leave_cal_id:
+            for ev in _calendar_events_for_range(token, leave_cal_id, month_start, scan_end):
+                if (ev.get("status") or "").strip().lower() == "cancelled":
+                    continue
+                _bump_latest(_event_date_range(ev)[1])
+    except Exception:
+        pass
+    try:
+        wfh_cal_id, _ = _resolve_wfh_calendar_id(token)
+        if wfh_cal_id:
+            for ev in _calendar_events_for_range(token, wfh_cal_id, month_start, scan_end):
+                if (ev.get("status") or "").strip().lower() == "cancelled":
+                    continue
+                _bump_latest(_event_date_range(ev)[1])
+    except Exception:
+        pass
+
+    if latest_end > cap_end:
+        latest_end = cap_end
+    return _months_through(start_month, latest_end)
+
+
+def _prune_tracking_rows_before_month(
+    token: str,
+    *,
+    base_id: str,
+    table_id: str,
+    before_year: int,
+    before_month: int,
+    parse_row: Any,
+) -> int:
+    """Delete rows that end **before** the first day of ``before_year``/``before_month``."""
+    cutoff = date(before_year, before_month, 1)
+    existing = get_all_records(token, base_id, table_id)
+    removed = 0
+    for rec in existing:
+        parsed = parse_row(rec)
+        rid = str(rec.get("record_id") or "").strip()
+        if not parsed or not rid:
+            continue
+        end_d = parsed.get("end")
+        if isinstance(end_d, date) and end_d < cutoff:
+            try:
+                delete_record(token, base_id, table_id, rid)
+                removed += 1
+            except Exception:
+                pass
+    return removed
 
 
 def _overlaps_month(start: date, end: date, year: int, month: int) -> bool:
@@ -1957,57 +2088,62 @@ def sync_hrms_to_tracking_bitables(
     """
     Pull HRMS calendars → Lark Bitable tracking sheets (webapp / bot read these only).
 
-    - **leaveose** (``TRACK_TABLE_ID`` / tblvoXE0hsPjgb0j): OSE names in dutyList.csv only
+    - **leaveose** (``TRACK_TABLE_ID`` / tblvoXE0hsPjgb0j): OSE shift roster names
     - **leave 全员** (``ALL_LEAVE_TABLE_ID`` / tblmHJHe12BCJRD8): all company leave
     - **WFH** (``TRACK_WFH_TABLE_ID``): work-from-home
 
-    By default syncs **this calendar month and next** (``LEAVE_WFH_SYNC_EXTRA_MONTHS=1``).
+    Syncs **current month through all future HRMS events** (see ``LEAVE_WFH_SYNC_MAX_FUTURE_MONTHS``).
+    Rows that ended before the current month are pruned.
     """
     ref = ref_date or date.today()
     y = int(year if year is not None else ref.year)
     m = int(month if month is not None else ref.month)
-    month_targets: list[tuple[int, int]] = [(y, m)]
-    for step in range(1, LEAVE_WFH_SYNC_EXTRA_MONTHS + 1):
-        month_targets.append(_shift_calendar_month(y, m, step))
-
-    leaveose = sync_leave_calendar_to_bitable(year=y, month=m, ref_date=ref, ose_only=True)
-    leave_all = sync_all_leave_calendar_to_bitable(year=y, month=m, ref_date=ref)
-    wfh = sync_wfh_calendar_to_bitable(year=y, month=m, ref_date=ref)
-
-    for ny, nm in month_targets[1:]:
-        leaveose = _merge_month_sync_results(
-            leaveose,
-            sync_leave_calendar_to_bitable(year=ny, month=nm, ref_date=ref, ose_only=True),
-        )
-        leave_all = _merge_month_sync_results(
-            leave_all,
-            sync_all_leave_calendar_to_bitable(year=ny, month=nm, ref_date=ref),
-        )
-        wfh = _merge_month_sync_results(
-            wfh,
-            sync_wfh_calendar_to_bitable(year=ny, month=nm, ref_date=ref),
-        )
-
     token = get_tenant_access_token()
-    pruned_leaveose = _prune_tracking_rows_outside_months(
+    month_targets = _discover_hrms_sync_months(token, ref)
+
+    leaveose: dict[str, Any] = {"skipped": True, "deleted": 0, "added": 0}
+    leave_all: dict[str, Any] = {"skipped": True, "deleted": 0, "added": 0}
+    wfh: dict[str, Any] = {"skipped": True, "deleted": 0, "added": 0}
+    for idx, (sy, sm) in enumerate(month_targets):
+        cur_leaveose = sync_leave_calendar_to_bitable(
+            year=sy, month=sm, ref_date=ref, ose_only=True
+        )
+        cur_leave_all = sync_all_leave_calendar_to_bitable(year=sy, month=sm, ref_date=ref)
+        cur_wfh = sync_wfh_calendar_to_bitable(year=sy, month=sm, ref_date=ref)
+        leaveose = (
+            cur_leaveose
+            if idx == 0
+            else _merge_month_sync_results(leaveose, cur_leaveose)
+        )
+        leave_all = (
+            cur_leave_all
+            if idx == 0
+            else _merge_month_sync_results(leave_all, cur_leave_all)
+        )
+        wfh = cur_wfh if idx == 0 else _merge_month_sync_results(wfh, cur_wfh)
+
+    pruned_leaveose = _prune_tracking_rows_before_month(
         token,
         base_id=TRACK_BASE_ID,
         table_id=TRACK_TABLE_ID,
-        months=month_targets,
+        before_year=y,
+        before_month=m,
         parse_row=lambda rec: _parse_leave_row(rec, require_approved=False),
     )
-    pruned_leave_all = _prune_tracking_rows_outside_months(
+    pruned_leave_all = _prune_tracking_rows_before_month(
         token,
         base_id=ALL_LEAVE_BASE_ID,
         table_id=ALL_LEAVE_TABLE_ID,
-        months=month_targets,
+        before_year=y,
+        before_month=m,
         parse_row=lambda rec: _parse_leave_row(rec, require_approved=False),
     )
-    pruned_wfh = _prune_tracking_rows_outside_months(
+    pruned_wfh = _prune_tracking_rows_before_month(
         token,
         base_id=TRACK_BASE_ID,
         table_id=TRACK_WFH_TABLE_ID,
-        months=month_targets,
+        before_year=y,
+        before_month=m,
         parse_row=_parse_wfh_bitable_row,
     )
     try:
@@ -2020,9 +2156,9 @@ def sync_hrms_to_tracking_bitables(
         "year": y,
         "month": m,
         "sync_months": month_targets,
-        "leaveose": {**leaveose, "pruned_outside_window": pruned_leaveose},
-        "leave_all": {**leave_all, "pruned_outside_window": pruned_leave_all},
-        "wfh": {**wfh, "pruned_outside_window": pruned_wfh},
+        "leaveose": {**leaveose, "pruned_past": pruned_leaveose},
+        "leave_all": {**leave_all, "pruned_past": pruned_leave_all},
+        "wfh": {**wfh, "pruned_past": pruned_wfh},
     }
 
 

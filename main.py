@@ -2163,8 +2163,7 @@ def ose_leave_wfh_calendar_sync():
     """
     Sync HRMS company Leave + WFH calendars into tracking Bitables (leavewfh.py).
 
-    Keeps **this month and next month** in each tracking table (see ``LEAVE_WFH_SYNC_EXTRA_MONTHS``).
-    Same month: add new rows when someone is approved on Lark calendars.
+    Keeps **current month and all future months** in each tracking table (past months pruned).
     Per-month refresh only touches rows overlapping that month (other months stay).
     """
     if not _leave_wfh_sync_lock.acquire(blocking=False):
@@ -2183,10 +2182,15 @@ def ose_leave_wfh_calendar_sync():
         leave_all_res = bundle["leave_all"]
         wfh_res = bundle["wfh"]
         months_label = ", ".join(f"{yy}-{mm:02d}" for yy, mm in sync_months)
+        if len(sync_months) > 6:
+            months_label = (
+                f"{sync_months[0][0]}-{sync_months[0][1]:02d}"
+                f" … {sync_months[-1][0]}-{sync_months[-1][1]:02d} ({len(sync_months)} months)"
+            )
         print(
             f"[Leave/WFH sync] months={months_label} leaveose: "
             f"deleted={leave_res.get('deleted', 0)} added={leave_res.get('added', leave_res.get('created', 0))} "
-            f"pruned={leave_res.get('pruned_outside_window', 0)} "
+            f"pruned_past={leave_res.get('pruned_past', 0)} "
             f"| leave全员: deleted={leave_all_res.get('deleted', 0)} "
             f"added={leave_all_res.get('added', leave_all_res.get('created', 0))} "
             f"| WFH: deleted={wfh_res.get('deleted', 0)} added={wfh_res.get('added', 0)}",
@@ -2306,7 +2310,7 @@ def _register_leave_wfh_sync_jobs() -> None:
         f"[Leave/WFH sync] always on: pre-morning "
         f"{_LEAVE_WFH_PRE_MORNING_HOUR:02d}:{_LEAVE_WFH_PRE_MORNING_MINUTE:02d} "
         f"+ every {_LEAVE_WFH_SYNC_INTERVAL_MIN} min (first run on startup); "
-        f"syncs this month + next month",
+        f"syncs current month + all future HRMS months",
         flush=True,
     )
 
