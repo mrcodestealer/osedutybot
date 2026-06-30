@@ -10,7 +10,8 @@ Monthly leave calendar sync (OSE tracking Bitable):
   - Fallback: Leave2026 spreadsheet / OSE sheet markers, and leave Bitable rows.
   - Build who is on leave this calendar month
   - Write to TRACK_LEAVE_BASE_ID / TRACK_LEAVE_TABLE_ID (defaults = OSE leave table URL)
-  - On a new calendar month: delete **all** rows in the tracking table, then refill that month only
+  - Scheduled bot sync keeps **this month + next month** in each tracking table (older months pruned)
+  - Per-month refresh: update rows overlapping that month only (does not wipe other months)
   - During the month: **add** new leave rows when they appear; remove auto-synced rows that were cancelled
   - Tracking table: HRMS → OSE leave display Bitable (``TRACK_LEAVE_*`` / tblvoXE0hsPjgb0j)
   - Annual Leave rows are always included when they overlap the month
@@ -232,6 +233,15 @@ def create_record(token: str, app_token: str, table_id: str, fields: dict[str, A
 def _month_range(year: int, month: int) -> tuple[date, date]:
     _, last = calendar.monthrange(year, month)
     return date(year, month, 1), date(year, month, last)
+
+
+def _shift_calendar_month(year: int, month: int, delta: int = 1) -> tuple[int, int]:
+    idx = year * 12 + (month - 1) + delta
+    return idx // 12, (idx % 12) + 1
+
+
+# Bot scheduler syncs current month plus this many future months (1 = next month).
+LEAVE_WFH_SYNC_EXTRA_MONTHS = max(0, int(os.getenv("LEAVE_WFH_SYNC_EXTRA_MONTHS", "1")))
 
 
 def _overlaps_month(start: date, end: date, year: int, month: int) -> bool:
@@ -1066,15 +1076,12 @@ def sync_wfh_calendar_to_bitable(
 
     existing = get_all_records(token, TRACK_BASE_ID, TRACK_WFH_TABLE_ID)
     source_by_key = {_leave_row_key(r): r for r in source_rows}
-    synced_by_key = _existing_wfh_rows_by_key(existing)
+    synced_in_month = _existing_wfh_rows_by_key_for_month(existing, year, month)
 
     deleted = 0
     delete_errors: list[str] = []
     if month_changed or force_resync:
-        for rec in existing:
-            rid = str(rec.get("record_id") or "").strip()
-            if not rid:
-                continue
+        for rid in set(synced_in_month.values()):
             try:
                 delete_record(token, TRACK_BASE_ID, TRACK_WFH_TABLE_ID, rid)
                 deleted += 1
@@ -1082,7 +1089,7 @@ def sync_wfh_calendar_to_bitable(
                 delete_errors.append(f"{rid}: {exc}")
         rows_to_add = list(source_rows)
     else:
-        for key, rid in synced_by_key.items():
+        for key, rid in synced_in_month.items():
             if key in source_by_key:
                 continue
             try:
@@ -1090,7 +1097,7 @@ def sync_wfh_calendar_to_bitable(
                 deleted += 1
             except Exception as exc:
                 delete_errors.append(f"{rid}: {exc}")
-        rows_to_add = [row for key, row in source_by_key.items() if key not in synced_by_key]
+        rows_to_add = [row for key, row in source_by_key.items() if key not in synced_in_month]
 
     created_ids: list[str] = []
     create_errors: list[str] = []
@@ -1547,6 +1554,89 @@ def _existing_synced_rows_by_key(
     return out
 
 
+def _existing_synced_rows_by_key_for_month(
+    records: list[dict[str, Any]],
+    year: int,
+    month: int,
+) -> dict[tuple[str, str, str, str], str]:
+    """Synced leave rows in the tracking Bitable that overlap ``year``/``month``."""
+    out: dict[tuple[str, str, str, str], str] = {}
+    for rec in records:
+        parsed = _parse_leave_row(rec, require_approved=False)
+        rid = str(rec.get("record_id") or "").strip()
+        if not parsed or not rid:
+            continue
+        if _overlaps_month(parsed["start"], parsed["end"], year, month):
+            out[_leave_row_key(parsed)] = rid
+    return out
+
+
+def _existing_wfh_rows_by_key_for_month(
+    records: list[dict[str, Any]],
+    year: int,
+    month: int,
+) -> dict[tuple[str, str, str, str], str]:
+    out: dict[tuple[str, str, str, str], str] = {}
+    for rec in records:
+        parsed = _parse_wfh_bitable_row(rec)
+        rid = str(rec.get("record_id") or "").strip()
+        if not parsed or not rid:
+            continue
+        if _overlaps_month(parsed["start"], parsed["end"], year, month):
+            out[_leave_row_key(parsed)] = rid
+    return out
+
+
+def _prune_tracking_rows_outside_months(
+    token: str,
+    *,
+    base_id: str,
+    table_id: str,
+    months: list[tuple[int, int]],
+    parse_row: Any,
+) -> int:
+    """Delete tracking rows that do not overlap any of ``months`` (returns delete count)."""
+    if not months:
+        return 0
+    existing = get_all_records(token, base_id, table_id)
+    removed = 0
+    for rec in existing:
+        parsed = parse_row(rec)
+        rid = str(rec.get("record_id") or "").strip()
+        if not parsed or not rid:
+            continue
+        if any(
+            _overlaps_month(parsed["start"], parsed["end"], y, m) for y, m in months
+        ):
+            continue
+        try:
+            delete_record(token, base_id, table_id, rid)
+            removed += 1
+        except Exception:
+            pass
+    return removed
+
+
+def _merge_month_sync_results(
+    current: dict[str, Any],
+    upcoming: dict[str, Any],
+) -> dict[str, Any]:
+    """Combine two per-month sync results for logging."""
+    merged = dict(current)
+    merged["deleted"] = int(current.get("deleted") or 0) + int(upcoming.get("deleted") or 0)
+    merged["added"] = int(current.get("added") or 0) + int(upcoming.get("added") or 0)
+    merged["created"] = int(current.get("created") or 0) + int(upcoming.get("created") or 0)
+    merged["next_month"] = {
+        "year": upcoming.get("year"),
+        "month": upcoming.get("month"),
+        "deleted": upcoming.get("deleted"),
+        "added": upcoming.get("added"),
+        "skipped": upcoming.get("skipped"),
+        "fetch_failed": upcoming.get("fetch_failed"),
+    }
+    return merged
+
+
 def get_leave_calendar(year: int, month: int) -> dict[str, Any]:
     """
     Who is on leave each day this month (Lark company calendar + other sources).
@@ -1748,26 +1838,12 @@ def sync_leave_calendar_to_bitable(
 
     existing = get_all_records(token, track_base, track_table)
     source_by_key = {_leave_row_key(r): r for r in source_rows}
-    synced_by_key = _existing_synced_rows_by_key(existing)
+    synced_in_month = _existing_synced_rows_by_key_for_month(existing, year, month)
 
     deleted = 0
     delete_errors: list[str] = []
-    if month_changed:
-        for rec in existing:
-            rid = str(rec.get("record_id") or "").strip()
-            if not rid:
-                continue
-            try:
-                delete_record(token, track_base, track_table, rid)
-                deleted += 1
-            except Exception as exc:
-                delete_errors.append(f"{rid}: {exc}")
-        rows_to_add = list(source_rows)
-    elif force_resync:
-        for rec in existing:
-            rid = str(rec.get("record_id") or "").strip()
-            if not rid:
-                continue
+    if month_changed or force_resync:
+        for rid in set(synced_in_month.values()):
             try:
                 delete_record(token, track_base, track_table, rid)
                 deleted += 1
@@ -1775,7 +1851,7 @@ def sync_leave_calendar_to_bitable(
                 delete_errors.append(f"{rid}: {exc}")
         rows_to_add = list(source_rows)
     else:
-        for key, rid in synced_by_key.items():
+        for key, rid in synced_in_month.items():
             if key in source_by_key:
                 continue
             try:
@@ -1784,7 +1860,7 @@ def sync_leave_calendar_to_bitable(
             except Exception as exc:
                 delete_errors.append(f"{rid}: {exc}")
         rows_to_add = [
-            row for key, row in source_by_key.items() if key not in synced_by_key
+            row for key, row in source_by_key.items() if key not in synced_in_month
         ]
 
     created_ids: list[str] = []
@@ -1884,13 +1960,56 @@ def sync_hrms_to_tracking_bitables(
     - **leaveose** (``TRACK_TABLE_ID`` / tblvoXE0hsPjgb0j): OSE names in dutyList.csv only
     - **leave 全员** (``ALL_LEAVE_TABLE_ID`` / tblmHJHe12BCJRD8): all company leave
     - **WFH** (``TRACK_WFH_TABLE_ID``): work-from-home
+
+    By default syncs **this calendar month and next** (``LEAVE_WFH_SYNC_EXTRA_MONTHS=1``).
     """
     ref = ref_date or date.today()
     y = int(year if year is not None else ref.year)
     m = int(month if month is not None else ref.month)
+    month_targets: list[tuple[int, int]] = [(y, m)]
+    for step in range(1, LEAVE_WFH_SYNC_EXTRA_MONTHS + 1):
+        month_targets.append(_shift_calendar_month(y, m, step))
+
     leaveose = sync_leave_calendar_to_bitable(year=y, month=m, ref_date=ref, ose_only=True)
     leave_all = sync_all_leave_calendar_to_bitable(year=y, month=m, ref_date=ref)
     wfh = sync_wfh_calendar_to_bitable(year=y, month=m, ref_date=ref)
+
+    for ny, nm in month_targets[1:]:
+        leaveose = _merge_month_sync_results(
+            leaveose,
+            sync_leave_calendar_to_bitable(year=ny, month=nm, ref_date=ref, ose_only=True),
+        )
+        leave_all = _merge_month_sync_results(
+            leave_all,
+            sync_all_leave_calendar_to_bitable(year=ny, month=nm, ref_date=ref),
+        )
+        wfh = _merge_month_sync_results(
+            wfh,
+            sync_wfh_calendar_to_bitable(year=ny, month=nm, ref_date=ref),
+        )
+
+    token = get_tenant_access_token()
+    pruned_leaveose = _prune_tracking_rows_outside_months(
+        token,
+        base_id=TRACK_BASE_ID,
+        table_id=TRACK_TABLE_ID,
+        months=month_targets,
+        parse_row=lambda rec: _parse_leave_row(rec, require_approved=False),
+    )
+    pruned_leave_all = _prune_tracking_rows_outside_months(
+        token,
+        base_id=ALL_LEAVE_BASE_ID,
+        table_id=ALL_LEAVE_TABLE_ID,
+        months=month_targets,
+        parse_row=lambda rec: _parse_leave_row(rec, require_approved=False),
+    )
+    pruned_wfh = _prune_tracking_rows_outside_months(
+        token,
+        base_id=TRACK_BASE_ID,
+        table_id=TRACK_WFH_TABLE_ID,
+        months=month_targets,
+        parse_row=_parse_wfh_bitable_row,
+    )
     try:
         import ose_Duty as od
 
@@ -1900,9 +2019,10 @@ def sync_hrms_to_tracking_bitables(
     return {
         "year": y,
         "month": m,
-        "leaveose": leaveose,
-        "leave_all": leave_all,
-        "wfh": wfh,
+        "sync_months": month_targets,
+        "leaveose": {**leaveose, "pruned_outside_window": pruned_leaveose},
+        "leave_all": {**leave_all, "pruned_outside_window": pruned_leave_all},
+        "wfh": {**wfh, "pruned_outside_window": pruned_wfh},
     }
 
 
