@@ -51,6 +51,8 @@ _CANONICAL_ALIASES: dict[str, str] = {
     "wengyong": "Weng Yong",
     "maoshu": "Mau Shu",
     "maushu": "Mau Shu",
+    "bryanpeh": "Bryan Peh",
+    "bryan": "Bryan Peh",
 }
 
 
@@ -217,16 +219,36 @@ def filter_leave_rows_to_ose_dutylist(
     *,
     csv_path: Optional[Path] = None,
 ) -> list[dict]:
-    """Keep only HRMS/Bitable leave rows for people in dutyList.csv with OSE department."""
+    """
+    Keep HRMS/Bitable leave rows for OSE duty display.
+
+    Primary gate: name on the 31-person OSE shift roster (``ose_Duty.OSE_SHIFT_ROSTER``).
+    Fallback: dutyList.csv row with OSE department (legacy / phone lookup).
+    """
+    import ose_Duty as od
+
     entries = duty_entries if duty_entries is not None else load_duty_list(csv_path)
     out: list[dict] = []
     seen: set[tuple[Any, ...]] = set()
     for row in rows:
-        entry = match_duty_entry(str(row.get("name") or ""), entries)
-        if not entry or not is_ose_department(entry["department"]):
+        raw_name = str(row.get("name") or "")
+        roster_key = od._resolve_ose_roster_key(raw_name)
+        if not roster_key:
+            for rk, _label in od.OSE_SHIFT_ROSTER:
+                if od._names_same_person(raw_name, rk):
+                    roster_key = rk
+                    break
+        entry = match_duty_entry(raw_name, entries)
+        if roster_key:
+            canonical = roster_key
+            dept = (entry or {}).get("department") or "OSE"
+        elif entry and is_ose_department(entry["department"]):
+            canonical = entry["name"]
+            dept = entry["department"]
+        else:
             continue
         key = (
-            entry["name"].lower(),
+            canonical.lower(),
             row.get("start"),
             row.get("end"),
             str(row.get("leave_type") or "").strip().lower(),
@@ -235,7 +257,7 @@ def filter_leave_rows_to_ose_dutylist(
             continue
         seen.add(key)
         merged = dict(row)
-        merged["name"] = entry["name"]
-        merged["department"] = entry["department"]
+        merged["name"] = canonical
+        merged["department"] = dept
         out.append(merged)
     return out
