@@ -557,10 +557,10 @@ _NL_JENKINS_UPDATE_RE = re.compile(
     r"|(?:帮我|请).{0,12}更新"
     r")"
 )
-# VPN creation triggers: slash command ``/createvpn`` and natural phrases like "create vpn".
+# VPN creation triggers: slash command ``/createvpn`` and natural phrases like "create vpn" / "build vpn".
 VPN_CREATE_CMD_RE = re.compile(r"/create\s*vpn\b", re.I)
 _NL_VPN_CREATE_RE = re.compile(
-    r"(?i)\b(?:create|make|generate|new|open|add)\s+(?:a\s+|an\s+|new\s+)?vpn\b"
+    r"(?i)\b(?:create|make|generate|new|open|add|build)\s+(?:a\s+|an\s+|new\s+)?vpn\b"
 )
 # Find **existing** VPN ``.conf`` on VPN_CREATION (search only — no new build).
 VPN_FIND_CMD_RE = re.compile(r"/find\s*vpn(?:\s*(?:conf|file))?\b", re.I)
