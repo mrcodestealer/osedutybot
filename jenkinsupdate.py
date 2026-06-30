@@ -221,7 +221,7 @@ VPN_CREATION_JOB_FOLDER_URL = (
     "https://ose-jenkinsaliyun.bewen.me/job/DEVOPS_CP/job/VPN_CONFIGURATION/job/VPN_CREATION/"
 )
 VPN_CREATION_BUILD_URL = VPN_CREATION_JOB_FOLDER_URL + "build?delay=0sec"
-# Speed: ``VPN_FAST_FILL=1`` (default) — short waits; ``JENKINSUPDATE_VPN_FORM_SCREENSHOT=1`` for YES/NO card image.
+# Speed: ``VPN_FAST_FILL=1`` (default) — short waits; ``JENKINSUPDATE_VPN_FORM_SCREENSHOT=1`` for optional form image on rebuild.
 # Dropdown values for VPN_LOCATION (keep in sync with the Jenkins job parameter).
 VPN_LOCATION_OPTIONS: list[str] = [
     "HK_235",
@@ -1225,15 +1225,8 @@ class _VpnWarmBrowser:
         send = job["send"]
         vpn_users = job["vpn_users"]
         vpn_location = job["vpn_location"]
-        build_url = job["build_url"]
-        to = float(job.get("timeout_sec", 7200))
         trigger_mid = job.get("trigger_mid")
         run_token = job.get("run_token")
-        gate = {
-            "job_profile": "vpn_creation",
-            "upload_image": job.get("upload_image"),
-            "send_image": job.get("send_image"),
-        }
         self._ensure_form_ready()
         page = self._page
         fill_text_parameter(page, "VPN_USERS", vpn_users)
@@ -1249,83 +1242,17 @@ class _VpnWarmBrowser:
             print(f"    {ln}", flush=True)
 
         next_build_number = _predict_next_build_number_from_history(page)
-        filled_env, filled_branch = _jenkins_filled_env_branch_for_display(
-            "vpn_creation", vpn_users=vpn_users, vpn_location=vpn_location
-        )
-
-        shot_paths: list[str] = []
-        shot_dir = ""
-        img_key = ""
-        if _jenkins_form_screenshot_enabled(gate):
-            try:
-                shot_paths, shot_dir = capture_jenkins_build_parameters_screenshots(
-                    page, "vpn_creation", services_expected=None
-                )
-            except Exception as shot_ex:
-                print(f"[vpn-warm] screenshot failed: {shot_ex!r}", flush=True)
-                _fpms_lark_cleanup_screenshot_dir(shot_dir)
-                shot_paths, shot_dir = [], ""
-        if shot_paths:
-            up, _si = _fpms_lark_resolve_image_upload_helpers(gate)
-            if callable(up):
-                img_key = up(shot_paths[0]) or ""
-
-        _fpms_lark_send_verification_summary(
-            send,
-            cid,
-            filled_env=filled_env,
-            filled_branch=filled_branch,
-            ok_all=ok_all,
-            build_url=build_url,
-            job_profile="vpn_creation",
+        if _vpn_lark_auto_build_after_verify(
+            page,
+            send=send,
+            chat_id=cid,
+            vpn_users=vpn_users,
+            vpn_location=vpn_location,
             next_build_number=next_build_number,
-            screenshot_img_key=img_key,
-        )
-        if shot_dir:
-            _fpms_lark_cleanup_screenshot_dir(shot_dir)
-
-        with _fpms_lark_sessions_lock:
-            gsess = _fpms_lark_sessions.get(sk)
-            ev = gsess.get("build_gate_event") if isinstance(gsess, dict) else None
-        if not isinstance(ev, threading.Event):
-            raise RuntimeError("Lost Lark build gate event (warm VPN).")
-
-        if not ev.wait(timeout=to):
-            send(cid, "Timed out waiting for **yes** / **no**. **Build** skipped.")
-            return
-
-        with _fpms_lark_sessions_lock:
-            approved = _fpms_lark_sessions.get(sk, {}).get("approve_build")
-        if approved is True and ok_all:
-            _click_jenkins_build_button(page)
+            ok_all=ok_all,
+            session_key=sk,
+        ):
             self._dirty = True
-            print("→ **Build** clicked (warm VPN, Lark-approved).", flush=True)
-            send(cid, "Creating VPN file. Kindly wait...")
-            resolved_bn = _resolve_build_number_after_jenkins_build_click(
-                page, next_build_number, timeout_ms=_vpn_post_build_wait_ms()
-            )
-            _fpms_lark_notify_jenkinsbot_vpn(
-                send,
-                cid,
-                folder_url=VPN_CREATION_JOB_FOLDER_URL,
-                build_number=resolved_bn,
-                vpn_users=vpn_users,
-                vpn_location=vpn_location,
-            )
-        elif approved is True and not ok_all:
-            send(
-                cid,
-                "**Build** was NOT clicked — verification still has ❌. Fix the job in Jenkins if needed.",
-            )
-        else:
-            with _fpms_lark_sessions_lock:
-                cancelled = bool(_fpms_lark_sessions.get(sk, {}).get("lark_cancel"))
-            send(
-                cid,
-                "⏹️ **Cancelled.** **Build** skipped — back to ready."
-                if cancelled
-                else "**Build** skipped (you replied **no**).",
-            )
 
 
 _vpn_warm_singleton: "_VpnWarmBrowser | None" = None
@@ -13471,6 +13398,61 @@ def _fpms_lark_notify_jenkins_after_build_click(
         )
 
 
+def _vpn_lark_auto_build_after_verify(
+    page,
+    *,
+    send,
+    chat_id: str,
+    vpn_users: str,
+    vpn_location: str,
+    next_build_number: int | None,
+    ok_all: bool,
+    session_key: str | None = None,
+) -> bool:
+    """VPN_CREATION: verification passed → click **Build** immediately (no YES/NO card)."""
+    if not ok_all:
+        send(
+            chat_id,
+            "**Build** was NOT clicked — VPN form verification has ❌. "
+            "Fix the job in Jenkins if needed.",
+        )
+        return False
+    _click_jenkins_build_button(page)
+    print("→ **Build** clicked (VPN, auto).", flush=True)
+    send(chat_id, "Creating VPN file. Kindly wait...")
+    if session_key:
+        try:
+            with _fpms_lark_sessions_lock:
+                _g_rec = _fpms_lark_sessions.get(session_key)
+                _pend = (
+                    _g_rec.get("_ju_pending_record")
+                    if isinstance(_g_rec, dict)
+                    else None
+                )
+                _rec_cid = (
+                    _g_rec.get("_ju_chat_id") if isinstance(_g_rec, dict) else None
+                ) or chat_id
+            if _pend:
+                _ju_commit_run_record(_rec_cid, _pend)
+        except Exception as _commit_err:
+            print(
+                f"[jenkinsupdate] VPN run-history commit failed: {_commit_err!r}",
+                flush=True,
+            )
+    resolved_bn = _resolve_build_number_after_jenkins_build_click(
+        page, next_build_number, timeout_ms=_vpn_post_build_wait_ms()
+    )
+    _fpms_lark_notify_jenkinsbot_vpn(
+        send,
+        chat_id,
+        folder_url=VPN_CREATION_JOB_FOLDER_URL,
+        build_number=resolved_bn,
+        vpn_users=vpn_users,
+        vpn_location=vpn_location,
+    )
+    return True
+
+
 def _fpms_lark_notify_jenkinsbot_vpn(
     send,
     chat_id: str,
@@ -13592,8 +13574,8 @@ def _fpms_lark_begin_vpn_run(
         bot_headless = True
     send(
         chat_id,
-        f"▶️ Creating VPN for **{vpn_users}** at **{vpn_location}** — filling Jenkins "
-        "(a YES/NO confirmation card will follow)…",
+        f"▶️ Creating VPN for **{vpn_users}** at **{vpn_location}** — "
+        "filling Jenkins and clicking **Build**…",
     )
 
     if _vpn_warm_enabled():
@@ -16377,140 +16359,136 @@ def run(
                 to = float(bot_lark_gate.get("timeout_sec", 7200))
                 build_url = str(bot_lark_gate.get("build_url") or BUILD_URL)
                 next_build_number = _predict_next_build_number_from_history(page)
-                filled_env, filled_branch = _jenkins_filled_env_branch_for_display(
-                    jp,
-                    environment=environment,
-                    branch=branch,
-                    command=command,
-                    vpn_users=vpn_users,
-                    vpn_location=vpn_location,
-                )
-                shot_paths: list[str] = []
-                shot_dir = ""
-                screenshot_img_key = ""
-                if _jenkins_form_screenshot_enabled(bot_lark_gate):
-                    try:
-                        shot_paths, shot_dir = capture_jenkins_build_parameters_screenshots(
-                            page,
-                            jp,
-                            services_expected=(
-                                None
-                                if update_all_services
-                                else list(services or [])
-                            ),
-                        )
-                    except Exception as shot_ex:
-                        try:
-                            send(
-                                cid,
-                                f"⚠️ Jenkins form screenshot capture failed (card still sent):\n```\n{shot_ex}\n```",
-                            )
-                        except Exception:
-                            pass
-                        print(f"[jenkinsupdate] form screenshot failed: {shot_ex!r}", flush=True)
-                        shot_paths = []
-                        _fpms_lark_cleanup_screenshot_dir(shot_dir)
-                        shot_dir = ""
-                if shot_paths:
-                    upload_fn, _send_img_fn = _fpms_lark_resolve_image_upload_helpers(
-                        bot_lark_gate
+                if is_vpn:
+                    build_clicked = _vpn_lark_auto_build_after_verify(
+                        page,
+                        send=send,
+                        chat_id=cid,
+                        vpn_users=vpn_users,
+                        vpn_location=vpn_location,
+                        next_build_number=next_build_number,
+                        ok_all=ok_all,
+                        session_key=sk,
                     )
-                    if callable(upload_fn):
-                        screenshot_img_key = upload_fn(shot_paths[0]) or ""
-                _fpms_lark_send_verification_summary(
-                    send,
-                    cid,
-                    filled_env=filled_env,
-                    filled_branch=filled_branch,
-                    ok_all=ok_all,
-                    build_url=build_url,
-                    job_profile=jp,
-                    next_build_number=next_build_number,
-                    screenshot_img_key=screenshot_img_key,
-                )
-                # After the whole-form YES/NO card, also send Services row + per-service close-ups.
-                if (
-                    len(shot_paths) > 1
-                    and not update_all_services
-                    and (services or [])
-                    and _jenkins_services_detail_screenshot_enabled()
-                ):
-                    _fpms_lark_send_parameter_screenshots(
-                        cid,
-                        send,
-                        shot_paths[1:],
-                        job_profile=jp,
-                        bot_lark_gate=bot_lark_gate,
-                    )
-                if shot_dir:
-                    _fpms_lark_cleanup_screenshot_dir(shot_dir)
-                with _fpms_lark_sessions_lock:
-                    gate = _fpms_lark_sessions.get(sk)
-                    ev = gate.get("build_gate_event") if isinstance(gate, dict) else None
-                if not isinstance(ev, threading.Event):
-                    raise RuntimeError("Lost Lark build gate event (session_key).")
-                if not ev.wait(timeout=to):
-                    send(cid, "Timed out waiting for **yes** / **no**. **Build** skipped.")
-                    build_clicked = False
                 else:
-                    with _fpms_lark_sessions_lock:
-                        approved = _fpms_lark_sessions.get(sk, {}).get("approve_build")
-                    if approved is True:
-                        if ok_all:
-                            _click_jenkins_build_button(page)
-                            build_clicked = True
-                            print("→ **Build** clicked (Lark-approved).")
-                            # Persist to jenkinsupdate.json ONLY now that Build was actually clicked.
-                            try:
-                                with _fpms_lark_sessions_lock:
-                                    _g_rec = _fpms_lark_sessions.get(sk)
-                                    _pend = (
-                                        _g_rec.get("_ju_pending_record")
-                                        if isinstance(_g_rec, dict)
-                                        else None
-                                    )
-                                    _rec_cid = (
-                                        _g_rec.get("_ju_chat_id")
-                                        if isinstance(_g_rec, dict)
-                                        else None
-                                    ) or cid
-                                if _pend:
-                                    _ju_commit_run_record(_rec_cid, _pend)
-                            except Exception as _commit_err:
-                                print(
-                                    f"[jenkinsupdate] run-history commit failed: {_commit_err!r}",
-                                    flush=True,
-                                )
-                            if is_vpn:
-                                send(cid, "Creating VPN file. Kindly wait...")
-                            else:
-                                send(cid, "**Build** clicked in Jenkins.")
-                            folder_u = _jenkins_job_folder_url(build_url)
-                            _raw_wait_bn = (
-                                os.environ.get("VPN_POST_BUILD_NUMBER_WAIT_MS")
-                                if is_vpn
-                                else os.environ.get("JENKINS_POST_BUILD_NUMBER_WAIT_MS")
-                            ) or ("6000" if is_vpn else "20000")
-                            _raw_wait_bn = (_raw_wait_bn or "").strip()
-                            try:
-                                wait_bn_ms = int(_raw_wait_bn or "20000")
-                            except ValueError:
-                                wait_bn_ms = 20_000
-                            resolved_bn = _resolve_build_number_after_jenkins_build_click(
+                    filled_env, filled_branch = _jenkins_filled_env_branch_for_display(
+                        jp,
+                        environment=environment,
+                        branch=branch,
+                        command=command,
+                        vpn_users=vpn_users,
+                        vpn_location=vpn_location,
+                    )
+                    shot_paths: list[str] = []
+                    shot_dir = ""
+                    screenshot_img_key = ""
+                    if _jenkins_form_screenshot_enabled(bot_lark_gate):
+                        try:
+                            shot_paths, shot_dir = capture_jenkins_build_parameters_screenshots(
                                 page,
-                                next_build_number,
-                                timeout_ms=max(0, wait_bn_ms),
+                                jp,
+                                services_expected=(
+                                    None
+                                    if update_all_services
+                                    else list(services or [])
+                                ),
                             )
-                            if is_vpn:
-                                _fpms_lark_notify_jenkinsbot_vpn(
-                                    send,
+                        except Exception as shot_ex:
+                            try:
+                                send(
                                     cid,
-                                    folder_url=VPN_CREATION_JOB_FOLDER_URL,
-                                    build_number=resolved_bn,
-                                    vpn_users=vpn_users,
-                                    vpn_location=vpn_location,
+                                    f"⚠️ Jenkins form screenshot capture failed (card still sent):\n```\n{shot_ex}\n```",
                                 )
-                            else:
+                            except Exception:
+                                pass
+                            print(f"[jenkinsupdate] form screenshot failed: {shot_ex!r}", flush=True)
+                            shot_paths = []
+                            _fpms_lark_cleanup_screenshot_dir(shot_dir)
+                            shot_dir = ""
+                    if shot_paths:
+                        upload_fn, _send_img_fn = _fpms_lark_resolve_image_upload_helpers(
+                            bot_lark_gate
+                        )
+                        if callable(upload_fn):
+                            screenshot_img_key = upload_fn(shot_paths[0]) or ""
+                    _fpms_lark_send_verification_summary(
+                        send,
+                        cid,
+                        filled_env=filled_env,
+                        filled_branch=filled_branch,
+                        ok_all=ok_all,
+                        build_url=build_url,
+                        job_profile=jp,
+                        next_build_number=next_build_number,
+                        screenshot_img_key=screenshot_img_key,
+                    )
+                    # After the whole-form YES/NO card, also send Services row + per-service close-ups.
+                    if (
+                        len(shot_paths) > 1
+                        and not update_all_services
+                        and (services or [])
+                        and _jenkins_services_detail_screenshot_enabled()
+                    ):
+                        _fpms_lark_send_parameter_screenshots(
+                            cid,
+                            send,
+                            shot_paths[1:],
+                            job_profile=jp,
+                            bot_lark_gate=bot_lark_gate,
+                        )
+                    if shot_dir:
+                        _fpms_lark_cleanup_screenshot_dir(shot_dir)
+                    with _fpms_lark_sessions_lock:
+                        gate = _fpms_lark_sessions.get(sk)
+                        ev = gate.get("build_gate_event") if isinstance(gate, dict) else None
+                    if not isinstance(ev, threading.Event):
+                        raise RuntimeError("Lost Lark build gate event (session_key).")
+                    if not ev.wait(timeout=to):
+                        send(cid, "Timed out waiting for **yes** / **no**. **Build** skipped.")
+                        build_clicked = False
+                    else:
+                        with _fpms_lark_sessions_lock:
+                            approved = _fpms_lark_sessions.get(sk, {}).get("approve_build")
+                        if approved is True:
+                            if ok_all:
+                                _click_jenkins_build_button(page)
+                                build_clicked = True
+                                print("→ **Build** clicked (Lark-approved).")
+                                # Persist to jenkinsupdate.json ONLY now that Build was actually clicked.
+                                try:
+                                    with _fpms_lark_sessions_lock:
+                                        _g_rec = _fpms_lark_sessions.get(sk)
+                                        _pend = (
+                                            _g_rec.get("_ju_pending_record")
+                                            if isinstance(_g_rec, dict)
+                                            else None
+                                        )
+                                        _rec_cid = (
+                                            _g_rec.get("_ju_chat_id")
+                                            if isinstance(_g_rec, dict)
+                                            else None
+                                        ) or cid
+                                    if _pend:
+                                        _ju_commit_run_record(_rec_cid, _pend)
+                                except Exception as _commit_err:
+                                    print(
+                                        f"[jenkinsupdate] run-history commit failed: {_commit_err!r}",
+                                        flush=True,
+                                    )
+                                send(cid, "**Build** clicked in Jenkins.")
+                                folder_u = _jenkins_job_folder_url(build_url)
+                                _raw_wait_bn = (
+                                    os.environ.get("JENKINS_POST_BUILD_NUMBER_WAIT_MS") or "20000"
+                                ).strip()
+                                try:
+                                    wait_bn_ms = int(_raw_wait_bn or "20000")
+                                except ValueError:
+                                    wait_bn_ms = 20_000
+                                resolved_bn = _resolve_build_number_after_jenkins_build_click(
+                                    page,
+                                    next_build_number,
+                                    timeout_ms=max(0, wait_bn_ms),
+                                )
                                 _fpms_lark_notify_jenkins_after_build_click(
                                     send,
                                     cid,
@@ -16518,26 +16496,26 @@ def run(
                                     folder_url=folder_u,
                                     build_number=resolved_bn,
                                 )
+                            else:
+                                build_clicked = False
+                                send(
+                                    cid,
+                                    "**Build** was NOT clicked — verification still has ❌. Fix the job in Jenkins if needed.",
+                                )
                         else:
                             build_clicked = False
-                            send(
-                                cid,
-                                "**Build** was NOT clicked — verification still has ❌. Fix the job in Jenkins if needed.",
-                            )
-                    else:
-                        build_clicked = False
-                        with _fpms_lark_sessions_lock:
-                            gate_after = _fpms_lark_sessions.get(sk, {})
-                            cancelled = bool(
-                                isinstance(gate_after, dict) and gate_after.get("lark_cancel")
-                            )
-                        if cancelled:
-                            send(
-                                cid,
-                                "⏹️ **Cancelled.** **Build** skipped; the Jenkins session will close.",
-                            )
-                        else:
-                            send(cid, "**Build** skipped (you replied **no**).")
+                            with _fpms_lark_sessions_lock:
+                                gate_after = _fpms_lark_sessions.get(sk, {})
+                                cancelled = bool(
+                                    isinstance(gate_after, dict) and gate_after.get("lark_cancel")
+                                )
+                            if cancelled:
+                                send(
+                                    cid,
+                                    "⏹️ **Cancelled.** **Build** skipped; the Jenkins session will close.",
+                                )
+                            else:
+                                send(cid, "**Build** skipped (you replied **no**).")
             elif skip_env:
                 print(
                     "→ ECP job (no Environment — FNT RC / SMS UAT): interactive **yes** to Build is only wired "
