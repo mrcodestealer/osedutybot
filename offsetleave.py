@@ -84,6 +84,10 @@ BOT_MENU_EVENT_KEY_SHOW_OFFSET = "6543761547615237517625312"
 BOT_MENU_EVENT_KEYS_SHOW_OFFSET: frozenset[str] = frozenset({BOT_MENU_EVENT_KEY_SHOW_OFFSET})
 BOT_MENU_EVENT_KEY_OFFSET_EDIT = "16246751235716253765123123"
 BOT_MENU_EVENT_KEYS_OFFSET_EDIT: frozenset[str] = frozenset({BOT_MENU_EVENT_KEY_OFFSET_EDIT})
+BOT_MENU_EVENT_KEY_PENDING_OFFSET = "741626437812648126123"
+BOT_MENU_EVENT_KEYS_PENDING_OFFSET: frozenset[str] = frozenset({BOT_MENU_EVENT_KEY_PENDING_OFFSET})
+BOT_MENU_EVENT_KEY_APPROVER_OFFSET_EDIT = "1726387126481826481"
+BOT_MENU_EVENT_KEYS_APPROVER_OFFSET_EDIT: frozenset[str] = frozenset({BOT_MENU_EVENT_KEY_APPROVER_OFFSET_EDIT})
 
 OFFSET_APPROVAL_CALLBACK_KEYS = frozenset({_OFFSET_APPR_PICK_KEY, _OFFSET_APPR_CONFIRM_KEY})
 
@@ -2273,8 +2277,81 @@ def handle_bot_menu_event(
         )
         return True
 
+    if event_key in BOT_MENU_EVENT_KEYS_PENDING_OFFSET:
+        print(f"[offsetleave] bot menu {event_key!r} → pending offset queue for {oid}", flush=True)
+        _open_pending_offset_queue(
+            sender_open_id=oid,
+            chat_id=oid,
+            chat_type="p2p",
+            send_message=_send_open_id,
+            get_token_func=get_token_func,
+        )
+        return True
+
+    if event_key in BOT_MENU_EVENT_KEYS_APPROVER_OFFSET_EDIT:
+        print(f"[offsetleave] bot menu {event_key!r} → approver edit offset for {oid}", flush=True)
+        _open_approver_offset_edit_picker(
+            sender_open_id=oid,
+            chat_id=oid,
+            chat_type="p2p",
+            send_message=_send_open_id,
+            get_token_func=get_token_func,
+        )
+        return True
+
     print(f"[offsetleave] bot menu: unhandled event_key={event_key!r}", flush=True)
     return True
+
+
+def _open_pending_offset_queue(
+    *,
+    sender_open_id: str,
+    chat_id: str,
+    chat_type: Optional[str],
+    send_message: Callable[..., dict[str, Any]],
+    get_token_func: Callable[[], str],
+) -> bool:
+    """Approver menu: pending offset approval queue (same as ``pendingoffset``)."""
+    oid = (sender_open_id or "").strip()
+    if not _is_offset_approver_open_id(oid):
+        send_message(chat_id, "As checked you are not Approver")
+        return True
+    return handle_pendingoffset_command(
+        "pendingoffset",
+        sender_open_id=oid,
+        chat_id=chat_id,
+        chat_type=chat_type,
+        send_message=send_message,
+        get_token_func=get_token_func,
+        force=True,
+    )
+
+
+def _open_approver_offset_edit_picker(
+    *,
+    sender_open_id: str,
+    chat_id: str,
+    chat_type: Optional[str],
+    send_message: Callable[..., dict[str, Any]],
+    get_token_func: Callable[[], str],
+) -> bool:
+    """Approver menu: edit approved/rejected offset rows (skips requester pending menu)."""
+    oid = (sender_open_id or "").strip()
+    if not _is_offset_approver_open_id(oid):
+        send_message(chat_id, "As checked you are not Approver")
+        return True
+    return handle_editoffset_command(
+        "editoffset",
+        sender_open_id=oid,
+        chat_id=chat_id,
+        chat_type=chat_type,
+        send_message=send_message,
+        get_token_func=get_token_func,
+        force=True,
+        person_filter="",
+        status_filter="",
+        approver_admin_only=True,
+    )
 
 
 def _open_offset_delete_picker(
@@ -2574,6 +2651,7 @@ def handle_editoffset_command(
     month_target: Optional[tuple[int, int]] = None,
     person_filter: Optional[str] = None,
     status_filter: Optional[str] = None,
+    approver_admin_only: bool = False,
 ) -> bool:
     if not force and not wants_editoffset(clean_text):
         return False
@@ -2615,7 +2693,8 @@ def handle_editoffset_command(
                 )
                 return True
             if (
-                not has_nl_filter
+                not approver_admin_only
+                and not has_nl_filter
                 and request_person
                 and _pending_offsets_for_request_person(request_person)
             ):
