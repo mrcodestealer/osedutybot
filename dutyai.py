@@ -632,7 +632,10 @@ def _fpms_text_for_date(d: date) -> Optional[str]:
 def _cpms_text_for_date(d: date) -> Optional[str]:
     import cpms_duty
 
-    _, main_name, main_phone, backup_name, backup_phone = cpms_duty.get_cpms_duty_for_date(d)
+    try:
+        _, main_name, main_phone, backup_name, backup_phone = cpms_duty.get_cpms_duty_for_date(d)
+    except cpms_duty.CpmsSheetNotPublished as e:
+        return e.friendly_message
     sections = []
     if main_name:
         sections.append(f"🟢 **Main**\n• {main_name}  📞 {main_phone}".rstrip())

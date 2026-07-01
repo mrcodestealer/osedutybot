@@ -234,7 +234,7 @@ def get_all_duty_summary():
     lines.append(fe_duty.get_fe_next_three_duty())
     lines.append("")
     lines.append("**【CPMS】**")
-    lines.append(cpms_duty.get_cpms_three_days())
+    lines.append(cpms_duty.get_cpms_three_days_text())
     lines.append("")
     lines.append("**【SRE】**")
     lines.append(sre_Duty.get_sre_week_duty())
@@ -302,7 +302,7 @@ def _dispatch_daily_duty_reply(cmd: str) -> Optional[str]:
     if c == "/fe":
         return fe_duty.get_fe_next_three_duty()
     if c == "/cpms":
-        return cpms_duty.format_output(cpms_duty.get_cpms_three_days())
+        return cpms_duty.get_cpms_three_days_text()
     if c == "/sre":
         return sre_Duty.get_sre_week_duty()
     if c in ("/db", "/dba"):
@@ -5350,8 +5350,7 @@ def lark_webhook():
         send_message(chat_id, reply)
         return _lark_im_done()
     elif clean_text.lower() == '/cpms':
-        results = cpms_duty.get_cpms_three_days()
-        reply = cpms_duty.format_output(results)
+        reply = cpms_duty.get_cpms_three_days_text()
     elif clean_text.lower().startswith('/cpmscheck'):
         parts = clean_text.split()
         if len(parts) > 1:
