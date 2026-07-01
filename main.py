@@ -2701,6 +2701,21 @@ def _handle_git_pull_restart_deploy(chat_id: str) -> None:
     start_lark_background_thread(_run_git_pull_and_restart, chat_id)
 
 
+def _run_jenkins_warm_status_check(chat_id: str) -> None:
+    try:
+        import jenkinsupdate as _ju_status
+
+        report = _ju_status.jenkins_warm_pool_status_report()
+    except Exception as exc:
+        send_message(chat_id, f"❌ warm status check failed: {exc!r}")
+        return
+    send_message(chat_id, f"🌡️ **Jenkins warm browser status**\n{report}")
+
+
+def _handle_jenkins_warm_status(chat_id: str) -> None:
+    start_lark_background_thread(_run_jenkins_warm_status_check, chat_id)
+
+
 def _dispatch_jenkins_duty_command(
     chat_id: str,
     sender_id: str,
@@ -6019,6 +6034,9 @@ def lark_webhook():
             send_message(chat_id, "❌ You are not allowed to use this command.")
             return _lark_im_done()
         _handle_git_pull_restart_deploy(chat_id)
+        return _lark_im_done()
+    elif clean_text.lower() in ("/warmstatus", "/jenkinswarmstatus"):
+        _handle_jenkins_warm_status(chat_id)
         return _lark_im_done()
     elif (
         (bot_mentioned or chat_type == "p2p")

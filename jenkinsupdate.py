@@ -1018,6 +1018,14 @@ class _VpnWarmBrowser:
     def wait_ready(self, timeout: float | None = None) -> bool:
         return self._ready.wait(timeout)
 
+    def status(self, timeout: float = 5.0) -> dict:
+        """Passive health snapshot — never launches a browser, just reports current state."""
+        done = threading.Event()
+        box: dict = {}
+        self._jobs.put({"kind": "status", "done": done, "box": box})
+        box["responded"] = done.wait(timeout)
+        return box
+
     def start(self) -> None:
         with self._lock:
             if not self._started:
@@ -1063,6 +1071,10 @@ class _VpnWarmBrowser:
                     self._prewarm_safe()
                 elif kind == "job":
                     self._run_job_safe(item)
+                elif kind == "status":
+                    item["box"]["ready"] = self._ready.is_set()
+                    item["box"]["healthy"] = self._healthy()
+                    item["done"].set()
             except Exception as ex:  # never let the worker thread die
                 print(f"[vpn-warm] loop error: {ex!r}", flush=True)
 
@@ -1512,6 +1524,14 @@ class _JuWarmWorker:
     def wait_ready(self, timeout: float | None = None) -> bool:
         return self._ready.wait(timeout)
 
+    def status(self, timeout: float = 5.0) -> dict:
+        """Passive health snapshot — never launches or logs in, just reports current state."""
+        done = threading.Event()
+        box: dict = {}
+        self._tasks.put({"kind": "status", "done": done, "box": box})
+        box["responded"] = done.wait(timeout)
+        return box
+
     def _loop(self) -> None:
         while True:
             task = self._tasks.get()
@@ -1522,6 +1542,12 @@ class _JuWarmWorker:
                 except Exception as ex:
                     print(f"[ju-pool:{self.slug}] prewarm failed: {ex!r}", flush=True)
                     self._teardown()
+                continue
+            if task.get("kind") == "status":
+                box = task["box"]
+                box["ready"] = self._ready.is_set()
+                box["healthy"] = self._healthy()
+                task["done"].set()
                 continue
             if task.get("page_fn"):
                 fn = task["page_fn"]
@@ -1810,6 +1836,75 @@ def prewarm_ju_pool_on_startup() -> None:
         _ju_warm_pool_get().prewarm_all()
     except Exception as ex:
         print(f"[ju-pool] startup pre-warm failed: {ex!r}", flush=True)
+
+
+def jenkins_warm_pool_status_report(timeout: float = 6.0) -> str:
+    """
+    Live status of every Jenkins warm browser (JU ``/update`` pool + VPN creation).
+
+    Read-only: queries each worker through its own task queue (Playwright pages are
+    thread-bound, so status has to be answered on the worker's own thread) and never
+    launches / logs in a browser just to answer this. Safe to call even when a pool was
+    never started — reports "not started" instead of creating one.
+    """
+    lines: list[str] = []
+
+    ju_on = _ju_warm_pool_enabled()
+    pool = _ju_warm_pool_singleton
+    lines.append(
+        f"Jenkins /update pool — JU_WARM_POOL={'on' if ju_on else 'off'}, "
+        f"cold_fallback={'on' if _ju_warm_allow_cold_fallback() else 'off'}"
+    )
+    if not ju_on:
+        lines.append("  ⚠️ disabled — every /update will cold-launch a browser (~20s delay).")
+    elif pool is None:
+        lines.append("  ⚠️ pool not started yet — no browsers launched.")
+    else:
+        workers = pool._all_workers()
+        results: list[tuple[str, dict]] = []
+        submitted = []
+        for w in workers:
+            done = threading.Event()
+            box: dict = {}
+            w._tasks.put({"kind": "status", "done": done, "box": box})
+            submitted.append((w, done, box))
+        deadline = time.monotonic() + max(0.0, timeout)
+        for w, done, box in submitted:
+            done.wait(max(0.0, deadline - time.monotonic()))
+            box["responded"] = done.is_set()
+            results.append((w.slug, box))
+        ready_n = sum(1 for _slug, box in results if box.get("ready") and box.get("healthy"))
+        lines.append(f"  {ready_n}/{len(results)} job browsers warm & ready")
+        for slug, box in sorted(results, key=lambda row: row[0]):
+            if box.get("ready") and box.get("healthy"):
+                mark = "✅"
+            elif not box.get("responded"):
+                mark = "⏳ busy/no response"
+            else:
+                mark = "❌"
+            lines.append(f"  {mark} {slug}")
+
+    vpn_on = _vpn_warm_enabled()
+    lines.append("")
+    lines.append(
+        f"VPN creation browser — VPN_WARM_BROWSER={'on' if vpn_on else 'off'}, "
+        f"cold_fallback={'on' if _vpn_warm_allow_cold_fallback() else 'off'}"
+    )
+    vpn = _vpn_warm_singleton
+    if not vpn_on:
+        lines.append("  ⚠️ disabled — VPN creation will cold-launch a browser.")
+    elif vpn is None:
+        lines.append("  ⚠️ not started yet.")
+    else:
+        box = vpn.status(timeout=timeout)
+        if box.get("ready") and box.get("healthy"):
+            lines.append("  ✅ vpn-creation (Aliyun Jenkins)")
+        elif not box.get("responded"):
+            lines.append("  ⏳ vpn-creation (Aliyun Jenkins) — busy/no response")
+        else:
+            lines.append("  ❌ vpn-creation (Aliyun Jenkins)")
+
+    return "\n".join(lines)
 
 
 class ServiceNotDetectedError(Exception):
