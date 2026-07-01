@@ -1021,6 +1021,7 @@ _GIT_PULL_RESTART_RE = re.compile(
     r"(?i)(?:"
     r"git\s+pull(?:\s+and|\s*[,，]?\s*then)?\s+(?:restart|reboot)\s+(?:the\s+)?(?:service|services|bot|larkbot|duty\s+bot|webapp)"
     r"|git\s+pull\s+(?:and\s+)?(?:restart|reboot)\b"
+    r"|git\s+pull\b"
     r"|(?:pull|update)\s+(?:code|repo|git)\s+(?:and\s+)?(?:restart|reboot)\s+(?:the\s+)?(?:service|services|bot|larkbot|webapp)"
     r"|(?:deploy|update)\s+(?:the\s+)?(?:bot|code|server|osedutybot)\b"
     r"|拉代码.*重启|部署.*重启"
