@@ -4319,6 +4319,40 @@ def lark_webhook():
                     return
                 if (
                     isinstance(parsed_ca, dict)
+                    and str(parsed_ca.get("k") or "").strip().lower() == "findmachine_submit"
+                ):
+                    act_ca = ev_ca.get("action") if isinstance(ev_ca.get("action"), dict) else {}
+                    fm_env_raw = _lark_get_card_form_field(act_ca, "fm_env")
+                    fm_game_raw = _lark_get_card_form_field(act_ca, "fm_game")
+                    fm_online_raw = _lark_get_card_form_field(act_ca, "fm_online")
+                    fv_fm = parsed_ca.get("form_value")
+                    if isinstance(fv_fm, dict):
+                        fm_env_raw = fm_env_raw or _lark_form_field_text(fv_fm.get("fm_env"))
+                        fm_game_raw = fm_game_raw or _lark_form_field_text(fv_fm.get("fm_game"))
+                        fm_online_raw = fm_online_raw or _lark_form_field_text(fv_fm.get("fm_online"))
+                    fm_env_raw = fm_env_raw or _lark_find_field_deep(ev_ca, "fm_env")
+                    fm_game_raw = fm_game_raw or _lark_find_field_deep(ev_ca, "fm_game")
+                    fm_online_raw = fm_online_raw or _lark_find_field_deep(ev_ca, "fm_online")
+
+                    def _run_findmachine_job():
+                        try:
+                            import findmachine as _fm_mod
+
+                            for _fm_msg in _fm_mod.run_findmachine_query(
+                                fm_env_raw, fm_game_raw, fm_online_raw
+                            ):
+                                send_message(chat_id_ca, _fm_msg)
+                        except Exception as _fm_err:
+                            print(f"❌ findmachine job: {_fm_err!r}", flush=True)
+                            try:
+                                send_message(chat_id_ca, f"❌ findmachine failed: {_fm_err}")
+                            except Exception:
+                                pass
+
+                    threading.Thread(target=_run_findmachine_job, daemon=True).start()
+                    return
+                if (
+                    isinstance(parsed_ca, dict)
                     and str(parsed_ca.get("k") or "").strip().lower() == "vpn_create_submit"
                 ):
                     act_ca = ev_ca.get("action") if isinstance(ev_ca.get("action"), dict) else {}
@@ -6000,6 +6034,20 @@ def lark_webhook():
         else:
             reply = list_range.format_list_range(parts[1])
         send_message(chat_id, reply)
+        return _lark_im_done()
+    elif re.match(r"^/(?:findmachine|fm)\b", clean_text, re.I) or re.match(
+        r"(?i)^find\s*machines?\s*$", clean_text
+    ):
+        # Interactive card: environment + game type + online/offline → machine names.
+        try:
+            import findmachine as _findmachine
+
+            card_fm = _findmachine.build_findmachine_form_card()
+            resp_fm = send_message(chat_id, json.dumps(card_fm, ensure_ascii=False), msg_type="interactive")
+            if isinstance(resp_fm, dict) and resp_fm.get("code") not in (0, None):
+                send_message(chat_id, f"❌ Find-machine card rejected: {resp_fm}")
+        except Exception as e:
+            send_message(chat_id, f"❌ findmachine card failed: {e}")
         return _lark_im_done()
     elif clean_text.lower().startswith('/nch'):
         parts = clean_text.split(maxsplit=1)

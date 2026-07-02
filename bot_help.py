@@ -134,6 +134,11 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
                     "Expand ids; e.g. 8900-8911, 8905,8910, NWR2133-NWR2142, NWR2144-NWR2150",
                     "展开编号；如 8900-8911、8905,8910、多个区间逗号分隔",
                 ),
+                (
+                    "/findmachine",
+                    "Find machines card: env + game type + online/offline",
+                    "查找机台卡片：环境+游戏类型+在线状态",
+                ),
                 ("/nch <id>", "NCH machine info", "NCH 机台"),
                 ("/nwr <id>", "NWR machine info", "NWR 机台"),
                 ("/wf <id>", "Winford asset", "Winford 资产"),
