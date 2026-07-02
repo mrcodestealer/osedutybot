@@ -23,7 +23,20 @@ load_dotenv()
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
 SPREADSHEET_TOKEN = os.getenv("OSE_SPREADSHEET_TOKEN")
-SHEET_ID = os.getenv("OSE_SHEET_ID")
+# 值班数据已迁移到合并后的 wiki 工作表 AS33r7（"FINAL OSE & QA MERGE"），
+# 取代旧 tab 3RIBRL。可用 OSE_SHEET_ID 覆盖；未设置或旧 tab 自动映射到 AS33r7。
+_DEFAULT_OSE_SHEET_ID = "AS33r7"
+_LEGACY_OSE_SHEET_IDS = frozenset({"3RIBRL", "65p5cn"})
+
+
+def _resolve_ose_sheet_id() -> str:
+    sid = (os.getenv("OSE_SHEET_ID") or "").strip().replace(" ", "")
+    if not sid or sid in _LEGACY_OSE_SHEET_IDS:
+        return _DEFAULT_OSE_SHEET_ID
+    return sid
+
+
+SHEET_ID = _resolve_ose_sheet_id()
 DUTY_LIST_PATH = "dutyList.csv"
 
 _SRE_TOKEN_CACHE: dict[str, object] = {"token": None, "expires_at": 0.0}

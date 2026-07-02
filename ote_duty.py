@@ -22,7 +22,22 @@ from datetime import datetime, timedelta
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
 SPREADSHEET_TOKEN = os.getenv("OTE_SPREADSHEET_TOKEN")
-DUTY_LIST_PATH = "dutyList.csv"         
+DUTY_LIST_PATH = "dutyList.csv"
+
+# 值班数据已迁移到合并后的 wiki 工作表 AS33r7（"FINAL OSE & QA MERGE"），
+# 取代按年分表的 OSE{year}（旧 tab 3RIBRL）。可用 OSE_SHEET_ID 覆盖；旧 tab 自动映射到 AS33r7。
+_DEFAULT_OSE_SHEET_ID = "AS33r7"
+_LEGACY_OSE_SHEET_IDS = frozenset({"3RIBRL", "65p5cn"})
+
+
+def _resolve_ose_sheet_id() -> str:
+    sid = (os.getenv("OSE_SHEET_ID") or "").strip().replace(" ", "")
+    if not sid or sid in _LEGACY_OSE_SHEET_IDS:
+        return _DEFAULT_OSE_SHEET_ID
+    return sid
+
+
+OSE_SHEET_ID = _resolve_ose_sheet_id()
 
 # Team members (as they appear in column A) and their CSV‑lookup names
 TARGET_DUTY = [
@@ -69,18 +84,13 @@ def get_all_sheets_metadata(token):
     return result.get("data", {}).get("sheets", [])
 
 def get_sheet_id_by_year(year):
-    """Return sheet ID for the sheet named 'OSE{year}', or None if not found."""
-    token = get_tenant_access_token()
-    sheets = get_all_sheets_metadata(token)
-    if not sheets:
-        return None
-    target_title = f"OSE{year}"
-    for sheet in sheets:
-        if sheet.get("title") == target_title:
-            debug_print(f"Found sheet '{target_title}' with ID: {sheet.get('sheetId')}")
-            return sheet.get("sheetId")
-    debug_print(f"Sheet '{target_title}' not found.")
-    return None
+    """Return the OSE duty tab ID (merged 'FINAL OSE & QA MERGE' = ``AS33r7``).
+
+    ``year`` is kept for signature/back-compat; duty now lives in a single merged
+    tab (override via ``OSE_SHEET_ID``; legacy ``3RIBRL``/``65p5cn`` map to it).
+    """
+    debug_print(f"Using OSE duty sheet id: {OSE_SHEET_ID}")
+    return OSE_SHEET_ID
 
 def get_range_values_for_sheet(token, sheet_id, range_str):
     url = f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/{SPREADSHEET_TOKEN}/values/{sheet_id}!{range_str}?valueRenderOption=FormattedValue"

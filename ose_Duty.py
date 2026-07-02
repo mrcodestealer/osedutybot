@@ -32,9 +32,22 @@ APP_SECRET = os.getenv("APP_SECRET")
 
 SPREADSHEET_TOKEN = (os.getenv("OSE_SPREADSHEET_TOKEN") or "UjF0saOVuhJSWLtBv9GlaQOkgbe").strip()
 # Single OSE wiki sheet (replaces legacy ``3RIBRL`` / ``65p5cn``).
-SHEET_ID = (os.getenv("OSE_SHEET_ID") or "AS33r7").strip().replace(" ", "")
-
 _LEGACY_OSE_SHEET_IDS = frozenset({"3RIBRL", "65p5cn"})
+
+
+def _resolve_ose_duty_sheet_id() -> str:
+    """Duty now lives in the merged 'FINAL OSE & QA MERGE' tab (``AS33r7``).
+
+    A stale/legacy ``OSE_SHEET_ID`` (``3RIBRL`` / ``65p5cn``) is mapped to
+    ``AS33r7`` so duty never falls back to the retired per-year tab.
+    """
+    sid = (os.getenv("OSE_SHEET_ID") or "").strip().replace(" ", "")
+    if not sid or sid in _LEGACY_OSE_SHEET_IDS:
+        return "AS33r7"
+    return sid
+
+
+SHEET_ID = _resolve_ose_duty_sheet_id()
 
 
 def _resolve_ose_leave_sheet_id() -> str:
