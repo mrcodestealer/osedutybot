@@ -1741,6 +1741,9 @@ class _JuWarmPool:
         attempts = _ju_warm_retry_attempts()
         last_pre_error: Exception | None = None
         box: dict = {}
+        gate = run_kwargs.get("bot_lark_gate") or {}
+        notify = gate.get("send")
+        chat_id = gate.get("chat_id")
         for attempt in range(1, attempts + 1):
             box = worker.execute(run_kwargs)
             if "pre_error" not in box:
@@ -1753,6 +1756,15 @@ class _JuWarmPool:
             )
             worker.submit_prewarm()
             wait_sec = float(os.environ.get("JU_WARM_RETRY_WAIT_SEC", "90"))
+            # Only the caller (Lark chat run) carries a notify callback; CLI/script runs don't.
+            # Skip on the last attempt — the final outcome message covers that case.
+            if attempt < attempts and callable(notify) and chat_id:
+                _notify_chat_resilient(
+                    notify,
+                    chat_id,
+                    f"⏳ Jenkins browser for **{worker.slug}** lost its session — "
+                    f"reconnecting (attempt {attempt}/{attempts}, ~{int(wait_sec)}s)…",
+                )
             worker.wait_ready(wait_sec)
         if "pre_error" in box:
             if _ju_warm_allow_cold_fallback():
@@ -11054,6 +11066,24 @@ def _fpms_bot_build_config_block(data: dict, resolved_ids: list[str]) -> str:
     )
 
 
+def _notify_chat_resilient(send, chat_id: str, text: str) -> bool:
+    """
+    Best-effort chat notification with one retry, so a transient Lark API hiccup can't turn a
+    real failure into total silence. Always logs the outcome (success or give-up) so a dropped
+    notification is at least visible server-side.
+    """
+    for attempt in (1, 2):
+        try:
+            send(chat_id, text)
+            return True
+        except Exception as ex:
+            print(f"[jenkinsupdate] chat notify attempt {attempt}/2 failed: {ex!r}", flush=True)
+            if attempt == 1:
+                time.sleep(1.0)
+    print(f"[jenkinsupdate] GAVE UP notifying chat_id={chat_id!r}: {text[:200]!r}", flush=True)
+    return False
+
+
 def _fpms_lark_spawn_run(
     chat_id: str,
     session_key: str,
@@ -11129,12 +11159,11 @@ def _fpms_lark_spawn_run(
                 }
             )
         except Exception as ex:
-            try:
-                prof_lbl = _jenkins_job_profile_display(jp)
-                send(chat_id, f"❌ {prof_lbl} Jenkins automation failed:\n```\n{ex}\n```")
-            except Exception:
-                pass
+            prof_lbl = _jenkins_job_profile_display(jp)
             print(f"[jenkinsupdate bot] run failed: {ex!r}", flush=True)
+            _notify_chat_resilient(
+                send, chat_id, f"❌ {prof_lbl} Jenkins automation failed:\n```\n{ex}\n```"
+            )
         finally:
             _fpms_lark_mark_trigger_message_done(trigger_mid)
             _fpms_lark_finish_jenkins_run_session(

@@ -834,6 +834,31 @@ def resolve_environment(extraction: JenkinsUpdateExtraction, full_text: str = ""
 # ---------------------------------------------------------------------------
 
 
+def _rules_fast_path_enabled() -> bool:
+    """Skip the LLM when the rules engine already extracted a complete request (default on)."""
+    return (os.getenv("BOT_JENKINS_AGENT_RULES_FAST_PATH", "1") or "").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _rules_extraction_complete(res: JenkinsUpdateExtraction) -> bool:
+    """
+    True when the deterministic engine found every field a well-formed request carries —
+    environment headline, branch, version and an explicit service list (or ALL). In that
+    case the LLM merge can only echo the same values back, so the round-trip (seconds on
+    a local Ollama model) is pure latency and is skipped.
+    """
+    return bool(
+        res.environment
+        and res.branch
+        and res.version
+        and (res.update_all or res.services)
+    )
+
+
 def extract(text: str, *, use_llm: bool = True) -> JenkinsUpdateExtraction:
     """
     Extract Jenkins update fields from arbitrary text.
@@ -841,17 +866,25 @@ def extract(text: str, *, use_llm: bool = True) -> JenkinsUpdateExtraction:
     Runs the deterministic engine always; runs the LLM engine when enabled and
     merges (LLM wins, rules fill gaps). Resolves the environment to a live job.
     Never raises.
+
+    Fast path: when the rules engine already extracted a complete request
+    (environment + branch + version + services), the LLM call is skipped entirely —
+    it saves a multi-second model round-trip on every well-formatted paste.
+    Disable with ``BOT_JENKINS_AGENT_RULES_FAST_PATH=0``.
     """
     rules = rule_extract(text)
     result = rules
     if use_llm and llm_enabled():
-        try:
-            llm = _llm_extract(text)
-        except Exception as exc:  # pragma: no cover - defensive
-            print(f"[jenkinsupdateagent] LLM extract error: {exc!r}", flush=True)
-            llm = None
-        if llm is not None:
-            result = _merge(llm, rules)
+        if _rules_fast_path_enabled() and _rules_extraction_complete(rules):
+            rules.source = "rules-fast"
+        else:
+            try:
+                llm = _llm_extract(text)
+            except Exception as exc:  # pragma: no cover - defensive
+                print(f"[jenkinsupdateagent] LLM extract error: {exc!r}", flush=True)
+                llm = None
+            if llm is not None:
+                result = _merge(llm, rules)
     resolve_environment(result, full_text=text)
     return result
 
