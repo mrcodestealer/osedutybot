@@ -150,23 +150,87 @@ def get_month_for_column(col_idx, headers):
                     debug_print(f"Column {c} header '{header_text}' – no month/year pattern found")
     return None, None
 
-def find_target_rows(values):
-    """Find rows in column A that contain one of the target names."""
-    target_rows = []  # list of (row_idx, name)
+# DBA section header (matches "DB", "DBA", "DBA Team", optional trailing colon).
+_DBA_HEADER_RE = re.compile(r'^\s*DBA?\s*(?:team)?\s*:?\s*$', re.IGNORECASE)
+# A phone number inside a column-A cell, e.g. "+60169294328" or "+6011 16392152".
+_PHONE_RE = re.compile(r'\+?\d[\d\-\s]{6,}\d')
+
+
+def _parse_member_cell(cell_text):
+    """Parse a DBA person cell like ``"Kah Zheng +60169294328 (note)"``.
+
+    Returns ``(name, phone)`` or ``None`` when the cell has no phone number
+    (i.e. it's a section header / note rather than a person entry).
+    """
+    text = (cell_text or "").strip()
+    if not text:
+        return None
+    m = _PHONE_RE.search(text)
+    if not m:
+        return None
+    # Name = everything before the phone; keep only the first line, trim punctuation.
+    name = text[:m.start()].splitlines()[0].strip(" \t-:,") if text[:m.start()].strip() else ""
+    if not name:
+        return None
+    raw = m.group(0).strip()
+    digits = re.sub(r'\D', '', raw)
+    if not digits:
+        return None
+    phone = ("+" + digits) if raw.startswith("+") else digits
+    return name, phone
+
+
+def find_dba_members(values):
+    """Return DBA on-call members as ``[(row_idx, name, phone), ...]``.
+
+    Reads the sheet's ``DBA`` section dynamically (name + phone from column A)
+    so it stays correct as the roster changes. Falls back to the legacy
+    ``TARGET_DUTY`` name scan if the ``DBA`` header can't be located.
+    """
+    header_idx = None
     for row_idx in range(len(values)):
         row = values[row_idx]
-        if not row or len(row) == 0:
+        if not row:
+            continue
+        if _DBA_HEADER_RE.match(extract_text_from_cell(row[0]).strip()):
+            header_idx = row_idx
+            debug_print(f"Found DBA section header at row {row_idx}")
+            break
+
+    members = []
+    if header_idx is not None:
+        for row_idx in range(header_idx + 1, len(values)):
+            row = values[row_idx]
+            cell_a = extract_text_from_cell(row[0]).strip() if row else ""
+            if not cell_a:
+                continue  # spacer row between members
+            parsed = _parse_member_cell(cell_a)
+            if parsed is None:
+                # A labelled row with no phone marks the next section → stop.
+                debug_print(f"DBA section ends at row {row_idx}: {cell_a!r}")
+                break
+            name, phone = parsed
+            members.append((row_idx, name, phone))
+            debug_print(f"DBA member '{name}' ({phone}) at row {row_idx}")
+
+    if members:
+        return members
+
+    # Fallback: legacy hardcoded-name scan (keeps working if the header changes).
+    debug_print("DBA section not found; falling back to TARGET_DUTY name scan")
+    for row_idx in range(len(values)):
+        row = values[row_idx]
+        if not row:
             continue
         cell_a = extract_text_from_cell(row[0])
         if not cell_a:
             continue
         for target in TARGET_DUTY:
-            name = target["name"]
-            if re.search(rf'\b{re.escape(name)}\b', cell_a, re.IGNORECASE):
-                target_rows.append((row_idx, name))
-                debug_print(f"Found target '{name}' at row {row_idx}")
+            if re.search(rf'\b{re.escape(target["name"])}\b', cell_a, re.IGNORECASE):
+                members.append((row_idx, target["name"], target["phone"]))
+                debug_print(f"Found target '{target['name']}' at row {row_idx}")
                 break
-    return target_rows
+    return members
 
 def get_date_column(target_date, values):
     """Return the column index where the day number for target_date is located, or None."""
@@ -209,13 +273,13 @@ def get_date_column(target_date, values):
                 return col
     return None
 
-def get_duty_for_date(target_date, values, target_rows):
-    """Return list of names for DB members checked on target_date."""
+def get_duty_for_date(target_date, values, members):
+    """Return list of ``(name, phone)`` for DBA members checked on target_date."""
     date_col = get_date_column(target_date, values)
     if date_col is None:
         return []
     checked = []
-    for row_idx, name in target_rows:
+    for row_idx, name, phone in members:
         if row_idx >= len(values):
             continue
         row = values[row_idx]
@@ -223,7 +287,7 @@ def get_duty_for_date(target_date, values, target_rows):
             continue
         cell = extract_text_from_cell(row[date_col])
         if is_checked(cell):
-            checked.append(name)
+            checked.append((name, phone))
     return checked
 
 def get_values_and_targets_for_year(year):
@@ -249,26 +313,24 @@ def get_values_and_targets_for_year(year):
     if len(values) < 2:
         return None, None, f"Sheet OSE{year} has fewer than 2 rows."
 
-    target_rows = find_target_rows(values)
-    return values, target_rows, None
+    members = find_dba_members(values)
+    return values, members, None
 
-def get_week_summary_from_data(week_start, values, target_rows):
+def get_week_summary_from_data(week_start, values, members):
     """Return week summary using pre‑fetched data."""
-    duty_names = set()
+    duty = set()  # set of (name, phone)
     for i in range(7):
         day = week_start + timedelta(days=i)
-        checked = get_duty_for_date(day, values, target_rows)
-        duty_names.update(checked)
+        duty.update(get_duty_for_date(day, values, members))
 
     week_end = week_start + timedelta(days=6)
     title = f"📅 DB Duty – {week_start.strftime('%B %d, %Y Monday')} – {week_end.strftime('%B %d, %Y Sunday')}"
-    if not duty_names:
+    if not duty:
         return f"{title}\n• no duty"
 
     lines = [title]
-    for name in sorted(duty_names):
-        phone = next((t["phone"] for t in TARGET_DUTY if t["name"] == name), "未找到电话号码")
-        lines.append(f"• {name} 📞 {phone}")
+    for name, phone in sorted(duty):
+        lines.append(f"• {name} 📞 {phone or '未找到电话号码'}")
     return "\n".join(lines)
 
 def get_three_weeks_summary():
@@ -278,35 +340,33 @@ def get_three_weeks_summary():
 
     # Determine the year of the Monday (assumes all three weeks are in same year)
     year = monday.year
-    values, target_rows, error = get_values_and_targets_for_year(year)
+    values, members, error = get_values_and_targets_for_year(year)
     if error:
         return error
-    if not target_rows:
+    if not members:
         return "❌ No DB duty section found in sheet."
 
     results = []
     for i in range(3):
         week_start = monday + timedelta(days=7*i)
-        results.append(get_week_summary_from_data(week_start, values, target_rows))
+        results.append(get_week_summary_from_data(week_start, values, members))
     return "\n\n".join(results)
 
 def get_db_day_duty(target_date):
     """Return duty for a single date."""
-    values, target_rows, error = get_values_and_targets_for_year(target_date.year)
+    values, members, error = get_values_and_targets_for_year(target_date.year)
     if error:
         return error
-    if not target_rows:
+    if not members:
         return f"📅 {target_date.strftime('%d/%m/%Y')} – no DB duty section found."
 
-    checked = get_duty_for_date(target_date, values, target_rows)
+    checked = get_duty_for_date(target_date, values, members)
     if not checked:
         return f"📅 {target_date.strftime('%d/%m/%Y')} – no db duty assigned."
 
-    checked.sort()
     lines = [f"📅 DB Duty – {target_date.strftime('%d/%m/%Y')}"]
-    for name in checked:
-        phone = next((t["phone"] for t in TARGET_DUTY if t["name"] == name), "未找到电话号码")
-        lines.append(f"• {name} DB (Phone: {phone})")
+    for name, phone in sorted(set(checked)):
+        lines.append(f"• {name} DB (Phone: {phone or '未找到电话号码'})")
     return "\n".join(lines)
 
 def get_db_week_detail(week_start=None):
@@ -317,26 +377,23 @@ def get_db_week_detail(week_start=None):
     else:
         week_start = week_start - timedelta(days=week_start.weekday())
 
-    values, target_rows, error = get_values_and_targets_for_year(week_start.year)
+    values, members, error = get_values_and_targets_for_year(week_start.year)
     if error:
         return error
-    if not target_rows:
+    if not members:
         return "❌ No DB duty section found in sheet."
 
     lines = [f"📅 DB Duty details – week starting {week_start.strftime('%d/%m/%Y')}"]
     missing_days = []
     for i in range(7):
         day = week_start + timedelta(days=i)
-        checked = get_duty_for_date(day, values, target_rows)
+        checked = get_duty_for_date(day, values, members)
         if not checked:
             missing_days.append(day.strftime('%A %d/%m/%Y'))
             lines.append(f"  {day.strftime('%A %d/%m/%Y')}: ❌ no duty")
         else:
-            checked.sort()
-            duty_list = []
-            for name in checked:
-                phone = next((t["phone"] for t in TARGET_DUTY if t["name"] == name), "未找到电话号码")
-                duty_list.append(f"{name} DB (Phone: {phone})")
+            duty_list = [f"{name} DB (Phone: {phone or '未找到电话号码'})"
+                         for name, phone in sorted(set(checked))]
             lines.append(f"  {day.strftime('%A %d/%m/%Y')}: ✅ " + ", ".join(duty_list))
     if missing_days:
         lines.append(f"\n⚠️ Missing duty on: {', '.join(missing_days)}")
@@ -381,16 +438,16 @@ def db_check(month=None, year=None):
     days_in_month = (next_month_first - datetime(year, month, 1).date()).days
 
     # 获取该年份的表格数据
-    values, target_rows, error = get_values_and_targets_for_year(year)
+    values, members, error = get_values_and_targets_for_year(year)
     if error:
         return error
-    if not target_rows:
+    if not members:
         return f"❌ 在 OSE{year} 工作表中未找到 DB 值班人员区域。"
 
     missing = []
     for day in range(1, days_in_month + 1):
         target_date = datetime(year, month, day).date()
-        checked = get_duty_for_date(target_date, values, target_rows)
+        checked = get_duty_for_date(target_date, values, members)
         if not checked:
             missing.append(day)
 
@@ -415,22 +472,22 @@ if __name__ == "__main__":
                 user_date = parse_date_arg(sys.argv[2])
                 if user_date:
                     monday = user_date - timedelta(days=user_date.weekday())
-                    values, target_rows, error = get_values_and_targets_for_year(monday.year)
+                    values, members, error = get_values_and_targets_for_year(monday.year)
                     if error:
                         print(error)
                     else:
-                        print(get_week_summary_from_data(monday, values, target_rows))
+                        print(get_week_summary_from_data(monday, values, members))
                 else:
                     print(get_three_weeks_summary())  # fallback
             else:
                 # default: show current week
                 today = datetime.now().date()
                 monday = today - timedelta(days=today.weekday())
-                values, target_rows, error = get_values_and_targets_for_year(monday.year)
+                values, members, error = get_values_and_targets_for_year(monday.year)
                 if error:
                     print(error)
                 else:
-                    print(get_week_summary_from_data(monday, values, target_rows))
+                    print(get_week_summary_from_data(monday, values, members))
         elif sys.argv[1] == "--week-detail":
             if len(sys.argv) > 2:
                 user_date = parse_date_arg(sys.argv[2])

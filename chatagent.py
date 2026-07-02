@@ -31,7 +31,7 @@ import traceback
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -217,6 +217,77 @@ def _vision_max_images() -> int:
 
 _chat_memory_lock = threading.Lock()
 _chat_memory_sessions: dict[str, dict[str, Any]] = {}
+_chat_memory_loaded = False
+
+
+def memory_persist_enabled() -> bool:
+    return (os.getenv("BOT_CHAT_MEMORY_PERSIST") or "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _memory_persist_path() -> Path:
+    explicit = (os.getenv("BOT_CHAT_MEMORY_FILE") or "").strip()
+    if explicit:
+        return Path(explicit)
+    return _CHBOX_DIR / ".chat_memory_sessions.json"
+
+
+def _memory_load_locked() -> None:
+    """Load persisted sessions once (caller holds ``_chat_memory_lock``). Keeps only the **current week**."""
+    global _chat_memory_loaded
+    if _chat_memory_loaded:
+        return
+    _chat_memory_loaded = True
+    if not memory_persist_enabled():
+        return
+    path = _memory_persist_path()
+    try:
+        if not path.is_file():
+            return
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            return
+        week = _memory_week_key()
+        loaded = 0
+        for sk, bucket in raw.items():
+            if not isinstance(bucket, dict) or bucket.get("week") != week:
+                continue
+            msgs = bucket.get("messages")
+            if not isinstance(msgs, list):
+                continue
+            _chat_memory_sessions.setdefault(str(sk), bucket)
+            loaded += 1
+        if loaded:
+            print(
+                f"[chatagent] memory restored {loaded} session(s) from {path.name}",
+                flush=True,
+            )
+    except Exception as ex:
+        print(f"[chatagent] memory load failed: {ex!r}", flush=True)
+
+
+def _memory_save_locked() -> None:
+    """Atomically persist this week's sessions (caller holds ``_chat_memory_lock``)."""
+    if not memory_persist_enabled():
+        return
+    path = _memory_persist_path()
+    week = _memory_week_key()
+    keep = {
+        sk: b
+        for sk, b in _chat_memory_sessions.items()
+        if isinstance(b, dict) and b.get("week") == week
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(keep, ensure_ascii=False, indent=0), encoding="utf-8")
+        tmp.replace(path)
+    except Exception as ex:
+        print(f"[chatagent] memory save failed: {ex!r}", flush=True)
 
 
 def memory_enabled() -> bool:
@@ -240,30 +311,66 @@ def _memory_today_key() -> str:
     return datetime.now(_memory_timezone()).date().isoformat()
 
 
+def _memory_week_key() -> str:
+    """ISO date of **Monday** of the current week — memory keeps the whole week and resets every Monday."""
+    today = datetime.now(_memory_timezone()).date()
+    return (today - timedelta(days=today.weekday())).isoformat()
+
+
 def _memory_max_turns() -> int:
+    """Turns included in the **LLM prompt** (keep small — prod model context is tiny)."""
     try:
         return max(1, int(os.getenv("BOT_CHAT_MEMORY_MAX_TURNS", "12")))
     except ValueError:
         return 12
 
 
+def _memory_max_stored_turns() -> int:
+    """Turns kept **on disk** for the week (recall/search works over all of these)."""
+    try:
+        return max(
+            _memory_max_turns(),
+            int(os.getenv("BOT_CHAT_MEMORY_MAX_STORED_TURNS", "80")),
+        )
+    except ValueError:
+        return 80
+
+
 def memory_session_key(chat_id: str, sender_id: str) -> str:
-    """Per-user memory in a chat (resets daily)."""
+    """Per-user memory in a chat (keeps the current week, resets every Monday)."""
     return f"{(chat_id or '').strip()}:{(sender_id or '').strip()}"
 
 
 def _memory_get_history(session_key: str) -> list[dict[str, str]]:
+    """This week's turns as ``{"role", "content"}`` dicts (LLM-safe — extra keys stripped).
+
+    Callers that build an LLM prompt should slice to the last ``_memory_max_turns() * 2``
+    entries; recall/search helpers use the full week.
+    """
+    return [
+        {"role": str(m.get("role")), "content": str(m.get("content"))}
+        for m in _memory_raw_messages(session_key)
+    ]
+
+
+def _memory_raw_messages(session_key: str) -> list[dict[str, Any]]:
+    """This week's stored messages incl. ``ts`` (for day filtering). Copies — safe outside the lock."""
     if not session_key or not memory_enabled():
         return []
-    today = _memory_today_key()
+    week = _memory_week_key()
     with _chat_memory_lock:
+        _memory_load_locked()
         bucket = _chat_memory_sessions.get(session_key)
-        if not bucket or bucket.get("day") != today:
+        if not bucket or bucket.get("week") != week:
             return []
         msgs = bucket.get("messages")
         if not isinstance(msgs, list):
             return []
-        return [m for m in msgs if isinstance(m, dict) and m.get("role") and m.get("content")]
+        return [
+            dict(m)
+            for m in msgs
+            if isinstance(m, dict) and m.get("role") and m.get("content")
+        ]
 
 
 def _memory_append_turn(
@@ -275,30 +382,35 @@ def _memory_append_turn(
     assistant_part = (assistant_text or "").strip()
     if not user_part or not assistant_part:
         return
-    today = _memory_today_key()
-    cap = _memory_max_turns() * 2
+    week = _memory_week_key()
+    cap = _memory_max_stored_turns() * 2
+    now_ts = datetime.now(_memory_timezone()).timestamp()
     with _chat_memory_lock:
+        _memory_load_locked()
         bucket = _chat_memory_sessions.get(session_key)
-        if not bucket or bucket.get("day") != today:
-            bucket = {"day": today, "messages": []}
+        if not bucket or bucket.get("week") != week:
+            bucket = {"week": week, "messages": []}
             _chat_memory_sessions[session_key] = bucket
-        msgs: list[dict[str, str]] = list(bucket.get("messages") or [])
-        msgs.append({"role": "user", "content": user_part[:4000]})
-        msgs.append({"role": "assistant", "content": assistant_part[:4000]})
+        msgs: list[dict[str, Any]] = list(bucket.get("messages") or [])
+        msgs.append({"role": "user", "content": user_part[:4000], "ts": now_ts})
+        msgs.append({"role": "assistant", "content": assistant_part[:4000], "ts": now_ts})
         if len(msgs) > cap:
             msgs = msgs[-cap:]
         bucket["messages"] = msgs
+        _memory_save_locked()
     print(
-        f"[chatagent] memory saved session={session_key!r} turns={len(msgs) // 2} day={today}",
+        f"[chatagent] memory saved session={session_key!r} turns={len(msgs) // 2} week={week}",
         flush=True,
     )
 
 
 def clear_memory_session(session_key: str) -> bool:
-    """Clear one user's today memory (optional admin hook)."""
+    """Clear one user's memory for this week (optional admin hook)."""
     with _chat_memory_lock:
+        _memory_load_locked()
         if session_key in _chat_memory_sessions:
             _chat_memory_sessions.pop(session_key, None)
+            _memory_save_locked()
             return True
     return False
 
@@ -306,10 +418,11 @@ def clear_memory_session(session_key: str) -> bool:
 def _memory_bucket(session_key: str) -> Optional[dict[str, Any]]:
     if not session_key or not memory_enabled():
         return None
-    today = _memory_today_key()
+    week = _memory_week_key()
     with _chat_memory_lock:
+        _memory_load_locked()
         bucket = _chat_memory_sessions.get(session_key)
-        if not bucket or bucket.get("day") != today:
+        if not bucket or bucket.get("week") != week:
             return None
         return bucket
 
@@ -319,14 +432,16 @@ def _memory_set_recall_pending(
 ) -> None:
     if not session_key or not choices:
         return
-    today = _memory_today_key()
+    week = _memory_week_key()
     with _chat_memory_lock:
+        _memory_load_locked()
         bucket = _chat_memory_sessions.get(session_key)
-        if not bucket or bucket.get("day") != today:
+        if not bucket or bucket.get("week") != week:
             return
         bucket["recall_pending"] = [
             {"user": c.get("user", ""), "bot": c.get("bot", "")} for c in choices
         ]
+        _memory_save_locked()
 
 
 def _memory_get_recall_pending(session_key: str) -> list[dict[str, str]]:
@@ -341,9 +456,11 @@ def _memory_get_recall_pending(session_key: str) -> list[dict[str, str]]:
 
 def _memory_clear_recall_pending(session_key: str) -> None:
     with _chat_memory_lock:
+        _memory_load_locked()
         bucket = _chat_memory_sessions.get(session_key)
         if isinstance(bucket, dict):
             bucket.pop("recall_pending", None)
+            _memory_save_locked()
 
 
 def _sanitize_llm_reply(text: str) -> str:
@@ -411,6 +528,14 @@ _TODAY_MEMORY_RECALL_RE = re.compile(
     r"今天.{0,12}(?:问|说|聊).{0,12}(?:什么|哪些|啥)|"
     r"(?:什么|哪些).{0,8}今天.{0,8}(?:问|说)|"
     r"what (?:did|have) i (?:ask|say).{0,12}today"
+    r")",
+    re.I,
+)
+_WEEK_MEMORY_RECALL_RE = re.compile(
+    r"(?:"
+    r"(?:这|本|这一)\s*(?:周|礼拜|星期).{0,12}(?:问|说|聊).{0,12}(?:什么|哪些|啥)|"
+    r"(?:什么|哪些).{0,8}(?:这|本)\s*(?:周|礼拜|星期).{0,8}(?:问|说)|"
+    r"what (?:did|have) i (?:ask(?:ed)?|say|said).{0,12}this week"
     r")",
     re.I,
 )
@@ -517,6 +642,18 @@ def looks_like_today_memory_recall(text: str) -> bool:
     )
 
 
+def looks_like_week_memory_recall(text: str) -> bool:
+    raw = _strip_lark_mention_noise(text)
+    if not raw:
+        return False
+    if _WEEK_MEMORY_RECALL_RE.search(raw):
+        return True
+    return bool(
+        looks_like_memory_recall(raw)
+        and re.search(r"(?:这周|本周|这一周|这个?礼拜|this week)", raw, re.I)
+    )
+
+
 def _latest_math_turn_from_memory(
     session_key: Optional[str],
 ) -> tuple[str, str]:
@@ -540,14 +677,23 @@ def _latest_math_turn_from_memory(
 def _today_user_messages_from_memory(
     session_key: Optional[str], *, limit: int = 10
 ) -> list[str]:
+    """User messages sent **today** (memory now spans the week, so filter by timestamp)."""
     if not session_key:
         return []
+    today = _memory_today_key()
+    tz = _memory_timezone()
     out: list[str] = []
-    for msg in _memory_get_history(session_key):
+    for msg in _memory_raw_messages(session_key):
         if msg.get("role") != "user":
             continue
         content = (msg.get("content") or "").strip()
-        if content:
+        if not content:
+            continue
+        try:
+            msg_day = datetime.fromtimestamp(float(msg.get("ts") or 0), tz).date().isoformat()
+        except Exception:
+            msg_day = ""
+        if msg_day == today:
             out.append(content)
     return out[-limit:]
 
@@ -697,8 +843,11 @@ def _reply_last_turn(
     last_turns = _collect_user_turns_from_memory(session_key)
     if not last_turns:
         if cjk:
-            return "我今天还没记下你之前说过什么。（重启 bot 会清空记忆。）"
-        return "I don't have an earlier message from you in today's chat memory."
+            return "我这周还没记下你之前说过什么。（记忆每周一重置。）"
+        return (
+            "I don't have an earlier message from you in this week's chat memory "
+            "(memory resets every Monday)."
+        )
     last = last_turns[-1]
     _memory_clear_recall_pending(session_key)
     if cjk:
@@ -772,28 +921,39 @@ def try_memory_recall_reply(
         math_user, math_bot = _latest_math_turn_from_memory(session_key)
         if not math_user:
             if cjk:
-                return (
-                    "我今天还没记下你问过的数学题。"
-                    "（重启 bot 会清空今日记忆；请把算式再发一次。）"
-                )
+                return "我这周还没记下你问过的数学题，请把算式再发一次。"
             return (
-                "I don't have a math question from you in today's chat memory "
-                "(memory clears when the bot restarts)."
+                "I don't have a math question from you in this week's chat memory — "
+                "please send the full expression again."
             )
         _memory_clear_recall_pending(session_key)
         return _format_turn_recall(
             {"user": math_user, "bot": math_bot}, cjk=cjk
         )
 
-    if looks_like_today_memory_recall(raw):
-        users = _today_user_messages_from_memory(session_key)
+    week_recall = looks_like_week_memory_recall(raw)
+    if week_recall or looks_like_today_memory_recall(raw):
+        if week_recall:
+            users = [
+                t["user"]
+                for t in _collect_user_turns_from_memory(session_key, limit=10)
+            ]
+        else:
+            users = _today_user_messages_from_memory(session_key)
         if not users:
+            if week_recall:
+                if cjk:
+                    return "我这周还没记下你问过什么。（记忆每周一重置。）"
+                return (
+                    "I don't have any messages from you in this week's chat memory "
+                    "(memory resets every Monday)."
+                )
             if cjk:
-                return "我今天还没记下你问过什么。（重启 bot 会清空记忆。）"
+                return "我今天还没记下你问过什么。"
             return "I don't have any messages from you in today's chat memory."
         _memory_clear_recall_pending(session_key)
         if cjk:
-            lines = ["今天你问过："]
+            lines = ["这周你问过：" if week_recall else "今天你问过："]
             for i, item in enumerate(users, 1):
                 lines.append(f"{i}. {_preview_turn(item)}")
             lines.append("若要展开某一条，请回复编号或说关键词。")
@@ -802,7 +962,7 @@ def try_memory_recall_reply(
                 [{"user": u, "bot": ""} for u in users],
             )
             return "\n".join(lines)
-        lines = ["Today you asked:"]
+        lines = ["This week you asked:" if week_recall else "Today you asked:"]
         for i, item in enumerate(users, 1):
             lines.append(f"{i}. {_preview_turn(item)}")
         lines.append("Reply with a number or keyword to expand one.")
@@ -831,7 +991,7 @@ def try_memory_recall_reply(
             return _format_turn_recall(matches[0], cjk=cjk)
         if len(matches) > 1:
             intro = (
-                f"关于「{topic}」，我今天记下 {len(matches)} 条，你指的是哪一个？"
+                f"关于「{topic}」，我这周记下 {len(matches)} 条，你指的是哪一个？"
                 if cjk
                 else f"I found {len(matches)} messages about “{topic}”. Which one?"
             )
@@ -841,12 +1001,12 @@ def try_memory_recall_reply(
         all_turns = _collect_user_turns_from_memory(session_key)
         if not all_turns:
             if cjk:
-                return "我今天还没记下你问过什么。"
-            return "I don't have earlier messages in today's memory."
+                return "我这周还没记下你问过什么。"
+            return "I don't have earlier messages in this week's memory."
         intro = (
-            f"我没找到关于「{topic}」的明确记录。你今天问过这些："
+            f"我没找到关于「{topic}」的明确记录。你这周问过这些："
             if cjk
-            else f"I couldn't find “{topic}”. Today you asked:"
+            else f"I couldn't find “{topic}”. This week you asked:"
         )
         return _format_recall_clarification(
             session_key, list(reversed(all_turns)), cjk=cjk, intro=intro
@@ -856,15 +1016,15 @@ def try_memory_recall_reply(
         recent = list(reversed(_collect_user_turns_from_memory(session_key)))
         if not recent:
             if cjk:
-                return "我今天还没记下你之前说过什么。"
-            return "I don't have earlier messages in today's memory."
+                return "我这周还没记下你之前说过什么。"
+            return "I don't have earlier messages in this week's memory."
         if len(recent) == 1:
             _memory_clear_recall_pending(session_key)
             return _format_turn_recall(recent[0], cjk=cjk)
         intro = (
-            "我不太确定你指的是哪一条。你今天问过这些："
+            "我不太确定你指的是哪一条。你这周问过这些："
             if cjk
-            else "I'm not sure which message you mean. Today you asked:"
+            else "I'm not sure which message you mean. This week you asked:"
         )
         return _format_recall_clarification(session_key, recent, cjk=cjk, intro=intro)
 
@@ -877,7 +1037,7 @@ def _math_source_from_memory(session_key: Optional[str]) -> str:
 
 
 def resolve_math_from_context(text: str, *, session_key: Optional[str] = None) -> Optional[str]:
-    """Deterministic math for the current message or a prior math turn in today's memory."""
+    """Deterministic math for the current message or a prior math turn in this week's memory."""
     raw = (text or "").strip()
     direct = try_math_reply(raw)
     if direct:
@@ -898,6 +1058,101 @@ def remember_chat_turn(
 
 def has_pending_recall(session_key: Optional[str]) -> bool:
     return bool(_memory_get_recall_pending(session_key or ""))
+
+
+# Card callback key for the recall-clarification card buttons (handled in main.py).
+MEMORY_RECALL_PICK_KEY = "mem_pick"
+
+
+def build_recall_choice_card(
+    session_key: Optional[str], reply_text: str
+) -> Optional[dict]:
+    """
+    Lark 卡片 JSON 2.0 for a pending recall clarification: the numbered list as markdown
+    plus one tap-button per choice (``{"k": "mem_pick", "i": "<n>"}``). Returns ``None``
+    when there is nothing pending, so callers fall back to the plain-text reply.
+    """
+    pending = _memory_get_recall_pending(session_key or "")
+    if not pending or not (reply_text or "").strip():
+        return None
+    cjk = any(_CJK_RE.search(p.get("user") or "") for p in pending) or bool(
+        _CJK_RE.search(reply_text)
+    )
+    buttons: list[dict] = []
+    for i, _turn in enumerate(pending[:8], 1):
+        buttons.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": str(i)},
+                "type": "primary" if i == 1 else "default",
+                "behaviors": [
+                    {
+                        "type": "callback",
+                        "value": {"k": MEMORY_RECALL_PICK_KEY, "i": str(i)},
+                    }
+                ],
+                "element_id": f"mem_pick_{i}"[:20],
+            }
+        )
+    columns = [
+        {
+            "tag": "column",
+            "width": "auto",
+            "weight": 1,
+            "vertical_align": "top",
+            "elements": [b],
+        }
+        for b in buttons
+    ]
+    note = "点一下编号即可展开那条记录。" if cjk else "Tap a number to expand that message."
+    title = "你指的是哪一条？" if cjk else "Which message did you mean?"
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": title},
+        },
+        "body": {
+            "elements": [
+                {"tag": "div", "text": {"tag": "lark_md", "content": reply_text}},
+                {
+                    "tag": "column_set",
+                    "flex_mode": "flow",
+                    "background_style": "default",
+                    "horizontal_spacing": "8px",
+                    "columns": columns,
+                },
+                {"tag": "div", "text": {"tag": "lark_md", "content": note}},
+            ]
+        },
+    }
+
+
+def resolve_recall_pick(
+    chat_id: str, sender_ids: list[str], index: int
+) -> Optional[str]:
+    """
+    Resolve a recall-clarification card tap: try each candidate sender id (open_id /
+    union_id) to find the pending list, expand choice ``index`` (1-based) and clear it.
+    """
+    for sid in sender_ids:
+        sid = (sid or "").strip()
+        if not sid:
+            continue
+        session_key = memory_session_key(chat_id, sid)
+        pending = _memory_get_recall_pending(session_key)
+        if not pending:
+            continue
+        if not (1 <= index <= len(pending)):
+            return None
+        _memory_clear_recall_pending(session_key)
+        turn = pending[index - 1]
+        cjk = bool(
+            _CJK_RE.search(turn.get("user") or "") or _CJK_RE.search(turn.get("bot") or "")
+        )
+        return _format_turn_recall(turn, cjk=cjk)
+    return None
 
 
 def _save_memory_turn(
@@ -1288,11 +1543,14 @@ def _llm_chat(
         print(f"[chatagent] codeassist skipped: {_code_err!r}", flush=True)
     history: list[dict[str, str]] = []
     if session_key and memory_enabled() and not images:
-        history = _memory_get_history(session_key)
+        # Full week is stored on disk; only the most recent turns go to the LLM
+        # (prod model context is tiny).
+        history = _memory_get_history(session_key)[-(_memory_max_turns() * 2):]
         if history:
             system_prompt += (
-                "\nEarlier messages in this chat today are included below for context. "
-                "Do not invent facts from memory — duty data still needs slash commands."
+                "\nEarlier messages in this chat (kept for the current week) are included "
+                "below for context. Do not invent facts from memory — duty data still "
+                "needs slash commands."
             )
     if images:
         parts: list[dict] = [

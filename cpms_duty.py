@@ -29,7 +29,8 @@ APP_SECRET = os.getenv("APP_SECRET")
 SPREADSHEET_TOKEN = os.getenv("CPMS_SPREADSHEET_TOKEN")
 
 _WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
-_month_duty_cache: dict[tuple[int, int], tuple[float, dict[str, tuple[str, str, str, str]]]] = {}
+# value 可为解析好的 weekday_map，或缓存的 CpmsSheetNotPublished（负缓存，避免重复请求缺失月份）
+_month_duty_cache: dict[tuple[int, int], tuple[float, object]] = {}
 try:
     _MONTH_CACHE_SEC = max(0, int((os.getenv("CPMS_DUTY_CACHE_SEC") or "300").strip() or "300"))
 except ValueError:
@@ -190,13 +191,19 @@ def get_cpms_weekday_duty_map(year: int, month: int) -> dict[str, tuple[str, str
     if _MONTH_CACHE_SEC > 0:
         cached = _month_duty_cache.get(key)
         if cached and now - cached[0] < _MONTH_CACHE_SEC:
-            return cached[1]
+            payload = cached[1]
+            if isinstance(payload, CpmsSheetNotPublished):
+                raise payload
+            return payload
 
     token = get_tenant_access_token()
     sheets = get_sheet_list(token)
     sheet_id = get_sheet_id_for_month(token, year, month, sheets=sheets)
     if not sheet_id:
-        raise CpmsSheetNotPublished(year, month, _latest_available_month(sheets))
+        exc = CpmsSheetNotPublished(year, month, _latest_available_month(sheets))
+        if _MONTH_CACHE_SEC > 0:
+            _month_duty_cache[key] = (now, exc)
+        raise exc
 
     values = get_range_values(token, sheet_id, "A1:C100")
     if values is None:
@@ -206,6 +213,36 @@ def get_cpms_weekday_duty_map(year: int, month: int) -> dict[str, tuple[str, str
     if _MONTH_CACHE_SEC > 0:
         _month_duty_cache[key] = (now, weekday_map)
     return weekday_map
+
+
+def _cpms_month_human(year: int, month: int) -> str:
+    return datetime(year, month, 1).strftime("%B %Y")
+
+
+def cpms_fallback_notice(target_year: int, target_month: int, src_year: int, src_month: int) -> str:
+    """回退提示：说明目标月份未发布，正显示的是哪个月份（是否恰为上个月）的值班。"""
+    prev_year, prev_month = (target_year, target_month - 1) if target_month > 1 else (target_year - 1, 12)
+    rel = "previous month" if (src_year, src_month) == (prev_year, prev_month) else "most recent available"
+    return (
+        f"⚠️ {_cpms_month_human(target_year, target_month)} CPMS roster hasn't been published yet — "
+        f"showing **{_cpms_month_human(src_year, src_month)}** duty ({rel})."
+    )
+
+
+def _resolve_duty_map(year: int, month: int):
+    """返回 ``(weekday_map, fallback_source)``。
+
+    找不到目标月份工作表时回退到最近可用月份；``fallback_source`` 为 ``None``（使用当月）
+    或 ``(src_year, src_month)``（已回退）。仅当整份表格没有任何月份工作表时才抛出
+    ``CpmsSheetNotPublished``。
+    """
+    try:
+        return get_cpms_weekday_duty_map(year, month), None
+    except CpmsSheetNotPublished as e:
+        if not e.latest:
+            raise
+        src_year, src_month = e.latest
+        return get_cpms_weekday_duty_map(src_year, src_month), (src_year, src_month)
 
 
 def invalidate_cpms_duty_cache() -> None:
@@ -280,12 +317,13 @@ def cpms_check(month=None, year=None):
 def get_cpms_duty_for_date(target_date):
     """
     返回指定日期 target_date 的 CPMS 值班信息。
-    返回格式: (date_obj, main_name, main_phone, backup_name, backup_phone)
+    返回格式: (date_obj, main_name, main_phone, backup_name, backup_phone, fallback)
+    fallback 为 None（使用当月工作表）或 (src_year, src_month)（当月未发布，回退到该月）。
     """
     weekday = target_date.strftime("%A")
-    weekday_map = get_cpms_weekday_duty_map(target_date.year, target_date.month)
+    weekday_map, fallback = _resolve_duty_map(target_date.year, target_date.month)
     main_name, main_phone, backup_name, backup_phone = weekday_map.get(weekday, ("", "", "", ""))
-    return target_date, main_name, main_phone, backup_name, backup_phone
+    return target_date, main_name, main_phone, backup_name, backup_phone, fallback
 
 def get_cpms_three_days(start_date=None):
     """获取连续三天的值班信息"""
@@ -303,7 +341,7 @@ def get_cpms_three_days(start_date=None):
             results.append((target, e))
         except Exception as e:
             # 如果某天出错（如临时 API 错误），添加错误信息
-            results.append((target, f"Error: {e}", "", "", ""))
+            results.append((target, f"Error: {e}"))
     return results
 
 
@@ -322,21 +360,35 @@ def get_cpms_three_days_text(start_date=None):
 
 
 def format_output(results):
-    """格式化输出三天的值班信息"""
+    """格式化输出三天的值班信息。
+
+    若某天回退到了上个月的工作表，会在最前面加一条统一的回退提示（不逐日重复）。
+    """
     lines = []
+    fallbacks = set()  # {(target_year, target_month, src_year, src_month)}
     for item in results:
         date_obj = item[0]
         date_str = date_obj.strftime("%B %d, %Y %A")
-        lines.append(f"📅 CPMS Schedule - {date_str}")
 
-        # 该天所在月份尚未发布：渲染友好提示后跳过主/备解析
+        # 该月完全没有任何工作表：渲染友好提示后跳过主/备解析
         if len(item) == 2 and isinstance(item[1], CpmsSheetNotPublished):
+            lines.append(f"📅 CPMS Schedule - {date_str}")
             lines.append(item[1].friendly_message)
             lines.append("")
             continue
 
-        _, main_name, main_phone, backup_name, backup_phone = item
+        # 临时错误
+        if len(item) == 2 and isinstance(item[1], str):
+            lines.append(f"📅 CPMS Schedule - {date_str}")
+            lines.append(f"• {item[1]}")
+            lines.append("")
+            continue
 
+        _, main_name, main_phone, backup_name, backup_phone, fallback = item
+        if fallback:
+            fallbacks.add((date_obj.year, date_obj.month, fallback[0], fallback[1]))
+
+        lines.append(f"📅 CPMS Schedule - {date_str}")
         if main_name:
             lines.append(f"• {main_name}  📞 {main_phone}")
         else:
@@ -350,6 +402,10 @@ def format_output(results):
             lines.append("• No backup duty assigned")
 
         lines.append("")  # 空行分隔
+
+    if fallbacks:
+        notices = [cpms_fallback_notice(ty, tm, sy, sm) for (ty, tm, sy, sm) in sorted(fallbacks)]
+        lines = notices + [""] + lines
     return "\n".join(lines)
 
 # ================= Main =================

@@ -172,7 +172,7 @@ def _llm_thinking(
         if session_key and ca.memory_enabled():
             history = ca._memory_get_history(session_key)
             if history:
-                messages.extend(history)
+                messages.extend(history[-(ca._memory_max_turns() * 2):])
     except Exception:
         pass
     messages.append({"role": "user", "content": question})

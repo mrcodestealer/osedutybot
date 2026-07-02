@@ -633,7 +633,7 @@ def _cpms_text_for_date(d: date) -> Optional[str]:
     import cpms_duty
 
     try:
-        _, main_name, main_phone, backup_name, backup_phone = cpms_duty.get_cpms_duty_for_date(d)
+        _, main_name, main_phone, backup_name, backup_phone, fallback = cpms_duty.get_cpms_duty_for_date(d)
     except cpms_duty.CpmsSheetNotPublished as e:
         return e.friendly_message
     sections = []
@@ -641,7 +641,11 @@ def _cpms_text_for_date(d: date) -> Optional[str]:
         sections.append(f"🟢 **Main**\n• {main_name}  📞 {main_phone}".rstrip())
     if backup_name:
         sections.append(f"🔵 **Backup**\n• {backup_name}  📞 {backup_phone}".rstrip())
-    return "\n\n".join(sections) or None
+    body = "\n\n".join(sections) or None
+    if body and fallback:
+        notice = cpms_duty.cpms_fallback_notice(d.year, d.month, fallback[0], fallback[1])
+        body = f"{notice}\n\n{body}"
+    return body
 
 
 def _pms_text_for_date(d: date) -> Optional[str]:

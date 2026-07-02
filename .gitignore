@@ -32,6 +32,7 @@ chatagent_llm_pt/
 .tmp/
 .code_rag_cache/
 .all_leave_calendar_sync_state.json
+.chat_memory_sessions.json
 .leave_calendar_sync_state.json
 .offset_duty_sync_state.json
 .prod_batch_sm_sessions.json

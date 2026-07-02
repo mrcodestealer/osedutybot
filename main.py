@@ -4169,6 +4169,34 @@ def lark_webhook():
                             daemon=True,
                         ).start()
                     return
+                if isinstance(parsed_ca, dict) and str(parsed_ca.get("k") or "").strip().lower() == "mem_pick":
+                    try:
+                        idx_mem = int(parsed_ca.get("i"))
+                    except (TypeError, ValueError):
+                        return
+                    try:
+                        import chatagent as _chatagent_pick
+
+                        _sender_cands = [
+                            (op_ca.get("open_id") or "").strip(),
+                            (sender_id_ca or "").strip(),
+                            (op_ca.get("union_id") or "").strip(),
+                        ]
+                        _mem_reply = _chatagent_pick.resolve_recall_pick(
+                            chat_id_ca, _sender_cands, idx_mem
+                        )
+                    except Exception as _mem_err:
+                        print(f"⚠️ mem_pick failed: {_mem_err!r}", flush=True)
+                        _mem_reply = None
+                    if _mem_reply:
+                        send_message(chat_id_ca, _mem_reply)
+                    else:
+                        send_message(
+                            chat_id_ca,
+                            "ℹ️ That memory list has expired — ask me again "
+                            "(e.g. “what did I ask today?”).",
+                        )
+                    return
                 if isinstance(parsed_ca, dict) and smmachine.handle_prod_batch_card_callback(
                     parsed_ca,
                     chat_id=chat_id_ca,
@@ -5037,12 +5065,13 @@ def lark_webhook():
                     print(f"💬 Math follow-up reply to chat {chat_id}", flush=True)
                     return _lark_im_done()
             elif (
-                bot_mentioned
+                (bot_mentioned or chat_type == "p2p")
                 and (
                     _math_agent.has_pending_recall(_chat_memory_key)
                     or _math_agent.looks_like_memory_recall(_math_src)
                     or _math_agent.looks_like_math_memory_recall(_math_src)
                     or _math_agent.looks_like_today_memory_recall(_math_src)
+                    or _math_agent.looks_like_week_memory_recall(_math_src)
                     or _math_agent.looks_like_vague_memory_recall(_math_src)
                 )
             ):
@@ -5053,7 +5082,29 @@ def lark_webhook():
                     _math_agent.remember_chat_turn(
                         _chat_memory_key, _math_src, _recall_reply
                     )
-                    send_message(chat_id, _recall_reply)
+                    # Ambiguous recall → interactive card with numbered buttons
+                    # (fallback: the plain numbered-list text).
+                    _recall_card = _math_agent.build_recall_choice_card(
+                        _chat_memory_key, _recall_reply
+                    )
+                    _card_sent = False
+                    if isinstance(_recall_card, dict):
+                        try:
+                            _resp_rc = send_message(
+                                chat_id,
+                                json.dumps(_recall_card, ensure_ascii=False),
+                                msg_type="interactive",
+                            )
+                            _card_sent = not (
+                                isinstance(_resp_rc, dict)
+                                and _resp_rc.get("code") not in (0, None)
+                            )
+                        except Exception as _rc_err:
+                            print(
+                                f"⚠️ recall choice card failed: {_rc_err!r}", flush=True
+                            )
+                    if not _card_sent:
+                        send_message(chat_id, _recall_reply)
                     print(f"💬 Memory recall reply to chat {chat_id}", flush=True)
                     return _lark_im_done()
     except Exception as _math_err:
