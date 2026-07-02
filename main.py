@@ -6423,12 +6423,35 @@ def lark_webhook():
         except Exception:
             pass
         if _looks_like_jenkins_nl_update(_full_body):
+            _jenkins_nl_reply = None
+            try:
+                import chatagent as _notice_ca
+
+                _jenkins_nl_reply = _notice_ca.llm_notice_reply(
+                    "The user pasted a Jenkins update request, but the update flow did NOT "
+                    "start — nothing was filled or built. The most common cause: a previous "
+                    "update in this chat is still waiting on its Confirm/Cancel card. What "
+                    "the user should do: reply `cancel` first, then resend the same full "
+                    "request (environment + Branch/Version/Services); or start it explicitly "
+                    "with `/jenkinsupdate` plus the same block. The bot only fills the "
+                    "Jenkins form and shows a screenshot with Confirm/Cancel buttons — it "
+                    "never builds without the user's click.",
+                    user_text=_chat_source,
+                    must_contain=("cancel",),
+                )
+            except Exception as _notice_err:
+                print(f"[jenkins-fallback] notice LLM skipped: {_notice_err!r}", flush=True)
             send_message(
                 chat_id,
-                "⚠️ Jenkins **update** was not started from that message.\n"
-                "Try `@Duty Bot /jenkinsupdate rc uat master` then paste Branch/Version/Services, "
-                "or say **cancel** and send the full block again.\n"
-                "The bot fills the form + screenshot — you tap **Confirm** or **Cancel** (no auto-build).",
+                _jenkins_nl_reply
+                or (
+                    "⚠️ Jenkins **update** was not started from that message.\n"
+                    "A previous update may still be waiting on **Confirm / Cancel** — say "
+                    "**cancel**, then send the full block again, or use "
+                    "`/jenkinsupdate <environment>` + Branch/Version/Services.\n"
+                    "The bot fills the form + screenshot — you tap **Confirm** or **Cancel** "
+                    "(no auto-build)."
+                ),
             )
             print(f"💬 Jenkins NL fallback hint for chat {chat_id}", flush=True)
         elif (mc := _parse_missing_credit_alert(_full_body)) and bot_mentioned:

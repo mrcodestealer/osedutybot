@@ -13248,10 +13248,16 @@ def agent_route_free_form_body(raw_text: str) -> str | None:
 def _jenkins_message_has_config_block(text: str) -> bool:
     """True when the message looks like a full parameter paste (not only a job keyword)."""
     raw = (text or "").replace("\r\n", "\n")
-    if not JENKINS_UPDATE_CMD_RE.search(raw):
-        return False
     has_branch, has_version, has_svc = _config_block_has_branch_version_services(raw)
-    return has_branch and has_version and has_svc
+    if not (has_branch and has_version and has_svc):
+        return False
+    if JENKINS_UPDATE_CMD_RE.search(raw):
+        return True
+    # Natural-language pastes ("please Update RC UAT … " + Branch/Version/Services)
+    # count as a full config block too — otherwise a pending YES/NO from a previous
+    # run silently swallows the paste (state ``jenkins_wait_build`` returns False and
+    # the user only gets the generic "update was not started" hint).
+    return looks_like_natural_jenkins_update(raw) or _looks_like_freeform_update_request(raw)
 
 
 def _fpms_lark_preserve_updatemore_queue(prev: dict | None, sess: dict) -> dict:

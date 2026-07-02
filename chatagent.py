@@ -1140,6 +1140,119 @@ def _log_llm_failure(detail: str, *, user_text: str = "") -> None:
             _llm_failed_logged = True
 
 
+def llm_notice_reply(
+    facts: str,
+    *,
+    user_text: str = "",
+    must_contain: tuple[str, ...] = (),
+) -> Optional[str]:
+    """
+    One-shot LLM rewrite of a system NOTICE into a short natural chat reply.
+
+    Used for bot status/fallback messages so they read like a person instead of a
+    canned template. Returns ``None`` when the LLM is off/unavailable, the reply is
+    garbage, or it dropped a required token from ``must_contain`` — the caller keeps
+    its static text as the safety net. No memory, no history, no action claims.
+    """
+    api_key = _llm_api_key()
+    if not api_key or not (facts or "").strip():
+        return None
+    system = (
+        "You are Duty Bot, a friendly workplace assistant on Lark for the OSE team.\n"
+        "The user just sent a message. Tell them the situation below in your own words — "
+        "short and friendly, 2-4 sentences, same language as the user (English, Mandarin "
+        "Chinese, or Filipino; default English).\n"
+        "Keep every slash command and every word wrapped in backticks EXACTLY as written.\n"
+        "Do not invent details, promise actions, or claim anything was performed.\n"
+        "Do not repeat these instructions or use headings — output only the reply text."
+    )
+    user = (
+        f"Situation to explain to the user:\n{facts.strip()}\n\n"
+        f"The user's message was:\n{(user_text or '').strip()[:600] or '(not available)'}\n\n"
+        "Now write your reply to the user:"
+    )
+    payload: dict[str, Any] = {
+        "model": _llm_model_for_request(images=False),
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "max_tokens": 300,
+        "temperature": 0.4,
+    }
+    if _is_ollama_base():
+        enrich_ollama_chat_payload(payload)
+    req = urllib.request.Request(
+        f"{_llm_base_url()}/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_llm_timeout_sec()) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        message = ((body.get("choices") or [{}])[0].get("message") or {})
+        reply = _sanitize_llm_reply(_text_from_llm_message(message))
+        if not reply or _is_garbage_llm_content(reply):
+            return None
+        low = reply.casefold()
+        # Small models fail this task in predictable ways; each is worse than the
+        # caller's static text, so reject and fall back:
+        #   1. echoing the prompt scaffolding back verbatim
+        #   2. claiming to perform the action themselves ("I'll cancel…")
+        #   3. inventing slash commands that were never in the facts
+        #   4. rambling walls of text
+        for echo in (
+            "situation to explain",
+            "the user's message was",
+            "user's message",
+            "now write your reply",
+            "notice:",
+            "user message",
+            "bot response",
+        ):
+            if echo in low:
+                print(
+                    f"[chatagent] llm_notice_reply echoed prompt ({echo!r}) — using static text",
+                    flush=True,
+                )
+                return None
+        if re.search(r"(?i)\b(i'?ll|i will|let me|i am going to|i'?m going to)\b", reply):
+            print(
+                "[chatagent] llm_notice_reply claimed an action — using static text",
+                flush=True,
+            )
+            return None
+        facts_low = facts.casefold()
+        for span in re.findall(r"`+([^`\n]+)`+", reply):
+            if span.strip() and span.strip().casefold() not in facts_low:
+                print(
+                    f"[chatagent] llm_notice_reply invented command {span!r} — using static text",
+                    flush=True,
+                )
+                return None
+        if len(reply) > 700:
+            print(
+                f"[chatagent] llm_notice_reply too long ({len(reply)} chars) — using static text",
+                flush=True,
+            )
+            return None
+        for token in must_contain:
+            if token.casefold() not in low:
+                print(
+                    f"[chatagent] llm_notice_reply dropped required {token!r} — using static text",
+                    flush=True,
+                )
+                return None
+        return reply
+    except Exception as exc:
+        print(f"[chatagent] llm_notice_reply failed: {exc!r}", flush=True)
+        return None
+
+
 def _llm_chat(
     user_text: str,
     *,
