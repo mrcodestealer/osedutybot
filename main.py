@@ -3918,6 +3918,79 @@ def _process_evo_sd_batch_paste(chat_id: str, email_text: str) -> None:
         send_message(chat_id, f"❌ EVO 批量 `/m` 处理失败: `{ex}`")
 
 
+def _reinject_synthetic_command_message(
+    chat_id: str, sender_open_id: str, command_text: str
+) -> bool:
+    """Card button (``k=cmd_run``) → run a command through the FULL normal message pipeline.
+
+    Mirrors the WS-mode synthetic dispatch (:func:`_lark_ws_dispatch_payload`): an
+    in-process POST of an ``im.message.receive_v1`` event, so tapping a button behaves
+    exactly like typing that command. ``message_id`` stays EMPTY on purpose — that skips
+    duplicate-dedupe, the GotIt reaction and the quote-reply contextvar (a fake id would
+    make ``send_message``'s reply POST fail with no fallback). ``chat_type: p2p`` bypasses
+    the group @mention gate while replies still target the real ``chat_id``.
+    """
+    cmd = (command_text or "").strip()
+    if not cmd or len(cmd) > 400:
+        return False
+    # Admin/destructive commands are never run from a button — defense in depth
+    # (our suggestion cards never offer them, but card values are client data).
+    _denied = {
+        "/restart", "/restarta", "/deploy", "/gitpullrestart",
+        "/restartservices", "/restservices", "/secret1", "/secret2", "/cashout",
+    }
+    if cmd.split()[0].lower() in _denied:
+        print(f"[cmdbtn] blocked admin command from button: {cmd!r}", flush=True)
+        return False
+    now_ms = str(int(time.time() * 1000))
+    payload = {
+        "schema": "2.0",
+        "header": {
+            "event_id": f"cmdbtn-{uuid.uuid4().hex}",
+            "event_type": "im.message.receive_v1",
+            "create_time": now_ms,
+            "token": VERIFICATION_TOKEN,
+            "app_id": APP_ID or "",
+            "tenant_key": "",
+        },
+        "event": {
+            "sender": {
+                "sender_id": {"open_id": (sender_open_id or "").strip() or "ou_cmdbtn"},
+                "sender_type": "user",
+            },
+            "message": {
+                "message_id": "",
+                "chat_id": chat_id,
+                # Keep group semantics (some flows post differently in p2p);
+                # a synthetic @bot mention passes the group gate instead.
+                "chat_type": "group",
+                "message_type": "text",
+                "create_time": now_ms,
+                "content": json.dumps({"text": cmd}, ensure_ascii=False),
+                "mentions": [
+                    {
+                        "key": "@_user_1",
+                        "id": {"open_id": BOT_OPEN_ID},
+                        "name": "Duty Bot",
+                        "tenant_key": "",
+                    }
+                ],
+            },
+        },
+    }
+    try:
+        with app.test_client() as client:
+            rv = client.post("/webhook/event", json=payload)
+        print(
+            f"[cmdbtn] reinjected {cmd!r} for chat {chat_id} → HTTP {rv.status_code}",
+            flush=True,
+        )
+        return int(rv.status_code) < 400
+    except Exception as ex:
+        print(f"[cmdbtn] reinject failed for {cmd!r}: {ex!r}", flush=True)
+        return False
+
+
 @app.route("/webhook/event", methods=["POST", "GET", "OPTIONS"])
 def lark_webhook():
     # Some proxies send OPTIONS; **405** breaks Feishu card interaction (expects HTTP 200 family on callback URL).
@@ -4197,6 +4270,62 @@ def lark_webhook():
                             "ℹ️ That memory list has expired — ask me again "
                             "(e.g. “what did I ask today?”).",
                         )
+                    return
+                if isinstance(parsed_ca, dict) and str(parsed_ca.get("k") or "").strip().lower() == "cmd_run":
+                    cmd_btn = str(parsed_ca.get("c") or "").strip()
+                    op_open_cs = (
+                        (op_ca.get("open_id") or "").strip()
+                        or (sender_id_ca or "").strip()
+                        or (op_ca.get("union_id") or "").strip()
+                    )
+                    if cmd_btn:
+                        threading.Thread(
+                            target=_reinject_synthetic_command_message,
+                            args=(chat_id_ca, op_open_cs, cmd_btn),
+                            daemon=True,
+                        ).start()
+                    return
+                if isinstance(parsed_ca, dict) and str(parsed_ca.get("k") or "").strip().lower() == "cmd_chat":
+                    def _run_cmd_chat_fallback() -> None:
+                        try:
+                            import commandsuggest as _cmdsuggest_cb
+                            import chatagent as _chatagent_cb
+
+                            _cs_open = (op_ca.get("open_id") or "").strip() or (
+                                sender_id_ca or ""
+                            ).strip()
+                            pend_text = _cmdsuggest_cb.pop_pending_chat(
+                                chat_id_ca,
+                                [
+                                    _cs_open,
+                                    (op_ca.get("union_id") or "").strip(),
+                                    (sender_id_ca or "").strip(),
+                                ],
+                            )
+                            if not pend_text:
+                                send_message(
+                                    chat_id_ca,
+                                    "ℹ️ That suggestion card expired — please resend your message.",
+                                )
+                                return
+                            _cs_key = _chatagent_cb.memory_session_key(chat_id_ca, _cs_open)
+                            chat_reply = _chatagent_cb.reply_if_enabled(
+                                pend_text, session_key=_cs_key
+                            )
+                            if chat_reply:
+                                chat_reply = (
+                                    _chatagent_cb.sanitize_outbound_chat_reply(chat_reply)
+                                    or chat_reply
+                                )
+                            send_message(
+                                chat_id_ca,
+                                chat_reply
+                                or "Hi! 👋 I'm Duty Bot — ask me about duty/leave/machines, or `/help`.",
+                            )
+                        except Exception as _cs_err:
+                            print(f"⚠️ cmd_chat fallback failed: {_cs_err!r}", flush=True)
+
+                    threading.Thread(target=_run_cmd_chat_fallback, daemon=True).start()
                     return
                 if isinstance(parsed_ca, dict) and smmachine.handle_prod_batch_card_callback(
                     parsed_ca,
@@ -6570,6 +6699,44 @@ def lark_webhook():
                 "Use the **checkcredit** card above, or `@Duty Bot /checkcreditdate <machine>` "
                 f"with player `{mc.get('account', '?')}` and date `{mc.get('date_iso', '?')}`.",
             )
+        elif _chat_source.lstrip().startswith("/") and bot_mentioned:
+            # Unknown/typo'd slash command → "did you mean" buttons instead of silence.
+            _slash_sug_sent = False
+            try:
+                import commandsuggest as _cmdsuggest_slash
+
+                _slash_sug = _cmdsuggest_slash.suggest_for_slash_typo(_chat_source)
+                if _slash_sug:
+                    _slash_sug_sent = _cmdsuggest_slash.send_suggestion_card(
+                        chat_id,
+                        _chat_source,
+                        _slash_sug,
+                        send_message=send_message,
+                        sender_id=sender_id,
+                    )
+                    if _slash_sug_sent:
+                        print(
+                            f"🧭 Slash-typo suggestions ({len(_slash_sug)}) for chat {chat_id}",
+                            flush=True,
+                        )
+            except Exception as _slash_sug_err:
+                print(f"⚠️ Slash suggest skipped: {_slash_sug_err!r}", flush=True)
+            if not _slash_sug_sent:
+                _slash_usage = None
+                try:
+                    import commandsuggest as _cmdsuggest_usage
+
+                    _slash_usage = _cmdsuggest_usage.usage_hint(_chat_source)
+                except Exception:
+                    _slash_usage = None
+                send_message(
+                    chat_id,
+                    _slash_usage
+                    or (
+                        "❓ Unknown command "
+                        f"`{_chat_source.split()[0][:40]}` — say `/help` for the full list."
+                    ),
+                )
         elif (
             _chat_source
             and not _chat_source.lstrip().startswith("/")
@@ -6582,6 +6749,33 @@ def lark_webhook():
                 )
             )
         ):
+            # Command-first: before the chat LLM, offer "did you mean …" command
+            # buttons when the text scores against the command registry. Strong
+            # matches (score ≥ 2.0, e.g. a machine token) even override a router
+            # "chat" verdict — the tiny prod LLM misroutes work requests to chat.
+            if bot_mentioned:
+                try:
+                    import commandsuggest as _cmdsuggest_nl
+
+                    _nl_sug = _cmdsuggest_nl.suggest_commands(_chat_source)
+                    _nl_top = float(_nl_sug[0]["score"]) if _nl_sug else 0.0
+                    if (_nl_top >= 2.0 or (not _is_chatty and _nl_top >= 1.0)) and (
+                        _cmdsuggest_nl.send_suggestion_card(
+                            chat_id,
+                            _chat_source,
+                            _nl_sug,
+                            send_message=send_message,
+                            sender_id=sender_id,
+                        )
+                    ):
+                        print(
+                            f"🧭 Command suggestions ({len(_nl_sug)}, top={_nl_top:.2f}) "
+                            f"for chat {chat_id}",
+                            flush=True,
+                        )
+                        return _lark_im_done()
+                except Exception as _nl_sug_err:
+                    print(f"⚠️ Command suggest skipped: {_nl_sug_err!r}", flush=True)
             chat_reply = None
             try:
                 import chitchat as _chitchat
@@ -7340,6 +7534,12 @@ def _run_main_entry() -> int:
             _boot_router.startup_status()
         except Exception as _boot_router_err:
             print(f"[chathandleagent] startup check skipped: {_boot_router_err!r}", flush=True)
+        try:
+            import commandsuggest as _boot_cmdsuggest
+
+            _boot_cmdsuggest.startup_status()
+        except Exception as _boot_cmdsuggest_err:
+            print(f"[commandsuggest] startup check skipped: {_boot_cmdsuggest_err!r}", flush=True)
         try:
             import aithinking as _boot_aithinking
 

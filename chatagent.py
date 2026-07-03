@@ -80,7 +80,7 @@ Instead, when the user asks you to DO an action, tell them plainly you can't do 
 - pull code / deploy / update the bot / git pull → `/gitpullrestart` (or `/deploy`)
 - restart services / restart webapp+bot → `/restartservices`
 - who is on duty (fpms/bi/sre/db/fe/cpms/ote) → e.g. `/fpms`
-- leave / WFH / offset → `/oseleave`, `/offset`
+- leave / WFH / offset → `/leave`, `/wfh`, `/offset`
 - check machine / credit → `/checkcredit`, or the machine command
 If you are not sure which command fits, say so and suggest `/help` — never guess by pretending to act. Example: "I can't run that from chat, but you can trigger it with `/gitpullrestart`." """
 

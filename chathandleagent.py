@@ -43,7 +43,7 @@ _COMMAND_KEYWORDS_RE = re.compile(
     r"fpms|pms|bi|fe|cpms|sre|dba|db|liveslot|ote|ft|"
     r"leave|wfh|work from home|holiday|offset|"
     r"jenkins|deploy|build|update|git|pull|"
-    r"machine|asset|egm|nch|nwr|winford|tbr|tbp|mdr|dhs|"
+    r"machine|asset|egm|encoder|nch|nwr|winford|tbr|tbp|mdr|dhs|osm|"
     r"maintenance|maint|"
     r"checkcredit|credit|cctv|sms|otp|reminder|provider id|pid|"
     r"cashout|p0|p1|emergency contact"
@@ -187,6 +187,28 @@ def route(text: str, *, bot_mentioned: bool = True) -> RouteDecision:
             return RouteDecision(_CHAT, reason="math", chat_conf=0.85)
         if _looks_like_math_followup(raw) and not has_kw and not has_search:
             return RouteDecision(_CHAT, reason="math_followup", chat_conf=0.8)
+
+        # 3b) A resolvable machine token beats the LLM — the tiny prod model
+        #     (qwen2.5:0.5b) misroutes bare ids like "TBR2099" to chat.
+        if has_machine and not _looks_like_pure_chitchat(raw):
+            resolved_pre = None
+            try:
+                import commandagent as _ca
+
+                resolved_pre = _ca._resolve_command_for_route(raw, cmd_sig)
+            except Exception:
+                resolved_pre = None
+            if resolved_pre:
+                print(
+                    f"[chathandleagent] machine token → {resolved_pre!r} (pre-LLM)",
+                    flush=True,
+                )
+                return RouteDecision(
+                    _CMD,
+                    reason="machine_id",
+                    command=resolved_pre,
+                    command_conf=0.95,
+                )
 
         # 4) LLM only when rules did not decide.
         llm_sig = _command_signal(raw, allow_llm=True)
