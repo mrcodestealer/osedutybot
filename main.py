@@ -5106,6 +5106,7 @@ def lark_webhook():
                     or _math_agent.looks_like_math_memory_recall(_math_src)
                     or _math_agent.looks_like_today_memory_recall(_math_src)
                     or _math_agent.looks_like_week_memory_recall(_math_src)
+                    or _math_agent.looks_like_memory_capability_question(_math_src)
                     or _math_agent.looks_like_vague_memory_recall(_math_src)
                 )
             ):

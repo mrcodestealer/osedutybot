@@ -70,6 +70,8 @@ Priority when choosing reply language: **English > Chinese > Filipino**.
 - Do not reply in Cantonese, other dialects, or any language outside this list.
 If they ask for work data you cannot look up in chat, gently suggest `/help` or examples like "who is on fpms duty" / 「今天谁值班」.
 Never invent duty names, phone numbers, machine IDs, or confidential information.
+
+Memory: you DO remember this week's messages with each user in this chat — memory keeps the current week, resets every Monday, and survives bot restarts. Recent turns may be included above as context. NEVER claim you "start fresh every conversation", "cannot remember previous chats", or that memory is lost between sessions or days — that is false for you.
 Stay professional; avoid politics, religion, and inappropriate topics.
 
 CRITICAL — you CANNOT perform actions. You are only a chat responder. You do NOT run code, deploy, pull git, restart services, trigger Jenkins, book leave/offset, send messages, or execute ANY command. You have no tools and nothing you say makes anything happen.
@@ -539,6 +541,25 @@ _WEEK_MEMORY_RECALL_RE = re.compile(
     r")",
     re.I,
 )
+# "Do you have memory / can you remember (across chats/days)?" — a question about the bot's
+# ABILITY, not a recall of a specific message. Answered deterministically (the small prod LLM
+# otherwise replies with the canned "I start fresh every conversation" disclaimer — wrong here).
+_MEMORY_CAPABILITY_RE = re.compile(
+    r"(?:"
+    r"(?:你|妳|u|you).{0,6}(?:有|有没有|是否有).{0,4}(?:记忆|記憶)|"
+    r"(?:你|妳).{0,4}(?:能|会|可以|能不能|会不会|可不可以).{0,6}记(?:住|得)|"
+    r"记忆.{0,8}(?:多久|几天|多长|怎么|如何)|"
+    r"(?:跨|隔)(?:会话|对话|天)|"
+    r"(?:新对话|新会话|重启|下次|明天|隔天).{0,10}(?:记得|记住|记忆|忘)|"
+    r"(?:do|does|will|would|can|could)\s+(?:you|u)\s+(?:have|keep|retain)\s+(?:a\s+|any\s+)?memor|"
+    r"(?:can|will|would|do)\s+(?:you|u)\s+remember\s+(?:me|us|things|stuff|this|anything|"
+    r"(?:our|previous|past|earlier)\s+(?:chats?|conversations?|messages?)|"
+    r"(?:across|between)\s+(?:sessions?|chats?|conversations?|days?)|"
+    r"tomorrow|next\s+time|after\s+(?:a\s+)?restart)|"
+    r"how\s+long\s+(?:do|can|will)\s+(?:you|u)\s+remember"
+    r")",
+    re.I,
+)
 _RECALL_TOPIC_PATTERNS = (
     re.compile(r"关于(.+?)(?:的|吗|呢|？|\?|$)"),
     re.compile(r"(?:问|说)(?:过)?(?:的)?(.+?)(?:是什么|是啥|什么|啥|吗|呢|？|\?|$)"),
@@ -652,6 +673,48 @@ def looks_like_week_memory_recall(text: str) -> bool:
         looks_like_memory_recall(raw)
         and re.search(r"(?:这周|本周|这一周|这个?礼拜|this week)", raw, re.I)
     )
+
+
+def looks_like_memory_capability_question(text: str) -> bool:
+    """「你有记忆吗 / 你能记住我们的对话吗 / do you remember across sessions?」— ability, not recall."""
+    raw = _strip_lark_mention_noise(text)
+    if not raw or _looks_like_command(raw):
+        return False
+    return bool(_MEMORY_CAPABILITY_RE.search(raw))
+
+
+def try_memory_capability_reply(
+    text: str, *, session_key: Optional[str] = None
+) -> Optional[str]:
+    """Deterministic, truthful answer about the bot's memory (the small LLM would deny having any)."""
+    if not looks_like_memory_capability_question(text):
+        return None
+    cjk = bool(_CJK_RE.search(text))
+    turns = len(_collect_user_turns_from_memory(session_key, limit=10_000)) if session_key else 0
+    if cjk:
+        lines = [
+            "有的～我会记住你在这个聊天里**最近一周**的对话（每周一重置，bot 重启也不会丢）。",
+        ]
+        if turns:
+            lines.append(f"这周我已经记下你的 {turns} 条消息。")
+        lines.append(
+            "想回顾可以问我「今天我问过什么」「这周我问过什么」，或者直接说关键词"
+            "（例如「还记得那道数学题吗」）。Jenkins 更新也可以直接说 **rebuild**，"
+            "我会用你上次的参数再跑一次并先让你确认。"
+        )
+        return "\n".join(lines)
+    lines = [
+        "Yes — I remember **this week's** conversation with you in this chat "
+        "(resets every Monday; it also survives bot restarts).",
+    ]
+    if turns:
+        lines.append(f"So far this week I've noted {turns} message(s) from you.")
+    lines.append(
+        "You can ask “what did I ask today?” / “what did I ask this week?”, or use a "
+        "keyword (e.g. “do you remember the math question?”). For Jenkins you can just "
+        "say **rebuild** — I'll reuse your last build parameters and confirm first."
+    )
+    return "\n".join(lines)
 
 
 def _latest_math_turn_from_memory(
@@ -916,6 +979,10 @@ def try_memory_recall_reply(
     pending_reply = try_resolve_pending_recall(raw, session_key=session_key)
     if pending_reply:
         return pending_reply
+
+    capability_reply = try_memory_capability_reply(text, session_key=session_key)
+    if capability_reply:
+        return capability_reply
 
     if looks_like_math_memory_recall(raw):
         math_user, math_bot = _latest_math_turn_from_memory(session_key)
