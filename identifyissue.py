@@ -486,6 +486,8 @@ def _llm_complete_full(
         if think is None:
             think = (os.getenv("BOT_CHAT_LLM_THINK") or "false").strip().lower() in ("1", "true", "yes", "on")
         payload["think"] = bool(think)
+        # /v1 (OpenAI-compat) ignores "think"; "reasoning_effort" is what actually works.
+        payload["reasoning_effort"] = "medium" if think else "none"
         # Keep the model resident so Ollama doesn't unload/reload between calls
         # (reload churn is what causes the intermittent 500 "connection closed").
         keep_alive = (os.getenv("BOT_CHAT_OLLAMA_KEEP_ALIVE") or "-1").strip()

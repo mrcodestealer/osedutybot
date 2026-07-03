@@ -692,6 +692,8 @@ def _llm_complete(system_prompt: str, user_text: str, *, max_tokens: int = 700, 
         # answer is clean & fast, INDEPENDENT of the global BOT_CHAT_LLM_THINK setting.
         # Override with BOT_CHECKPERSON_THINK=1 only if you want the reasoning channel.
         payload["think"] = (os.getenv("BOT_CHECKPERSON_THINK") or "false").strip().lower() in ("1", "true", "yes", "on")
+        # /v1 (OpenAI-compat) ignores "think"; "reasoning_effort" is what actually works.
+        payload["reasoning_effort"] = "medium" if payload["think"] else "none"
         keep_alive = (os.getenv("BOT_CHAT_OLLAMA_KEEP_ALIVE") or "-1").strip()
         try:
             payload["keep_alive"] = int(keep_alive)

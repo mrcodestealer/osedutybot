@@ -186,6 +186,8 @@ def _llm_thinking(
     try:
         if ca._is_ollama_base():
             payload["think"] = False
+            # /v1 (OpenAI-compat) ignores "think"; "reasoning_effort" is what actually works.
+            payload["reasoning_effort"] = "none"
             keep_alive = (os.getenv("BOT_CHAT_OLLAMA_KEEP_ALIVE") or "-1").strip()
             if keep_alive.lower() not in ("0", "off", "false", "no"):
                 try:

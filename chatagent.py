@@ -1387,6 +1387,13 @@ def enrich_ollama_chat_payload(payload: dict, *, think: Optional[bool] = None) -
             "on",
         )
     payload["think"] = bool(think)
+    # Ollama's /v1 (OpenAI-compat) endpoint IGNORES "think" — it only honors
+    # "reasoning_effort". Without this, thinking models (qwen3.x) reason at full
+    # effort on every reply (hundreds of hidden tokens -> very slow answers).
+    payload["reasoning_effort"] = (
+        (os.getenv("BOT_CHAT_OLLAMA_REASONING_EFFORT") or "").strip().lower()
+        or ("medium" if think else "none")
+    )
     keep_alive = (os.getenv("BOT_CHAT_OLLAMA_KEEP_ALIVE") or "-1").strip()
     if keep_alive.lower() not in ("0", "off", "false", "no"):
         try:
