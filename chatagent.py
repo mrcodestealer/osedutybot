@@ -553,7 +553,7 @@ _MEMORY_CAPABILITY_RE = re.compile(
     r"(?:新对话|新会话|重启|下次|明天|隔天).{0,10}(?:记得|记住|记忆|忘)|"
     r"(?:do|does|will|would|can|could)\s+(?:you|u)\s+(?:have|keep|retain)\s+(?:a\s+|any\s+)?memor|"
     r"(?:can|will|would|do)\s+(?:you|u)\s+remember\s+(?:me|us|things|stuff|this|anything|"
-    r"(?:our|previous|past|earlier)\s+(?:chats?|conversations?|messages?)|"
+    r"(?:(?:our|previous|past|earlier|old)\s+)+(?:chats?|conversations?|messages?)|"
     r"(?:across|between)\s+(?:sessions?|chats?|conversations?|days?)|"
     r"tomorrow|next\s+time|after\s+(?:a\s+)?restart)|"
     r"how\s+long\s+(?:do|can|will)\s+(?:you|u)\s+remember"

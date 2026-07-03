@@ -2051,6 +2051,9 @@ def _run_deterministic_detectors(text: str) -> dict[str, Any] | None:
     ii = detect_identify_issue_command(raw)
     if ii:
         return dict(tag="cmd_identifyissue", confidence=1.0, margin=1.0, command=ii, deterministic=True, source="deterministic", route="command")
+    du = detect_single_duty_command(raw)
+    if du:
+        return dict(tag="cmd_duty", confidence=1.0, margin=1.0, command=du, deterministic=True, source="deterministic", route="command")
     return None
 
 
@@ -2103,6 +2106,55 @@ def detect_multi_duty_commands(text: str) -> Optional[list[str]]:
     order_idx = {d: i for i, d in enumerate(_MULTI_DUTY_DEPT_ORDER)}
     found_depts.sort(key=lambda d: order_idx.get(d, 999))
     return [f"/{d}" for d in found_depts]
+
+
+# Filler words that don't change a single-department duty ask ("sre duty today",
+# "who is on fpms", "db pls"). Anything left over after removing the department +
+# these = a real sentence, so we DON'T hijack it (let patterns / the LLM decide).
+_SINGLE_DUTY_FILLER_RE = re.compile(
+    r"(?i)\b("
+    r"duty|roster|on[\s-]?call|oncall|schedule|shift|"
+    r"today|now|tonight|tomorrow|tmr|tmrw|tmmr|tmw|tomo|"
+    r"who|whos|is|are|on|of|the|a|for|me|us|my|our|"
+    r"please|pls|kindly|thanks|thx|ty|"
+    r"show|tell|give|list|provide|check|see|want|need|"
+    r"what|whats|current|currently|any"
+    r")\b"
+)
+
+
+def detect_single_duty_command(text: str) -> Optional[str]:
+    """Map a bare single-department ask to its slash command, deterministically (no LLM).
+
+    Fires only when the message is *essentially just one department name* (plus
+    filler / a near-date word) — e.g. ``sre``, ``fpms duty today``, ``who is on db``.
+    Returns ``None`` for real sentences ("fe is broken"), zero departments, or 2+
+    departments (``detect_multi_duty_commands`` owns those).
+    """
+    raw = (text or "").strip()
+    if not raw or _looks_like_slash_command(raw):
+        return None
+    if _MULTI_DUTY_SKIP_RE.search(raw):
+        return None
+
+    found: list[str] = []
+    for dept in _MULTI_DUTY_DEPT_ORDER:
+        if re.search(rf"(?i)\b{re.escape(dept)}\b", raw):
+            found.append(dept)
+    if re.search(r"(?i)\bdba\b", raw) and "db" not in found:
+        found.append("db")
+    if len(found) != 1:
+        return None
+
+    dept = found[0]
+    residue = re.sub(rf"(?i)\b{re.escape(dept)}\b", " ", raw)
+    if dept == "db":
+        residue = re.sub(r"(?i)\bdba\b", " ", residue)
+    residue = _SINGLE_DUTY_FILLER_RE.sub(" ", residue)
+    residue = re.sub(r"[^0-9A-Za-z一-鿿]+", " ", residue).strip()
+    if residue:
+        return None  # leftover meaningful words → not a bare duty ask
+    return f"/{dept}"
 
 
 def command_signal(text: str, *, allow_llm: bool = True) -> dict[str, Any]:

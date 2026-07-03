@@ -497,7 +497,11 @@ def parse_request(text: str, *, session_key: Optional[str] = None) -> dict:
     if has_leave and not has_dept:
         if dates or _LEAVE_SIGNAL_RE.search(raw):
             return {"kind": "leave", "departments": depts, "dates": dates or [today]}
-    if depts and (dates or has_duty_word or has_date):
+    # A department mention IS a duty request — bare "sre" / "fpms" means "today".
+    # The regex already has the dept + any dates; the 0.5b LLM can't improve a
+    # bare-dept lookup (it would also default to today), and the last-resort scan
+    # below already resolves these, so resolve here and skip the LLM round-trip.
+    if depts:
         print(f"[dutyai] regex parse (no LLM): {raw[:80]!r} → {depts} {len(dates)} date(s)", flush=True)
         return {"kind": "duty", "departments": depts, "dates": dates or [today]}
 
