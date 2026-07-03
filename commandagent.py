@@ -152,7 +152,7 @@ _DEPT_CHECK_TEMPLATES = (
     "report missing {d} duty",
 )
 
-_MACHINE_PREFIXES = ("nch", "nwr", "wf", "winford", "tbp", "cp", "dhs", "mdr")
+_MACHINE_PREFIXES = ("nch", "nwr", "wf", "winford", "tbp", "tbr", "cp", "dhs", "mdr")
 
 _MACHINE_TEMPLATES = (
     "lookup {p} {id}",

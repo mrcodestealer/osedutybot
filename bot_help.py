@@ -143,6 +143,7 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
                 ("/nwr <id>", "NWR machine info", "NWR 机台"),
                 ("/wf <id>", "Winford asset", "Winford 资产"),
                 ("/tbp <id>", "TBP machine", "TBP 机台"),
+                ("/tbr <id>", "TBR machine", "TBR 机台"),
                 ("/cp <id>", "CP asset", "CP 资产"),
                 ("/dhs <id>", "DHS asset", "DHS 资产"),
                 ("/mdr <id>", "MDR asset", "MDR 资产"),

@@ -85,6 +85,7 @@ import winford
 import nch
 import cp
 import tbp
+import tbr
 import dhs
 import mdr
 import smmachine
@@ -6075,6 +6076,15 @@ def lark_webhook():
         else:
             query = parts[1]
             reply = winford.get_winford_info(query)
+        send_message(chat_id, reply)
+        return _lark_im_done()
+    elif clean_text.lower().startswith('/tbr'):
+        # Accept both "/tbr 2099" and "/tbr2099" (no space).
+        query = clean_text[len('/tbr'):].strip()
+        if not query:
+            reply = "❌ Usage: `/tbr <machine_id(s)>`\nExamples: `/tbr 2099`, `/tbr2099`, `/tbr tbr2099 tbr2100`, `/tbr 2099,2100`"
+        else:
+            reply = tbr.get_tbr_info(query)
         send_message(chat_id, reply)
         return _lark_im_done()
     elif clean_text.lower().startswith('/tbp'):
