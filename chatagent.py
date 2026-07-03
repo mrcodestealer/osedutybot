@@ -1606,13 +1606,22 @@ def _llm_chat(
         return None
     url = f"{_llm_base_url()}/chat/completions"
     system_prompt = _SYSTEM_PROMPT + (_VISION_EXTRA if images else "")
+    # PERF: keep the system message byte-identical on EVERY turn. Ollama caches
+    # the prompt KV by prefix; any change to this message forces the CPU to
+    # re-read ~700 tokens (~10s). Variable content (codeassist ctx) goes into a
+    # separate message near the end instead.
+    if not images and memory_enabled():
+        system_prompt += (
+            "\nEarlier messages in this chat (kept for the current week) may be included "
+            "below for context. Do not invent facts from memory — duty data still "
+            "needs slash commands."
+        )
+    code_ctx = ""
     try:
         import codeassist as _codeassist
 
         if _codeassist.is_enabled() and not images:
-            code_ctx = _codeassist.context_for_llm(user_text)
-            if code_ctx:
-                system_prompt += code_ctx
+            code_ctx = _codeassist.context_for_llm(user_text) or ""
     except Exception as _code_err:
         print(f"[chatagent] codeassist skipped: {_code_err!r}", flush=True)
     history: list[dict[str, str]] = []
@@ -1620,12 +1629,6 @@ def _llm_chat(
         # Full week is stored on disk; only the most recent turns go to the LLM
         # (prod model context is tiny).
         history = _memory_get_history(session_key)[-(_memory_max_turns() * 2):]
-        if history:
-            system_prompt += (
-                "\nEarlier messages in this chat (kept for the current week) are included "
-                "below for context. Do not invent facts from memory — duty data still "
-                "needs slash commands."
-            )
     if images:
         parts: list[dict] = [
             {
@@ -1646,6 +1649,10 @@ def _llm_chat(
         user_message = {"role": "user", "content": user_text}
     messages: list[dict] = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
+    if code_ctx:
+        # Placed AFTER the static prefix + history so it never invalidates the
+        # cached prompt prefix (it changes with every user message).
+        messages.append({"role": "system", "content": code_ctx})
     messages.append(user_message)
     payload = {
         "model": _llm_model_for_request(images=bool(images)),

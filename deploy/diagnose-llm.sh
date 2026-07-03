@@ -40,6 +40,7 @@ RESP=$(curl -s "${OLLAMA_HOST}/api/generate" -d "{
   \"model\": \"${MODEL}\",
   \"prompt\": \"Say hello in one short sentence.\",
   \"stream\": false,
+  \"think\": false,
   \"keep_alive\": -1
 }")
 python3 - "$RESP" <<'PY'
@@ -61,6 +62,7 @@ if gen_s:    print(f"generation speed: {gen_n/gen_s:8.1f} tok/s ({gen_n} tokens)
 print(f"total           : {total:8.2f}s")
 if load > 5: print(">> PROBLEM: model was NOT resident in RAM (keep_alive not working)")
 if gen_s and gen_n/gen_s < 5: print(">> PROBLEM: generation very slow -> check swap / CPU contention")
+if gen_n > 100: print(">> PROBLEM: too many tokens for a one-line reply -> thinking mode still active")
 PY
 
 hr; echo "== 5) Top CPU consumers right now =="

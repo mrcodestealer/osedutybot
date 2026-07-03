@@ -11510,6 +11510,10 @@ def _fpms_lark_dispatch_fnt_rc_parameter_flow(
         "jenkins_job_url": jenkins_build_url,
     }
     with _fpms_lark_sessions_lock:
+        prev_pick = _fpms_lark_sessions.get(session_key)
+        _fpms_lark_preserve_updatemore_queue(
+            prev_pick if isinstance(prev_pick, dict) else None, sess_new
+        )
         _fpms_lark_sessions[session_key] = sess_new
     _fpms_lark_send_service_pick_card(chat_id, session_key, first, ranked0, send)
     return True
@@ -11594,6 +11598,10 @@ def _fpms_lark_dispatch_sms_uat_parameter_flow(
         "jenkins_job_url": jenkins_build_url,
     }
     with _fpms_lark_sessions_lock:
+        prev_pick = _fpms_lark_sessions.get(session_key)
+        _fpms_lark_preserve_updatemore_queue(
+            prev_pick if isinstance(prev_pick, dict) else None, sess_new
+        )
         _fpms_lark_sessions[session_key] = sess_new
     _fpms_lark_send_service_pick_card(chat_id, session_key, first, ranked0, send)
     return True
@@ -12871,6 +12879,10 @@ def _fpms_lark_dispatch_fpms_parameter_flow(
         "jenkins_job_url": jenkins_build_url,
     }
     with _fpms_lark_sessions_lock:
+        prev_pick = _fpms_lark_sessions.get(session_key)
+        _fpms_lark_preserve_updatemore_queue(
+            prev_pick if isinstance(prev_pick, dict) else None, sess_new
+        )
         _fpms_lark_sessions[session_key] = sess_new
     _fpms_lark_send_service_pick_card(chat_id, session_key, first, ranked0, send)
     return True
@@ -13033,6 +13045,10 @@ def _fpms_lark_dispatch_bi_script_update_parameter_flow(
         "jenkins_job_url": jenkins_build_url,
     }
     with _fpms_lark_sessions_lock:
+        prev_pick = _fpms_lark_sessions.get(session_key)
+        _fpms_lark_preserve_updatemore_queue(
+            prev_pick if isinstance(prev_pick, dict) else None, sess_new
+        )
         _fpms_lark_sessions[session_key] = sess_new
     _fpms_lark_send_service_pick_card(chat_id, session_key, first, ranked0, send)
     return True
@@ -13440,6 +13456,10 @@ def _fpms_lark_notify_jenkins_after_build_click(
 
     seg = um.current_segment(q)
     email = (seg.get("email_subject") or "").strip() if seg else ""
+    if not email:
+        # A stale/leftover queue in this chat must not eat a fresh single-update's Email:
+        # the session-stored subject (set by _dispatch_lark_update_command_body) wins.
+        email = _fpms_lark_session_email_subject(session_key)
     seg_idx = int(q.get("index") or 0)
     next_same = um.next_segment_same_env(q)
     has_next = um.has_next_segment(q)
