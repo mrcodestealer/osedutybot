@@ -5566,7 +5566,8 @@ def lark_webhook():
         send_message(chat_id, reply)
         return _lark_im_done()
     elif clean_text.lower() == '/bi':
-        reply = bi_duty.get_bi_today_duty()
+        _send_duty_card("bi", bi_duty.get_bi_today_duty(), chat_id)
+        return _lark_im_done()
     elif clean_text.lower().startswith('/bicheck'):
         parts = clean_text.split()
         if len(parts) > 1:
@@ -5586,7 +5587,8 @@ def lark_webhook():
         send_message(chat_id, reply)
         return _lark_im_done()
     elif clean_text.lower() == '/fe':
-        reply = fe_duty.get_fe_next_three_duty()
+        _send_duty_card("fe", fe_duty.get_fe_next_three_duty(), chat_id)
+        return _lark_im_done()
     elif clean_text.lower().startswith('/fecheck'):
         parts = clean_text.split()
         if len(parts) > 1:
@@ -5606,7 +5608,8 @@ def lark_webhook():
         send_message(chat_id, reply)
         return _lark_im_done()
     elif clean_text.lower() == '/cpms':
-        reply = cpms_duty.get_cpms_three_days_text()
+        _send_duty_card("cpms", cpms_duty.get_cpms_three_days_text(), chat_id)
+        return _lark_im_done()
     elif clean_text.lower().startswith('/cpmscheck'):
         parts = clean_text.split()
         if len(parts) > 1:
@@ -5626,7 +5629,8 @@ def lark_webhook():
         send_message(chat_id, reply)
         return _lark_im_done()
     elif clean_text.lower() == '/sre':
-        reply = sre_Duty.get_sre_week_duty()
+        _send_duty_card("sre", sre_Duty.get_sre_week_duty(), chat_id)
+        return _lark_im_done()
     elif clean_text.lower().startswith('/srecheck'):
         parts = clean_text.split()
         if len(parts) > 1:
@@ -5646,7 +5650,8 @@ def lark_webhook():
         send_message(chat_id, reply)
         return _lark_im_done()
     elif clean_text.lower() in ('/db', '/dba'):
-        reply = db_duty.get_three_weeks_summary()
+        _send_duty_card("db", db_duty.get_three_weeks_summary(), chat_id)
+        return _lark_im_done()
     elif clean_text.lower().startswith('/dbcheck'):
         parts = clean_text.split()
         if len(parts) > 1:
@@ -5666,7 +5671,8 @@ def lark_webhook():
         send_message(chat_id, reply)
         return _lark_im_done()
     elif clean_text.lower() == '/liveslot':
-        reply = liveslot_duty.get_three_weeks_summary()
+        _send_duty_card("liveslot", liveslot_duty.get_three_weeks_summary(), chat_id)
+        return _lark_im_done()
     elif clean_text.lower().startswith('/liveslotcheck'):
         parts = clean_text.split()
         if len(parts) > 1:
@@ -5686,7 +5692,8 @@ def lark_webhook():
         send_message(chat_id, reply)
         return _lark_im_done()
     elif clean_text.lower() == '/ote':
-        reply = ote_duty.get_three_weeks_summary()
+        _send_duty_card("ote", ote_duty.get_three_weeks_summary(), chat_id)
+        return _lark_im_done()
     elif clean_text.lower().startswith('/otecheck'):
         parts = clean_text.split()
         if len(parts) > 1:
@@ -5709,7 +5716,7 @@ def lark_webhook():
         duty_schedule = _append_department_leave_wfh_footer(
             ft.get_ft_three_days(), "/ft"
         )
-        send_message(chat_id, duty_schedule)
+        _send_duty_card("ft", duty_schedule, chat_id)
         fyi_message = """FYI
         Phan Qi Xiang - Try whatsapp first, else use phone line 
         Kevin Lim       - Call phone number , not whatapps call
