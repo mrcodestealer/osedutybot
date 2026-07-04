@@ -771,6 +771,54 @@ def _build_card(*, title: str, colour: str, elements: list[dict]) -> dict:
     }
 
 
+def build_text_card(dept: str, body_text: str, *, title: Optional[str] = None) -> Optional[dict]:
+    """Wrap a department's existing plain-text duty output in a styled Lark card.
+
+    Used by the ``/fpms``, ``/pms``, … slash commands so their reply renders as a
+    message card (same look as the natural-language duty cards) without changing
+    the underlying content. Splits the text on ``📅`` day/week headers so each
+    block becomes its own card section. Returns ``{"text", "lark_card"}`` or
+    ``None`` when ``dept`` is unknown or ``body_text`` is empty.
+    """
+    meta = _DEPT_META.get(dept)
+    raw = (body_text or "").strip()
+    if not meta or not raw:
+        return None
+    display, emoji, colour = meta
+
+    def _norm(s: str) -> str:
+        # Lark rich-text <b>..</b> → lark_md **..**, drop any other HTML-ish tags.
+        s = s.replace("<b>", "**").replace("</b>", "**")
+        s = re.sub(r"</?[a-zA-Z]+[^>]*>", "", s)
+        return s.strip()
+
+    # Split into blocks on the 📅 marker (each day / week becomes a section).
+    blocks: list[str] = []
+    cur: list[str] = []
+    for line in raw.splitlines():
+        if line.lstrip().startswith("📅") and cur:
+            blocks.append("\n".join(cur))
+            cur = [line]
+        else:
+            cur.append(line)
+    if cur:
+        blocks.append("\n".join(cur))
+    blocks = [b for b in (_norm(b) for b in blocks) if b] or [_norm(raw)]
+
+    elements: list[dict] = []
+    for i, b in enumerate(blocks):
+        if i > 0:
+            elements.append({"tag": "hr"})
+        elements.append(_md_div(b))
+
+    card = _build_card(
+        title=title or f"{emoji} {display} DUTY",
+        colour=colour,
+        elements=elements,
+    )
+    return {"text": f"{display} DUTY\n{_norm(raw)}", "lark_card": card}
+
+
 def _dept_card_payload(dept: str, dates: list[date]) -> dict:
     """Build a single card covering one department across one or more dates."""
     display, emoji, colour = _DEPT_META[dept]
