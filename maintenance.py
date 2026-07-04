@@ -5056,8 +5056,13 @@ _EGS_MONTHS = {
     "september", "october", "november", "december",
     "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
 }
+# Weekday names / abbreviations — never a vendor (appear as "(Wed)", "24th (Wed)").
+_EGS_WEEKDAYS = {
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "mon", "tue", "tues", "wed", "weds", "thu", "thur", "thurs", "fri", "sat", "sun",
+}
 # Leading words that disqualify an LLM title's vendor (date/generic/greeting noise).
-_EGS_BAD_VENDOR_LEAD = _EGS_VENDOR_STOP | _EGS_MONTHS | _EGS_VENDOR_GENERIC
+_EGS_BAD_VENDOR_LEAD = _EGS_VENDOR_STOP | _EGS_MONTHS | _EGS_WEEKDAYS | _EGS_VENDOR_GENERIC
 
 
 def _egs_maint_type(text: str) -> str:
@@ -5075,9 +5080,11 @@ def _egs_brand_run(s: str) -> str:
         w = tok.strip(" ,.:;[](){}\"'/-").strip()
         if not w:
             continue
-        if w.lower() in _EGS_VENDOR_GENERIC or w.lower() in _EGS_MONTHS:
+        if w.lower() in _EGS_VENDOR_GENERIC or w.lower() in _EGS_MONTHS or w.lower() in _EGS_WEEKDAYS:
             break
-        if re.match(r"[A-Za-z0-9][\w&.\-]*$", w) and re.search(r"[A-Za-z]", w):
+        # Brand tokens start with an UPPERCASE letter or a digit (SimplePlay, VA, 5G).
+        # A lowercase word ("will", "perform", "the") ends the run — a brand is not a sentence.
+        if re.match(r"[A-Z0-9][\w&.\-]*$", w) and re.search(r"[A-Za-z]", w):
             brand.append(w)
         else:
             break  # lowercase word / emoji / symbol ends the brand run
@@ -5096,12 +5103,13 @@ def _egs_vendor(text: str) -> str:
     text = text or ""
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
 
-    # (1) Bracketed brand in the first few lines: [Yggdrasil Gaming], (…), 【…】.
+    # (1) Bracketed brand in the first few lines: [Yggdrasil Gaming], 【…】.
+    #     Parentheses are excluded on purpose — they wrap "(Wed)"/"(GMT+8)", not brands.
     for ln in lines[:4]:
-        mb = re.search(r"[\[\(【]\s*([^\]\)】]{2,40})\s*[\]\)】]", ln)
+        mb = re.search(r"[\[【]\s*([^\]】]{2,40})\s*[\]】]", ln)
         if mb:
             cand = _egs_brand_run(mb.group(1))
-            if len(cand) >= 2:
+            if len(cand) >= 2 and cand.split()[0].lower() not in _EGS_BAD_VENDOR_LEAD:
                 return cand
 
     # (2) Explicit "Impact:/Game(s):/Product:/Provider: <Vendor>" line (emoji-tolerant).
@@ -5141,7 +5149,10 @@ def _egs_vendor(text: str) -> str:
     counts: dict[str, int] = {}
     for tok in re.findall(r"\b([A-Z][A-Za-z0-9]{2,})\b", text):
         low = tok.lower()
-        if low in _EGS_VENDOR_STOP or low in _EGS_MONTHS or low in _EGS_VENDOR_GENERIC:
+        if (
+            low in _EGS_VENDOR_STOP or low in _EGS_MONTHS
+            or low in _EGS_WEEKDAYS or low in _EGS_VENDOR_GENERIC
+        ):
             continue
         counts[tok] = counts.get(tok, 0) + 1
     if counts:
