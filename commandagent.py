@@ -1156,7 +1156,7 @@ _MULTI_DUTY_SKIP_RE = re.compile(
     r")\b|/"
 )
 _MACHINE_ID_RE = re.compile(
-    r"(?i)\b(?:(?:nch|nwr|wf|winford|tbp|cp|dhs|mdr)\s*)?(\d{3,}|[A-Z]{2,4}\d+)\b"
+    r"(?i)\b(?:(?:nch|nwr|wf|winford|tbr|tbp|cp|osm|dhs|mdr)\s*)?(\d{3,}|[A-Z]{2,4}\d+)\b"
 )
 _MACHINE_NL_PREFIX_RE = re.compile(
     r"(?i)^(?:i want|show|lookup|check|get|find|info for|machine|asset)\s+"
@@ -1173,6 +1173,67 @@ def _machine_digits(text: str) -> Optional[str]:
     raw = re.sub(r"\s+", "", m.group(1))
     dm = re.search(r"(\d{3,})", raw)
     return dm.group(1) if dm else None
+
+
+# ---------------------------------------------------------------------------
+# Bare machine-ID lookup: "TBR2099" / "tbr 2099 encoder" / "NCH1001 的信息" →
+# the per-site sheet command ("/tbr 2099"). High precision by construction:
+# after stripping machine tokens and lookup-noise words, NOTHING may remain —
+# so "set maintenance TBR2099", "TBR2099 stuck credit" etc. never match here
+# and keep flowing to the prod-batch / checkcredit / maintenance detectors.
+# This runs BEFORE any LLM, fixing the "@Duty Bot TBR2099 → chat" misroute.
+# ---------------------------------------------------------------------------
+_MACHINE_LOOKUP_SITE_CMDS = {
+    "nch": "/nch",
+    "nwr": "/nwr",
+    "wf": "/wf",
+    "win": "/wf",
+    "winford": "/wf",
+    "tbr": "/tbr",
+    "tbp": "/tbp",
+    "cp": "/cp",
+    "osm": "/cp",
+    "dhs": "/dhs",
+    "mdr": "/mdr",
+}
+# Lookbehind/lookahead instead of \b: CJK chars count as \w in Python re, so
+# "看tbr2099" / "tbr2099的" would never match with plain word boundaries.
+_MACHINE_LOOKUP_TOKEN_RE = re.compile(
+    r"(?i)(?<![a-z0-9_])(nch|nwr|winford|win|wf|tbr|tbp|cp|osm|dhs|mdr)\s*-?\s*(\d{1,6})(?!\d)"
+)
+_MACHINE_LOOKUP_NOISE_RE = re.compile(
+    r"(?i)\b(?:encoders?|machines?|assets?|info|information|details?|"
+    r"check|checking|lookup|look|up|show|me|find|get|status|stream(?:ing)?|url|"
+    r"cctv|mini\s*pc|pc|ip|please|pls|plz|help|hi|hello|the|for|of|is|what|whats|"
+    r"about|can|you|u|give|tell|number|id|query|search|need|want|i"
+    r")\b"
+    r"|[?？!！。，,.:：;；、~～()（）\[\]【】\"'`]"
+    r"|(?:编码器|机台|机器|资产|信息|资料|详情|状态|查询|查一下|查下|查|帮我|帮忙|麻烦|请问|请|"
+    r"看一下|看下|看看|是什么|什么|哪个|你好|我要|我想|给我|你能|你可以|能不能|可不可以|"
+    r"一下|你|能|想|要|看|的|了|吗|呢|啊|哦)"
+)
+
+
+def detect_machine_lookup_command(text: str) -> Optional[str]:
+    """「TBR2099」「tbr 2099 encoder」「NCH1001 的信息」→ ``/tbr 2099`` 等 site 查机台指令。"""
+    raw = (text or "").strip()
+    # Group messages reach the router as the FULL body incl. "@_user_1" mention
+    # placeholders — strip them or the leftover check below always abstains.
+    raw = re.sub(r"@_user_\d+|<at[^>]*>.*?</at>", " ", raw, flags=re.I | re.S).strip()
+    if not raw or raw.startswith("/") or len(raw) > 100:
+        return None
+    toks = _MACHINE_LOOKUP_TOKEN_RE.findall(raw)
+    if not toks or len(toks) > 6:
+        return None
+    bases = {_MACHINE_LOOKUP_SITE_CMDS[t[0].lower()] for t in toks}
+    if len(bases) != 1:
+        return None
+    leftover = _MACHINE_LOOKUP_TOKEN_RE.sub(" ", raw)
+    leftover = _MACHINE_LOOKUP_NOISE_RE.sub(" ", leftover)
+    if leftover.strip():
+        return None
+    ids = " ".join(t[1] for t in toks)
+    return f"{bases.pop()} {ids}"
 
 
 def extract_argument(arg_kind: Optional[str], user_text: str, spec: IntentSpec) -> Optional[str]:
@@ -1278,7 +1339,7 @@ _COMMAND_LLM_SIGNAL_RE = re.compile(
     r"(?i)\b("
     r"duty|roster|on[\s-]?call|leave|wfh|holiday|offset|"
     r"fpms|pms|bi|fe|cpms|sre|dba|db|liveslot|ote|ft|ose|"
-    r"machine|asset|egm|nch|nwr|winford|tbr|tbp|mdr|dhs|"
+    r"machine|asset|egm|encoders?|nch|nwr|winford|tbr|tbp|mdr|dhs|osm|"
     r"maintenance|maint|test|credit|cctv|jenkins|deploy|update|"
     r"reminder|help|restart|cashout|sms|pid|provider|"
     r"who is|find|look ?up|search|phone|contact|check"
@@ -1850,6 +1911,10 @@ def _resolve_command_for_route(text: str, cmd_sig: dict[str, Any]) -> Optional[s
             return built
         if spec.arg_kind is None and spec.command:
             return spec.command
+    # Bare machine-ID lookup ("TBR2099", "tbr 2099 encoder") — no verb needed.
+    ml = detect_machine_lookup_command(text)
+    if ml:
+        return ml
     # Machine prefix + digits (e.g. "lookup nwr 2005") when not in training samples.
     m = re.search(
         r"(?i)\b(?:lookup|show|check|get|find|info for|machine)\s+"
@@ -1864,7 +1929,13 @@ def _resolve_command_for_route(text: str, cmd_sig: dict[str, Any]) -> Optional[s
         r"(?i)\b(nch|nwr|wf|winford|tbp|tbr|cp|dhs|mdr)\s*-?\s*(\d{2,})\b",
         text,
     )
-    if m2 and re.search(r"(?i)\b(lookup|show|check|machine|asset|info)\b", text):
+    if m2 and (
+        re.search(
+            r"(?i)\b(lookup|show|check|machine|asset|info|encoders?|status|streaming|url|ip)\b",
+            text,
+        )
+        or re.search(r"编码器|机台|状态|信息|资料", text)
+    ):
         prefix = m2.group(1).lower()
         cmd_base = "/wf" if prefix == "winford" else f"/{prefix}"
         return f"{cmd_base} {m2.group(2)}"
@@ -2054,6 +2125,9 @@ def _run_deterministic_detectors(text: str) -> dict[str, Any] | None:
     du = detect_single_duty_command(raw)
     if du:
         return dict(tag="cmd_duty", confidence=1.0, margin=1.0, command=du, deterministic=True, source="deterministic", route="command")
+    ml = detect_machine_lookup_command(raw)
+    if ml:
+        return dict(tag="cmd_machine_lookup", confidence=1.0, margin=1.0, command=ml, deterministic=True, source="deterministic", route="command")
     return None
 
 

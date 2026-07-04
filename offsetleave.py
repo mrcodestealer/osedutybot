@@ -88,6 +88,10 @@ BOT_MENU_EVENT_KEY_PENDING_OFFSET = "741626437812648126123"
 BOT_MENU_EVENT_KEYS_PENDING_OFFSET: frozenset[str] = frozenset({BOT_MENU_EVENT_KEY_PENDING_OFFSET})
 BOT_MENU_EVENT_KEY_APPROVER_OFFSET_EDIT = "1726387126481826481"
 BOT_MENU_EVENT_KEYS_APPROVER_OFFSET_EDIT: frozenset[str] = frozenset({BOT_MENU_EVENT_KEY_APPROVER_OFFSET_EDIT})
+BOT_MENU_EVENT_KEY_APPROVER_OFFSET_DELETE = "512346512435816238"
+BOT_MENU_EVENT_KEYS_APPROVER_OFFSET_DELETE: frozenset[str] = frozenset({BOT_MENU_EVENT_KEY_APPROVER_OFFSET_DELETE})
+BOT_MENU_EVENT_KEY_APPROVER_SHOW_OFFSET = "7632487287468163123"
+BOT_MENU_EVENT_KEYS_APPROVER_SHOW_OFFSET: frozenset[str] = frozenset({BOT_MENU_EVENT_KEY_APPROVER_SHOW_OFFSET})
 
 OFFSET_APPROVAL_CALLBACK_KEYS = frozenset({_OFFSET_APPR_PICK_KEY, _OFFSET_APPR_CONFIRM_KEY})
 
@@ -2299,6 +2303,27 @@ def handle_bot_menu_event(
         )
         return True
 
+    if event_key in BOT_MENU_EVENT_KEYS_APPROVER_OFFSET_DELETE:
+        print(f"[offsetleave] bot menu {event_key!r} → approver delete offset for {oid}", flush=True)
+        _open_approver_offset_delete_picker(
+            sender_open_id=oid,
+            chat_id=oid,
+            chat_type="p2p",
+            send_message=_send_open_id,
+            get_token_func=get_token_func,
+        )
+        return True
+
+    if event_key in BOT_MENU_EVENT_KEYS_APPROVER_SHOW_OFFSET:
+        print(f"[offsetleave] bot menu {event_key!r} → approver show offset for {oid}", flush=True)
+        _open_approver_show_offset(
+            sender_open_id=oid,
+            chat_id=oid,
+            send_message=_send_open_id,
+            get_token_func=get_token_func,
+        )
+        return True
+
     print(f"[offsetleave] bot menu: unhandled event_key={event_key!r}", flush=True)
     return True
 
@@ -2351,6 +2376,52 @@ def _open_approver_offset_edit_picker(
         person_filter="",
         status_filter="",
         approver_admin_only=True,
+    )
+
+
+def _open_approver_offset_delete_picker(
+    *,
+    sender_open_id: str,
+    chat_id: str,
+    chat_type: Optional[str],
+    send_message: Callable[..., dict[str, Any]],
+    get_token_func: Callable[[], str],
+) -> bool:
+    """Approver menu: delete any offset row (approver-only delete list)."""
+    oid = (sender_open_id or "").strip()
+    if not _is_offset_approver_open_id(oid):
+        send_message(chat_id, "As checked you are not Approver")
+        return True
+    return handle_deleteoffset_command(
+        "deleteoffset",
+        sender_open_id=oid,
+        chat_id=chat_id,
+        chat_type=chat_type,
+        send_message=send_message,
+        get_token_func=get_token_func,
+        force=True,
+        person_filter="",
+        status_filter="",
+    )
+
+
+def _open_approver_show_offset(
+    *,
+    sender_open_id: str,
+    chat_id: str,
+    send_message: Callable[..., dict[str, Any]],
+    get_token_func: Callable[[], str],
+) -> bool:
+    """Approver menu: show the full-team offset calendar (approver view of ``showoffset``)."""
+    oid = (sender_open_id or "").strip()
+    if not _is_offset_approver_open_id(oid):
+        send_message(chat_id, "As checked you are not Approver")
+        return True
+    return _open_show_offset_calendar(
+        sender_open_id=oid,
+        chat_id=chat_id,
+        send_message=send_message,
+        get_token_func=get_token_func,
     )
 
 
