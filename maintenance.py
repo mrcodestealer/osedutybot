@@ -4825,15 +4825,17 @@ def _evo_email_subject_date(blocks_out: list[str]) -> str:
 # down or returns garbage (e.g. the tiny prod model).
 # ---------------------------------------------------------------------------
 _EGS_TITLE_SYSTEM = (
-    "You generate the SUBJECT title for a scheduled-maintenance notification email. "
-    "Output ONLY the title itself on a SINGLE line: the product / vendor name followed "
-    "by the maintenance type, in Title Case. "
-    "No date, no time, no quotes, no labels (do not write 'Subject:' or 'Title:'), "
+    "You generate the SUBJECT title for a game/vendor scheduled-maintenance email. "
+    "Output ONLY the title on a SINGLE line, 2 to 5 words in Title Case: the "
+    "product / game / vendor name, then the maintenance type, then the word Maintenance. "
+    "It MUST end with the word 'Maintenance'. "
+    "Drop filler words like 'Production', 'environment', 'notice', 'notification'. "
+    "No date, no time, no quotes, no labels (never write 'Subject:' or 'Title:'), "
     "no bullet points, no explanation, no extra words.\n"
     "Examples:\n"
-    "Body says 'SimplePlay will perform regular maintenance ...' -> SimplePlay Regular Maintenance\n"
-    "Body says 'PG Soft scheduled maintenance ...' -> PG Soft Scheduled Maintenance\n"
-    "Body says 'Evolution emergency maintenance ...' -> Evolution Emergency Maintenance"
+    "'SimplePlay will perform regular maintenance ...' -> SimplePlay Regular Maintenance\n"
+    "'VA Gaming Production environment scheduled maintenance notice ...' -> VA Gaming Scheduled Maintenance\n"
+    "'PG Soft emergency maintenance ...' -> PG Soft Emergency Maintenance"
 )
 
 # Meta / instruction-echo fragments a confused model may emit instead of a title.
@@ -4921,7 +4923,7 @@ def _egs_title_looks_bad(title: str) -> bool:
         b in low
         for b in (
             "input text", "notification", "email", "the following",
-            "here is", "will ", "from ", "schedule",
+            "here is", "will ", "from ",
         )
     ):
         return True
@@ -4986,9 +4988,18 @@ _EGS_MAINT_TYPES = (
 # Capitalized tokens that are never the vendor brand.
 _EGS_VENDOR_STOP = {
     "dear", "valued", "customers", "customer", "date", "time", "during", "should",
-    "thank", "game", "client", "back", "office", "web", "service", "api", "support",
-    "gmt", "the", "from", "subject", "we", "as", "part", "our", "monday", "tuesday",
-    "wednesday", "thursday", "friday", "saturday", "sunday",
+    "thank", "thanks", "game", "client", "back", "office", "web", "service", "api",
+    "support", "gmt", "the", "from", "subject", "we", "as", "part", "our", "this",
+    "please", "production", "environment", "monday", "tuesday", "wednesday",
+    "thursday", "friday", "saturday", "sunday",
+}
+# Words that end the vendor phrase in a header line ("VA Gaming Production …" → "VA Gaming").
+# NB: "game"/"gaming" are NOT here — they are often part of the brand ("VA Gaming").
+_EGS_VENDOR_GENERIC = {
+    "production", "environment", "scheduled", "regular", "routine", "emergency",
+    "planned", "periodic", "system", "server", "maintenance", "notice",
+    "notification", "client", "platform", "service", "services",
+    "api", "back", "office", "web",
 }
 
 
@@ -5001,15 +5012,49 @@ def _egs_maint_type(text: str) -> str:
 
 
 def _egs_vendor(text: str) -> str:
-    """Best-guess vendor/brand: the '<Vendor> will perform …' subject, else the most-repeated brand."""
+    """Best-guess vendor/brand for the title.
+
+    In priority order: (1) the leading brand of a short header line that names the
+    maintenance (e.g. ``VA Gaming Production environment scheduled maintenance notice``
+    → ``VA Gaming``); (2) the ``<Vendor> will perform/have …`` subject
+    (``SimplePlay``); (3) the most-repeated capitalized brand token.
+    """
     text = text or ""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    # (1) First line as a header — short, mentions maintenance, not a greeting.
+    if lines:
+        first = lines[0]
+        if (
+            "maintenance" in first.lower()
+            and len(first.split()) <= 12
+            and not re.match(r"(?i)(dear|hi|hello|greetings|to\s+whom)\b", first)
+        ):
+            brand: list[str] = []
+            for tok in first.split():
+                w = tok.strip(" ,.:;\"'")
+                if not w:
+                    continue
+                if w.lower() in _EGS_VENDOR_GENERIC:
+                    break  # brand ends where the generic words begin
+                if re.match(r"[A-Z0-9][\w&.\-]*$", w):  # brand token or acronym (VA, PG)
+                    brand.append(w)
+                else:
+                    break  # a lowercase word ends the brand run
+            brand_s = re.sub(r"\s+", " ", " ".join(brand)).strip()
+            if len(brand_s) >= 2:
+                return brand_s
+
+    # (2) "<Vendor> will (be) perform/conduct/undergo/carry out/have …"
     m = re.search(
         r"([A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+){0,2})\s+will\s+(?:be\s+)?"
-        r"(?:perform|performing|conduct|conducting|undergo|carry\s+out)",
+        r"(?:perform|performing|conduct|conducting|undergo|carry\s+out|have)",
         text,
     )
     if m:
         return re.sub(r"\s+", " ", m.group(1)).strip()
+
+    # (3) Most-repeated brand-ish token.
     counts: dict[str, int] = {}
     for tok in re.findall(r"\b([A-Z][A-Za-z0-9]{2,})\b", text):
         if tok.lower() in _EGS_VENDOR_STOP:
@@ -5038,18 +5083,41 @@ def _egs_fallback_title(body: str) -> str:
     return "Maintenance Notification"
 
 
+def _egs_title_verified(title: str, body: str) -> bool:
+    """True when an LLM title is a clean ``{Vendor} {Type} Maintenance`` grounded in the body.
+
+    Guards against the reasoning model's verbose descriptions AND against a
+    hallucinated vendor: the title must end in "Maintenance" and its leading
+    vendor word(s) must actually appear in the pasted notice.
+    """
+    t = (title or "").strip()
+    if _egs_title_looks_bad(t):
+        return False
+    if not re.search(r"(?i)\bmaintenance\s*$", t):  # must be a title, not a sentence
+        return False
+    # Strip an optional trailing "{type} maintenance" to isolate the vendor portion.
+    lead = re.sub(
+        rf"(?i)\s*(?:{'|'.join(_EGS_MAINT_TYPES)})?\s*maintenance\s*$", "", t
+    ).strip()
+    words = [w for w in re.findall(r"[A-Za-z0-9]+", lead) if len(w) >= 2]
+    if not words:
+        return False  # "Maintenance" with no vendor is too generic
+    body_low = (body or "").lower()
+    return words[0].lower() in body_low  # vendor must be present in the notice
+
+
 def build_egs_email_subject(body: str, *, now: datetime | None = None) -> str:
     """``/egs`` subject: '{what maintenance} - DD/MM/YYYY' (today's date, GMT+8).
 
-    Deterministic extraction is used first (reliable, gives the short
-    ``{Vendor} {Type} Maintenance`` form); the LLM is only consulted when the
-    regex can't identify a vendor/type.
+    LLM-FIRST: qwen extracts the title from the body; if its output fails
+    :func:`_egs_title_verified` (verbose, not a title, or a hallucinated vendor),
+    the deterministic ``{Vendor} {Type} Maintenance`` regex is used instead.
     """
-    title = _egs_fallback_title(body)
-    if title == "Maintenance Notification":
-        llm = _egs_llm_title(body)
-        if llm:
-            title = llm
+    llm_title = _egs_llm_title(body)
+    if _egs_title_verified(llm_title, body):
+        title = llm_title
+    else:
+        title = _egs_fallback_title(body) or "Maintenance Notification"
     when = now or datetime.now(_display_tz())
     return f"{title} - {when.strftime('%d/%m/%Y')}"
 
