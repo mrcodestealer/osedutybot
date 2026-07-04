@@ -967,13 +967,32 @@ def _vpn_persistent_profile_dir() -> str | None:
     return d or None
 
 
+def _vpn_warm_force_off() -> bool:
+    """Hard opt-out for the server VPN-warm override (rare: VPN Jenkins down / no creds)."""
+    return (os.environ.get("VPN_WARM_FORCE_OFF") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _vpn_warm_enabled() -> bool:
-    return (os.environ.get("VPN_WARM_BROWSER", "1") or "").strip().lower() not in (
+    enabled = (os.environ.get("VPN_WARM_BROWSER", "1") or "").strip().lower() not in (
         "0",
         "false",
         "no",
         "off",
     )
+    if enabled:
+        return True
+    # Explicitly disabled. On the production duty-bot server — detected as Linux with the
+    # force-enabled JU warm pool — keep the VPN browser warm anyway, so a stray
+    # ``VPN_WARM_BROWSER=0`` copied from a dev ``.env`` can't silently cold-start every
+    # ``create vpn`` (~20s). Escape hatch for the genuine off case: ``VPN_WARM_FORCE_OFF=1``.
+    if sys.platform.startswith("linux") and _ju_warm_pool_enabled() and not _vpn_warm_force_off():
+        return True
+    return False
 
 
 def _vpn_warm_profile_dir() -> str:
