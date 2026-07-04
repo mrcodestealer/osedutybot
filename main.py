@@ -331,6 +331,29 @@ def _build_multi_duty_reply(commands: list[str]) -> Optional[str]:
     return "\n\n".join(blocks).strip()
 
 
+def _send_duty_card(dept: str, body_text: str, chat_id: str) -> bool:
+    """Send a department's duty text as a styled Lark message card.
+
+    Falls back to a plain-text message if the card can't be built or the
+    interactive send is rejected. Returns ``True`` when a card was delivered.
+    """
+    try:
+        import dutyai as _dutyai
+
+        payload = _dutyai.build_text_card(dept, body_text)
+        card = payload.get("lark_card") if isinstance(payload, dict) else None
+        if isinstance(card, dict):
+            resp = send_message(
+                chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive"
+            )
+            if not (isinstance(resp, dict) and resp.get("code") not in (0, None)):
+                return True
+    except Exception as exc:
+        print(f"⚠️ duty card send failed for {dept}: {exc!r}", flush=True)
+    send_message(chat_id, body_text)
+    return False
+
+
 def display_all_duty():
     summary = get_all_duty_summary()
     send_message(DUTY_CHAT_ID, summary)
@@ -5501,7 +5524,8 @@ def lark_webhook():
             send_message(chat_id, "❌ Could not find the check person right now. Please try again.")
         return _lark_im_done()
     elif clean_text.lower() == '/fpms':
-        reply = fpms_duty.get_fpms_today_duty()
+        _send_duty_card("fpms", fpms_duty.get_fpms_today_duty(), chat_id)
+        return _lark_im_done()
     elif clean_text.lower().startswith('/fpmscheck'):
         parts = clean_text.split()
         if len(parts) > 1:
@@ -5521,7 +5545,8 @@ def lark_webhook():
         send_message(chat_id, reply)
         return _lark_im_done()
     elif clean_text.lower() == '/pms':
-        reply = pms_duty.dutyNextDay()
+        _send_duty_card("pms", pms_duty.dutyNextDay(), chat_id)
+        return _lark_im_done()
     elif clean_text.lower().startswith('/pmscheck'):
         parts = clean_text.split()
         if len(parts) > 1:
