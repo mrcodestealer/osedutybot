@@ -173,17 +173,17 @@ EVO_BATCH_MAIL_CC_NAME = (
     or os.getenv("evo_batch_mail_cc_name", "").strip()
     or NOT_CP_REPLY_CC_NAME
 )
-# ``/egs`` maintenance notice — LLM-titled paste → junchen@ (Cc om@), same mailbox as ``/m``.
-# Defaults are the literal recipients (independent of FORWARD_* so /egs always goes to junchen@).
+# ``/egs`` maintenance notice — LLM-titled paste → egs.maintenance@ (Cc om@), same mailbox as ``/m``.
+# Defaults are the literal recipients (independent of FORWARD_* so /egs always goes to egs.maintenance@).
 EGS_MAIL_TO = (
     os.getenv("EGS_MAIL_TO", "").strip()
     or os.getenv("egs_mail_to", "").strip()
-    or "junchen@snsoft.my"
+    or "egs.maintenance@om.hotelstotsenberg.com"
 )
 EGS_MAIL_TO_NAME = (
     os.getenv("EGS_MAIL_TO_NAME", "").strip()
     or os.getenv("egs_mail_to_name", "").strip()
-    or "junchen@snsoft.my"
+    or "egs.maintenance@om.hotelstotsenberg.com"
 )
 EGS_MAIL_CC = (
     os.getenv("EGS_MAIL_CC", "").strip()

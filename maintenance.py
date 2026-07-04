@@ -5198,7 +5198,7 @@ def _egs_recipients_display() -> tuple[str, str]:
 
         return _mm.EGS_MAIL_TO, _mm.EGS_MAIL_CC
     except Exception:
-        return "junchen@snsoft.my", "om@hotelstotsenberg.com"
+        return "egs.maintenance@om.hotelstotsenberg.com", "om@hotelstotsenberg.com"
 
 
 def build_egs_preview_card(subject: str, body: str, reply_to_message_id: str = "") -> dict:

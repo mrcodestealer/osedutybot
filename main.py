@@ -3984,7 +3984,7 @@ def _process_egs_paste(chat_id: str, body_text: str, *, dry_run: bool = False) -
             reply_mid,
             f"请在 `{_cmd}` 后粘贴维护通知内容。\n"
             "标题会自动生成：`{维护内容} - {今天日期 DD/MM/YYYY}`，"
-            "邮件发送到 junchen@snsoft.my（抄送 om@hotelstotsenberg.com）。",
+            "邮件发送到 egs.maintenance@om.hotelstotsenberg.com（抄送 om@hotelstotsenberg.com）。",
         )
         return
     try:
@@ -4086,6 +4086,13 @@ def _try_egs_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Opt
                 subject=title, body=body, append_signature=False
             )
             _egs_reply(chat_id_ca, orig_mid, f"✅ `/egs` 邮件已发送\n📌 主题: {title}")
+            # @tag QA Support Team + CS in the forward group to check the sent email.
+            fwd_chat = maintenance.evo_batch_forward_chat_id()
+            if fwd_chat:
+                send_message(
+                    fwd_chat,
+                    maintenance.build_evo_batch_check_email_text(title),
+                )
         except Exception as ex:  # noqa: BLE001
             _egs_reply(chat_id_ca, orig_mid, f"❌ `/egs` 发送失败: `{ex}`")
 
