@@ -173,6 +173,35 @@ EVO_BATCH_MAIL_CC_NAME = (
     or os.getenv("evo_batch_mail_cc_name", "").strip()
     or NOT_CP_REPLY_CC_NAME
 )
+# ``/egs`` maintenance notice — LLM-titled paste → junchen@ (Cc om@), same mailbox as ``/m``.
+# Defaults are the literal recipients (independent of FORWARD_* so /egs always goes to junchen@).
+EGS_MAIL_TO = (
+    os.getenv("EGS_MAIL_TO", "").strip()
+    or os.getenv("egs_mail_to", "").strip()
+    or "junchen@snsoft.my"
+)
+EGS_MAIL_TO_NAME = (
+    os.getenv("EGS_MAIL_TO_NAME", "").strip()
+    or os.getenv("egs_mail_to_name", "").strip()
+    or "junchen@snsoft.my"
+)
+EGS_MAIL_CC = (
+    os.getenv("EGS_MAIL_CC", "").strip()
+    or os.getenv("egs_mail_cc", "").strip()
+    or "om@hotelstotsenberg.com"
+)
+EGS_MAIL_CC_NAME = (
+    os.getenv("EGS_MAIL_CC_NAME", "").strip()
+    or os.getenv("egs_mail_cc_name", "").strip()
+    or FORWARD_FROM_NAME
+)
+# Signature appended to every ``/egs`` body. Env override may use literal ``\n``.
+EGS_MAIL_SIGNATURE = (
+    (os.getenv("EGS_MAIL_SIGNATURE", "") or os.getenv("egs_mail_signature", ""))
+    .replace("\\n", "\n")
+    .strip()
+    or "Thank you and best regards,\nOM"
+)
 # Link Fw: to the incoming maintenance mail in om@ (In-Reply-To). Set 0 if Show/Hide breaks.
 FORWARD_THREAD_HEADERS = (
     os.getenv("MAINTENANCE_MAIL_FORWARD_THREAD", "").strip() or "1"
@@ -1366,6 +1395,32 @@ def send_evo_batch_maintenance_email(*, subject: str, body: str) -> None:
         smtp.login(MAIL_USER, MAIL_PASSWORD)
         smtp.sendmail(MAIL_USER, recipients, msg.as_string())
     print(f"[maint-mail] EVO batch {subj!r} → {route}", flush=True)
+
+
+def send_egs_maintenance_email(*, subject: str, body: str) -> None:
+    """``/egs`` maintenance notice: om@ mailbox → junchen@ + Cc om@ (plain text, same account as ``/m``)."""
+    if not MAIL_PASSWORD:
+        raise RuntimeError("MAINTENANCE_MAIL_PASSWORD not set")
+    subj = (subject or "").strip() or "Maintenance Notification"
+    text = (body or "").strip()
+    if not text:
+        raise ValueError("empty /egs email body")
+    if EGS_MAIL_SIGNATURE:
+        text = f"{text}\n\n{EGS_MAIL_SIGNATURE}"
+    msg = MIMEText(text, "plain", "utf-8")
+    msg["Subject"] = Header(subj, "utf-8")
+    msg["From"] = formataddr((FORWARD_FROM_NAME, MAIL_USER))
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid()
+    msg["To"] = formataddr((EGS_MAIL_TO_NAME, EGS_MAIL_TO))
+    msg["Cc"] = formataddr((EGS_MAIL_CC_NAME, EGS_MAIL_CC))
+    recipients = [EGS_MAIL_TO, EGS_MAIL_CC]
+    route = f"{EGS_MAIL_TO} cc={EGS_MAIL_CC}"
+    ctx = ssl.create_default_context()
+    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=IMAP_TIMEOUT, context=ctx) as smtp:
+        smtp.login(MAIL_USER, MAIL_PASSWORD)
+        smtp.sendmail(MAIL_USER, recipients, msg.as_string())
+    print(f"[maint-mail] /egs {subj!r} → {route}", flush=True)
 
 
 JENKINS_DONE_REPLY_TO = (

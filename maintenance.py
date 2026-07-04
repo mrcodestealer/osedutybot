@@ -4818,6 +4818,122 @@ def _evo_email_subject_date(blocks_out: list[str]) -> str:
     return datetime.now(_display_tz()).strftime("%Y%m%d")
 
 
+# ---------------------------------------------------------------------------
+# ``/egs`` — email subject "{what maintenance} - DD/MM/YYYY" (today, GMT+8).
+# The LLM turns the pasted body into the "{what maintenance}" part; we append
+# today's date. A deterministic regex fallback keeps it working if the LLM is
+# down or returns garbage (e.g. the tiny prod model).
+# ---------------------------------------------------------------------------
+_EGS_TITLE_SYSTEM = (
+    "You write the SUBJECT title of a scheduled-maintenance notification email. "
+    "Given the notification body, reply with ONLY the maintenance title: the "
+    "product / vendor name followed by the maintenance type, in Title Case. "
+    "Do NOT include any date, time, quotes, or extra words, and do NOT explain. "
+    "Keep it under 80 characters.\n"
+    "Example body: 'SimplePlay will perform regular maintenance on the following "
+    "schedule ...' -> SimplePlay Regular Maintenance"
+)
+
+
+def _egs_title_model() -> str:
+    return (
+        os.getenv("BOT_EGS_TITLE_MODEL", "").strip()
+        or os.getenv("BOT_CHAT_MODEL", "").strip()
+        or os.getenv("BOT_COMMANDAGENT_LLM_MODEL", "").strip()
+        or "qwen2.5:0.5b"
+    )
+
+
+def _clean_egs_title(raw: str) -> str:
+    """Strip reasoning traces / fences / quotes / stray date and keep the title line."""
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    # Reasoning models (qwen3.x) may wrap their chain-of-thought in <think> tags.
+    s = re.sub(r"<think>.*?</think>", "", s, flags=re.I | re.S).strip()
+    s = re.sub(r"^```(?:\w+)?|```$", "", s, flags=re.I | re.M).strip()
+    lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
+    if lines:
+        s = lines[-1]  # models sometimes prepend a note; the title is the last line
+    s = re.sub(r"(?i)^(subject|title)\s*[:：]\s*", "", s).strip().strip('"').strip("'").strip()
+    # Drop a trailing date the model may have added on its own (we append our own).
+    s = re.sub(r"\s*[-–—]\s*\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4}\s*$", "", s).strip()
+    return re.sub(r"\s+", " ", s)[:80].strip()
+
+
+def _egs_llm_title(body: str) -> str:
+    """Ask the LLM (BOT_CHAT_* / qwen) for the '{what maintenance}' title. '' on any failure."""
+    api_key = (os.getenv("BOT_CHAT_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        return ""
+    base = (os.getenv("BOT_CHAT_API_BASE") or "https://api.openai.com/v1").strip().rstrip("/")
+    payload = {
+        "model": _egs_title_model(),
+        "messages": [
+            {"role": "system", "content": _EGS_TITLE_SYSTEM},
+            {"role": "user", "content": (body or "").strip()[:4000]},
+        ],
+        "max_tokens": 60,
+        "temperature": 0,
+    }
+    try:
+        import chatagent as _ca
+
+        _ca.enrich_ollama_chat_payload(payload)  # think=off + keep_alive for qwen3.x on Ollama
+    except Exception:
+        pass
+    try:
+        resp = requests.post(
+            f"{base}/chat/completions",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            data=json.dumps(payload).encode("utf-8"),
+            timeout=float(os.getenv("BOT_EGS_TITLE_TIMEOUT", "45")),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        msg = (data.get("choices") or [{}])[0].get("message") or {}
+        content = msg.get("content") or ""
+        title = _clean_egs_title(content)
+        # Some Ollama models put the answer only in ``reasoning`` when content is empty.
+        if not title and msg.get("reasoning"):
+            title = _clean_egs_title(str(msg.get("reasoning")))
+        return title
+    except Exception as ex:  # noqa: BLE001
+        print(f"⚠️ /egs title LLM failed: {ex!r}", flush=True)
+        return ""
+
+
+def _egs_fallback_title(body: str) -> str:
+    """Deterministic '{what maintenance}' when the LLM is unavailable."""
+    text = body or ""
+    m = re.search(
+        r"([A-Z][\w&.\-]*(?:\s+[A-Z][\w&.\-]*){0,3})\s+will\s+(?:be\s+)?"
+        r"(?:perform|performing|conduct|conducting|undergo|carry\s+out)\w*\s+"
+        r"(?:a\s+|an\s+)?(regular\s+|scheduled\s+|routine\s+|emergency\s+)?maintenance",
+        text,
+        re.I,
+    )
+    if m:
+        vendor = re.sub(r"\s+", " ", m.group(1)).strip()
+        kind = (m.group(2) or "").strip().title()
+        kind = f"{kind} " if kind else ""
+        return re.sub(r"\s+", " ", f"{vendor} {kind}Maintenance").strip()[:80]
+    m2 = re.search(r"\b([A-Z][A-Za-z0-9]{2,})\b", text)
+    if m2:
+        return f"{m2.group(1)} Maintenance"[:80]
+    return "Maintenance Notification"
+
+
+def build_egs_email_subject(body: str, *, now: datetime | None = None) -> str:
+    """``/egs`` subject: '{what maintenance} - DD/MM/YYYY' (today's date, GMT+8)."""
+    title = _egs_llm_title(body) or _egs_fallback_title(body) or "Maintenance Notification"
+    when = now or datetime.now(_display_tz())
+    return f"{title} - {when.strftime('%d/%m/%Y')}"
+
+
 EVO_BATCH_FORWARD_CHAT_ID_DEFAULT = "oc_9ffa9a76810abf72e39d597aee37d65a"
 EVO_BATCH_COMMAND_CHAT_ID_DEFAULT = "oc_51b6fbf2636525acfb4ead3afa3c93ce"
 MAINTENANCE_CONFIRM_CHAT_ID_DEFAULT = "oc_9de3d63fc589df6feeb9b0bee9c45b72"
