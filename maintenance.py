@@ -4824,18 +4824,18 @@ def _evo_email_subject_date(blocks_out: list[str]) -> str:
 # today's date. A deterministic regex fallback keeps it working if the LLM is
 # down or returns garbage (e.g. the tiny prod model).
 # ---------------------------------------------------------------------------
-_EGS_TITLE_SYSTEM = (
-    "You generate the SUBJECT title for a game/vendor scheduled-maintenance email. "
-    "Output ONLY the title on a SINGLE line, 2 to 5 words in Title Case: the "
-    "product / game / vendor name, then the maintenance type, then the word Maintenance. "
-    "It MUST end with the word 'Maintenance'. "
-    "Drop filler words like 'Production', 'environment', 'notice', 'notification'. "
-    "No date, no time, no quotes, no labels (never write 'Subject:' or 'Title:'), "
-    "no bullet points, no explanation, no extra words.\n"
-    "Examples:\n"
-    "'SimplePlay will perform regular maintenance ...' -> SimplePlay Regular Maintenance\n"
-    "'VA Gaming Production environment scheduled maintenance notice ...' -> VA Gaming Scheduled Maintenance\n"
-    "'PG Soft emergency maintenance ...' -> PG Soft Emergency Maintenance"
+_EGS_EXTRACT_SYSTEM = (
+    "You read a game/casino vendor's maintenance notice and pull out two facts. "
+    "Reply with ONLY a compact JSON object — no prose, no markdown, no code fences:\n"
+    '{"vendor": "<the game / studio / provider / brand being maintained, copied '
+    'verbatim from the notice, e.g. SimplePlay, VA Gaming, Yggdrasil Gaming, PG Soft, '
+    'Evolution>", "type": "<one of: regular, scheduled, routine, emergency, planned, '
+    'periodic — or an empty string if not stated>"}\n'
+    "The vendor is the game provider whose platform is under maintenance. It is NOT a "
+    "date, month, weekday, time, a team/department name (e.g. 'DC Team', 'OM'), the word "
+    "'Production'/'Environment', or the recipient. Look at the subject/header line, any "
+    "bracketed name like [Yggdrasil Gaming], and lines such as 'Impact: <vendor>'. "
+    "Copy the vendor exactly as written. If you truly cannot find it, use an empty string."
 )
 
 # Meta / instruction-echo fragments a confused model may emit instead of a title.
@@ -4930,20 +4930,43 @@ def _egs_title_looks_bad(title: str) -> bool:
     return False
 
 
-def _egs_llm_title(body: str) -> str:
-    """Ask the LLM (BOT_CHAT_* / qwen) for the '{what maintenance}' title. '' on any failure/garbage."""
+def _egs_norm(s: str) -> str:
+    """Lowercase alphanumerics only — for loose vendor↔body grounding ('VA Gaming'→'vagaming')."""
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def _egs_parse_json(content: str) -> dict | None:
+    """Pull the first ``{…}`` object out of a model reply (tolerates think traces / fences)."""
+    s = (content or "").strip()
+    if not s:
+        return None
+    s = re.sub(r"<think>.*?</think>", "", s, flags=re.I | re.S).strip()
+    s = re.sub(r"</?think>", "", s, flags=re.I).strip()
+    s = re.sub(r"^```(?:json)?|```$", "", s, flags=re.I | re.M).strip()
+    a, b = s.find("{"), s.rfind("}")
+    if a == -1 or b == -1 or b < a:
+        return None
+    try:
+        obj = json.loads(s[a : b + 1])
+    except ValueError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _egs_llm_extract(body: str) -> dict | None:
+    """LLM structured extract → ``{"vendor": .., "type": ..}`` (or None). Works for ANY provider."""
     api_key = (os.getenv("BOT_CHAT_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
     if not api_key:
-        return ""
+        return None
     base = (os.getenv("BOT_CHAT_API_BASE") or "https://api.openai.com/v1").strip().rstrip("/")
     payload = {
         "model": _egs_title_model(),
         "messages": [
-            {"role": "system", "content": _EGS_TITLE_SYSTEM},
+            {"role": "system", "content": _EGS_EXTRACT_SYSTEM},
             # ``/no_think`` disables reasoning on qwen3.x (harmless on other models).
             {"role": "user", "content": ((body or "").strip()[:4000]) + "\n\n/no_think"},
         ],
-        "max_tokens": 80,
+        "max_tokens": 200,
         "temperature": 0,
     }
     try:
@@ -4966,19 +4989,42 @@ def _egs_llm_title(body: str) -> str:
         data = resp.json()
         msg = (data.get("choices") or [{}])[0].get("message") or {}
         content = msg.get("content") or ""
-        title = _clean_egs_title(content)
-        # Some Ollama models put the answer only in ``reasoning`` when content is empty.
-        if _egs_title_looks_bad(title) and msg.get("reasoning"):
-            title = _clean_egs_title(str(msg.get("reasoning")))
+        obj = _egs_parse_json(content)
+        if obj is None and msg.get("reasoning"):
+            obj = _egs_parse_json(str(msg.get("reasoning")))
         print(
-            f"[egs] title model={_egs_title_model()} "
-            f"raw={content.strip()[:120]!r} -> {title!r}",
+            f"[egs] extract model={_egs_title_model()} "
+            f"raw={content.strip()[:160]!r} -> {obj!r}",
             flush=True,
         )
-        return "" if _egs_title_looks_bad(title) else title
+        return obj
     except Exception as ex:  # noqa: BLE001
-        print(f"⚠️ /egs title LLM failed: {ex!r}", flush=True)
+        print(f"⚠️ /egs extract LLM failed: {ex!r}", flush=True)
+        return None
+
+
+def _egs_llm_title(body: str) -> str:
+    """LLM-derived '{Vendor} {Type} Maintenance' — the vendor is extracted by the model
+    (any game/provider), then grounded against the body so it can't be hallucinated.
+    Returns '' when the LLM is unavailable or its answer isn't trustworthy."""
+    data = _egs_llm_extract(body)
+    if not isinstance(data, dict):
         return ""
+    vendor = re.sub(r"\s+", " ", str(data.get("vendor") or "").strip()).strip(" \"'[]()")
+    mtype = str(data.get("type") or "").strip().lower()
+    if not vendor:
+        return ""
+    words = re.findall(r"[A-Za-z0-9]+", vendor)
+    if not words or words[0].lower() in _EGS_BAD_VENDOR_LEAD:
+        return ""  # a date/generic word slipped in as the "vendor"
+    if _egs_norm(vendor) not in _egs_norm(body):
+        return ""  # not actually in the notice → treat as hallucination
+    # Type: trust the text (adjective before "maintenance") over the LLM's guess,
+    # which can drift (e.g. "regular" → "scheduled" when it sees "following schedule").
+    kind = _egs_maint_type(body) or (mtype.title() if mtype in _EGS_MAINT_TYPES else "")
+    title = f"{vendor} {kind} Maintenance" if kind else f"{vendor} Maintenance"
+    title = re.sub(r"\s+", " ", title).strip()[:80]
+    return "" if _egs_title_looks_bad(title) else title
 
 
 _EGS_MAINT_TYPES = (
@@ -5001,6 +5047,14 @@ _EGS_VENDOR_GENERIC = {
     "notification", "client", "platform", "service", "services",
     "api", "back", "office", "web",
 }
+# Month names / abbreviations — never a vendor (they appear in schedule dates).
+_EGS_MONTHS = {
+    "january", "february", "march", "april", "may", "june", "july", "august",
+    "september", "october", "november", "december",
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
+}
+# Leading words that disqualify an LLM title's vendor (date/generic/greeting noise).
+_EGS_BAD_VENDOR_LEAD = _EGS_VENDOR_STOP | _EGS_MONTHS | _EGS_VENDOR_GENERIC
 
 
 def _egs_maint_type(text: str) -> str:
@@ -5011,41 +5065,67 @@ def _egs_maint_type(text: str) -> str:
     return m.group(1).title() if m else ""
 
 
+def _egs_brand_run(s: str) -> str:
+    """Leading run of brand tokens (incl. acronyms like VA/PG), stopping at generic/month/lowercase."""
+    brand: list[str] = []
+    for tok in (s or "").split():
+        w = tok.strip(" ,.:;[](){}\"'/-").strip()
+        if not w:
+            continue
+        if w.lower() in _EGS_VENDOR_GENERIC or w.lower() in _EGS_MONTHS:
+            break
+        if re.match(r"[A-Za-z0-9][\w&.\-]*$", w) and re.search(r"[A-Za-z]", w):
+            brand.append(w)
+        else:
+            break  # lowercase word / emoji / symbol ends the brand run
+    return re.sub(r"\s+", " ", " ".join(brand)).strip()
+
+
 def _egs_vendor(text: str) -> str:
     """Best-guess vendor/brand for the title.
 
-    In priority order: (1) the leading brand of a short header line that names the
-    maintenance (e.g. ``VA Gaming Production environment scheduled maintenance notice``
-    → ``VA Gaming``); (2) the ``<Vendor> will perform/have …`` subject
-    (``SimplePlay``); (3) the most-repeated capitalized brand token.
+    Priority: (1) a bracketed brand near the top (``🚧 [Yggdrasil Gaming] …`` → ``Yggdrasil
+    Gaming``); (2) an ``Impact:/Game:/Provider:`` line; (3) the leading brand of a short
+    header line that names the maintenance (``VA Gaming Production … maintenance`` →
+    ``VA Gaming``); (4) the ``<Vendor> will perform/have …`` subject (``SimplePlay``);
+    (5) the most-repeated capitalized brand token (months/generic excluded).
     """
     text = text or ""
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
 
-    # (1) First line as a header — short, mentions maintenance, not a greeting.
+    # (1) Bracketed brand in the first few lines: [Yggdrasil Gaming], (…), 【…】.
+    for ln in lines[:4]:
+        mb = re.search(r"[\[\(【]\s*([^\]\)】]{2,40})\s*[\]\)】]", ln)
+        if mb:
+            cand = _egs_brand_run(mb.group(1))
+            if len(cand) >= 2:
+                return cand
+
+    # (2) Explicit "Impact:/Game(s):/Product:/Provider: <Vendor>" line (emoji-tolerant).
+    for ln in lines:
+        mi = re.search(
+            r"(?i)\b(?:impact|impacted|games?|product|provider|vendor|brand)\s*[:：]\s*(.+)$",
+            ln,
+        )
+        if mi:
+            cand = _egs_brand_run(mi.group(1))
+            if len(cand) >= 2:
+                return cand
+
+    # (3) First line as a header — mentions maintenance, not a greeting.
+    #     Strip leading emojis/symbols so "🚧 VA Gaming …" still yields the brand.
     if lines:
-        first = lines[0]
+        first = re.sub(r"^[^A-Za-z0-9\[\(【]+", "", lines[0])
         if (
-            "maintenance" in first.lower()
-            and len(first.split()) <= 12
+            "maintenance" in lines[0].lower()
+            and len(lines[0].split()) <= 14
             and not re.match(r"(?i)(dear|hi|hello|greetings|to\s+whom)\b", first)
         ):
-            brand: list[str] = []
-            for tok in first.split():
-                w = tok.strip(" ,.:;\"'")
-                if not w:
-                    continue
-                if w.lower() in _EGS_VENDOR_GENERIC:
-                    break  # brand ends where the generic words begin
-                if re.match(r"[A-Z0-9][\w&.\-]*$", w):  # brand token or acronym (VA, PG)
-                    brand.append(w)
-                else:
-                    break  # a lowercase word ends the brand run
-            brand_s = re.sub(r"\s+", " ", " ".join(brand)).strip()
-            if len(brand_s) >= 2:
-                return brand_s
+            cand = _egs_brand_run(first)
+            if len(cand) >= 2:
+                return cand
 
-    # (2) "<Vendor> will (be) perform/conduct/undergo/carry out/have …"
+    # (4) "<Vendor> will (be) perform/conduct/undergo/carry out/have …"
     m = re.search(
         r"([A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+){0,2})\s+will\s+(?:be\s+)?"
         r"(?:perform|performing|conduct|conducting|undergo|carry\s+out|have)",
@@ -5054,10 +5134,11 @@ def _egs_vendor(text: str) -> str:
     if m:
         return re.sub(r"\s+", " ", m.group(1)).strip()
 
-    # (3) Most-repeated brand-ish token.
+    # (5) Most-repeated brand-ish token (skip months / generic / stopwords).
     counts: dict[str, int] = {}
     for tok in re.findall(r"\b([A-Z][A-Za-z0-9]{2,})\b", text):
-        if tok.lower() in _EGS_VENDOR_STOP:
+        low = tok.lower()
+        if low in _EGS_VENDOR_STOP or low in _EGS_MONTHS or low in _EGS_VENDOR_GENERIC:
             continue
         counts[tok] = counts.get(tok, 0) + 1
     if counts:
@@ -5083,41 +5164,15 @@ def _egs_fallback_title(body: str) -> str:
     return "Maintenance Notification"
 
 
-def _egs_title_verified(title: str, body: str) -> bool:
-    """True when an LLM title is a clean ``{Vendor} {Type} Maintenance`` grounded in the body.
-
-    Guards against the reasoning model's verbose descriptions AND against a
-    hallucinated vendor: the title must end in "Maintenance" and its leading
-    vendor word(s) must actually appear in the pasted notice.
-    """
-    t = (title or "").strip()
-    if _egs_title_looks_bad(t):
-        return False
-    if not re.search(r"(?i)\bmaintenance\s*$", t):  # must be a title, not a sentence
-        return False
-    # Strip an optional trailing "{type} maintenance" to isolate the vendor portion.
-    lead = re.sub(
-        rf"(?i)\s*(?:{'|'.join(_EGS_MAINT_TYPES)})?\s*maintenance\s*$", "", t
-    ).strip()
-    words = [w for w in re.findall(r"[A-Za-z0-9]+", lead) if len(w) >= 2]
-    if not words:
-        return False  # "Maintenance" with no vendor is too generic
-    body_low = (body or "").lower()
-    return words[0].lower() in body_low  # vendor must be present in the notice
-
-
 def build_egs_email_subject(body: str, *, now: datetime | None = None) -> str:
-    """``/egs`` subject: '{what maintenance} - DD/MM/YYYY' (today's date, GMT+8).
+    """``/egs`` subject: '{Vendor} {Type} Maintenance - DD/MM/YYYY' (today's date, GMT+8).
 
-    LLM-FIRST: qwen extracts the title from the body; if its output fails
-    :func:`_egs_title_verified` (verbose, not a title, or a hallucinated vendor),
-    the deterministic ``{Vendor} {Type} Maintenance`` regex is used instead.
+    LLM-FIRST: qwen reads the notice and extracts the vendor (works for ANY game
+    provider); the vendor is grounded against the body inside :func:`_egs_llm_title`,
+    and we assemble the fixed ``{Vendor} {Type} Maintenance`` format ourselves. If the
+    LLM is down or its answer isn't trustworthy, the deterministic regex takes over.
     """
-    llm_title = _egs_llm_title(body)
-    if _egs_title_verified(llm_title, body):
-        title = llm_title
-    else:
-        title = _egs_fallback_title(body) or "Maintenance Notification"
+    title = _egs_llm_title(body) or _egs_fallback_title(body) or "Maintenance Notification"
     when = now or datetime.now(_display_tz())
     return f"{title} - {when.strftime('%d/%m/%Y')}"
 
