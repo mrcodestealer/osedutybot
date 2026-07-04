@@ -1240,7 +1240,15 @@ def extract_argument(arg_kind: Optional[str], user_text: str, spec: IntentSpec) 
     if not arg_kind:
         return None
     text = (user_text or "").strip()
+    # Group messages arrive with "@_user_1" mention placeholders / <at> tags. Strip
+    # them here so they never leak into the extracted argument (e.g. the router
+    # building "/s @_user_1 ryan" from a mention-laden body).
+    text = re.sub(r"@_user_\d+|<at[^>]*>.*?</at>", " ", text, flags=re.I | re.S)
+    text = re.sub(r"\s+", " ", text).strip()
     if arg_kind == "search_name":
+        # A leading slash command ("/s ryan", "/search ryan") must not become part
+        # of the name — otherwise the query doubles up to "/s ryan".
+        text = re.sub(r"^/(?:s|search)\b\s*", "", text, flags=re.I).strip()
         m = re.search(r"(?i)search duty for\s+(.+)$", text)
         if m:
             q = m.group(1).strip(" ?!.,")
