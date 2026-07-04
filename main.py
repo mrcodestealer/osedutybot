@@ -4008,13 +4008,24 @@ def _process_egs_paste(chat_id: str, body_text: str, *, dry_run: bool = False) -
             )
             return
 
-        # /egs → interactive preview card (Send / Cancel), quote-replied to the user's message.
-        # The original message id rides in the button values so the confirmation quotes it too.
+        # /egs → interactive preview card (Send / Cancel). Post it DIRECTLY to the chat,
+        # NOT via the reply endpoint: Feishu renders interactive cards invisibly when they
+        # are sent as a reply (the user then sees only a reaction, no card). The original
+        # message id rides in the button values so the confirmation can quote it.
         card = maintenance.build_egs_preview_card(subject, full_body, reply_to_message_id=reply_mid)
-        _egs_reply(
-            chat_id, reply_mid, json.dumps(card, ensure_ascii=False), msg_type="interactive"
+        _resp = send_message(
+            chat_id,
+            json.dumps(card, ensure_ascii=False),
+            msg_type="interactive",
+            reply_to_message_id="",  # force a direct post, not a reply
+        )
+        print(
+            f"[egs] preview card sent code={(_resp or {}).get('code')!r} "
+            f"msg={(_resp or {}).get('msg')!r}",
+            flush=True,
         )
     except Exception as ex:
+        print(f"[egs] preview card failed: {ex!r}", flush=True)
         _egs_reply(chat_id, reply_mid, f"❌ `{_cmd}` 处理失败: `{ex}`")
 
 
