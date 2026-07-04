@@ -5209,8 +5209,11 @@ def build_egs_preview_card(subject: str, body: str, reply_to_message_id: str = "
     ``reply_to_message_id`` (the user's original message) rides in the button values as
     ``m`` so the confirmation can thread under it.
     """
-    subject = (subject or "").strip()
+    # Feishu card inputs cap max_length at 1000 — keep both the property AND the
+    # pre-filled default_value within it or the whole card is rejected (ErrCode 11310).
+    subject = (subject or "").strip()[:300]
     body = (body or "").strip()
+    body_input = body[:1000]
     to_disp, cc_disp = _egs_recipients_display()
     _mid = (reply_to_message_id or "").strip()
     send_val = {"k": "egs_send"}
@@ -5238,6 +5241,11 @@ def build_egs_preview_card(subject: str, body: str, reply_to_message_id: str = "
                             f"**收件 To:** {to_disp}　**抄送 Cc:** {cc_disp}\n"
                             "可直接修改下方**标题**与**正文**，确认后点 **发送 / Send Email**，"
                             "或点 **取消 / Cancel**（不会发送）。"
+                            + (
+                                "\n⚠️ 正文超过 1000 字符，编辑框已截断显示（Feishu 限制）。"
+                                if len(body) > 1000
+                                else ""
+                            )
                         ),
                     },
                 },
@@ -5262,11 +5270,11 @@ def build_egs_preview_card(subject: str, body: str, reply_to_message_id: str = "
                             "rows": 8,
                             "auto_resize": True,
                             "max_rows": 20,
-                            "default_value": body,
+                            "default_value": body_input,
                             "label": {"tag": "plain_text", "content": "正文 Content"},
                             "label_position": "top",
                             "width": "fill",
-                            "max_length": 8000,
+                            "max_length": 1000,
                             "placeholder": {"tag": "plain_text", "content": "Email body"},
                         },
                         {
