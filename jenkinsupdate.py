@@ -1569,7 +1569,8 @@ class _JuWarmWorker:
             box = task["box"]
             try:
                 try:
-                    self._ensure_ready()
+                    # Skip the redundant form reload — run() navigates + logs in authoritatively.
+                    self._ensure_ready(navigate_job_page=False)
                 except Exception as ex:
                     box["pre_error"] = ex
                     self._teardown()
@@ -1640,7 +1641,15 @@ class _JuWarmWorker:
         )
         jenkins_login_if_needed(self._page, *_credentials())
 
-    def _ensure_ready(self) -> None:
+    def _ensure_ready(self, *, navigate_job_page: bool = True) -> None:
+        """Guarantee the browser is alive + logged in.
+
+        ``navigate_job_page`` re-loads the build form so the page is left ready (prewarm /
+        keepalive / discovery). The **run** path passes ``False``: ``run()`` →
+        ``open_fpms_build_with_login`` does the single authoritative navigation + login itself,
+        so re-loading the form here first is a redundant full page load (~1–3s of UnoChoice
+        init) on every request. A dead/idle session is still re-logged by that call.
+        """
         if not self._healthy():
             self._launch()
             try:
@@ -1648,12 +1657,13 @@ class _JuWarmWorker:
                     _ju_warm_base_url(), wait_until="domcontentloaded", timeout=90_000
                 )
                 jenkins_login_if_needed(self._page, *_credentials())
-                self._goto_job_page()
+                if navigate_job_page:
+                    self._goto_job_page()
             except Exception as ex:
                 print(f"[ju-pool:{self.slug}] warm login failed: {ex!r}", flush=True)
                 self._ready.clear()
                 raise
-        else:
+        elif navigate_job_page:
             try:
                 self._goto_job_page()
             except Exception as ex:
