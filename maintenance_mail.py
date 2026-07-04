@@ -1397,15 +1397,19 @@ def send_evo_batch_maintenance_email(*, subject: str, body: str) -> None:
     print(f"[maint-mail] EVO batch {subj!r} → {route}", flush=True)
 
 
-def send_egs_maintenance_email(*, subject: str, body: str) -> None:
-    """``/egs`` maintenance notice: om@ mailbox → junchen@ + Cc om@ (plain text, same account as ``/m``)."""
+def send_egs_maintenance_email(*, subject: str, body: str, append_signature: bool = True) -> None:
+    """``/egs`` maintenance notice: om@ mailbox → junchen@ + Cc om@ (plain text, same account as ``/m``).
+
+    ``append_signature=False`` when the caller's body already ends with the signature
+    (e.g. the editable preview card, which shows the full email for the user to edit).
+    """
     if not MAIL_PASSWORD:
         raise RuntimeError("MAINTENANCE_MAIL_PASSWORD not set")
     subj = (subject or "").strip() or "Maintenance Notification"
     text = (body or "").strip()
     if not text:
         raise ValueError("empty /egs email body")
-    if EGS_MAIL_SIGNATURE:
+    if append_signature and EGS_MAIL_SIGNATURE:
         text = f"{text}\n\n{EGS_MAIL_SIGNATURE}"
     msg = MIMEText(text, "plain", "utf-8")
     msg["Subject"] = Header(subj, "utf-8")

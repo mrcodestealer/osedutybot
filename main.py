@@ -3926,11 +3926,19 @@ def _process_evo_sd_batch_paste(chat_id: str, email_text: str) -> None:
             )
             fwd_chat = maintenance.evo_batch_forward_chat_id()
             fwd_card = batch.get("forward_card")
-            if fwd_chat and fwd_card:
+            if fwd_chat:
+                if fwd_card:
+                    send_message(
+                        fwd_chat,
+                        json.dumps(fwd_card, ensure_ascii=False),
+                        msg_type="interactive",
+                    )
+                # @tag QA Support Team + CS to check the email that was just sent.
                 send_message(
                     fwd_chat,
-                    json.dumps(fwd_card, ensure_ascii=False),
-                    msg_type="interactive",
+                    maintenance.build_evo_batch_check_email_text(
+                        batch.get("email_subject") or ""
+                    ),
                 )
         send_message(
             chat_id,
@@ -3941,24 +3949,46 @@ def _process_evo_sd_batch_paste(chat_id: str, email_text: str) -> None:
         send_message(chat_id, f"❌ EVO 批量 `/m` 处理失败: `{ex}`")
 
 
+def _egs_thread_post(chat_id: str, reply_mid: str, payload, *, msg_type: str = "text") -> dict:
+    """Post as a **thread reply** to the user's original message; fall back to a normal send.
+
+    Keeps the whole ``/egs`` exchange (preview card + confirmation) inside the thread of
+    the message the user typed ``/egs`` in.
+    """
+    mid = (reply_mid or "").strip()
+    if mid:
+        try:
+            resp = reply_message_in_thread(mid, payload, msg_type=msg_type)
+            if isinstance(resp, dict) and resp.get("code") == 0:
+                return resp
+            print(f"[egs] thread reply resp={resp!r}; falling back to send_message", flush=True)
+        except Exception as ex:  # noqa: BLE001
+            print(f"[egs] thread reply failed ({ex!r}); falling back", flush=True)
+    return send_message(chat_id, payload, msg_type=msg_type)
+
+
 def _process_egs_paste(chat_id: str, body_text: str, *, dry_run: bool = False) -> None:
-    """``/egs`` — email a pasted maintenance notice to junchen@ (Cc om@), same mailbox as ``/m``.
+    """``/egs`` — show an **editable preview card** for a pasted maintenance notice.
 
-    The subject is derived by the LLM from the body (``{what maintenance}``) and
-    suffixed with today's date, e.g. ``SimplePlay Regular Maintenance - 04/07/2026``.
-    Gated to the same OSE BOT - Ops & Maintenance group as ``/m``.
+    The LLM-derived subject (``{Vendor} {Type} Maintenance - DD/MM/YYYY``) and the body
+    (+ signature) are pre-filled into editable fields; nothing is sent until the user
+    taps **Send Email** on the card. The card is posted as a **thread reply** to the
+    user's ``/egs`` message so the whole exchange stays in that thread. Gated to the same
+    OSE BOT - Ops & Maintenance group as ``/m``. Sends to junchen@ (Cc om@).
 
-    ``dry_run=True`` (``/egstest``) generates the title and previews the exact email
-    (subject + recipients + body incl. signature) **without sending** anything.
+    ``dry_run=True`` (``/egstest``) just prints the title + body preview as text — no card,
+    no send — for a quick title check.
     """
     _cmd = "/egstest" if dry_run else "/egs"
     if not maintenance.is_evo_batch_command_chat(chat_id):
         send_message(chat_id, maintenance.EVO_BATCH_WRONG_GROUP_MESSAGE)
         return
+    reply_mid = (_lark_user_message_id.get() or "").strip()
     body = (body_text or "").strip()
     if not body:
-        send_message(
+        _egs_thread_post(
             chat_id,
+            reply_mid,
             f"请在 `{_cmd}` 后粘贴维护通知内容。\n"
             "标题会自动生成：`{维护内容} - {今天日期 DD/MM/YYYY}`，"
             "邮件发送到 junchen@snsoft.my（抄送 om@hotelstotsenberg.com）。",
@@ -3968,30 +3998,95 @@ def _process_egs_paste(chat_id: str, body_text: str, *, dry_run: bool = False) -
         subject = maintenance.build_egs_email_subject(body)
         import maintenance_mail as _maint_mail
 
+        full_body = body
+        if _maint_mail.EGS_MAIL_SIGNATURE:
+            full_body = f"{body}\n\n{_maint_mail.EGS_MAIL_SIGNATURE}"
+
         if dry_run:
-            preview = body
-            if _maint_mail.EGS_MAIL_SIGNATURE:
-                preview = f"{body}\n\n{_maint_mail.EGS_MAIL_SIGNATURE}"
-            send_message(
+            _egs_thread_post(
                 chat_id,
+                reply_mid,
                 "🧪 `/egstest`（未发送 / dry-run）\n"
                 f"📌 标题: {subject}\n"
                 f"📧 收件: {_maint_mail.EGS_MAIL_TO}\n"
                 f"📄 抄送: {_maint_mail.EGS_MAIL_CC}\n"
                 "———— 正文预览 ————\n"
-                f"{preview}",
+                f"{full_body}",
             )
             return
-        _maint_mail.send_egs_maintenance_email(subject=subject, body=body)
-        send_message(
-            chat_id,
-            "✅ `/egs` 邮件已发送\n"
-            f"📌 主题: {subject}\n"
-            f"📧 收件: {_maint_mail.EGS_MAIL_TO}\n"
-            f"📄 抄送: {_maint_mail.EGS_MAIL_CC}",
+
+        # /egs → interactive preview card (Send / Cancel), threaded under the user's message.
+        # The original message id rides in the button values so the confirmation threads too.
+        card = maintenance.build_egs_preview_card(subject, full_body, reply_to_message_id=reply_mid)
+        _egs_thread_post(
+            chat_id, reply_mid, json.dumps(card, ensure_ascii=False), msg_type="interactive"
         )
     except Exception as ex:
-        send_message(chat_id, f"❌ `{_cmd}` 处理失败: `{ex}`")
+        _egs_thread_post(chat_id, reply_mid, f"❌ `{_cmd}` 处理失败: `{ex}`")
+
+
+def _try_egs_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Optional[dict]:
+    """Synchronous card.callback for the ``/egs`` **Send Email** / **Cancel** buttons.
+
+    Reads the (possibly edited) title + content from the form, updates the card in place
+    (buttons removed → no double-send), and sends the email in a background thread so we
+    stay within Lark's ~3s callback window.
+    """
+    k = str(parsed_ca.get("k") or "").strip().lower()
+    if k not in ("egs_send", "egs_cancel"):
+        return None
+
+    # The card's own message_id — so we can DELETE the card (make it disappear) after the tap.
+    ctx = ev_ca.get("context") if isinstance(ev_ca.get("context"), dict) else {}
+    card_msg_id = (
+        (ctx.get("open_message_id") or ev_ca.get("open_message_id") or "").strip()
+    )
+    # The user's original /egs message id (rode in on the button) — so the confirmation
+    # threads under it, same as the card.
+    orig_mid = str(parsed_ca.get("m") or "").strip()
+
+    def _recall_card() -> None:
+        if card_msg_id:
+            try:
+                recall_message(card_msg_id)
+            except Exception as _rc_err:  # noqa: BLE001
+                print(f"[egs] card recall failed: {_rc_err!r}", flush=True)
+
+    if k == "egs_cancel":
+        threading.Thread(target=_recall_card, daemon=True).start()  # card disappears
+        return {"toast": {"type": "info", "content": "Cancelled"}}
+
+    # egs_send — pull the edited Title + Content out of the submitted form.
+    act = ev_ca.get("action") if isinstance(ev_ca.get("action"), dict) else {}
+    title = _lark_get_card_form_field(act, "egs_title")
+    body = _lark_get_card_form_field(act, "egs_body")
+    fv = parsed_ca.get("form_value")
+    if isinstance(fv, dict):
+        title = title or _lark_form_field_text(fv.get("egs_title"))
+        body = body or _lark_form_field_text(fv.get("egs_body"))
+    title = title or _lark_find_field_deep(ev_ca, "egs_title")
+    body = body or _lark_find_field_deep(ev_ca, "egs_body")
+    title = (title or "").strip()
+    body = (body or "").strip()
+    if not title or not body:
+        # Keep the card so the user can fix it — just warn.
+        return {"toast": {"type": "error", "content": "Title and content cannot be empty."}}
+
+    def _send_job() -> None:
+        _recall_card()  # remove the form card first so it disappears on click
+        try:
+            import maintenance_mail as _maint_mail
+
+            # Body already includes the signature (shown/edited in the card) → don't re-append.
+            _maint_mail.send_egs_maintenance_email(
+                subject=title, body=body, append_signature=False
+            )
+            _egs_thread_post(chat_id_ca, orig_mid, f"✅ `/egs` 邮件已发送\n📌 主题: {title}")
+        except Exception as ex:  # noqa: BLE001
+            _egs_thread_post(chat_id_ca, orig_mid, f"❌ `/egs` 发送失败: `{ex}`")
+
+    threading.Thread(target=_send_job, daemon=True).start()
+    return {"toast": {"type": "success", "content": "Sending email"}}
 
 
 def _reinject_synthetic_command_message(
@@ -4248,6 +4343,15 @@ def lark_webhook():
                 if eid_ca:
                     _remember_processed_message_id(eid_ca)
                 return _lark_http_card_callback_response(rem_sync)
+            egs_sync = _try_egs_card_response(
+                parsed_sync,
+                ev_sync,
+                chat_id_ca or "",
+            )
+            if egs_sync is not None:
+                if eid_ca:
+                    _remember_processed_message_id(eid_ca)
+                return _lark_http_card_callback_response(egs_sync)
         # Never wait on ``processed_lock`` in this thread — Lark times out ~3s; lock contention → ``code: undefined``.
         def _run_card_callback_worker() -> None:
             if eid_ca and _remember_processed_message_id(eid_ca):

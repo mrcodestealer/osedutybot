@@ -5191,6 +5191,136 @@ def build_egs_email_subject(body: str, *, now: datetime | None = None) -> str:
     return f"{title} - {when.strftime('%d/%m/%Y')}"
 
 
+def _egs_recipients_display() -> tuple[str, str]:
+    """(To, Cc) addresses shown on the /egs preview card."""
+    try:
+        import maintenance_mail as _mm
+
+        return _mm.EGS_MAIL_TO, _mm.EGS_MAIL_CC
+    except Exception:
+        return "junchen@snsoft.my", "om@hotelstotsenberg.com"
+
+
+def build_egs_preview_card(subject: str, body: str, reply_to_message_id: str = "") -> dict:
+    """``/egs`` editable preview: Title + Content inputs (pre-filled) + Send / Cancel buttons.
+
+    Nothing is sent until the user taps **Send Email** (``k=egs_send``); the edited
+    title/content ride back in the form values. **Cancel** (``k=egs_cancel``) sends nothing.
+    ``reply_to_message_id`` (the user's original message) rides in the button values as
+    ``m`` so the confirmation can thread under it.
+    """
+    subject = (subject or "").strip()
+    body = (body or "").strip()
+    to_disp, cc_disp = _egs_recipients_display()
+    _mid = (reply_to_message_id or "").strip()
+    send_val = {"k": "egs_send"}
+    cancel_val = {"k": "egs_cancel"}
+    if _mid:
+        send_val["m"] = _mid
+        cancel_val["m"] = _mid
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "orange",
+            "title": {
+                "tag": "plain_text",
+                "content": "📧 EGS 维护邮件预览 / Review before sending",
+            },
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": (
+                            f"**收件 To:** {to_disp}　**抄送 Cc:** {cc_disp}\n"
+                            "可直接修改下方**标题**与**正文**，确认后点 **发送 / Send Email**，"
+                            "或点 **取消 / Cancel**（不会发送）。"
+                        ),
+                    },
+                },
+                {
+                    "tag": "form",
+                    "name": "egs_form",
+                    "elements": [
+                        {
+                            "tag": "input",
+                            "name": "egs_title",
+                            "default_value": subject,
+                            "label": {"tag": "plain_text", "content": "标题 Title"},
+                            "label_position": "top",
+                            "width": "fill",
+                            "max_length": 300,
+                            "placeholder": {"tag": "plain_text", "content": "Email subject"},
+                        },
+                        {
+                            "tag": "input",
+                            "name": "egs_body",
+                            "input_type": "multiline_text",
+                            "rows": 8,
+                            "auto_resize": True,
+                            "max_rows": 20,
+                            "default_value": body,
+                            "label": {"tag": "plain_text", "content": "正文 Content"},
+                            "label_position": "top",
+                            "width": "fill",
+                            "max_length": 8000,
+                            "placeholder": {"tag": "plain_text", "content": "Email body"},
+                        },
+                        {
+                            "tag": "column_set",
+                            "columns": [
+                                {
+                                    "tag": "column",
+                                    "width": "weighted",
+                                    "weight": 1,
+                                    "elements": [
+                                        {
+                                            "tag": "button",
+                                            "name": "egs_send_btn",
+                                            "text": {
+                                                "tag": "plain_text",
+                                                "content": "✅ 发送 / Send Email",
+                                            },
+                                            "type": "primary",
+                                            "form_action_type": "submit",
+                                            "behaviors": [
+                                                {"type": "callback", "value": send_val}
+                                            ],
+                                        }
+                                    ],
+                                },
+                                {
+                                    "tag": "column",
+                                    "width": "weighted",
+                                    "weight": 1,
+                                    "elements": [
+                                        {
+                                            "tag": "button",
+                                            "name": "egs_cancel_btn",
+                                            "text": {
+                                                "tag": "plain_text",
+                                                "content": "✖️ 取消 / Cancel",
+                                            },
+                                            "type": "danger",
+                                            "form_action_type": "submit",
+                                            "behaviors": [
+                                                {"type": "callback", "value": cancel_val}
+                                            ],
+                                        }
+                                    ],
+                                },
+                            ],
+                        },
+                    ],
+                },
+            ]
+        },
+    }
+
+
 EVO_BATCH_FORWARD_CHAT_ID_DEFAULT = "oc_9ffa9a76810abf72e39d597aee37d65a"
 EVO_BATCH_COMMAND_CHAT_ID_DEFAULT = "oc_51b6fbf2636525acfb4ead3afa3c93ce"
 MAINTENANCE_CONFIRM_CHAT_ID_DEFAULT = "oc_9de3d63fc589df6feeb9b0bee9c45b72"
@@ -5223,6 +5353,43 @@ def evo_batch_forward_chat_id() -> str:
         or os.getenv("evo_batch_forward_chat_id", "").strip()
         or EVO_BATCH_FORWARD_CHAT_ID_DEFAULT
     )
+
+
+# Users @-tagged in the forward group after ``/m`` sends the email (QA Support Team, CS).
+EVO_BATCH_CHECK_TAG_DEFAULTS = (
+    ("ou_0342007237c6c1aa262acae839acb7c6", "QA Support Team"),
+    ("ou_c927a378e9b464741c67b61c1641577b", "CS (Team)"),
+)
+
+
+def evo_batch_check_email_mentions() -> list[tuple[str, str]]:
+    """(open_id, display_name) pairs to @tag with "kindly check this email".
+
+    Overridable via ``EVO_BATCH_QA_OPEN_ID`` / ``EVO_BATCH_CS_OPEN_ID`` (+ ``*_NAME``).
+    """
+    qa_id = os.getenv("EVO_BATCH_QA_OPEN_ID", "").strip() or EVO_BATCH_CHECK_TAG_DEFAULTS[0][0]
+    qa_nm = os.getenv("EVO_BATCH_QA_NAME", "").strip() or EVO_BATCH_CHECK_TAG_DEFAULTS[0][1]
+    cs_id = os.getenv("EVO_BATCH_CS_OPEN_ID", "").strip() or EVO_BATCH_CHECK_TAG_DEFAULTS[1][0]
+    cs_nm = os.getenv("EVO_BATCH_CS_NAME", "").strip() or EVO_BATCH_CHECK_TAG_DEFAULTS[1][1]
+    out: list[tuple[str, str]] = []
+    for oid, nm in ((qa_id, qa_nm), (cs_id, cs_nm)):
+        if oid:
+            out.append((oid, nm))
+    return out
+
+
+def build_evo_batch_check_email_text(subject: str) -> str:
+    """``Hi @QA Support Team @CS (Team) Kindly check this email`` + subject line (real @mentions)."""
+    ats = " ".join(
+        f'<at user_id="{oid}">{name}</at>'
+        for oid, name in evo_batch_check_email_mentions()
+    )
+    prefix = f"Hi {ats} " if ats else "Hi "
+    text = f"{prefix}Kindly check this email"
+    subj = (subject or "").strip()
+    if subj:
+        text += f"\n{subj}"
+    return text
 
 
 def maintenance_confirm_chat_id() -> str:
