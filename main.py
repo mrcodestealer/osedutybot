@@ -3949,22 +3949,15 @@ def _process_evo_sd_batch_paste(chat_id: str, email_text: str) -> None:
         send_message(chat_id, f"❌ EVO 批量 `/m` 处理失败: `{ex}`")
 
 
-def _egs_thread_post(chat_id: str, reply_mid: str, payload, *, msg_type: str = "text") -> dict:
-    """Post as a **thread reply** to the user's original message; fall back to a normal send.
+def _egs_reply(chat_id: str, reply_mid: str, payload, *, msg_type: str = "text") -> dict:
+    """Post an ``/egs`` message as a **quote-reply** to the user's original message.
 
-    Keeps the whole ``/egs`` exchange (preview card + confirmation) inside the thread of
-    the message the user typed ``/egs`` in.
+    Quote-reply (not ``reply_in_thread``): interactive cards accepted as thread replies
+    render invisibly in Feishu — the user then sees only a reaction. A quote-reply keeps
+    the message tied to the user's ``/egs`` message AND visible in the chat.
     """
-    mid = (reply_mid or "").strip()
-    if mid:
-        try:
-            resp = reply_message_in_thread(mid, payload, msg_type=msg_type)
-            if isinstance(resp, dict) and resp.get("code") == 0:
-                return resp
-            print(f"[egs] thread reply resp={resp!r}; falling back to send_message", flush=True)
-        except Exception as ex:  # noqa: BLE001
-            print(f"[egs] thread reply failed ({ex!r}); falling back", flush=True)
-    return send_message(chat_id, payload, msg_type=msg_type)
+    mid = (reply_mid or "").strip() or None
+    return send_message(chat_id, payload, msg_type=msg_type, reply_to_message_id=mid)
 
 
 def _process_egs_paste(chat_id: str, body_text: str, *, dry_run: bool = False) -> None:
@@ -3986,7 +3979,7 @@ def _process_egs_paste(chat_id: str, body_text: str, *, dry_run: bool = False) -
     reply_mid = (_lark_user_message_id.get() or "").strip()
     body = (body_text or "").strip()
     if not body:
-        _egs_thread_post(
+        _egs_reply(
             chat_id,
             reply_mid,
             f"请在 `{_cmd}` 后粘贴维护通知内容。\n"
@@ -4003,7 +3996,7 @@ def _process_egs_paste(chat_id: str, body_text: str, *, dry_run: bool = False) -
             full_body = f"{body}\n\n{_maint_mail.EGS_MAIL_SIGNATURE}"
 
         if dry_run:
-            _egs_thread_post(
+            _egs_reply(
                 chat_id,
                 reply_mid,
                 "🧪 `/egstest`（未发送 / dry-run）\n"
@@ -4015,14 +4008,14 @@ def _process_egs_paste(chat_id: str, body_text: str, *, dry_run: bool = False) -
             )
             return
 
-        # /egs → interactive preview card (Send / Cancel), threaded under the user's message.
-        # The original message id rides in the button values so the confirmation threads too.
+        # /egs → interactive preview card (Send / Cancel), quote-replied to the user's message.
+        # The original message id rides in the button values so the confirmation quotes it too.
         card = maintenance.build_egs_preview_card(subject, full_body, reply_to_message_id=reply_mid)
-        _egs_thread_post(
+        _egs_reply(
             chat_id, reply_mid, json.dumps(card, ensure_ascii=False), msg_type="interactive"
         )
     except Exception as ex:
-        _egs_thread_post(chat_id, reply_mid, f"❌ `{_cmd}` 处理失败: `{ex}`")
+        _egs_reply(chat_id, reply_mid, f"❌ `{_cmd}` 处理失败: `{ex}`")
 
 
 def _try_egs_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Optional[dict]:
@@ -4081,9 +4074,9 @@ def _try_egs_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Opt
             _maint_mail.send_egs_maintenance_email(
                 subject=title, body=body, append_signature=False
             )
-            _egs_thread_post(chat_id_ca, orig_mid, f"✅ `/egs` 邮件已发送\n📌 主题: {title}")
+            _egs_reply(chat_id_ca, orig_mid, f"✅ `/egs` 邮件已发送\n📌 主题: {title}")
         except Exception as ex:  # noqa: BLE001
-            _egs_thread_post(chat_id_ca, orig_mid, f"❌ `/egs` 发送失败: `{ex}`")
+            _egs_reply(chat_id_ca, orig_mid, f"❌ `/egs` 发送失败: `{ex}`")
 
     threading.Thread(target=_send_job, daemon=True).start()
     return {"toast": {"type": "success", "content": "Sending email"}}
