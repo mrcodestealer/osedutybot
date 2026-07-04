@@ -99,6 +99,7 @@ _EXTRA_ALIASES: dict[str, tuple[str, ...]] = {
     "/sm": ("set maintenance", "unset maintenance", "维护", "prod maintenance"),
     "/m": ("evo batch", "evo 批量"),
     "/egs": ("egs", "egs maintenance", "simpleplay maintenance", "维护通知发信"),
+    "/egstest": ("egs test", "egstest", "preview egs", "测试维护标题"),
     "/al": ("amount loss", "损失", "输赢"),
     "/pid": ("provider id", "provider", "供应商"),
     "/smsfail": ("sms fail", "短信失败", "otp fail"),

@@ -4825,14 +4825,22 @@ def _evo_email_subject_date(blocks_out: list[str]) -> str:
 # down or returns garbage (e.g. the tiny prod model).
 # ---------------------------------------------------------------------------
 _EGS_TITLE_SYSTEM = (
-    "You write the SUBJECT title of a scheduled-maintenance notification email. "
-    "Given the notification body, reply with ONLY the maintenance title: the "
-    "product / vendor name followed by the maintenance type, in Title Case. "
-    "Do NOT include any date, time, quotes, or extra words, and do NOT explain. "
-    "Keep it under 80 characters.\n"
-    "Example body: 'SimplePlay will perform regular maintenance on the following "
-    "schedule ...' -> SimplePlay Regular Maintenance"
+    "You generate the SUBJECT title for a scheduled-maintenance notification email. "
+    "Output ONLY the title itself on a SINGLE line: the product / vendor name followed "
+    "by the maintenance type, in Title Case. "
+    "No date, no time, no quotes, no labels (do not write 'Subject:' or 'Title:'), "
+    "no bullet points, no explanation, no extra words.\n"
+    "Examples:\n"
+    "Body says 'SimplePlay will perform regular maintenance ...' -> SimplePlay Regular Maintenance\n"
+    "Body says 'PG Soft scheduled maintenance ...' -> PG Soft Scheduled Maintenance\n"
+    "Body says 'Evolution emergency maintenance ...' -> Evolution Emergency Maintenance"
 )
+
+# Meta / instruction-echo fragments a confused model may emit instead of a title.
+_EGS_TITLE_BAD_WORDS = {
+    "reply", "title", "subject", "answer", "output", "none", "null", "na", "n/a",
+    "maintenance", "the title", "here is the title",
+}
 
 
 def _egs_title_model() -> str:
@@ -4845,24 +4853,62 @@ def _egs_title_model() -> str:
 
 
 def _clean_egs_title(raw: str) -> str:
-    """Strip reasoning traces / fences / quotes / stray date and keep the title line."""
+    """Extract a clean single-line title from noisy model output (bullets, labels, think traces)."""
     s = (raw or "").strip()
     if not s:
         return ""
     # Reasoning models (qwen3.x) may wrap their chain-of-thought in <think> tags.
     s = re.sub(r"<think>.*?</think>", "", s, flags=re.I | re.S).strip()
+    s = re.sub(r"</?think>", "", s, flags=re.I).strip()  # unbalanced/truncated tag
     s = re.sub(r"^```(?:\w+)?|```$", "", s, flags=re.I | re.M).strip()
-    lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
-    if lines:
-        s = lines[-1]  # models sometimes prepend a note; the title is the last line
-    s = re.sub(r"(?i)^(subject|title)\s*[:：]\s*", "", s).strip().strip('"').strip("'").strip()
+    cleaned: list[str] = []
+    for ln in s.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        # strip leading bullets / list markers ("- ", "* ", "1. ", "• ")
+        ln = re.sub(r"^[\-\*•·•]+\s*", "", ln).strip()
+        ln = re.sub(r"^\d+[\.\)]\s*", "", ln).strip()
+        # strip a leading label ("Subject:", "Title -", "Answer：")
+        ln = re.sub(r"(?i)^(subject|title|answer|output|the title(?:\s+is)?)\s*[:：\-]\s*", "", ln).strip()
+        ln = ln.strip('"').strip("'").strip()
+        if ln:
+            cleaned.append(ln)
+    if not cleaned:
+        return ""
+
+    # Prefer a real title line: one that ENDS in "...maintenance" (titles do), over a
+    # meta/preamble line that merely mentions the word ("The maintenance title is").
+    def _title_score(ln: str) -> int:
+        low = ln.lower()
+        if re.search(r"maintenance\s*$", low):
+            return 3
+        if "maintenance" in low and not re.match(
+            r"(?i)(the|here|this|below|following|note)\b", ln
+        ):
+            return 2
+        if "maintenance" in low:
+            return 1
+        return 0
+
+    pick = max(cleaned, key=_title_score)  # ties keep the earliest line
     # Drop a trailing date the model may have added on its own (we append our own).
-    s = re.sub(r"\s*[-–—]\s*\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4}\s*$", "", s).strip()
-    return re.sub(r"\s+", " ", s)[:80].strip()
+    pick = re.sub(r"\s*[-–—]\s*\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4}\s*$", "", pick).strip()
+    return re.sub(r"\s+", " ", pick)[:80].strip()
+
+
+def _egs_title_looks_bad(title: str) -> bool:
+    """True when the LLM title is empty / meta-echo / not a real title → use the fallback."""
+    t = (title or "").strip()
+    if len(t) < 3 or not re.search(r"[A-Za-z]", t):
+        return True
+    if t.lower() in _EGS_TITLE_BAD_WORDS:
+        return True
+    return False
 
 
 def _egs_llm_title(body: str) -> str:
-    """Ask the LLM (BOT_CHAT_* / qwen) for the '{what maintenance}' title. '' on any failure."""
+    """Ask the LLM (BOT_CHAT_* / qwen) for the '{what maintenance}' title. '' on any failure/garbage."""
     api_key = (os.getenv("BOT_CHAT_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
     if not api_key:
         return ""
@@ -4871,9 +4917,10 @@ def _egs_llm_title(body: str) -> str:
         "model": _egs_title_model(),
         "messages": [
             {"role": "system", "content": _EGS_TITLE_SYSTEM},
-            {"role": "user", "content": (body or "").strip()[:4000]},
+            # ``/no_think`` disables reasoning on qwen3.x (harmless on other models).
+            {"role": "user", "content": ((body or "").strip()[:4000]) + "\n\n/no_think"},
         ],
-        "max_tokens": 60,
+        "max_tokens": 80,
         "temperature": 0,
     }
     try:
@@ -4898,9 +4945,14 @@ def _egs_llm_title(body: str) -> str:
         content = msg.get("content") or ""
         title = _clean_egs_title(content)
         # Some Ollama models put the answer only in ``reasoning`` when content is empty.
-        if not title and msg.get("reasoning"):
+        if _egs_title_looks_bad(title) and msg.get("reasoning"):
             title = _clean_egs_title(str(msg.get("reasoning")))
-        return title
+        print(
+            f"[egs] title model={_egs_title_model()} "
+            f"raw={content.strip()[:120]!r} -> {title!r}",
+            flush=True,
+        )
+        return "" if _egs_title_looks_bad(title) else title
     except Exception as ex:  # noqa: BLE001
         print(f"⚠️ /egs title LLM failed: {ex!r}", flush=True)
         return ""

@@ -3941,13 +3941,17 @@ def _process_evo_sd_batch_paste(chat_id: str, email_text: str) -> None:
         send_message(chat_id, f"❌ EVO 批量 `/m` 处理失败: `{ex}`")
 
 
-def _process_egs_paste(chat_id: str, body_text: str) -> None:
+def _process_egs_paste(chat_id: str, body_text: str, *, dry_run: bool = False) -> None:
     """``/egs`` — email a pasted maintenance notice to junchen@ (Cc om@), same mailbox as ``/m``.
 
     The subject is derived by the LLM from the body (``{what maintenance}``) and
     suffixed with today's date, e.g. ``SimplePlay Regular Maintenance - 04/07/2026``.
-    Gated to the same OSE BOT - Ops & Maintenance group as ``/m`` (sends real email).
+    Gated to the same OSE BOT - Ops & Maintenance group as ``/m``.
+
+    ``dry_run=True`` (``/egstest``) generates the title and previews the exact email
+    (subject + recipients + body incl. signature) **without sending** anything.
     """
+    _cmd = "/egstest" if dry_run else "/egs"
     if not maintenance.is_evo_batch_command_chat(chat_id):
         send_message(chat_id, maintenance.EVO_BATCH_WRONG_GROUP_MESSAGE)
         return
@@ -3955,7 +3959,7 @@ def _process_egs_paste(chat_id: str, body_text: str) -> None:
     if not body:
         send_message(
             chat_id,
-            "请在 `/egs` 后粘贴维护通知内容。\n"
+            f"请在 `{_cmd}` 后粘贴维护通知内容。\n"
             "标题会自动生成：`{维护内容} - {今天日期 DD/MM/YYYY}`，"
             "邮件发送到 junchen@snsoft.my（抄送 om@hotelstotsenberg.com）。",
         )
@@ -3964,6 +3968,20 @@ def _process_egs_paste(chat_id: str, body_text: str) -> None:
         subject = maintenance.build_egs_email_subject(body)
         import maintenance_mail as _maint_mail
 
+        if dry_run:
+            preview = body
+            if _maint_mail.EGS_MAIL_SIGNATURE:
+                preview = f"{body}\n\n{_maint_mail.EGS_MAIL_SIGNATURE}"
+            send_message(
+                chat_id,
+                "🧪 `/egstest`（未发送 / dry-run）\n"
+                f"📌 标题: {subject}\n"
+                f"📧 收件: {_maint_mail.EGS_MAIL_TO}\n"
+                f"📄 抄送: {_maint_mail.EGS_MAIL_CC}\n"
+                "———— 正文预览 ————\n"
+                f"{preview}",
+            )
+            return
         _maint_mail.send_egs_maintenance_email(subject=subject, body=body)
         send_message(
             chat_id,
@@ -3973,7 +3991,7 @@ def _process_egs_paste(chat_id: str, body_text: str) -> None:
             f"📄 抄送: {_maint_mail.EGS_MAIL_CC}",
         )
     except Exception as ex:
-        send_message(chat_id, f"❌ `/egs` 处理失败: `{ex}`")
+        send_message(chat_id, f"❌ `{_cmd}` 处理失败: `{ex}`")
 
 
 def _reinject_synthetic_command_message(
@@ -5874,21 +5892,23 @@ def lark_webhook():
             return _lark_im_done()
         _process_evo_sd_batch_paste(chat_id, email_text)
         return _lark_im_done()
-    elif cmd == "/egs":
+    elif cmd in ("/egs", "/egstest"):
         # Pasted maintenance notice → LLM-titled email to junchen@ (Cc om@), same
-        # mailbox as `/m`. Rebuild the body from ``original_text`` (keeps newlines,
-        # which ``clean_text`` collapses) and strip the leading ``/egs`` + mentions.
+        # mailbox as `/m`. `/egstest` previews the title/body without sending.
+        # Rebuild the body from ``original_text`` (keeps newlines, which ``clean_text``
+        # collapses) and strip the leading command token + mentions.
+        _egs_dry = cmd == "/egstest"
         _egs_src = original_text or ""
         for _mk in mention_keys:
             _egs_src = _egs_src.replace(_mk, "")
         _egs_src = re.sub(r"@_user_\d+", "", _egs_src)
         _egs_src = re.sub(r"<[^>]+>", "", _egs_src)
-        _egs_cmd = re.search(r"(?:^|\s)/egs\b\s*", _egs_src, re.IGNORECASE)
+        _egs_cmd = re.search(rf"(?:^|\s){re.escape(cmd)}\b\s*", _egs_src, re.IGNORECASE)
         _egs_src = _egs_src[_egs_cmd.end():] if _egs_cmd else ""
         _egs_src = _egs_src.strip()
         if _egs_src.startswith('"') and _egs_src.endswith('"'):
             _egs_src = _egs_src[1:-1].strip()
-        _process_egs_paste(chat_id, _egs_src)
+        _process_egs_paste(chat_id, _egs_src, dry_run=_egs_dry)
         return _lark_im_done()
     elif re.search(
         r"(?:^|\s)/(maintenance|maintenanceshort|ms)\s+",
