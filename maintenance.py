@@ -4898,11 +4898,32 @@ def _clean_egs_title(raw: str) -> str:
 
 
 def _egs_title_looks_bad(title: str) -> bool:
-    """True when the LLM title is empty / meta-echo / not a real title → use the fallback."""
+    """True when the LLM title is empty / meta-echo / a verbose sentence → use the fallback.
+
+    A good title is short and ends in "…Maintenance" (e.g. ``SimplePlay Regular
+    Maintenance``). Reasoning models sometimes reply with a description instead
+    (``**Input Text:** A scheduled maintenance notification email from "SimplePlay".``);
+    those are rejected here so the deterministic fallback runs.
+    """
     t = (title or "").strip()
     if len(t) < 3 or not re.search(r"[A-Za-z]", t):
         return True
-    if t.lower() in _EGS_TITLE_BAD_WORDS:
+    low = t.lower()
+    if low in _EGS_TITLE_BAD_WORDS:
+        return True
+    if "maintenance" not in low:  # a real title always names the maintenance
+        return True
+    if len(t.split()) > 6:  # titles are short; sentences are not
+        return True
+    if t.endswith(".") or "**" in t or ":" in t or '"' in t:
+        return True
+    if any(
+        b in low
+        for b in (
+            "input text", "notification", "email", "the following",
+            "here is", "will ", "from ", "schedule",
+        )
+    ):
         return True
     return False
 
@@ -4958,30 +4979,77 @@ def _egs_llm_title(body: str) -> str:
         return ""
 
 
-def _egs_fallback_title(body: str) -> str:
-    """Deterministic '{what maintenance}' when the LLM is unavailable."""
-    text = body or ""
+_EGS_MAINT_TYPES = (
+    "regular", "scheduled", "routine", "emergency",
+    "planned", "periodic", "system", "server",
+)
+# Capitalized tokens that are never the vendor brand.
+_EGS_VENDOR_STOP = {
+    "dear", "valued", "customers", "customer", "date", "time", "during", "should",
+    "thank", "game", "client", "back", "office", "web", "service", "api", "support",
+    "gmt", "the", "from", "subject", "we", "as", "part", "our", "monday", "tuesday",
+    "wednesday", "thursday", "friday", "saturday", "sunday",
+}
+
+
+def _egs_maint_type(text: str) -> str:
+    """The adjective before 'maintenance' (Regular / Scheduled / …), '' if none."""
     m = re.search(
-        r"([A-Z][\w&.\-]*(?:\s+[A-Z][\w&.\-]*){0,3})\s+will\s+(?:be\s+)?"
-        r"(?:perform|performing|conduct|conducting|undergo|carry\s+out)\w*\s+"
-        r"(?:a\s+|an\s+)?(regular\s+|scheduled\s+|routine\s+|emergency\s+)?maintenance",
+        rf"(?i)\b({'|'.join(_EGS_MAINT_TYPES)})\s+maintenance\b", text or ""
+    )
+    return m.group(1).title() if m else ""
+
+
+def _egs_vendor(text: str) -> str:
+    """Best-guess vendor/brand: the '<Vendor> will perform …' subject, else the most-repeated brand."""
+    text = text or ""
+    m = re.search(
+        r"([A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+){0,2})\s+will\s+(?:be\s+)?"
+        r"(?:perform|performing|conduct|conducting|undergo|carry\s+out)",
         text,
-        re.I,
     )
     if m:
-        vendor = re.sub(r"\s+", " ", m.group(1)).strip()
-        kind = (m.group(2) or "").strip().title()
-        kind = f"{kind} " if kind else ""
-        return re.sub(r"\s+", " ", f"{vendor} {kind}Maintenance").strip()[:80]
-    m2 = re.search(r"\b([A-Z][A-Za-z0-9]{2,})\b", text)
-    if m2:
-        return f"{m2.group(1)} Maintenance"[:80]
+        return re.sub(r"\s+", " ", m.group(1)).strip()
+    counts: dict[str, int] = {}
+    for tok in re.findall(r"\b([A-Z][A-Za-z0-9]{2,})\b", text):
+        if tok.lower() in _EGS_VENDOR_STOP:
+            continue
+        counts[tok] = counts.get(tok, 0) + 1
+    if counts:
+        return max(counts, key=lambda k: (counts[k], len(k)))
+    return ""
+
+
+def _egs_fallback_title(body: str) -> str:
+    """Deterministic '{Vendor} {Type} Maintenance' from the pasted notice.
+
+    Reliable for standard vendor notices (e.g. ``SimplePlay Regular Maintenance``),
+    so it is the PRIMARY title source — the LLM is only a backup for odd formats.
+    """
+    text = body or ""
+    vendor = _egs_vendor(text)
+    kind = _egs_maint_type(text)
+    if vendor and kind:
+        return f"{vendor} {kind} Maintenance"[:80]
+    if vendor:
+        return f"{vendor} Maintenance"[:80]
+    if kind:
+        return f"{kind} Maintenance"[:80]
     return "Maintenance Notification"
 
 
 def build_egs_email_subject(body: str, *, now: datetime | None = None) -> str:
-    """``/egs`` subject: '{what maintenance} - DD/MM/YYYY' (today's date, GMT+8)."""
-    title = _egs_llm_title(body) or _egs_fallback_title(body) or "Maintenance Notification"
+    """``/egs`` subject: '{what maintenance} - DD/MM/YYYY' (today's date, GMT+8).
+
+    Deterministic extraction is used first (reliable, gives the short
+    ``{Vendor} {Type} Maintenance`` form); the LLM is only consulted when the
+    regex can't identify a vendor/type.
+    """
+    title = _egs_fallback_title(body)
+    if title == "Maintenance Notification":
+        llm = _egs_llm_title(body)
+        if llm:
+            title = llm
     when = now or datetime.now(_display_tz())
     return f"{title} - {when.strftime('%d/%m/%Y')}"
 
