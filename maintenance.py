@@ -5035,9 +5035,12 @@ _EGS_MAINT_TYPES = (
 _EGS_VENDOR_STOP = {
     "dear", "valued", "customers", "customer", "date", "time", "during", "should",
     "thank", "thanks", "game", "client", "back", "office", "web", "service", "api",
-    "support", "gmt", "the", "from", "subject", "we", "as", "part", "our", "this",
-    "please", "production", "environment", "monday", "tuesday", "wednesday",
+    "support", "gmt", "utc", "the", "from", "subject", "we", "as", "part", "our",
+    "this", "please", "production", "environment", "monday", "tuesday", "wednesday",
     "thursday", "friday", "saturday", "sunday",
+    # sentence-starters / greetings that must never be read as a brand
+    "hi", "hello", "greetings", "team", "if", "to", "for", "all", "note", "item",
+    "affected", "agents", "informed", "be", "kindly", "please",
 }
 # Words that end the vendor phrase in a header line ("VA Gaming Production …" → "VA Gaming").
 # NB: "game"/"gaming" are NOT here — they are often part of the brand ("VA Gaming").
@@ -5112,18 +5115,18 @@ def _egs_vendor(text: str) -> str:
             if len(cand) >= 2:
                 return cand
 
-    # (3) First line as a header — mentions maintenance, not a greeting.
-    #     Strip leading emojis/symbols so "🚧 VA Gaming …" still yields the brand.
-    if lines:
-        first = re.sub(r"^[^A-Za-z0-9\[\(【]+", "", lines[0])
-        if (
-            "maintenance" in lines[0].lower()
-            and len(lines[0].split()) <= 14
-            and not re.match(r"(?i)(dear|hi|hello|greetings|to\s+whom)\b", first)
-        ):
-            cand = _egs_brand_run(first)
-            if len(cand) >= 2:
-                return cand
+    # (3) A header/title line among the first several — mentions maintenance or notice.
+    #     Strip leading emojis / symbols / opening brackets so "🚧 [Yggdrasil …" or
+    #     "【5G GAMES …" still yields the leading brand. Skip if the brand run starts with
+    #     a stopword (a sentence like "If the maintenance …" → "If", rejected).
+    for ln in lines[:8]:
+        low = ln.lower()
+        if "maintenance" not in low and "notice" not in low:
+            continue
+        stripped = re.sub(r"^[^\w\[\(【]*[\[\(【]?\s*", "", ln)  # drop emoji/symbols + opening bracket
+        cand = _egs_brand_run(stripped)
+        if len(cand) >= 2 and cand.split()[0].lower() not in _EGS_VENDOR_STOP:
+            return cand
 
     # (4) "<Vendor> will (be) perform/conduct/undergo/carry out/have …"
     m = re.search(

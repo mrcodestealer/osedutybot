@@ -200,7 +200,7 @@ EGS_MAIL_SIGNATURE = (
     (os.getenv("EGS_MAIL_SIGNATURE", "") or os.getenv("egs_mail_signature", ""))
     .replace("\\n", "\n")
     .strip()
-    or "Thank you and best regards,\nOM"
+    or "Thank you and best regards,\nJC"
 )
 # Link Fw: to the incoming maintenance mail in om@ (In-Reply-To). Set 0 if Show/Hide breaks.
 FORWARD_THREAD_HEADERS = (
