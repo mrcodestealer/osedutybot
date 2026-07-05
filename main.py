@@ -294,6 +294,8 @@ def get_all_duty_check(month=None, year=None):
 def _dispatch_daily_duty_reply(cmd: str) -> Optional[str]:
     """Return today's duty text for a single department slash command, or ``None``."""
     c = (cmd or "").strip().lower()
+    if c == "/ose":
+        return ose_Duty.get_ose_today_duty()
     if c == "/fpms":
         return fpms_duty.get_fpms_today_duty()
     if c == "/pms":
@@ -504,6 +506,11 @@ def run_checkcredit_finderror(
     if thread_root:
         _set_checkcredit_thread_root(chat_id, thread_root)
 
+    # R1: warm the Third-Http browser login for this machine's backend now, so it overlaps
+    # the log read below — the later Detail screenshot (checkcredit/machineerror) then reuses
+    # the ready page instead of launching+logging-in on the critical path.
+    _prewarm_third_http_for_machine(machine_query)
+
     def _cc_send(text, **kwargs):
         return _checkcredit_send(chat_id, text, thread_root=thread_root, **kwargs)
 
@@ -659,6 +666,56 @@ def run_checkcredit_finderror(
         print(f"[{cmd}] error: {e!r}")
 
 
+def _prewarm_third_http_for_machine(machine_query: str) -> None:
+    """R1: start the Third-Http warm browser login for this machine's backend NOW, so it
+    overlaps phase A (the OSS log read) instead of paying launch+login later on the critical
+    path. Non-blocking (queues a prewarm task on the per-tag worker); safe no-op when the pool
+    is disabled, credentials are missing, or the browser is already warm (login fast-paths)."""
+    try:
+        from third_http_warm_pool import third_http_warm_pool, third_http_warm_pool_enabled
+
+        if not third_http_warm_pool_enabled():
+            return
+        import checkcredit as _cc
+
+        tag = _cc._np_log_backend_tag(str(machine_query).strip())
+        if not tag or not _cc._np_backend_has_credentials(tag):
+            return
+        third_http_warm_pool().prewarm([tag])
+        print(
+            f"[third-http-warm] prewarm {tag} submitted (overlaps log read for {machine_query!r})",
+            flush=True,
+        )
+    except Exception as ex:
+        print(f"[third-http-warm] prewarm skip for {machine_query!r}: {ex!r}", flush=True)
+
+
+def _send_machine_lookup_card(chat_id: str, text: str, *, title: str) -> None:
+    """Send a machine-lookup result as a TRTC-parsed Lark card; fall back to raw text
+    when there's nothing card-worthy (error/usage) or the interactive send is rejected."""
+    card = None
+    try:
+        import machine_card
+
+        card = machine_card.build_card_from_text(text, title=title)
+    except Exception as ex:
+        print(f"[machine-card] build failed: {ex!r}", flush=True)
+    if card:
+        try:
+            resp = send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
+            if isinstance(resp, dict) and resp.get("code") in (0, None):
+                return
+            print(f"[machine-card] interactive rejected: {resp!r}", flush=True)
+        except Exception as ex:
+            print(f"[machine-card] send failed: {ex!r}", flush=True)
+    send_message(chat_id, text)
+
+
+def _machine_query_after_prefix(clean_text: str, prefix: str) -> str:
+    """Text after a machine command prefix, accepting both '/nwr 2005' and '/nwr2005'."""
+    return clean_text[len(prefix):].strip()
+
+
 def run_check_machine_log_job(
     chat_id: str,
     machine_query: str,
@@ -671,6 +728,11 @@ def run_check_machine_log_job(
     thread_root = (thread_root_message_id or _get_checkcredit_thread_root(chat_id) or "").strip() or None
     if thread_root:
         _set_checkcredit_thread_root(chat_id, thread_root)
+
+    # R1: kick the Third-Http browser login off concurrently with the log read below, so a
+    # cold/slept browser finishes authenticating while OSS fetch runs — the screenshot step
+    # then reuses the ready page instead of launching+logging-in on the critical path.
+    _prewarm_third_http_for_machine(machine_query)
 
     def _cml_send(text, **kwargs):
         return _checkcredit_send(chat_id, text, thread_root=thread_root, **kwargs)
@@ -6399,76 +6461,61 @@ def lark_webhook():
             send_message(chat_id, f"❌ findmachine card failed: {e}")
         return _lark_im_done()
     elif clean_text.lower().startswith('/nch'):
-        parts = clean_text.split(maxsplit=1)
-        if len(parts) == 1:
-            reply = "❌ Usage: `/nch <asset_id(s)>`\nExamples: `/nch 1900`, `/nch nch2839 nch2378`, `/nch nch2839,nch2378`"
+        # Accept both "/nch 1900" and "/nch1900" (no space); multiple ids ok.
+        query = _machine_query_after_prefix(clean_text, '/nch')
+        if not query:
+            send_message(chat_id, "❌ Usage: `/nch <asset_id(s)>`\nExamples: `/nch 1900`, `/nch1900`, `/nch nch2839 nch2378`, `/nch nch2839,nch2378`")
         else:
-            query = parts[1]
-            reply = nch.get_nch_info(query)
-        send_message(chat_id, reply)
+            _send_machine_lookup_card(chat_id, nch.get_nch_info(query), title="NCH machine")
         return _lark_im_done()
     elif clean_text.lower().startswith('/nwr'):
-        parts = clean_text.split(maxsplit=1)
-        if len(parts) == 1:
-            reply = "❌ Usage: `/nwr <nwr_number(s)>`\nExamples: `/nwr 2005`, `/nwr 2005,2006`, `/nwr nwr2005 nwr2006`"
+        query = _machine_query_after_prefix(clean_text, '/nwr')
+        if not query:
+            send_message(chat_id, "❌ Usage: `/nwr <nwr_number(s)>`\nExamples: `/nwr 2005`, `/nwr2005`, `/nwr 2005,2006`, `/nwr nwr2005 nwr2006`")
         else:
-            query = parts[1]
-            reply = nwr.get_nwr_info(query)
-        send_message(chat_id, reply)
+            _send_machine_lookup_card(chat_id, nwr.get_nwr_info(query), title="NWR machine")
         return _lark_im_done()
     elif clean_text.lower().startswith('/wf'):
-        parts = clean_text.split(maxsplit=1)
-        if len(parts) == 1:
-            reply = "❌ Usage: `/wf <asset_id(s)>`\nExamples: `/wf 8092`, `/wf 8092,8093`, `/wf win8092 win8093`"
+        query = _machine_query_after_prefix(clean_text, '/wf')
+        if not query:
+            send_message(chat_id, "❌ Usage: `/wf <asset_id(s)>`\nExamples: `/wf 8092`, `/wf8092`, `/wf 8092,8093`, `/wf win8092 win8093`")
         else:
-            query = parts[1]
-            reply = winford.get_winford_info(query)
-        send_message(chat_id, reply)
+            _send_machine_lookup_card(chat_id, winford.get_winford_info(query), title="Winford asset")
         return _lark_im_done()
     elif clean_text.lower().startswith('/tbr'):
-        # Accept both "/tbr 2099" and "/tbr2099" (no space).
-        query = clean_text[len('/tbr'):].strip()
+        query = _machine_query_after_prefix(clean_text, '/tbr')
         if not query:
-            reply = "❌ Usage: `/tbr <machine_id(s)>`\nExamples: `/tbr 2099`, `/tbr2099`, `/tbr tbr2099 tbr2100`, `/tbr 2099,2100`"
+            send_message(chat_id, "❌ Usage: `/tbr <machine_id(s)>`\nExamples: `/tbr 2099`, `/tbr2099`, `/tbr tbr2099 tbr2100`, `/tbr 2099,2100`")
         else:
-            reply = tbr.get_tbr_info(query)
-        send_message(chat_id, reply)
+            _send_machine_lookup_card(chat_id, tbr.get_tbr_info(query), title="TBR machine")
         return _lark_im_done()
     elif clean_text.lower().startswith('/tbp'):
-        parts = clean_text.split(maxsplit=1)
-        if len(parts) == 1:
-            reply = "❌ Usage: `/tbp <machine_id(s)>`\nExamples: `/tbp 1234`, `/tbp tbp1234 tbp5678`, `/tbp 1234,5678`"
+        query = _machine_query_after_prefix(clean_text, '/tbp')
+        if not query:
+            send_message(chat_id, "❌ Usage: `/tbp <machine_id(s)>`\nExamples: `/tbp 1234`, `/tbp1234`, `/tbp tbp1234 tbp5678`, `/tbp 1234,5678`")
         else:
-            query = parts[1]
-            reply = tbp.get_tbp_info(query)
-        send_message(chat_id, reply)
+            _send_machine_lookup_card(chat_id, tbp.get_tbp_info(query), title="TBP machine")
         return _lark_im_done()
     elif clean_text.lower().startswith('/cp') and not clean_text.lower().startswith('/cpms'):
-        parts = clean_text.split(maxsplit=1)
-        if len(parts) == 1:
-            reply = "❌ Usage: `/cp <asset_number(s)>`\nExamples: `/cp 1234`, `/cp cp2839 cp2378`, `/cp cp2839,cp2378`"
+        query = _machine_query_after_prefix(clean_text, '/cp')
+        if not query:
+            send_message(chat_id, "❌ Usage: `/cp <asset_number(s)>`\nExamples: `/cp 1234`, `/cp1234`, `/cp cp2839 cp2378`, `/cp cp2839,cp2378`")
         else:
-            query = parts[1]
-            reply = cp.get_cp_info(query)
-        send_message(chat_id, reply)
+            _send_machine_lookup_card(chat_id, cp.get_cp_info(query), title="CP asset")
         return _lark_im_done()
     elif clean_text.lower().startswith('/dhs'):
-        parts = clean_text.split(maxsplit=1)
-        if len(parts) == 1:
-            reply = "❌ Usage: `/dhs <asset_id(s)>`\nExamples: `/dhs 1234`, `/dhs dhs1234 dhs5678`, `/dhs 1234,5678`"
+        query = _machine_query_after_prefix(clean_text, '/dhs')
+        if not query:
+            send_message(chat_id, "❌ Usage: `/dhs <asset_id(s)>`\nExamples: `/dhs 1234`, `/dhs1234`, `/dhs dhs1234 dhs5678`, `/dhs 1234,5678`")
         else:
-            query = parts[1]
-            reply = dhs.get_dhs_info(query)
-        send_message(chat_id, reply)
+            _send_machine_lookup_card(chat_id, dhs.get_dhs_info(query), title="DHS asset")
         return _lark_im_done()
     elif clean_text.lower().startswith('/mdr'):
-        parts = clean_text.split(maxsplit=1)
-        if len(parts) == 1:
-            reply = "❌ Usage: `/mdr <asset_id(s)>`\nExamples: `/mdr 1234`, `/mdr mdr1234 mdr5678`, `/mdr 1234,5678`"
+        query = _machine_query_after_prefix(clean_text, '/mdr')
+        if not query:
+            send_message(chat_id, "❌ Usage: `/mdr <asset_id(s)>`\nExamples: `/mdr 1234`, `/mdr1234`, `/mdr mdr1234 mdr5678`, `/mdr 1234,5678`")
         else:
-            query = parts[1]
-            reply = mdr.get_mdr_info(query)
-        send_message(chat_id, reply)
+            _send_machine_lookup_card(chat_id, mdr.get_mdr_info(query), title="MDR asset")
         return _lark_im_done()
     elif clean_text.lower().startswith('/secret1'):
         if not _secret_command_allowed(sender_id):

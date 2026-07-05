@@ -1132,6 +1132,7 @@ _DEPT_IN_TEXT_RE = re.compile(
 )
 # Stable order when one message asks for several department duty rosters.
 _MULTI_DUTY_DEPT_ORDER = (
+    "ose",
     "fpms",
     "pms",
     "bi",
@@ -1207,7 +1208,7 @@ _MACHINE_LOOKUP_NOISE_RE = re.compile(
     r"cctv|mini\s*pc|pc|ip|please|pls|plz|help|hi|hello|the|for|of|is|what|whats|"
     r"about|can|you|u|give|tell|number|id|query|search|need|want|i"
     r")\b"
-    r"|[?？!！。，,.:：;；、~～()（）\[\]【】\"'`]"
+    r"|[?？!！。，,.:：;；、~～()（）\[\]【】\"'`&＆+＋/／|｜]"
     r"|(?:编码器|机台|机器|资产|信息|资料|详情|状态|查询|查一下|查下|查|帮我|帮忙|麻烦|请问|请|"
     r"看一下|看下|看看|是什么|什么|哪个|你好|我要|我想|给我|你能|你可以|能不能|可不可以|"
     r"一下|你|能|想|要|看|的|了|吗|呢|啊|哦)"
@@ -2214,6 +2215,10 @@ def detect_single_duty_command(text: str) -> Optional[str]:
     departments (``detect_multi_duty_commands`` owns those).
     """
     raw = (text or "").strip()
+    # Group messages arrive as "@_user_1 cpms" — strip the mention placeholder so the
+    # residue check below doesn't see "user 1" and bail out (which forced a slow LLM
+    # fallback and meant bare dept names only worked in DMs, not group chats).
+    raw = re.sub(r"@_user_\d+|<at[^>]*>.*?</at>", " ", raw, flags=re.I | re.S).strip()
     if not raw or _looks_like_slash_command(raw):
         return None
     if _MULTI_DUTY_SKIP_RE.search(raw):

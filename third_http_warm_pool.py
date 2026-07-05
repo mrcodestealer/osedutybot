@@ -111,7 +111,11 @@ class _ThirdHttpWarmWorker:
             if kind == "keepalive":
                 try:
                     if self._healthy():
-                        self._ensure_ready(timeout_ms=120_000)
+                        # force=True so this idle refresh actually re-hits the server and
+                        # re-logs-in an expired session HERE — not mid-screenshot. Without
+                        # force, the login fast-path returns instantly and the session is
+                        # never refreshed, so it silently dies and the next request goes cold.
+                        self._ensure_ready(timeout_ms=120_000, force=True)
                 except Exception:
                     self._teardown()
                 continue
@@ -172,12 +176,27 @@ class _ThirdHttpWarmWorker:
         except Exception:
             return False
 
-    def _ensure_ready(self, *, timeout_ms: int) -> None:
+    def _ensure_ready(self, *, timeout_ms: int, force: bool = False) -> None:
         import checkcredit as cc
         from np_third_http_page import np_third_http_login_and_open_log_page
 
         if not self._healthy():
             self._launch()
+        elif force:
+            # Idle keepalive ONLY. Reload so the SPA re-validates its session against the
+            # server: if the session is still good the page stays on the log URL and the
+            # login call below fast-paths; if it expired the reload redirects to /login and
+            # the login call re-authenticates — so an expired session is refreshed HERE,
+            # during idle, instead of failing mid-screenshot. If the reload wedges the page,
+            # rebuild it clean rather than logging in on a half-dead page.
+            # The screenshot hot path never forces, so it keeps the original cheap login
+            # fast-path behaviour unchanged (no regression).
+            try:
+                self._page.reload(wait_until="domcontentloaded", timeout=min(60_000, timeout_ms))
+            except Exception:
+                self._teardown()
+                self._launch()
+
         base, user, pw = cc._np_resolve_backend_for_tag(self.tag)
         if not user or not pw:
             raise RuntimeError(
