@@ -4022,19 +4022,18 @@ def _egs_reply(chat_id: str, reply_mid: str, payload, *, msg_type: str = "text")
     return send_message(chat_id, payload, msg_type=msg_type, reply_to_message_id=mid)
 
 
-def _process_egs_paste(chat_id: str, body_text: str, *, dry_run: bool = False) -> None:
+def _process_egs_paste(chat_id: str, body_text: str, *, test: bool = False) -> None:
     """``/egs`` — show an **editable preview card** for a pasted maintenance notice.
 
     The LLM-derived subject (``{Vendor} {Type} Maintenance - DD/MM/YYYY``) and the body
-    (+ signature) are pre-filled into editable fields; nothing is sent until the user
-    taps **Send Email** on the card. The card is posted as a **thread reply** to the
-    user's ``/egs`` message so the whole exchange stays in that thread. Gated to the same
-    OSE BOT - Ops & Maintenance group as ``/m``. Sends to junchen@ (Cc om@).
+    (+ signature) are pre-filled into editable fields; nothing is sent until the user taps
+    **Send** on the card. Posted DIRECTLY to the chat (interactive cards render invisibly
+    as replies). Gated to the same OSE BOT - Ops & Maintenance group as ``/m``.
 
-    ``dry_run=True`` (``/egstest``) just prints the title + body preview as text — no card,
-    no send — for a quick title check.
+    ``test=True`` (``/egstest``) marks the card TEST — Send delivers ONLY to junchen@
+    (``EGS_TEST_REPLY_TO``), no Cc, no QA/CS tag, not recorded in egs.json.
     """
-    _cmd = "/egstest" if dry_run else "/egs"
+    _cmd = "/egstest" if test else "/egs"
     if not maintenance.is_evo_batch_command_chat(chat_id):
         send_message(chat_id, maintenance.EVO_BATCH_WRONG_GROUP_MESSAGE)
         return
@@ -4046,7 +4045,11 @@ def _process_egs_paste(chat_id: str, body_text: str, *, dry_run: bool = False) -
             reply_mid,
             f"请在 `{_cmd}` 后粘贴维护通知内容。\n"
             "标题会自动生成：`{维护内容} - {今天日期 DD/MM/YYYY}`，"
-            "邮件发送到 egs.maintenance@om.hotelstotsenberg.com（抄送 om@hotelstotsenberg.com）。",
+            + (
+                "点发送后**只**发到 junchen@snsoft.my（测试）。"
+                if test
+                else "邮件发送到 egs.maintenance@om.hotelstotsenberg.com（抄送 om@hotelstotsenberg.com）。"
+            ),
         )
         return
     try:
@@ -4057,24 +4060,20 @@ def _process_egs_paste(chat_id: str, body_text: str, *, dry_run: bool = False) -
         if _maint_mail.EGS_MAIL_SIGNATURE:
             full_body = f"{body}\n\n{_maint_mail.EGS_MAIL_SIGNATURE}"
 
-        if dry_run:
-            _egs_reply(
-                chat_id,
-                reply_mid,
-                "🧪 `/egstest`（未发送 / dry-run）\n"
-                f"📌 标题: {subject}\n"
-                f"📧 收件: {_maint_mail.EGS_MAIL_TO}\n"
-                f"📄 抄送: {_maint_mail.EGS_MAIL_CC}\n"
-                "———— 正文预览 ————\n"
-                f"{full_body}",
+        kwargs: dict = {}
+        if test:
+            kwargs = dict(
+                header_title="🧪 EGS 测试邮件预览 / Test — sends to junchen@",
+                info_md=(
+                    f"🧪 测试模式：点 **发送** 后邮件只发送到 **{_maint_mail.EGS_TEST_REPLY_TO}**"
+                    "（无抄送、不 @QA/CS、不记录）。可编辑标题/正文。"
+                ),
+                send_label="🧪 发送测试 / Send test",
+                extra_send_val={"t": "1"},
             )
-            return
-
-        # /egs → interactive preview card (Send / Cancel). Post it DIRECTLY to the chat,
-        # NOT via the reply endpoint: Feishu renders interactive cards invisibly when they
-        # are sent as a reply (the user then sees only a reaction, no card). The original
-        # message id rides in the button values so the confirmation can quote it.
-        card = maintenance.build_egs_preview_card(subject, full_body, reply_to_message_id=reply_mid)
+        card = maintenance.build_egs_preview_card(
+            subject, full_body, reply_to_message_id=reply_mid, **kwargs
+        )
         _resp = send_message(
             chat_id,
             json.dumps(card, ensure_ascii=False),
@@ -4082,7 +4081,7 @@ def _process_egs_paste(chat_id: str, body_text: str, *, dry_run: bool = False) -
             reply_to_message_id="",  # force a direct post, not a reply
         )
         print(
-            f"[egs] preview card sent code={(_resp or {}).get('code')!r} "
+            f"[egs] preview card sent test={test} code={(_resp or {}).get('code')!r} "
             f"msg={(_resp or {}).get('msg')!r}",
             flush=True,
         )
@@ -4289,6 +4288,20 @@ def _try_egs_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Opt
                     orig_mid,
                     f"✅ `{_lbl}` 已发送{_note}\n📌 {info.get('subject') or ''}\n📧 收件: {_to}",
                 )
+            elif is_test:
+                # /egstest — throwaway send to junchen@ only (no Cc, no QA/CS tag, not stored).
+                _maint_mail.send_egs_maintenance_email(
+                    subject=title,
+                    body=body,
+                    append_signature=False,
+                    to_override=_maint_mail.EGS_TEST_REPLY_TO,
+                )
+                _egs_reply(
+                    chat_id_ca,
+                    orig_mid,
+                    f"✅ `/egstest` 测试邮件已发送\n📌 主题: {title}\n"
+                    f"📧 收件: {_maint_mail.EGS_TEST_REPLY_TO}",
+                )
             else:
                 # Body already includes the signature (shown/edited in the card) → don't re-append.
                 _maint_mail.send_egs_maintenance_email(
@@ -4303,7 +4316,10 @@ def _try_egs_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Opt
                         maintenance.build_evo_batch_check_email_text(title),
                     )
         except Exception as ex:  # noqa: BLE001
-            _lbl = ("/egsreplytest" if is_test else "/egsreply") if is_reply else "/egs"
+            if is_reply:
+                _lbl = "/egsreplytest" if is_test else "/egsreply"
+            else:
+                _lbl = "/egstest" if is_test else "/egs"
             _egs_reply(chat_id_ca, orig_mid, f"❌ `{_lbl}` 失败: `{ex}`")
 
     threading.Thread(target=_send_job, daemon=True).start()
@@ -6218,11 +6234,11 @@ def lark_webhook():
         _process_evo_sd_batch_paste(chat_id, email_text)
         return _lark_im_done()
     elif cmd in ("/egs", "/egstest"):
-        # Pasted maintenance notice → LLM-titled email to egs.maintenance@ (Cc om@), same
-        # mailbox as `/m`. `/egstest` previews the title/body without sending.
+        # Pasted maintenance notice → editable card → Send. `/egs` → egs.maintenance@
+        # (Cc om@) + @QA/CS tag; `/egstest` → test send to junchen@ only.
         # Rebuild the body from ``original_text`` (keeps newlines, which ``clean_text``
         # collapses) and strip the leading command token + mentions.
-        _egs_dry = cmd == "/egstest"
+        _egs_test = cmd == "/egstest"
         _egs_src = original_text or ""
         for _mk in mention_keys:
             _egs_src = _egs_src.replace(_mk, "")
@@ -6233,7 +6249,7 @@ def lark_webhook():
         _egs_src = _egs_src.strip()
         if _egs_src.startswith('"') and _egs_src.endswith('"'):
             _egs_src = _egs_src[1:-1].strip()
-        _process_egs_paste(chat_id, _egs_src, dry_run=_egs_dry)
+        _process_egs_paste(chat_id, _egs_src, test=_egs_test)
         return _lark_im_done()
     elif cmd in ("/egsreply", "/egsreplytest"):
         # First line after the command = email title to find & reply to; rest = reply body.

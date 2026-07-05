@@ -1474,11 +1474,19 @@ def send_evo_batch_maintenance_email(*, subject: str, body: str) -> None:
     print(f"[maint-mail] EVO batch {subj!r} → {route}", flush=True)
 
 
-def send_egs_maintenance_email(*, subject: str, body: str, append_signature: bool = True) -> None:
-    """``/egs`` maintenance notice: om@ mailbox → junchen@ + Cc om@ (plain text, same account as ``/m``).
+def send_egs_maintenance_email(
+    *,
+    subject: str,
+    body: str,
+    append_signature: bool = True,
+    to_override: str | None = None,
+) -> None:
+    """``/egs`` maintenance notice: om@ mailbox → egs.maintenance@ + Cc om@ (plain text).
 
     ``append_signature=False`` when the caller's body already ends with the signature
     (e.g. the editable preview card, which shows the full email for the user to edit).
+    ``to_override`` (``/egstest``) sends ONLY to that address (no Cc, no QA/CS tag) and is
+    NOT recorded in egs.json — a throwaway test send to junchen@.
     """
     if not MAIL_PASSWORD:
         raise RuntimeError("MAINTENANCE_MAIL_PASSWORD not set")
@@ -1493,16 +1501,23 @@ def send_egs_maintenance_email(*, subject: str, body: str, append_signature: boo
     msg["From"] = formataddr((FORWARD_FROM_NAME, MAIL_USER))
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid()
-    msg["To"] = formataddr((EGS_MAIL_TO_NAME, EGS_MAIL_TO))
-    msg["Cc"] = formataddr((EGS_MAIL_CC_NAME, EGS_MAIL_CC))
-    recipients = [EGS_MAIL_TO, EGS_MAIL_CC]
-    route = f"{EGS_MAIL_TO} cc={EGS_MAIL_CC}"
+    test_to = (to_override or "").strip()
+    if test_to:
+        msg["To"] = test_to
+        recipients = [test_to]
+        route = f"{test_to} (test)"
+    else:
+        msg["To"] = formataddr((EGS_MAIL_TO_NAME, EGS_MAIL_TO))
+        msg["Cc"] = formataddr((EGS_MAIL_CC_NAME, EGS_MAIL_CC))
+        recipients = [EGS_MAIL_TO, EGS_MAIL_CC]
+        route = f"{EGS_MAIL_TO} cc={EGS_MAIL_CC}"
     ctx = ssl.create_default_context()
     with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=IMAP_TIMEOUT, context=ctx) as smtp:
         smtp.login(MAIL_USER, MAIL_PASSWORD)
         smtp.sendmail(MAIL_USER, recipients, msg.as_string())
-    print(f"[maint-mail] /egs {subj!r} → {route}", flush=True)
-    egs_store_sent_email(subj)  # powers the /egsreply picker card
+    print(f"[maint-mail] /egs{'test' if test_to else ''} {subj!r} → {route}", flush=True)
+    if not test_to:
+        egs_store_sent_email(subj)  # only real sends power the /egsreply picker card
 
 
 JENKINS_DONE_REPLY_TO = (

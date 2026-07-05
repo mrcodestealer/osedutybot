@@ -196,7 +196,7 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
                 [
                     ("/m <EVO batch>", "EVO SD batch → CP filter + email", "EVO 批量维护 + 发信"),
                     ("/egs <notice>", "Email pasted notice (LLM title) → egs.maintenance@", "粘贴维护通知 → 发信"),
-                    ("/egstest <notice>", "Preview /egs title + body (no email sent)", "预览 /egs 标题和正文（不发信）"),
+                    ("/egstest <notice>", "Like /egs but test send → junchen@", "同 /egs，测试发到 junchen@"),
                     ("/egsreply", "Pick a sent /egs email → reply in its thread", "选择已发 /egs 邮件 → 原邮件内回复"),
                     ("/egsreplytest", "Like /egsreply but reply → junchen@ (test)", "同 /egsreply，回复发到 junchen@（测试）"),
                     ("/ms <email> | /maintenance …", "Parse single maintenance email", "解析单封维护邮件"),
