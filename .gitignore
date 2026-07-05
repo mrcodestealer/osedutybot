@@ -75,3 +75,4 @@ cloudflared.rpm
 miniconda.sh
 *.tar.xz
 wireguard-go-*/
+.pldt_prefix_state.json

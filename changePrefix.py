@@ -35,13 +35,20 @@ returns empty content (~90s). Override the model only via ``PLDT_CAPTCHA_MODEL``
 
 import base64
 import hashlib
+import json
 import os
 import re
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None  # type: ignore
 
 load_dotenv()
 
@@ -569,14 +576,65 @@ def _next_prefix(current: str):
     return new_prefix, PREFIX_TO_NUMBER[new_prefix]
 
 
-def _rotate_in_browser(cookies: dict, provider_url: str, shots_dir, dry_run: bool, headless: bool) -> dict:
-    """Screenshot before → read+compute+apply the new prefix → screenshot after.
+# ---- Idempotency state (prevents double-advancing the prefix) --------------
+# The rotation is stateless per-run (it reads the live field and does +1), so a
+# submit that COMMITS server-side but whose verify-reload fails would otherwise be
+# retried and advance the prefix a SECOND time. We therefore record the rotation
+# INTENT (target + ISO week) BEFORE submitting, and only ever advance once per ISO
+# week: a same-week rerun reconciles against the live value instead of advancing.
+def _state_path() -> Path:
+    explicit = (os.getenv("PLDT_PREFIX_STATE_FILE") or "").strip()
+    if explicit:
+        return Path(explicit)
+    return Path(__file__).resolve().parent / ".pldt_prefix_state.json"
 
-    On ``dry_run`` it stops after computing the new value (no Apply, no after shot).
+
+def _load_state() -> dict:
+    try:
+        return json.loads(_state_path().read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_state(state: dict) -> None:
+    try:
+        path = _state_path()
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[changePrefix] could not save rotation state: {exc!r}", flush=True)
+
+
+def _iso_week_key() -> str:
+    """ISO year-week in the rotation timezone (default Asia/Manila, UTC+8)."""
+    tzname = (os.getenv("PLDT_PREFIX_TZ") or "Asia/Manila").strip()
+    now = None
+    if ZoneInfo is not None:
+        try:
+            now = datetime.now(ZoneInfo(tzname))
+        except Exception:
+            now = None
+    if now is None:
+        now = datetime.now()
+    y, w, _ = now.isocalendar()
+    return f"{y}-W{w:02d}"
+
+
+def _rotate_in_browser(
+    cookies: dict, provider_url: str, provider_id: str, shots_dir, dry_run: bool, headless: bool
+) -> dict:
+    """Screenshot before → decide target (idempotent per ISO week) → apply → screenshot after.
+
+    Records the intent BEFORE submitting so a commit-then-verify-fail cannot double
+    advance. ``already_applied`` is True when this ISO week's rotation was already done
+    (the caller then skips the group announcement).
     """
     from playwright.sync_api import sync_playwright
 
     root = _ipbx_root() + "/"
+    week = _iso_week_key()
+    state = _load_state()
     res = {
         "ok": False,
         "old_prefix": None,
@@ -585,6 +643,8 @@ def _rotate_in_browser(cookies: dict, provider_url: str, shots_dir, dry_run: boo
         "before_image": None,
         "after_image": None,
         "applied": False,
+        "already_applied": False,
+        "iso_week": week,
         "message": "",
     }
     with sync_playwright() as p:
@@ -601,36 +661,85 @@ def _rotate_in_browser(cookies: dict, provider_url: str, shots_dir, dry_run: boo
             except Exception:
                 pass
 
-            # Screenshot BEFORE the change.
+            # Screenshot BEFORE any change.
             before = shots_dir / "pldt_prefix_before.png"
             page.screenshot(path=str(before), full_page=True)
             res["before_image"] = str(before)
 
             # Read the current prefix straight from the field (source of truth).
             try:
-                old = (page.input_value(_PREFIX_INPUT, timeout=_nav_timeout()) or "").strip()
+                live = (page.input_value(_PREFIX_INPUT, timeout=_nav_timeout()) or "").strip()
             except Exception as exc:  # noqa: BLE001
                 res["message"] = f"could not read the Prefix field ({_PREFIX_INPUT}): {exc!r}"
                 return res
-            res["old_prefix"] = old
 
-            new_prefix, number = _next_prefix(old)
-            if not new_prefix:
-                res["message"] = (
-                    f"current prefix {old!r} is not in the known 028-991-2880..2899 "
-                    "table — aborting to avoid setting a wrong value"
-                )
-                return res
+            # Decide the target for THIS run.
+            same_week = (
+                isinstance(state, dict)
+                and state.get("iso_week") == week
+                and str(state.get("provider_id")) == str(provider_id)
+            )
+            if same_week:
+                target = state.get("target_prefix")
+                from_prefix = state.get("from_prefix")
+                number = PREFIX_TO_NUMBER.get(target or "")
+                if live == target:
+                    # This week's rotation already took effect (confirmed now, even if a
+                    # previous run failed to verify). Do NOT advance again.
+                    res.update(
+                        old_prefix=from_prefix,
+                        new_prefix=target,
+                        message_number=number,
+                        applied=True,
+                        already_applied=True,
+                        ok=True,
+                        after_image=str(before),
+                        message=f"already rotated this week ({from_prefix} → {target}); not advancing again",
+                    )
+                    # Make sure the confirmed state is persisted.
+                    _save_state({
+                        "iso_week": week, "provider_id": str(provider_id),
+                        "from_prefix": from_prefix, "target_prefix": target, "applied": True,
+                    })
+                    return res
+                elif live == from_prefix and number:
+                    # Last submit did not commit — retry the SAME target (no advance).
+                    new_prefix = target
+                else:
+                    res["message"] = (
+                        f"this week's target was {target!r} (from {from_prefix!r}) but the live "
+                        f"prefix is {live!r} — unexpected; aborting to avoid a wrong change"
+                    )
+                    return res
+            else:
+                # New week (or no state): advance once from the live value.
+                from_prefix = live
+                new_prefix, number = _next_prefix(live)
+                if not new_prefix:
+                    res["message"] = (
+                        f"current prefix {live!r} is not in the known 028-991-2880..2899 "
+                        "table — aborting to avoid setting a wrong value"
+                    )
+                    return res
+
+            res["old_prefix"] = from_prefix
             res["new_prefix"] = new_prefix
             res["message_number"] = number
 
             if dry_run:
                 res["ok"] = True
                 res["message"] = (
-                    f"[dry-run] would change {old} → {new_prefix}; CS number {number} "
+                    f"[dry-run] would change {from_prefix} → {new_prefix}; CS number {number} "
                     "(no change applied)"
                 )
                 return res
+
+            # Record the INTENT before submitting, so a commit-then-verify-fail is
+            # reconciled (not double-advanced) on the next run.
+            _save_state({
+                "iso_week": week, "provider_id": str(provider_id),
+                "from_prefix": from_prefix, "target_prefix": new_prefix, "applied": False,
+            })
 
             # Apply: set the field, then submit the edit form directly. A human click
             # goes Apply → name-check AJAX → "Submit success!" confirm → OK → form.submit().
@@ -643,16 +752,21 @@ def _rotate_in_browser(cookies: dict, provider_url: str, shots_dir, dry_run: boo
             except Exception:
                 pass
 
-            # Verify by reloading the edit page and reading the field back.
-            page.goto(provider_url, wait_until="domcontentloaded", timeout=_nav_timeout())
-            try:
-                page.wait_for_load_state("networkidle", timeout=8000)
-            except Exception:
-                pass
-            try:
-                confirmed = (page.input_value(_PREFIX_INPUT, timeout=_nav_timeout()) or "").strip()
-            except Exception:
-                confirmed = ""
+            # Verify by reloading the edit page and reading the field back (a couple of
+            # tries, since the write may have committed even if the first reload is slow).
+            confirmed = ""
+            for _ in range(3):
+                try:
+                    page.goto(provider_url, wait_until="domcontentloaded", timeout=_nav_timeout())
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=8000)
+                    except Exception:
+                        pass
+                    confirmed = (page.input_value(_PREFIX_INPUT, timeout=_nav_timeout()) or "").strip()
+                    if confirmed:
+                        break
+                except Exception:
+                    confirmed = ""
             res["applied"] = confirmed == new_prefix
 
             # Screenshot AFTER the change.
@@ -661,12 +775,17 @@ def _rotate_in_browser(cookies: dict, provider_url: str, shots_dir, dry_run: boo
             res["after_image"] = str(after)
 
             if res["applied"]:
+                _save_state({
+                    "iso_week": week, "provider_id": str(provider_id),
+                    "from_prefix": from_prefix, "target_prefix": new_prefix, "applied": True,
+                })
                 res["ok"] = True
-                res["message"] = f"changed {old} → {new_prefix}; CS number {number}"
+                res["message"] = f"changed {from_prefix} → {new_prefix}; CS number {number}"
             else:
                 res["message"] = (
-                    f"submitted {old} → {new_prefix} but the page read back {confirmed!r}; "
-                    "NOT confirmed — no announcement will be sent"
+                    f"submitted {from_prefix} → {new_prefix} but the page read back {confirmed!r}; "
+                    "NOT confirmed. Intent is recorded, so a retry this week will reconcile "
+                    "rather than double-advance."
                 )
             return res
         finally:
@@ -683,9 +802,10 @@ def _rotate_in_browser(cookies: dict, provider_url: str, shots_dir, dry_run: boo
 def rotate_prefix(provider_id=None, headless=None, max_attempts=None, dry_run: bool = False) -> dict:
     """Log in, then change the CallerID Prefix to the next value (with before/after shots).
 
-    Returns {ok, dry_run, provider_id, attempts, old_prefix, new_prefix, message_number,
-    before_image, after_image, applied, message, codes}. Does NOT send anything to
-    Lark — the caller (main.py) posts the images/message.
+    Idempotent per ISO week: at most one advance per week; a same-week rerun reconciles
+    against the live value instead of advancing again. Returns {ok, dry_run, provider_id,
+    attempts, old_prefix, new_prefix, message_number, before_image, after_image, applied,
+    already_applied, iso_week, message, codes}. Does NOT post to Lark — main.py does.
     """
     provider_id = _provider_id(provider_id)
     headless = _headless(headless)
@@ -705,6 +825,8 @@ def rotate_prefix(provider_id=None, headless=None, max_attempts=None, dry_run: b
         "before_image": None,
         "after_image": None,
         "applied": False,
+        "already_applied": False,
+        "iso_week": None,
         "message": "",
         "codes": [],
     }
@@ -716,7 +838,12 @@ def rotate_prefix(provider_id=None, headless=None, max_attempts=None, dry_run: b
             result["message"] = login["message"]
             return result
         rr = _rotate_in_browser(
-            login["session"].cookies.get_dict(), provider_url, shots_dir, dry_run, headless
+            login["session"].cookies.get_dict(),
+            provider_url,
+            provider_id,
+            shots_dir,
+            dry_run,
+            headless,
         )
         for k in (
             "old_prefix",
@@ -725,6 +852,8 @@ def rotate_prefix(provider_id=None, headless=None, max_attempts=None, dry_run: b
             "before_image",
             "after_image",
             "applied",
+            "already_applied",
+            "iso_week",
         ):
             result[k] = rr.get(k)
         result["ok"] = rr["ok"]

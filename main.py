@@ -2126,31 +2126,48 @@ def run_pldt_prefix_rotation(dry_run: bool = False, notify_chat: Optional[str] =
 
     Run this in a background thread / scheduler job (never inline in the webhook), so
     ``send_message`` posts to the group instead of quote-replying an inbound message.
+    ``notify_chat`` set = manual run: status/errors go there. ``notify_chat`` None =
+    scheduled run: only the successful announcement is posted to the group; status/
+    errors are logged (never spam the CS group with bot chatter).
     """
     group = PLDT_PREFIX_GROUP_CHAT_ID
-    status_chat = (notify_chat or group)
+
+    def _status(text: str) -> None:
+        if notify_chat:
+            send_message(notify_chat, text)
+        else:
+            print(f"[pldtprefix] {text}", flush=True)
+
     try:
         import changePrefix as _cp
         res = _cp.rotate_prefix(dry_run=dry_run)
     except Exception as exc:  # noqa: BLE001
         print(f"[pldtprefix] rotation error: {exc!r}", flush=True)
-        send_message(status_chat, f"❌ PLDT prefix rotation error: {exc}")
+        _status(f"❌ PLDT prefix rotation error: {exc}")
         return
 
     if not res.get("ok"):
-        send_message(
-            status_chat,
+        _status(
             f"❌ PLDT prefix rotation failed (attempts={res.get('attempts')}): "
-            f"{res.get('message')}",
+            f"{res.get('message')}"
         )
         return
 
     if dry_run:
-        send_message(
-            status_chat,
+        _status(
             f"🧪 [dry-run] PLDT prefix would change "
             f"`{res.get('old_prefix')}` → `{res.get('new_prefix')}`; "
-            f"CS number `{res.get('message_number')}`. No change applied, nothing posted to the group.",
+            f"CS number `{res.get('message_number')}`. No change applied, nothing posted to the group."
+        )
+        return
+
+    if res.get("already_applied"):
+        # This ISO week's rotation already happened (or was reconciled) — do NOT post
+        # a duplicate announcement to the CS group.
+        _status(
+            f"ℹ️ PLDT prefix already rotated this week "
+            f"(`{res.get('old_prefix')}` → `{res.get('new_prefix')}`, "
+            f"number `{res.get('message_number')}`). Skipping the group announcement."
         )
         return
 
