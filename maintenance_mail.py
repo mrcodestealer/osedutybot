@@ -220,10 +220,47 @@ EGS_SENT_STORE_PATH = os.path.join(_EGS_DIR, "egs.json")        # real /egs send
 EGS_TEST_STORE_PATH = os.path.join(_EGS_DIR, "egstest.json")   # /egstest sends (for /egsreplytest picker)
 _EGS_SENT_STORE_MAX = max(5, int(os.getenv("EGS_SENT_STORE_MAX", "").strip() or "30"))
 _egs_store_lock = threading.Lock()
+# Stores auto-reset each Monday 00:00 (GMT+8): entries carry the week they belong to;
+# a stale week reads as empty and is overwritten on the next write. `egs_reset_stores`
+# (scheduled at Monday 00:00) also physically clears them.
+_EGS_WEEK_TZ = timezone(timedelta(hours=int(os.getenv("EGS_WEEK_TZ_OFFSET", "8"))))
+
+
+def _egs_week_key() -> str:
+    """ISO date of Monday (GMT+8) for the current week."""
+    now = datetime.now(_EGS_WEEK_TZ)
+    return (now.date() - timedelta(days=now.weekday())).isoformat()
 
 
 def _egs_store_path(test: bool) -> str:
     return EGS_TEST_STORE_PATH if test else EGS_SENT_STORE_PATH
+
+
+def egs_reset_stores() -> None:
+    """Empty egs.json + egstest.json — weekly clear (scheduled Monday 00:00)."""
+    week = _egs_week_key()
+    with _egs_store_lock:
+        for path in (EGS_SENT_STORE_PATH, EGS_TEST_STORE_PATH):
+            try:
+                tmp = path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump({"week": week, "sent": []}, f, ensure_ascii=False, indent=1)
+                os.replace(tmp, path)
+            except Exception as ex:  # noqa: BLE001
+                print(f"[maint-mail] egs reset {os.path.basename(path)} failed: {ex!r}", flush=True)
+    print("[maint-mail] egs.json + egstest.json cleared (weekly reset)", flush=True)
+
+
+def _egs_load_current_week(path: str) -> list[dict[str, Any]]:
+    """Entries for the CURRENT week only ([] if file missing / stale week / bad json)."""
+    try:
+        raw = json.loads(open(path, encoding="utf-8").read())
+    except (FileNotFoundError, ValueError):
+        return []
+    if not isinstance(raw, dict) or raw.get("week") != _egs_week_key():
+        return []  # previous week (or legacy format) → treat as cleared
+    entries = raw.get("sent")
+    return [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
 
 
 def egs_store_sent_email(
@@ -246,17 +283,11 @@ def egs_store_sent_email(
     path = _egs_store_path(test)
     try:
         with _egs_store_lock:
-            entries: list[dict[str, Any]] = []
-            try:
-                raw = json.loads(open(path, encoding="utf-8").read())
-                if isinstance(raw, dict) and isinstance(raw.get("sent"), list):
-                    entries = [e for e in raw["sent"] if isinstance(e, dict)]
-            except (FileNotFoundError, ValueError):
-                pass
+            entries = _egs_load_current_week(path)  # drops previous-week data
             entries.append(
                 {
                     "subject": subj,
-                    "at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "at": datetime.now(_EGS_WEEK_TZ).strftime("%Y-%m-%d %H:%M"),
                     "message_id": (message_id or "").strip(),
                     "to": list(to or []),
                     "cc": list(cc or []),
@@ -265,26 +296,18 @@ def egs_store_sent_email(
             entries = entries[-_EGS_SENT_STORE_MAX:]
             tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump({"sent": entries}, f, ensure_ascii=False, indent=1)
+                json.dump(
+                    {"week": _egs_week_key(), "sent": entries}, f, ensure_ascii=False, indent=1
+                )
             os.replace(tmp, path)
     except Exception as ex:  # noqa: BLE001
         print(f"[maint-mail] {os.path.basename(path)} store failed: {ex!r}", flush=True)
 
 
 def egs_store_lookup(subject: str, *, test: bool = False) -> dict[str, Any] | None:
-    """Newest stored sent entry with a matching subject AND a Message-ID (for threading)."""
-    path = _egs_store_path(test)
-    try:
-        raw = json.loads(open(path, encoding="utf-8").read())
-        entries = raw.get("sent") if isinstance(raw, dict) else None
-        if not isinstance(entries, list):
-            return None
-    except (FileNotFoundError, ValueError):
-        return None
+    """Newest CURRENT-WEEK entry with a matching subject AND a Message-ID (for threading)."""
     want = (subject or "").strip().casefold()
-    for e in reversed(entries):  # newest first
-        if not isinstance(e, dict):
-            continue
+    for e in reversed(_egs_load_current_week(_egs_store_path(test))):  # newest first
         if str(e.get("subject") or "").strip().casefold() == want and str(
             e.get("message_id") or ""
         ).strip():
@@ -293,15 +316,8 @@ def egs_store_lookup(subject: str, *, test: bool = False) -> dict[str, Any] | No
 
 
 def egs_recent_sent_emails(limit: int = 8, *, test: bool = False) -> list[dict[str, Any]]:
-    """Newest-first sent emails from ``egs.json`` (real) or ``egstest.json`` (test), deduped."""
-    path = _egs_store_path(test)
-    try:
-        raw = json.loads(open(path, encoding="utf-8").read())
-        entries = raw.get("sent") if isinstance(raw, dict) else None
-        if not isinstance(entries, list):
-            return []
-    except (FileNotFoundError, ValueError):
-        return []
+    """Newest-first CURRENT-WEEK sent emails (real egs.json / test egstest.json), deduped."""
+    entries = _egs_load_current_week(_egs_store_path(test))
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for e in reversed(entries):  # newest first
@@ -393,13 +409,18 @@ JENKINS_REPLY_IMAP_SCAN_LIMIT = int(
     os.getenv("JENKINS_REPLY_IMAP_SCAN_LIMIT", "").strip() or "1200"
 )
 
-# ===================== allemail.json — rolling 1-week email index =====================
-# A local index of every email seen in the reply folders over the last N days, keyed by
+# ===================== allemail.json — 1-week email index =====================
+# A local index of every email seen in the reply folders for the current week, keyed by
 # subject + Message-ID (with the original From/To/Cc). When a Jenkins update carries an
 # ``Email:`` line, the reply is built straight from this index — replying IN the original
 # thread (In-Reply-To/References) with the SAME To/Cc (reply-all) — no fragile live IMAP
 # subject search. Refreshed by a background scanner; falls back to live search on a miss.
+#
+# Retention: ``ALLEMAIL_RESET_MODE=weekly`` (default) → HARD reset at the start of each
+# local week (Monday 00:00 ``MAINTENANCE_MAIL_TZ``): the file is cleared and re-indexed
+# from that Monday. ``rolling`` → keep a trailing ``ALLEMAIL_WINDOW_DAYS`` window instead.
 ALLEMAIL_STORE_PATH = os.path.join(_CHBOX_DIR, "allemail.json")
+ALLEMAIL_RESET_MODE = (os.getenv("ALLEMAIL_RESET_MODE", "").strip().lower() or "weekly")
 ALLEMAIL_WINDOW_DAYS = min(60, max(1, int(os.getenv("ALLEMAIL_WINDOW_DAYS", "").strip() or "7")))
 ALLEMAIL_SCAN_INTERVAL_SEC = max(
     60, int(os.getenv("ALLEMAIL_SCAN_INTERVAL_SEC", "").strip() or "1800")
@@ -4309,10 +4330,45 @@ def _allemail_load() -> dict[str, Any]:
     return {"version": 1, "updated_at": "", "emails": []}
 
 
+def _allemail_weekly_mode() -> bool:
+    return ALLEMAIL_RESET_MODE != "rolling"
+
+
+def _allemail_week_start_dt() -> datetime:
+    """Monday 00:00 (local ``MAINTENANCE_MAIL_TZ``) of the current week."""
+    now_local = datetime.now(_local_tz())
+    monday = now_local.date() - timedelta(days=now_local.weekday())
+    return datetime(monday.year, monday.month, monday.day, tzinfo=_local_tz())
+
+
+def _allemail_current_week_id() -> str:
+    """ISO ``YYYY-Www`` label for the current local week (changes at Monday 00:00 local)."""
+    iso = datetime.now(_local_tz()).isocalendar()
+    return f"{iso[0]:04d}-W{iso[1]:02d}"
+
+
 def _allemail_window_cutoff_ts() -> float:
+    if _allemail_weekly_mode():
+        # Hard weekly reset: keep only mail from this week's Monday 00:00 onward.
+        return _allemail_week_start_dt().timestamp()
     return (
         datetime.now(timezone.utc) - timedelta(days=ALLEMAIL_WINDOW_DAYS)
     ).timestamp()
+
+
+def _allemail_scan_since_date() -> str:
+    """IMAP ``SINCE`` date — this week's Monday (weekly) or now-window (rolling)."""
+    if _allemail_weekly_mode():
+        return _allemail_week_start_dt().astimezone(timezone.utc).strftime("%d-%b-%Y")
+    return (
+        datetime.now(timezone.utc) - timedelta(days=ALLEMAIL_WINDOW_DAYS)
+    ).strftime("%d-%b-%Y")
+
+
+def _allemail_retention_label() -> str:
+    if _allemail_weekly_mode():
+        return f"week {_allemail_current_week_id()} (hard reset Mon 00:00 {MAIL_TZ})"
+    return f"rolling {ALLEMAIL_WINDOW_DAYS}d"
 
 
 def _allemail_entry_key(entry: dict[str, Any]) -> str:
@@ -4337,6 +4393,8 @@ def _allemail_save(emails: list[dict[str, Any]]) -> None:
     data = {
         "version": 1,
         "updated_at": datetime.now(timezone.utc).isoformat(),
+        "reset_mode": ALLEMAIL_RESET_MODE,
+        "week_id": _allemail_current_week_id(),
         "window_days": ALLEMAIL_WINDOW_DAYS,
         "count": len(fresh),
         "emails": fresh,
@@ -4408,9 +4466,7 @@ def _allemail_parse_header_bytes(raw: bytes, *, folder: str, uid: str) -> dict[s
 def _allemail_scan_folder(mail: imaplib.IMAP4, folder: str) -> list[dict[str, Any]]:
     if not _select_mail_folder(mail, folder, readonly=True):
         return []
-    since = (
-        datetime.now(timezone.utc) - timedelta(days=ALLEMAIL_WINDOW_DAYS)
-    ).strftime("%d-%b-%Y")
+    since = _allemail_scan_since_date()
     uids = _uid_search(mail, f"(SINCE {since})")
     if not uids:
         return []
@@ -4442,7 +4498,7 @@ def _allemail_scan_folder(mail: imaplib.IMAP4, folder: str) -> list[dict[str, An
 
 
 def scan_allemail_cache() -> int:
-    """Refresh allemail.json with every email from the last ``ALLEMAIL_WINDOW_DAYS`` days."""
+    """Refresh allemail.json; hard-reset the index at the start of each local week."""
     if not _allemail_enabled():
         return 0
     mail = _connect_imap_simple(timeout=_JENKINS_REPLY_IMAP_TIMEOUT)
@@ -4459,7 +4515,20 @@ def scan_allemail_cache() -> int:
         except Exception:
             pass
     with _allemail_lock:
-        existing = _allemail_load().get("emails", [])
+        prior = _allemail_load()
+        existing = prior.get("emails", [])
+        # Hard weekly reset: when the local ISO week has rolled over, drop the whole prior
+        # index and re-index from scratch (this week's Monday onward).
+        if _allemail_weekly_mode():
+            cur_week = _allemail_current_week_id()
+            prev_week = (prior.get("week_id") or "").strip()
+            if prev_week and prev_week != cur_week:
+                print(
+                    f"[allemail] new week {cur_week} (was {prev_week}) — cleared "
+                    f"{len(existing)} entr(y/ies); re-indexing from this Monday.",
+                    flush=True,
+                )
+                existing = []
         merged: dict[str, dict[str, Any]] = {}
         for e in existing:
             merged[_allemail_entry_key(e)] = e
@@ -4711,7 +4780,7 @@ def start_allemail_cache_scanner() -> bool:
                 n = scan_allemail_cache()
                 print(
                     f"[allemail] cache refreshed: {n} email(s) scanned "
-                    f"(last {ALLEMAIL_WINDOW_DAYS}d, folders={', '.join(_allemail_folders())}).",
+                    f"({_allemail_retention_label()}, folders={', '.join(_allemail_folders())}).",
                     flush=True,
                 )
             except Exception as ex:
@@ -4722,7 +4791,7 @@ def start_allemail_cache_scanner() -> bool:
     _allemail_scanner_started = True
     print(
         f"[allemail] cache scanner started (every {ALLEMAIL_SCAN_INTERVAL_SEC}s, "
-        f"{ALLEMAIL_WINDOW_DAYS}d window).",
+        f"{_allemail_retention_label()}).",
         flush=True,
     )
     return True
@@ -6799,7 +6868,7 @@ if __name__ == "__main__":
     if len(sys.argv) >= 2 and sys.argv[1] == "allemail-scan":
         _n = scan_allemail_cache()
         print(
-            f"allemail.json refreshed: {_n} email(s) in last {ALLEMAIL_WINDOW_DAYS}d "
+            f"allemail.json refreshed: {_n} email(s) ({_allemail_retention_label()}) "
             f"→ {ALLEMAIL_STORE_PATH}",
             flush=True,
         )
