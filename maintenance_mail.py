@@ -208,6 +208,77 @@ EGS_TEST_REPLY_TO = (
     or os.getenv("egs_test_reply_to", "").strip()
     or "junchen@snsoft.my"
 )
+# ``/egs`` sent-email log — powers the ``/egsreply`` picker card (choose which email to reply).
+EGS_SENT_STORE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "egs.json"
+)
+_EGS_SENT_STORE_MAX = max(5, int(os.getenv("EGS_SENT_STORE_MAX", "").strip() or "30"))
+_egs_store_lock = threading.Lock()
+
+
+def egs_store_sent_email(subject: str) -> None:
+    """Append a ``/egs`` sent email to ``egs.json`` (newest last, capped). Never raises."""
+    subj = (subject or "").strip()
+    if not subj:
+        return
+    try:
+        with _egs_store_lock:
+            entries: list[dict[str, Any]] = []
+            try:
+                raw = json.loads(open(EGS_SENT_STORE_PATH, encoding="utf-8").read())
+                if isinstance(raw, dict) and isinstance(raw.get("sent"), list):
+                    entries = [e for e in raw["sent"] if isinstance(e, dict)]
+            except (FileNotFoundError, ValueError):
+                pass
+            entries.append(
+                {"subject": subj, "at": datetime.now().strftime("%Y-%m-%d %H:%M")}
+            )
+            entries = entries[-_EGS_SENT_STORE_MAX:]
+            tmp = EGS_SENT_STORE_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"sent": entries}, f, ensure_ascii=False, indent=1)
+            os.replace(tmp, EGS_SENT_STORE_PATH)
+    except Exception as ex:  # noqa: BLE001
+        print(f"[maint-mail] egs.json store failed: {ex!r}", flush=True)
+
+
+def egs_recent_sent_emails(limit: int = 8) -> list[dict[str, Any]]:
+    """Newest-first ``/egs`` sent emails from ``egs.json`` (deduped by subject)."""
+    try:
+        raw = json.loads(open(EGS_SENT_STORE_PATH, encoding="utf-8").read())
+        entries = raw.get("sent") if isinstance(raw, dict) else None
+        if not isinstance(entries, list):
+            return []
+    except (FileNotFoundError, ValueError):
+        return []
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for e in reversed(entries):  # newest first
+        if not isinstance(e, dict):
+            continue
+        subj = str(e.get("subject") or "").strip()
+        if not subj or subj in seen:
+            continue
+        seen.add(subj)
+        out.append({"subject": subj, "at": str(e.get("at") or "")})
+        if len(out) >= max(1, limit):
+            break
+    return out
+
+
+# ``/egsreply`` search: folders scanned (newest-first) + how far back. Kept small for speed —
+# vendor notices land in INBOX / OSE Pending; our own /egs sends are in Sent.
+EGS_REPLY_IMAP_FOLDERS = [
+    f.strip()
+    for f in (
+        os.getenv("EGS_REPLY_IMAP_FOLDERS", "").strip()
+        or os.getenv("egs_reply_imap_folders", "").strip()
+        or "INBOX,OSE Pending,Sent"
+    ).split(",")
+    if f.strip()
+]
+EGS_REPLY_SINCE_DAYS = int(os.getenv("EGS_REPLY_SINCE_DAYS", "").strip() or "30")
+EGS_REPLY_SCAN_LIMIT = int(os.getenv("EGS_REPLY_SCAN_LIMIT", "").strip() or "200")
 # Link Fw: to the incoming maintenance mail in om@ (In-Reply-To). Set 0 if Show/Hide breaks.
 FORWARD_THREAD_HEADERS = (
     os.getenv("MAINTENANCE_MAIL_FORWARD_THREAD", "").strip() or "1"
@@ -1431,6 +1502,7 @@ def send_egs_maintenance_email(*, subject: str, body: str, append_signature: boo
         smtp.login(MAIL_USER, MAIL_PASSWORD)
         smtp.sendmail(MAIL_USER, recipients, msg.as_string())
     print(f"[maint-mail] /egs {subj!r} → {route}", flush=True)
+    egs_store_sent_email(subj)  # powers the /egsreply picker card
 
 
 JENKINS_DONE_REPLY_TO = (
@@ -4223,6 +4295,180 @@ def reply_jenkins_update_done_email(
     }
 
 
+def _egs_reply_title_tokens(title: str) -> list[str]:
+    """Tokens used to fuzzy-match a user-typed title against real subjects.
+
+    Drops our ``/egs`` date suffix (`` - DD/MM/YYYY``), ``Re:``/``Fw:`` prefixes and
+    pure-number tokens (dates/times) — user titles often carry a date the vendor's
+    actual subject formats differently (or not at all).
+    """
+    s = (title or "").strip()
+    s = re.sub(r"(?i)^(?:(?:re|fw|fwd)\s*:\s*)+", "", s)
+    s = re.sub(r"\s*[-–—]\s*\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4}\s*$", "", s)
+    toks = [t.casefold() for t in re.findall(r"[A-Za-z0-9]+", s)]
+    return [t for t in toks if len(t) >= 2 and re.search(r"[a-z]", t)]
+
+
+def _egs_reply_subject_score(subject: str, needle: str, tokens: list[str]) -> float:
+    """1.0 = subject contains the typed title verbatim; else token-coverage in (0,1].
+
+    0 unless the FIRST token (the vendor, e.g. ``cq9``) appears — coverage of generic
+    words like "maintenance notice" alone must not match some other vendor's mail.
+    ``Re:``/``Fw:`` subjects get a small penalty so the vendor's ORIGINAL outranks
+    replies/forwards (including our own earlier bot reply) at equal coverage.
+    """
+    subj = (subject or "").casefold()
+    if not subj:
+        return 0.0
+    n = (needle or "").strip().casefold()
+    if n and n in subj:
+        score = 1.0
+    elif not tokens or tokens[0] not in subj:
+        return 0.0
+    else:
+        score = sum(1 for t in tokens if t in subj) / len(tokens)
+    if re.match(r"^(?:re|fw|fwd)\s*:", subj):
+        score *= 0.98
+    return score
+
+
+def _egs_reply_peek_has_recipients(h: dict[str, Any]) -> bool:
+    """True when a header peek would yield non-empty Reply-All recipients.
+
+    Filters out e.g. our own Sent copy whose only To is an own identity
+    (``junchen@`` is in ``_own_smtp_identities``) — replying to that raises later.
+    """
+    stub = email.message.Message()
+    for hdr, key in (("From", "from_hdr"), ("To", "to_raw"), ("Cc", "cc_raw")):
+        v = (h.get(key) or "").strip()
+        if v:
+            stub[hdr] = v
+    try:
+        _jenkins_reply_all_recipients(stub)
+        return True
+    except Exception:
+        return False
+
+
+_EGS_REPLY_CHUNK = max(10, int(os.getenv("EGS_REPLY_CHUNK", "").strip() or "40"))
+
+
+def find_egs_reply_message_fuzzy(
+    title: str,
+) -> tuple[email.message.Message, str, float] | None:
+    """Fast fuzzy finder for ``/egsreply``: newest best-matching mail across
+    ``EGS_REPLY_IMAP_FOLDERS``.
+
+    Lark IMAP quirks (measured): server-side ``SUBJECT``/``TEXT`` filters are IGNORED
+    (return every SINCE hit) and header fetches cost ~55ms/message server-side. So each
+    folder is scanned newest-first in chunks of ``EGS_REPLY_CHUNK`` headers with early
+    exit on an exact match, and the folders run in PARALLEL (one IMAP connection each).
+
+    Match = subject contains the typed title verbatim (1.0; ``Re:``/``Fw:`` ×0.98 so the
+    vendor's original outranks replies) or ≥60% of the title's word tokens present,
+    always requiring the leading vendor token. Bounces and messages with no usable
+    Reply-All recipients are skipped. Returns ``(message, folder, score)`` or ``None``.
+    """
+    needle = (title or "").strip()
+    if not needle:
+        return None
+    tokens = _egs_reply_title_tokens(needle)
+    since_s = (
+        datetime.now(timezone.utc) - timedelta(days=EGS_REPLY_SINCE_DAYS)
+    ).strftime("%d-%b-%Y")
+    t0 = time.monotonic()
+    stop_all = threading.Event()  # a folder found an exact original — others stop early
+    results: list[tuple[float, datetime, bytes, str]] = []  # (score, ts, uid, folder)
+    results_lock = threading.Lock()
+
+    def _scan_folder(folder: str) -> None:
+        try:
+            mail = _connect_imap_simple(timeout=_JENKINS_REPLY_IMAP_TIMEOUT)
+        except Exception as ex:  # noqa: BLE001
+            print(f"[maint-mail] /egsreply connect for {folder!r} failed: {ex!r}", flush=True)
+            return
+        try:
+            resolved = _resolve_imap_folder_name(mail, folder)
+            if not _select_mail_folder(mail, resolved, readonly=True):
+                return
+            uids = _uid_search(mail, f"(SINCE {since_s})") or _uid_search(mail, "ALL")
+            if not uids:
+                return
+            newest_first = [_uid_as_bytes(u) for u in uids[-EGS_REPLY_SCAN_LIMIT:]][::-1]
+            local: tuple[float, datetime, bytes, str] | None = None
+            for off in range(0, len(newest_first), _EGS_REPLY_CHUNK):
+                if stop_all.is_set():
+                    break
+                chunk = newest_first[off : off + _EGS_REPLY_CHUNK]
+                headers = _imap_uid_fetch_headers_batch(mail, chunk, chunk_size=len(chunk))
+                for uid in chunk:
+                    h = headers.get(uid) or {}
+                    score = _egs_reply_subject_score(h.get("subj") or "", needle, tokens)
+                    if score < 0.6:
+                        continue
+                    from_low = (h.get("from_hdr") or "").casefold()
+                    if any(m in from_low for m in _BOUNCE_FROM_MARKERS):
+                        continue
+                    if not _egs_reply_peek_has_recipients(h):
+                        continue
+                    ts = h.get("ts") or datetime.min.replace(tzinfo=timezone.utc)
+                    if local is None or (score, ts) > (local[0], local[1]):
+                        local = (score, ts, uid, resolved)
+                # ≥0.98 = verbatim title (original or its Re:) — nothing deeper in this
+                # folder can beat it meaningfully; stop scanning here.
+                if local is not None and local[0] >= 0.98:
+                    break
+            if local is not None:
+                with results_lock:
+                    results.append(local)
+                if local[0] >= 1.0:
+                    stop_all.set()
+        except (imaplib.IMAP4.abort, imaplib.IMAP4.error, OSError, ImapStaleConnectionError) as ex:
+            print(f"[maint-mail] /egsreply scan {folder!r} failed: {ex!r}", flush=True)
+        finally:
+            try:
+                mail.logout()
+            except Exception:
+                pass
+
+    threads = [
+        threading.Thread(target=_scan_folder, args=(f,), daemon=True)
+        for f in EGS_REPLY_IMAP_FOLDERS
+    ]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=max(30.0, _JENKINS_REPLY_IMAP_TIMEOUT * 2))
+
+    if not results:
+        print(
+            f"[maint-mail] /egsreply: no match ≥0.6 for {needle!r} "
+            f"(tokens={tokens}) in {EGS_REPLY_IMAP_FOLDERS} "
+            f"({time.monotonic() - t0:.1f}s)",
+            flush=True,
+        )
+        return None
+    score, _ts, uid, folder = max(results, key=lambda r: (r[0], r[1]))
+    mail = _connect_imap_simple(timeout=_JENKINS_REPLY_IMAP_TIMEOUT)
+    try:
+        if not _select_mail_folder(mail, folder, readonly=True):
+            return None
+        msg = _fetch_uid_message(mail, uid)
+        if msg is None:
+            return None
+        print(
+            f"[maint-mail] /egsreply: matched {_decode_msg_subject(msg)!r} in {folder!r} "
+            f"(score={score:.2f}, {time.monotonic() - t0:.1f}s)",
+            flush=True,
+        )
+        return msg, folder, score
+    finally:
+        try:
+            mail.logout()
+        except Exception:
+            pass
+
+
 def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[str, Any]:
     """``/egsreply``: find the email whose subject matches ``email_title`` and Reply-All
     inside its thread — To/Cc taken from the original (``In-Reply-To`` set for threading).
@@ -4245,16 +4491,17 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
     orig = None
     orig_folder = ""
     try:
-        found = find_message_by_subject_title(title)
+        found = find_egs_reply_message_fuzzy(title)
         if found:
-            orig, orig_folder = found
+            orig, orig_folder, _score = found
     except EmailThreadNotFoundError:
         orig = None  # e.g. only bounces matched — treat as not found
 
     if orig is None and not test:
         raise EmailThreadNotFoundError(
-            f"Email not found — no message with subject matching {title!r} in "
-            f"folder(s): {', '.join(JENKINS_REPLY_IMAP_FOLDERS)}."
+            f"Email not found — no subject fuzzy-matching {title!r} in "
+            f"folder(s): {', '.join(EGS_REPLY_IMAP_FOLDERS)} "
+            f"(last {EGS_REPLY_SINCE_DAYS} days)."
         )
 
     orig_mid = ""
@@ -4264,7 +4511,13 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
         if test:
             to_addrs, cc_addrs, recipients = [EGS_TEST_REPLY_TO], [], [EGS_TEST_REPLY_TO]
         else:
-            to_addrs, cc_addrs, recipients = _jenkins_reply_all_recipients(orig)
+            try:
+                to_addrs, cc_addrs, recipients = _jenkins_reply_all_recipients(orig)
+            except ValueError as ex:
+                raise EmailThreadNotFoundError(
+                    f"Matched {subj!r} but it has no usable Reply-All recipients "
+                    f"(To/Cc empty or only our own mailbox): {ex}"
+                ) from ex
     else:
         # test-only fallback: no original found → plain email to the test address.
         subj = _reply_subject(title)

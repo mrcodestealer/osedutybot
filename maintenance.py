@@ -5337,6 +5337,77 @@ def build_egs_preview_card(
     }
 
 
+def build_egsreply_picker_card(
+    entries: list[dict],
+    *,
+    test: bool = False,
+    reply_to_message_id: str = "",
+) -> dict:
+    """``/egsreply`` picker: one button per recent ``/egs`` sent email (from ``egs.json``).
+
+    Tapping a button (``k=egsreply_pick``, full subject in ``s``) opens the editable
+    reply preview for that email. ``t=1`` marks the test flow (reply → junchen@ only).
+    """
+    _mid = (reply_to_message_id or "").strip()
+    elements: list[dict] = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": (
+                    ("🧪 **测试模式** — 回复只发到 junchen@snsoft.my。\n" if test else "")
+                    + "点击要回复的邮件（按 `/egs` 发送记录，最新在前）："
+                ),
+            },
+        }
+    ]
+    for e in entries:
+        subj = str(e.get("subject") or "").strip()
+        if not subj:
+            continue
+        at = str(e.get("at") or "").strip()
+        label = subj if len(subj) <= 70 else subj[:67] + "…"
+        if at:
+            label = f"{label}　({at})"
+        val = {"k": "egsreply_pick", "s": subj}
+        if test:
+            val["t"] = "1"
+        if _mid:
+            val["m"] = _mid
+        elements.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": label[:100]},
+                "type": "default",
+                "width": "fill",
+                "behaviors": [{"type": "callback", "value": val}],
+            }
+        )
+    cancel_val: dict = {"k": "egs_cancel"}
+    if _mid:
+        cancel_val["m"] = _mid
+    elements.append(
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "✖️ 取消 / Cancel"},
+            "type": "danger",
+            "behaviors": [{"type": "callback", "value": cancel_val}],
+        }
+    )
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "turquoise",
+            "title": {
+                "tag": "plain_text",
+                "content": "📮 选择要回复的邮件 / Pick the email to reply",
+            },
+        },
+        "body": {"elements": elements},
+    }
+
+
 EVO_BATCH_FORWARD_CHAT_ID_DEFAULT = "oc_9ffa9a76810abf72e39d597aee37d65a"
 EVO_BATCH_COMMAND_CHAT_ID_DEFAULT = "oc_51b6fbf2636525acfb4ead3afa3c93ce"
 MAINTENANCE_CONFIRM_CHAT_ID_DEFAULT = "oc_9de3d63fc589df6feeb9b0bee9c45b72"
