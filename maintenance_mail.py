@@ -226,8 +226,20 @@ def _egs_store_path(test: bool) -> str:
     return EGS_TEST_STORE_PATH if test else EGS_SENT_STORE_PATH
 
 
-def egs_store_sent_email(subject: str, *, test: bool = False) -> None:
-    """Append a sent email to ``egs.json`` (real) or ``egstest.json`` (test). Never raises."""
+def egs_store_sent_email(
+    subject: str,
+    *,
+    test: bool = False,
+    message_id: str = "",
+    to: list[str] | None = None,
+    cc: list[str] | None = None,
+) -> None:
+    """Append a sent email to ``egs.json`` (real) or ``egstest.json`` (test). Never raises.
+
+    Stores the generated ``message_id`` + recipients so ``/egsreply`` can thread the reply
+    off the original (``In-Reply-To``) WITHOUT an IMAP search — the send may not land in any
+    searchable folder (e.g. test sends go to junchen@, not our mailbox).
+    """
     subj = (subject or "").strip()
     if not subj:
         return
@@ -242,7 +254,13 @@ def egs_store_sent_email(subject: str, *, test: bool = False) -> None:
             except (FileNotFoundError, ValueError):
                 pass
             entries.append(
-                {"subject": subj, "at": datetime.now().strftime("%Y-%m-%d %H:%M")}
+                {
+                    "subject": subj,
+                    "at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "message_id": (message_id or "").strip(),
+                    "to": list(to or []),
+                    "cc": list(cc or []),
+                }
             )
             entries = entries[-_EGS_SENT_STORE_MAX:]
             tmp = path + ".tmp"
@@ -251,6 +269,27 @@ def egs_store_sent_email(subject: str, *, test: bool = False) -> None:
             os.replace(tmp, path)
     except Exception as ex:  # noqa: BLE001
         print(f"[maint-mail] {os.path.basename(path)} store failed: {ex!r}", flush=True)
+
+
+def egs_store_lookup(subject: str, *, test: bool = False) -> dict[str, Any] | None:
+    """Newest stored sent entry with a matching subject AND a Message-ID (for threading)."""
+    path = _egs_store_path(test)
+    try:
+        raw = json.loads(open(path, encoding="utf-8").read())
+        entries = raw.get("sent") if isinstance(raw, dict) else None
+        if not isinstance(entries, list):
+            return None
+    except (FileNotFoundError, ValueError):
+        return None
+    want = (subject or "").strip().casefold()
+    for e in reversed(entries):  # newest first
+        if not isinstance(e, dict):
+            continue
+        if str(e.get("subject") or "").strip().casefold() == want and str(
+            e.get("message_id") or ""
+        ).strip():
+            return e
+    return None
 
 
 def egs_recent_sent_emails(limit: int = 8, *, test: bool = False) -> list[dict[str, Any]]:
@@ -1512,19 +1551,23 @@ def send_egs_maintenance_email(
     msg["Subject"] = Header(subj, "utf-8")
     msg["From"] = formataddr((FORWARD_FROM_NAME, MAIL_USER))
     msg["Date"] = formatdate(localtime=True)
-    msg["Message-ID"] = make_msgid()
+    mid = make_msgid()
+    msg["Message-ID"] = mid
     test_to = (to_override or "").strip()
     if test_to:
         msg["To"] = test_to
         recipients = [test_to]
+        store_to, store_cc = [test_to], []
         if EGS_TEST_REPLY_CC:
             msg["Cc"] = EGS_TEST_REPLY_CC
             recipients.append(EGS_TEST_REPLY_CC)
+            store_cc = [EGS_TEST_REPLY_CC]
         route = f"{test_to} cc={EGS_TEST_REPLY_CC or '-'} (test)"
     else:
         msg["To"] = formataddr((EGS_MAIL_TO_NAME, EGS_MAIL_TO))
         msg["Cc"] = formataddr((EGS_MAIL_CC_NAME, EGS_MAIL_CC))
         recipients = [EGS_MAIL_TO, EGS_MAIL_CC]
+        store_to, store_cc = [EGS_MAIL_TO], [EGS_MAIL_CC]
         route = f"{EGS_MAIL_TO} cc={EGS_MAIL_CC}"
     ctx = ssl.create_default_context()
     with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=IMAP_TIMEOUT, context=ctx) as smtp:
@@ -1532,7 +1575,10 @@ def send_egs_maintenance_email(
         smtp.sendmail(MAIL_USER, recipients, msg.as_string())
     print(f"[maint-mail] /egs{'test' if test_to else ''} {subj!r} → {route}", flush=True)
     # Real → egs.json (/egsreply picker); test → egstest.json (/egsreplytest picker).
-    egs_store_sent_email(subj, test=bool(test_to))
+    # Store the Message-ID + recipients so /egsreply threads off it (no IMAP search needed).
+    egs_store_sent_email(
+        subj, test=bool(test_to), message_id=mid, to=store_to, cc=store_cc
+    )
 
 
 JENKINS_DONE_REPLY_TO = (
@@ -4518,45 +4564,65 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
     if not text:
         raise ValueError("empty /egsreply body")
 
-    orig = None
-    orig_folder = ""
-    try:
-        found = find_egs_reply_message_fuzzy(title)
-        if found:
-            orig, orig_folder, _score = found
-    except EmailThreadNotFoundError:
-        orig = None  # e.g. only bounces matched — treat as not found
-
-    if orig is None and not test:
-        raise EmailThreadNotFoundError(
-            f"Email not found — no subject fuzzy-matching {title!r} in "
-            f"folder(s): {', '.join(EGS_REPLY_IMAP_FOLDERS)} "
-            f"(last {EGS_REPLY_SINCE_DAYS} days)."
-        )
-
     def _test_recipients() -> tuple[list[str], list[str], list[str]]:
         """Test reply: To junchen@, Cc om@ (EGS_TEST_REPLY_CC)."""
         cc = [EGS_TEST_REPLY_CC] if EGS_TEST_REPLY_CC else []
         return [EGS_TEST_REPLY_TO], cc, [EGS_TEST_REPLY_TO] + cc
 
+    # Tier 1 — stored send (picker / our own /egs|/egstest): we saved the Message-ID at
+    # send time, so we can thread the reply off it WITHOUT any IMAP search. This is the
+    # only reliable path for test sends (they live in junchen@, not our searchable folders).
+    stored = egs_store_lookup(title, test=test)
+    orig = None
+    orig_folder = ""
     orig_mid = ""
-    if orig is not None:
-        subj = _reply_subject(_decode_msg_subject(orig))
-        orig_mid = (orig.get("Message-ID") or "").strip()
+    orig_refs = ""
+    via = ""
+
+    if stored is not None:
+        subj = str(stored.get("subject") or title).strip()  # SAME subject → no "Re:"
+        orig_mid = str(stored.get("message_id") or "").strip()
+        via = "store"
         if test:
             to_addrs, cc_addrs, recipients = _test_recipients()
         else:
-            try:
-                to_addrs, cc_addrs, recipients = _jenkins_reply_all_recipients(orig)
-            except ValueError as ex:
-                raise EmailThreadNotFoundError(
-                    f"Matched {subj!r} but it has no usable Reply-All recipients "
-                    f"(To/Cc empty or only our own mailbox): {ex}"
-                ) from ex
+            to_addrs = [a for a in (stored.get("to") or []) if a] or [EGS_MAIL_TO]
+            cc_addrs = [a for a in (stored.get("cc") or []) if a]
+            recipients = list(dict.fromkeys([*to_addrs, *cc_addrs]))
     else:
-        # test-only fallback: no original found → plain email to the test address.
-        subj = _reply_subject(title)
-        to_addrs, cc_addrs, recipients = _test_recipients()
+        # Tier 2 — IMAP fuzzy search (received vendor mail / typed titles not in store).
+        try:
+            found = find_egs_reply_message_fuzzy(title)
+            if found:
+                orig, orig_folder, _score = found
+        except EmailThreadNotFoundError:
+            orig = None
+        if orig is None and not test:
+            raise EmailThreadNotFoundError(
+                f"Email not found — not in egs.json and no subject fuzzy-matching "
+                f"{title!r} in folder(s): {', '.join(EGS_REPLY_IMAP_FOLDERS)} "
+                f"(last {EGS_REPLY_SINCE_DAYS} days)."
+            )
+        if orig is not None:
+            subj = _decode_msg_subject(orig)  # SAME subject → no "Re:"
+            orig_mid = (orig.get("Message-ID") or "").strip()
+            orig_refs = (orig.get("References") or "").strip()
+            via = "imap"
+            if test:
+                to_addrs, cc_addrs, recipients = _test_recipients()
+            else:
+                try:
+                    to_addrs, cc_addrs, recipients = _jenkins_reply_all_recipients(orig)
+                except ValueError as ex:
+                    raise EmailThreadNotFoundError(
+                        f"Matched {subj!r} but it has no usable Reply-All recipients "
+                        f"(To/Cc empty or only our own mailbox): {ex}"
+                    ) from ex
+        else:
+            # Tier 3 — test-only fallback: nothing found → plain send to the test address.
+            subj = title
+            via = "fallback"
+            to_addrs, cc_addrs, recipients = _test_recipients()
 
     msg = MIMEText(text, "plain", "utf-8")
     msg["Subject"] = Header(subj, "utf-8")
@@ -4568,16 +4634,14 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
     msg["Message-ID"] = make_msgid()
     if orig_mid:
         msg["In-Reply-To"] = orig_mid
-        refs = (orig.get("References") or "").strip()
-        msg["References"] = f"{refs} {orig_mid}".strip() if refs else orig_mid
+        msg["References"] = f"{orig_refs} {orig_mid}".strip() if orig_refs else orig_mid
     ctx = ssl.create_default_context()
     with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=IMAP_TIMEOUT, context=ctx) as smtp:
         smtp.login(MAIL_USER, MAIL_PASSWORD)
         smtp.sendmail(MAIL_USER, recipients, msg.as_string())
     print(
-        f"[maint-mail] /egsreply{'test' if test else ''} title={title!r} "
-        f"found={orig is not None} folder={orig_folder!r} To={to_addrs!r} Cc={cc_addrs!r} "
-        f"→ {', '.join(recipients)}",
+        f"[maint-mail] /egsreply{'test' if test else ''} via={via} title={title!r} "
+        f"threaded={bool(orig_mid)} To={to_addrs!r} Cc={cc_addrs!r} → {', '.join(recipients)}",
         flush=True,
     )
     return {
@@ -4586,7 +4650,8 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
         "recipients": recipients,
         "subject": subj,
         "folder": orig_folder,
-        "found": orig is not None,
+        "found": via in ("store", "imap"),
+        "threaded": bool(orig_mid),
     }
 
 

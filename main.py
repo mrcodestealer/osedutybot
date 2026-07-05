@@ -4291,7 +4291,12 @@ def _try_egs_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Opt
                 _to = ", ".join(info.get("to") or [])
                 _cc = ", ".join(info.get("cc") or [])
                 _lbl = "/egsreplytest" if is_test else "/egsreply"
-                _note = "" if info.get("found") else "（⚠️ 未找到原邮件，已发送纯测试邮件）"
+                if info.get("threaded"):
+                    _note = "（已在原邮件会话内回复）"
+                elif info.get("found"):
+                    _note = ""
+                else:
+                    _note = "（⚠️ 未找到原邮件，已发送纯测试邮件）"
                 _egs_reply(
                     chat_id_ca,
                     orig_mid,
