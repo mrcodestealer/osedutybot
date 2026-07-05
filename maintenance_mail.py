@@ -202,30 +202,41 @@ EGS_MAIL_SIGNATURE = (
     .strip()
     or "Thank you and best regards,\nJC"
 )
-# ``/egsreplytest`` sends the reply here only (real ``/egsreply`` replies to the original sender/cc).
+# ``/egstest`` & ``/egsreplytest`` deliver to this address (real cmds use the true recipients).
 EGS_TEST_REPLY_TO = (
     os.getenv("EGS_TEST_REPLY_TO", "").strip()
     or os.getenv("egs_test_reply_to", "").strip()
     or "junchen@snsoft.my"
 )
-# ``/egs`` sent-email log — powers the ``/egsreply`` picker card (choose which email to reply).
-EGS_SENT_STORE_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "egs.json"
+# Cc on test sends. Empty string ("") disables the test Cc.
+EGS_TEST_REPLY_CC = (
+    os.getenv("EGS_TEST_REPLY_CC", "egs_unset").strip()
 )
+if EGS_TEST_REPLY_CC == "egs_unset":
+    EGS_TEST_REPLY_CC = "om@hotelstotsenberg.com"
+# ``/egs`` sent-email log — powers the ``/egsreply`` picker card (choose which email to reply).
+_EGS_DIR = os.path.dirname(os.path.abspath(__file__))
+EGS_SENT_STORE_PATH = os.path.join(_EGS_DIR, "egs.json")        # real /egs sends
+EGS_TEST_STORE_PATH = os.path.join(_EGS_DIR, "egstest.json")   # /egstest sends (for /egsreplytest picker)
 _EGS_SENT_STORE_MAX = max(5, int(os.getenv("EGS_SENT_STORE_MAX", "").strip() or "30"))
 _egs_store_lock = threading.Lock()
 
 
-def egs_store_sent_email(subject: str) -> None:
-    """Append a ``/egs`` sent email to ``egs.json`` (newest last, capped). Never raises."""
+def _egs_store_path(test: bool) -> str:
+    return EGS_TEST_STORE_PATH if test else EGS_SENT_STORE_PATH
+
+
+def egs_store_sent_email(subject: str, *, test: bool = False) -> None:
+    """Append a sent email to ``egs.json`` (real) or ``egstest.json`` (test). Never raises."""
     subj = (subject or "").strip()
     if not subj:
         return
+    path = _egs_store_path(test)
     try:
         with _egs_store_lock:
             entries: list[dict[str, Any]] = []
             try:
-                raw = json.loads(open(EGS_SENT_STORE_PATH, encoding="utf-8").read())
+                raw = json.loads(open(path, encoding="utf-8").read())
                 if isinstance(raw, dict) and isinstance(raw.get("sent"), list):
                     entries = [e for e in raw["sent"] if isinstance(e, dict)]
             except (FileNotFoundError, ValueError):
@@ -234,18 +245,19 @@ def egs_store_sent_email(subject: str) -> None:
                 {"subject": subj, "at": datetime.now().strftime("%Y-%m-%d %H:%M")}
             )
             entries = entries[-_EGS_SENT_STORE_MAX:]
-            tmp = EGS_SENT_STORE_PATH + ".tmp"
+            tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump({"sent": entries}, f, ensure_ascii=False, indent=1)
-            os.replace(tmp, EGS_SENT_STORE_PATH)
+            os.replace(tmp, path)
     except Exception as ex:  # noqa: BLE001
-        print(f"[maint-mail] egs.json store failed: {ex!r}", flush=True)
+        print(f"[maint-mail] {os.path.basename(path)} store failed: {ex!r}", flush=True)
 
 
-def egs_recent_sent_emails(limit: int = 8) -> list[dict[str, Any]]:
-    """Newest-first ``/egs`` sent emails from ``egs.json`` (deduped by subject)."""
+def egs_recent_sent_emails(limit: int = 8, *, test: bool = False) -> list[dict[str, Any]]:
+    """Newest-first sent emails from ``egs.json`` (real) or ``egstest.json`` (test), deduped."""
+    path = _egs_store_path(test)
     try:
-        raw = json.loads(open(EGS_SENT_STORE_PATH, encoding="utf-8").read())
+        raw = json.loads(open(path, encoding="utf-8").read())
         entries = raw.get("sent") if isinstance(raw, dict) else None
         if not isinstance(entries, list):
             return []
@@ -1505,7 +1517,10 @@ def send_egs_maintenance_email(
     if test_to:
         msg["To"] = test_to
         recipients = [test_to]
-        route = f"{test_to} (test)"
+        if EGS_TEST_REPLY_CC:
+            msg["Cc"] = EGS_TEST_REPLY_CC
+            recipients.append(EGS_TEST_REPLY_CC)
+        route = f"{test_to} cc={EGS_TEST_REPLY_CC or '-'} (test)"
     else:
         msg["To"] = formataddr((EGS_MAIL_TO_NAME, EGS_MAIL_TO))
         msg["Cc"] = formataddr((EGS_MAIL_CC_NAME, EGS_MAIL_CC))
@@ -1516,8 +1531,8 @@ def send_egs_maintenance_email(
         smtp.login(MAIL_USER, MAIL_PASSWORD)
         smtp.sendmail(MAIL_USER, recipients, msg.as_string())
     print(f"[maint-mail] /egs{'test' if test_to else ''} {subj!r} → {route}", flush=True)
-    if not test_to:
-        egs_store_sent_email(subj)  # only real sends power the /egsreply picker card
+    # Real → egs.json (/egsreply picker); test → egstest.json (/egsreplytest picker).
+    egs_store_sent_email(subj, test=bool(test_to))
 
 
 JENKINS_DONE_REPLY_TO = (
@@ -4519,12 +4534,17 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
             f"(last {EGS_REPLY_SINCE_DAYS} days)."
         )
 
+    def _test_recipients() -> tuple[list[str], list[str], list[str]]:
+        """Test reply: To junchen@, Cc om@ (EGS_TEST_REPLY_CC)."""
+        cc = [EGS_TEST_REPLY_CC] if EGS_TEST_REPLY_CC else []
+        return [EGS_TEST_REPLY_TO], cc, [EGS_TEST_REPLY_TO] + cc
+
     orig_mid = ""
     if orig is not None:
         subj = _reply_subject(_decode_msg_subject(orig))
         orig_mid = (orig.get("Message-ID") or "").strip()
         if test:
-            to_addrs, cc_addrs, recipients = [EGS_TEST_REPLY_TO], [], [EGS_TEST_REPLY_TO]
+            to_addrs, cc_addrs, recipients = _test_recipients()
         else:
             try:
                 to_addrs, cc_addrs, recipients = _jenkins_reply_all_recipients(orig)
@@ -4536,7 +4556,7 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
     else:
         # test-only fallback: no original found → plain email to the test address.
         subj = _reply_subject(title)
-        to_addrs, cc_addrs, recipients = [EGS_TEST_REPLY_TO], [], [EGS_TEST_REPLY_TO]
+        to_addrs, cc_addrs, recipients = _test_recipients()
 
     msg = MIMEText(text, "plain", "utf-8")
     msg["Subject"] = Header(subj, "utf-8")

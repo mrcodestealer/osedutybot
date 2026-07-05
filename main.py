@@ -4062,11 +4062,16 @@ def _process_egs_paste(chat_id: str, body_text: str, *, test: bool = False) -> N
 
         kwargs: dict = {}
         if test:
+            _cc_note = (
+                f"（抄送 {_maint_mail.EGS_TEST_REPLY_CC}）"
+                if _maint_mail.EGS_TEST_REPLY_CC
+                else "（无抄送）"
+            )
             kwargs = dict(
                 header_title="🧪 EGS 测试邮件预览 / Test — sends to junchen@",
                 info_md=(
-                    f"🧪 测试模式：点 **发送** 后邮件只发送到 **{_maint_mail.EGS_TEST_REPLY_TO}**"
-                    "（无抄送、不 @QA/CS、不记录）。可编辑标题/正文。"
+                    f"🧪 测试模式：点 **发送** 后邮件发送到 **{_maint_mail.EGS_TEST_REPLY_TO}**"
+                    f"{_cc_note}，不 @QA/CS、不记录。可编辑标题/正文。"
                 ),
                 send_label="🧪 发送测试 / Send test",
                 extra_send_val={"t": "1"},
@@ -4167,16 +4172,19 @@ def _process_egsreply_paste(chat_id: str, raw_body: str, *, test: bool = False) 
             break
     try:
         if not email_title:
-            # Bare command → picker card of recent /egs sends.
+            # Bare command → picker card: /egsreply lists real /egs sends (egs.json),
+            # /egsreplytest lists /egstest sends (egstest.json).
             import maintenance_mail as _maint_mail
 
-            entries = _maint_mail.egs_recent_sent_emails()
+            entries = _maint_mail.egs_recent_sent_emails(test=test)
             if not entries:
+                _store = "egstest.json" if test else "egs.json"
+                _src = "/egstest" if test else "/egs"
                 _egs_reply(
                     chat_id,
                     reply_mid,
-                    f"没有 `/egs` 发送记录（egs.json 为空）。\n"
-                    f"也可以直接指定标题：`{_cmd}` 第一行=邮件标题，之后=回复正文。",
+                    f"没有 `{_src}` 发送记录（{_store} 为空）。先用 `{_src}` 发送一封，"
+                    f"或直接指定标题：`{_cmd}` 第一行=邮件标题，之后=回复正文。",
                 )
                 return
             picker = maintenance.build_egsreply_picker_card(
@@ -4281,26 +4289,30 @@ def _try_egs_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Opt
                     email_title=title, body=body, test=is_test
                 )
                 _to = ", ".join(info.get("to") or [])
+                _cc = ", ".join(info.get("cc") or [])
                 _lbl = "/egsreplytest" if is_test else "/egsreply"
                 _note = "" if info.get("found") else "（⚠️ 未找到原邮件，已发送纯测试邮件）"
                 _egs_reply(
                     chat_id_ca,
                     orig_mid,
-                    f"✅ `{_lbl}` 已发送{_note}\n📌 {info.get('subject') or ''}\n📧 收件: {_to}",
+                    f"✅ `{_lbl}` 已发送{_note}\n📌 {info.get('subject') or ''}\n📧 收件: {_to}"
+                    + (f"\n📄 抄送: {_cc}" if _cc else ""),
                 )
             elif is_test:
-                # /egstest — throwaway send to junchen@ only (no Cc, no QA/CS tag, not stored).
+                # /egstest — throwaway send to junchen@ (Cc om@), no QA/CS tag, not stored.
                 _maint_mail.send_egs_maintenance_email(
                     subject=title,
                     body=body,
                     append_signature=False,
                     to_override=_maint_mail.EGS_TEST_REPLY_TO,
                 )
+                _cc = _maint_mail.EGS_TEST_REPLY_CC
                 _egs_reply(
                     chat_id_ca,
                     orig_mid,
                     f"✅ `/egstest` 测试邮件已发送\n📌 主题: {title}\n"
-                    f"📧 收件: {_maint_mail.EGS_TEST_REPLY_TO}",
+                    f"📧 收件: {_maint_mail.EGS_TEST_REPLY_TO}"
+                    + (f"\n📄 抄送: {_cc}" if _cc else ""),
                 )
             else:
                 # Body already includes the signature (shown/edited in the card) → don't re-append.
