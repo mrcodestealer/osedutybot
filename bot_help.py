@@ -195,8 +195,10 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
                 "grey",
                 [
                     ("/m <EVO batch>", "EVO SD batch → CP filter + email", "EVO 批量维护 + 发信"),
-                    ("/egs <notice>", "Email pasted notice (LLM title) → junchen@", "粘贴维护通知 → 发信给 junchen@"),
+                    ("/egs <notice>", "Email pasted notice (LLM title) → egs.maintenance@", "粘贴维护通知 → 发信"),
                     ("/egstest <notice>", "Preview /egs title + body (no email sent)", "预览 /egs 标题和正文（不发信）"),
+                    ("/egsreply <title>⏎<reply>", "Find email by title → reply in thread", "按标题找邮件 → 原邮件内回复"),
+                    ("/egsreplytest <title>⏎<reply>", "Like /egsreply but reply → junchen@ (test)", "同 /egsreply，回复发到 junchen@（测试）"),
                     ("/ms <email> | /maintenance …", "Parse single maintenance email", "解析单封维护邮件"),
                     ("/cashout", "Cashout reminder template", "出款提醒模板"),
                     ("/restartA", "Pi restart one-liner", "Pi 重启命令"),

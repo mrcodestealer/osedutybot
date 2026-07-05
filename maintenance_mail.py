@@ -202,6 +202,12 @@ EGS_MAIL_SIGNATURE = (
     .strip()
     or "Thank you and best regards,\nJC"
 )
+# ``/egsreplytest`` sends the reply here only (real ``/egsreply`` replies to the original sender/cc).
+EGS_TEST_REPLY_TO = (
+    os.getenv("EGS_TEST_REPLY_TO", "").strip()
+    or os.getenv("egs_test_reply_to", "").strip()
+    or "junchen@snsoft.my"
+)
 # Link Fw: to the incoming maintenance mail in om@ (In-Reply-To). Set 0 if Show/Hide breaks.
 FORWARD_THREAD_HEADERS = (
     os.getenv("MAINTENANCE_MAIL_FORWARD_THREAD", "").strip() or "1"
@@ -4214,6 +4220,66 @@ def reply_jenkins_update_done_email(
         "recipients": recipients,
         "folder": orig_folder,
         "subject": subj,
+    }
+
+
+def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[str, Any]:
+    """``/egsreply``: find the email whose subject matches ``email_title`` and Reply-All
+    inside its thread — To/Cc taken from the original (``In-Reply-To`` set for threading).
+
+    ``test=True`` (``/egsreplytest``) sends only to ``EGS_TEST_REPLY_TO`` (junchen@) instead.
+    ``body`` is sent as-is (the preview card already carries the signature). Raises
+    :class:`EmailThreadNotFoundError` when no matching mail is found.
+    """
+    if not MAIL_PASSWORD:
+        raise RuntimeError("MAINTENANCE_MAIL_PASSWORD not set")
+    title = (email_title or "").strip()
+    if not title:
+        raise ValueError("email title required")
+    text = (body or "").strip()
+    if not text:
+        raise ValueError("empty /egsreply body")
+    found = find_message_by_subject_title(title)
+    if not found:
+        raise EmailThreadNotFoundError(
+            f"Email not found — no message with subject matching {title!r} in "
+            f"folder(s): {', '.join(JENKINS_REPLY_IMAP_FOLDERS)}."
+        )
+    orig, orig_folder = found
+    to_addrs, cc_addrs, recipients = _jenkins_reply_all_recipients(orig)
+    subj = _reply_subject(_decode_msg_subject(orig))
+    if test:
+        to_addrs = [EGS_TEST_REPLY_TO]
+        cc_addrs = []
+        recipients = [EGS_TEST_REPLY_TO]
+    msg = MIMEText(text, "plain", "utf-8")
+    msg["Subject"] = Header(subj, "utf-8")
+    msg["From"] = formataddr((FORWARD_FROM_NAME, MAIL_USER))
+    msg["To"] = ", ".join(to_addrs)
+    if cc_addrs:
+        msg["Cc"] = ", ".join(cc_addrs)
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid()
+    orig_mid = (orig.get("Message-ID") or "").strip()
+    if orig_mid:
+        msg["In-Reply-To"] = orig_mid
+        refs = (orig.get("References") or "").strip()
+        msg["References"] = f"{refs} {orig_mid}".strip() if refs else orig_mid
+    ctx = ssl.create_default_context()
+    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=IMAP_TIMEOUT, context=ctx) as smtp:
+        smtp.login(MAIL_USER, MAIL_PASSWORD)
+        smtp.sendmail(MAIL_USER, recipients, msg.as_string())
+    print(
+        f"[maint-mail] /egsreply{'test' if test else ''} title={title!r} "
+        f"folder={orig_folder!r} To={to_addrs!r} Cc={cc_addrs!r} → {', '.join(recipients)}",
+        flush=True,
+    )
+    return {
+        "to": to_addrs,
+        "cc": cc_addrs,
+        "recipients": recipients,
+        "subject": subj,
+        "folder": orig_folder,
     }
 
 

@@ -4091,6 +4091,88 @@ def _process_egs_paste(chat_id: str, body_text: str, *, dry_run: bool = False) -
         _egs_reply(chat_id, reply_mid, f"❌ `{_cmd}` 处理失败: `{ex}`")
 
 
+def _process_egsreply_paste(chat_id: str, raw_body: str, *, test: bool = False) -> None:
+    """``/egsreply`` — find an email by title and show an editable REPLY preview card.
+
+    Input layout: the **first non-empty line** is the email title (used to find the mail),
+    everything after it is the reply content. On **Send** it replies inside that email's
+    thread (To/Cc from the original). ``test=True`` (``/egsreplytest``) replies only to the
+    test address (``EGS_TEST_REPLY_TO`` = junchen@).
+    """
+    _cmd = "/egsreplytest" if test else "/egsreply"
+    if not maintenance.is_evo_batch_command_chat(chat_id):
+        send_message(chat_id, maintenance.EVO_BATCH_WRONG_GROUP_MESSAGE)
+        return
+    reply_mid = (_lark_user_message_id.get() or "").strip()
+    # First non-empty line = email title to reply to; the rest = reply content.
+    lines = (raw_body or "").split("\n")
+    email_title = ""
+    content = ""
+    for i, ln in enumerate(lines):
+        if ln.strip():
+            email_title = ln.strip()
+            content = "\n".join(lines[i + 1:]).strip()
+            break
+    if not email_title:
+        _egs_reply(
+            chat_id,
+            reply_mid,
+            f"用法 `{_cmd}`：第一行=要回复的邮件标题，之后=回复正文。\n"
+            f"示例：\n`{_cmd} SimplePlay Regular Maintenance - 04/07/2026`\n`Noted, thanks.`",
+        )
+        return
+    try:
+        import maintenance_mail as _maint_mail
+
+        full_content = content
+        if _maint_mail.EGS_MAIL_SIGNATURE:
+            full_content = (
+                f"{content}\n\n{_maint_mail.EGS_MAIL_SIGNATURE}"
+                if content
+                else _maint_mail.EGS_MAIL_SIGNATURE
+            )
+        if test:
+            header = "🧪 EGS 回复预览(测试) / Reply preview (TEST)"
+            info = (
+                f"🧪 测试模式：回复只发送到 **{_maint_mail.EGS_TEST_REPLY_TO}**（不发给原收件人）。\n"
+                "上方**标题**用于**查找**要回复的邮件；可编辑标题/正文后点 **发送**。"
+            )
+            send_label = "🧪 回复(测试) / Send Reply (test)"
+        else:
+            header = "📧 EGS 回复邮件预览 / Reply — review before sending"
+            info = (
+                "将**查找**该标题的邮件并**回复**（收件/抄送同原邮件，保持在原会话内）。\n"
+                "可编辑下方**标题**（查找用）与**正文**后点 **回复 / Send Reply**。"
+            )
+            send_label = "✅ 回复 / Send Reply"
+        card = maintenance.build_egs_preview_card(
+            email_title,
+            full_content,
+            reply_to_message_id=reply_mid,
+            header_title=header,
+            title_label="邮件标题 Email Title (查找并回复)",
+            title_placeholder="Subject of the email to reply to",
+            send_key="egsreply_send",
+            send_label=send_label,
+            info_md=info,
+            extra_send_val={"t": "1"} if test else None,
+        )
+        _resp = send_message(
+            chat_id,
+            json.dumps(card, ensure_ascii=False),
+            msg_type="interactive",
+            reply_to_message_id="",  # direct post (interactive cards render invisibly as replies)
+        )
+        print(
+            f"[egsreply] preview card sent test={test} code={(_resp or {}).get('code')!r} "
+            f"msg={(_resp or {}).get('msg')!r}",
+            flush=True,
+        )
+    except Exception as ex:
+        print(f"[egsreply] preview failed: {ex!r}", flush=True)
+        _egs_reply(chat_id, reply_mid, f"❌ `{_cmd}` 处理失败: `{ex}`")
+
+
 def _try_egs_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Optional[dict]:
     """Synchronous card.callback for the ``/egs`` **Send Email** / **Cancel** buttons.
 
@@ -4099,7 +4181,7 @@ def _try_egs_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Opt
     stay within Lark's ~3s callback window.
     """
     k = str(parsed_ca.get("k") or "").strip().lower()
-    if k not in ("egs_send", "egs_cancel"):
+    if k not in ("egs_send", "egs_cancel", "egsreply_send"):
         return None
 
     # The card's own message_id — so we can DELETE the card (make it disappear) after the tap.
@@ -4122,7 +4204,7 @@ def _try_egs_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Opt
         threading.Thread(target=_recall_card, daemon=True).start()  # card disappears
         return {"toast": {"type": "info", "content": "Cancelled"}}
 
-    # egs_send — pull the edited Title + Content out of the submitted form.
+    # Send tapped — pull the edited Title + Content out of the submitted form.
     act = ev_ca.get("action") if isinstance(ev_ca.get("action"), dict) else {}
     title = _lark_get_card_form_field(act, "egs_title")
     body = _lark_get_card_form_field(act, "egs_body")
@@ -4138,28 +4220,45 @@ def _try_egs_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Opt
         # Keep the card so the user can fix it — just warn.
         return {"toast": {"type": "error", "content": "Title and content cannot be empty."}}
 
+    is_reply = k == "egsreply_send"
+    is_test = str(parsed_ca.get("t") or "").strip() == "1"
+
     def _send_job() -> None:
         _recall_card()  # remove the form card first so it disappears on click
         try:
             import maintenance_mail as _maint_mail
 
-            # Body already includes the signature (shown/edited in the card) → don't re-append.
-            _maint_mail.send_egs_maintenance_email(
-                subject=title, body=body, append_signature=False
-            )
-            _egs_reply(chat_id_ca, orig_mid, f"✅ `/egs` 邮件已发送\n📌 主题: {title}")
-            # @tag QA Support Team + CS in the forward group to check the sent email.
-            fwd_chat = maintenance.evo_batch_forward_chat_id()
-            if fwd_chat:
-                send_message(
-                    fwd_chat,
-                    maintenance.build_evo_batch_check_email_text(title),
+            if is_reply:
+                # `title` here is the subject to FIND; reply-all inside that email's thread.
+                info = _maint_mail.reply_egs_email(
+                    email_title=title, body=body, test=is_test
                 )
+                _to = ", ".join(info.get("to") or [])
+                _lbl = "/egsreplytest" if is_test else "/egsreply"
+                _egs_reply(
+                    chat_id_ca,
+                    orig_mid,
+                    f"✅ `{_lbl}` 已回复\n📌 {info.get('subject') or ''}\n📧 收件: {_to}",
+                )
+            else:
+                # Body already includes the signature (shown/edited in the card) → don't re-append.
+                _maint_mail.send_egs_maintenance_email(
+                    subject=title, body=body, append_signature=False
+                )
+                _egs_reply(chat_id_ca, orig_mid, f"✅ `/egs` 邮件已发送\n📌 主题: {title}")
+                # @tag QA Support Team + CS in the forward group to check the sent email.
+                fwd_chat = maintenance.evo_batch_forward_chat_id()
+                if fwd_chat:
+                    send_message(
+                        fwd_chat,
+                        maintenance.build_evo_batch_check_email_text(title),
+                    )
         except Exception as ex:  # noqa: BLE001
-            _egs_reply(chat_id_ca, orig_mid, f"❌ `/egs` 发送失败: `{ex}`")
+            _lbl = ("/egsreplytest" if is_test else "/egsreply") if is_reply else "/egs"
+            _egs_reply(chat_id_ca, orig_mid, f"❌ `{_lbl}` 失败: `{ex}`")
 
     threading.Thread(target=_send_job, daemon=True).start()
-    return {"toast": {"type": "success", "content": "Sending email"}}
+    return {"toast": {"type": "success", "content": "Sending reply" if is_reply else "Sending email"}}
 
 
 def _reinject_synthetic_command_message(
@@ -6070,7 +6169,7 @@ def lark_webhook():
         _process_evo_sd_batch_paste(chat_id, email_text)
         return _lark_im_done()
     elif cmd in ("/egs", "/egstest"):
-        # Pasted maintenance notice → LLM-titled email to junchen@ (Cc om@), same
+        # Pasted maintenance notice → LLM-titled email to egs.maintenance@ (Cc om@), same
         # mailbox as `/m`. `/egstest` previews the title/body without sending.
         # Rebuild the body from ``original_text`` (keeps newlines, which ``clean_text``
         # collapses) and strip the leading command token + mentions.
@@ -6086,6 +6185,19 @@ def lark_webhook():
         if _egs_src.startswith('"') and _egs_src.endswith('"'):
             _egs_src = _egs_src[1:-1].strip()
         _process_egs_paste(chat_id, _egs_src, dry_run=_egs_dry)
+        return _lark_im_done()
+    elif cmd in ("/egsreply", "/egsreplytest"):
+        # First line after the command = email title to find & reply to; rest = reply body.
+        # `/egsreplytest` sends the reply to the test address only.
+        _egsr_test = cmd == "/egsreplytest"
+        _egsr_src = original_text or ""
+        for _mk in mention_keys:
+            _egsr_src = _egsr_src.replace(_mk, "")
+        _egsr_src = re.sub(r"@_user_\d+", "", _egsr_src)
+        _egsr_src = re.sub(r"<[^>]+>", "", _egsr_src)
+        _egsr_cmd = re.search(rf"(?:^|\s){re.escape(cmd)}\b\s*", _egsr_src, re.IGNORECASE)
+        _egsr_src = _egsr_src[_egsr_cmd.end():] if _egsr_cmd else ""
+        _process_egsreply_paste(chat_id, _egsr_src, test=_egsr_test)
         return _lark_im_done()
     elif re.search(
         r"(?:^|\s)/(maintenance|maintenanceshort|ms)\s+",

@@ -5201,13 +5201,26 @@ def _egs_recipients_display() -> tuple[str, str]:
         return "egs.maintenance@om.hotelstotsenberg.com", "om@hotelstotsenberg.com"
 
 
-def build_egs_preview_card(subject: str, body: str, reply_to_message_id: str = "") -> dict:
-    """``/egs`` editable preview: Title + Content inputs (pre-filled) + Send / Cancel buttons.
+def build_egs_preview_card(
+    subject: str,
+    body: str,
+    reply_to_message_id: str = "",
+    *,
+    header_title: str = "📧 EGS 维护邮件预览 / Review before sending",
+    title_label: str = "标题 Title",
+    title_placeholder: str = "Email subject",
+    send_key: str = "egs_send",
+    send_label: str = "✅ 发送 / Send Email",
+    info_md: str | None = None,
+    extra_send_val: dict | None = None,
+) -> dict:
+    """Editable preview: Title + Content inputs (pre-filled) + Send / Cancel buttons.
 
-    Nothing is sent until the user taps **Send Email** (``k=egs_send``); the edited
+    Nothing is sent until the user taps the Send button (``k=send_key``); the edited
     title/content ride back in the form values. **Cancel** (``k=egs_cancel``) sends nothing.
     ``reply_to_message_id`` (the user's original message) rides in the button values as
-    ``m`` so the confirmation can thread under it.
+    ``m`` so the confirmation can quote it. ``extra_send_val`` merges into the Send button
+    value (e.g. ``{"t": "1"}`` to flag a test). Reused by ``/egs`` and ``/egsreply``.
     """
     # Feishu card inputs cap max_length at 1000 — keep both the property AND the
     # pre-filled default_value within it or the whole card is rejected (ErrCode 11310).
@@ -5216,38 +5229,33 @@ def build_egs_preview_card(subject: str, body: str, reply_to_message_id: str = "
     body_input = body[:1000]
     to_disp, cc_disp = _egs_recipients_display()
     _mid = (reply_to_message_id or "").strip()
-    send_val = {"k": "egs_send"}
+    send_val = {"k": send_key}
     cancel_val = {"k": "egs_cancel"}
     if _mid:
         send_val["m"] = _mid
         cancel_val["m"] = _mid
+    if extra_send_val:
+        send_val.update({str(k): str(v) for k, v in extra_send_val.items()})
+    if info_md is None:
+        info_md = (
+            f"**收件 To:** {to_disp}　**抄送 Cc:** {cc_disp}\n"
+            "可直接修改下方**标题**与**正文**，确认后点 **发送 / Send Email**，"
+            "或点 **取消 / Cancel**（不会发送）。"
+        )
+    if len(body) > 1000:
+        info_md += "\n⚠️ 正文超过 1000 字符，编辑框已截断显示（Feishu 限制）。"
     return {
         "schema": "2.0",
         "config": {"update_multi": True, "width_mode": "fill"},
         "header": {
             "template": "orange",
-            "title": {
-                "tag": "plain_text",
-                "content": "📧 EGS 维护邮件预览 / Review before sending",
-            },
+            "title": {"tag": "plain_text", "content": header_title},
         },
         "body": {
             "elements": [
                 {
                     "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": (
-                            f"**收件 To:** {to_disp}　**抄送 Cc:** {cc_disp}\n"
-                            "可直接修改下方**标题**与**正文**，确认后点 **发送 / Send Email**，"
-                            "或点 **取消 / Cancel**（不会发送）。"
-                            + (
-                                "\n⚠️ 正文超过 1000 字符，编辑框已截断显示（Feishu 限制）。"
-                                if len(body) > 1000
-                                else ""
-                            )
-                        ),
-                    },
+                    "text": {"tag": "lark_md", "content": info_md},
                 },
                 {
                     "tag": "form",
@@ -5257,11 +5265,11 @@ def build_egs_preview_card(subject: str, body: str, reply_to_message_id: str = "
                             "tag": "input",
                             "name": "egs_title",
                             "default_value": subject,
-                            "label": {"tag": "plain_text", "content": "标题 Title"},
+                            "label": {"tag": "plain_text", "content": title_label},
                             "label_position": "top",
                             "width": "fill",
                             "max_length": 300,
-                            "placeholder": {"tag": "plain_text", "content": "Email subject"},
+                            "placeholder": {"tag": "plain_text", "content": title_placeholder},
                         },
                         {
                             "tag": "input",
@@ -5290,7 +5298,7 @@ def build_egs_preview_card(subject: str, body: str, reply_to_message_id: str = "
                                             "name": "egs_send_btn",
                                             "text": {
                                                 "tag": "plain_text",
-                                                "content": "✅ 发送 / Send Email",
+                                                "content": send_label,
                                             },
                                             "type": "primary",
                                             "form_action_type": "submit",
