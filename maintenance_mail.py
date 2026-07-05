@@ -393,6 +393,57 @@ JENKINS_REPLY_IMAP_SCAN_LIMIT = int(
     os.getenv("JENKINS_REPLY_IMAP_SCAN_LIMIT", "").strip() or "1200"
 )
 
+# ===================== allemail.json — rolling 1-week email index =====================
+# A local index of every email seen in the reply folders over the last N days, keyed by
+# subject + Message-ID (with the original From/To/Cc). When a Jenkins update carries an
+# ``Email:`` line, the reply is built straight from this index — replying IN the original
+# thread (In-Reply-To/References) with the SAME To/Cc (reply-all) — no fragile live IMAP
+# subject search. Refreshed by a background scanner; falls back to live search on a miss.
+ALLEMAIL_STORE_PATH = os.path.join(_CHBOX_DIR, "allemail.json")
+ALLEMAIL_WINDOW_DAYS = min(60, max(1, int(os.getenv("ALLEMAIL_WINDOW_DAYS", "").strip() or "7")))
+ALLEMAIL_SCAN_INTERVAL_SEC = max(
+    60, int(os.getenv("ALLEMAIL_SCAN_INTERVAL_SEC", "").strip() or "1800")
+)
+ALLEMAIL_SCAN_CAP_PER_FOLDER = min(
+    5000, max(50, int(os.getenv("ALLEMAIL_SCAN_CAP_PER_FOLDER", "").strip() or "1500"))
+)
+ALLEMAIL_MAX_ENTRIES = min(
+    50000, max(200, int(os.getenv("ALLEMAIL_MAX_ENTRIES", "").strip() or "8000"))
+)
+_ALLEMAIL_HEADER_FETCH_SPEC = (
+    "(BODY.PEEK[HEADER.FIELDS "
+    "(DATE SUBJECT FROM TO CC MESSAGE-ID REFERENCES IN-REPLY-TO AUTO-SUBMITTED)])"
+)
+_allemail_lock = threading.Lock()
+_allemail_scanner_started = False
+
+
+def _allemail_enabled() -> bool:
+    if not MAIL_PASSWORD:
+        return False
+    return (os.getenv("ALLEMAIL_CACHE", "1") or "").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _allemail_folders() -> list[str]:
+    raw = (os.getenv("ALLEMAIL_IMAP_FOLDERS", "") or "").strip()
+    if raw:
+        seen: set[str] = set()
+        out: list[str] = []
+        for f in raw.split(","):
+            name = f.strip()
+            if name and name.casefold() not in seen:
+                seen.add(name.casefold())
+                out.append(name)
+        if out:
+            return out
+    return list(JENKINS_REPLY_IMAP_FOLDERS)
+
+
 _state_lock = threading.Lock()
 
 
@@ -4240,10 +4291,448 @@ def find_jenkins_reply_message_by_subject_title(
     return find_message_by_subject_title(title, folders=JENKINS_REPLY_IMAP_FOLDERS)
 
 
+# ---------------------------------------------------------------------------
+# allemail.json — rolling weekly email index + cache-first Jenkins reply
+# ---------------------------------------------------------------------------
+
+
+def _allemail_load() -> dict[str, Any]:
+    try:
+        with open(ALLEMAIL_STORE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get("emails"), list):
+            return data
+    except FileNotFoundError:
+        pass
+    except Exception as ex:
+        print(f"[allemail] load failed ({ex!r}) — starting empty", flush=True)
+    return {"version": 1, "updated_at": "", "emails": []}
+
+
+def _allemail_window_cutoff_ts() -> float:
+    return (
+        datetime.now(timezone.utc) - timedelta(days=ALLEMAIL_WINDOW_DAYS)
+    ).timestamp()
+
+
+def _allemail_entry_key(entry: dict[str, Any]) -> str:
+    mid = _normalize_message_id(entry.get("message_id"))
+    if mid:
+        return f"mid:{mid}"
+    uid = entry.get("uid") or ""
+    if uid:
+        return f"loc:{(entry.get('folder') or '').casefold()}:{uid}"
+    # No Message-ID and no UID (e.g. stored from a live reply): key on subject+date so two
+    # distinct id-less messages don't collapse onto one 'loc::' slot.
+    subj = (entry.get("subject") or "").strip().casefold()
+    return f"sub:{subj}:{int(float(entry.get('date_ts') or 0.0))}"
+
+
+def _allemail_save(emails: list[dict[str, Any]]) -> None:
+    cutoff = _allemail_window_cutoff_ts()
+    fresh = [e for e in emails if float(e.get("date_ts") or 0.0) >= cutoff]
+    fresh.sort(key=lambda e: float(e.get("date_ts") or 0.0))
+    if len(fresh) > ALLEMAIL_MAX_ENTRIES:
+        fresh = fresh[-ALLEMAIL_MAX_ENTRIES:]
+    data = {
+        "version": 1,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "window_days": ALLEMAIL_WINDOW_DAYS,
+        "count": len(fresh),
+        "emails": fresh,
+    }
+    # Per-process/-thread tmp name so a CLI ``allemail-scan`` racing the daemon scanner can't
+    # clobber a shared temp file mid-write (os.replace onto the final path stays atomic).
+    tmp = f"{ALLEMAIL_STORE_PATH}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, ALLEMAIL_STORE_PATH)
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+
+
+def _allemail_parse_header_bytes(raw: bytes, *, folder: str, uid: str) -> dict[str, Any]:
+    """Parse a HEADER.FIELDS fetch into an allemail entry (subject, message_id, From/To/Cc)."""
+    msg = email.message_from_bytes(raw or b"")
+    subject = _decode_msg_subject(msg)
+    from_raw = _decode_mime_header(msg.get("From")) or ""
+    to_raw = _decode_mime_header(msg.get("To")) or ""
+    cc_raw = _decode_mime_header(msg.get("Cc")) or ""
+    message_id = (msg.get("Message-ID") or "").strip()
+    references = (msg.get("References") or "").strip()
+    auto = (_decode_mime_header(msg.get("Auto-Submitted")) or "").strip()
+    date_raw = (msg.get("Date") or "").strip()
+    ts = 0.0
+    date_iso = ""
+    if date_raw:
+        try:
+            dt = parsedate_to_datetime(date_raw)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            ts = dt.timestamp()
+            date_iso = dt.isoformat()
+        except Exception:
+            pass
+    if ts <= 0.0:
+        # Missing / unparseable Date. The scan already filtered to the SINCE window, so
+        # stamp "now" instead of 0.0 — otherwise _allemail_save's window prune would drop it.
+        now = datetime.now(timezone.utc)
+        ts = now.timestamp()
+        date_iso = now.isoformat()
+    to_list = [a for _n, a in getaddresses([to_raw]) if a and "@" in a]
+    cc_list = [a for _n, a in getaddresses([cc_raw]) if a and "@" in a]
+    from_list = [a for _n, a in getaddresses([from_raw]) if a and "@" in a]
+    return {
+        "subject": subject,
+        "message_id": message_id,
+        "references": references,
+        "from_raw": from_raw,
+        "to_raw": to_raw,
+        "cc_raw": cc_raw,
+        "from": from_list,
+        "to": to_list,
+        "cc": cc_list,
+        "date": date_iso,
+        "date_ts": ts,
+        "auto_submitted": auto,
+        "folder": folder,
+        "uid": uid,
+    }
+
+
+def _allemail_scan_folder(mail: imaplib.IMAP4, folder: str) -> list[dict[str, Any]]:
+    if not _select_mail_folder(mail, folder, readonly=True):
+        return []
+    since = (
+        datetime.now(timezone.utc) - timedelta(days=ALLEMAIL_WINDOW_DAYS)
+    ).strftime("%d-%b-%Y")
+    uids = _uid_search(mail, f"(SINCE {since})")
+    if not uids:
+        return []
+    if len(uids) > ALLEMAIL_SCAN_CAP_PER_FOLDER:
+        uids = uids[-ALLEMAIL_SCAN_CAP_PER_FOLDER:]
+    out: list[dict[str, Any]] = []
+    chunk = 50
+    for off in range(0, len(uids), chunk):
+        part = [_uid_as_bytes(u) for u in uids[off : off + chunk]]
+        uid_str = ",".join(u.decode() for u in part)
+        try:
+            typ, data = mail.uid("fetch", uid_str, _ALLEMAIL_HEADER_FETCH_SPEC)
+        except Exception as ex:
+            print(f"[allemail] fetch failed in {folder!r}: {ex!r}", flush=True)
+            continue
+        if typ != "OK" or not data:
+            continue
+        parsed = _parse_uid_header_fetch_data(data)
+        for uid_b, hdr in parsed.items():
+            try:
+                out.append(
+                    _allemail_parse_header_bytes(
+                        hdr, folder=folder, uid=uid_b.decode(errors="replace")
+                    )
+                )
+            except Exception:
+                continue
+    return out
+
+
+def scan_allemail_cache() -> int:
+    """Refresh allemail.json with every email from the last ``ALLEMAIL_WINDOW_DAYS`` days."""
+    if not _allemail_enabled():
+        return 0
+    mail = _connect_imap_simple(timeout=_JENKINS_REPLY_IMAP_TIMEOUT)
+    scanned: list[dict[str, Any]] = []
+    try:
+        for folder in _allemail_folders():
+            try:
+                scanned.extend(_allemail_scan_folder(mail, folder))
+            except Exception as ex:
+                print(f"[allemail] scan folder {folder!r} failed: {ex!r}", flush=True)
+    finally:
+        try:
+            mail.logout()
+        except Exception:
+            pass
+    with _allemail_lock:
+        existing = _allemail_load().get("emails", [])
+        merged: dict[str, dict[str, Any]] = {}
+        for e in existing:
+            merged[_allemail_entry_key(e)] = e
+        for e in scanned:
+            # Newest wins per key (fresh scan overrides an older stored copy).
+            key = _allemail_entry_key(e)
+            prev = merged.get(key)
+            if prev is None or float(e.get("date_ts") or 0.0) >= float(
+                prev.get("date_ts") or 0.0
+            ):
+                merged[key] = e
+        _allemail_save(list(merged.values()))
+    return len(scanned)
+
+
+def allemail_store_message(orig: email.message.Message, *, folder: str = "") -> None:
+    """Best-effort: index a live-fetched message so the next reply hits the cache."""
+    if not _allemail_enabled():
+        return
+    try:
+        mid = (orig.get("Message-ID") or "").strip()
+        date_raw = (orig.get("Date") or "").strip()
+        ts = 0.0
+        date_iso = ""
+        if date_raw:
+            try:
+                dt = parsedate_to_datetime(date_raw)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                ts = dt.timestamp()
+                date_iso = dt.isoformat()
+            except Exception:
+                pass
+        if ts <= 0.0:
+            ts = datetime.now(timezone.utc).timestamp()
+            date_iso = datetime.now(timezone.utc).isoformat()
+        entry = {
+            "subject": _decode_msg_subject(orig),
+            "message_id": mid,
+            "references": (orig.get("References") or "").strip(),
+            "from_raw": _decode_mime_header(orig.get("From")) or "",
+            "to_raw": _decode_mime_header(orig.get("To")) or "",
+            "cc_raw": _decode_mime_header(orig.get("Cc")) or "",
+            "from": _parse_header_address_list(orig, "From"),
+            "to": _parse_header_address_list(orig, "To"),
+            "cc": _parse_header_address_list(orig, "Cc"),
+            "date": date_iso,
+            "date_ts": ts,
+            "auto_submitted": (_decode_mime_header(orig.get("Auto-Submitted")) or "").strip(),
+            "folder": folder,
+            "uid": "",
+        }
+        with _allemail_lock:
+            emails = _allemail_load().get("emails", [])
+            merged: dict[str, dict[str, Any]] = {}
+            for e in emails:
+                merged[_allemail_entry_key(e)] = e
+            merged[_allemail_entry_key(entry)] = entry
+            _allemail_save(list(merged.values()))
+    except Exception as ex:
+        print(f"[allemail] store_message failed: {ex!r}", flush=True)
+
+
+def _allemail_entry_stub(entry: dict[str, Any]) -> email.message.Message:
+    """Header-only Message from a cached entry so existing reply-all logic applies.
+
+    Built from the already-parsed addr-spec lists (comma-joined, newline-free) rather than
+    the raw header strings, so a folded/edge-case ``To``/``Cc`` header can't inject stray
+    header lines into the stub.
+    """
+    stub = email.message.Message()
+    to_list = entry.get("to") or []
+    cc_list = entry.get("cc") or []
+    from_list = entry.get("from") or []
+    if not from_list and entry.get("from_raw"):
+        from_list = [a for _n, a in getaddresses([entry.get("from_raw") or ""]) if a and "@" in a]
+    if to_list:
+        stub["To"] = ", ".join(to_list)
+    if cc_list:
+        stub["Cc"] = ", ".join(cc_list)
+    if from_list:
+        stub["From"] = ", ".join(from_list)
+    return stub
+
+
+def _allemail_entry_reply_recipients(
+    entry: dict[str, Any],
+) -> tuple[list[str], list[str], list[str]] | None:
+    try:
+        return _jenkins_reply_all_recipients(_allemail_entry_stub(entry))
+    except ValueError:
+        return None
+
+
+def _allemail_subject_is_reply_or_forward(subject: str) -> bool:
+    return bool(re.match(r"^\s*(?:re|fw|fwd|aw)\s*:", (subject or ""), re.I))
+
+
+def _allemail_from_is_own(from_raw: str) -> bool:
+    own = _own_smtp_identities()
+    for _n, addr in getaddresses([from_raw or ""]):
+        if _normalize_email_address(addr) in own:
+            return True
+    return False
+
+
+def _allemail_folder_priority(folder: str) -> int:
+    """Lower index = higher priority (mirror JENKINS_REPLY_IMAP_FOLDERS order)."""
+    f = (folder or "").casefold()
+    for i, name in enumerate(JENKINS_REPLY_IMAP_FOLDERS):
+        if name.casefold() == f:
+            return i
+    return len(JENKINS_REPLY_IMAP_FOLDERS)
+
+
+def _allemail_reply_lookup(title: str) -> dict[str, Any] | None:
+    """
+    Best cached ORIGINAL email whose subject matches ``title`` and is a safe reply target.
+
+    Only genuine originals qualify: entries are rejected when the subject is a reply/forward
+    (``Re:``/``Fw:``) or the From is our own mailbox — those cover prior bot auto-replies and
+    Lark "Failed to send" delivery notices (whose bounce marker lives in the BODY, which a
+    header-only cache can't inspect). Those rare cases fall through to the live IMAP search,
+    which does the full body-level bounce/auto-reply filtering. Ranked by subject score, then
+    folder priority (OSE Pending first), then recency.
+    """
+    needle = (title or "").strip()
+    if not needle:
+        return None
+    with _allemail_lock:
+        emails = _allemail_load().get("emails", [])
+    best: dict[str, Any] | None = None
+    best_rank: tuple[int, int, float] = (-(10**9), -(10**9), -(10**9))
+    for e in emails:
+        subj = e.get("subject") or ""
+        score = _jenkins_reply_subject_score(subj, needle)
+        if score <= 0:
+            continue
+        # Never reply from cache into a reply/forward/bounce or our own sent copy — the
+        # header-only index can't run the live path's body-level bounce checks, so restrict
+        # cache hits to genuine (plain-subject, external-From) originals.
+        if _allemail_subject_is_reply_or_forward(subj):
+            continue
+        if _allemail_from_is_own(e.get("from_raw", "")):
+            continue
+        if _should_skip_jenkins_reply_thread(from_hdr=e.get("from_raw", ""), subject=subj):
+            continue
+        auto = (e.get("auto_submitted") or "").strip().casefold()
+        if auto and auto != "no":
+            continue
+        if _allemail_entry_reply_recipients(e) is None:
+            continue
+        rank = (
+            int(score),
+            -_allemail_folder_priority(e.get("folder", "")),
+            float(e.get("date_ts") or 0.0),
+        )
+        if rank > best_rank:
+            best_rank = rank
+            best = e
+    return best
+
+
+def _send_jenkins_reply_all(
+    *,
+    reply_subject: str,
+    body: str,
+    to_addrs: list[str],
+    cc_addrs: list[str],
+    recipients: list[str],
+    orig_message_id: str,
+    orig_references: str,
+) -> None:
+    """Build + send the plain-text Reply-All, threading in the original via In-Reply-To."""
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = Header(reply_subject, "utf-8")
+    msg["From"] = formataddr((FORWARD_FROM_NAME, MAIL_USER))
+    msg["To"] = ", ".join(to_addrs)
+    if cc_addrs:
+        msg["Cc"] = ", ".join(cc_addrs)
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid()
+    omid = (orig_message_id or "").strip()
+    if omid:
+        msg["In-Reply-To"] = omid
+        refs = (orig_references or "").strip()
+        msg["References"] = f"{refs} {omid}".strip() if refs else omid
+    ctx = ssl.create_default_context()
+    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=IMAP_TIMEOUT, context=ctx) as smtp:
+        smtp.login(MAIL_USER, MAIL_PASSWORD)
+        smtp.sendmail(MAIL_USER, recipients, msg.as_string())
+
+
+def _reply_jenkins_update_done_email_via_cache(
+    *, title: str, body: str, completions: list[tuple[str, str]]
+) -> dict[str, Any] | None:
+    """Cache-first reply: use the allemail.json original (Message-ID + To/Cc). None on miss."""
+    if not _allemail_enabled():
+        return None
+    cached = _allemail_reply_lookup(title)
+    if not cached:
+        return None
+    recips = _allemail_entry_reply_recipients(cached)
+    if recips is None:
+        return None
+    to_addrs, cc_addrs, recipients = recips
+    subj = _reply_subject(cached.get("subject") or title)
+    _send_jenkins_reply_all(
+        reply_subject=subj,
+        body=body,
+        to_addrs=to_addrs,
+        cc_addrs=cc_addrs,
+        recipients=recipients,
+        orig_message_id=cached.get("message_id") or "",
+        orig_references=cached.get("references") or "",
+    )
+    envs = ", ".join(c[0] for c in completions)
+    print(
+        f"[allemail] jenkins done reply (cache) envs={envs!r} title={title!r} "
+        f"mid={cached.get('message_id')!r} folder={cached.get('folder')!r} "
+        f"To={to_addrs!r} Cc={cc_addrs!r}",
+        flush=True,
+    )
+    return {
+        "to": to_addrs,
+        "cc": cc_addrs,
+        "recipients": recipients,
+        "folder": cached.get("folder") or "",
+        "subject": subj,
+        "source": "allemail-cache",
+    }
+
+
+def start_allemail_cache_scanner() -> bool:
+    """Background daemon: scan on startup then refresh allemail.json every interval."""
+    global _allemail_scanner_started
+    if _allemail_scanner_started:
+        return True
+    if not _allemail_enabled():
+        print(
+            "[allemail] cache disabled (set MAINTENANCE_MAIL_PASSWORD; ALLEMAIL_CACHE!=0).",
+            flush=True,
+        )
+        return False
+
+    def _loop() -> None:
+        while True:
+            try:
+                n = scan_allemail_cache()
+                print(
+                    f"[allemail] cache refreshed: {n} email(s) scanned "
+                    f"(last {ALLEMAIL_WINDOW_DAYS}d, folders={', '.join(_allemail_folders())}).",
+                    flush=True,
+                )
+            except Exception as ex:
+                print(f"[allemail] scan failed: {ex!r}", flush=True)
+            time.sleep(ALLEMAIL_SCAN_INTERVAL_SEC)
+
+    threading.Thread(target=_loop, name="allemail-cache-scan", daemon=True).start()
+    _allemail_scanner_started = True
+    print(
+        f"[allemail] cache scanner started (every {ALLEMAIL_SCAN_INTERVAL_SEC}s, "
+        f"{ALLEMAIL_WINDOW_DAYS}d window).",
+        flush=True,
+    )
+    return True
+
+
 def reply_jenkins_update_done_email(
     *,
     email_title: str,
     completions: list[tuple[str, str]],
+    use_cache: bool = True,
 ) -> dict[str, Any]:
     """
     Auto-reply after Jenkins success (``/SuccessInformMeTime`` flow).
@@ -4251,11 +4740,14 @@ def reply_jenkins_update_done_email(
     ``completions`` is a list of ``(environment, time)`` pairs. Multiple pairs are
     combined into one email when several segments share the same subject.
 
-    Finds the **newest usable** matching message in ``JENKINS_REPLY_IMAP_FOLDERS``
-    (walks backward skipping mailer-daemon / ``Failed to send …`` notices and bot test
-    replies until a message has ``To``/``Cc``), then **Reply-All**
-    to its ``To`` / ``Cc`` (plus ``From`` in ``To``). Does **not** send if no
-    matching mail exists.
+    Cache-first: when ``use_cache`` and the ``allemail.json`` index has the original
+    (matched by subject), the reply is built straight from the stored Message-ID + To/Cc
+    — a true in-thread **Reply-All** with the SAME To/Cc as the original, no live IMAP
+    search. On a cache miss it falls back to finding the **newest usable** matching
+    message in ``JENKINS_REPLY_IMAP_FOLDERS`` (walks backward skipping mailer-daemon /
+    ``Failed to send …`` notices and bot test replies until a message has ``To``/``Cc``),
+    then **Reply-All** to its ``To`` / ``Cc`` (plus ``From`` in ``To``). Does **not** send
+    if no matching mail exists in either.
 
     Returns ``{"to": [...], "cc": [...], "folder": str, "subject": str}``.
     """
@@ -4271,6 +4763,20 @@ def reply_jenkins_update_done_email(
         + "\n\nBest Regards,\n"
         "JC\n"
     )
+    # Cache-first: reply straight off the indexed original (exact Message-ID + reply-all).
+    if use_cache:
+        try:
+            cached_result = _reply_jenkins_update_done_email_via_cache(
+                title=title, body=body, completions=completions
+            )
+            if cached_result is not None:
+                return cached_result
+        except Exception as ex:
+            print(
+                f"[allemail] cache reply for {title!r} failed "
+                f"({ex!r}) — falling back to live IMAP search.",
+                flush=True,
+            )
     orig_found = None
     _attempts = _JENKINS_REPLY_FIND_RETRIES
     for _attempt in range(1, _attempts + 1):
@@ -4338,23 +4844,24 @@ def reply_jenkins_update_done_email(
         )
     to_addrs, cc_addrs, recipients = _jenkins_reply_all_recipients(orig)
     subj = _reply_subject(_decode_msg_subject(orig))
-    msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = Header(subj, "utf-8")
-    msg["From"] = formataddr((FORWARD_FROM_NAME, MAIL_USER))
-    msg["To"] = ", ".join(to_addrs)
-    if cc_addrs:
-        msg["Cc"] = ", ".join(cc_addrs)
-    msg["Date"] = formatdate(localtime=True)
-    msg["Message-ID"] = make_msgid()
-    orig_mid = (orig.get("Message-ID") or "").strip()
-    if orig_mid:
-        msg["In-Reply-To"] = orig_mid
-        refs = (orig.get("References") or "").strip()
-        msg["References"] = f"{refs} {orig_mid}".strip() if refs else orig_mid
-    ctx = ssl.create_default_context()
-    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=IMAP_TIMEOUT, context=ctx) as smtp:
-        smtp.login(MAIL_USER, MAIL_PASSWORD)
-        smtp.sendmail(MAIL_USER, recipients, msg.as_string())
+    _send_jenkins_reply_all(
+        reply_subject=subj,
+        body=body,
+        to_addrs=to_addrs,
+        cc_addrs=cc_addrs,
+        recipients=recipients,
+        orig_message_id=(orig.get("Message-ID") or "").strip(),
+        orig_references=(orig.get("References") or "").strip(),
+    )
+    # Index the found original so the NEXT reply to this subject is an instant cache hit.
+    # Fire-and-forget: never add file-lock latency to the reply hot path.
+    threading.Thread(
+        target=allemail_store_message,
+        args=(orig,),
+        kwargs={"folder": orig_folder},
+        name="allemail-store",
+        daemon=True,
+    ).start()
     envs = ", ".join(c[0] for c in completions)
     route = ", ".join(recipients)
     print(
@@ -4368,6 +4875,7 @@ def reply_jenkins_update_done_email(
         "recipients": recipients,
         "folder": orig_folder,
         "subject": subj,
+        "source": "live-imap",
     }
 
 
@@ -6288,6 +6796,26 @@ if __name__ == "__main__":
     if len(sys.argv) >= 2 and sys.argv[1] == "jenkins-reply-search":
         _needle = sys.argv[2] if len(sys.argv) > 2 else "TESTING BOT"
         raise SystemExit(debug_jenkins_reply_search(_needle))
+    if len(sys.argv) >= 2 and sys.argv[1] == "allemail-scan":
+        _n = scan_allemail_cache()
+        print(
+            f"allemail.json refreshed: {_n} email(s) in last {ALLEMAIL_WINDOW_DAYS}d "
+            f"→ {ALLEMAIL_STORE_PATH}",
+            flush=True,
+        )
+        raise SystemExit(0 if _n >= 0 else 1)
+    if len(sys.argv) >= 2 and sys.argv[1] == "allemail-lookup":
+        _t = sys.argv[2] if len(sys.argv) > 2 else ""
+        _hit = _allemail_reply_lookup(_t)
+        if _hit:
+            print(
+                f"MATCH subject={_hit.get('subject')!r} mid={_hit.get('message_id')!r}\n"
+                f"  From: {_hit.get('from_raw')!r}\n  To: {_hit.get('to')!r}\n  Cc: {_hit.get('cc')!r}",
+                flush=True,
+            )
+            raise SystemExit(0)
+        print(f"NO MATCH for {_t!r} in allemail.json", flush=True)
+        raise SystemExit(1)
     if len(sys.argv) >= 2 and sys.argv[1] in (
         "audit-window",
         "audit-maintenance-mail",
@@ -6312,6 +6840,8 @@ if __name__ == "__main__":
         "  python3 maintenance_mail.py audit-window [--fresh] [--quiet]\n"
         "  python3 maintenance_mail.py reset-ticket TINC-720579 [--hash <sha256>]\n"
         "  python3 maintenance_mail.py jenkins-reply-search [subject]\n"
+        "  python3 maintenance_mail.py allemail-scan\n"
+        "  python3 maintenance_mail.py allemail-lookup <subject>\n"
         "  python3 maintenance_mail.py test-confirm-group",
         flush=True,
     )

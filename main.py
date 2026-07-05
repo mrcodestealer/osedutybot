@@ -7618,6 +7618,13 @@ try:
 except Exception as _mail_e:
     print(f"⚠️ Maintenance mail watcher failed to start: {_mail_e!r}", flush=True)
 
+try:
+    import maintenance_mail as _allemail_mod
+
+    _allemail_mod.start_allemail_cache_scanner()
+except Exception as _allemail_e:
+    print(f"⚠️ allemail.json cache scanner failed to start: {_allemail_e!r}", flush=True)
+
 def _lark_event_mode() -> str:
     """``http`` (default) = public Request URL only; ``websocket`` = persistent connection + local Flask."""
     return (os.getenv("LARK_EVENT_MODE") or "http").strip().lower()
