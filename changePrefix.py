@@ -304,9 +304,20 @@ def _is_captcha_error(tip: str) -> bool:
     return any(m.lower() in low for m in _CAPTCHA_ERROR_MARKERS)
 
 
-# ================= Screenshot (Playwright, authenticated) =================
-def _screenshot_provider(cookies: dict, provider_url: str, out_path: Path, headless: bool) -> str:
-    """Open the provider page with the logged-in session cookies and screenshot it."""
+# ================= Provider page (Playwright, authenticated) =================
+def _render_provider(
+    cookies: dict,
+    provider_url: str,
+    headless: bool,
+    out_path=None,
+    hold: bool = False,
+):
+    """Open the provider page with the logged-in session cookies.
+
+    ``out_path``  — if given, save a full-page screenshot there (returns the path).
+    ``hold``      — keep the browser window open until Enter is pressed (only useful
+                    when ``headless`` is False, e.g. a local ``--headed`` demo).
+    """
     from playwright.sync_api import sync_playwright
 
     root = _ipbx_root() + "/"
@@ -327,8 +338,16 @@ def _screenshot_provider(cookies: dict, provider_url: str, out_path: Path, headl
                 page.wait_for_load_state("networkidle", timeout=8000)
             except Exception:
                 pass
-            page.screenshot(path=str(out_path), full_page=True)
-            return str(out_path)
+            saved = None
+            if out_path is not None:
+                page.screenshot(path=str(out_path), full_page=True)
+                saved = str(out_path)
+            if hold:
+                try:
+                    input("\n👀 Browser open on the Provider page. Press Enter to close…\n")
+                except (EOFError, KeyboardInterrupt):
+                    pass
+            return saved
         finally:
             try:
                 context.close()
@@ -340,17 +359,136 @@ def _screenshot_provider(cookies: dict, provider_url: str, out_path: Path, headl
                 pass
 
 
-# ================= Main routine =================
-def run_change_prefix(provider_id=None, headless=None, max_attempts=None) -> dict:
+# ================= HTTP login =================
+def _login_session(max_attempts: int) -> dict:
+    """Log in over HTTP; return {ok, session, attempts, codes, captcha_image, message}.
+
+    ``session`` is an authenticated ``requests.Session`` when ``ok`` is True.
+    """
+    ipbx = _ipbx_base()
+    landing_url = f"{ipbx}/user!setSystemLocale.action"
+    captcha_url = f"{ipbx}/securityCode!getSecurityCodeImg.action"
+    login_url = f"{ipbx}/user!login.action"
+    shots_dir = _shots_dir()
+    timeout = _http_timeout()
+
+    out = {
+        "ok": False,
+        "session": None,
+        "attempts": 0,
+        "codes": [],
+        "captcha_image": None,
+        "message": "",
+    }
+    session = requests.Session()
+    session.headers.update({"User-Agent": "Mozilla/5.0 (osedutybot changePrefix)"})
+    pw_md5 = hashlib.md5(_password().encode("utf-8")).hexdigest()
+
+    # 1) Establish a session (sets JSESSIONID).
+    session.get(landing_url, timeout=timeout)
+
+    last_reason = ""
+    for attempt in range(1, max_attempts + 1):
+        out["attempts"] = attempt
+
+        # 2) Fresh captcha bound to this session.
+        try:
+            cap = session.get(captcha_url, timeout=timeout)
+            cap.raise_for_status()
+        except Exception as exc:  # noqa: BLE001
+            last_reason = f"captcha fetch failed: {exc!r}"
+            print(f"[changePrefix] {last_reason}", flush=True)
+            continue
+        ctype = (cap.headers.get("Content-Type") or "image/jpeg").split(";")[0].strip()
+        body = cap.content or b""
+        is_image = (
+            ctype.lower().startswith("image/")
+            or body[:3] == b"\xff\xd8\xff"          # JPEG
+            or body[:8] == b"\x89PNG\r\n\x1a\n"      # PNG
+            or body[:6] in (b"GIF87a", b"GIF89a")    # GIF
+        )
+        if not is_image:
+            last_reason = (
+                f"captcha endpoint returned non-image ({ctype}, {len(body)}B) — "
+                "session may have expired"
+            )
+            print(f"[changePrefix] {last_reason}", flush=True)
+            try:
+                session.get(landing_url, timeout=timeout)
+            except Exception:
+                pass
+            continue
+        ext = "png" if "png" in ctype else "jpg"
+        cap_path = shots_dir / f"pldt_captcha_{attempt}.{ext}"
+        cap_path.write_bytes(body)
+        out["captcha_image"] = str(cap_path)
+
+        # 3) OCR.
+        code = _recognize_captcha(cap.content, mime=ctype or "image/jpeg")
+        out["codes"].append(code)
+        if not code:
+            last_reason = "captcha OCR returned empty (check vision model)"
+            continue
+
+        # 4) Submit login. The page MD5-hashes the password client-side; we do the
+        #    same here so ``user.pin`` matches.
+        data = {
+            "user.pbxdbCompany.id": _company_id(),
+            "user.username": _user(),
+            "user.pin": pw_md5,
+            "user.securityCode": code,
+            "submit": "Login",
+        }
+        try:
+            resp = session.post(
+                login_url,
+                data=data,
+                timeout=timeout,
+                allow_redirects=True,
+                headers={"Referer": landing_url},
+            )
+            resp.raise_for_status()
+        except Exception as exc:  # noqa: BLE001
+            last_reason = f"login POST failed: {exc!r}"
+            print(f"[changePrefix] {last_reason}", flush=True)
+            continue
+
+        if not _is_login_page(resp.text):
+            out["ok"] = True
+            out["session"] = session
+            out["message"] = f"Login OK on attempt {attempt} (code={code!r})."
+            return out
+
+        # Still a login page → failed. Retry only on a captcha error; any other
+        # message (bad credentials, locked account, …) aborts so we don't burn
+        # retries re-submitting the same password.
+        tip = _extract_form_tip(resp.text)
+        last_reason = tip or "login returned the login form (no message)"
+        print(f"[changePrefix] attempt {attempt} failed: {last_reason!r}", flush=True)
+        if tip and not _is_captcha_error(tip):
+            out["message"] = (
+                f"Login rejected: {last_reason} (attempt {attempt}). Aborting retries."
+            )
+            return out
+
+    out["message"] = f"Failed after {max_attempts} attempt(s). Last: {last_reason}"
+    return out
+
+
+# ================= Main routine (login + screenshot) =================
+def run_change_prefix(
+    provider_id=None,
+    headless=None,
+    max_attempts=None,
+    screenshot: bool = True,
+    hold: bool = False,
+) -> dict:
     provider_id = _provider_id(provider_id)
     headless = _headless(headless)
     max_attempts = _max_attempts(max_attempts)
     ipbx = _ipbx_base()
     provider_url = f"{ipbx}/providers!jumpEditProvider.action?id={provider_id}"
-    captcha_url = f"{ipbx}/securityCode!getSecurityCodeImg.action"
-    login_url = f"{ipbx}/user!login.action"
     shots_dir = _shots_dir()
-    timeout = _http_timeout()
 
     result = {
         "ok": False,
@@ -361,117 +499,32 @@ def run_change_prefix(provider_id=None, headless=None, max_attempts=None) -> dic
         "captcha_image": None,
         "codes": [],
     }
-
-    session = requests.Session()
-    session.headers.update({"User-Agent": "Mozilla/5.0 (osedutybot changePrefix)"})
-    pw_md5 = hashlib.md5(_password().encode("utf-8")).hexdigest()
-
     try:
-        # 1) Establish a session (also sets JSESSIONID).
-        session.get(provider_url, timeout=timeout)
+        login = _login_session(max_attempts)
+        result["attempts"] = login["attempts"]
+        result["codes"] = login["codes"]
+        result["captcha_image"] = login["captcha_image"]
+        if not login["ok"]:
+            result["message"] = login["message"]
+            return result
+        session = login["session"]
 
-        last_reason = ""
-        for attempt in range(1, max_attempts + 1):
-            result["attempts"] = attempt
-
-            # 2) Fresh captcha bound to this session.
+        if screenshot or hold:
+            out = (shots_dir / f"pldt_provider_{provider_id}.png") if screenshot else None
             try:
-                cap = session.get(captcha_url, timeout=timeout)
-                cap.raise_for_status()
-            except Exception as exc:  # noqa: BLE001
-                last_reason = f"captcha fetch failed: {exc!r}"
-                print(f"[changePrefix] {last_reason}", flush=True)
-                continue
-            ctype = (cap.headers.get("Content-Type") or "image/jpeg").split(";")[0].strip()
-            body = cap.content or b""
-            is_image = (
-                ctype.lower().startswith("image/")
-                or body[:3] == b"\xff\xd8\xff"          # JPEG
-                or body[:8] == b"\x89PNG\r\n\x1a\n"      # PNG
-                or body[:6] in (b"GIF87a", b"GIF89a")    # GIF
-            )
-            if not is_image:
-                last_reason = (
-                    f"captcha endpoint returned non-image ({ctype}, {len(body)}B) — "
-                    "session may have expired"
+                result["result_image"] = _render_provider(
+                    session.cookies.get_dict(), provider_url, headless, out, hold
                 )
-                print(f"[changePrefix] {last_reason}", flush=True)
-                # Try to re-establish the session before the next attempt.
-                try:
-                    session.get(provider_url, timeout=timeout)
-                except Exception:
-                    pass
-                continue
-            ext = "png" if "png" in ctype else "jpg"
-            cap_path = shots_dir / f"pldt_captcha_{attempt}.{ext}"
-            cap_path.write_bytes(body)
-            result["captcha_image"] = str(cap_path)
-
-            # 3) OCR.
-            code = _recognize_captcha(cap.content, mime=ctype or "image/jpeg")
-            result["codes"].append(code)
-            if not code:
-                last_reason = "captcha OCR returned empty (check vision model)"
-                continue
-
-            # 4) Submit login. The page MD5-hashes the password client-side; we do
-            #    the same here so ``user.pin`` matches.
-            data = {
-                "user.pbxdbCompany.id": _company_id(),
-                "user.username": _user(),
-                "user.pin": pw_md5,
-                "user.securityCode": code,
-                "submit": "Login",
-            }
-            try:
-                resp = session.post(
-                    login_url,
-                    data=data,
-                    timeout=timeout,
-                    allow_redirects=True,
-                    headers={"Referer": f"{ipbx}/user!setSystemLocale.action"},
-                )
-                resp.raise_for_status()
             except Exception as exc:  # noqa: BLE001
-                last_reason = f"login POST failed: {exc!r}"
-                print(f"[changePrefix] {last_reason}", flush=True)
-                continue
-
-            if not _is_login_page(resp.text):
-                # 5) Logged in — screenshot the provider page with these cookies.
-                #    Only report success if the screenshot (the whole point) works.
-                out = shots_dir / f"pldt_provider_{provider_id}.png"
-                try:
-                    result["result_image"] = _screenshot_provider(
-                        session.cookies.get_dict(), provider_url, out, headless
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    result["ok"] = False
-                    result["message"] = (
-                        f"Login OK on attempt {attempt} (code={code!r}) but the "
-                        f"screenshot failed: {exc!r}"
-                    )
-                    print(f"[changePrefix] screenshot failed: {exc!r}", flush=True)
-                    return result
-                result["ok"] = True
-                result["message"] = f"Login OK on attempt {attempt} (code={code!r})."
-                return result
-
-            # Still a login page → failed. Retry only on a captcha error; any other
-            # message (bad credentials, locked account, …) aborts so we don't burn
-            # retries re-submitting the same password.
-            tip = _extract_form_tip(resp.text)
-            last_reason = tip or "login returned the login form (no message)"
-            print(f"[changePrefix] attempt {attempt} failed: {last_reason!r}", flush=True)
-            if tip and not _is_captcha_error(tip):
+                result["ok"] = False
                 result["message"] = (
-                    f"Login rejected: {last_reason} (attempt {attempt}). "
-                    "Aborting retries."
+                    f"{login['message']} but opening the provider page failed: {exc!r}"
                 )
+                print(f"[changePrefix] provider page failed: {exc!r}", flush=True)
                 return result
-            # else captcha wrong / unknown → next loop fetches a new captcha.
-
-        result["message"] = f"Failed after {max_attempts} attempt(s). Last: {last_reason}"
+        result["ok"] = True
+        extra = "" if screenshot else " (screenshot skipped)"
+        result["message"] = f"{login['message']}{extra}"
         return result
     except Exception as exc:  # noqa: BLE001
         result["message"] = f"Error: {exc!r}"
@@ -479,11 +532,244 @@ def run_change_prefix(provider_id=None, headless=None, max_attempts=None) -> dic
         return result
 
 
+# ================= Prefix rotation (change value + before/after shots) =================
+# Mapping from prefix.png (picture 3): left = CallerID Prefix set in the field,
+# right = the active PLDT number announced to CS. Prefix 028-991-28NN (NN=80..99)
+# maps to 9190599800..819; the announced number carries a leading 0.
+def _build_prefix_map() -> dict:
+    m = {}
+    for nn in range(80, 100):
+        m[f"02899128{nn:02d}"] = f"091905998{nn - 80:02d}"
+    return m
+
+
+PREFIX_TO_NUMBER = _build_prefix_map()
+PREFIX_SEQUENCE = list(PREFIX_TO_NUMBER.keys())  # ordered 0289912880 → 0289912899
+# Anchors verified against picture 3 (guards against a formula typo).
+assert PREFIX_TO_NUMBER["0289912880"] == "09190599800"
+assert PREFIX_TO_NUMBER["0289912894"] == "09190599814"
+assert PREFIX_TO_NUMBER["0289912899"] == "09190599819"
+
+_PREFIX_INPUT = "#callerPrefix"  # name=pbxdbSipProviderGateway.callerPrefix
+_EDIT_FORM_ID = "fom"            # <form action="providers!editProvider.action">
+
+
+def _next_prefix(current: str):
+    """Return (new_prefix, message_number) for the +1 weekly rotation (2899 → 2880).
+
+    ``message_number`` maps to the NEW prefix. Returns (None, None) if ``current`` is
+    not one of the known 028-991-2880..2899 values (so the caller aborts instead of
+    guessing).
+    """
+    cur = (current or "").strip()
+    if cur not in PREFIX_TO_NUMBER:
+        return None, None
+    idx = PREFIX_SEQUENCE.index(cur)
+    new_prefix = PREFIX_SEQUENCE[(idx + 1) % len(PREFIX_SEQUENCE)]
+    return new_prefix, PREFIX_TO_NUMBER[new_prefix]
+
+
+def _rotate_in_browser(cookies: dict, provider_url: str, shots_dir, dry_run: bool, headless: bool) -> dict:
+    """Screenshot before → read+compute+apply the new prefix → screenshot after.
+
+    On ``dry_run`` it stops after computing the new value (no Apply, no after shot).
+    """
+    from playwright.sync_api import sync_playwright
+
+    root = _ipbx_root() + "/"
+    res = {
+        "ok": False,
+        "old_prefix": None,
+        "new_prefix": None,
+        "message_number": None,
+        "before_image": None,
+        "after_image": None,
+        "applied": False,
+        "message": "",
+    }
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=headless)
+        context = browser.new_context()
+        try:
+            context.add_cookies(
+                [{"name": n, "value": v, "url": root} for n, v in cookies.items() if v]
+            )
+            page = context.new_page()
+            page.goto(provider_url, wait_until="domcontentloaded", timeout=_nav_timeout())
+            try:
+                page.wait_for_load_state("networkidle", timeout=8000)
+            except Exception:
+                pass
+
+            # Screenshot BEFORE the change.
+            before = shots_dir / "pldt_prefix_before.png"
+            page.screenshot(path=str(before), full_page=True)
+            res["before_image"] = str(before)
+
+            # Read the current prefix straight from the field (source of truth).
+            try:
+                old = (page.input_value(_PREFIX_INPUT, timeout=_nav_timeout()) or "").strip()
+            except Exception as exc:  # noqa: BLE001
+                res["message"] = f"could not read the Prefix field ({_PREFIX_INPUT}): {exc!r}"
+                return res
+            res["old_prefix"] = old
+
+            new_prefix, number = _next_prefix(old)
+            if not new_prefix:
+                res["message"] = (
+                    f"current prefix {old!r} is not in the known 028-991-2880..2899 "
+                    "table — aborting to avoid setting a wrong value"
+                )
+                return res
+            res["new_prefix"] = new_prefix
+            res["message_number"] = number
+
+            if dry_run:
+                res["ok"] = True
+                res["message"] = (
+                    f"[dry-run] would change {old} → {new_prefix}; CS number {number} "
+                    "(no change applied)"
+                )
+                return res
+
+            # Apply: set the field, then submit the edit form directly. A human click
+            # goes Apply → name-check AJAX → "Submit success!" confirm → OK → form.submit().
+            # We only change callerPrefix (name/username unchanged), so submitting #fom
+            # directly is equivalent and avoids the fragile confirm modal.
+            page.fill(_PREFIX_INPUT, new_prefix)
+            page.evaluate(f"document.getElementById('{_EDIT_FORM_ID}').submit()")
+            try:
+                page.wait_for_load_state("networkidle", timeout=_nav_timeout())
+            except Exception:
+                pass
+
+            # Verify by reloading the edit page and reading the field back.
+            page.goto(provider_url, wait_until="domcontentloaded", timeout=_nav_timeout())
+            try:
+                page.wait_for_load_state("networkidle", timeout=8000)
+            except Exception:
+                pass
+            try:
+                confirmed = (page.input_value(_PREFIX_INPUT, timeout=_nav_timeout()) or "").strip()
+            except Exception:
+                confirmed = ""
+            res["applied"] = confirmed == new_prefix
+
+            # Screenshot AFTER the change.
+            after = shots_dir / "pldt_prefix_after.png"
+            page.screenshot(path=str(after), full_page=True)
+            res["after_image"] = str(after)
+
+            if res["applied"]:
+                res["ok"] = True
+                res["message"] = f"changed {old} → {new_prefix}; CS number {number}"
+            else:
+                res["message"] = (
+                    f"submitted {old} → {new_prefix} but the page read back {confirmed!r}; "
+                    "NOT confirmed — no announcement will be sent"
+                )
+            return res
+        finally:
+            try:
+                context.close()
+            except Exception:
+                pass
+            try:
+                browser.close()
+            except Exception:
+                pass
+
+
+def rotate_prefix(provider_id=None, headless=None, max_attempts=None, dry_run: bool = False) -> dict:
+    """Log in, then change the CallerID Prefix to the next value (with before/after shots).
+
+    Returns {ok, dry_run, provider_id, attempts, old_prefix, new_prefix, message_number,
+    before_image, after_image, applied, message, codes}. Does NOT send anything to
+    Lark — the caller (main.py) posts the images/message.
+    """
+    provider_id = _provider_id(provider_id)
+    headless = _headless(headless)
+    max_attempts = _max_attempts(max_attempts)
+    ipbx = _ipbx_base()
+    provider_url = f"{ipbx}/providers!jumpEditProvider.action?id={provider_id}"
+    shots_dir = _shots_dir()
+
+    result = {
+        "ok": False,
+        "dry_run": dry_run,
+        "provider_id": provider_id,
+        "attempts": 0,
+        "old_prefix": None,
+        "new_prefix": None,
+        "message_number": None,
+        "before_image": None,
+        "after_image": None,
+        "applied": False,
+        "message": "",
+        "codes": [],
+    }
+    try:
+        login = _login_session(max_attempts)
+        result["attempts"] = login["attempts"]
+        result["codes"] = login["codes"]
+        if not login["ok"]:
+            result["message"] = login["message"]
+            return result
+        rr = _rotate_in_browser(
+            login["session"].cookies.get_dict(), provider_url, shots_dir, dry_run, headless
+        )
+        for k in (
+            "old_prefix",
+            "new_prefix",
+            "message_number",
+            "before_image",
+            "after_image",
+            "applied",
+        ):
+            result[k] = rr.get(k)
+        result["ok"] = rr["ok"]
+        result["message"] = rr["message"]
+        return result
+    except Exception as exc:  # noqa: BLE001
+        result["message"] = f"Error: {exc!r}"
+        print(f"[changePrefix] rotate error: {exc!r}", flush=True)
+        return result
+
+
 if __name__ == "__main__":
     import sys
 
-    pid = next((a for a in sys.argv[1:] if a.isdigit()), None)
-    res = run_change_prefix(provider_id=pid, headless="--headed" not in sys.argv)
+    args = sys.argv[1:]
+    if "--help" in args or "-h" in args:
+        print(
+            "Usage: python changePrefix.py [provider_id] [flags]\n"
+            "  (default)         log in and screenshot the provider page\n"
+            "  --headed          show a visible browser (default: headless)\n"
+            "  --no-screenshot   don't save the provider-page PNG\n"
+            "  --no-hold         with --headed, don't wait for Enter (close immediately)\n"
+            "  --rotate          change the prefix to the next value (+1, wraps 2899→2880)\n"
+            "  --dry-run         with --rotate: compute the new value but DON'T Apply\n"
+            "\nExamples:\n"
+            "  python changePrefix.py --headed --no-screenshot   # watch login, no file\n"
+            "  python changePrefix.py --rotate --dry-run         # preview next prefix, no change\n"
+            "  python changePrefix.py --rotate                   # ⚠️ really changes the prefix\n"
+        )
+        sys.exit(0)
+
+    pid = next((a for a in args if a.isdigit()), None)
+    headed = "--headed" in args or "--head" in args
+
+    if "--rotate" in args:
+        dry = "--dry-run" in args or "--dry" in args
+        res = rotate_prefix(provider_id=pid, headless=not headed, dry_run=dry)
+    else:
+        no_shot = "--no-screenshot" in args or "--no-shot" in args
+        # When headed, keep the window open so you can look at the page (login is HTTP,
+        # so the browser is otherwise the only thing that would flash by).
+        hold = headed and "--no-hold" not in args
+        res = run_change_prefix(
+            provider_id=pid, headless=not headed, screenshot=not no_shot, hold=hold
+        )
     print("\n===== RESULT =====")
     for k, v in res.items():
         print(f"{k}: {v}")

@@ -149,6 +149,7 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
                 ("/mdr <id>", "MDR asset", "MDR 资产"),
                 ("/pid <id>", "Provider ID lookup", "Provider ID"),
                 ("/pldtprefix [id]", "Open Polylink UC Provider page (auto-login + captcha)", "登录 Polylink 打开 Provider 页"),
+                ("/pldtrotate [apply]", "PLDT prefix rotate: dry-run preview, or `apply` to change + notify CS", "PLDT 前缀轮换：预览 / apply 执行"),
                 ("/cctv <machine>", "EGM CCTV screenshot", "EGM 监控截图"),
             ],
         ),

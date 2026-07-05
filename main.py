@@ -2104,6 +2104,87 @@ OFFSET_APPROVER_OPEN_IDS: frozenset[str] = frozenset(
     }
 )
 
+# ---- PLDT prefix rotation (changePrefix.py) ----
+# Weekly job changes the CPPLDT trunk's CallerID Prefix (+1) and posts before/after
+# screenshots + prefix.png + a @CS(Team) message to this group.
+PLDT_PREFIX_GROUP_CHAT_ID = (
+    os.getenv("PLDT_PREFIX_GROUP_CHAT_ID", "").strip()
+    or "oc_51b6fbf2636525acfb4ead3afa3c93ce"
+)
+PLDT_CS_OPEN_ID = (
+    os.getenv("PLDT_CS_OPEN_ID", "").strip()
+    or "ou_c927a378e9b464741c67b61c1641577b"  # @CS (Team)
+)
+
+
+def run_pldt_prefix_rotation(dry_run: bool = False, notify_chat: Optional[str] = None) -> None:
+    """Rotate the PLDT prefix and post the result to the CS group.
+
+    ``notify_chat`` receives dry-run summaries and failures (defaults to the group).
+    On a successful real run, posts to the group in order:
+    before shot → after shot → prefix.png → @CS(Team) message.
+
+    Run this in a background thread / scheduler job (never inline in the webhook), so
+    ``send_message`` posts to the group instead of quote-replying an inbound message.
+    """
+    group = PLDT_PREFIX_GROUP_CHAT_ID
+    status_chat = (notify_chat or group)
+    try:
+        import changePrefix as _cp
+        res = _cp.rotate_prefix(dry_run=dry_run)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[pldtprefix] rotation error: {exc!r}", flush=True)
+        send_message(status_chat, f"❌ PLDT prefix rotation error: {exc}")
+        return
+
+    if not res.get("ok"):
+        send_message(
+            status_chat,
+            f"❌ PLDT prefix rotation failed (attempts={res.get('attempts')}): "
+            f"{res.get('message')}",
+        )
+        return
+
+    if dry_run:
+        send_message(
+            status_chat,
+            f"🧪 [dry-run] PLDT prefix would change "
+            f"`{res.get('old_prefix')}` → `{res.get('new_prefix')}`; "
+            f"CS number `{res.get('message_number')}`. No change applied, nothing posted to the group.",
+        )
+        return
+
+    def _post_image(path: Optional[str]) -> None:
+        if path and os.path.isfile(path):
+            key = upload_image_lark(path)
+            if key:
+                send_image_message(group, key)
+            else:
+                send_message(group, "⚠️ (screenshot upload failed)")
+
+    # Post in the confirmed order: before → after → prefix.png → @CS message.
+    send_message(group, "Before changed the value")
+    _post_image(res.get("before_image"))
+    send_message(group, "After Changed the value")
+    _post_image(res.get("after_image"))
+
+    prefix_png = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prefix.png")
+    _post_image(prefix_png)
+
+    number = res.get("message_number")
+    msg = (
+        f'<at user_id="{PLDT_CS_OPEN_ID}">CS (Team)</at> Please be informed that we have '
+        f"already changed the PLDT prefix number to {number}. Thank you."
+    )
+    send_message(group, msg)
+    print(f"[pldtprefix] rotation done: {res.get('old_prefix')} → {res.get('new_prefix')}", flush=True)
+
+
+def pldt_prefix_weekly_rotate() -> None:
+    """Scheduler entrypoint — Tuesday 05:55 Asia/Manila."""
+    run_pldt_prefix_rotation(dry_run=False)
+
+
 def send_shift_reminder(chat_id, message):
     send_message(chat_id, message)
     print(f"⏰ Shift reminder sent to {chat_id}: {message}")
@@ -2465,6 +2546,16 @@ try:
 except ImportError:
     print("[Amount Loss] 9:00 cron not registered (amountloss unavailable)", flush=True)
 _add_scheduler_job("myoseweeklymeeting", myoseweeklymeeting, "cron", day_of_week="tue", hour=17, minute=0)
+# PLDT prefix rotation — every Tuesday 05:55 Asia/Manila (UTC+8, no DST).
+_add_scheduler_job(
+    "pldt_prefix_weekly_rotate",
+    pldt_prefix_weekly_rotate,
+    "cron",
+    day_of_week="tue",
+    hour=5,
+    minute=55,
+    timezone="Asia/Manila",
+)
 _add_scheduler_job("monthly_duty_check", monthly_duty_check, "cron", day=1, hour=0, minute=0)
 # Weekly clear of /egs + /egstest sent logs (egs.json / egstest.json) — Monday 00:00 (GMT+8).
 try:
@@ -6259,6 +6350,32 @@ def lark_webhook():
                     pass
 
         threading.Thread(target=_run_pldtprefix_job, daemon=True).start()
+        return _lark_im_done()
+    elif cmd == '/pldtrotate':
+        # Change the PLDT prefix to the next value + announce to the CS group.
+        # Default is a SAFE dry-run (preview only). `/pldtrotate apply` really changes it.
+        _pr_mode = (cmd_parts[1].lower() if len(cmd_parts) > 1 else "")
+        _pr_apply = _pr_mode in ("apply", "confirm", "real", "run", "go", "yes")
+        _pr_dry = not _pr_apply
+
+        def _run_pldtrotate_job(chat_pr=chat_id, dry_pr=_pr_dry):
+            try:
+                if dry_pr:
+                    send_message(chat_pr, "🧪 Running PLDT prefix rotation (dry-run — no change, no group post)…")
+                    # Dry-run summary goes to the invoker, not the CS group.
+                    run_pldt_prefix_rotation(dry_run=True, notify_chat=chat_pr)
+                else:
+                    send_message(chat_pr, "🔄 Changing PLDT prefix and posting to the CS group…")
+                    run_pldt_prefix_rotation(dry_run=False)
+                    send_message(chat_pr, "✅ PLDT prefix rotation finished.")
+            except Exception as _pr_err:
+                print(f"❌ pldtrotate job: {_pr_err!r}", flush=True)
+                try:
+                    send_message(chat_pr, f"❌ /pldtrotate failed: {_pr_err}")
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run_pldtrotate_job, daemon=True).start()
         return _lark_im_done()
     elif cmd == '/ec':
         game_name = cmd_parts[1] if len(cmd_parts) > 1 else None
