@@ -2466,6 +2466,15 @@ except ImportError:
     print("[Amount Loss] 9:00 cron not registered (amountloss unavailable)", flush=True)
 _add_scheduler_job("myoseweeklymeeting", myoseweeklymeeting, "cron", day_of_week="tue", hour=17, minute=0)
 _add_scheduler_job("monthly_duty_check", monthly_duty_check, "cron", day=1, hour=0, minute=0)
+# Weekly clear of /egs + /egstest sent logs (egs.json / egstest.json) — Monday 00:00 (GMT+8).
+try:
+    import maintenance_mail as _egs_mail_reset
+    _add_scheduler_job(
+        "egs_weekly_reset", _egs_mail_reset.egs_reset_stores, "cron",
+        day_of_week="mon", hour=0, minute=0,
+    )
+except Exception as _egs_reset_err:
+    print(f"[egs] weekly reset cron not registered: {_egs_reset_err!r}", flush=True)
 _add_scheduler_job("clean_pending_p0_confirmations", clean_pending_p0_confirmations, "interval", minutes=5)
 _add_scheduler_job("clean_pending_p1_confirmations", clean_pending_p1_confirmations, "interval", minutes=5)
 
