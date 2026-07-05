@@ -6211,6 +6211,55 @@ def lark_webhook():
         reply = ecsre.get_responsible_games(game_name)
         send_message(chat_id, reply)
         return _lark_im_done()
+    elif cmd == '/pldtprefix':
+        # Log in to Polylink UC (IPBX), read the captcha via vision LLM (retry up
+        # to 10x on `验证码不正确`), then screenshot the Provider edit page.
+        _pp_pid = None
+        for _tok in cmd_parts[1:]:
+            if _tok.isdigit():
+                _pp_pid = _tok
+                break
+
+        def _run_pldtprefix_job(chat_id_pp=chat_id, provider_id_pp=_pp_pid):
+            try:
+                import changePrefix as _cp_mod
+
+                send_message(
+                    chat_id_pp,
+                    f"🔐 Logging in to Polylink UC and opening Provider "
+                    f"`id={provider_id_pp or _cp_mod._provider_id()}` … "
+                    "(reading captcha, up to 10 tries)",
+                )
+                res = _cp_mod.run_change_prefix(provider_id=provider_id_pp)
+                img_path = res.get("result_image")
+                if res.get("ok"):
+                    head = (
+                        f"✅ Provider `id={res.get('provider_id')}` opened "
+                        f"({res.get('attempts')} attempt(s))."
+                    )
+                else:
+                    head = (
+                        f"❌ Could not open Provider `id={res.get('provider_id')}` "
+                        f"after {res.get('attempts')} attempt(s).\n{res.get('message')}"
+                    )
+                send_message(chat_id_pp, head)
+                if img_path and os.path.isfile(img_path):
+                    key = upload_image_lark(img_path)
+                    if key:
+                        r = send_image_message(chat_id_pp, key)
+                        if r.get("code") != 0:
+                            send_message(chat_id_pp, f"❌ Failed to send screenshot: {r}")
+                    else:
+                        send_message(chat_id_pp, "❌ Failed to upload screenshot.")
+            except Exception as _pp_err:
+                print(f"❌ pldtprefix job: {_pp_err!r}", flush=True)
+                try:
+                    send_message(chat_id_pp, f"❌ /pldtprefix failed: {_pp_err}")
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run_pldtprefix_job, daemon=True).start()
+        return _lark_im_done()
     elif cmd == '/ec':
         game_name = cmd_parts[1] if len(cmd_parts) > 1 else None
         result = emergency.get_emergency_contacts_payload(game_name)

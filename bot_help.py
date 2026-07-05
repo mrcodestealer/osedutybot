@@ -148,6 +148,7 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
                 ("/dhs <id>", "DHS asset", "DHS 资产"),
                 ("/mdr <id>", "MDR asset", "MDR 资产"),
                 ("/pid <id>", "Provider ID lookup", "Provider ID"),
+                ("/pldtprefix [id]", "Open Polylink UC Provider page (auto-login + captcha)", "登录 Polylink 打开 Provider 页"),
                 ("/cctv <machine>", "EGM CCTV screenshot", "EGM 监控截图"),
             ],
         ),
