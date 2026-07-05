@@ -4235,10 +4235,11 @@ def _try_egs_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Opt
                 )
                 _to = ", ".join(info.get("to") or [])
                 _lbl = "/egsreplytest" if is_test else "/egsreply"
+                _note = "" if info.get("found") else "（⚠️ 未找到原邮件，已发送纯测试邮件）"
                 _egs_reply(
                     chat_id_ca,
                     orig_mid,
-                    f"✅ `{_lbl}` 已回复\n📌 {info.get('subject') or ''}\n📧 收件: {_to}",
+                    f"✅ `{_lbl}` 已发送{_note}\n📌 {info.get('subject') or ''}\n📧 收件: {_to}",
                 )
             else:
                 # Body already includes the signature (shown/edited in the card) → don't re-append.

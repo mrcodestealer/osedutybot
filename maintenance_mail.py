@@ -4227,9 +4227,11 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
     """``/egsreply``: find the email whose subject matches ``email_title`` and Reply-All
     inside its thread — To/Cc taken from the original (``In-Reply-To`` set for threading).
 
-    ``test=True`` (``/egsreplytest``) sends only to ``EGS_TEST_REPLY_TO`` (junchen@) instead.
-    ``body`` is sent as-is (the preview card already carries the signature). Raises
-    :class:`EmailThreadNotFoundError` when no matching mail is found.
+    ``test=True`` (``/egsreplytest``) sends only to ``EGS_TEST_REPLY_TO`` (junchen@). In test
+    mode, if the original email can't be found it STILL sends a plain ``Re: <title>`` email
+    to the test address (so the test always delivers). Real ``/egsreply`` raises
+    :class:`EmailThreadNotFoundError` when no matching mail is found (can't reply to nothing).
+    ``body`` is sent as-is (the preview card already carries the signature).
     """
     if not MAIL_PASSWORD:
         raise RuntimeError("MAINTENANCE_MAIL_PASSWORD not set")
@@ -4239,19 +4241,35 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
     text = (body or "").strip()
     if not text:
         raise ValueError("empty /egsreply body")
-    found = find_message_by_subject_title(title)
-    if not found:
+
+    orig = None
+    orig_folder = ""
+    try:
+        found = find_message_by_subject_title(title)
+        if found:
+            orig, orig_folder = found
+    except EmailThreadNotFoundError:
+        orig = None  # e.g. only bounces matched — treat as not found
+
+    if orig is None and not test:
         raise EmailThreadNotFoundError(
             f"Email not found — no message with subject matching {title!r} in "
             f"folder(s): {', '.join(JENKINS_REPLY_IMAP_FOLDERS)}."
         )
-    orig, orig_folder = found
-    to_addrs, cc_addrs, recipients = _jenkins_reply_all_recipients(orig)
-    subj = _reply_subject(_decode_msg_subject(orig))
-    if test:
-        to_addrs = [EGS_TEST_REPLY_TO]
-        cc_addrs = []
-        recipients = [EGS_TEST_REPLY_TO]
+
+    orig_mid = ""
+    if orig is not None:
+        subj = _reply_subject(_decode_msg_subject(orig))
+        orig_mid = (orig.get("Message-ID") or "").strip()
+        if test:
+            to_addrs, cc_addrs, recipients = [EGS_TEST_REPLY_TO], [], [EGS_TEST_REPLY_TO]
+        else:
+            to_addrs, cc_addrs, recipients = _jenkins_reply_all_recipients(orig)
+    else:
+        # test-only fallback: no original found → plain email to the test address.
+        subj = _reply_subject(title)
+        to_addrs, cc_addrs, recipients = [EGS_TEST_REPLY_TO], [], [EGS_TEST_REPLY_TO]
+
     msg = MIMEText(text, "plain", "utf-8")
     msg["Subject"] = Header(subj, "utf-8")
     msg["From"] = formataddr((FORWARD_FROM_NAME, MAIL_USER))
@@ -4260,7 +4278,6 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
         msg["Cc"] = ", ".join(cc_addrs)
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid()
-    orig_mid = (orig.get("Message-ID") or "").strip()
     if orig_mid:
         msg["In-Reply-To"] = orig_mid
         refs = (orig.get("References") or "").strip()
@@ -4271,7 +4288,8 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
         smtp.sendmail(MAIL_USER, recipients, msg.as_string())
     print(
         f"[maint-mail] /egsreply{'test' if test else ''} title={title!r} "
-        f"folder={orig_folder!r} To={to_addrs!r} Cc={cc_addrs!r} → {', '.join(recipients)}",
+        f"found={orig is not None} folder={orig_folder!r} To={to_addrs!r} Cc={cc_addrs!r} "
+        f"→ {', '.join(recipients)}",
         flush=True,
     )
     return {
@@ -4280,6 +4298,7 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
         "recipients": recipients,
         "subject": subj,
         "folder": orig_folder,
+        "found": orig is not None,
     }
 
 
