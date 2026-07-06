@@ -559,6 +559,55 @@ assert PREFIX_TO_NUMBER["0289912899"] == "09190599819"
 
 _PREFIX_INPUT = "#callerPrefix"  # name=pbxdbSipProviderGateway.callerPrefix
 _EDIT_FORM_ID = "fom"            # <form action="providers!editProvider.action">
+_APPLY_BUTTON = "input[name='input2']"  # <input value="Apply" onclick="editProvider();">
+
+
+def _apply_max_clicks() -> int:
+    """How many times to click Apply before giving up (verifies + stops early)."""
+    try:
+        return max(1, int(os.getenv("PLDT_APPLY_CLICKS", "4")))
+    except ValueError:
+        return 4
+
+
+def _click_apply_and_confirm(page) -> None:
+    """Click the real Apply button and confirm the 'Submit success!' popup.
+
+    Apply runs ``editProvider()`` → name-check AJAX → a ymPrompt confirm dialog whose
+    OK calls ``form.submit()``. We click Apply, then click that OK; if the popup can't
+    be found we submit ``#fom`` directly so the change still goes through. Then wait for
+    the resulting page load.
+    """
+    try:
+        page.click(_APPLY_BUTTON, timeout=_nav_timeout())
+    except Exception as exc:  # noqa: BLE001
+        print(f"[changePrefix] Apply button click failed: {exc!r}", flush=True)
+
+    confirmed_modal = False
+    for sel in (
+        "#ymPrompt_btnV a",
+        ".ymPrompt_btnV a",
+        ".ymPrompt a:has-text('OK')",
+        "a:has-text('OK')",
+    ):
+        try:
+            loc = page.locator(sel).first
+            loc.wait_for(state="visible", timeout=2000)
+            loc.click(timeout=1500)
+            confirmed_modal = True
+            break
+        except Exception:
+            continue
+    if not confirmed_modal:
+        # Popup not found — guarantee the submit so the change still lands.
+        try:
+            page.evaluate(f"document.getElementById('{_EDIT_FORM_ID}').submit()")
+        except Exception:
+            pass
+    try:
+        page.wait_for_load_state("networkidle", timeout=_nav_timeout())
+    except Exception:
+        pass
 
 
 def _next_prefix(current: str):
@@ -741,21 +790,43 @@ def _rotate_in_browser(
                 "from_prefix": from_prefix, "target_prefix": new_prefix, "applied": False,
             })
 
-            # Apply: set the field, then submit the edit form directly. A human click
-            # goes Apply → name-check AJAX → "Submit success!" confirm → OK → form.submit().
-            # We only change callerPrefix (name/username unchanged), so submitting #fom
-            # directly is equivalent and avoids the fragile confirm modal.
-            page.fill(_PREFIX_INPUT, new_prefix)
-            page.evaluate(f"document.getElementById('{_EDIT_FORM_ID}').submit()")
-            try:
-                page.wait_for_load_state("networkidle", timeout=_nav_timeout())
-            except Exception:
-                pass
-
-            # Verify by reloading the edit page and reading the field back (a couple of
-            # tries, since the write may have committed even if the first reload is slow).
+            # Apply by clicking the real Apply button — up to _apply_max_clicks() times
+            # (default 4), because a single click sometimes doesn't persist. Between
+            # clicks we reload and read the field back; as soon as it shows the new value
+            # we stop (no point clicking more). Re-saving the same value is idempotent.
+            max_clicks = _apply_max_clicks()
             confirmed = ""
-            for _ in range(3):
+            clicks_done = 0
+            for i in range(1, max_clicks + 1):
+                # Reload a clean edit page (this also verifies the previous click).
+                try:
+                    page.goto(provider_url, wait_until="domcontentloaded", timeout=_nav_timeout())
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=8000)
+                    except Exception:
+                        pass
+                    cur = (page.input_value(_PREFIX_INPUT, timeout=_nav_timeout()) or "").strip()
+                except Exception:
+                    cur = ""
+                if cur == new_prefix:
+                    confirmed = cur
+                    print(
+                        f"[changePrefix] Apply confirmed after {clicks_done} click(s) "
+                        f"({from_prefix} → {new_prefix})",
+                        flush=True,
+                    )
+                    break
+                # Not saved yet → set the field and click Apply again.
+                try:
+                    page.fill(_PREFIX_INPUT, new_prefix)
+                except Exception:
+                    pass
+                _click_apply_and_confirm(page)
+                clicks_done = i
+                print(f"[changePrefix] clicked Apply {i}/{max_clicks}", flush=True)
+
+            # Final verification on a fresh reload (in case the last click just landed).
+            if confirmed != new_prefix:
                 try:
                     page.goto(provider_url, wait_until="domcontentloaded", timeout=_nav_timeout())
                     try:
@@ -763,10 +834,8 @@ def _rotate_in_browser(
                     except Exception:
                         pass
                     confirmed = (page.input_value(_PREFIX_INPUT, timeout=_nav_timeout()) or "").strip()
-                    if confirmed:
-                        break
                 except Exception:
-                    confirmed = ""
+                    pass
             res["applied"] = confirmed == new_prefix
 
             # Screenshot AFTER the change.
@@ -780,12 +849,15 @@ def _rotate_in_browser(
                     "from_prefix": from_prefix, "target_prefix": new_prefix, "applied": True,
                 })
                 res["ok"] = True
-                res["message"] = f"changed {from_prefix} → {new_prefix}; CS number {number}"
+                res["message"] = (
+                    f"changed {from_prefix} → {new_prefix} (Apply clicked {clicks_done}×); "
+                    f"CS number {number}"
+                )
             else:
                 res["message"] = (
-                    f"submitted {from_prefix} → {new_prefix} but the page read back {confirmed!r}; "
-                    "NOT confirmed. Intent is recorded, so a retry this week will reconcile "
-                    "rather than double-advance."
+                    f"clicked Apply {clicks_done}× for {from_prefix} → {new_prefix} but the page "
+                    f"read back {confirmed!r}; NOT confirmed. Intent is recorded, so a retry this "
+                    "week will reconcile rather than double-advance."
                 )
             return res
         finally:

@@ -2211,8 +2211,8 @@ def run_pldt_prefix_rotation(dry_run: bool = False, notify_chat: Optional[str] =
     _post_image(prefix_png)
 
     number = res.get("message_number")
-    # CARD group: the announcement card only (title + the "hi CS team" content).
-    # Card @mentions use `<at id=ou_…></at>` (NOT `user_id=` — that's for plain text).
+    # The announcement card goes to BOTH groups (screenshot group gets it AFTER the
+    # shots; card group gets only this). Card @mentions use `<at id=ou_…></at>`.
     card = {
         "schema": "2.0",
         "config": {"update_multi": True, "width_mode": "fill"},
@@ -2235,15 +2235,17 @@ def run_pldt_prefix_rotation(dry_run: bool = False, notify_chat: Optional[str] =
             ]
         },
     }
-    resp = send_message(card_group, json.dumps(card, ensure_ascii=False), msg_type="interactive")
-    if isinstance(resp, dict) and resp.get("code") not in (0, None):
-        # Card failed → fall back to plain text so CS still gets notified.
-        print(f"[pldtprefix] announcement card failed ({resp}); sending text", flush=True)
-        send_message(
-            card_group,
-            f'<at user_id="{PLDT_CS_OPEN_ID}">CS (Team)</at> Please be informed that we have '
-            f"already changed the PLDT prefix number to {number}. Thank you.",
-        )
+    card_json = json.dumps(card, ensure_ascii=False)
+    text_fallback = (
+        f'<at user_id="{PLDT_CS_OPEN_ID}">CS (Team)</at> Please be informed that we have '
+        f"already changed the PLDT prefix number to {number}. Thank you."
+    )
+    for g in dict.fromkeys([card_group, shot_group]):  # both groups, deduped
+        resp = send_message(g, card_json, msg_type="interactive")
+        if isinstance(resp, dict) and resp.get("code") not in (0, None):
+            # Card failed for this group → fall back to plain text so CS still gets notified.
+            print(f"[pldtprefix] announcement card failed for {g} ({resp}); sending text", flush=True)
+            send_message(g, text_fallback)
     print(
         f"[pldtprefix] rotation done: {res.get('old_prefix')} → {res.get('new_prefix')} "
         f"(shots→{shot_group}, card→{card_group})",
