@@ -2107,9 +2107,17 @@ OFFSET_APPROVER_OPEN_IDS: frozenset[str] = frozenset(
 # ---- PLDT prefix rotation (changePrefix.py) ----
 # Weekly job changes the CPPLDT trunk's CallerID Prefix (+1) and posts before/after
 # screenshots + prefix.png + a @CS(Team) message to this group.
-PLDT_PREFIX_GROUP_CHAT_ID = (
-    os.getenv("PLDT_PREFIX_GROUP_CHAT_ID", "").strip()
+# PLDT rotation posts to TWO groups with DIFFERENT content:
+#   - screenshots group: before/after shots + prefix.png (the visual proof)
+#   - card group: only the "Change PLDT CallerID Prefix" announcement card
+PLDT_SCREENSHOT_GROUP_CHAT_ID = (
+    os.getenv("PLDT_SCREENSHOT_GROUP_CHAT_ID", "").strip()
+    or os.getenv("PLDT_PREFIX_GROUP_CHAT_ID", "").strip()  # legacy env name
     or "oc_51b6fbf2636525acfb4ead3afa3c93ce"
+)
+PLDT_CARD_GROUP_CHAT_ID = (
+    os.getenv("PLDT_CARD_GROUP_CHAT_ID", "").strip()
+    or "oc_6a2f477c2a5a36aba633afab466f3166"
 )
 PLDT_CS_OPEN_ID = (
     os.getenv("PLDT_CS_OPEN_ID", "").strip()
@@ -2118,19 +2126,19 @@ PLDT_CS_OPEN_ID = (
 
 
 def run_pldt_prefix_rotation(dry_run: bool = False, notify_chat: Optional[str] = None) -> None:
-    """Rotate the PLDT prefix and post the result to the CS group.
+    """Rotate the PLDT prefix and post the result to the two groups.
 
-    ``notify_chat`` receives dry-run summaries and failures (defaults to the group).
-    On a successful real run, posts to the group in order:
-    before shot → after shot → prefix.png → @CS(Team) message.
+    On a successful real run:
+      - SCREENSHOT group (``PLDT_SCREENSHOT_GROUP_CHAT_ID``): before shot → after shot → prefix.png
+      - CARD group (``PLDT_CARD_GROUP_CHAT_ID``): the "Change PLDT CallerID Prefix" card only
 
     Run this in a background thread / scheduler job (never inline in the webhook), so
     ``send_message`` posts to the group instead of quote-replying an inbound message.
     ``notify_chat`` set = manual run: status/errors go there. ``notify_chat`` None =
-    scheduled run: only the successful announcement is posted to the group; status/
-    errors are logged (never spam the CS group with bot chatter).
+    scheduled run: status/errors are logged (never spam the groups with bot chatter).
     """
-    group = PLDT_PREFIX_GROUP_CHAT_ID
+    shot_group = PLDT_SCREENSHOT_GROUP_CHAT_ID
+    card_group = PLDT_CARD_GROUP_CHAT_ID
 
     def _status(text: str) -> None:
         if notify_chat:
@@ -2172,29 +2180,62 @@ def run_pldt_prefix_rotation(dry_run: bool = False, notify_chat: Optional[str] =
         return
 
     def _post_image(path: Optional[str]) -> None:
-        if path and os.path.isfile(path):
-            key = upload_image_lark(path)
-            if key:
-                send_image_message(group, key)
-            else:
-                send_message(group, "⚠️ (screenshot upload failed)")
+        """Upload + send an image to the SCREENSHOT group only."""
+        if not (path and os.path.isfile(path)):
+            return
+        key = upload_image_lark(path)
+        if key:
+            send_image_message(shot_group, key)
+        else:
+            send_message(shot_group, "⚠️ (screenshot upload failed)")
 
-    # Post in the confirmed order: before → after → prefix.png → @CS message.
-    send_message(group, "Before changed the value")
+    # SCREENSHOT group: before shot → after shot → prefix.png (+ their labels).
+    send_message(shot_group, "Before changed the value")
     _post_image(res.get("before_image"))
-    send_message(group, "After Changed the value")
+    send_message(shot_group, "After Changed the value")
     _post_image(res.get("after_image"))
-
     prefix_png = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prefix.png")
     _post_image(prefix_png)
 
     number = res.get("message_number")
-    msg = (
-        f'<at user_id="{PLDT_CS_OPEN_ID}">CS (Team)</at> Please be informed that we have '
-        f"already changed the PLDT prefix number to {number}. Thank you."
+    # CARD group: the announcement card only (title + the "hi CS team" content).
+    # Card @mentions use `<at id=ou_…></at>` (NOT `user_id=` — that's for plain text).
+    card = {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": "Change PLDT CallerID Prefix"},
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": (
+                            f'<at id="{PLDT_CS_OPEN_ID}"></at> Please be informed that we have '
+                            f"already changed the PLDT prefix number to {number}. Thank you."
+                        ),
+                    },
+                }
+            ]
+        },
+    }
+    resp = send_message(card_group, json.dumps(card, ensure_ascii=False), msg_type="interactive")
+    if isinstance(resp, dict) and resp.get("code") not in (0, None):
+        # Card failed → fall back to plain text so CS still gets notified.
+        print(f"[pldtprefix] announcement card failed ({resp}); sending text", flush=True)
+        send_message(
+            card_group,
+            f'<at user_id="{PLDT_CS_OPEN_ID}">CS (Team)</at> Please be informed that we have '
+            f"already changed the PLDT prefix number to {number}. Thank you.",
+        )
+    print(
+        f"[pldtprefix] rotation done: {res.get('old_prefix')} → {res.get('new_prefix')} "
+        f"(shots→{shot_group}, card→{card_group})",
+        flush=True,
     )
-    send_message(group, msg)
-    print(f"[pldtprefix] rotation done: {res.get('old_prefix')} → {res.get('new_prefix')}", flush=True)
 
 
 def pldt_prefix_weekly_rotate() -> None:
