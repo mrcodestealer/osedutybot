@@ -2119,6 +2119,19 @@ PLDT_CARD_GROUP_CHAT_ID = (
     os.getenv("PLDT_CARD_GROUP_CHAT_ID", "").strip()
     or "oc_6a2f477c2a5a36aba633afab466f3166"
 )
+# Announce-only groups: the bot POSTS here but IGNORES every inbound message
+# (no commands, chat, or @mention handling). The PLDT card group is announce-only;
+# add more via ANNOUNCE_ONLY_CHAT_IDS (comma-separated).
+ANNOUNCE_ONLY_CHAT_IDS = {PLDT_CARD_GROUP_CHAT_ID} | {
+    c.strip() for c in os.getenv("ANNOUNCE_ONLY_CHAT_IDS", "").split(",") if c.strip()
+}
+
+
+def _is_announce_only_chat(chat_id: Optional[str]) -> bool:
+    """Groups where the bot only announces — inbound messages are ignored."""
+    return (chat_id or "").strip() in ANNOUNCE_ONLY_CHAT_IDS
+
+
 PLDT_CS_OPEN_ID = (
     os.getenv("PLDT_CS_OPEN_ID", "").strip()
     or "ou_c927a378e9b464741c67b61c1641577b"  # @CS (Team)
@@ -4769,9 +4782,9 @@ def lark_webhook():
             if eid_ca and _remember_processed_message_id(eid_ca):
                 print(f"⏭️ Duplicate card callback {eid_ca} ignored ({hdr_et!r})", flush=True)
                 return
-            if maintenance.is_evo_batch_forward_only_chat(chat_id_ca):
+            if maintenance.is_evo_batch_forward_only_chat(chat_id_ca) or _is_announce_only_chat(chat_id_ca):
                 print(
-                    f"⏭️ EVO forward-only group — ignoring card callback ({chat_id_ca})",
+                    f"⏭️ announce-only / forward-only group — ignoring card callback ({chat_id_ca})",
                     flush=True,
                 )
                 return
@@ -5258,9 +5271,9 @@ def lark_webhook():
         print("❌ Could not extract chat_id or text")
         return jsonify({"error": "Missing data"}), 400
 
-    if maintenance.is_evo_batch_forward_only_chat(chat_id):
+    if maintenance.is_evo_batch_forward_only_chat(chat_id) or _is_announce_only_chat(chat_id):
         print(
-            f"⏭️ EVO forward-only group — ignoring inbound message ({chat_id})",
+            f"⏭️ announce-only / forward-only group — ignoring inbound message ({chat_id})",
             flush=True,
         )
         return _lark_im_ack()
