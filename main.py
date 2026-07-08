@@ -4271,7 +4271,9 @@ def _process_egs_paste(chat_id: str, body_text: str, *, test: bool = False) -> N
 def _post_egsreply_preview_card(
     chat_id: str, email_title: str, content: str, reply_mid: str, *, test: bool
 ) -> None:
-    """Post the editable ``/egsreply`` preview card (title = email to find & reply to)."""
+    """Post the editable ``/egsreply`` reply preview card. ``email_title`` is the PICKED
+    email's subject — it rides in the Send button value (``s``) and locks the reply target,
+    so the reply always threads off that email (editing the shown title can't change it)."""
     import maintenance_mail as _maint_mail
 
     full_content = content
@@ -4285,14 +4287,14 @@ def _post_egsreply_preview_card(
         header = "🧪 EGS 回复预览(测试) / Reply preview (TEST)"
         info = (
             f"🧪 测试模式：回复只发送到 **{_maint_mail.EGS_TEST_REPLY_TO}**（不发给原收件人）。\n"
-            "上方**标题**用于**查找**要回复的邮件；可编辑标题/正文后点 **发送**。"
+            "回复的**邮件已选定**（上方标题即所选邮件，勿改）；填写下方**正文**后点 **发送**。"
         )
         send_label = "🧪 回复(测试) / Send Reply (test)"
     else:
         header = "📧 EGS 回复邮件预览 / Reply — review before sending"
         info = (
-            "将**查找**该标题的邮件并**回复**（收件/抄送同原邮件，保持在原会话内）。\n"
-            "可编辑下方**标题**（查找用）与**正文**后点 **回复 / Send Reply**。"
+            "将在**所选邮件**的会话内**回复**（收件/抄送同原邮件，保持在原会话内）。\n"
+            "回复的**邮件已选定**（上方标题即所选邮件，勿改）；填写**正文**后点 **回复 / Send Reply**。"
         )
         send_label = "✅ 回复 / Send Reply"
     card = maintenance.build_egs_preview_card(
@@ -4300,12 +4302,14 @@ def _post_egsreply_preview_card(
         full_content,
         reply_to_message_id=reply_mid,
         header_title=header,
-        title_label="邮件标题 Email Title (查找并回复)",
+        title_label="回复邮件 Replying to (已选定)",
         title_placeholder="Subject of the email to reply to",
         send_key="egsreply_send",
         send_label=send_label,
         info_md=info,
-        extra_send_val={"t": "1"} if test else None,
+        # Lock the reply subject to the PICKED email (rides in the Send button value as `s`),
+        # so the stored-Message-ID lookup always matches even if the title field is edited.
+        extra_send_val={"t": "1", "s": email_title} if test else {"s": email_title},
     )
     _resp = send_message(
         chat_id,
@@ -4320,64 +4324,52 @@ def _post_egsreply_preview_card(
     )
 
 
-def _process_egsreply_paste(chat_id: str, raw_body: str, *, test: bool = False) -> None:
-    """``/egsreply`` — reply inside a previously sent ``/egs`` email's thread.
+def _process_egsreply_paste(chat_id: str, *, test: bool = False) -> None:
+    """``/egsreply`` / ``/egsreplytest`` — ALWAYS show the PICKER card so the user picks
+    which previously sent email to reply to.
 
-    Bare command → PICKER card listing recent ``/egs`` sends (from ``egs.json``); the
-    user taps the email to reply to, then edits the reply in the preview card.
-    With text: first non-empty line = email title (search key), rest = reply content
-    (old direct mode). ``test=True`` (``/egsreplytest``) replies only to the test
-    address (``EGS_TEST_REPLY_TO`` = junchen@).
+    The picker lists recent ``/egs`` sends (``egs.json``) — or ``/egstest`` sends
+    (``egstest.json``) for ``/egsreplytest``. Tapping an email opens the editable reply
+    preview card, where the user writes the reply and sends it; the reply threads off the
+    stored Message-ID (no fuzzy search, no "email not found"). Any text pasted after the
+    command is ignored. ``test=True`` replies only to the test address (junchen@).
     """
     _cmd = "/egsreplytest" if test else "/egsreply"
     if not maintenance.is_evo_batch_command_chat(chat_id):
         send_message(chat_id, maintenance.EVO_BATCH_WRONG_GROUP_MESSAGE)
         return
     reply_mid = (_lark_user_message_id.get() or "").strip()
-    # First non-empty line = email title to reply to; the rest = reply content.
-    lines = (raw_body or "").split("\n")
-    email_title = ""
-    content = ""
-    for i, ln in enumerate(lines):
-        if ln.strip():
-            email_title = ln.strip()
-            content = "\n".join(lines[i + 1:]).strip()
-            break
     try:
-        if not email_title:
-            # Bare command → picker card: /egsreply lists real /egs sends (egs.json),
-            # /egsreplytest lists /egstest sends (egstest.json).
-            import maintenance_mail as _maint_mail
+        # Picker card: /egsreply lists real /egs sends (egs.json),
+        # /egsreplytest lists /egstest sends (egstest.json).
+        import maintenance_mail as _maint_mail
 
-            entries = _maint_mail.egs_recent_sent_emails(test=test)
-            if not entries:
-                _store = "egstest.json" if test else "egs.json"
-                _src = "/egstest" if test else "/egs"
-                _egs_reply(
-                    chat_id,
-                    reply_mid,
-                    f"没有 `{_src}` 发送记录（{_store} 为空）。先用 `{_src}` 发送一封，"
-                    f"或直接指定标题：`{_cmd}` 第一行=邮件标题，之后=回复正文。",
-                )
-                return
-            picker = maintenance.build_egsreply_picker_card(
-                entries, test=test, reply_to_message_id=reply_mid
-            )
-            _resp = send_message(
+        entries = _maint_mail.egs_recent_sent_emails(test=test)
+        if not entries:
+            _store = "egstest.json" if test else "egs.json"
+            _src = "/egstest" if test else "/egs"
+            _egs_reply(
                 chat_id,
-                json.dumps(picker, ensure_ascii=False),
-                msg_type="interactive",
-                reply_to_message_id="",  # direct post
-            )
-            print(
-                f"[egsreply] picker sent test={test} n={len(entries)} "
-                f"code={(_resp or {}).get('code')!r}",
-                flush=True,
+                reply_mid,
+                f"没有 `{_src}` 发送记录（{_store} 为空）。先用 `{_src}` 发送一封再回复。",
             )
             return
-        _post_egsreply_preview_card(chat_id, email_title, content, reply_mid, test=test)
-    except Exception as ex:
-        print(f"[egsreply] preview failed: {ex!r}", flush=True)
+        picker = maintenance.build_egsreply_picker_card(
+            entries, test=test, reply_to_message_id=reply_mid
+        )
+        _resp = send_message(
+            chat_id,
+            json.dumps(picker, ensure_ascii=False),
+            msg_type="interactive",
+            reply_to_message_id="",  # direct post
+        )
+        print(
+            f"[egsreply] picker sent test={test} n={len(entries)} "
+            f"code={(_resp or {}).get('code')!r}",
+            flush=True,
+        )
+    except Exception as ex:  # noqa: BLE001
+        print(f"[egsreply] picker failed: {ex!r}", flush=True)
         _egs_reply(chat_id, reply_mid, f"❌ `{_cmd}` 处理失败: `{ex}`")
 
 
@@ -4444,12 +4436,19 @@ def _try_egs_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Opt
     body = body or _lark_find_field_deep(ev_ca, "egs_body")
     title = (title or "").strip()
     body = (body or "").strip()
-    if not title or not body:
-        # Keep the card so the user can fix it — just warn.
-        return {"toast": {"type": "error", "content": "Title and content cannot be empty."}}
 
     is_reply = k == "egsreply_send"
     is_test = str(parsed_ca.get("t") or "").strip() == "1"
+    if is_reply:
+        # Reply subject is LOCKED to the picked email (carried in the Send button value as
+        # `s`), so the stored-Message-ID lookup always matches — no "未找到原邮件" fallback,
+        # even if the (informational) title field was edited.
+        _picked = str(parsed_ca.get("s") or "").strip()
+        if _picked:
+            title = _picked
+    if not title or not body:
+        # Keep the card so the user can fix it — just warn.
+        return {"toast": {"type": "error", "content": "Title and content cannot be empty."}}
 
     def _send_job() -> None:
         _recall_card()  # remove the form card first so it disappears on click
@@ -6517,17 +6516,9 @@ def lark_webhook():
         _process_egs_paste(chat_id, _egs_src, test=_egs_test)
         return _lark_im_done()
     elif cmd in ("/egsreply", "/egsreplytest"):
-        # First line after the command = email title to find & reply to; rest = reply body.
-        # `/egsreplytest` sends the reply to the test address only.
-        _egsr_test = cmd == "/egsreplytest"
-        _egsr_src = original_text or ""
-        for _mk in mention_keys:
-            _egsr_src = _egsr_src.replace(_mk, "")
-        _egsr_src = re.sub(r"@_user_\d+", "", _egsr_src)
-        _egsr_src = re.sub(r"<[^>]+>", "", _egsr_src)
-        _egsr_cmd = re.search(rf"(?:^|\s){re.escape(cmd)}\b\s*", _egsr_src, re.IGNORECASE)
-        _egsr_src = _egsr_src[_egsr_cmd.end():] if _egsr_cmd else ""
-        _process_egsreply_paste(chat_id, _egsr_src, test=_egsr_test)
+        # Always show the picker so the user chooses which sent email to reply to.
+        # Any text pasted after the command is ignored. `/egsreplytest` → test address only.
+        _process_egsreply_paste(chat_id, test=cmd == "/egsreplytest")
         return _lark_im_done()
     elif re.search(
         r"(?:^|\s)/(maintenance|maintenanceshort|ms)\s+",
