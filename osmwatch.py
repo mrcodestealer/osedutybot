@@ -413,27 +413,58 @@ def _capture_qr(page, out_path: Path) -> Path:
 # Hosts of the Lark QR login page (where re-sending a fresh QR makes sense).
 _QR_PAGE_HOSTS = ("accounts.larksuite.com", "accounts.feishu.cn")
 
-# Consent-screen "Authorize" button, across locales (English default + zh).
-_AUTHORIZE_SELECTORS = (
-    "button:has-text('Authorize')",
-    "button:has-text('授权')",
-    "button:has-text('同意')",
-    "button:has-text('允许')",
-)
+# Consent-screen host + "Authorize" labels across locales (English default + zh).
+_CONSENT_HOSTS = ("open.larksuite.com", "open.feishu.cn")
+_AUTHORIZE_LABELS = ("Authorize", "授权", "同意授权", "同意", "允许")
 
 
-def _click_authorize(page) -> bool:
+def _click_authorize(page, *, log=print) -> bool:
     """After the QR is scanned, Lark shows an OAuth consent screen. Click its
-    primary 'Authorize' button (never 'Reject'). Returns True iff clicked."""
-    for sel in _AUTHORIZE_SELECTORS:
-        try:
-            el = page.query_selector(sel)  # instant; None if absent
-            if el and el.is_visible():
-                el.click(timeout=3000)
-                return True
-        except Exception:
-            continue
+    primary 'Authorize' button (never 'Reject'). Robust to non-<button> markup
+    and iframes. Returns True iff a click landed."""
+    # Search the main frame and any iframes (Lark sometimes nests the consent UI).
+    for frame in page.frames:
+        for lab in _AUTHORIZE_LABELS:
+            # 1) accessible role=button with this name
+            try:
+                loc = frame.get_by_role("button", name=lab, exact=True)
+                if loc.count() and loc.first.is_visible():
+                    loc.first.click(timeout=3000)
+                    return True
+            except Exception:
+                pass
+            # 2) any element whose exact text is the label (div/span/a acting as a button)
+            try:
+                loc = frame.get_by_text(lab, exact=True)
+                for i in range(min(loc.count(), 5)):
+                    el = loc.nth(i)
+                    if el.is_visible():
+                        el.click(timeout=3000)
+                        return True
+            except Exception:
+                pass
+            # 3) CSS :has-text fallback (real <button> element)
+            try:
+                el = frame.query_selector(f"button:has-text('{lab}')")
+                if el and el.is_visible():
+                    el.click(timeout=3000)
+                    return True
+            except Exception:
+                pass
     return False
+
+
+def _log_consent_candidates(page, log) -> None:
+    """One-time debug: dump the visible clickable labels on the consent screen."""
+    try:
+        cands = page.eval_on_selector_all(
+            "button, [role=button], a, input[type=submit]",
+            "els => els.filter(e => e.offsetParent !== null)"
+            ".map(e => (e.innerText || e.value || '').trim()).filter(Boolean).slice(0, 25)",
+        )
+        log(f"[osmwatch] consent screen at {page.url} — clickable labels: {cands}")
+    except Exception as e:
+        log(f"[osmwatch] consent candidate probe failed: {e!r}")
 
 
 def _qr_login_on_page(page, *, qr_chat_id: str | None, timeout_s: int, resend_sec: int = 90, log=print) -> bool:
@@ -468,6 +499,7 @@ def _qr_login_on_page(page, *, qr_chat_id: str | None, timeout_s: int, resend_se
     deadline = time.time() + timeout_s
     next_resend = time.time() + resend_sec
     approved_note = False
+    consent_logged = False
     while time.time() < deadline:
         if _authenticated(page.url):
             _settle_url(page, seconds=8)
@@ -475,7 +507,7 @@ def _qr_login_on_page(page, *, qr_chat_id: str | None, timeout_s: int, resend_se
                 return True
 
         # After the user scans, Lark shows a consent screen — auto-approve it.
-        if _click_authorize(page):
+        if _click_authorize(page, log=log):
             log("→ clicked Authorize on the consent screen")
             if qr_chat_id and not approved_note:
                 approved_note = True
@@ -487,6 +519,11 @@ def _qr_login_on_page(page, *, qr_chat_id: str | None, timeout_s: int, resend_se
             _settle_url(page, seconds=10)
             if _authenticated(page.url):
                 return True
+        elif _host(page.url) in _CONSENT_HOSTS and not consent_logged:
+            # On the consent screen but no Authorize button matched — dump what's
+            # there once so the selector can be fixed from the logs.
+            consent_logged = True
+            _log_consent_candidates(page, log)
 
         # Only re-send a fresh QR while still on the QR login page (not after the
         # scan, when we're on the consent screen or redirecting to the dashboard).
