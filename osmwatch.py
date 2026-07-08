@@ -410,6 +410,32 @@ def _capture_qr(page, out_path: Path) -> Path:
     return out_path
 
 
+# Hosts of the Lark QR login page (where re-sending a fresh QR makes sense).
+_QR_PAGE_HOSTS = ("accounts.larksuite.com", "accounts.feishu.cn")
+
+# Consent-screen "Authorize" button, across locales (English default + zh).
+_AUTHORIZE_SELECTORS = (
+    "button:has-text('Authorize')",
+    "button:has-text('授权')",
+    "button:has-text('同意')",
+    "button:has-text('允许')",
+)
+
+
+def _click_authorize(page) -> bool:
+    """After the QR is scanned, Lark shows an OAuth consent screen. Click its
+    primary 'Authorize' button (never 'Reject'). Returns True iff clicked."""
+    for sel in _AUTHORIZE_SELECTORS:
+        try:
+            el = page.query_selector(sel)  # instant; None if absent
+            if el and el.is_visible():
+                el.click(timeout=3000)
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _qr_login_on_page(page, *, qr_chat_id: str | None, timeout_s: int, resend_sec: int = 90, log=print) -> bool:
     """Drive the Lark QR login on an already-open page.
 
@@ -441,12 +467,34 @@ def _qr_login_on_page(page, *, qr_chat_id: str | None, timeout_s: int, resend_se
     push_qr(first=True)
     deadline = time.time() + timeout_s
     next_resend = time.time() + resend_sec
+    approved_note = False
     while time.time() < deadline:
         if _authenticated(page.url):
             _settle_url(page, seconds=8)
             if _authenticated(page.url):
                 return True
-        if qr_chat_id and time.time() >= next_resend and not _authenticated(page.url):
+
+        # After the user scans, Lark shows a consent screen — auto-approve it.
+        if _click_authorize(page):
+            log("→ clicked Authorize on the consent screen")
+            if qr_chat_id and not approved_note:
+                approved_note = True
+                try:
+                    send_text_message(qr_chat_id, "✅ Scanned — approving access…")
+                except Exception:
+                    pass
+            page.wait_for_timeout(1500)
+            _settle_url(page, seconds=10)
+            if _authenticated(page.url):
+                return True
+
+        # Only re-send a fresh QR while still on the QR login page (not after the
+        # scan, when we're on the consent screen or redirecting to the dashboard).
+        if (
+            qr_chat_id
+            and time.time() >= next_resend
+            and _host(page.url) in _QR_PAGE_HOSTS
+        ):
             push_qr(first=False)
             next_resend = time.time() + resend_sec
         page.wait_for_timeout(1000)
