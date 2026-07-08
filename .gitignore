@@ -41,6 +41,7 @@ browser_state.json
 browser_data/
 osmwatch.png
 osmwatch_qr.png
+osmwatch.json
 cookies.json
 user_token.json
 holiday.csv

@@ -6449,6 +6449,53 @@ def lark_webhook():
 
         threading.Thread(target=_run_pldtrotate_job, daemon=True).start()
         return _lark_im_done()
+    elif cmd == '/loginosmwatch':
+        # Force a fresh Lark login QR for the OSM-Watch dashboard, posted to the
+        # lab group. Used when the session expired and the auto-QR already timed out.
+        try:
+            import osmwatch as _ow_mod
+
+            _ow_mod.request_login(chat_id)
+            send_message(
+                chat_id,
+                "🔐 OSM-Watch: login requested — a fresh QR will be posted to the lab group "
+                "shortly. Scan it with your Lark app to sign the bot in.",
+            )
+        except Exception as _ow_err:
+            print(f"❌ loginosmwatch: {_ow_err!r}", flush=True)
+            try:
+                send_message(chat_id, f"❌ /loginosmwatch failed: {_ow_err}")
+            except Exception:
+                pass
+        return _lark_im_done()
+    elif cmd == '/osmwatch':
+        # Screenshot the OSM-Watch dashboard (warm browser) and send it to this chat.
+        _ow_url = None
+        for _tok in cmd_parts[1:]:
+            if _tok.startswith("http"):
+                _ow_url = _tok
+                break
+
+        def _run_osmwatch_shot(chat_id_ow=chat_id, url_ow=_ow_url):
+            try:
+                import osmwatch as _ow_mod
+
+                send_message(chat_id_ow, "📸 OSM-Watch: capturing the dashboard…")
+                box = _ow_mod.capture_and_send(chat_id_ow, url=url_ow)
+                err = box.get("error")
+                # 'blocked' / 'not_authenticated' already notify the chat themselves;
+                # a screenshot on success is sent from inside capture_and_send.
+                if err and err not in ("blocked", "not_authenticated"):
+                    send_message(chat_id_ow, f"❌ OSM-Watch capture failed: {err}")
+            except Exception as _ow_err:
+                print(f"❌ osmwatch: {_ow_err!r}", flush=True)
+                try:
+                    send_message(chat_id_ow, f"❌ /osmwatch failed: {_ow_err}")
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run_osmwatch_shot, daemon=True).start()
+        return _lark_im_done()
     elif cmd == '/ec':
         game_name = cmd_parts[1] if len(cmd_parts) > 1 else None
         result = emergency.get_emergency_contacts_payload(game_name)
@@ -8299,6 +8346,12 @@ def _run_main_entry() -> int:
             prewarm_third_http_pool_on_startup()
         except Exception as _boot_th_err:
             print(f"[third-http-warm] startup pre-warm skipped: {_boot_th_err!r}", flush=True)
+        try:
+            import osmwatch as _boot_ow
+
+            _boot_ow.prewarm_osmwatch_on_startup()
+        except Exception as _boot_ow_err:
+            print(f"[osmwatch-warm] startup pre-warm skipped: {_boot_ow_err!r}", flush=True)
         if _lark_ws_uses_persistent_connection():
             def _flask_bg() -> None:
                 app.run(host="127.0.0.1", port=port, debug=False, threaded=True, use_reloader=False)
