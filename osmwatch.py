@@ -1042,10 +1042,8 @@ def _encoder_max_matches() -> int:
 _ENCODER_ROWS_JS = r"""
 () => {
   const clean = (s) => (s || '').replace(/\u{1F4CB}/gu, '').replace(/\s+/g, ' ').trim();
-  // The room/user/sig cells are visually truncated (text-overflow ellipsis),
-  // but each has a copy button whose onclick carries the FULL value:
-  //   copyToClipboard('<full value>', event)
-  // Prefer that; fall back to the (possibly truncated) cell text.
+  // The IP / room / user cells are visually truncated (text-overflow ellipsis)
+  // but their copy button carries the FULL value: copyToClipboard('<value>', ..).
   const copyVal = (td) => {
     if (!td) return null;
     const btn = td.querySelector('[onclick*="copyToClipboard"]');
@@ -1053,6 +1051,17 @@ _ENCODER_ROWS_JS = r"""
     const oc = btn.getAttribute('onclick') || '';
     const m = oc.match(/copyToClipboard\(\s*'([^']*)'/) || oc.match(/copyToClipboard\(\s*"([^"]*)"/);
     return m ? m[1] : null;
+  };
+  // USER SIG is different: its copy button is copyUserSig('<id>', ..) (an id, not
+  // the value) and the <code> text is ellipsis-truncated. The FULL sig is in the
+  // code element's data-original-sig attribute.
+  const sigVal = (td) => {
+    if (!td) return '';
+    const c = td.querySelector('[data-original-sig]');
+    const v = c ? c.getAttribute('data-original-sig') : null;
+    if (v) return v;
+    const cp = copyVal(td);
+    return (cp !== null && cp !== '') ? cp : clean(td.innerText);
   };
   const rows = [];
   const trs = document.querySelectorAll(
@@ -1074,7 +1083,7 @@ _ENCODER_ROWS_JS = r"""
       ip: (tr.getAttribute('data-ip') || full(3) || '').trim(),
       room_id: full(4),
       user_id: full(5),
-      user_sig: full(6),
+      user_sig: sigVal(tds[6]),
       status: cell(7) || (tr.getAttribute('data-status') || ''),
       updated: cell(8),
     });
@@ -1162,19 +1171,18 @@ def _fmt_encoder_machine(entry: dict) -> str:
             continue
         ip = info.get("ip") or "—"
         meta = " · ".join(x for x in (info.get("status") or "", info.get("updated") or "") if x)
-        head = f" • **{_ENCODER_TYPE_LABEL.get(t, t.upper())}** — `{ip}`"
+        label = _ENCODER_TYPE_LABEL.get(t, t.upper())
+        head = f" • **{label} Encoder** IP ADDRESS — `{ip}`"
         if meta:
             head += f"  {meta}"
         lines.append(head)
-        room, user = info.get("room_id") or "", info.get("user_id") or ""
-        idline = " · ".join(
-            p for p in ((f"room `{room}`" if room else ""), (f"user `{user}`" if user else "")) if p
-        )
-        if idline:
-            lines.append(f"     {idline}")
-        sig = info.get("user_sig") or ""
+        room, user, sig = info.get("room_id") or "", info.get("user_id") or "", info.get("user_sig") or ""
+        if room:
+            lines.append(f"     ROOM ID  : `{room}`")
+        if user:
+            lines.append(f"     User ID  : `{user}`")
         if sig:
-            lines.append(f"     sig `{sig}`")
+            lines.append(f"     User Sig : `{sig}`")
     return "\n".join(lines)
 
 
