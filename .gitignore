@@ -42,6 +42,8 @@ browser_data/
 osmwatch.png
 osmwatch_qr.png
 osmwatch.json
+latestencoder.json
+encoder_dump/
 cookies.json
 user_token.json
 holiday.csv

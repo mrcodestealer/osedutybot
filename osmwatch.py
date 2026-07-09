@@ -46,6 +46,7 @@ import json
 import mimetypes
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -999,6 +1000,246 @@ def do_encoder_dump(
 
 
 # ---------------------------------------------------------------------------
+# Encoder / TRTC scraper -> latestencoder.json  (+ /encoder lookup)
+# ---------------------------------------------------------------------------
+# The trtc-details page renders ALL rows (~3300) into a single table
+# (#trtcTable / table.trtc-flat); each machine has 3 rows (one per stream type),
+# each carrying data-* attributes. So the whole dataset is read in one
+# page.evaluate — no per-asset clicking. Rows are grouped by machine into
+# latestencoder.json; the warm browser re-scrapes on a silent interval, and the
+# /encoder lookup reads the FILE (never the browser) so replies are instant.
+LATESTENCODER_JSON = _ROOT_DIR / os.getenv("OSMWATCH_ENCODER_DATA_FILE", "latestencoder.json")
+
+# data-type on each row -> our normalized stream type. "top" is the dashboard's
+# internal name for the POOL stream (its badge reads "🎮 POOL").
+_ENCODER_TYPE_MAP = {"main": "main", "top": "pool", "pool": "pool", "cctv": "cctv"}
+_ENCODER_TYPE_ORDER = ("main", "pool", "cctv")
+_ENCODER_TYPE_LABEL = {"main": "MAIN", "pool": "POOL", "cctv": "CCTV"}
+_ENCODER_QUERY_SPLIT = re.compile(r"[\s,&]+")
+
+
+def _encoder_enabled() -> bool:
+    return _truthy(os.getenv("OSMWATCH_ENCODER", "1"))
+
+
+def _encoder_interval_sec() -> int:
+    try:
+        return max(300, int(os.getenv("OSMWATCH_ENCODER_INTERVAL_SEC", "1800")))
+    except ValueError:
+        return 1800
+
+
+def _encoder_max_matches() -> int:
+    try:
+        return max(1, int(os.getenv("OSMWATCH_ENCODER_MAX_MATCHES", "50")))
+    except ValueError:
+        return 50
+
+
+# Reads every data row from the trtc table. Returns raw per-row dicts; grouping
+# stays in Python so it's unit-testable without a browser. The clipboard glyph
+# (📋, U+1F4CB) that the copy buttons render into cell text is stripped out.
+_ENCODER_ROWS_JS = r"""
+() => {
+  const clean = (s) => (s || '').replace(/\u{1F4CB}/gu, '').replace(/\s+/g, ' ').trim();
+  const rows = [];
+  const trs = document.querySelectorAll(
+    '#trtcTable tbody tr.trtc-row, table.trtc-flat tbody tr.trtc-row');
+  for (const tr of trs) {
+    const tds = tr.children;
+    const cell = (i) => tds[i] ? clean(tds[i].innerText) : '';
+    rows.push({
+      env: (tr.getAttribute('data-env') || cell(0) || '').trim(),
+      machine: (tr.getAttribute('data-machine') || cell(1) || '').trim(),
+      type: (tr.getAttribute('data-type') || '').trim().toLowerCase(),
+      type_label: cell(2),
+      ip: (tr.getAttribute('data-ip') || cell(3) || '').trim(),
+      room_id: cell(4),
+      user_id: cell(5),
+      user_sig: cell(6),
+      status: cell(7) || (tr.getAttribute('data-status') || ''),
+      updated: cell(8),
+    });
+  }
+  return rows;
+}
+"""
+
+
+def _group_encoder_rows(rows: list[dict]) -> dict[str, dict]:
+    """Group raw scrape rows into {UPPER_MACHINE: {machine, env, types:{...}}}."""
+    machines: dict[str, dict] = {}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        machine = str(r.get("machine") or "").strip()
+        if not machine:
+            continue
+        env = str(r.get("env") or "").strip()
+        raw_type = str(r.get("type") or "").strip().lower()
+        typ = _ENCODER_TYPE_MAP.get(raw_type, raw_type or "?")
+        entry = machines.setdefault(machine.upper(), {"machine": machine, "env": env, "types": {}})
+        if env and not entry.get("env"):
+            entry["env"] = env
+        entry["types"][typ] = {
+            "ip": str(r.get("ip") or "").strip(),
+            "room_id": str(r.get("room_id") or "").strip(),
+            "user_id": str(r.get("user_id") or "").strip(),
+            "user_sig": str(r.get("user_sig") or "").strip(),
+            "status": str(r.get("status") or "").strip(),
+            "updated": str(r.get("updated") or "").strip(),
+        }
+    return machines
+
+
+def _build_encoder_snapshot(rows: list[dict]) -> dict:
+    machines = _group_encoder_rows(rows)
+    return {
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "source": ENCODER_TRTC_URL,
+        "row_count": len(rows),
+        "machine_count": len(machines),
+        "machines": machines,
+    }
+
+
+def _persist_latestencoder(snapshot: dict) -> None:
+    try:
+        LATESTENCODER_JSON.write_text(
+            json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except OSError as e:
+        print(f"[osmwatch-enc] could not save {LATESTENCODER_JSON.name}: {e!r}", flush=True)
+
+
+def load_latestencoder() -> dict | None:
+    try:
+        raw = json.loads(LATESTENCODER_JSON.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _parse_encoder_queries(arg: str) -> list[str]:
+    return [t for t in _ENCODER_QUERY_SPLIT.split((arg or "").strip()) if t]
+
+
+def _fmt_encoder_machine(entry: dict) -> str:
+    machine = entry.get("machine") or "?"
+    env = entry.get("env") or ""
+    lines = [f"🎥 **{machine}**" + (f" ({env})" if env else "")]
+    types = entry.get("types") or {}
+    ordered = list(_ENCODER_TYPE_ORDER) + [t for t in types if t not in _ENCODER_TYPE_ORDER]
+    for t in ordered:
+        info = types.get(t)
+        if not info:
+            continue
+        ip = info.get("ip") or "—"
+        room = info.get("room_id") or ""
+        extra = f"  · {room}" if room else ""
+        lines.append(f" • {_ENCODER_TYPE_LABEL.get(t, t.upper()):4} : `{ip}`{extra}")
+    return "\n".join(lines)
+
+
+def query_encoder(arg: str) -> list[str]:
+    """Look up machines in latestencoder.json; return Lark-ready message string(s).
+
+    Tokens split on whitespace / comma / ``&`` and matched as case-insensitive
+    substrings of the machine name (e.g. ``nwr2205`` -> ``NWR2205``)."""
+    snap = load_latestencoder()
+    if not snap or not snap.get("machines"):
+        return ["⚠️ Encoder data isn't ready yet — it's scraped in the background. "
+                "Try again shortly (or run `/encoder refresh`)."]
+    machines = snap.get("machines") or {}
+    updated = snap.get("updated_at") or "?"
+    tokens = _parse_encoder_queries(arg)
+    if not tokens:
+        return [f"Usage: `/encoder <machine>` — e.g. `/encoder nwr2205` "
+                f"(multiple: `nwr2205 & nwr2206`).\n"
+                f"📅 {snap.get('machine_count', '?')} machines · updated {updated}"]
+
+    matched: dict[str, dict] = {}  # ordered, deduped by machine key
+    for tok in tokens:
+        up = tok.upper()
+        for key, entry in machines.items():
+            if up in key:
+                matched.setdefault(key, entry)
+
+    if not matched:
+        return [f"🔎 No encoder machine matched: {', '.join(tokens)}\n📅 updated {updated}"]
+
+    cap = _encoder_max_matches()
+    keys = list(matched.keys())
+    truncated = len(keys) > cap
+    keys = keys[:cap]
+
+    header = (f"🎬 **Encoder RTC** — {len(matched)} match(es) for {', '.join(tokens)}"
+              f"\n📅 updated {updated}")
+    blocks = [header] + [_fmt_encoder_machine(matched[k]) for k in keys]
+    if truncated:
+        blocks.append(f"… {len(matched) - cap} more not shown — narrow your query.")
+
+    messages: list[str] = []
+    cur = ""
+    for b in blocks:
+        piece = ("\n\n" + b) if cur else b
+        if cur and len(cur) + len(piece) > 3500:
+            messages.append(cur)
+            cur = b
+        else:
+            cur += piece
+    if cur:
+        messages.append(cur)
+    return messages
+
+
+def do_encoder_scrape_cli(*, headless: bool, timeout_ms: int) -> int:
+    """One-shot CLI: scrape the encoder/TRTC page into latestencoder.json (reuses
+    the saved session). Handy for testing the scraper without the bot running."""
+    from playwright.sync_api import sync_playwright
+
+    print(f"→ Encoder scrape: {ENCODER_TRTC_URL}")
+    with sync_playwright() as p:
+        browser, ctx, page = _open(p, headless=headless)
+        try:
+            resp = page.goto(ENCODER_TRTC_URL, wait_until="domcontentloaded", timeout=timeout_ms)
+            _settle_url(page, seconds=15)
+            verdict = _classify(page, resp)
+            if verdict != "authenticated":
+                print(f"⚠️  Not authenticated / blocked ({verdict}) at {page.url}")
+                print("   Log in first:  python osmwatch.py --login")
+                return 2
+            try:
+                page.wait_for_selector("tr.trtc-row", timeout=30_000)
+            except Exception:
+                pass
+            deadline, last, stable = time.time() + 40, -1, 0
+            while time.time() < deadline:
+                try:
+                    n = page.evaluate("() => document.querySelectorAll('tr.trtc-row').length")
+                except Exception:
+                    n = 0
+                if n > 0 and n == last:
+                    stable += 1
+                    if stable >= 3:
+                        break
+                else:
+                    stable, last = 0, n
+                page.wait_for_timeout(700)
+            rows = page.evaluate(_ENCODER_ROWS_JS) or []
+            snap = _build_encoder_snapshot(rows)
+            _persist_latestencoder(snap)
+            _save_state(ctx)
+            print(f"✅ scraped {snap['row_count']} rows / {snap['machine_count']} machines "
+                  f"-> {LATESTENCODER_JSON}")
+            return 0
+        finally:
+            try:
+                browser.close()
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Warm browser (long-lived, in-process; mirrors third_http_warm_pool)
 # ---------------------------------------------------------------------------
 # Playwright's sync API is thread-confined, so ALL browser calls run on one
@@ -1025,6 +1266,8 @@ class _OsmWatchWarm:
             self._started = True
             threading.Thread(target=self._loop, name="osmwatch-warm", daemon=True).start()
             threading.Thread(target=self._keepalive_loop, name="osmwatch-warm-ka", daemon=True).start()
+            if _encoder_enabled():
+                threading.Thread(target=self._encoder_loop, name="osmwatch-warm-enc", daemon=True).start()
 
     def _launch(self) -> None:
         from playwright.sync_api import sync_playwright
@@ -1068,6 +1311,20 @@ class _OsmWatchWarm:
         done.wait()
         return box
 
+    def scrape_encoder(self, *, chat_id: str | None = None, block: bool = False) -> dict:
+        """Queue an encoder scrape. With ``block`` the caller waits for completion."""
+        task: dict = {"kind": "encoder_scrape", "auto": False, "chat_id": chat_id}
+        if block:
+            done = threading.Event()
+            box: dict = {}
+            task["done"] = done
+            task["box"] = box
+            self._tasks.put(task)
+            done.wait()
+            return box
+        self._tasks.put(task)
+        return {}
+
     # -- worker loop ---------------------------------------------------------
     def _loop(self) -> None:
         while True:
@@ -1080,6 +1337,8 @@ class _OsmWatchWarm:
                     self._handle_login(task)
                 elif kind == "capture":
                     self._handle_capture(task)
+                elif kind == "encoder_scrape":
+                    self._handle_encoder_scrape(task)
             except Exception as e:
                 print(f"[osmwatch-warm] task {kind} error: {e!r}", flush=True)
                 self._teardown()
@@ -1091,6 +1350,14 @@ class _OsmWatchWarm:
         while True:
             time.sleep(_keepalive_sec())
             self._tasks.put({"kind": "keepalive", "auto": True})
+
+    def _encoder_loop(self) -> None:
+        # Small initial delay so the startup ensure/login settles first, then a
+        # silent re-scrape on the interval keeps latestencoder.json fresh.
+        time.sleep(min(90, _encoder_interval_sec()))
+        while True:
+            self._tasks.put({"kind": "encoder_scrape", "auto": True})
+            time.sleep(_encoder_interval_sec())
 
     # -- task handlers (worker thread only) ----------------------------------
     def _check_auth(self, timeout_ms: int = 60_000) -> str:
@@ -1236,6 +1503,87 @@ class _OsmWatchWarm:
             box["error"] = repr(e)
             self._teardown()
 
+    def _wait_rows_stable(self, *, timeout_ms: int = 40_000) -> int:
+        """Wait until the trtc table's row count stops growing (SPA finished
+        rendering), then return the final count."""
+        deadline = time.time() + timeout_ms / 1000.0
+        last, stable = -1, 0
+        while time.time() < deadline:
+            try:
+                n = self._page.evaluate(
+                    "() => document.querySelectorAll('tr.trtc-row').length")
+            except Exception:
+                n = 0
+            if n > 0 and n == last:
+                stable += 1
+                if stable >= 3:
+                    return n
+            else:
+                stable = 0
+                last = n
+            self._page.wait_for_timeout(700)
+        return max(last, 0)
+
+    def _scrape_encoder_into_file(self, *, timeout_ms: int = 90_000) -> dict:
+        """Load the encoder/TRTC page, read every row, persist latestencoder.json.
+        Returns the snapshot. Raises on nav/auth failure (caller decides)."""
+        resp = self._page.goto(ENCODER_TRTC_URL, wait_until="domcontentloaded", timeout=timeout_ms)
+        _settle_url(self._page, seconds=15)
+        verdict = _classify(self._page, resp)
+        if verdict != "authenticated":
+            raise RuntimeError(f"encoder page not authenticated ({verdict})")
+        try:
+            self._page.wait_for_selector("tr.trtc-row", timeout=30_000)
+        except Exception:
+            pass
+        self._wait_rows_stable()
+        rows = self._page.evaluate(_ENCODER_ROWS_JS) or []
+        snap = _build_encoder_snapshot(rows)
+        _persist_latestencoder(snap)
+        _save_state(self._context)
+        print(f"[osmwatch-enc] scraped {snap['row_count']} rows / {snap['machine_count']} "
+              f"machines -> {LATESTENCODER_JSON.name}", flush=True)
+        return snap
+
+    def _handle_encoder_scrape(self, task: dict) -> None:
+        box = task.get("box")
+        chat_id = task.get("chat_id")
+        try:
+            if not self._healthy():
+                self._launch()
+            verdict = self._check_auth()
+            if verdict != "authenticated":
+                if verdict == "login" and not _get_needs_manual():
+                    self._do_qr_login()  # one auto attempt
+                    verdict = self._check_auth()
+                if verdict != "authenticated":
+                    print(f"[osmwatch-enc] skip scrape — verdict={verdict}", flush=True)
+                    if box is not None:
+                        box["error"] = "blocked" if verdict == "blocked" else "not_authenticated"
+                    if chat_id:
+                        if verdict == "blocked":
+                            self._notify_blocked(chat_id)
+                        else:
+                            send_text_message(
+                                chat_id,
+                                "⚠️ OSM-Watch: not logged in — tag me and send /loginosmwatch first.",
+                            )
+                    return
+            snap = self._scrape_encoder_into_file()
+            if box is not None:
+                box["snapshot"] = snap
+            if chat_id:
+                send_text_message(
+                    chat_id,
+                    f"✅ Encoder data refreshed: {snap['machine_count']} machines "
+                    f"({snap['row_count']} rows).",
+                )
+        except Exception as e:
+            print(f"[osmwatch-enc] scrape error: {e!r}", flush=True)
+            if box is not None:
+                box["error"] = repr(e)
+            self._teardown()
+
 
 _warm_singleton: _OsmWatchWarm | None = None
 _warm_lock = threading.Lock()
@@ -1257,6 +1605,9 @@ def prewarm_osmwatch_on_startup() -> None:
     w = warm()
     w.start()
     w.submit_ensure(auto=True)
+    if _encoder_enabled():
+        # Populate latestencoder.json soon after boot (don't wait a full interval).
+        w.scrape_encoder()
     print("[osmwatch-warm] startup pre-warm submitted", flush=True)
 
 
@@ -1272,6 +1623,13 @@ def capture_and_send(chat_id: str | None = None, url: str | None = None) -> dict
     w = warm()
     w.start()
     return w.capture(url=url, chat_id=chat_id)
+
+
+def refresh_encoder(chat_id: str | None = None) -> None:
+    """`/encoder refresh` entry point — queue a fresh scrape of latestencoder.json."""
+    w = warm()
+    w.start()
+    w.scrape_encoder(chat_id=chat_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1318,7 +1676,24 @@ def main(argv: list[str] | None = None) -> int:
                     help="CSS selector for the filter box used by --search (default: #searchFilter).")
     ap.add_argument("--dump-to", default=None,
                     help="With --encoder-dump, also push each step's screenshot to this chat_id.")
+    # --- encoder scraper / lookup (production feature) -------------------------
+    ap.add_argument("--encoder-scrape", action="store_true",
+                    help="One-shot: scrape the encoder/TRTC page into latestencoder.json.")
+    ap.add_argument("--encoder-query", default=None,
+                    help="Look up machine(s) in latestencoder.json (e.g. 'nwr2205 & nwr2206') and print.")
     args = ap.parse_args(argv)
+
+    if args.encoder_query is not None:
+        for msg in query_encoder(args.encoder_query):
+            print(msg)
+            print("-" * 40)
+        return 0
+
+    if args.encoder_scrape:
+        return do_encoder_scrape_cli(
+            headless=(_headless_default() and not args.headed),
+            timeout_ms=max(5_000, args.timeout_ms),
+        )
 
     if args.encoder_dump:
         return do_encoder_dump(

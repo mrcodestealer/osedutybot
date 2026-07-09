@@ -6496,6 +6496,31 @@ def lark_webhook():
 
         threading.Thread(target=_run_osmwatch_shot, daemon=True).start()
         return _lark_im_done()
+    elif cmd == '/encoder':
+        # Look up encoder/TRTC info (MAIN/POOL/CCTV IPs) for one or more machines
+        # from latestencoder.json (kept fresh by the osmwatch warm browser).
+        # Tokens split on space / comma / '&' — e.g. `/encoder nwr2205 & nwr2206`.
+        _enc_arg = " ".join(cmd_parts[1:]).strip()
+
+        def _run_encoder(chat_id_enc=chat_id, arg_enc=_enc_arg):
+            try:
+                import osmwatch as _ow_mod
+
+                if arg_enc.lower() == "refresh":
+                    send_message(chat_id_enc, "🔄 OSM-Watch: refreshing encoder data…")
+                    _ow_mod.refresh_encoder(chat_id_enc)
+                    return
+                for _msg in _ow_mod.query_encoder(arg_enc):
+                    send_message(chat_id_enc, _msg)
+            except Exception as _enc_err:
+                print(f"❌ encoder: {_enc_err!r}", flush=True)
+                try:
+                    send_message(chat_id_enc, f"❌ /encoder failed: {_enc_err}")
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run_encoder, daemon=True).start()
+        return _lark_im_done()
     elif cmd == '/ec':
         game_name = cmd_parts[1] if len(cmd_parts) > 1 else None
         result = emergency.get_emergency_contacts_payload(game_name)
