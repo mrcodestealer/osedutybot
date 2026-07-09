@@ -1015,6 +1015,7 @@ LATESTENCODER_JSON = _ROOT_DIR / os.getenv("OSMWATCH_ENCODER_DATA_FILE", "latest
 _ENCODER_TYPE_MAP = {"main": "main", "top": "pool", "pool": "pool", "cctv": "cctv"}
 _ENCODER_TYPE_ORDER = ("main", "pool", "cctv")
 _ENCODER_TYPE_LABEL = {"main": "MAIN", "pool": "POOL", "cctv": "CCTV"}
+_ENCODER_TYPE_EMOJI = {"main": "🎬", "pool": "🎱", "cctv": "📹"}
 _ENCODER_QUERY_SPLIT = re.compile(r"[\s,&]+")
 
 
@@ -1236,6 +1237,95 @@ def query_encoder(arg: str) -> list[str]:
     if cur:
         messages.append(cur)
     return messages
+
+
+# --- Lark interactive card (emoji) -------------------------------------------
+def _encoder_status_emoji(status: str) -> str:
+    s = (status or "").lower()
+    if "not" in s or "✗" in status or "✖" in status or "⚠" in status:
+        return "⚠️"
+    if "sync" in s or "ok" in s or "✓" in status or "✔" in status:
+        return "✅"
+    return "▫️"
+
+
+def _encoder_machine_md(entry: dict) -> str:
+    """lark_md body for one machine card block (emoji per stream type)."""
+    machine = entry.get("machine") or "?"
+    env = entry.get("env") or ""
+    parts = [f"🎥 **{machine}**" + (f"  ·  {env}" if env else "")]
+    types = entry.get("types") or {}
+    ordered = list(_ENCODER_TYPE_ORDER) + [t for t in types if t not in _ENCODER_TYPE_ORDER]
+    for t in ordered:
+        info = types.get(t)
+        if not info:
+            continue
+        emoji = _ENCODER_TYPE_EMOJI.get(t, "🎞️")
+        label = _ENCODER_TYPE_LABEL.get(t, t.upper())
+        ip = info.get("ip") or "—"
+        status_raw = info.get("status") or ""
+        status_txt = re.sub(r"^[✓✔✗✖⚠️\s]+", "", status_raw).strip()
+        status_bit = f"{_encoder_status_emoji(status_raw)} {status_txt}".strip() if (status_raw or status_txt) else ""
+        meta = " · ".join(x for x in (status_bit, info.get("updated") or "") if x)
+        block = [f"{emoji} **{label} Encoder** — IP ADDRESS `{ip}`"]
+        if meta:
+            block.append(meta)
+        room, user, sig = info.get("room_id") or "", info.get("user_id") or "", info.get("user_sig") or ""
+        if room:
+            block.append(f"🏠 ROOM ID  : `{room}`")
+        if user:
+            block.append(f"👤 User ID  : `{user}`")
+        if sig:
+            block.append(f"🔑 User Sig : `{sig}`")
+        parts.append("\n".join(block))
+    return "\n\n".join(parts)
+
+
+def build_encoder_card(arg: str) -> dict | None:
+    """Build a Lark schema-2.0 interactive card for the query, or None to signal
+    the caller to fall back to plain text (no data / no tokens / no match)."""
+    snap = load_latestencoder()
+    if not snap or not snap.get("machines"):
+        return None
+    tokens = _parse_encoder_queries(arg)
+    if not tokens:
+        return None
+    machines = snap.get("machines") or {}
+    matched: dict[str, dict] = {}
+    for tok in tokens:
+        up = tok.upper()
+        for key, entry in machines.items():
+            if up in key:
+                matched.setdefault(key, entry)
+    if not matched:
+        return None
+
+    cap = _encoder_max_matches()
+    keys = list(matched.keys())
+    truncated = len(keys) > cap
+    keys = keys[:cap]
+    updated = snap.get("updated_at") or "?"
+
+    elements: list[dict] = [
+        {"tag": "div", "text": {"tag": "lark_md",
+         "content": f"🔎 **{len(matched)}** match(es) for `{', '.join(tokens)}`\n📅 updated {updated}"}},
+        {"tag": "hr"},
+    ]
+    for i, k in enumerate(keys):
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": _encoder_machine_md(matched[k])}})
+        if i != len(keys) - 1:
+            elements.append({"tag": "hr"})
+    if truncated:
+        elements.append({"tag": "hr"})
+        elements.append({"tag": "div", "text": {"tag": "lark_md",
+                         "content": f"… {len(matched) - cap} more not shown — narrow your query."}})
+
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {"template": "blue", "title": {"tag": "plain_text", "content": "🎬 Encoder RTC Info"}},
+        "body": {"elements": elements},
+    }
 
 
 def do_encoder_scrape_cli(*, headless: bool, timeout_ms: int) -> int:

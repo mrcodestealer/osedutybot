@@ -6510,6 +6510,13 @@ def lark_webhook():
                     send_message(chat_id_enc, "🔄 OSM-Watch: refreshing encoder data…")
                     _ow_mod.refresh_encoder(chat_id_enc)
                     return
+                # Prefer an interactive emoji card; fall back to plain text when the
+                # card can't render (no data / no match / usage) or the send fails.
+                _enc_card = _ow_mod.build_encoder_card(arg_enc)
+                if _enc_card:
+                    _enc_resp = send_message(chat_id_enc, json.dumps(_enc_card), msg_type="interactive")
+                    if isinstance(_enc_resp, dict) and _enc_resp.get("code") == 0:
+                        return
                 for _msg in _ow_mod.query_encoder(arg_enc):
                     send_message(chat_id_enc, _msg)
             except Exception as _enc_err:
