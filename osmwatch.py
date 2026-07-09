@@ -1042,21 +1042,39 @@ def _encoder_max_matches() -> int:
 _ENCODER_ROWS_JS = r"""
 () => {
   const clean = (s) => (s || '').replace(/\u{1F4CB}/gu, '').replace(/\s+/g, ' ').trim();
+  // The room/user/sig cells are visually truncated (text-overflow ellipsis),
+  // but each has a copy button whose onclick carries the FULL value:
+  //   copyToClipboard('<full value>', event)
+  // Prefer that; fall back to the (possibly truncated) cell text.
+  const copyVal = (td) => {
+    if (!td) return null;
+    const btn = td.querySelector('[onclick*="copyToClipboard"]');
+    if (!btn) return null;
+    const oc = btn.getAttribute('onclick') || '';
+    const m = oc.match(/copyToClipboard\(\s*'([^']*)'/) || oc.match(/copyToClipboard\(\s*"([^"]*)"/);
+    return m ? m[1] : null;
+  };
   const rows = [];
   const trs = document.querySelectorAll(
     '#trtcTable tbody tr.trtc-row, table.trtc-flat tbody tr.trtc-row');
   for (const tr of trs) {
     const tds = tr.children;
     const cell = (i) => tds[i] ? clean(tds[i].innerText) : '';
+    const full = (i) => {
+      const td = tds[i];
+      if (!td) return '';
+      const c = copyVal(td);
+      return (c !== null && c !== '') ? c : clean(td.innerText);
+    };
     rows.push({
       env: (tr.getAttribute('data-env') || cell(0) || '').trim(),
       machine: (tr.getAttribute('data-machine') || cell(1) || '').trim(),
       type: (tr.getAttribute('data-type') || '').trim().toLowerCase(),
       type_label: cell(2),
-      ip: (tr.getAttribute('data-ip') || cell(3) || '').trim(),
-      room_id: cell(4),
-      user_id: cell(5),
-      user_sig: cell(6),
+      ip: (tr.getAttribute('data-ip') || full(3) || '').trim(),
+      room_id: full(4),
+      user_id: full(5),
+      user_sig: full(6),
       status: cell(7) || (tr.getAttribute('data-status') || ''),
       updated: cell(8),
     });
@@ -1104,17 +1122,26 @@ def _build_encoder_snapshot(rows: list[dict]) -> dict:
 
 
 def _persist_latestencoder(snapshot: dict) -> None:
+    # Atomic write: the warm browser rewrites this every ~30 min on its worker
+    # thread while /encoder reads it from separate command threads. Writing to a
+    # temp file then os.replace() means a reader never sees a truncated/partial
+    # file (which, since status cells carry a multibyte glyph like "⚠", could
+    # otherwise split a UTF-8 sequence mid-read).
     try:
-        LATESTENCODER_JSON.write_text(
-            json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        data = json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n"
+        tmp = LATESTENCODER_JSON.with_name(LATESTENCODER_JSON.name + ".tmp")
+        tmp.write_text(data, encoding="utf-8")
+        os.replace(tmp, LATESTENCODER_JSON)
     except OSError as e:
         print(f"[osmwatch-enc] could not save {LATESTENCODER_JSON.name}: {e!r}", flush=True)
 
 
 def load_latestencoder() -> dict | None:
+    # ValueError covers both json.JSONDecodeError and UnicodeDecodeError, so a
+    # torn read degrades to the graceful "not ready yet" path instead of crashing.
     try:
         raw = json.loads(LATESTENCODER_JSON.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return None
     return raw if isinstance(raw, dict) else None
 
@@ -1134,9 +1161,20 @@ def _fmt_encoder_machine(entry: dict) -> str:
         if not info:
             continue
         ip = info.get("ip") or "—"
-        room = info.get("room_id") or ""
-        extra = f"  · {room}" if room else ""
-        lines.append(f" • {_ENCODER_TYPE_LABEL.get(t, t.upper()):4} : `{ip}`{extra}")
+        meta = " · ".join(x for x in (info.get("status") or "", info.get("updated") or "") if x)
+        head = f" • **{_ENCODER_TYPE_LABEL.get(t, t.upper())}** — `{ip}`"
+        if meta:
+            head += f"  {meta}"
+        lines.append(head)
+        room, user = info.get("room_id") or "", info.get("user_id") or ""
+        idline = " · ".join(
+            p for p in ((f"room `{room}`" if room else ""), (f"user `{user}`" if user else "")) if p
+        )
+        if idline:
+            lines.append(f"     {idline}")
+        sig = info.get("user_sig") or ""
+        if sig:
+            lines.append(f"     sig `{sig}`")
     return "\n".join(lines)
 
 
