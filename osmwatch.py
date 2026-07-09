@@ -657,10 +657,20 @@ ENCODER_TRTC_URL = os.getenv(
 # Runs inside the page. Collects visible, "notable" elements — interactive, or a
 # reddish bar, or asset-like text (OSM/DHS/MDR/NCH/NWR/TBP/WF + digits), or
 # POOL/MAIN/CCTV, or an IP — with enough attributes to craft Playwright selectors.
+# v2: skips nav/SVG/icon chrome (which flooded the cap) and raises the cap so the
+# scan actually reaches the data table below the toolbar.
 _CANDIDATE_JS = r"""
 () => {
   const ipRe = /\b\d{1,3}(\.\d{1,3}){3}\b/;
   const assetRe = /\b(OSM|DHS|MDR|NCH|NWR|TBP|WF)\s?-?\d+\b/i;
+  const SKIP_TAGS = new Set(['script','style','head','meta','link','svg','g','circle',
+    'path','rect','line','polygon','polyline','ellipse','use','defs','symbol','clippath',
+    'mask','i','br','hr','img','noscript','picture','source']);
+  const clsOf = (el) => {
+    const c = el.className;
+    if (c == null) return '';
+    return (typeof c === 'string') ? c : (c.baseVal || '');
+  };
   const cssPath = (el) => {
     if (!(el instanceof Element)) return '';
     if (el.id) return '#' + CSS.escape(el.id);
@@ -681,33 +691,37 @@ _CANDIDATE_JS = r"""
     }
     return parts.join(' > ');
   };
+  const isRed = (col) => {
+    const m = (col || '').match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([0-9.]+))?/);
+    if (!m) return false;
+    const R=+m[1], G=+m[2], B=+m[3], A=(m[4]===undefined?1:+m[4]);
+    return A > 0.3 && R > 110 && R > G*1.4 && R > B*1.4;
+  };
   const rows = [];
   const seen = new Set();
   for (const el of document.querySelectorAll('*')) {
+    const tag = el.nodeName.toLowerCase();
+    if (SKIP_TAGS.has(tag)) continue;
+    // Skip page chrome (navbars/subnav/header/footer) — it flooded v1's cap.
+    if (el.closest('nav, .navbar, .secondary-nav, .encoder-subnav, header, footer')) continue;
     const cs = getComputedStyle(el);
     if (cs.visibility === 'hidden' || cs.display === 'none') continue;
     const r = el.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0) continue;
-    const tag = el.nodeName.toLowerCase();
-    if (['script','style','head','meta','link','svg','path','noscript'].includes(tag)) continue;
     const text = (el.innerText || el.value || '').trim().replace(/\s+/g, ' ');
     const bg = cs.backgroundColor || '';
-    let reddish = false;
-    const m = bg.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([0-9.]+))?/);
-    if (m) {
-      const R=+m[1], G=+m[2], B=+m[3], A=(m[4]===undefined?1:+m[4]);
-      reddish = A > 0.3 && R > 110 && R > G*1.4 && R > B*1.4;
-    }
+    const clsStr = clsOf(el);
+    const reddish = isRed(bg) || isRed(cs.borderTopColor) || /(^|[\s-])(red|danger|alert|warn)/i.test(clsStr);
     const interactive = ['button','a','input','select','textarea'].includes(tag)
       || el.getAttribute('role') === 'button'
       || el.hasAttribute('onclick')
       || el.getAttribute('tabindex') !== null
       || cs.cursor === 'pointer';
     const childCount = el.childElementCount;
-    const shortText = text.length > 0 && text.length < 60 && childCount < 6;
+    const shortText = text.length > 0 && text.length < 60 && childCount < 8;
     const isAsset = shortText && assetRe.test(text);
     const isPMC = shortText && /(POOL|MAIN|CCTV)/i.test(text);
-    const hasIp = text.length < 120 && ipRe.test(text);
+    const hasIp = text.length < 200 && ipRe.test(text);
     const reddishBar = reddish && r.width >= r.height;   // bar-ish, not a red dot
     if (!(interactive || reddishBar || isAsset || isPMC || hasIp)) continue;
     const selector = cssPath(el);
@@ -715,16 +729,62 @@ _CANDIDATE_JS = r"""
     if (seen.has(key)) continue;
     seen.add(key);
     rows.push({
-      tag, id: el.id || '', cls: [...el.classList].join(' '),
+      tag, id: el.id || '', cls: clsStr.slice(0, 120),
       role: el.getAttribute('role') || '', href: el.getAttribute('href') || '',
       text: text.slice(0, 80), bg,
       w: Math.round(r.width), h: Math.round(r.height),
       x: Math.round(r.x), y: Math.round(r.y),
       reddish, interactive, isAsset, isPMC, hasIp, selector,
     });
-    if (rows.length >= 600) break;
+    if (rows.length >= 1500) break;
   }
   return rows;
+}
+"""
+
+# Extracts the data region: every <table> (headers + sample rows + row count) and
+# a few "row template" outerHTML samples for any element that carries an IP or an
+# asset id (so non-<table> card/grid layouts are covered too).
+_TABLE_JS = r"""
+() => {
+  const clean = (s) => (s || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+  const ipRe = /\b\d{1,3}(\.\d{1,3}){3}\b/;
+  const assetRe = /\b(OSM|DHS|MDR|NCH|NWR|TBP|WF)\s?-?\d+\b/i;
+  const clsFirst = (el) => {
+    const c = el.className;
+    const s = (c == null) ? '' : (typeof c === 'string' ? c : (c.baseVal || ''));
+    return s.trim().split(/\s+/).filter(Boolean).slice(0, 2).join('.');
+  };
+  const selOf = (el) => el.id ? '#' + el.id
+    : (el.nodeName.toLowerCase() + (clsFirst(el) ? '.' + clsFirst(el) : ''));
+  const out = { tables: [], rowSamples: [] };
+  for (const t of document.querySelectorAll('table')) {
+    const headers = [...t.querySelectorAll('thead th, thead td')].map(th => clean(th.innerText));
+    let bodyRows = [...t.querySelectorAll('tbody tr')];
+    if (!bodyRows.length) bodyRows = [...t.querySelectorAll('tr')];
+    const sample = bodyRows.slice(0, 8).map(tr => [...tr.children].map(td => clean(td.innerText)));
+    out.tables.push({ selector: selOf(t), headers, rowCount: bodyRows.length, sample });
+  }
+  // Row-template samples: smallest elements matching common row/card selectors
+  // that contain an IP or asset id — dedupe by class signature.
+  const seenSig = new Set();
+  const cand = document.querySelectorAll(
+    'tr, [class*="row"], [class*="card"], [class*="item"], [class*="asset"], [class*="trtc"], li');
+  for (const el of cand) {
+    const txt = (el.innerText || '').replace(/\s+/g, ' ');
+    if (!(ipRe.test(txt) || assetRe.test(txt))) continue;
+    if (txt.length > 400) continue;               // skip big containers
+    const sig = el.nodeName + '|' + clsFirst(el);
+    if (seenSig.has(sig)) continue;
+    seenSig.add(sig);
+    out.rowSamples.push({
+      selector: selOf(el),
+      text: txt.slice(0, 200),
+      outerHTML: el.outerHTML.slice(0, 1200),
+    });
+    if (out.rowSamples.length >= 8) break;
+  }
+  return out;
 }
 """
 
@@ -758,13 +818,35 @@ def _encoder_dump_step(page, outdir: Path, tag: str, *, send_to: str | None = No
         cand.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass
+    tables: dict = {}
+    try:
+        tables = page.evaluate(_TABLE_JS) or {}
+    except Exception as e:
+        print(f"[encoder-dump] table scan {tag} failed: {e!r}", flush=True)
+    try:
+        (outdir / f"{tag}.tables.json").write_text(
+            json.dumps(tables, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
     try:
         title = page.title()
     except Exception:
         title = ""
     print(f"\n===== [{tag}] {page.url}  title={title!r} =====", flush=True)
-    print(f"  saved: {png.name}, {html.name}, {cand.name}  ({len(rows)} candidates)", flush=True)
+    print(f"  saved: {png.name}, {html.name}, {cand.name}, {tag}.tables.json  "
+          f"({len(rows)} candidates)", flush=True)
+
+    # ---- data table(s) — the most useful part for the scraper ----
+    for t in (tables.get("tables") or []):
+        print(f"  --- TABLE {t.get('selector')} · {t.get('rowCount')} rows ---", flush=True)
+        print(f"      headers: {t.get('headers')}", flush=True)
+        for sr in (t.get("sample") or [])[:6]:
+            print(f"      row: {sr}", flush=True)
+    for rs in (tables.get("rowSamples") or []):
+        print(f"  --- ROW SAMPLE {rs.get('selector')} ---", flush=True)
+        print(f"      text: {rs.get('text')!r}", flush=True)
+        print(f"      html: {rs.get('outerHTML')}", flush=True)
 
     def _show(label: str, items: list[dict], n: int = 25) -> None:
         if not items:
@@ -773,16 +855,16 @@ def _encoder_dump_step(page, outdir: Path, tag: str, *, send_to: str | None = No
         for c in items[:n]:
             print(
                 f"   - <{c['tag']}> {c['w']}x{c['h']} @({c['x']},{c['y']}) bg={c['bg']} "
-                f"text={c['text']!r}\n       sel: {c['selector']}",
+                f"cls={c['cls']!r} text={c['text']!r}\n       sel: {c['selector']}",
                 flush=True,
             )
 
-    _show("REDDISH / bar", [c for c in rows if c["reddish"]])
+    _show("REDDISH / bar", [c for c in rows if c["reddish"]], n=30)
     _show("ASSET-like text", [c for c in rows if c["isAsset"]], n=40)
     _show("POOL/MAIN/CCTV", [c for c in rows if c["isPMC"]], n=40)
     _show("IP-bearing", [c for c in rows if c["hasIp"]], n=40)
     _show(
-        "other interactive",
+        "other interactive (content area)",
         [c for c in rows if c["interactive"] and not (c["reddish"] or c["isAsset"] or c["isPMC"] or c["hasIp"])],
         n=40,
     )
@@ -839,10 +921,16 @@ def do_encoder_dump(
     outdir: Path,
     redbar_sel: str | None,
     asset_sel: str | None,
+    search: str | None,
+    search_sel: str,
     send_to: str | None,
     timeout_ms: int,
 ) -> int:
-    """One-shot: walk page -> red bar -> asset and dump each state for selector authoring."""
+    """One-shot: dump the encoder/TRTC page and its data table for selector authoring.
+
+    Flow: load -> dump 00-initial (incl. table extract). If ``search`` is given,
+    type it into the built-in filter box and dump the filtered result. Otherwise
+    walk the red-bar -> asset click flow and dump each state."""
     from playwright.sync_api import sync_playwright
 
     print(f"→ Encoder DOM dump: {url}")
@@ -866,12 +954,27 @@ def do_encoder_dump(
                 _encoder_dump_step(page, outdir, "00-initial", send_to=send_to)
                 return 2
 
+            # Give the SPA a moment to fetch + render the table after settle.
+            try:
+                page.wait_for_timeout(2500)
+            except Exception:
+                pass
             _encoder_dump_step(page, outdir, "00-initial", send_to=send_to)
+
+            if search:
+                # Test the built-in filter box — this is likely how /encoder will work.
+                print(f"[encoder-dump] typing search {search!r} into {search_sel}", flush=True)
+                try:
+                    page.fill(search_sel, search, timeout=5_000)
+                    page.wait_for_timeout(1500)
+                except Exception as e:
+                    print(f"[encoder-dump] search fill failed ({search_sel}): {e!r}", flush=True)
+                _encoder_dump_step(page, outdir, "01-after-search", send_to=send_to)
 
             # Step 1 — the red bar (reveals the asset list, "picture 3").
             if _dump_try_click(page, redbar_sel, kind="redbar"):
                 _settle_url(page, seconds=6)
-                _encoder_dump_step(page, outdir, "01-after-redbar", send_to=send_to)
+                _encoder_dump_step(page, outdir, "02-after-redbar", send_to=send_to)
             else:
                 print('[encoder-dump] no red-bar click (see 00-initial candidates; '
                       're-run with --redbar "<css>").')
@@ -879,14 +982,14 @@ def do_encoder_dump(
             # Step 2 — an asset number (reveals the POOL/MAIN/CCTV IP panel).
             if _dump_try_click(page, asset_sel, kind="asset"):
                 _settle_url(page, seconds=6)
-                _encoder_dump_step(page, outdir, "02-after-asset", send_to=send_to)
+                _encoder_dump_step(page, outdir, "03-after-asset", send_to=send_to)
             else:
-                print('[encoder-dump] no asset click (see 01 candidates; '
+                print('[encoder-dump] no asset click (see prior candidates; '
                       're-run with --asset "<css>").')
 
             print(f"\n✅ Dump complete → {outdir}")
-            print("   Send me: the PNG screenshots + the *.candidates.json files "
-                  "(or paste the grouped summaries above).")
+            print("   Send me: the PNG screenshots + the *.tables.json / *.candidates.json "
+                  "files (or paste the grouped summaries above).")
             return 0
         finally:
             try:
@@ -1209,6 +1312,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="CSS selector for the red bar to click (overrides auto-pick).")
     ap.add_argument("--asset", default=None,
                     help="CSS selector for the asset number to click (overrides auto-pick).")
+    ap.add_argument("--search", default=None,
+                    help="With --encoder-dump, type this into the page filter box and dump the result.")
+    ap.add_argument("--search-sel", default="#searchFilter",
+                    help="CSS selector for the filter box used by --search (default: #searchFilter).")
     ap.add_argument("--dump-to", default=None,
                     help="With --encoder-dump, also push each step's screenshot to this chat_id.")
     args = ap.parse_args(argv)
@@ -1220,6 +1327,8 @@ def main(argv: list[str] | None = None) -> int:
             outdir=Path(args.dump_out),
             redbar_sel=args.redbar,
             asset_sel=args.asset,
+            search=args.search,
+            search_sel=args.search_sel,
             send_to=(args.dump_to.strip() or None) if args.dump_to else None,
             timeout_ms=max(5_000, args.timeout_ms),
         )
