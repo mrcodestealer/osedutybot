@@ -639,6 +639,263 @@ def do_capture(*, headless: bool, target_url: str, out_path: Path, timeout_ms: i
 
 
 # ---------------------------------------------------------------------------
+# Encoder / TRTC page inspection (one-shot DOM dump for building selectors)
+# ---------------------------------------------------------------------------
+# The /encoder-batchtools/trtc-details/ page is Lark + Cloudflare gated, so its
+# DOM can't be inspected from a dev box. This one-shot mode reuses the saved
+# session, walks the intended click flow (page -> red bar -> asset number ->
+# POOL/MAIN/CCTV panel), and at each step saves a screenshot + full HTML + a
+# JSON of "candidate" elements. That lets the real scraper's selectors be written
+# from actual markup instead of guessed. Run it on the server:
+#     python osmwatch.py --encoder-dump
+# then send back the PNGs + *.candidates.json (or the printed summaries).
+ENCODER_TRTC_URL = os.getenv(
+    "OSMWATCH_ENCODER_URL",
+    f"{OSM_BASE}/encoder-batchtools/trtc-details/",
+)
+
+# Runs inside the page. Collects visible, "notable" elements — interactive, or a
+# reddish bar, or asset-like text (OSM/DHS/MDR/NCH/NWR/TBP/WF + digits), or
+# POOL/MAIN/CCTV, or an IP — with enough attributes to craft Playwright selectors.
+_CANDIDATE_JS = r"""
+() => {
+  const ipRe = /\b\d{1,3}(\.\d{1,3}){3}\b/;
+  const assetRe = /\b(OSM|DHS|MDR|NCH|NWR|TBP|WF)\s?-?\d+\b/i;
+  const cssPath = (el) => {
+    if (!(el instanceof Element)) return '';
+    if (el.id) return '#' + CSS.escape(el.id);
+    const parts = [];
+    let cur = el;
+    while (cur && cur.nodeType === 1 && parts.length < 6) {
+      let sel = cur.nodeName.toLowerCase();
+      if (cur.classList && cur.classList.length) {
+        sel += '.' + [...cur.classList].slice(0, 3).map(c => CSS.escape(c)).join('.');
+      }
+      const parent = cur.parentNode;
+      if (parent && parent.children) {
+        const same = [...parent.children].filter(c => c.nodeName === cur.nodeName);
+        if (same.length > 1) sel += ':nth-of-type(' + (same.indexOf(cur) + 1) + ')';
+      }
+      parts.unshift(sel);
+      cur = cur.parentElement;
+    }
+    return parts.join(' > ');
+  };
+  const rows = [];
+  const seen = new Set();
+  for (const el of document.querySelectorAll('*')) {
+    const cs = getComputedStyle(el);
+    if (cs.visibility === 'hidden' || cs.display === 'none') continue;
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) continue;
+    const tag = el.nodeName.toLowerCase();
+    if (['script','style','head','meta','link','svg','path','noscript'].includes(tag)) continue;
+    const text = (el.innerText || el.value || '').trim().replace(/\s+/g, ' ');
+    const bg = cs.backgroundColor || '';
+    let reddish = false;
+    const m = bg.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([0-9.]+))?/);
+    if (m) {
+      const R=+m[1], G=+m[2], B=+m[3], A=(m[4]===undefined?1:+m[4]);
+      reddish = A > 0.3 && R > 110 && R > G*1.4 && R > B*1.4;
+    }
+    const interactive = ['button','a','input','select','textarea'].includes(tag)
+      || el.getAttribute('role') === 'button'
+      || el.hasAttribute('onclick')
+      || el.getAttribute('tabindex') !== null
+      || cs.cursor === 'pointer';
+    const childCount = el.childElementCount;
+    const shortText = text.length > 0 && text.length < 60 && childCount < 6;
+    const isAsset = shortText && assetRe.test(text);
+    const isPMC = shortText && /(POOL|MAIN|CCTV)/i.test(text);
+    const hasIp = text.length < 120 && ipRe.test(text);
+    const reddishBar = reddish && r.width >= r.height;   // bar-ish, not a red dot
+    if (!(interactive || reddishBar || isAsset || isPMC || hasIp)) continue;
+    const selector = cssPath(el);
+    const key = selector + '|' + text.slice(0, 40);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push({
+      tag, id: el.id || '', cls: [...el.classList].join(' '),
+      role: el.getAttribute('role') || '', href: el.getAttribute('href') || '',
+      text: text.slice(0, 80), bg,
+      w: Math.round(r.width), h: Math.round(r.height),
+      x: Math.round(r.x), y: Math.round(r.y),
+      reddish, interactive, isAsset, isPMC, hasIp, selector,
+    });
+    if (rows.length >= 600) break;
+  }
+  return rows;
+}
+"""
+
+
+def _encoder_dump_step(page, outdir: Path, tag: str, *, send_to: str | None = None) -> list[dict]:
+    """Save screenshot + full HTML + candidate JSON for the current page state.
+
+    Returns the candidate rows (also printed, grouped, to the console)."""
+    outdir.mkdir(parents=True, exist_ok=True)
+    png = outdir / f"{tag}.png"
+    html = outdir / f"{tag}.html"
+    cand = outdir / f"{tag}.candidates.json"
+    try:
+        page.wait_for_load_state("networkidle", timeout=8_000)
+    except Exception:
+        pass
+    try:
+        page.screenshot(path=str(png), full_page=True)
+    except Exception as e:
+        print(f"[encoder-dump] screenshot {tag} failed: {e!r}", flush=True)
+    try:
+        html.write_text(page.content(), encoding="utf-8")
+    except Exception as e:
+        print(f"[encoder-dump] html {tag} failed: {e!r}", flush=True)
+    rows: list[dict] = []
+    try:
+        rows = page.evaluate(_CANDIDATE_JS) or []
+    except Exception as e:
+        print(f"[encoder-dump] candidate scan {tag} failed: {e!r}", flush=True)
+    try:
+        cand.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+    try:
+        title = page.title()
+    except Exception:
+        title = ""
+    print(f"\n===== [{tag}] {page.url}  title={title!r} =====", flush=True)
+    print(f"  saved: {png.name}, {html.name}, {cand.name}  ({len(rows)} candidates)", flush=True)
+
+    def _show(label: str, items: list[dict], n: int = 25) -> None:
+        if not items:
+            return
+        print(f"  --- {label} ({len(items)}) ---", flush=True)
+        for c in items[:n]:
+            print(
+                f"   - <{c['tag']}> {c['w']}x{c['h']} @({c['x']},{c['y']}) bg={c['bg']} "
+                f"text={c['text']!r}\n       sel: {c['selector']}",
+                flush=True,
+            )
+
+    _show("REDDISH / bar", [c for c in rows if c["reddish"]])
+    _show("ASSET-like text", [c for c in rows if c["isAsset"]], n=40)
+    _show("POOL/MAIN/CCTV", [c for c in rows if c["isPMC"]], n=40)
+    _show("IP-bearing", [c for c in rows if c["hasIp"]], n=40)
+    _show(
+        "other interactive",
+        [c for c in rows if c["interactive"] and not (c["reddish"] or c["isAsset"] or c["isPMC"] or c["hasIp"])],
+        n=40,
+    )
+    if send_to:
+        try:
+            send_screenshot_to_lark(str(png), send_to)
+        except Exception:
+            pass
+    return rows
+
+
+def _dump_try_click(page, selector: str | None, *, kind: str) -> bool:
+    """Click a user-given selector, else auto-pick the best candidate for ``kind``
+    ('redbar' = largest reddish element; 'asset' = first asset-like element)."""
+    if selector:
+        try:
+            page.click(selector, timeout=5_000)
+            print(f"[encoder-dump] clicked {kind} via --{kind} selector: {selector}", flush=True)
+            return True
+        except Exception as e:
+            print(f"[encoder-dump] {kind} selector click failed ({selector}): {e!r}", flush=True)
+            return False
+    try:
+        rows = page.evaluate(_CANDIDATE_JS) or []
+    except Exception:
+        rows = []
+    if kind == "redbar":
+        picks = sorted((c for c in rows if c["reddish"]), key=lambda c: c["w"] * c["h"], reverse=True)
+    else:
+        picks = sorted((c for c in rows if c["isAsset"]), key=lambda c: (c["y"], c["x"]))
+    pick = picks[0] if picks else None
+    if not pick:
+        return False
+    sel = pick["selector"]
+    try:
+        page.click(sel, timeout=5_000)
+        print(f"[encoder-dump] auto-clicked {kind}: {pick['text']!r}  sel={sel}", flush=True)
+        return True
+    except Exception as e:
+        print(f"[encoder-dump] auto-click {kind} failed ({sel}): {e!r} — trying text fallback", flush=True)
+        try:
+            page.get_by_text(pick["text"], exact=False).first.click(timeout=4_000)
+            print(f"[encoder-dump] {kind} clicked via text fallback: {pick['text']!r}", flush=True)
+            return True
+        except Exception as e2:
+            print(f"[encoder-dump] {kind} text fallback failed: {e2!r}", flush=True)
+            return False
+
+
+def do_encoder_dump(
+    *,
+    headless: bool,
+    url: str,
+    outdir: Path,
+    redbar_sel: str | None,
+    asset_sel: str | None,
+    send_to: str | None,
+    timeout_ms: int,
+) -> int:
+    """One-shot: walk page -> red bar -> asset and dump each state for selector authoring."""
+    from playwright.sync_api import sync_playwright
+
+    print(f"→ Encoder DOM dump: {url}")
+    print(f"  output dir: {outdir}")
+    with sync_playwright() as p:
+        browser, ctx, page = _open(p, headless=headless)
+        try:
+            try:
+                resp = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            except Exception as e:
+                print(f"❌ Navigation error: {e!r}")
+                return 1
+            _settle_url(page, seconds=20)
+            verdict = _classify(page, resp)
+            if verdict != "authenticated":
+                print(f"⚠️  Not authenticated / blocked ({verdict}) at {page.url}")
+                if verdict == "blocked":
+                    print("   Cloudflare/WAF block — allowlist the server IP, then retry.")
+                else:
+                    print("   Do the Lark login first:  python osmwatch.py --login")
+                _encoder_dump_step(page, outdir, "00-initial", send_to=send_to)
+                return 2
+
+            _encoder_dump_step(page, outdir, "00-initial", send_to=send_to)
+
+            # Step 1 — the red bar (reveals the asset list, "picture 3").
+            if _dump_try_click(page, redbar_sel, kind="redbar"):
+                _settle_url(page, seconds=6)
+                _encoder_dump_step(page, outdir, "01-after-redbar", send_to=send_to)
+            else:
+                print('[encoder-dump] no red-bar click (see 00-initial candidates; '
+                      're-run with --redbar "<css>").')
+
+            # Step 2 — an asset number (reveals the POOL/MAIN/CCTV IP panel).
+            if _dump_try_click(page, asset_sel, kind="asset"):
+                _settle_url(page, seconds=6)
+                _encoder_dump_step(page, outdir, "02-after-asset", send_to=send_to)
+            else:
+                print('[encoder-dump] no asset click (see 01 candidates; '
+                      're-run with --asset "<css>").')
+
+            print(f"\n✅ Dump complete → {outdir}")
+            print("   Send me: the PNG screenshots + the *.candidates.json files "
+                  "(or paste the grouped summaries above).")
+            return 0
+        finally:
+            try:
+                browser.close()
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Warm browser (long-lived, in-process; mirrors third_http_warm_pool)
 # ---------------------------------------------------------------------------
 # Playwright's sync API is thread-confined, so ALL browser calls run on one
@@ -940,7 +1197,32 @@ def main(argv: list[str] | None = None) -> int:
                     help="Seconds to wait for you to finish the manual login (default 300).")
     ap.add_argument("--timeout-ms", type=int, default=60_000,
                     help="Navigation timeout for the capture (default 60000).")
+    # --- encoder / TRTC page DOM dump (one-shot, for building the scraper) -----
+    ap.add_argument("--encoder-dump", action="store_true",
+                    help="Walk the encoder/TRTC page (page -> red bar -> asset) and dump "
+                         "screenshots + HTML + candidate elements at each step.")
+    ap.add_argument("--encoder-url", default=ENCODER_TRTC_URL,
+                    help=f"Encoder/TRTC page to dump (default: {ENCODER_TRTC_URL}).")
+    ap.add_argument("--dump-out", default=str(_ROOT_DIR / "encoder_dump"),
+                    help="Directory for the encoder-dump output (default: ./encoder_dump).")
+    ap.add_argument("--redbar", default=None,
+                    help="CSS selector for the red bar to click (overrides auto-pick).")
+    ap.add_argument("--asset", default=None,
+                    help="CSS selector for the asset number to click (overrides auto-pick).")
+    ap.add_argument("--dump-to", default=None,
+                    help="With --encoder-dump, also push each step's screenshot to this chat_id.")
     args = ap.parse_args(argv)
+
+    if args.encoder_dump:
+        return do_encoder_dump(
+            headless=(_headless_default() and not args.headed),
+            url=args.encoder_url,
+            outdir=Path(args.dump_out),
+            redbar_sel=args.redbar,
+            asset_sel=args.asset,
+            send_to=(args.dump_to.strip() or None) if args.dump_to else None,
+            timeout_ms=max(5_000, args.timeout_ms),
+        )
 
     if args.login:
         return do_login(
