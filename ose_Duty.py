@@ -578,6 +578,10 @@ def _resolve_ose_leave_roster_key(name: str) -> str:
         if nk == _name_key(key) or nk == _name_key(label):
             return key
         if _names_same_person_tokens(norm, key) or _names_same_person_tokens(norm, label):
+            # Fuzzy prefix match — but don't merge a distinct real person into
+            # this roster slot (e.g. "Ken"/DB must not resolve to "Kenneth"/OSE).
+            if dlm.are_distinct_known_people(name, key):
+                continue
             return key
     return ""
 
@@ -644,6 +648,10 @@ def _names_same_person(roster_name: str, leave_sheet_name: str) -> bool:
     """Roster / shift label vs leave Bitable full name (may differ in length)."""
     a = _normalize_person_name_for_match(roster_name)
     b = _normalize_person_name_for_match(leave_sheet_name)
+    # Two confidently-known, different dutyList people are never the same person,
+    # even if one name is a character-prefix of the other ("Ken" vs "Kenneth").
+    if dlm.are_distinct_known_people(roster_name, leave_sheet_name):
+        return False
     ra = _resolve_ose_roster_key(a) or a
     rb = _resolve_ose_roster_key(b) or b
     if ra and rb and _name_key(ra) == _name_key(rb):

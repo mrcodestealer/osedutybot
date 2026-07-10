@@ -192,6 +192,63 @@ def match_duty_name(
     return row["name"] if row else None
 
 
+def confident_canonical(
+    name: str,
+    duty_entries: Optional[list[dict[str, str]]] = None,
+    *,
+    csv_path: Optional[Path] = None,
+) -> Optional[str]:
+    """
+    Canonical dutyList name via EXACT name or ALIAS/normalized match only.
+
+    Deliberately skips the fuzzy contains / difflib fallbacks used by
+    :func:`match_duty_entry`, so the result is a *high-confidence* identity
+    (``None`` when the name would only match fuzzily). Callers use this to
+    tell two real, distinct people apart — never to guess.
+    """
+    raw = (name or "").strip()
+    if not raw:
+        return None
+    entries = duty_entries if duty_entries is not None else load_duty_list(csv_path)
+    if not entries:
+        return None
+    by_name = {e["name"]: e for e in entries}
+    if raw in by_name:
+        return raw
+    norm_map = _build_norm_map(entries)
+    for key in name_match_keys(raw):
+        alias_target = _CANONICAL_ALIASES.get(key)
+        if alias_target and alias_target in by_name:
+            return alias_target
+        if key in norm_map:
+            return norm_map[key]
+    return None
+
+
+def are_distinct_known_people(
+    a: str,
+    b: str,
+    duty_entries: Optional[list[dict[str, str]]] = None,
+    *,
+    csv_path: Optional[Path] = None,
+) -> bool:
+    """
+    True when ``a`` and ``b`` each *confidently* identify **different** dutyList
+    people (e.g. ``Ken`` in DB vs ``Kenneth`` in OSE).
+
+    Used to veto fuzzy prefix matches that would otherwise merge two distinct
+    real people. Returns ``False`` when either side is not confidently known,
+    so aliases of the same person (``Kat``/``Katleen``, ``Jewel``/``Jewell``)
+    are never split.
+    """
+    entries = duty_entries if duty_entries is not None else load_duty_list(csv_path)
+    ca = confident_canonical(a, entries)
+    cb = confident_canonical(b, entries)
+    if not ca or not cb:
+        return False
+    return ca.strip().lower() != cb.strip().lower()
+
+
 def is_ose_dutylist_name(
     name: str,
     duty_entries: Optional[list[dict[str, str]]] = None,
