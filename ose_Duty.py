@@ -4299,6 +4299,10 @@ def _collect_offset_month_pair_lines(
     pairs: dict[tuple[str, str], dict[str, set[int]]] = {}
     for it in items:
         f = it.get("fields") or {}
+        # Only approved offsets are real swaps — skip pending / rejected rows
+        # (same rule as _extract_offset_lines_for_date).
+        if not _is_approved(_get_field_by_aliases(f, ["Approval Status", "Status"])):
+            continue
         req = _title_name(
             _field_text(_get_field_by_aliases(f, ["Request Person", "Requester", "Requester Person", "Name"]))
         )
@@ -4347,6 +4351,10 @@ def _collect_offset_month_summary(
     by_person: dict[str, dict[str, set[int]]] = {}
     for it in items:
         f = it.get("fields") or {}
+        # Only approved offsets are real swaps — skip pending / rejected rows
+        # (same rule as _extract_offset_lines_for_date).
+        if not _is_approved(_get_field_by_aliases(f, ["Approval Status", "Status"])):
+            continue
         req = _title_name(
             _field_text(_get_field_by_aliases(f, ["Request Person", "Requester", "Requester Person", "Name"]))
         )
