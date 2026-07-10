@@ -356,6 +356,27 @@ def _send_duty_card(dept: str, body_text: str, chat_id: str) -> bool:
     return False
 
 
+def _send_payload_card(payload: dict, chat_id: str) -> bool:
+    """Send a pre-built ``{"text", "lark_card"}`` payload as an interactive card.
+
+    Falls back to the plain-text version if the card is missing or the
+    interactive send is rejected. Returns ``True`` when a card was delivered.
+    """
+    try:
+        card = payload.get("lark_card") if isinstance(payload, dict) else None
+        if isinstance(card, dict):
+            resp = send_message(
+                chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive"
+            )
+            if not (isinstance(resp, dict) and resp.get("code") not in (0, None)):
+                return True
+    except Exception as exc:
+        print(f"⚠️ payload card send failed: {exc!r}", flush=True)
+    if isinstance(payload, dict) and payload.get("text"):
+        send_message(chat_id, payload["text"])
+    return False
+
+
 def display_all_duty():
     summary = get_all_duty_summary()
     send_message(DUTY_CHAT_ID, summary)
@@ -6191,7 +6212,7 @@ def lark_webhook():
         send_message(chat_id, reply)
         return _lark_im_done()
     elif clean_text.lower() == '/cpms':
-        _send_duty_card("cpms", cpms_duty.get_cpms_three_days_text(), chat_id)
+        _send_payload_card(cpms_duty.get_cpms_payload(), chat_id)
         return _lark_im_done()
     elif clean_text.lower().startswith('/cpmscheck'):
         parts = clean_text.split()

@@ -638,7 +638,7 @@ def _cpms_text_for_date(d: date) -> Optional[str]:
 
     try:
         _, main_name, main_phone, backup_name, backup_phone, fallback = cpms_duty.get_cpms_duty_for_date(d)
-    except cpms_duty.CpmsSheetNotPublished as e:
+    except (cpms_duty.CpmsSheetNotPublished, cpms_duty.CpmsNoPermission) as e:
         return e.friendly_message
     sections = []
     if main_name:
@@ -833,6 +833,17 @@ def _dept_card_payload(dept: str, dates: list[date]) -> dict:
                 return {"text": payload.get("text") or "", "lark_card": payload["lark_card"]}
         except Exception as exc:
             print(f"⚠️ dutyai OSE native card failed: {exc!r}", flush=True)
+
+    # CPMS → native calendar card that renders each phone number as a button.
+    if dept == "cpms" and dates:
+        try:
+            import cpms_duty
+
+            payload = cpms_duty.build_cpms_card(sorted(set(dates)))
+            if isinstance(payload, dict) and payload.get("lark_card"):
+                return {"text": payload.get("text") or "", "lark_card": payload["lark_card"]}
+        except Exception as exc:
+            print(f"⚠️ dutyai CPMS native card failed: {exc!r}", flush=True)
 
     # Look up each day's roster, then collapse consecutive days with the SAME
     # roster into one range (so a Mon–Fri week with one person shows once).
