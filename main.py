@@ -4182,16 +4182,20 @@ def _process_evo_sd_batch_paste(chat_id: str, email_text: str) -> None:
             )
             fwd_chat = maintenance.evo_batch_forward_chat_id()
             fwd_card = batch.get("forward_card")
-            if fwd_chat:
-                if fwd_card:
-                    send_message(
-                        fwd_chat,
-                        json.dumps(fwd_card, ensure_ascii=False),
-                        msg_type="interactive",
-                    )
-                # @tag QA Support Team + CS to check the email that was just sent.
+            if fwd_chat and fwd_card:
                 send_message(
                     fwd_chat,
+                    json.dumps(fwd_card, ensure_ascii=False),
+                    msg_type="interactive",
+                )
+            # @tag QA Support Team + CS to check the email that was just sent. Pinned to the
+            # forward group (oc_9ffa9a…) via its own resolver, INDEPENDENT of fwd_chat — so a
+            # misconfigured EVO_BATCH_FORWARD_CHAT_ID can't divert this ping into the /m
+            # command group (oc_51b6fbf…).
+            check_chat = maintenance.evo_batch_check_email_chat_id()
+            if check_chat:
+                send_message(
+                    check_chat,
                     maintenance.build_evo_batch_check_email_text(
                         batch.get("email_subject") or ""
                     ),
@@ -4345,21 +4349,70 @@ def _post_egsreply_preview_card(
     )
 
 
-def _process_egsreply_paste(chat_id: str, *, test: bool = False) -> None:
+# Reply body pasted WITH ``/egsreply`` (``/egsreply\n{body}``), held until the user taps an
+# email in the picker so it can pre-fill the reply preview. Keyed by the user's original
+# message id (which rides on the picker buttons as ``m``), falling back to chat_id. The Lark
+# server is single-process threaded (``app.run(threaded=True)``) so a lock-guarded dict is
+# shared across the picker→callback threads; entries self-expire so a never-picked paste leaks
+# nothing.
+_EGSREPLY_PENDING_BODY: dict[str, tuple[float, str]] = {}
+_EGSREPLY_PENDING_LOCK = threading.Lock()
+_EGSREPLY_PENDING_TTL = 1800.0  # 30 min
+_EGSREPLY_PENDING_MAX = 50
+
+
+def _egsreply_stash_body(key: str, body: str) -> None:
+    """Remember the pasted reply ``body`` under ``key`` for the pending picker (no-op if
+    either is empty). Prunes stale/overflow entries so the map stays small."""
+    key = (key or "").strip()
+    if not key or not body:
+        return
+    now = time.time()
+    with _EGSREPLY_PENDING_LOCK:
+        for _k in [
+            _k for _k, (_ts, _) in _EGSREPLY_PENDING_BODY.items()
+            if now - _ts > _EGSREPLY_PENDING_TTL
+        ]:
+            _EGSREPLY_PENDING_BODY.pop(_k, None)
+        while len(_EGSREPLY_PENDING_BODY) >= _EGSREPLY_PENDING_MAX:
+            _oldest = min(_EGSREPLY_PENDING_BODY, key=lambda k: _EGSREPLY_PENDING_BODY[k][0])
+            _EGSREPLY_PENDING_BODY.pop(_oldest, None)
+        _EGSREPLY_PENDING_BODY[key] = (now, body)
+
+
+def _egsreply_pop_body(key: str) -> str:
+    """Remove and return the pasted reply body stashed under ``key`` (``""`` if none/expired)."""
+    key = (key or "").strip()
+    if not key:
+        return ""
+    now = time.time()
+    with _EGSREPLY_PENDING_LOCK:
+        item = _EGSREPLY_PENDING_BODY.pop(key, None)
+    if not item:
+        return ""
+    _ts, body = item
+    return body if now - _ts <= _EGSREPLY_PENDING_TTL else ""
+
+
+def _process_egsreply_paste(chat_id: str, content: str = "", *, test: bool = False) -> None:
     """``/egsreply`` / ``/egsreplytest`` — ALWAYS show the PICKER card so the user picks
     which previously sent email to reply to.
 
     The picker lists recent ``/egs`` sends (``egs.json``) — or ``/egstest`` sends
     (``egstest.json``) for ``/egsreplytest``. Tapping an email opens the editable reply
-    preview card, where the user writes the reply and sends it; the reply threads off the
-    stored Message-ID (no fuzzy search, no "email not found"). Any text pasted after the
-    command is ignored. ``test=True`` replies only to the test address (junchen@).
+    preview card, where the user writes (or reviews) the reply and sends it; the reply threads
+    off the stored Message-ID (no fuzzy search, no "email not found"). ``content`` is the body
+    pasted with the command — stashed here and pre-filled into the preview once the user picks
+    an email (so it isn't retyped). ``test=True`` replies only to the test address (junchen@).
     """
     _cmd = "/egsreplytest" if test else "/egsreply"
     if not maintenance.is_evo_batch_command_chat(chat_id):
         send_message(chat_id, maintenance.EVO_BATCH_WRONG_GROUP_MESSAGE)
         return
     reply_mid = (_lark_user_message_id.get() or "").strip()
+    # Hold the pasted body against the same key the picker buttons carry (``m`` → reply_mid,
+    # else chat_id), so the ``egsreply_pick`` callback can pre-fill the reply preview.
+    _egsreply_stash_body(reply_mid or chat_id, (content or "").strip())
     try:
         # Picker card: /egsreply lists real /egs sends (egs.json),
         # /egsreplytest lists /egstest sends (egstest.json).
@@ -4427,17 +4480,19 @@ def _try_egs_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Opt
 
     if k == "egsreply_pick":
         # Picker button tapped — swap the picker for the editable reply preview card
-        # pre-filled with the chosen email's subject.
+        # pre-filled with the chosen email's subject and any body pasted with the command.
         pick_subject = str(parsed_ca.get("s") or "").strip()
         pick_test = str(parsed_ca.get("t") or "").strip() == "1"
         if not pick_subject:
             return {"toast": {"type": "error", "content": "No email subject on this button."}}
+        # Reply body the user pasted with `/egsreply` (same key the picker was stashed under).
+        pick_body = _egsreply_pop_body(orig_mid or chat_id_ca)
 
         def _pick_job() -> None:
             _recall_card()  # remove the picker
             try:
                 _post_egsreply_preview_card(
-                    chat_id_ca, pick_subject, "", orig_mid, test=pick_test
+                    chat_id_ca, pick_subject, pick_body, orig_mid, test=pick_test
                 )
             except Exception as ex:  # noqa: BLE001
                 _egs_reply(chat_id_ca, orig_mid, f"❌ `/egsreply` 打开编辑卡失败: `{ex}`")
@@ -4518,11 +4573,12 @@ def _try_egs_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Opt
                     subject=title, body=body, append_signature=False
                 )
                 _egs_reply(chat_id_ca, orig_mid, f"✅ `/egs` 邮件已发送\n📌 主题: {title}")
-                # @tag QA Support Team + CS in the forward group to check the sent email.
-                fwd_chat = maintenance.evo_batch_forward_chat_id()
-                if fwd_chat:
+                # @tag QA Support Team + CS to check the sent email — same pinned forward group
+                # (oc_9ffa9a…) as /m, via evo_batch_check_email_chat_id() (env-independent).
+                check_chat = maintenance.evo_batch_check_email_chat_id()
+                if check_chat:
                     send_message(
-                        fwd_chat,
+                        check_chat,
                         maintenance.build_evo_batch_check_email_text(title),
                     )
         except Exception as ex:  # noqa: BLE001
@@ -6616,9 +6672,24 @@ def lark_webhook():
         _process_egs_paste(chat_id, _egs_src, test=_egs_test)
         return _lark_im_done()
     elif cmd in ("/egsreply", "/egsreplytest"):
-        # Always show the picker so the user chooses which sent email to reply to.
-        # Any text pasted after the command is ignored. `/egsreplytest` → test address only.
-        _process_egsreply_paste(chat_id, test=cmd == "/egsreplytest")
+        # Show the picker so the user chooses which sent email to reply to; any text pasted
+        # WITH the command becomes the reply body, pre-filled into the preview after picking.
+        # Rebuild from ``original_text`` (keeps newlines, which ``clean_text`` collapses) and
+        # strip the leading command token + mentions. `/egsreplytest` → test address only.
+        _egr_src = original_text or ""
+        for _mk in mention_keys:
+            _egr_src = _egr_src.replace(_mk, "")
+        _egr_src = re.sub(r"@_user_\d+", "", _egr_src)
+        # Strip only Lark mention markup (``<at ...>name</at>``), NOT every ``<...>`` — the
+        # reply body is free prose that may legitimately contain angle brackets (e.g. an email
+        # ``<admin@x.com>`` or a ``<placeholder>``), which must survive into the sent reply.
+        _egr_src = re.sub(r"</?at\b[^>]*>", "", _egr_src)
+        _egr_cmd = re.search(rf"(?:^|\s){re.escape(cmd)}\b\s*", _egr_src, re.IGNORECASE)
+        _egr_src = _egr_src[_egr_cmd.end():] if _egr_cmd else ""
+        _egr_src = _egr_src.strip()
+        if _egr_src.startswith('"') and _egr_src.endswith('"'):
+            _egr_src = _egr_src[1:-1].strip()
+        _process_egsreply_paste(chat_id, _egr_src, test=cmd == "/egsreplytest")
         return _lark_im_done()
     elif re.search(
         r"(?:^|\s)/(maintenance|maintenanceshort|ms)\s+",

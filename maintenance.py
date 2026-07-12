@@ -5442,6 +5442,28 @@ def evo_batch_forward_chat_id() -> str:
     )
 
 
+# The "Kindly check this email" @QA/@CS ping (``build_evo_batch_check_email_text``) posted
+# after ``/m`` (and ``/egs``) sends the maintenance email is PINNED to the forward group and
+# resolved independently of ``evo_batch_forward_chat_id`` — so it always lands in the QA/CS
+# forward group even if a server ``EVO_BATCH_FORWARD_CHAT_ID`` override diverts the rest.
+EVO_BATCH_CHECK_EMAIL_CHAT_ID_DEFAULT = EVO_BATCH_FORWARD_CHAT_ID_DEFAULT  # oc_9ffa9a…
+
+
+def evo_batch_check_email_chat_id() -> str:
+    """Lark group for the "Kindly check this email" QA/CS ping after the email is sent.
+
+    Defaults to the forward group (``oc_9ffa9a…``) and is deliberately NOT tied to
+    :func:`evo_batch_forward_chat_id`, so a misconfigured ``EVO_BATCH_FORWARD_CHAT_ID`` can't
+    push this ping into the ``/m`` command group. Override with ``EVO_BATCH_CHECK_EMAIL_CHAT_ID``
+    only to intentionally send it elsewhere.
+    """
+    return (
+        os.getenv("EVO_BATCH_CHECK_EMAIL_CHAT_ID", "").strip()
+        or os.getenv("evo_batch_check_email_chat_id", "").strip()
+        or EVO_BATCH_CHECK_EMAIL_CHAT_ID_DEFAULT
+    )
+
+
 # Users @-tagged in the forward group after ``/m`` sends the email (QA Support Team, CS).
 EVO_BATCH_CHECK_TAG_DEFAULTS = (
     ("ou_0342007237c6c1aa262acae839acb7c6", "QA Support Team"),
