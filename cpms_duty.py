@@ -36,7 +36,21 @@ load_dotenv()
 
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
-SPREADSHEET_TOKEN = os.getenv("CPMS_SPREADSHEET_TOKEN")
+
+_LARK_BASE = "https://open.larksuite.com"
+
+# CPMS 数据源现为一个 Lark Wiki 节点（标题 "CPMS for JC BOT"，链接 /wiki/<token>）。
+# Sheets API 需要该 wiki 节点底层的电子表格 token（obj_token），运行时解析一次并缓存。
+#   - CPMS_WIKI_TOKEN            覆盖 wiki 节点 token（默认即当前链接）
+#   - CPMS_SPREADSHEET_TOKEN_OVERRIDE  直接指定电子表格 token（跳过 wiki 解析）
+# 旧的 CPMS_SPREADSHEET_TOKEN 环境变量已弃用（指向旧表），不再读取。
+CPMS_WIKI_TOKEN = (os.getenv("CPMS_WIKI_TOKEN") or "XI6Rw6vsziGF2LkZNonlPcsYgtb").strip()
+_CPMS_TOKEN_OVERRIDE = (os.getenv("CPMS_SPREADSHEET_TOKEN_OVERRIDE") or "").strip()
+
+# 解析后的电子表格 token（get_sheet_list / get_range_values 拼 URL 用）；惰性解析 + 缓存
+SPREADSHEET_TOKEN = _CPMS_TOKEN_OVERRIDE or None
+_spreadsheet_token_ts = 0.0
+_SPREADSHEET_TOKEN_TTL = 3600
 
 # value 可为解析好的 day_map，或缓存的 CpmsSheetNotPublished（负缓存，避免重复请求缺失月份）
 _month_duty_cache: dict[tuple[int, int], tuple[float, object]] = {}
@@ -159,6 +173,38 @@ def get_tenant_access_token():
     if result.get("code") != 0:
         raise Exception(f"Failed to get token: {result}")
     return result["tenant_access_token"]
+
+def _ensure_spreadsheet_token(tenant_token=None) -> str:
+    """把 CPMS wiki 节点解析为底层电子表格 token（obj_token），写入模块级 ``SPREADSHEET_TOKEN``
+    （供 get_sheet_list / get_range_values 拼 URL），并缓存 ``_SPREADSHEET_TOKEN_TTL`` 秒。
+
+    显式设置了 ``CPMS_SPREADSHEET_TOKEN_OVERRIDE`` 时直接返回，不做解析。
+    解析失败：无权限 → ``CpmsNoPermission``；其他 → ``Exception``（绝不回退到旧 token）。
+    """
+    global SPREADSHEET_TOKEN, _spreadsheet_token_ts
+    if _CPMS_TOKEN_OVERRIDE:
+        SPREADSHEET_TOKEN = _CPMS_TOKEN_OVERRIDE
+        return SPREADSHEET_TOKEN
+    now = time.time()
+    if SPREADSHEET_TOKEN and (now - _spreadsheet_token_ts) < _SPREADSHEET_TOKEN_TTL:
+        return SPREADSHEET_TOKEN
+    tok = tenant_token or get_tenant_access_token()
+    resp = requests.get(
+        f"{_LARK_BASE}/open-apis/wiki/v2/spaces/get_node",
+        headers={"Authorization": f"Bearer {tok}"},
+        params={"token": CPMS_WIKI_TOKEN},
+    )
+    result = resp.json()
+    if result.get("code") != 0:
+        if _looks_like_permission_error(resp.status_code, result):
+            raise CpmsNoPermission()
+        raise Exception(f"Failed to resolve CPMS wiki node: {result}")
+    node = (result.get("data") or {}).get("node") or {}
+    obj_token = node.get("obj_token")
+    if not obj_token:
+        raise Exception(f"CPMS wiki node has no obj_token: {result}")
+    SPREADSHEET_TOKEN, _spreadsheet_token_ts = obj_token, now
+    return obj_token
 
 def get_sheet_list(token):
     """获取电子表格下所有工作表的列表"""
@@ -436,6 +482,7 @@ def get_cpms_month_duty(year: int, month: int) -> dict[int, tuple[str, str, str,
 
     try:
         token = get_tenant_access_token()
+        _ensure_spreadsheet_token(token)  # wiki 节点 → 电子表格 token（缓存）
         sheets = get_sheet_list(token)
         sheet_id = get_sheet_id_for_month(token, year, month, sheets=sheets)
         if not sheet_id:
