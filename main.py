@@ -5813,6 +5813,10 @@ def lark_webhook():
                 _commandagent.is_enabled()
                 and _router_decision is not None
                 and getattr(_router_decision, "command", None)
+                # An explicit slash command is never rewritten — in groups the router sees
+                # the body WITH the "@_user_1" placeholder, misses its slash fast-path, and
+                # its content heuristics can misroute pastes like "/stresstest <notice>".
+                and not (clean_text or "").lstrip().startswith("/")
             ):
                 cand = _router_decision.command
                 if cand and cand != clean_text:
@@ -6867,6 +6871,27 @@ def lark_webhook():
             json.dumps(card, ensure_ascii=False),
             msg_type="interactive",
         )
+        return _lark_im_done()
+    elif clean_text.lower().startswith('/stresstest'):
+        # Explicit stress-test announcement paste: the AI reads the machine list + the
+        # set-maintenance time and schedules a one-time reminder 10 min before it.
+        _stress_body = re.sub(
+            r'(?is)^\s*/stresstest\b[ \t]*', '', clean_text_multiline or clean_text, count=1
+        ).strip()
+        try:
+            _stress_reply = maintenancemachineagent.handle_stresstest_command(
+                _stress_body,
+                chat_id=chat_id,
+                send_message=send_message,
+                get_token_func=get_tenant_access_token,
+                scheduler=scheduler,
+                target_user_id=TARGET_USER_OPEN_ID,
+                schedule_chat_id=REMINDER_TARGET_CHAT_ID,
+            )
+        except Exception as _stress_err:
+            _stress_reply = f"❌ /stresstest failed: {_stress_err}"
+        if _stress_reply:
+            send_message(chat_id, _stress_reply)
         return _lark_im_done()
     elif maintenancemachineagent.is_maintenance_schedule_message(original_text, mention_keys):
         # Scheduled stress-test announcement (has an action + a future date/time + machine list /

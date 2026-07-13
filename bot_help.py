@@ -202,6 +202,7 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
                     ("/egsreply <body>", "Paste reply body → pick a sent /egs email → reply in its thread", "粘贴回复正文 → 选择已发 /egs 邮件 → 原邮件内回复"),
                     ("/egsreplytest <body>", "Like /egsreply but reply → junchen@ (test)", "同 /egsreply，回复发到 junchen@（测试）"),
                     ("/ms <email> | /maintenance …", "Parse single maintenance email", "解析单封维护邮件"),
+                    ("/stresstest <notice>", "Paste stress-test notice → reminder 10 min before set-maintenance time", "粘贴压测通知 → 提前10分钟提醒设维护"),
                     ("/cashout", "Cashout reminder template", "出款提醒模板"),
                     ("/restartA", "Pi restart one-liner", "Pi 重启命令"),
                 ],

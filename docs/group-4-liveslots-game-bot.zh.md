@@ -145,6 +145,18 @@ Dragon of the Eastern Ocean-WF8146
 
 到点后人工执行实际维护（`/sm` 或 prod-batch），再在提醒卡片上确认。
 
+### `/stresstest`（显式命令）
+
+同样的解析，但显式触发（不依赖 @mention 措辞判断）。输入 `/stresstest`，下一行粘贴公告。机器人读取**设维护的日期时间**（不是压测本身的时间）和**机台列表**，在其**前 10 分钟**排提醒，并必定回复（解析结果或缺失项）：
+
+```
+/stresstest
+We have 4 DFDC machines subject for Stress Test July 15, 2026 at 11:00 AM.
+Please set to maintain status and test mode July 14, 2026 at 2145H
+- WF8109 ( 5 Treasures )
+- WF8112 ( 5 Treasures )
+```
+
 ### 压测截图
 
 Prod-batch 可在开关维护后附带**机台截图**（由服务器环境变量控制）。使用 `/sm` 或 prod-batch 命令，截图会出现在话题回复中。

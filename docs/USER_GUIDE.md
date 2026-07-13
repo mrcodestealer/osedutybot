@@ -413,6 +413,16 @@ Dragon of the Eastern Ocean-WF8146
 
 Bot schedules reminder **10 minutes before** action time. At action time: run `/sm` or prod-batch, then tap **I have set maintenance** on the reminder card.
 
+Or use the explicit command — `/stresstest` + paste the announcement on the next line (always replies with the parsed machines and times, or with what is missing):
+
+```
+/stresstest
+We have 4 DFDC machines subject for Stress Test July 15, 2026 at 11:00 AM.
+Please set to maintain status and test mode July 14, 2026 at 2145H
+- WF8109 ( 5 Treasures )
+- WF8112 ( 5 Treasures )
+```
+
 ### 7.8 Machine encoder (browser)
 
 Open (ask admin for host): `http://<server>:<PORT>/machine-encoders`

@@ -97,6 +97,7 @@ _EXTRA_ALIASES: dict[str, tuple[str, ...]] = {
     "/mdr": ("mdr", "encoder", "编码器"),
     "/list": ("machine list", "机台列表"),
     "/sm": ("set maintenance", "unset maintenance", "维护", "prod maintenance"),
+    "/stresstest": ("stress test", "stress test reminder", "压测", "压力测试", "meter roll over"),
     "/m": ("evo batch", "evo 批量"),
     "/egs": ("egs", "egs maintenance", "simpleplay maintenance", "维护通知发信"),
     "/egstest": ("egs test", "egstest", "preview egs", "测试维护标题"),

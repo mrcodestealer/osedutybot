@@ -380,6 +380,16 @@ later JUNE 09, 2026 09:45 pm, due to Stress Test.
 
 到点前 10 分钟会提醒；到点后执行 `/sm`，再在卡片点 **I have set maintenance**。
 
+也可用显式命令 `/stresstest` + 下一行粘贴公告（必定回复：解析到的机台与时间，或缺什么）：
+
+```
+/stresstest
+We have 4 DFDC machines subject for Stress Test July 15, 2026 at 11:00 AM.
+Please set to maintain status and test mode July 14, 2026 at 2145H
+- WF8109 ( 5 Treasures )
+- WF8112 ( 5 Treasures )
+```
+
 ### 7.8 Machine Encoder（浏览器）
 
 打开：`http://<服务器>:<PORT>/machine-encoders`（问管理员要地址）

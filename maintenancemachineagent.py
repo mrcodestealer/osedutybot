@@ -1063,7 +1063,11 @@ def _normalize_llm_intent(raw: dict[str, Any], *, now: datetime) -> dict[str, An
     target_kind = str(raw.get("target_kind") or "").strip().lower()
 
     note = ""
-    machines = [str(m).strip() for m in (raw.get("machines") or []) if str(m).strip()]
+    machines_raw = raw.get("machines")
+    if isinstance(machines_raw, str):
+        # Small models sometimes return a bare string instead of a list — don't char-split it.
+        machines_raw = [machines_raw]
+    machines = [str(m).strip() for m in (machines_raw or []) if str(m).strip()]
     if machines:
         target_kind = "list"
     elif target_kind == "all_group" or venue:
@@ -2037,44 +2041,29 @@ def build_reminder_reason(parsed: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def handle_maintenance_schedule_message(
-    original_text: str,
-    mention_keys: Sequence[str],
+def _schedule_stress_reminder(
     *,
+    body: str,
+    action: str,
+    action_dt: datetime,
+    machines: list[str],
+    note: str,
+    env_code: str,
+    now: datetime,
     chat_id: str,
     send_message: Callable[..., Any],
     get_token_func: Callable[[], str],
     scheduler: Any,
     target_user_id: str,
-    schedule_chat_id: str | None = None,
-) -> tuple[bool, str | None]:
+    schedule_chat_id: str | None,
+) -> str:
     """
-    Parse the announcement and schedule a one-time reminder ``MAINT_LEAD_MINUTES`` before the
-    action time. Returns ``(handled, optional_reply_text)``.
+    Shared core for schedule announcements and ``/stresstest``: validate the action time,
+    write the One-time sheet reminder (fires ``MAINT_LEAD_MINUTES`` early), return the reply.
     """
     import reminder
 
-    body = _strip_mentions(original_text, mention_keys)
-    now = datetime.now()
-    c = _classify(body, now=now)
-    if not c or c.get("action_dt") is None:
-        return False, None
-
-    env_code = (c.get("env_code") or "").strip().upper()
-    if c["target_kind"] == "all_group" and not _ENV_SITE_ALIAS.get(env_code):
-        return False, None
-    machines, note = _resolve_machines_for(c)
-    action = c["action"]
     label = ACTION_LABELS.get(action, action)
-    action_dt: datetime = c["action_dt"]
-    when_str_full = action_dt.strftime("%b %d, %Y %I:%M %p")
-    if not machines:
-        venue_txt = f" “{c.get('venue')}”" if c.get("venue") else ""
-        return True, (
-            f"⚠️ Understood a scheduled **{label}** for all **{env_code}**{venue_txt} machines at "
-            f"**{when_str_full}**, but found **0** matching machines. {_data_path_hint()}\n"
-            f"Nothing scheduled."
-        )
     env_codes = sorted({e for e in (_env_from_machine_name(m) for m in machines) if e})
     env_summary = "/".join(env_codes) if env_codes else (env_code or "?")
     parsed = {
@@ -2092,13 +2081,13 @@ def handle_maintenance_schedule_message(
     reminder_dt: datetime = parsed["reminder_dt"]
     when_str = action_dt.strftime("%b %d, %Y %I:%M %p")
     if action_dt <= now:
-        return True, (
+        return (
             f"⚠️ The action time **{when_str}** is already in the past "
             f"(now is {now.strftime('%b %d, %Y %I:%M %p')}). Nothing scheduled — "
             f"if this still needs doing, set maintenance now, or re-send with a future date/time."
         )
     if reminder_dt <= now:
-        return True, (
+        return (
             f"⚠️ The action time **{when_str}** is less than {MAINT_LEAD_MINUTES} min away, "
             f"so the {MAINT_LEAD_MINUTES}-min-early reminder would land in the past. "
             f"Nothing scheduled — please set maintenance now if needed."
@@ -2120,11 +2109,11 @@ def handle_maintenance_schedule_message(
             schedule_chat_id=schedule_chat_id,
         )
     except Exception as e:  # noqa: BLE001
-        return True, f"❌ Failed to schedule maintenance reminder: {e}"
+        return f"❌ Failed to schedule maintenance reminder: {e}"
 
     if result:
         # add_sheet_reminder returns a non-empty string only on failure.
-        return True, result
+        return result
 
     summary = (
         f"✅ Scheduled stress-test reminder for **{reminder_dt.strftime('%b %d, %Y %I:%M %p')}** "
@@ -2134,4 +2123,208 @@ def handle_maintenance_schedule_message(
     )
     if parsed.get("note"):
         summary += f"\n{parsed['note']}"
-    return True, summary
+    return summary
+
+
+def handle_maintenance_schedule_message(
+    original_text: str,
+    mention_keys: Sequence[str],
+    *,
+    chat_id: str,
+    send_message: Callable[..., Any],
+    get_token_func: Callable[[], str],
+    scheduler: Any,
+    target_user_id: str,
+    schedule_chat_id: str | None = None,
+) -> tuple[bool, str | None]:
+    """
+    Parse the announcement and schedule a one-time reminder ``MAINT_LEAD_MINUTES`` before the
+    action time. Returns ``(handled, optional_reply_text)``.
+    """
+    body = _strip_mentions(original_text, mention_keys)
+    now = datetime.now()
+    c = _classify(body, now=now)
+    if not c or c.get("action_dt") is None:
+        return False, None
+
+    env_code = (c.get("env_code") or "").strip().upper()
+    if c["target_kind"] == "all_group" and not _ENV_SITE_ALIAS.get(env_code):
+        return False, None
+    machines, note = _resolve_machines_for(c)
+    action = c["action"]
+    label = ACTION_LABELS.get(action, action)
+    action_dt: datetime = c["action_dt"]
+    when_str_full = action_dt.strftime("%b %d, %Y %I:%M %p")
+    if not machines:
+        venue_txt = f" “{c.get('venue')}”" if c.get("venue") else ""
+        return True, (
+            f"⚠️ Understood a scheduled **{label}** for all **{env_code}**{venue_txt} machines at "
+            f"**{when_str_full}**, but found **0** matching machines. {_data_path_hint()}\n"
+            f"Nothing scheduled."
+        )
+    return True, _schedule_stress_reminder(
+        body=body,
+        action=action,
+        action_dt=action_dt,
+        machines=machines,
+        note=note,
+        env_code=env_code,
+        now=now,
+        chat_id=chat_id,
+        send_message=send_message,
+        get_token_func=get_token_func,
+        scheduler=scheduler,
+        target_user_id=target_user_id,
+        schedule_chat_id=schedule_chat_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# /stresstest — explicit "parse this announcement" command (always replies)
+# ---------------------------------------------------------------------------
+STRESSTEST_USAGE = (
+    "Usage: `/stresstest` then paste the announcement (same or next line).\n\n"
+    f"The AI reads the **set maintenance/test date & time** and the **machine list**, then "
+    f"schedules a one-time reminder **{MAINT_LEAD_MINUTES} min before** that time.\n\n"
+    "Example:\n"
+    "/stresstest\n"
+    "4 DFDC machines are subject for Stress Test on July 15, 2026 at 11:00 AM. "
+    "Please set to maintain status and test mode July 14, 2026 at 2145H\n"
+    "- WF8109 ( 5 Treasures )\n"
+    "- WF8112 ( 5 Treasures )"
+)
+
+
+def classify_stresstest_announcement(
+    body: str, *, now: datetime | None = None
+) -> dict[str, Any] | None:
+    """
+    Classification for an explicit ``/stresstest`` announcement.
+
+    Same parse as the auto-detection path (deterministic rules first, LLM fallback), but the
+    command itself already declares the intent, so when the generic maintenance gate abstains
+    this falls back to *set maintenance and test* + machine tokens + action datetime from the
+    raw text.
+    """
+    real_now = now or datetime.now()
+    c = _classify(body, now=real_now)
+    if c is None:
+        machines = extract_machine_lines(body)
+        if not machines:
+            return None
+        envs = sorted(
+            {_normalize_env_code(e) for e in (_env_from_machine_name(m) for m in machines) if e}
+        )
+        c = {
+            "action": "set_both",
+            "action_dt": parse_action_datetime(body, now=real_now),
+            "target_kind": "list",
+            "env_code": envs[0] if len(envs) == 1 else "",
+            "venue": "",
+            "machines": machines,
+            "source": "rule",
+        }
+    if not c.get("action"):
+        c["action"] = "set_both"
+    return c
+
+
+def handle_stresstest_command(
+    body: str,
+    *,
+    chat_id: str,
+    send_message: Callable[..., Any],
+    get_token_func: Callable[[], str],
+    scheduler: Any,
+    target_user_id: str,
+    schedule_chat_id: str | None = None,
+) -> str:
+    """
+    Handle ``/stresstest <announcement>`` — always returns a reply.
+
+    Parses the pasted stress-test notice (machines + the set-maintenance action time; the
+    stress-test event time itself is ignored) and schedules the one-time reminder
+    ``MAINT_LEAD_MINUTES`` min before via the reminder sheet. On success the reply echoes the
+    parsed machines and times so the duty staff can verify what the AI read.
+    """
+    text = (body or "").strip()
+    if not text:
+        return STRESSTEST_USAGE
+    now = datetime.now()
+    c = classify_stresstest_announcement(text, now=now)
+    machines: list[str] = []
+    note = ""
+    all_group_no_env = bool(
+        c
+        and c.get("target_kind") == "all_group"
+        and not _ENV_SITE_ALIAS.get((c.get("env_code") or "").strip().upper())
+    )
+    if c and not all_group_no_env:
+        machines, note = _resolve_machines_for(c)
+    action_dt = c.get("action_dt") if c else None
+
+    problems: list[str] = []
+    if all_group_no_env:
+        problems.append(
+            "• **Environment** — the announcement targets *all machines* but no site "
+            "(WF / NWR / NCH / TBR / TBP / MDR / DHS / CP) could be determined."
+        )
+    elif not machines:
+        hint = _data_path_hint() if (c and c.get("target_kind") == "all_group") else ""
+        problems.append(
+            "• **Machines** — none found. Paste one machine per line, e.g. `WF8109 ( 5 Treasures )`."
+            + (f"\n  {hint}" if hint else "")
+        )
+    if not action_dt:
+        problems.append(
+            "• **Set-maintenance time** — no date + time found, e.g. `July 14, 2026 at 2145H`."
+        )
+    if problems:
+        return (
+            "⚠️ Could not schedule the stress-test reminder:\n"
+            + "\n".join(problems)
+            + "\n\n"
+            + STRESSTEST_USAGE
+        )
+
+    print(
+        f"[maintenanceagent] /stresstest {c['action']} at {action_dt:%Y-%m-%d %H:%M} "
+        f"machines={len(machines)} src={c.get('source')}",
+        flush=True,
+    )
+    reply = _schedule_stress_reminder(
+        body=text,
+        action=c["action"],
+        action_dt=action_dt,
+        machines=machines,
+        note=note,
+        env_code=(c.get("env_code") or "").strip().upper(),
+        now=now,
+        chat_id=chat_id,
+        send_message=send_message,
+        get_token_func=get_token_func,
+        scheduler=scheduler,
+        target_user_id=target_user_id,
+        schedule_chat_id=schedule_chat_id,
+    )
+    if reply.startswith("✅"):
+        shown = machines[:30]
+        lines = [reply, "", f"**Machines ({len(machines)}):**"]
+        lines.extend(f"• {m}" for m in shown)
+        if len(machines) > 30:
+            lines.append(f"… and {len(machines) - 30} more")
+        # A *set* time normally precedes the stress-test event. If the notice mentions an
+        # earlier datetime, the set instruction likely had no date of its own and borrowed
+        # the event's date (e.g. "set … at 2145H" + "Stress Test July 15 11:00 AM").
+        if str(c["action"]).startswith("set"):
+            earlier = [dt for _p, dt in _all_datetime_candidates(text, now=now) if dt < action_dt]
+            if earlier:
+                other = max(earlier)
+                lines.append(
+                    f"\n⚠️ The announcement also mentions **{other.strftime('%b %d, %Y %I:%M %p')}**, "
+                    f"which is *earlier* than the set-maintenance time above — double-check the "
+                    f"reminder date. If it is wrong, `/deletereminder` it and re-send the notice "
+                    f"with an explicit date (e.g. `July 14, 2026 at 2145H`)."
+                )
+        reply = "\n".join(lines)
+    return reply

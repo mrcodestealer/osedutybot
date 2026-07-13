@@ -148,6 +148,18 @@ Dragon of the Eastern Ocean-WF8146
 
 At action time, staff run the actual set-maintenance flow (`/sm` or prod-batch), then confirm on the reminder card.
 
+### `/stresstest` (explicit command)
+
+Same parsing, but explicit — no @mention wording heuristics. Type `/stresstest` and paste the announcement on the next line(s). The bot reads the **set-maintenance date & time** (not the stress-test event time) and the **machine list**, schedules the reminder **10 minutes before**, and always replies — either echoing the parsed machines/times, or saying exactly what it could not find:
+
+```
+/stresstest
+We have 4 DFDC machines subject for Stress Test July 15, 2026 at 11:00 AM.
+Please set to maintain status and test mode July 14, 2026 at 2145H
+- WF8109 ( 5 Treasures )
+- WF8112 ( 5 Treasures )
+```
+
 ### Stress-test screenshots
 
 Prod-batch jobs can attach **machine screenshots** after set/unset (enabled via server env). Use `/sm` or prod-batch commands; screenshots appear in the thread reply.
