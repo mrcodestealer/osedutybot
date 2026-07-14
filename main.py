@@ -2180,18 +2180,37 @@ def run_pldt_prefix_rotation(dry_run: bool = False, notify_chat: Optional[str] =
         else:
             print(f"[pldtprefix] {text}", flush=True)
 
+    def _alert_group(text: str) -> None:
+        # Real-run failures must reach the SCREENSHOT group even on scheduled runs
+        # (dry-run failures stay with the invoker; skip the dup if invoked from there).
+        if dry_run or not shot_group or shot_group == notify_chat:
+            return
+        try:
+            send_message(shot_group, text)
+        except Exception as alert_exc:  # noqa: BLE001
+            print(f"[pldtprefix] failure alert to {shot_group} failed: {alert_exc!r}", flush=True)
+
     try:
         import changePrefix as _cp
         res = _cp.rotate_prefix(dry_run=dry_run)
     except Exception as exc:  # noqa: BLE001
         print(f"[pldtprefix] rotation error: {exc!r}", flush=True)
         _status(f"❌ PLDT prefix rotation error: {exc}")
+        _alert_group(
+            f"❌ PLDT prefix rotation error: {exc}\n"
+            "The prefix was NOT changed. Please check the bot and rerun with `/pldtrotate apply`."
+        )
         return
 
     if not res.get("ok"):
         _status(
             f"❌ PLDT prefix rotation failed (attempts={res.get('attempts')}): "
             f"{res.get('message')}"
+        )
+        _alert_group(
+            f"❌ PLDT prefix login failed after {res.get('attempts')} attempt(s): "
+            f"{res.get('message')}\n"
+            "The prefix was NOT changed. Please check the bot and rerun with `/pldtrotate apply`."
         )
         return
 
@@ -6457,7 +6476,8 @@ def lark_webhook():
         return _lark_im_done()
     elif cmd == '/pldtprefix':
         # Log in to Polylink UC (IPBX), read the captcha via vision LLM (retry up
-        # to 10x on `验证码不正确`), then screenshot the Provider edit page.
+        # to PLDT_PREFIX_MAX_ATTEMPTS, default 20, on `验证码不正确`), then
+        # screenshot the Provider edit page.
         _pp_pid = None
         for _tok in cmd_parts[1:]:
             if _tok.isdigit():
@@ -6472,7 +6492,7 @@ def lark_webhook():
                     chat_id_pp,
                     f"🔐 Logging in to Polylink UC and opening Provider "
                     f"`id={provider_id_pp or _cp_mod._provider_id()}` … "
-                    "(reading captcha, up to 10 tries)",
+                    f"(reading captcha, up to {_cp_mod._max_attempts()} tries)",
                 )
                 res = _cp_mod.run_change_prefix(provider_id=provider_id_pp)
                 img_path = res.get("result_image")

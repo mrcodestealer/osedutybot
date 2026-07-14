@@ -19,12 +19,12 @@ Flow:
      password, exactly like the page's ``md5()``) + ``user.securityCode``.
      If the response is the login form again (e.g. ``验证码不正确`` / captcha
      incorrect), fetch a fresh captcha and retry — up to
-     ``PLDT_PREFIX_MAX_ATTEMPTS`` (default 10) times.
+     ``PLDT_PREFIX_MAX_ATTEMPTS`` (default 20) times.
   5. On success, inject the session cookies into Chromium, open the Provider
      page and screenshot the whole page.
 
 Public API:
-  ``run_change_prefix(provider_id=3, headless=True, max_attempts=10) -> dict``
+  ``run_change_prefix(provider_id=3, headless=True, max_attempts=20) -> dict``
   returns ``{ok, attempts, provider_id, message, result_image, captcha_image, codes}``.
 
 Captcha OCR uses ``qwen3.6:35b-a3b`` (vision-capable, confirmed on the local
@@ -94,9 +94,9 @@ def _max_attempts(explicit=None) -> int:
         except (TypeError, ValueError):
             pass
     try:
-        return max(1, int(os.getenv("PLDT_PREFIX_MAX_ATTEMPTS", "10")))
+        return max(1, int(os.getenv("PLDT_PREFIX_MAX_ATTEMPTS", "20")))
     except ValueError:
-        return 10
+        return 20
 
 
 def _headless(explicit=None) -> bool:
