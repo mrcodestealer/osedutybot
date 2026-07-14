@@ -39,6 +39,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -167,11 +168,78 @@ def _captcha_timeout() -> int:
         return 60
 
 
+def _warmup_timeout() -> int:
+    # Cold-loading the 35B vision model on this CPU box (often deep into swap) can
+    # take minutes — far beyond the per-attempt OCR timeout. One long-timeout
+    # warm-up call before the login loop absorbs that, so OCR attempts stay fast.
+    try:
+        return max(30, int(os.getenv("PLDT_CAPTCHA_WARMUP_TIMEOUT", "600")))
+    except ValueError:
+        return 600
+
+
+def _ollama_keep_alive():
+    ka = (
+        os.getenv("PLDT_CAPTCHA_KEEP_ALIVE")
+        or os.getenv("BOT_CHAT_OLLAMA_KEEP_ALIVE")
+        or "-1"
+    ).strip()
+    try:
+        return int(ka)
+    except ValueError:
+        return ka
+
+
 def _captcha_len() -> int:
     try:
         return max(1, int(os.getenv("PLDT_CAPTCHA_LEN", "4")))
     except ValueError:
         return 4
+
+
+def warmup_captcha_model() -> bool:
+    """Force-load the vision model into Ollama before any OCR attempt.
+
+    2026-07-14 failure mode: model not loaded at 05:55 + box swapping → cold load
+    exceeded the 60s per-attempt timeout, so ALL attempts timed out without a single
+    captcha ever being read. A tiny text-only request with a long timeout (default
+    600s, ``PLDT_CAPTCHA_WARMUP_TIMEOUT``) loads the model once; keep_alive then
+    holds it. Failure is non-fatal — the login loop still runs and reports normally.
+    """
+    base = _api_base()
+    payload = {
+        "model": _captcha_model(),
+        "messages": [{"role": "user", "content": "Reply with: ok"}],
+        "max_tokens": 4,
+        "temperature": 0,
+    }
+    if _is_ollama(base):
+        payload["reasoning_effort"] = "none"
+        payload["think"] = False
+        payload["keep_alive"] = _ollama_keep_alive()
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {_api_key()}",
+    }
+    t0 = time.time()
+    try:
+        resp = requests.post(
+            f"{base}/chat/completions", headers=headers, json=payload,
+            timeout=_warmup_timeout(),
+        )
+        resp.raise_for_status()
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[changePrefix] captcha model warm-up FAILED after {time.time() - t0:.0f}s: {exc!r} "
+            "(proceeding anyway — OCR attempts may time out)",
+            flush=True,
+        )
+        return False
+    print(
+        f"[changePrefix] captcha model {_captcha_model()} warm in {time.time() - t0:.0f}s",
+        flush=True,
+    )
+    return True
 
 
 # ================= Captcha OCR =================
@@ -239,15 +307,7 @@ def _recognize_captcha(img_bytes: bytes, mime: str = "image/jpeg") -> str:
         # it answer the code directly (~4s). keep_alive avoids reloading 35B per retry.
         payload["reasoning_effort"] = "none"
         payload["think"] = False
-        ka = (
-            os.getenv("PLDT_CAPTCHA_KEEP_ALIVE")
-            or os.getenv("BOT_CHAT_OLLAMA_KEEP_ALIVE")
-            or "-1"
-        ).strip()
-        try:
-            payload["keep_alive"] = int(ka)
-        except ValueError:
-            payload["keep_alive"] = ka
+        payload["keep_alive"] = _ollama_keep_alive()
     url = f"{base}/chat/completions"
     headers = {
         "Content-Type": "application/json",
@@ -390,6 +450,10 @@ def _login_session(max_attempts: int) -> dict:
     session = requests.Session()
     session.headers.update({"User-Agent": "Mozilla/5.0 (osedutybot changePrefix)"})
     pw_md5 = hashlib.md5(_password().encode("utf-8")).hexdigest()
+
+    # 0) Load the vision model BEFORE fetching any captcha — a cold load can take
+    # minutes and would otherwise eat every attempt's 60s OCR timeout.
+    warmup_captcha_model()
 
     # 1) Establish a session (sets JSESSIONID).
     session.get(landing_url, timeout=timeout)
