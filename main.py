@@ -2198,7 +2198,7 @@ def run_pldt_prefix_rotation(dry_run: bool = False, notify_chat: Optional[str] =
         _status(f"❌ PLDT prefix rotation error: {exc}")
         _alert_group(
             f"❌ PLDT prefix rotation error: {exc}\n"
-            "The prefix was NOT changed. Please check the bot and rerun with `/pldtrotate apply`."
+            "The prefix was NOT changed. Please check the bot and rerun with `/pldtrun`."
         )
         return
 
@@ -2210,7 +2210,7 @@ def run_pldt_prefix_rotation(dry_run: bool = False, notify_chat: Optional[str] =
         _alert_group(
             f"❌ PLDT prefix login failed after {res.get('attempts')} attempt(s): "
             f"{res.get('message')}\n"
-            "The prefix was NOT changed. Please check the bot and rerun with `/pldtrotate apply`."
+            "The prefix was NOT changed. Please check the bot and rerun with `/pldtrun`."
         )
         return
 
@@ -6524,14 +6524,21 @@ def lark_webhook():
 
         threading.Thread(target=_run_pldtprefix_job, daemon=True).start()
         return _lark_im_done()
-    elif cmd == '/pldtrotate':
-        # Change the PLDT prefix to the next value + announce to the CS group.
-        # Default is a SAFE dry-run (preview only). `/pldtrotate apply` really changes it.
+    elif cmd in ('/pldtrun', '/pldtrotate'):
+        # /pldtrun — really change the PLDT prefix to the next value + announce to
+        # the CS group (what `/pldtrotate apply` used to do).
+        # /pldtrotate — SAFE dry-run preview only (no change, no group post).
         _pr_mode = (cmd_parts[1].lower() if len(cmd_parts) > 1 else "")
-        _pr_apply = _pr_mode in ("apply", "confirm", "real", "run", "go", "yes")
-        _pr_dry = not _pr_apply
+        if cmd == '/pldtrotate' and _pr_mode in ("apply", "confirm", "real", "run", "go", "yes"):
+            send_message(
+                chat_id,
+                "ℹ️ The real rotation moved to `/pldtrun` — `/pldtrotate` is now always "
+                "a dry-run preview. Send `/pldtrun` to actually change the prefix.",
+            )
+            return _lark_im_done()
+        _pr_dry = cmd == '/pldtrotate'
 
-        def _run_pldtrotate_job(chat_pr=chat_id, dry_pr=_pr_dry):
+        def _run_pldtrotate_job(chat_pr=chat_id, dry_pr=_pr_dry, cmd_pr=cmd):
             try:
                 if dry_pr:
                     send_message(chat_pr, "🧪 Running PLDT prefix rotation (dry-run — no change, no group post)…")
@@ -6544,7 +6551,7 @@ def lark_webhook():
             except Exception as _pr_err:
                 print(f"❌ pldtrotate job: {_pr_err!r}", flush=True)
                 try:
-                    send_message(chat_pr, f"❌ /pldtrotate failed: {_pr_err}")
+                    send_message(chat_pr, f"❌ {cmd_pr} failed: {_pr_err}")
                 except Exception:
                     pass
 
