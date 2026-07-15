@@ -266,9 +266,12 @@ def _get_duty_names_for_date(target_date, values):
         cell_a = extract_text_from_cell(row[0])
         if not cell_a:
             continue
-        cell_upper = cell_a.upper()
+        # 锚定开头匹配（见 TARGET_NAMES 注释 “start-match”）。原来的子串匹配会让
+        # "Jay" 先命中更靠上的 "Chris Jay Montecalvo [QA]" 行，导致真正的
+        # "Jay (+6011...)" 行（row 90）永远不被读取 → Jay 值班天数全部漏报。
+        cell_upper = cell_a.strip().upper()
         for target in TARGET_NAMES:
-            if target.upper() in cell_upper:
+            if cell_upper.startswith(target.upper()):
                 if target not in name_rows:
                     name_rows[target] = row_idx
                 break
@@ -371,65 +374,8 @@ def get_sre_duty(target_date):
     checked = _get_duty_names_for_date(target_date, values)
     return _format_sre_duty_body(target_date, checked)
 
-def get_sre_week_duty():
-    """返回本周和下周的值班汇总信息（去重），每人显示一次并附带项目信息"""
-    try:
-        token = get_tenant_access_token()
-    except Exception as e:
-        return f"❌ Failed to get access token: {e}"
-
-    props = get_sheet_metadata(token, SPREADSHEET_TOKEN, SHEET_ID)
-    if not props:
-        return "❌ Cannot retrieve sheet metadata"
-    max_row = props.get("rowCount", 200)
-    scan_range = f"A1:ZZ{max_row}"
-    values = get_range_values(token, SPREADSHEET_TOKEN, SHEET_ID, scan_range)
-    if values is None:
-        return "❌ Failed to read sheet data"
-    if len(values) < 2:
-        return "Sheet has fewer than 2 rows."
-
-    today = datetime.now().date()
-    # 本周一
-    monday = today - timedelta(days=today.weekday())
-    # 下周一
-    next_monday = monday + timedelta(days=7)
-
-    def collect_week_names(start_monday):
-        """收集从周一到周日这一周内所有值班人员，返回姓名列表（去重）"""
-        week_set = set()
-        for i in range(7):
-            day = start_monday + timedelta(days=i)
-            day_checked = _get_duty_names_for_date(day, values)
-            week_set.update(day_checked)
-        return sorted(week_set)
-
-    this_week_names = collect_week_names(monday)
-    next_week_names = collect_week_names(next_monday)
-
-    # 在 get_sre_week_duty 中
-    def format_week_block(title, names):
-        if not names:
-            return f"📅 <b>{title}</b> – no duty"
-        lines = [f"📅 <b>{title}</b>"]
-        for name in names:
-            csv_name = TABLE_TO_CSV.get(name, name)
-            phone = get_phone_from_dutylist(csv_name)
-            project = NAME_TO_PROJECT.get(name, "")
-            if project:
-                lines.append(f"• {name} {project} 📞{phone}")
-            else:
-                lines.append(f"• {name} 📞{phone}")
-        return "\n".join(lines)
-
-    this_week_str = format_week_block(
-        f"SRE Duty this week – {monday.strftime('%d/%m/%Y')}",
-        this_week_names
-    )
-    next_week_str = format_week_block(
-        f"SRE Duty next week – {next_monday.strftime('%d/%m/%Y')}",
-        next_week_names
-    )
+# （旧的 get_sre_week_duty 首个实现已删除：它构建了字符串却从未 return，
+#   一直被文件末尾的同名函数遮蔽。现只保留 sretwoweek 版本。）
 
 def parse_date_arg(arg):
     """Parse a string in DD/MM/YYYY format and return a date object."""
