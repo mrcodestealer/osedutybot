@@ -74,7 +74,7 @@ TABLE_TO_CSV = {
 
 # 姓名 → 项目信息（固定映射，根据您提供的列表）
 NAME_TO_PROJECT = {
-    "Alex Tai": "FPMS",
+    "Alex Tai": "FE",
     "Kelvin": "FE",
     "WeiSiong": "",
     "Bowei": "PMS/IGO/CPMS",
