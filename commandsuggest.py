@@ -115,6 +115,7 @@ _EXTRA_ALIASES: dict[str, tuple[str, ...]] = {
     "/addreminder": ("add reminder", "加提醒"),
     "/deletereminder": ("delete reminder", "删提醒", "show reminder"),
     "/checkemail": ("check email", "邮件"),
+    "/checkerror": ("check error", "service error", "bot error", "服务错误", "查错误"),
     "/update": ("jenkins", "update jenkins", "构建", "build", "更新服务"),
     "/updatemore": ("update more", "multiple update", "多环境更新"),
     "/jenkinsupdate": ("jenkins update", "jenkins job"),

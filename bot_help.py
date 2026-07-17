@@ -198,6 +198,7 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
                     ("/ms <email> | /maintenance …", "Parse single maintenance email", "解析单封维护邮件"),
                     ("/stresstest <notice>", "Paste stress-test notice → reminder 10 min before set-maintenance time", "粘贴压测通知 → 提前10分钟提醒设维护"),
                     ("/cashout", "Cashout reminder template", "出款提醒模板"),
+                    ("/checkerror [24h|3d]", "AI reviews larkbot service journal — errors only: what error + what time", "AI 审查 larkbot 服务日志——仅错误：何时+什么错误"),
                     ("/restartA", "Pi restart one-liner", "Pi 重启命令"),
                 ],
             ),

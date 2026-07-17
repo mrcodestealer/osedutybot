@@ -6698,6 +6698,27 @@ def lark_webhook():
             msg_type="interactive",
         )
         return _lark_im_done()
+    elif cmd == '/checkerror':
+        # AI review of the larkbot.service journal — ERRORS ONLY: the module
+        # pre-filters the journal so the LLM reports what error + what time.
+        _ce_args = " ".join(cmd_parts[1:]).strip()
+
+        def _run_checkerror_job(chat_id_ce=chat_id, args_ce=_ce_args):
+            try:
+                import checkerror as _ce_mod
+
+                _ce_mod.handle_checkerror_command(
+                    args_ce, chat_id=chat_id_ce, send_message=send_message
+                )
+            except Exception as _ce_err:
+                print(f"❌ checkerror job: {_ce_err!r}", flush=True)
+                try:
+                    send_message(chat_id_ce, f"❌ /checkerror failed: {_ce_err}")
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run_checkerror_job, daemon=True).start()
+        return _lark_im_done()
     elif clean_text.lower().startswith('/stresstest'):
         # Explicit stress-test announcement paste: the AI reads the machine list + the
         # set-maintenance time and schedules a one-time reminder 10 min before it.
