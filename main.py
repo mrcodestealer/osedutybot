@@ -8095,6 +8095,47 @@ def _lark_ws_handler_dispatch_manual(handler, payload: bytes) -> Any:
     return None
 
 
+# The Lark app is subscribed (in the developer console) to event types the bot
+# never registered a processor for — vc.meeting.*, task.task.*,
+# meeting_room.* — so the WS SDK pushes them, ``_do_without_validation`` raises
+# ``EventException("processor not found, type: …")``, and the patched handler
+# below used to log every one as ``handle message failed`` (tens of thousands a
+# day; see checkerror.py's noise filter). These are NOT failures: an event with
+# no handler is simply ignored. We ACK 200 and stay silent, logging each
+# distinct unhandled event type ONCE for visibility. The permanent fix is to
+# unsubscribe those events in the console; this keeps the journal clean meanwhile.
+_lark_ws_unhandled_seen: set[str] = set()
+_lark_ws_unhandled_lock = threading.Lock()
+_LARK_WS_UNHANDLED_TYPE_RE = re.compile(r"type:\s*(\S+)")
+
+
+def _lark_ws_unhandled_event_type(exc: Exception) -> Optional[str]:
+    """If ``exc`` is the SDK's missing-processor error, return the event type.
+
+    Matches both ``processor not found`` and ``callback processor not found``.
+    Any other exception (a real handler crash) returns ``None`` so it still logs.
+    """
+    msg = str(exc or "")
+    if "processor not found" not in msg:
+        return None
+    m = _LARK_WS_UNHANDLED_TYPE_RE.search(msg)
+    return m.group(1) if m else "<unknown>"
+
+
+def _lark_ws_note_unhandled_event(event_type: str) -> None:
+    """Log a given unhandled event type at most once."""
+    with _lark_ws_unhandled_lock:
+        if event_type in _lark_ws_unhandled_seen:
+            return
+        _lark_ws_unhandled_seen.add(event_type)
+    print(
+        f"[lark-ws] ignoring unsubscribed event type {event_type!r} "
+        "(no processor registered → ACK 200, silenced). "
+        "Unsubscribe it in the Lark developer console to stop delivery.",
+        flush=True,
+    )
+
+
 def _lark_ws_apply_card_frame_patch() -> None:
     """lark-oapi ws client drops MessageType.CARD without ACK → Lark shows code: undefined."""
     try:
@@ -8147,18 +8188,24 @@ def _lark_ws_apply_card_frame_patch() -> None:
             if result is not None:
                 resp.data = base64.b64encode(JSON.marshal(result).encode(UTF_8))
         except Exception as e:
-            from lark_oapi.core.log import logger
+            _unhandled_type = _lark_ws_unhandled_event_type(e)
+            if _unhandled_type is not None:
+                # Subscribed-but-unhandled event (VC/task/meeting-room/…): not a
+                # failure. Keep the OK response created above, log the type once.
+                _lark_ws_note_unhandled_event(_unhandled_type)
+            else:
+                from lark_oapi.core.log import logger
 
-            logger.error(
-                self._fmt_log(
-                    "handle message failed, message_type: {}, message_id: {}, trace_id: {}, err: {}",
-                    message_type.value,
-                    msg_id,
-                    trace_id,
-                    e,
+                logger.error(
+                    self._fmt_log(
+                        "handle message failed, message_type: {}, message_id: {}, trace_id: {}, err: {}",
+                        message_type.value,
+                        msg_id,
+                        trace_id,
+                        e,
+                    )
                 )
-            )
-            resp = Response(code=http.HTTPStatus.INTERNAL_SERVER_ERROR)
+                resp = Response(code=http.HTTPStatus.INTERNAL_SERVER_ERROR)
 
         frame.payload = JSON.marshal(resp).encode(UTF_8)
         await self._write_message(frame.SerializeToString())
