@@ -5442,7 +5442,7 @@ def evo_batch_forward_chat_id() -> str:
     )
 
 
-# The "Kindly check this email" @QA/@CS ping (``build_evo_batch_check_email_text``) posted
+# The "Kindly check this email" @QA/@CS ping (``build_evo_batch_check_email_card``) posted
 # after ``/m`` (and ``/egs``) sends the maintenance email is PINNED to the forward group and
 # resolved independently of ``evo_batch_forward_chat_id`` — so it always lands in the QA/CS
 # forward group even if a server ``EVO_BATCH_FORWARD_CHAT_ID`` override diverts the rest.
@@ -5487,18 +5487,29 @@ def evo_batch_check_email_mentions() -> list[tuple[str, str]]:
     return out
 
 
-def build_evo_batch_check_email_text(subject: str) -> str:
-    """``Hi @QA Support Team @CS (Team) Kindly check this email`` + subject line (real @mentions)."""
+def build_evo_batch_check_email_card(subject: str) -> dict[str, Any]:
+    """"Kindly check this email" QA/CS ping as a card: header = email subject, body = ping text."""
+    title = (subject or "").strip() or "Kindly check this email"
+    if len(title) > _CARD_HEADER_TITLE_MAX:
+        title = title[: _CARD_HEADER_TITLE_MAX - 3] + "..."
     ats = " ".join(
-        f'<at user_id="{oid}">{name}</at>'
-        for oid, name in evo_batch_check_email_mentions()
+        lark_card_at_open_id(oid) for oid, _name in evo_batch_check_email_mentions()
     )
     prefix = f"Hi {ats} " if ats else "Hi "
-    text = f"{prefix}Kindly check this email"
-    subj = (subject or "").strip()
-    if subj:
-        text += f"\n{subj}"
-    return text
+    content = f"{prefix}Kindly check this email"
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "orange",
+            "title": {"tag": "plain_text", "content": title},
+        },
+        "body": {
+            "elements": [
+                {"tag": "div", "text": {"tag": "lark_md", "content": content}},
+            ]
+        },
+    }
 
 
 def maintenance_confirm_chat_id() -> str:

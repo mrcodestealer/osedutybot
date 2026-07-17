@@ -4215,9 +4215,13 @@ def _process_evo_sd_batch_paste(chat_id: str, email_text: str) -> None:
             if check_chat:
                 send_message(
                     check_chat,
-                    maintenance.build_evo_batch_check_email_text(
-                        batch.get("email_subject") or ""
+                    json.dumps(
+                        maintenance.build_evo_batch_check_email_card(
+                            batch.get("email_subject") or ""
+                        ),
+                        ensure_ascii=False,
                     ),
+                    msg_type="interactive",
                 )
         send_message(
             chat_id,
@@ -4598,7 +4602,11 @@ def _try_egs_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Opt
                 if check_chat:
                     send_message(
                         check_chat,
-                        maintenance.build_evo_batch_check_email_text(title),
+                        json.dumps(
+                            maintenance.build_evo_batch_check_email_card(title),
+                            ensure_ascii=False,
+                        ),
+                        msg_type="interactive",
                     )
         except Exception as ex:  # noqa: BLE001
             if is_reply:
