@@ -91,13 +91,10 @@ import mdr
 import smmachine
 import maintenancemachineagent
 
-import p0
-import p1
 import maintenance
 import emergency
 import ecsre
 
-import otpp1
 import bot_help
 import list_range
 
@@ -189,8 +186,6 @@ APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET") 
 VERIFICATION_TOKEN = (os.getenv("VERIFICATION_TOKEN") or "").strip()
 DUTY_CHAT_ID = os.getenv("DUTY_CHAT_ID")
-LABORATORY_GROUP = os.getenv("LABORATORY_GROUP")
-OSE_BOT_GROUP = os.getenv("OSE_BOT_GROUP")
 app = Flask(__name__)
 app.config.setdefault(
     "SECRET_KEY",
@@ -1319,138 +1314,6 @@ def scheduled_amountloss_check():
     ).start()
     print(f"✅ Scheduled Amount Loss (9:00) started (run_amountloss_check) → {target_chat_id}")
 
-# ================= P0 交互确认相关 =================
-pending_p0_confirmation = {}  # key: sender_id -> {"timestamp": datetime, "original_text": str}
-_pending_p0_lock = threading.Lock()
-P0_CONFIRMATION_TIMEOUT = 60  # 秒
-
-def handle_p0_confirmation(chat_id, sender_id, clean_text, original_text, send_func):
-    now = datetime.now()
-
-    # 情况1：用户在 OSE_BOT_GROUP 回复确认
-    if chat_id == OSE_BOT_GROUP:
-        with _pending_p0_lock:
-            entry = pending_p0_confirmation.get(sender_id)
-        if entry is not None:
-            if (now - entry["timestamp"]).total_seconds() > P0_CONFIRMATION_TIMEOUT:
-                with _pending_p0_lock:
-                    pending_p0_confirmation.pop(sender_id, None)
-                return False, None
-
-            reply_lower = clean_text.strip().lower()
-            if reply_lower in ('yes', 'y'):
-                with _pending_p0_lock:
-                    pending_p0_confirmation.pop(sender_id, None)
-                alert_msg = p0.format_p0_alert(chat_id, sender_id, entry["original_text"])
-                send_func(OSE_BOT_GROUP, alert_msg)
-                return True, None
-            if reply_lower in ('no', 'n'):
-                with _pending_p0_lock:
-                    pending_p0_confirmation.pop(sender_id, None)
-                return True, "👌 Understood, not a P0."
-            return True, "❓ Please confirm: is this a P0? Reply 'yes' or 'no'."
-
-    # 情况2：在 LABORATORY_GROUP 中检测到 P0 关键字（此分支之前缺失）
-    if chat_id == LABORATORY_GROUP and p0.should_broadcast(original_text):
-        with _pending_p0_lock:
-            pending_p0_confirmation[sender_id] = {
-                "timestamp": now,
-                "original_text": original_text
-            }
-        send_func(OSE_BOT_GROUP, f'⚠️ <at user_id="{sender_id}">User</at> This is P0? (Reply "yes" or "no" without mentioning me)')
-        return True, None
-
-    return False, None
-
-def clean_pending_p0_confirmations():
-    now = datetime.now()
-    with _pending_p0_lock:
-        expired = [
-            k
-            for k, v in pending_p0_confirmation.items()
-            if (now - v["timestamp"]).total_seconds() > P0_CONFIRMATION_TIMEOUT
-        ]
-        for k in expired:
-            pending_p0_confirmation.pop(k, None)
-    if expired:
-        print(f"🧹 Cleaned {len(expired)} expired P0 confirmations")
-
-# ================= P1 交互确认相关 =================
-pending_p1_confirmation = {}  # key: sender_id -> {"timestamp": datetime, "original_text": str}
-_pending_p1_lock = threading.Lock()
-P1_CONFIRMATION_TIMEOUT = 60  # 秒
-active_p1_reminders = {}      # key: sender_id -> job_id (用于取消提醒)
-_active_p1_reminders_lock = threading.Lock()
-
-def handle_p1_confirmation(chat_id, sender_id, clean_text, original_text, send_func):
-    now = datetime.now()
-
-    with _pending_p1_lock:
-        pending_keys = list(pending_p1_confirmation.keys())
-    print(f"[P1] ENV OSE_BOT_GROUP={OSE_BOT_GROUP}, chat_id={chat_id}, sender_id={sender_id}, clean_text='{clean_text}'")
-    print(f"[P1] pending keys: {pending_keys}")
-
-    # 情况1：用户在 OSE_BOT_GROUP 回复确认
-    if chat_id == OSE_BOT_GROUP:
-        with _pending_p1_lock:
-            entry = pending_p1_confirmation.get(sender_id)
-        if entry is not None:
-            if (now - entry["timestamp"]).total_seconds() > P1_CONFIRMATION_TIMEOUT:
-                with _pending_p1_lock:
-                    pending_p1_confirmation.pop(sender_id, None)
-                return False, None
-
-            reply_lower = clean_text.strip().lower()
-            if reply_lower in ('yes', 'y'):
-                with _pending_p1_lock:
-                    pending_p1_confirmation.pop(sender_id, None)
-                _, confirm_reply = send_p1_alert_and_reminder(OSE_BOT_GROUP, sender_id, entry["original_text"], send_func)
-                return True, confirm_reply
-            if reply_lower in ('no', 'n'):
-                with _pending_p1_lock:
-                    pending_p1_confirmation.pop(sender_id, None)
-                return True, "👌 Understood, not a P1."
-            return True, "❓ Please confirm: is this a P1? Reply 'yes' or 'no'."
-
-        print(f"[P1] sender_id {sender_id} not in pending list, ignoring.")
-        return False, None
-
-    # 情况2：在 LABORATORY_GROUP 中检测到 P1 关键字
-    if chat_id == LABORATORY_GROUP and p1.should_broadcast(original_text):
-        with _pending_p1_lock:
-            pending_p1_confirmation[sender_id] = {
-                "timestamp": now,
-                "original_text": original_text
-            }
-        send_func(OSE_BOT_GROUP, f'⚠️ <at user_id="{sender_id}">User</at> This is P1? (Reply "yes" or "no" without mentioning me)')
-        return True, None
-
-    return False, None
-
-def send_p1_alert_and_reminder(source_chat_id, sender_id, original_text, send_func):
-    alert_msg = p1.format_p1_alert(source_chat_id, sender_id, original_text)
-    send_func(OSE_BOT_GROUP, alert_msg)
-    print(f"[P1] Alert sent to {OSE_BOT_GROUP}")
-
-    reminder_text = f'<at user_id="{TARGET_USER_OPEN_ID}">User</at> ⏰ Already 15mins it might escalate to p0'
-    try:
-        job = reminder.schedule_reminder(
-            chat_id=OSE_BOT_GROUP,
-            user_id=sender_id,
-            duration_str="15m",
-            message=reminder_text,
-            scheduler=scheduler,
-            send_func=send_func
-        )
-        if job:
-            with _active_p1_reminders_lock:
-                active_p1_reminders[sender_id] = job.id
-            print(f"[P1] Reminder job {job.id} saved for sender {sender_id}")
-        return True, "✅ Will remind after 15minutes escalate to P0. If problem solved kindly tag me and use command /cancelp1"
-    except Exception as e:
-        print(f"[P1] Failed to schedule reminder: {e}")
-        return True, "✅ P1 alert sent but failed to set reminder."
-
 # ================= LARK API HELPERS =================
 def add_all_reactions(message_id):
     token = get_tenant_access_token()
@@ -2536,19 +2399,6 @@ def myoseweeklymeeting():
     msg = mention_line + "\n" + "MY OSE WEEKLY MEETING"
     send_shift_reminder(DUTY_CHAT_ID, msg)
 
-def clean_pending_p1_confirmations():
-    now = datetime.now()
-    with _pending_p1_lock:
-        expired = [
-            k
-            for k, v in pending_p1_confirmation.items()
-            if (now - v["timestamp"]).total_seconds() > P1_CONFIRMATION_TIMEOUT
-        ]
-        for k in expired:
-            pending_p1_confirmation.pop(k, None)
-    if expired:
-        print(f"🧹 Cleaned {len(expired)} expired P1 confirmations")
-
 scheduler = BackgroundScheduler()
 
 
@@ -2679,9 +2529,6 @@ try:
     )
 except Exception as _egs_reset_err:
     print(f"[egs] weekly reset cron not registered: {_egs_reset_err!r}", flush=True)
-_add_scheduler_job("clean_pending_p0_confirmations", clean_pending_p0_confirmations, "interval", minutes=5)
-_add_scheduler_job("clean_pending_p1_confirmations", clean_pending_p1_confirmations, "interval", minutes=5)
-
 PENDING_RESTART_FILE = "restart_pending.json"
 
 def send_restart_ready():
@@ -5463,20 +5310,6 @@ def lark_webhook():
             if re.search(r"/?replyupdateemail\b", duty_blob or "", re.I):
                 bot_mentioned = True
 
-    # ================= 跨群组 P0 交互确认 =================
-    handled_p0, p0_reply = handle_p0_confirmation(chat_id, sender_id, clean_text, original_text, send_message)
-    if handled_p0:
-        if p0_reply:
-            send_message(chat_id, p0_reply)
-        return _lark_im_done()
-
-    # ================= 跨群组 P1 交互确认 =================
-    handled_p1, p1_reply = handle_p1_confirmation(chat_id, sender_id, clean_text, original_text, send_message)
-    if handled_p1:
-        if p1_reply:
-            send_message(chat_id, p1_reply)
-        return _lark_im_done()
-
     # Reply **1**–**4** after `/checkcreditdate` NP prompt — works in group **without** @bot
     stripped_choice = clean_text.strip()
     if stripped_choice in ("1", "2", "3", "4"):
@@ -5900,7 +5733,7 @@ def lark_webhook():
     except Exception as _evo_auto_err:
         print(f"⚠️ EVO batch auto-detect skipped: {_evo_auto_err!r}", flush=True)
 
-    # Respect the router: if it already decided this is a COMMAND (e.g. /identifyissue,
+    # Respect the router: if it already decided this is a COMMAND (e.g. /checkperson,
     # a maintenance paste, a credit check), do NOT let the math/chat shortcut below
     # hijack it. A pasted report can contain dates/amounts that superficially look like
     # arithmetic ("2026/01/01 00:00:00 - 2026/06/03"), which previously produced a
@@ -6067,22 +5900,6 @@ def lark_webhook():
             send_message(chat_id, f"❌ Offset command failed: {_offset_cmd_err}")
             return _lark_im_done()
 
-    elif clean_text.lower() == '/cancelp1':
-        with _active_p1_reminders_lock:
-            job_id = active_p1_reminders.get(sender_id)
-        if job_id:
-            try:
-                scheduler.remove_job(job_id)
-                with _active_p1_reminders_lock:
-                    active_p1_reminders.pop(sender_id, None)
-                reply = "✅ P1 reminder has been cancelled."
-            except Exception as e:
-                reply = f"❌ Failed to cancel reminder: {e}"
-        else:
-            reply = "ℹ️ No active P1 reminder to cancel."
-        send_message(chat_id, reply)
-        return _lark_im_done()
-    
     elif len(clean_text) >= 3 and clean_text[:3].lower() == '/s ':
         query = clean_text[3:].strip()
         print(f"🔍 Duty query extracted: '{query}'")
@@ -6165,32 +5982,6 @@ def lark_webhook():
                 send_message(chat_id, f"❌ Failed to send cat picture: {result}")
         else:
             send_message(chat_id, "❌ Failed to upload cat picture.")
-        return _lark_im_done()
-    elif clean_text.lower() == '/fpmsp0':
-        reply = fpms_duty.fpmsp0()
-    elif clean_text.lower() == '/otpp0':
-        reply = otpp1.get_otp_p0_guide()
-    elif re.match(r"(?i)^/(?:identifyissue|identify_issue|checkissue|check_issue|issue|whatissue)\b", clean_text):
-        try:
-            import identifyissue as _identifyissue
-
-            _issue_src = (clean_text_multiline or _full_body or clean_text or "").strip()
-            _issue_body = _identifyissue.strip_command(_issue_src)
-            if not _issue_body:
-                send_message(chat_id, _identifyissue.USAGE)
-            else:
-                _issue_card, _issue_text = _identifyissue.build_card(_issue_body)
-                if _issue_card:
-                    _resp = send_message(
-                        chat_id, json.dumps(_issue_card, ensure_ascii=False), msg_type="interactive"
-                    )
-                    if _resp.get("code") != 0:
-                        send_message(chat_id, _issue_text)
-                else:
-                    send_message(chat_id, _issue_text)
-        except Exception as _issue_err:
-            print(f"⚠️ identifyissue failed: {_issue_err!r}", flush=True)
-            send_message(chat_id, "❌ Could not analyze the issue right now. Please try again.")
         return _lark_im_done()
     elif re.match(r"(?i)^/(?:checkperson|check_person|whochecks|findcheckperson)\b", clean_text):
         try:
@@ -7767,37 +7558,6 @@ def lark_webhook():
                     )
                     print(f"💬 Friendly chat fallback to chat {chat_id}", flush=True)
             else:
-                # Last-resort: if the message reads like a player issue/incident
-                # report, analyze it with the AI issue identifier instead of the
-                # generic "could not map" message.
-                _issue_handled = False
-                try:
-                    import identifyissue as _identifyissue_fb
-
-                    _issue_src = (
-                        clean_text_multiline or _full_body or _chat_source or clean_text or ""
-                    ).strip()
-                    # Fast regex first, then let the AI decide anything it missed.
-                    if _identifyissue_fb.is_issue_report(_issue_src):
-                        _issue_card, _issue_text = _identifyissue_fb.build_card(
-                            _identifyissue_fb.strip_command(_issue_src)
-                        )
-                        if _issue_card:
-                            _resp = send_message(
-                                chat_id,
-                                json.dumps(_issue_card, ensure_ascii=False),
-                                msg_type="interactive",
-                            )
-                            if _resp.get("code") != 0:
-                                send_message(chat_id, _issue_text)
-                        elif _issue_text:
-                            send_message(chat_id, _issue_text)
-                        print(f"🔎 Issue identifier (fallback) card to chat {chat_id}", flush=True)
-                        _issue_handled = True
-                except Exception as _issue_fb_err:
-                    print(f"⚠️ Issue identifier fallback skipped: {_issue_fb_err!r}", flush=True)
-                if _issue_handled:
-                    return _lark_im_done()
                 try:
                     import commandagent as _commandagent
 

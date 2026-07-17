@@ -43,7 +43,6 @@
 |------|------|
 | `/fpms` | FPMS 今日值班 |
 | `/fpmscheck [MM/YYYY]` | FPMS 缺勤检查 |
-| `/fpmsp0` | FPMS P0 联系 |
 | `/pms` | PMS 值班 |
 | `/pmscheck [MM/YYYY]` | PMS 缺勤检查 |
 | `/bi` | BI 今日值班 |
@@ -67,7 +66,6 @@
 | `/dutycheckall [MM/YYYY]` | 全部部门缺勤检查 |
 | `/ecsre [<游戏>]` | EC SRE 游戏负责人 |
 | `/ec [<游戏>]` | 紧急联系人 |
-| `/otpp0` | OTP P0 指引 |
 
 多数部门命令会在回复底部附带该部门**今日请假/WFH**。
 
@@ -106,19 +104,17 @@
 
 | 命令 | 说明 |
 |------|------|
-| `/identifyissue <描述>` | 识别玩家问题 P0/P1 + 中英文概览 |
 | `/checkperson <问题>` | 根据历史工单建议跟进信息 |
 
 ---
 
-## 提醒与 P1
+## 提醒
 
 | 命令 | 说明 |
 |------|------|
 | `/reminder <时间> <内容>` | 一次性提醒 |
 | `/addreminder …` | 表格提醒/表单 |
 | `/deletereminder [id]` | 删除/列出提醒 |
-| `/cancelp1` | 取消 P1 升级提醒 |
 
 自然语言：`@bot add timer 5mins 午饭`
 

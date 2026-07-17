@@ -167,23 +167,20 @@ Valid department keys: `fpms`, `ote`, `bi`, `fe`, `sre`, `db`, `dba`, `cpms`, `p
 @OSE Duty Bot /date
 ```
 
-### 4.6 P0 / incident helpers
+### 4.6 Incident helpers
 
 Paste the player report after the command:
 
 ```
-@OSE Duty Bot /identifyissue Players cannot login to PC version, password error.
-
 @OSE Duty Bot /checkperson player stuck at loading screen after top up
 ```
 
 ### 4.7 Reminders
 
 ```
-@OSE Duty Bot /reminder 30m Check P1 ticket
+@OSE Duty Bot /reminder 30m Check ticket
 @OSE Duty Bot /reminder 8:39PM Team sync
 @OSE Duty Bot add timer 5mins coffee
-@OSE Duty Bot /cancelp1
 ```
 
 ---

@@ -589,7 +589,7 @@ def _build_reason(
 
 
 # ---------------------------------------------------------------------------
-# LLM (OpenAI-compatible; same env as chatagent / identifyissue)
+# LLM (OpenAI-compatible; same env as chatagent)
 # ---------------------------------------------------------------------------
 
 def _llm_api_key() -> str:
@@ -1040,8 +1040,6 @@ def looks_like_checkperson_request(text: str) -> bool:
 
 def _priority_template(priority: str) -> str:
     p = (priority or "").upper()
-    if p == "P0":
-        return "red"
     if p == "P1":
         return "orange"
     if p == "P2":

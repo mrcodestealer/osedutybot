@@ -72,7 +72,6 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
             [
                 ("/fpms", "FPMS duty (today)", "FPMS 今日值班"),
                 ("/fpmscheck [MM/YYYY]", "FPMS missing-duty report", "FPMS 缺勤检查"),
-                ("/fpmsp0", "FPMS P0 contacts", "FPMS P0 联系"),
                 ("/pms", "PMS duty (next days)", "PMS 值班"),
                 ("/pmscheck [MM/YYYY]", "PMS missing-duty report", "PMS 缺勤检查"),
                 ("/bi", "BI duty (today)", "BI 今日值班"),
@@ -96,12 +95,6 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
                 ("/dutycheckall [MM/YYYY]", "All depts missing-duty", "全部部门缺勤检查"),
                 ("/ecsre [<game>]", "EC SRE game owner", "EC SRE 游戏负责人"),
                 ("/ec [<game>]", "Emergency contacts", "紧急联系人"),
-                ("/otpp0", "OTP P0 guide", "OTP P0 指引"),
-                (
-                    "/identifyissue <report>",
-                    "AI: classify a player issue (P0/P1) + bilingual P0 overview",
-                    "AI 识别玩家问题（P0/P1）+ 中英文 P0 概览",
-                ),
                 (
                     "/checkperson <issue>",
                     "AI: decide Issue/Priority/Department/Check Person from past tickets",
@@ -217,7 +210,6 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
                     ("/reminder <time> <msg>", "One-off reminder", "一次性提醒"),
                     ("/addreminder …", "Sheet reminder / form", "表格提醒/表单"),
                     ("/deletereminder [id]", "Delete / list reminders", "删除/列表提醒"),
-                    ("/cancelp1", "Cancel P1 escalation timer", "取消 P1 升级提醒"),
                 ],
             ),
         ]

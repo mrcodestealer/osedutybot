@@ -167,23 +167,20 @@ OSE Lark 机器人逐步操作说明。分群命令列表见 [各群文档](READ
 @OSE Duty Bot /date
 ```
 
-### 4.6 P0 / 事件辅助
+### 4.6 事件辅助
 
 在命令后粘贴玩家问题描述：
 
 ```
-@OSE Duty Bot /identifyissue 玩家 PC 版无法密码登录
-
 @OSE Duty Bot /checkperson 充值后卡在 loading
 ```
 
 ### 4.7 提醒
 
 ```
-@OSE Duty Bot /reminder 30m 检查 P1
+@OSE Duty Bot /reminder 30m 检查工单
 @OSE Duty Bot /reminder 8:39PM 站会
 @OSE Duty Bot add timer 5mins 咖啡
-@OSE Duty Bot /cancelp1
 ```
 
 ---

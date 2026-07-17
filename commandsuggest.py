@@ -108,7 +108,6 @@ _EXTRA_ALIASES: dict[str, tuple[str, ...]] = {
     "/smsfail": ("sms fail", "短信失败", "otp fail"),
     "/smscheckplayer": ("sms player", "短信玩家", "otp player"),
     "/npthirdhttp": ("np third", "third http"),
-    "/identifyissue": ("issue", "问题", "故障", "p0", "p1", "player report", "玩家问题"),
     "/checkperson": ("check person", "who checks", "检查人", "负责人"),
     "/ec": ("emergency contact", "紧急联系"),
     "/ecsre": ("sre emergency", "sre 紧急"),
@@ -120,8 +119,6 @@ _EXTRA_ALIASES: dict[str, tuple[str, ...]] = {
     "/updatemore": ("update more", "multiple update", "多环境更新"),
     "/jenkinsupdate": ("jenkins update", "jenkins job"),
     "/warmstatus": ("warm status", "warm pool"),
-    "/fpmsp0": ("fpms p0",),
-    "/otpp0": ("otp p0",),
     "/dutycheckall": ("duty check all", "值班检查"),
 }
 
@@ -240,7 +237,7 @@ def suggest_commands(text: str, *, limit: int = 5) -> list[dict[str, Any]]:
         elif len(raw) <= 80:
             # Short message with a machine token but extra words ("TBR2099 坏了")
             # — offer the lookup as a suggestion. Long pastes (incident reports)
-            # are excluded so identifyissue/chat still handle them.
+            # are excluded so plain chat still handles them.
             toks = _ca._MACHINE_LOOKUP_TOKEN_RE.findall(raw)
             if toks:
                 bases = {_ca._MACHINE_LOOKUP_SITE_CMDS[t[0].lower()] for t in toks}

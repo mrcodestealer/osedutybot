@@ -46,7 +46,7 @@ _COMMAND_KEYWORDS_RE = re.compile(
     r"machine|asset|egm|encoder|nch|nwr|winford|tbr|tbp|mdr|dhs|osm|"
     r"maintenance|maint|"
     r"checkcredit|credit|cctv|sms|otp|reminder|provider id|pid|"
-    r"cashout|p0|p1|emergency contact"
+    r"cashout|emergency contact"
     r")\b"
 )
 # A machine id like NWR2113 / NCH1422 / a bare 3+ digit asset.

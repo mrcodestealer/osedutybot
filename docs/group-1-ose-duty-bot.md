@@ -43,7 +43,6 @@
 |---------|-------------|
 | `/fpms` | FPMS duty (today) |
 | `/fpmscheck [MM/YYYY]` | FPMS missing-duty report |
-| `/fpmsp0` | FPMS P0 contacts |
 | `/pms` | PMS duty (next days) |
 | `/pmscheck [MM/YYYY]` | PMS missing-duty |
 | `/bi` | BI duty (today) |
@@ -67,7 +66,6 @@
 | `/dutycheckall [MM/YYYY]` | All departments missing-duty |
 | `/ecsre [<game>]` | EC SRE game owner |
 | `/ec [<game>]` | Emergency contacts |
-| `/otpp0` | OTP P0 guide |
 
 Most department commands append **today's leave/WFH** for that dept at the bottom of the reply.
 
@@ -106,19 +104,17 @@ Slash optional: `/editoffset`, `/pendingoffset`, `/showoffset` also work.
 
 | Command | Description |
 |---------|-------------|
-| `/identifyissue <report>` | Classify player issue (P0/P1) + bilingual P0 overview |
 | `/checkperson <issue>` | Suggest Issue / Priority / Department / Check Person from past tickets |
 
 ---
 
-## Reminders & P1
+## Reminders
 
 | Command | Description |
 |---------|-------------|
 | `/reminder <time> <msg>` | One-off reminder — e.g. `/reminder 1h30m Team meeting` |
 | `/addreminder …` | Sheet reminder / form |
 | `/deletereminder [id]` | Delete or list reminders |
-| `/cancelp1` | Cancel P1 escalation timer |
 
 Natural language: `@bot add timer 5mins lunch`
 

@@ -347,27 +347,6 @@ def build_intent_catalog(*, jenkins_available: bool = True) -> list[IntentSpec]:
     )
     intents.append(
         _simple_intent(
-            "cmd_cancelp1",
-            "/cancelp1",
-            "cancel p1 reminder|stop p1 escalation|cancel p1 alert",
-        )
-    )
-    intents.append(
-        _simple_intent(
-            "cmd_fpmsp0",
-            "/fpmsp0",
-            "fpms p0 contacts|fpms p0 phone|fpms emergency contact",
-        )
-    )
-    intents.append(
-        _simple_intent(
-            "cmd_otpp0",
-            "/otpp0",
-            "otp p0 guide|otp p0 contacts|otp emergency",
-        )
-    )
-    intents.append(
-        _simple_intent(
             "cmd_ose",
             "/ose",
             "ose duty now|who is ose on duty|ose on call|current ose duty",
@@ -1061,46 +1040,6 @@ def detect_restart_services_command(text: str) -> Optional[str]:
     return None
 
 
-# "check this issue" / "identify this issue" / "help us check this" / "what is this
-# issue" → /identifyissue. The full report (incl. account ids) is read separately by
-# main.py from the multiline body, so we only need to detect the *intent* here.
-_IDENTIFY_ISSUE_RE = re.compile(
-    r"(?i)("
-    r"(?:identify|check|explain|analy[sz]e|classify|diagnose|what\s+is|what's|whats|"
-    r"tell\s+me\s+about|help\s+(?:us|me)\s+(?:to\s+)?(?:check|identify|analy[sz]e))\s+"
-    r"(?:this|the|that|out|us\s+with)?\s*(?:issue|problem|incident|error|case|bug|report)"
-    r"|help\s+(?:us|me)\s+check\s+this(?:\s+(?:one|out))?"
-    r"|check\s+this\s+(?:one|out|issue|problem|incident)"
-    r"|identify\s+(?:this\s+)?(?:issue|problem|incident)"
-    r"|(?:这是?|帮.{0,6}看看?|分析|判断).{0,6}(?:什么)?(?:问题|事故|issue)"
-    r"|是什么问题"
-    r")"
-)
-
-
-def detect_identify_issue_command(text: str) -> Optional[str]:
-    """Map natural language → ``/identifyissue`` (AI explains/classifies the issue)."""
-    raw = (text or "").strip()
-    if not raw or _looks_like_slash_command(raw):
-        return None
-    # Avoid colliding with the maintenance / credit / jenkins structured flows.
-    if detect_prod_batch_command(raw) or detect_stuck_credit_command(raw) or detect_checkmachinelog_command(raw) or detect_checkcredit_command(raw):
-        return None
-    if _IDENTIFY_ISSUE_RE.search(raw):
-        return "/identifyissue"
-    # Auto-detect a player issue/incident report (e.g. "please help check this
-    # player account 12345, unable to withdraw ...") even without the literal
-    # phrase "identify issue" — let the AI explain it.
-    try:
-        import identifyissue as _ii
-
-        if _ii.looks_like_issue_report(raw):
-            return "/identifyissue"
-    except Exception:
-        pass
-    return None
-
-
 def detect_checkperson_command(text: str) -> Optional[str]:
     """Map natural language → ``/checkperson`` (AI decides who should check an issue)."""
     raw = (text or "").strip()
@@ -1680,7 +1619,7 @@ def _llm_route_obj_to_result(obj: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _correct_llm_duty_misroute(raw: str, result: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
-    """Fix common small-model swaps (p0/check) on plain duty roster questions."""
+    """Fix common small-model swaps (check) on plain duty roster questions."""
     if not result or result.get("route") != "command":
         return result
     m = re.search(r"(?i)\b(fpms|pms|bi|fe|cpms|sre|db|dba|liveslot|ote|ft)\b", raw or "")
@@ -1698,9 +1637,7 @@ def _correct_llm_duty_misroute(raw: str, result: Optional[dict[str, Any]]) -> Op
     tag = str(result.get("intent_tag") or "")
     if not duty_q or check_q:
         return result
-    if tag.endswith("p0") and not re.search(r"(?i)\bp0\b|emergency contact", raw or ""):
-        fix_tag = f"cmd_{dept}" if dept else "cmd_fpms"
-    elif tag.endswith("check"):
+    if tag.endswith("check"):
         fix_tag = f"cmd_{dept}" if dept else tag.replace("check", "").rstrip("_") or tag
         if not _intents_by_tag().get(fix_tag):
             fix_tag = f"cmd_{dept}" if dept else "cmd_fpms"
@@ -2128,9 +2065,6 @@ def _run_deterministic_detectors(text: str) -> dict[str, Any] | None:
     cp = detect_checkperson_command(raw)
     if cp:
         return dict(tag="cmd_checkperson", confidence=1.0, margin=1.0, command=cp, deterministic=True, source="deterministic", route="command")
-    ii = detect_identify_issue_command(raw)
-    if ii:
-        return dict(tag="cmd_identifyissue", confidence=1.0, margin=1.0, command=ii, deterministic=True, source="deterministic", route="command")
     du = detect_single_duty_command(raw)
     if du:
         return dict(tag="cmd_duty", confidence=1.0, margin=1.0, command=du, deterministic=True, source="deterministic", route="command")
