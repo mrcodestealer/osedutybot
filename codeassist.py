@@ -107,6 +107,36 @@ def _embed_model() -> str:
     return (os.getenv("BOT_CODE_EMBED_MODEL") or "nomic-embed-text").strip()
 
 
+# When the embed model isn't pulled on the server, Ollama's /api/embeddings
+# returns HTTP 404 for EVERY chunk. Without this guard a single index build
+# logged ~1 failure per chunk (thousands of lines) and re-ran on every manifest
+# change — 12k+ journal lines/day. Once we confirm the model is unavailable we
+# stop calling the endpoint for the rest of the process, log ONE actionable
+# line, and fall back to the grep search that already backs RAG.
+_EMBED_STATE_LOCK = threading.Lock()
+_EMBED_UNAVAILABLE = False
+
+
+def _embed_unavailable() -> bool:
+    with _EMBED_STATE_LOCK:
+        return _EMBED_UNAVAILABLE
+
+
+def _mark_embed_unavailable(reason: str) -> None:
+    global _EMBED_UNAVAILABLE
+    with _EMBED_STATE_LOCK:
+        if _EMBED_UNAVAILABLE:
+            return
+        _EMBED_UNAVAILABLE = True
+    print(
+        f"[codeassist] embed model {_embed_model()!r} unavailable ({reason}) — "
+        f"disabling RAG embeddings for this run, using grep fallback. "
+        f"Fix: run `ollama pull {_embed_model()}` on the server (then restart), "
+        f"or set BOT_CODE_RAG=0 to silence.",
+        flush=True,
+    )
+
+
 def _top_k() -> int:
     try:
         return max(1, min(20, int(os.getenv("BOT_CODE_TOP_K", "8"))))
@@ -206,6 +236,8 @@ def _chunk_file(path: Path, root: Path, *, lines_per_chunk: int = 80, overlap: i
 
 
 def _ollama_embed(text: str) -> Optional[list[float]]:
+    if _embed_unavailable():
+        return None
     model = _embed_model()
     payload = json.dumps({"model": model, "prompt": text[:8000]}).encode("utf-8")
     req = urllib.request.Request(
@@ -220,6 +252,15 @@ def _ollama_embed(text: str) -> Optional[list[float]]:
         emb = body.get("embedding")
         if isinstance(emb, list) and emb:
             return [float(x) for x in emb]
+        # HTTP 200 but no vector — the model isn't producing embeddings.
+        _mark_embed_unavailable("empty embedding in 200 response")
+    except urllib.error.HTTPError as exc:
+        # 404 = model not pulled / endpoint missing; 400 = model can't embed.
+        # Either way retrying every chunk is pointless — disable and grep.
+        if exc.code in (404, 400):
+            _mark_embed_unavailable(f"HTTP {exc.code} {exc.reason}")
+        else:
+            print(f"[codeassist] embed failed ({model}): HTTP {exc.code} {exc.reason}", flush=True)
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
         print(f"[codeassist] embed failed ({model}): {exc!r}", flush=True)
     return None
@@ -286,12 +327,16 @@ def _build_index(root: Path) -> dict[str, Any]:
         chunks.extend(_chunk_file(path, root))
 
     indexed: list[dict[str, Any]] = []
-    use_rag = _rag_enabled()
+    use_rag = _rag_enabled() and not _embed_unavailable()
     if use_rag:
         print(f"[codeassist] embedding {len(chunks)} chunks …", flush=True)
         for i, ch in enumerate(chunks):
             emb = _ollama_embed(ch["text"])
             if emb is None:
+                # Model went unavailable (404/etc.) — stop probing every chunk;
+                # the rest would all fail. _ollama_embed already logged once.
+                if _embed_unavailable():
+                    break
                 continue
             item = dict(ch)
             item["embedding"] = emb
@@ -300,6 +345,8 @@ def _build_index(root: Path) -> dict[str, Any]:
                 print(f"[codeassist] embedded {i + 1}/{len(chunks)}", flush=True)
         if not indexed:
             print("[codeassist] RAG embed empty — using grep fallback at query time", flush=True)
+    elif _rag_enabled():
+        print("[codeassist] embed model unavailable — grep-only index", flush=True)
 
     return {
         "version": 1,

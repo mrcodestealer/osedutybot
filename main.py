@@ -1384,6 +1384,39 @@ def add_message_reaction(message_id, emoji_type, *, fallbacks: tuple[str, ...] =
     return None
 
 
+def _reaction_id_from_response(add_reaction_body: Any) -> Optional[str]:
+    """Pull ``data.reaction_id`` out of a successful add-reaction response."""
+    if isinstance(add_reaction_body, dict):
+        rid = ((add_reaction_body.get("data") or {}).get("reaction_id") or "").strip()
+        return rid or None
+    return None
+
+
+def remove_message_reaction(message_id, reaction_id) -> bool:
+    """DELETE a reaction previously added to a message (by its reaction_id)."""
+    mid = (message_id or "").strip()
+    rid = (reaction_id or "").strip()
+    if not mid or not rid:
+        return False
+    token = get_tenant_access_token()
+    url = f"https://open.larksuite.com/open-apis/im/v1/messages/{mid}/reactions/{rid}"
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        response = requests.delete(url, headers=headers, timeout=20)
+        body = response.json()
+    except Exception as exc:  # noqa: BLE001 — network hiccups shouldn't break the reply
+        print(f"⚠️ remove reaction {rid} error: {exc!r}", flush=True)
+        return False
+    if response.status_code == 200 and int(body.get("code", -1)) == 0:
+        print(f"✅ Removed reaction {rid} from message {mid}", flush=True)
+        return True
+    print(
+        f"⚠️ remove reaction {rid} failed: status={response.status_code} body={body!r}",
+        flush=True,
+    )
+    return False
+
+
 # Lark UI tooltip may say "GotIt"; official emoji_type is **Get** (see im message-reaction emojis doc).
 _GOT_IT_REACTION_FALLBACKS = ("GotIt", "GOTIT", "LGTM", "OnIt", "CheckMark")
 
@@ -1410,12 +1443,23 @@ _lark_user_message_id: contextvars.ContextVar[Optional[str]] = contextvars.Conte
 _lark_defer_done_reaction: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "_lark_defer_done_reaction", default=False
 )
+# reaction_id of the "got it" ack, so it can be removed when processing finishes.
+_lark_gotit_reaction_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "_lark_gotit_reaction_id", default=None
+)
 
 
 def set_lark_incoming_message(message_id: Optional[str] = None) -> None:
     mid = (message_id or "").strip() or None
     _lark_user_message_id.set(mid)
     _lark_defer_done_reaction.set(False)
+    _lark_gotit_reaction_id.set(None)
+
+
+def remember_gotit_reaction(add_reaction_body: Any) -> None:
+    """Record the just-added GotIt reaction's id so :func:`mark_lark_process_done`
+    can remove it and replace it with DONE."""
+    _lark_gotit_reaction_id.set(_reaction_id_from_response(add_reaction_body))
 
 
 def defer_lark_done_reaction() -> None:
@@ -1425,8 +1469,14 @@ def defer_lark_done_reaction() -> None:
 
 def mark_lark_process_done(message_id: Optional[str] = None) -> None:
     mid = (message_id or _lark_user_message_id.get() or "").strip()
-    if mid:
-        add_done_reaction(mid)
+    if not mid:
+        return
+    # Swap the "got it" ack for "done": remove the ack reaction first, then add DONE.
+    rid = (_lark_gotit_reaction_id.get() or "").strip()
+    if rid:
+        remove_message_reaction(mid, rid)
+        _lark_gotit_reaction_id.set(None)
+    add_done_reaction(mid)
 
 
 def finish_lark_incoming_message_if_sync() -> None:
@@ -5388,7 +5438,7 @@ def lark_webhook():
 
     set_lark_incoming_message(message_id)
     if message_id and (chat_type == "p2p" or bot_mentioned):
-        add_gotit_reaction(message_id)
+        remember_gotit_reaction(add_gotit_reaction(message_id))
 
     if text == "我要验牌":
         reply = f'<at user_id="{sender_id}"></at> 给我擦皮鞋'
