@@ -3333,19 +3333,21 @@ def lookup_evo_gamelist_row(
             "status": "found",
             "fuzzy": fuzzy,
             "row_number": ridx + 1,  # 1-based sheet row
-            "name": str(row[ci_name]).strip() if len(row) > ci_name else "",
+            "name": _cellstr(row[ci_name]) if len(row) > ci_name else "",
             "launched": launched,
-            "header": [str(c).strip() for c in header],
-            "row": [str(c).strip() for c in row],
+            "header": [_cellstr(c) for c in header],
+            "row": [_cellstr(c) for c in row],
         }
     if substr:
         return {"status": "suggest", "suggestions": [s[2] for s in substr[:12]]}
     return {"status": "not_found"}
 
 
-def _checkevo_label(raw: str, index: int) -> str:
-    lbl = re.sub(r"\s+", " ", (raw or "").strip())
-    return lbl or f"列{index + 1}"
+def _cellstr(cell: Any) -> str:
+    """Sheet cell → clean string; ``None``/empty → ``""`` (never the text 'None')."""
+    if cell is None:
+        return ""
+    return str(cell).strip()
 
 
 def build_checkevo_reply(game_name: str, result: dict[str, Any]) -> str:
@@ -3384,12 +3386,14 @@ def build_checkevo_reply(game_name: str, result: dict[str, Any]) -> str:
         if result.get("fuzzy"):
             head += "（近似匹配）"
         lines = [head, f"状态：{status_line}", f"表行号：第 {result.get('row_number')} 行", ""]
-        n = max(len(header), len(row))
-        for i in range(n):
-            label = _checkevo_label(header[i] if i < len(header) else "", i)
-            val = (row[i] if i < len(row) else "").strip()
-            if not val and (i >= len(header) or not str(header[i]).strip()):
-                continue  # skip fully-empty trailing columns
+        # Only real, NAMED columns — the sheet is fetched over A1:ZZ, so every row
+        # carries hundreds of trailing empty cells; a column with no header is not
+        # a real field and is skipped (otherwise the card floods with blank rows).
+        for i, raw_label in enumerate(header):
+            label = re.sub(r"\s+", " ", (raw_label or "").strip())
+            if not label:
+                continue
+            val = re.sub(r"\s+", " ", (row[i] if i < len(row) else "").strip())
             lines.append(f"• {label}: {val}")
         return "\n".join(lines)
     return f"❌ /checkevo 未知结果：{st}"
