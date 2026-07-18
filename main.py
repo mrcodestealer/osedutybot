@@ -6769,6 +6769,22 @@ def lark_webhook():
 
         threading.Thread(target=_run_checkerror_job, daemon=True).start()
         return _lark_im_done()
+    elif cmd == '/checkevo':
+        # Look up one game by 游戏名称/Games Name in the EVO gamelist sheet and
+        # show its row. If the bot lacks sheet permission → explicit 91403 notice.
+        _ev_name = " ".join(cmd_parts[1:]).strip()
+        try:
+            import maintenance as _maint_ev
+
+            _ev_result = _maint_ev.lookup_evo_gamelist_row(
+                _ev_name, get_tenant_access_token()
+            )
+            _ev_reply = _maint_ev.build_checkevo_reply(_ev_name, _ev_result)
+        except Exception as _ev_err:
+            print(f"❌ /checkevo failed: {_ev_err!r}", flush=True)
+            _ev_reply = f"❌ /checkevo failed: {_ev_err}"
+        send_message(chat_id, _ev_reply)
+        return _lark_im_done()
     elif clean_text.lower().startswith('/stresstest'):
         # Explicit stress-test announcement paste: the AI reads the machine list + the
         # set-maintenance time and schedules a one-time reminder 10 min before it.

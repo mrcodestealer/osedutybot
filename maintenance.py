@@ -3164,6 +3164,15 @@ def _is_entrance_map_launched(cell: Any) -> bool:
         return False
 
 
+class GamelistForbidden(RuntimeError):
+    """Bot app lacks permission to VIEW the spreadsheet (Lark code 91403).
+
+    Subclass of RuntimeError so existing ``except Exception`` callers still catch
+    it, while new callers (e.g. ``/checkevo``) can single it out and tell the
+    user to share the sheet with the bot instead of silently reporting no data.
+    """
+
+
 def _fetch_sheet_values(
     tenant_token: str, spreadsheet_token: str, sheet_id: str, *, max_row: int = 2500
 ) -> list[list[Any]]:
@@ -3173,6 +3182,7 @@ def _fetch_sheet_values(
     headers = {"Authorization": f"Bearer {tenant_token}"}
     # UnformattedValue → raw 0/1 in 遊戲入口圖 (ToString may mis-read coloured cells).
     last_err: str | None = None
+    last_code: Any = None
     for render_opt in ("UnformattedValue", "ToString"):
         params = {
             "valueRenderOption": render_opt,
@@ -3187,8 +3197,11 @@ def _fetch_sheet_values(
                 or {}
             )
             return vr.get("values") or []
+        last_code = data.get("code")
         last_err = str(data.get("msg", data))
-    raise RuntimeError(last_err or "gamelist fetch failed")
+    if last_code == 91403 or "forbidden" in (last_err or "").lower():
+        raise GamelistForbidden(f"{last_err or 'Forbidden'} (code {last_code})")
+    raise RuntimeError(f"{last_err or 'gamelist fetch failed'} (code {last_code})")
 
 
 def _find_header_row_and_cols(grid: list[list[Any]]) -> tuple[int, int, int] | None:
@@ -3254,6 +3267,132 @@ def _row_launched_for_game(
         ent = r[ci_entrance] if len(r) > ci_entrance else ""
         return _is_entrance_map_launched(ent)
     return None
+
+
+# ---------------------------------------------------------------------------
+# ``/checkevo <game>`` — look up one game by 游戏名称 / Games Name and show its row.
+# ---------------------------------------------------------------------------
+
+
+def lookup_evo_gamelist_row(
+    game_name: str, tenant_access_token: str | None
+) -> dict[str, Any]:
+    """Find a game in the gamelist by **游戏名称 / Games Name** and return its row.
+
+    Status values: ``empty``, ``unconfigured``, ``forbidden`` (bot can't view the
+    sheet), ``fetch_error``, ``no_header``, ``not_found``, ``suggest`` (close but
+    not exact — lists candidates), ``found``.
+    """
+    q = (game_name or "").strip()
+    if not q:
+        return {"status": "empty"}
+    tok = (tenant_access_token or "").strip()
+    if not gamelist_configured() or not tok:
+        return {"status": "unconfigured"}
+    try:
+        grid = _fetch_sheet_values(tok, GAMELIST_SPREADSHEET_TOKEN, GAMELIST_SHEET_ID)
+    except GamelistForbidden as exc:
+        return {"status": "forbidden", "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 — surface, don't masquerade as "no data"
+        return {"status": "fetch_error", "error": str(exc)}
+
+    parsed = _find_header_row_and_cols(grid)
+    if not parsed:
+        return {"status": "no_header"}
+    hi, ci_name, ci_ent = parsed
+    header = grid[hi]
+    qkey = _canonical_game_name_key(q)
+
+    exact: tuple[int, list[Any]] | None = None
+    substr: list[tuple[int, list[Any], str]] = []
+    for ridx in range(hi + 1, len(grid)):
+        row = grid[ridx]
+        if not row or len(row) <= ci_name:
+            continue
+        name_cell = row[ci_name]
+        nkey = _canonical_game_name_key(name_cell)
+        if not nkey:
+            continue
+        if nkey == qkey or _names_match_gamelist(name_cell, q):
+            exact = (ridx, row)
+            break
+        if qkey and (qkey in nkey or nkey in qkey):
+            substr.append((ridx, row, str(name_cell).strip()))
+
+    fuzzy = False
+    if exact is None and len(substr) == 1:
+        exact = (substr[0][0], substr[0][1])
+        fuzzy = True
+
+    if exact is not None:
+        ridx, row = exact
+        launched = (
+            _is_entrance_map_launched(row[ci_ent]) if len(row) > ci_ent else False
+        )
+        return {
+            "status": "found",
+            "fuzzy": fuzzy,
+            "row_number": ridx + 1,  # 1-based sheet row
+            "name": str(row[ci_name]).strip() if len(row) > ci_name else "",
+            "launched": launched,
+            "header": [str(c).strip() for c in header],
+            "row": [str(c).strip() for c in row],
+        }
+    if substr:
+        return {"status": "suggest", "suggestions": [s[2] for s in substr[:12]]}
+    return {"status": "not_found"}
+
+
+def _checkevo_label(raw: str, index: int) -> str:
+    lbl = re.sub(r"\s+", " ", (raw or "").strip())
+    return lbl or f"列{index + 1}"
+
+
+def build_checkevo_reply(game_name: str, result: dict[str, Any]) -> str:
+    """Plain-text reply for ``/checkevo`` from :func:`lookup_evo_gamelist_row`."""
+    q = re.sub(r"\s+", " ", (game_name or "").strip())
+    st = result.get("status")
+    if st == "empty":
+        return "❌ 用法：`/checkevo <游戏名>` — 例如 `/checkevo Funky Time`"
+    if st == "unconfigured":
+        return "⚠️ Gamelist 未配置（缺少 `gamelist` / `gamelistsheetid` / token）。"
+    if st == "forbidden":
+        return (
+            "🚫 机器人无法查看 gamelist 表格（Forbidden 91403）。\n"
+            "请在 Lark 中把该表格分享给机器人（权限：可阅读），就像 OSE/FE/FPMS 表一样。\n"
+            f"• 表格 token：`{GAMELIST_SPREADSHEET_TOKEN}`\n"
+            f"• 工作表 id：`{GAMELIST_SHEET_ID}`"
+        )
+    if st == "fetch_error":
+        return f"❌ 读取 gamelist 表格失败：{result.get('error', '')}"
+    if st == "no_header":
+        return "❌ 未在 gamelist 表中找到表头（游戏名称 / Games Name + 遊戲入口圖）。"
+    if st == "not_found":
+        return f"❌ 未在 gamelist 找到「{q}」（按 游戏名称 / Games Name 匹配）。"
+    if st == "suggest":
+        sug = "\n".join(f"• {s}" for s in result.get("suggestions", []))
+        return f"❓ 未精确匹配「{q}」。是否想找：\n{sug}"
+    if st == "found":
+        header = result.get("header", [])
+        row = result.get("row", [])
+        launched = result.get("launched")
+        status_line = (
+            "✅ 上线（遊戲入口圖=1）" if launched else "⚠️ 未上线（遊戲入口圖≠1）"
+        )
+        title = result.get("name") or q
+        head = f"🎮 Gamelist — {title}"
+        if result.get("fuzzy"):
+            head += "（近似匹配）"
+        lines = [head, f"状态：{status_line}", f"表行号：第 {result.get('row_number')} 行", ""]
+        n = max(len(header), len(row))
+        for i in range(n):
+            label = _checkevo_label(header[i] if i < len(header) else "", i)
+            val = (row[i] if i < len(row) else "").strip()
+            if not val and (i >= len(header) or not str(header[i]).strip()):
+                continue  # skip fully-empty trailing columns
+            lines.append(f"• {label}: {val}")
+        return "\n".join(lines)
+    return f"❌ /checkevo 未知结果：{st}"
 
 
 def _clean_email_line(line: str) -> str:

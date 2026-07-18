@@ -199,6 +199,7 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
                     ("/stresstest <notice>", "Paste stress-test notice → reminder 10 min before set-maintenance time", "粘贴压测通知 → 提前10分钟提醒设维护"),
                     ("/cashout", "Cashout reminder template", "出款提醒模板"),
                     ("/checkerror [24h|3d]", "AI reviews larkbot service journal — errors only: what error + what time", "AI 审查 larkbot 服务日志——仅错误：何时+什么错误"),
+                    ("/checkevo <game>", "Look up a game in the EVO gamelist sheet (row + 遊戲入口圖 status)", "在 EVO gamelist 表按游戏名查该行（含上线状态）"),
                     ("/restartA", "Pi restart one-liner", "Pi 重启命令"),
                 ],
             ),
