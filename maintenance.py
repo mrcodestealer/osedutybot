@@ -5600,11 +5600,17 @@ def evo_batch_check_email_chat_id() -> str:
     push this ping into the ``/m`` command group. Override with ``EVO_BATCH_CHECK_EMAIL_CHAT_ID``
     only to intentionally send it elsewhere.
     """
-    return (
+    cid = (
         os.getenv("EVO_BATCH_CHECK_EMAIL_CHAT_ID", "").strip()
         or os.getenv("evo_batch_check_email_chat_id", "").strip()
         or EVO_BATCH_CHECK_EMAIL_CHAT_ID_DEFAULT
     )
+    # Never divert the QA/CS "check this email" ping into the /m command group
+    # (oc_51b6fbf…) — it belongs in the QA/CS forward group. If an env override
+    # points it at the command group, pin it back to the forward default.
+    if cid == evo_batch_command_chat_id():
+        return EVO_BATCH_CHECK_EMAIL_CHAT_ID_DEFAULT
+    return cid
 
 
 # Users @-tagged in the forward group after ``/m`` sends the email (QA Support Team, CS).
@@ -5631,15 +5637,23 @@ def evo_batch_check_email_mentions() -> list[tuple[str, str]]:
 
 
 def build_evo_batch_check_email_card(subject: str) -> dict[str, Any]:
-    """"Kindly check this email" QA/CS ping as a card: header = email subject, body = ping text."""
-    title = (subject or "").strip() or "Kindly check this email"
+    """"Kindly check this email" QA/CS ping as a card.
+
+    Header = email subject; body = ``Hi @QA @CS Kindly check this email.`` plus a
+    ``📧 Email: <subject>`` line so recipients see exactly which mail to open.
+    """
+    subj = (subject or "").strip()
+    title = subj or "Kindly check this email"
     if len(title) > _CARD_HEADER_TITLE_MAX:
         title = title[: _CARD_HEADER_TITLE_MAX - 3] + "..."
     ats = " ".join(
         lark_card_at_open_id(oid) for oid, _name in evo_batch_check_email_mentions()
     )
     prefix = f"Hi {ats} " if ats else "Hi "
-    content = f"{prefix}Kindly check this email"
+    lines = [f"{prefix}Kindly check this email."]
+    if subj:
+        lines.append(f"📧 Email: {subj}")
+    content = "\n".join(lines)
     return {
         "schema": "2.0",
         "config": {"update_multi": True, "width_mode": "fill"},
