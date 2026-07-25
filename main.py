@@ -1447,11 +1447,20 @@ _lark_defer_done_reaction: contextvars.ContextVar[bool] = contextvars.ContextVar
 _lark_gotit_reaction_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "_lark_gotit_reaction_id", default=None
 )
+# Chat the inbound message came from. ``send_message`` only auto-quote-replies when the
+# target chat IS this chat — otherwise a cross-group send would be turned into a reply
+# in the INBOUND chat and its ``chat_id`` argument silently discarded (see send_message).
+_lark_user_chat_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "_lark_user_chat_id", default=None
+)
 
 
-def set_lark_incoming_message(message_id: Optional[str] = None) -> None:
+def set_lark_incoming_message(
+    message_id: Optional[str] = None, chat_id: Optional[str] = None
+) -> None:
     mid = (message_id or "").strip() or None
     _lark_user_message_id.set(mid)
+    _lark_user_chat_id.set((chat_id or "").strip() or None)
     _lark_defer_done_reaction.set(False)
     _lark_gotit_reaction_id.set(None)
 
@@ -1571,11 +1580,24 @@ def send_message(
     receive_id_type="chat_id",
     reply_to_message_id=None,
 ):
-    """Send to chat, or quote-reply to ``reply_to_message_id`` (defaults to inbound user message)."""
+    """Send to chat, or quote-reply to ``reply_to_message_id`` (defaults to inbound user message).
+
+    The implicit quote-reply applies ONLY when ``chat_id`` is the chat the inbound
+    message came from. A reply is posted via ``/messages/{id}/reply``, which puts it in
+    the PARENT message's chat and ignores ``chat_id`` entirely — so without this check a
+    cross-group send (e.g. ``/m`` posting the forward + check-email cards to the QA/CS
+    group while the user typed ``/m`` in the command group) silently landed back in the
+    inbound chat. Pass ``reply_to_message_id=""`` to force a direct post explicitly.
+    """
     if reply_to_message_id is not None:
         reply_mid = (reply_to_message_id or "").strip() or None
     else:
-        reply_mid = (_lark_user_message_id.get() or "").strip() or None
+        _inbound_chat = (_lark_user_chat_id.get() or "").strip()
+        _target_chat = str(chat_id or "").strip()
+        if _inbound_chat and _target_chat and _target_chat != _inbound_chat:
+            reply_mid = None  # cross-chat send → direct post, never a reply
+        else:
+            reply_mid = (_lark_user_message_id.get() or "").strip() or None
     if reply_mid:
         return _lark_post_message_reply(
             reply_mid, text, msg_type=msg_type, mentions=mentions, reply_in_thread=False
@@ -4103,6 +4125,7 @@ def _process_evo_sd_batch_paste(chat_id: str, email_text: str) -> None:
                     fwd_chat,
                     json.dumps(fwd_card, ensure_ascii=False),
                     msg_type="interactive",
+                    reply_to_message_id="",  # direct post to the forward group, never a reply
                 )
             # @tag QA Support Team + CS to check the email that was just sent. Pinned to the
             # forward group (oc_9ffa9a…) via its own resolver, INDEPENDENT of fwd_chat — so a
@@ -4119,6 +4142,7 @@ def _process_evo_sd_batch_paste(chat_id: str, email_text: str) -> None:
                         ensure_ascii=False,
                     ),
                     msg_type="interactive",
+                    reply_to_message_id="",  # direct post to the QA/CS group, never a reply
                 )
         send_message(
             chat_id,
@@ -4504,6 +4528,7 @@ def _try_egs_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Opt
                             ensure_ascii=False,
                         ),
                         msg_type="interactive",
+                        reply_to_message_id="",  # direct post to the QA/CS group, never a reply
                     )
         except Exception as ex:  # noqa: BLE001
             if is_reply:
@@ -5436,7 +5461,7 @@ def lark_webhook():
             print("⏭️ Bot not mentioned in group chat – ignoring further commands")
         return _lark_im_ack()
 
-    set_lark_incoming_message(message_id)
+    set_lark_incoming_message(message_id, chat_id)
     if message_id and (chat_type == "p2p" or bot_mentioned):
         remember_gotit_reaction(add_gotit_reaction(message_id))
 
