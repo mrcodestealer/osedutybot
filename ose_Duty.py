@@ -2803,6 +2803,113 @@ def restore_leave_cells_to_original_shift(
     return result
 
 
+def scan_sheet_leave_codes_to_original_shift(
+    *,
+    months: Optional[list[tuple[int, int]]] = None,
+    apply: bool = False,
+    json_out: bool = False,
+    person: str | None = None,
+    codes: Optional[set[str]] = None,
+) -> dict[str, Any]:
+    """Find ``AL``/``SL``/``L``/``HL``/``EL`` cells ON THE SHEET and restore the shift.
+
+    State-free: reads the roster directly, so it also finds codes the bot never tracked
+    (hand-typed, or written before the state file was reset). The original shift comes
+    from the person's PREDOMINANT shift that month; ties are reported, never guessed.
+
+    DRY RUN unless ``apply=True``. This does not consult the leave Bitable, so it will
+    also list leave that is currently legitimate — read the list before applying, or
+    narrow it with ``person``.
+    """
+    values, err = _get_cached_ose_leave_sheet_values()
+    if not values:
+        raise RuntimeError(err or f"Could not load OSE sheet {SHEET_ID!r}")
+    if not months:
+        today = datetime.now(_display_tz()).date() if "_display_tz" in globals() else date.today()
+        nxt = (today.replace(day=1) + timedelta(days=31)).replace(day=1)
+        months = [(today.year, today.month), (nxt.year, nxt.month)]
+    want_person = _title_name(person).strip().lower() if person else ""
+    want_codes = {c.strip().upper() for c in (codes or set()) if c.strip()} or set(
+        _OSE_SHIFT_SHEET_LEAVE_CODES
+    )
+
+    found: list[dict[str, Any]] = []
+    rows_checked = 0
+    for name in OSE_LEAVE_ROSTER_KEYS:
+        nm = _title_name(name)
+        if want_person and nm.strip().lower() != want_person:
+            continue
+        row = _sheet_row_index_for_person(values, nm, targets=OSE_LEAVE_ROSTER_KEYS)
+        if row is None:
+            continue
+        rows_checked += 1
+        for (yy, mm) in months:
+            d = date(yy, mm, 1)
+            while d.month == mm:
+                col = _date_column_for_matrix(values, d)
+                if col is not None:
+                    cur = _shift_sheet_cell_value(values, row, col)
+                    if cur in want_codes:
+                        shift, confidence = _derive_original_shift_from_pattern(
+                            values, row, col, d
+                        )
+                        found.append(
+                            {
+                                "person": nm,
+                                "date": d.isoformat(),
+                                "row": row,
+                                "col": col,
+                                "current": cur,
+                                "restore_to": shift,
+                                "confidence": confidence,
+                            }
+                        )
+                d += timedelta(days=1)
+
+    writable = [f for f in found if f["restore_to"]]
+    result = {
+        "rows_checked": rows_checked,
+        "months": [f"{y}-{m:02d}" for y, m in months],
+        "found": len(found),
+        "restorable": len(writable),
+        "undecidable": len(found) - len(writable),
+        "written": 0,
+        "dry_run": not apply,
+        "cells": found,
+    }
+    if apply and writable:
+        token = get_tenant_access_token()
+        updates = [(f["row"], f["col"], f["restore_to"]) for f in writable]
+        col_dates: dict[int, date] = {}
+        for f in writable:
+            on = _parse_date_value(f["date"])
+            if on:
+                col_dates[f["col"]] = on
+        _put_ose_shift_sheet_cells(
+            token, updates, values=values, col_dates=col_dates, sheet_id=SHEET_ID
+        )
+        result["written"] = len(updates)
+    if json_out:
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    else:
+        mode = "APPLY" if apply else "DRY RUN"
+        print(
+            f"[ose_Duty] SHEET scan for leave codes ({mode}) on {SHEET_ID} "
+            f"months={','.join(result['months'])}: {rows_checked} roster row(s), "
+            f"{len(found)} leave cell(s), {len(writable)} restorable, "
+            f"{result['undecidable']} undecidable, {result['written']} written",
+            flush=True,
+        )
+        for f in found:
+            to = (
+                f"{f['restore_to']} ({f['confidence']})"
+                if f["restore_to"]
+                else "?? undecidable — fix by hand"
+            )
+            print(f"   {f['person']:<22} {f['date']:<12} {f['current']:>3} -> {to}", flush=True)
+    return result
+
+
 def probe_leave_shift_sheet_sync(*, apply: bool = False, json_out: bool = False) -> dict[str, Any]:
     """
     Debug leaveose → OSE shift sheet ``L`` sync.
@@ -5357,6 +5464,38 @@ if __name__ == "__main__":
             record_id=_opt("--record"),
             person=_opt("--person"),
             include_all=list_all,
+        )
+    elif "--scan-sheet-leave" in sys.argv:
+        # State-free: scan the roster itself for AL/SL/L/HL/EL and restore D/N.
+        #   --month 2026-07   (repeatable-ish: one month; default = this + next month)
+        #   --person "Name"   narrow to one person
+        #   --apply           write (default is a dry run)
+        json_out = "--json" in sys.argv
+        apply = "--apply" in sys.argv
+
+        def _opt2(flag: str) -> Optional[str]:
+            if flag in sys.argv:
+                i = sys.argv.index(flag)
+                if i + 1 < len(sys.argv):
+                    return sys.argv[i + 1]
+            return None
+
+        months = None
+        _m = _opt2("--month")
+        if _m:
+            try:
+                _y, _mo = _m.split("-")[:2]
+                months = [(int(_y), int(_mo))]
+            except (ValueError, IndexError):
+                print(f"❌ bad --month {_m!r}; expected YYYY-MM", flush=True)
+                sys.exit(2)
+        _codes = _opt2("--codes")
+        scan_sheet_leave_codes_to_original_shift(
+            months=months,
+            apply=apply,
+            json_out=json_out,
+            person=_opt2("--person"),
+            codes=set(_codes.split(",")) if _codes else None,
         )
     elif len(sys.argv) > 1:
         print(osedate(sys.argv[1]))
