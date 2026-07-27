@@ -1927,28 +1927,38 @@ def _parse_ose_leave_bitable_item_skip_reason(it: dict[str, Any]) -> str:
 
 
 def _load_leave_shift_sheet_state() -> dict[str, Any]:
+    empty = {"record_ids": [], "by_record": {}, "edited_records": []}
     try:
         with open(_LEAVE_SHIFT_SHEET_APPLIED_PATH, encoding="utf-8") as fh:
             data = json.load(fh)
     except FileNotFoundError:
-        return {"record_ids": [], "by_record": {}}
+        return dict(empty)
     except Exception:
-        return {"record_ids": [], "by_record": {}}
+        return dict(empty)
     if not isinstance(data, dict):
-        return {"record_ids": [], "by_record": {}}
+        return dict(empty)
     ids = [str(x).strip() for x in (data.get("record_ids") or []) if str(x).strip()]
     raw_by = data.get("by_record") if isinstance(data.get("by_record"), dict) else {}
     by_record = {str(k).strip(): dict(v) for k, v in raw_by.items() if str(k).strip() and isinstance(v, dict)}
-    return {"record_ids": ids, "by_record": by_record}
+    edited = [str(x).strip() for x in (data.get("edited_records") or []) if str(x).strip()]
+    return {"record_ids": ids, "by_record": by_record, "edited_records": edited}
 
 
-def _save_leave_shift_sheet_state(record_ids: set[str], by_record: dict[str, dict[str, Any]]) -> None:
+def _save_leave_shift_sheet_state(
+    record_ids: set[str],
+    by_record: dict[str, dict[str, Any]],
+    *,
+    edited_records: Optional[set[str]] = None,
+) -> None:
+    if edited_records is None:  # preserve whatever is on disk when caller doesn't touch it
+        edited_records = set(_load_leave_shift_sheet_state().get("edited_records") or [])
     tmp = _LEAVE_SHIFT_SHEET_APPLIED_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(
             {
                 "record_ids": sorted(record_ids),
                 "by_record": {k: by_record[k] for k in sorted(by_record)},
+                "edited_records": sorted(edited_records),
             },
             fh,
             ensure_ascii=False,
@@ -1956,6 +1966,29 @@ def _save_leave_shift_sheet_state(record_ids: set[str], by_record: dict[str, dic
         )
         fh.write("\n")
     os.replace(tmp, _LEAVE_SHIFT_SHEET_APPLIED_PATH)
+
+
+# Leave records that were EDITED after being written to the roster. Ops decision
+# 2026-07-27: an edited leave is NOT marked AL/SL/L — its cells show the person's
+# original D/N shift. Persisted so the periodic scan never re-marks them.
+def leave_shift_sheet_edited_records() -> set[str]:
+    return set(_load_leave_shift_sheet_state().get("edited_records") or [])
+
+
+def _set_leave_edited_flag(record_id: str, *, edited: bool) -> None:
+    rid = (record_id or "").strip()
+    if not rid:
+        return
+    state = _load_leave_shift_sheet_state()
+    flags = set(state.get("edited_records") or [])
+    if (rid in flags) == edited:
+        return
+    flags.add(rid) if edited else flags.discard(rid)
+    _save_leave_shift_sheet_state(
+        set(state.get("record_ids") or []),
+        dict(state.get("by_record") or {}),
+        edited_records=flags,
+    )
 
 
 def _mark_leave_shift_sheet_applied(record_id: str, *, snapshot: dict[str, Any]) -> None:
@@ -1990,6 +2023,81 @@ def _leave_shift_sheet_snapshots_match(a: dict[str, Any], b: dict[str, Any]) -> 
         and str(a.get("shift_code") or "") == str(b.get("shift_code") or "")
         and list(a.get("cells") or []) == list(b.get("cells") or [])
     )
+
+
+def _leave_request_identity(snap: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    """Identity of the leave REQUEST itself (never sheet-derived).
+
+    Deliberately excludes ``cells``: each cell's ``prev`` is re-read from the live sheet
+    on every poll, so comparing cells makes any third-party write (the offset sync, a
+    manual D/N correction, a row insert) look like a user edit. Only these five fields
+    change when someone actually edits the leave record.
+    """
+    return (
+        str(snap.get("person") or "").strip().lower(),
+        str(snap.get("start") or "").strip(),
+        str(snap.get("end") or "").strip(),
+        str(snap.get("leave_type") or "").strip().lower(),
+        str(snap.get("shift_code") or "").strip().upper(),
+    )
+
+
+def _leave_request_was_edited(old_snap: dict[str, Any], new_snap: dict[str, Any]) -> bool:
+    return bool(old_snap) and _leave_request_identity(old_snap) != _leave_request_identity(new_snap)
+
+
+def _restore_original_shift_cells(
+    token: str,
+    snap: dict[str, Any],
+    *,
+    values: list[list[Any]],
+    derive: bool = True,
+) -> dict[str, Any]:
+    """Put a snapshot's cells back to their original ``D``/``N``/``*``.
+
+    Idempotent: a cell that no longer holds a leave code is left alone, so re-running
+    issues no writes. When the stored ``prev`` is unusable (the old edit path saved
+    ``""``) and ``derive`` is on, the original is inferred from the person's own row
+    pattern; undecidable cells are reported instead of guessed.
+    """
+    updates: list[tuple[int, int, str]] = []
+    col_dates: dict[int, date] = {}
+    already_ok = 0
+    unresolved: list[dict[str, Any]] = []
+    for c in snap.get("cells") or []:
+        try:
+            row, col = int(c["row"]), int(c["col"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        current = _shift_sheet_cell_value(values, row, col)
+        if current not in _OSE_SHIFT_SHEET_LEAVE_CODES:
+            already_ok += 1  # nothing to undo (already a shift, or someone fixed it)
+            continue
+        on = _parse_date_value(c.get("date"))
+        prev = str(c.get("prev") or "").strip().upper()
+        confidence = "stored"
+        if prev not in ("D", "N", "*"):
+            prev, confidence = ("", "")
+            if derive:
+                prev, confidence = _derive_original_shift_from_pattern(values, row, col, on)
+        if prev not in ("D", "N", "*"):
+            unresolved.append({**c, "current": current})
+            continue
+        updates.append((row, col, prev))
+        if on:
+            col_dates[col] = on
+        c["_restored_to"] = prev
+        c["_confidence"] = confidence
+    if updates:
+        _put_ose_shift_sheet_cells(
+            token, updates, values=values, col_dates=col_dates, sheet_id=SHEET_ID
+        )
+    return {
+        "written": len(updates),
+        "already_ok": already_ok,
+        "unresolved": unresolved,
+        "updates": updates,
+    }
 
 
 def _leave_shift_sheet_snapshot_from_plan(parsed: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
@@ -2198,6 +2306,28 @@ def apply_leave_shift_sheet_for_record(
     values, err = _get_cached_ose_leave_sheet_values()
     if not values:
         raise RuntimeError(err or f"Could not load OSE sheet {SHEET_ID!r}")
+
+    # Known edited leave → keep the original D/N shift; never re-mark AL/SL.
+    # _restore_original_shift_cells is idempotent, so this writes only if the cell
+    # somehow shows a leave code again.
+    if rid in leave_shift_sheet_edited_records():
+        restored = 0
+        if old_snap:
+            out = _restore_original_shift_cells(
+                get_tenant_access_token(), old_snap, values=values
+            )
+            restored = out["written"]
+            if not out["unresolved"]:
+                _unmark_leave_shift_sheet_applied(rid)
+        return {
+            "ok": True,
+            "record_id": rid,
+            "person": parsed["person"],
+            "cells_updated": 0,
+            "restored_cells": restored,
+            "skipped": "edited_keep_original_shift",
+        }
+
     shift_code = str(parsed.get("shift_code") or "L")
     plan = _compute_leave_shift_sheet_plan(
         person=parsed["person"],
@@ -2222,10 +2352,39 @@ def apply_leave_shift_sheet_for_record(
             "skipped": "already_applied",
         }
     token = get_tenant_access_token()
+    if _leave_request_was_edited(old_snap, new_snap):
+        # The leave REQUEST changed (dates / type / person) → per ops policy the roster
+        # shows the ORIGINAL D/N shift, not AL/SL. Keyed off the bitable record only, so
+        # another writer touching the cell can never be mistaken for an edit.
+        out = _restore_original_shift_cells(token, old_snap, values=values)
+        _set_leave_edited_flag(rid, edited=True)
+        if out["unresolved"]:
+            # Original unknown for some cells — KEEP the snapshot so
+            # ``--fix-stranded-leave`` can still find them; don't pretend it's clean.
+            return {
+                "ok": True,
+                "record_id": rid,
+                "person": parsed["person"],
+                "cells_updated": 0,
+                "restored_cells": out["written"],
+                "unresolved_cells": len(out["unresolved"]),
+                "skipped": "edited_restored_original_shift_partial",
+            }
+        _unmark_leave_shift_sheet_applied(rid)
+        return {
+            "ok": True,
+            "record_id": rid,
+            "person": parsed["person"],
+            "cells_updated": 0,
+            "restored_cells": out["written"],
+            "skipped": "edited_restored_original_shift",
+        }
     if (
         old_snap
         and not _leave_shift_sheet_snapshots_match(old_snap, new_snap)
     ):
+        # Same request, but the cells drifted (offset sync, manual fix, row shift).
+        # Unchanged self-healing behaviour: revert what we wrote, then re-apply.
         _revert_leave_shift_sheet_snapshot(token, old_snap, values=values)
         values, err = _get_cached_ose_leave_sheet_values()
         if not values:
@@ -2349,7 +2508,8 @@ def scan_revert_deleted_leave_from_shift_sheet() -> dict[str, int]:
     """Restore ``D``/``N`` when a tracked leave row is removed or no longer approved."""
     state = _load_leave_shift_sheet_state()
     applied_ids = set(state.get("record_ids") or [])
-    if not applied_ids:
+    edited_ids = set(state.get("edited_records") or [])
+    if not applied_ids and not edited_ids:
         return {"scanned": 0, "reverted": 0, "errors": 0}
     invalidate_ose_bitable_cache()
     token = get_tenant_access_token()
@@ -2359,6 +2519,12 @@ def scan_revert_deleted_leave_from_shift_sheet() -> dict[str, int]:
         parsed = _parse_ose_leave_bitable_item(it)
         if parsed:
             approved_ids.add(parsed["record_id"])
+    # Only drop an edited flag once the record is really gone from the source. A single
+    # empty/failed fetch must not clear flags (that would let the next scan re-mark
+    # AL/SL), so require a non-empty item list first.
+    if items:
+        for rid in sorted(edited_ids - approved_ids):
+            _set_leave_edited_flag(rid, edited=False)
     reverted = 0
     errors = 0
     for rid in sorted(applied_ids):
@@ -2409,6 +2575,179 @@ def scan_bitable_approved_leave_for_shift_sheet() -> dict[str, int]:
             errors += 1
             print(f"[ose_Duty] leave shift sheet apply failed for {rid!r}: {exc!r}", flush=True)
     return {"scanned": len(items), "applied": applied, "restyled": restyled, "errors": errors}
+
+
+def _derive_original_shift_from_pattern(
+    values: list[list[Any]], row: int, col: int, on: Optional[date] = None
+) -> tuple[str, str]:
+    """Infer a cell's original shift from the person's PREDOMINANT shift that month.
+
+    OSE staff work a whole month on the same shift, so "what is this person mostly on
+    in this month" is the reliable signal (per ops, 2026-07-27): count every ``D`` and
+    ``N`` in their row across that month and take the majority.
+
+    ``high`` = one shift only (or ≥70% of counted days), ``medium`` = a plain majority,
+    ``("", "")`` = undecidable (tie, or no D/N in the month) → reported, never guessed.
+    Never returns ``*``: an offset original cannot be inferred.
+    """
+    if on is None:
+        return "", ""
+    counts = {"D": 0, "N": 0}
+    d = on.replace(day=1)
+    while d.month == on.month:
+        c = _date_column_for_matrix(values, d)
+        if c is not None and c != col:
+            val = _shift_sheet_cell_value(values, row, c)
+            if val in ("D", "N"):
+                counts[val] += 1
+        d += timedelta(days=1)
+    total = counts["D"] + counts["N"]
+    if not total:
+        return "", ""
+    win, lose = ("D", "N") if counts["D"] >= counts["N"] else ("N", "D")
+    if counts[win] == counts[lose]:
+        return "", ""  # genuine tie — a half-month rotation; let a human decide
+    share = counts[win] / total
+    return win, ("high" if (counts[lose] == 0 or share >= 0.7) else "medium")
+
+
+def _leave_snapshot_on_current_sheet(snap: dict[str, Any]) -> bool:
+    """Same tab guard the apply path uses — a legacy-tab snapshot's row/col would
+    otherwise be mapped onto THIS tab and hit the wrong person's row."""
+    sid = str(snap.get("sheet_id") or "")
+    if sid in ("3RIBRL", "65p5cn"):
+        return False
+    return sid in ("", SHEET_ID, LEAVE_SHEET_ID)
+
+
+def find_leave_records_needing_restore() -> list[dict[str, Any]]:
+    """Tracked leave records whose roster cells should show the original shift.
+
+    Two sources: records already flagged edited, and records with a cell stuck on a
+    leave code whose stored original is missing — the fingerprint of the pre-fix edit
+    path, which saved ``prev=""`` and could never be reverted.
+    """
+    values, err = _get_cached_ose_leave_sheet_values()
+    if not values:
+        raise RuntimeError(err or f"Could not load OSE sheet {SHEET_ID!r}")
+    state = _load_leave_shift_sheet_state()
+    flagged = set(state.get("edited_records") or [])
+    out: list[dict[str, Any]] = []
+    for rid, snap in sorted((state.get("by_record") or {}).items()):
+        if not _leave_snapshot_on_current_sheet(snap):
+            continue
+        cells: list[dict[str, Any]] = []
+        lost = False
+        for c in snap.get("cells") or []:
+            try:
+                row, col = int(c["row"]), int(c["col"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            current = _shift_sheet_cell_value(values, row, col)
+            if current not in _OSE_SHIFT_SHEET_LEAVE_CODES:
+                continue  # already a shift — nothing to restore
+            prev = str(c.get("prev") or "").strip().upper()
+            if prev in ("D", "N", "*"):
+                target, confidence = prev, "stored"
+            else:
+                lost = True
+                target, confidence = _derive_original_shift_from_pattern(
+                    values, row, col, _parse_date_value(c.get("date"))
+                )
+            cells.append(
+                {
+                    "date": c.get("date") or "",
+                    "row": row,
+                    "col": col,
+                    "current": current,
+                    "restore_to": target,
+                    "confidence": confidence,
+                }
+            )
+        if not cells:
+            continue
+        if rid not in flagged and not lost:
+            continue  # a normal, correctly-marked approved leave — leave it alone
+        out.append(
+            {
+                "record_id": rid,
+                "person": snap.get("person") or "",
+                "leave_type": snap.get("leave_type") or "",
+                "flagged_edited": rid in flagged,
+                "cells": cells,
+            }
+        )
+    return out
+
+
+def restore_leave_cells_to_original_shift(
+    *, apply: bool = False, json_out: bool = False, record_id: str | None = None
+) -> dict[str, Any]:
+    """Report (default) or restore leave-coded cells back to the original ``D``/``N``.
+
+    DRY RUN unless ``apply=True``. Only cells with a stored original or a high/medium
+    pattern match are written; undecidable ones are listed for manual fixing. Restored
+    records are flagged edited and their snapshot dropped, so the periodic scan neither
+    re-marks them nor treats them as still applied.
+    """
+    records = find_leave_records_needing_restore()
+    if record_id:
+        rid_want = record_id.strip()
+        records = [r for r in records if r["record_id"] == rid_want]
+    total_cells = sum(len(r["cells"]) for r in records)
+    writable = [
+        (r, [c for c in r["cells"] if c["restore_to"]]) for r in records
+    ]
+    unresolved = sum(1 for r in records for c in r["cells"] if not c["restore_to"])
+    result: dict[str, Any] = {
+        "records": len(records),
+        "cells": total_cells,
+        "restorable": sum(len(cs) for _r, cs in writable),
+        "unresolved": unresolved,
+        "written": 0,
+        "dry_run": not apply,
+        "detail": records,
+    }
+    if apply and result["restorable"]:
+        values, err = _get_cached_ose_leave_sheet_values()
+        if not values:
+            raise RuntimeError(err or "Could not load OSE shift sheet")
+        token = get_tenant_access_token()
+        for rec, cs in writable:
+            if not cs:
+                continue
+            updates = [(c["row"], c["col"], c["restore_to"]) for c in cs]
+            col_dates: dict[int, date] = {}
+            for c in cs:
+                on = _parse_date_value(c.get("date"))
+                if on:
+                    col_dates[c["col"]] = on
+            _put_ose_shift_sheet_cells(
+                token, updates, values=values, col_dates=col_dates, sheet_id=SHEET_ID
+            )
+            result["written"] += len(updates)
+            # Never let the next scan re-mark or re-revert what we just restored.
+            _set_leave_edited_flag(rec["record_id"], edited=True)
+            if len(cs) == len(rec["cells"]):
+                _unmark_leave_shift_sheet_applied(rec["record_id"])
+    if json_out:
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    else:
+        mode = "APPLY" if apply else "DRY RUN"
+        print(
+            f"[ose_Duty] leave cells -> original shift ({mode}): "
+            f"{len(records)} record(s), {total_cells} cell(s), "
+            f"{result['restorable']} restorable, {unresolved} undecidable, "
+            f"{result['written']} written",
+            flush=True,
+        )
+        for r in records:
+            tag = " [edited]" if r["flagged_edited"] else " [lost original]"
+            print(f"  {r['person']} ({r['leave_type']}){tag}", flush=True)
+            for c in r["cells"]:
+                to = f"{c['restore_to']} ({c['confidence']})" if c["restore_to"] else "?? undecidable — fix by hand"
+                print(f"     {c['date']:<12} {c['current']:>3} -> {to}", flush=True)
+    return result
 
 
 def probe_leave_shift_sheet_sync(*, apply: bool = False, json_out: bool = False) -> dict[str, Any]:
@@ -4943,6 +5282,16 @@ if __name__ == "__main__":
         json_out = "--json" in sys.argv
         apply = "--apply" in sys.argv
         probe_leave_shift_sheet_sync(apply=apply, json_out=json_out)
+    elif "--restore-leave-shift" in sys.argv:
+        # DRY RUN by default; add --apply to write. --record recXXXX limits to one leave.
+        json_out = "--json" in sys.argv
+        apply = "--apply" in sys.argv
+        rid = None
+        if "--record" in sys.argv:
+            _i = sys.argv.index("--record")
+            if _i + 1 < len(sys.argv):
+                rid = sys.argv[_i + 1]
+        restore_leave_cells_to_original_shift(apply=apply, json_out=json_out, record_id=rid)
     elif len(sys.argv) > 1:
         print(osedate(sys.argv[1]))
     else:
