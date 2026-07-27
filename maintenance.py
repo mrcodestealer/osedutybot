@@ -1695,7 +1695,13 @@ def build_cancelled_card_elements(
         original = resolve_maintenance_subject(email_subject, email_body) or _email_ref_line(
             inf, email_subject, email_body
         )
+    # @tag CS (Team) + CC QA Support, same as the set/unset maintenance cards — a
+    # cancellation still needs both teams to know the maintenance is off.
     return [
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"Hi {_at_cs_team()}"},
+        },
         _card_labeled_field("Date", date),
         _card_labeled_field("Table", table),
         {
@@ -1703,6 +1709,10 @@ def build_cancelled_card_elements(
             "text": {"tag": "lark_md", "content": notice},
         },
         {"tag": "hr"},
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"**CC:** {_at_qa_support()}"},
+        },
         {
             "tag": "div",
             "text": {
@@ -1870,11 +1880,14 @@ def build_cancelled_summary(
         original = resolve_maintenance_subject(ref_email, email_body) or ref_email
     return "\n".join(
         [
+            f"Hi {_at_cs_team()}",
+            "",
             f"**Date:**\n{date}",
             f"**Table:**\n{table}",
             "",
             notice,
             "",
+            f"**CC:** {_at_qa_support()}",
             f"📧 Original: {original}",
         ]
     )
