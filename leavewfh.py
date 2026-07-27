@@ -1207,28 +1207,50 @@ def sync_wfh_calendar_to_bitable(
 
     existing = get_all_records(token, TRACK_BASE_ID, TRACK_WFH_TABLE_ID)
     source_by_key = {_leave_row_key(r): r for r in source_rows}
+    # key -> ALL record_ids, month-unscoped — same fix as the leave sync (2026-07-27):
+    # the old key->one-rid month-scoped map could never delete more than one duplicate
+    # per WFH row and re-created out-of-month rows on every run.
+    rows_by_key = _existing_rows_by_key_all(existing, parse=_parse_wfh_bitable_row)
     synced_in_month = _existing_wfh_rows_by_key_for_month(existing, year, month)
 
     deleted = 0
+    duplicates_removed = 0
     delete_errors: list[str] = []
+
+    def _drop(rid: str) -> bool:
+        nonlocal deleted
+        try:
+            delete_record(token, TRACK_BASE_ID, TRACK_WFH_TABLE_ID, rid)
+            deleted += 1
+            return True
+        except Exception as exc:
+            delete_errors.append(f"{rid}: {exc}")
+            return False
+
+    # 1) Collapse duplicates of the SAME WFH row, whatever month it falls in.
+    for key, rids in list(rows_by_key.items()):
+        if len(rids) <= 1:
+            continue
+        kept: list[str] = rids[:1]
+        for rid in rids[1:]:
+            if _drop(rid):
+                duplicates_removed += 1
+            else:
+                kept.append(rid)
+        rows_by_key[key] = kept
+
+    # 2) Remove rows gone from the source calendar, within the month being synced.
     if month_changed or force_resync:
-        for rid in set(synced_in_month.values()):
-            try:
-                delete_record(token, TRACK_BASE_ID, TRACK_WFH_TABLE_ID, rid)
-                deleted += 1
-            except Exception as exc:
-                delete_errors.append(f"{rid}: {exc}")
-        rows_to_add = list(source_rows)
+        stale_keys = list(synced_in_month)
     else:
-        for key, rid in synced_in_month.items():
-            if key in source_by_key:
-                continue
-            try:
-                delete_record(token, TRACK_BASE_ID, TRACK_WFH_TABLE_ID, rid)
-                deleted += 1
-            except Exception as exc:
-                delete_errors.append(f"{rid}: {exc}")
-        rows_to_add = [row for key, row in source_by_key.items() if key not in synced_in_month]
+        stale_keys = [k for k in synced_in_month if k not in source_by_key]
+    for key in stale_keys:
+        for rid in rows_by_key.get(key, []):
+            _drop(rid)
+        rows_by_key.pop(key, None)
+
+    # 3) Create only what genuinely has no row left, judged against ALL existing rows.
+    rows_to_add = [row for key, row in source_by_key.items() if not rows_by_key.get(key)]
 
     created_ids: list[str] = []
     create_errors: list[str] = []
@@ -1253,6 +1275,7 @@ def sync_wfh_calendar_to_bitable(
         "month": month,
         "month_changed": month_changed,
         "deleted": deleted,
+        "duplicates_removed": duplicates_removed,
         "created": len(created_ids),
         "added": len(created_ids),
         "already_synced": len(source_rows) - len(rows_to_add),
@@ -1687,26 +1710,31 @@ def _existing_synced_rows_by_key(
 
 def _existing_rows_by_key_all(
     records: list[dict[str, Any]],
+    *,
+    parse: Any = None,
 ) -> dict[tuple[str, str, str, str], list[str]]:
-    """Map leave row key → EVERY record_id carrying it, oldest first.
+    """Map row key → EVERY record_id carrying it, original first.
 
-    The old helpers returned ``key -> one record_id`` (a dict), so a leave written N
+    The old helpers returned ``key -> one record_id`` (a dict), so a row written N
     times could only ever have ONE copy deleted — the cleanup could never converge and
     the table grew without bound (167 records for 7 real leaves, 2026-07-27). Ordering
-    is by numeric ``LeaveID`` so the original row is the one kept.
+    is by numeric ``LeaveID`` when present (the original row wins), else input order.
+    ``parse`` defaults to leave rows; pass ``_parse_wfh_bitable_row`` for the WFH table.
     """
-    out: dict[tuple[str, str, str, str], list[tuple[int, str]]] = {}
-    for rec in records:
-        parsed = _parse_leave_row(rec, require_approved=False)
+    if parse is None:
+        parse = lambda rec: _parse_leave_row(rec, require_approved=False)  # noqa: E731
+    out: dict[tuple[str, str, str, str], list[tuple[int, int, str]]] = {}
+    for idx, rec in enumerate(records):
+        parsed = parse(rec)
         rid = str(rec.get("record_id") or "").strip()
         if not parsed or not rid:
             continue
         f = rec.get("fields") or {}
         raw_lid = od._field_text(od._get_field_by_aliases(f, ["LeaveID", "Leave ID", "Leave Id"]))
         digits = re.sub(r"\D", "", raw_lid or "")
-        order = int(digits) if digits else 10**12  # no LeaveID → sort last
-        out.setdefault(_leave_row_key(parsed), []).append((order, rid))
-    return {k: [rid for _o, rid in sorted(v)] for k, v in out.items()}
+        order = int(digits) if digits else 10**12  # no LeaveID → keep table order
+        out.setdefault(_leave_row_key(parsed), []).append((order, idx, rid))
+    return {k: [rid for _o, _i, rid in sorted(v)] for k, v in out.items()}
 
 
 def _existing_synced_rows_by_key_for_month(
