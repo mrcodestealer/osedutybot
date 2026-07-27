@@ -2052,7 +2052,11 @@ def _compute_leave_shift_sheet_plan(
                     updates.append((row, col, code))
                     col_dates[col] = d
                     prior = prior_by_rc.get((row, col))
-                    if prior and str(prior.get("prev") or "").strip().upper() in ("D", "N"):
+                    # Carry the ORIGINAL pre-leave value forward when the leave TYPE
+                    # changes (AL→SL). ``*`` counts too: _revert_leave_shift_sheet_snapshot
+                    # restores D/N/*, so dropping ``*`` here stranded the cell on a leave
+                    # code permanently (the revert then skipped it forever).
+                    if prior and str(prior.get("prev") or "").strip().upper() in ("D", "N", "*"):
                         cells.append({**prior, "code": code})
                     else:
                         cells.append(
