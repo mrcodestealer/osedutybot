@@ -2213,6 +2213,15 @@ def apply_leave_to_shift_sheet(
     *, person: str, start_date: date, end_date: date, shift_code: str = "L"
 ) -> dict[str, Any]:
     """Write ``AL``/``SL``/``HL``/``EL``/``L`` on leave sheet days that were ``D``/``N`` for an approved OSE leave range."""
+    if not _leave_shift_sheet_marking_enabled():
+        return {
+            "ok": True,
+            "person": person,
+            "start": start_date.isoformat(),
+            "end": end_date.isoformat(),
+            "cells_updated": 0,
+            "skipped": "leave_marking_disabled",
+        }
     values, err = _get_cached_ose_leave_sheet_values()
     if not values:
         raise RuntimeError(err or "Could not load OSE shift sheet")
@@ -2284,6 +2293,15 @@ def apply_leave_shift_sheet_for_record(
     rid = (record_id or "").strip()
     if not rid:
         raise ValueError("record_id is required")
+    if not _leave_shift_sheet_marking_enabled():
+        # Roster never shows leave codes — the sweep in
+        # scan_bitable_approved_leave_for_shift_sheet keeps the shift in place.
+        return {
+            "ok": True,
+            "record_id": rid,
+            "cells_updated": 0,
+            "skipped": "leave_marking_disabled",
+        }
     if leave_item is None:
         token = get_tenant_access_token()
         leave_item = None
@@ -2541,8 +2559,32 @@ def scan_revert_deleted_leave_from_shift_sheet() -> dict[str, int]:
 
 
 def scan_bitable_approved_leave_for_shift_sheet() -> dict[str, int]:
-    """Apply ``L`` on OSE shift sheet for approved leave from leaveose + OSE leave 全员."""
+    """Apply ``L`` on OSE shift sheet for approved leave from leaveose + OSE leave 全员.
+
+    With marking disabled (the default since 2026-07-27) this instead SWEEPS any leave
+    code off the roster back to the person's ``D``/``N`` shift. Nothing re-adds a code,
+    so the sweep converges: once clean it writes nothing on later runs.
+    """
     global _LEAVE_SHIFT_SHEET_REENSURE_DONE
+    if not _leave_shift_sheet_marking_enabled():
+        try:
+            res = scan_sheet_leave_codes_to_original_shift(apply=True)
+        except Exception as exc:
+            print(f"[ose_Duty] leave sweep failed: {exc!r}", flush=True)
+            return {"scanned": 0, "applied": 0, "restyled": 0, "errors": 1}
+        if res.get("written") or res.get("undecidable"):
+            print(
+                f"[ose_Duty] leave sweep: {res.get('found')} leave cell(s) found, "
+                f"{res.get('written')} restored to D/N, "
+                f"{res.get('undecidable')} undecidable (left for manual fix)",
+                flush=True,
+            )
+        return {
+            "scanned": int(res.get("found") or 0),
+            "applied": int(res.get("written") or 0),
+            "restyled": 0,
+            "errors": int(res.get("undecidable") or 0),
+        }
     invalidate_ose_bitable_cache()
     if not _LEAVE_SHIFT_SHEET_REENSURE_DONE:
         _LEAVE_SHIFT_SHEET_REENSURE_DONE = True
@@ -2575,6 +2617,27 @@ def scan_bitable_approved_leave_for_shift_sheet() -> dict[str, int]:
             errors += 1
             print(f"[ose_Duty] leave shift sheet apply failed for {rid!r}: {exc!r}", flush=True)
     return {"scanned": len(items), "applied": applied, "restyled": restyled, "errors": errors}
+
+
+# Codes the roster must never keep — swept back to the person's D/N shift.
+# Plain ``L`` is deliberately EXCLUDED (ops, 2026-07-27): it stays on the roster.
+_OSE_LEAVE_CODES_SWEPT = frozenset({"AL", "SL", "HL", "EL"})
+
+
+def _leave_shift_sheet_marking_enabled() -> bool:
+    """Whether approved leave is written onto the OSE roster as ``AL``/``SL``/``L``/…
+
+    Ops decision 2026-07-27: **no**. Every roster day shows the person's ``D``/``N``
+    shift; leave lives in the Bitable/HRMS only. The periodic scan sweeps any leave code
+    it finds back to the shift, so an edited leave (or a hand-typed code) self-corrects.
+    Set ``OSE_LEAVE_MARK_SHIFT_SHEET=1`` to restore the old marking behaviour.
+    """
+    return (os.getenv("OSE_LEAVE_MARK_SHIFT_SHEET") or "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
 
 def _derive_original_shift_from_pattern(
@@ -2829,8 +2892,10 @@ def scan_sheet_leave_codes_to_original_shift(
         nxt = (today.replace(day=1) + timedelta(days=31)).replace(day=1)
         months = [(today.year, today.month), (nxt.year, nxt.month)]
     want_person = _title_name(person).strip().lower() if person else ""
+    # Default = AL/SL/HL/EL only; plain ``L`` stays on the roster unless asked for
+    # explicitly via ``codes`` (``--codes L``).
     want_codes = {c.strip().upper() for c in (codes or set()) if c.strip()} or set(
-        _OSE_SHIFT_SHEET_LEAVE_CODES
+        _OSE_LEAVE_CODES_SWEPT
     )
 
     found: list[dict[str, Any]] = []
