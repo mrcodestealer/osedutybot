@@ -1685,6 +1685,30 @@ def _existing_synced_rows_by_key(
     return out
 
 
+def _existing_rows_by_key_all(
+    records: list[dict[str, Any]],
+) -> dict[tuple[str, str, str, str], list[str]]:
+    """Map leave row key → EVERY record_id carrying it, oldest first.
+
+    The old helpers returned ``key -> one record_id`` (a dict), so a leave written N
+    times could only ever have ONE copy deleted — the cleanup could never converge and
+    the table grew without bound (167 records for 7 real leaves, 2026-07-27). Ordering
+    is by numeric ``LeaveID`` so the original row is the one kept.
+    """
+    out: dict[tuple[str, str, str, str], list[tuple[int, str]]] = {}
+    for rec in records:
+        parsed = _parse_leave_row(rec, require_approved=False)
+        rid = str(rec.get("record_id") or "").strip()
+        if not parsed or not rid:
+            continue
+        f = rec.get("fields") or {}
+        raw_lid = od._field_text(od._get_field_by_aliases(f, ["LeaveID", "Leave ID", "Leave Id"]))
+        digits = re.sub(r"\D", "", raw_lid or "")
+        order = int(digits) if digits else 10**12  # no LeaveID → sort last
+        out.setdefault(_leave_row_key(parsed), []).append((order, rid))
+    return {k: [rid for _o, rid in sorted(v)] for k, v in out.items()}
+
+
 def _existing_synced_rows_by_key_for_month(
     records: list[dict[str, Any]],
     year: int,
@@ -1969,30 +1993,52 @@ def sync_leave_calendar_to_bitable(
 
     existing = get_all_records(token, track_base, track_table)
     source_by_key = {_leave_row_key(r): r for r in source_rows}
+    # key -> ALL record_ids (oldest first). Unscoped by month on purpose: a leave dated
+    # outside the synced month still EXISTS, and treating it as missing is what made the
+    # sync re-create it on every run.
+    rows_by_key = _existing_rows_by_key_all(existing)
     synced_in_month = _existing_synced_rows_by_key_for_month(existing, year, month)
 
     deleted = 0
+    duplicates_removed = 0
     delete_errors: list[str] = []
+
+    def _drop(rid: str) -> bool:
+        nonlocal deleted
+        try:
+            delete_record(token, track_base, track_table, rid)
+            deleted += 1
+            return True
+        except Exception as exc:
+            delete_errors.append(f"{rid}: {exc}")
+            return False
+
+    # 1) Collapse duplicates of the SAME leave, whatever month it falls in. Keeping the
+    #    oldest row makes this idempotent: once clean, nothing is deleted again.
+    for key, rids in list(rows_by_key.items()):
+        if len(rids) <= 1:
+            continue
+        kept: list[str] = rids[:1]
+        for rid in rids[1:]:
+            if _drop(rid):
+                duplicates_removed += 1
+            else:
+                kept.append(rid)  # delete failed → still present, don't lose track of it
+        rows_by_key[key] = kept
+
+    # 2) Remove rows for leave that no longer exists in the source, but only within the
+    #    month being synced (other months are not this run's business).
     if month_changed or force_resync:
-        for rid in set(synced_in_month.values()):
-            try:
-                delete_record(token, track_base, track_table, rid)
-                deleted += 1
-            except Exception as exc:
-                delete_errors.append(f"{rid}: {exc}")
-        rows_to_add = list(source_rows)
+        stale_keys = list(synced_in_month)  # full month rebuild
     else:
-        for key, rid in synced_in_month.items():
-            if key in source_by_key:
-                continue
-            try:
-                delete_record(token, track_base, track_table, rid)
-                deleted += 1
-            except Exception as exc:
-                delete_errors.append(f"{rid}: {exc}")
-        rows_to_add = [
-            row for key, row in source_by_key.items() if key not in synced_in_month
-        ]
+        stale_keys = [k for k in synced_in_month if k not in source_by_key]
+    for key in stale_keys:
+        for rid in rows_by_key.get(key, []):
+            _drop(rid)
+        rows_by_key.pop(key, None)
+
+    # 3) Create only what genuinely has no row left, judged against ALL existing rows.
+    rows_to_add = [row for key, row in source_by_key.items() if not rows_by_key.get(key)]
 
     created_ids: list[str] = []
     create_errors: list[str] = []
@@ -2041,6 +2087,7 @@ def sync_leave_calendar_to_bitable(
         "created": len(created_ids),
         "added": len(created_ids),
         "already_synced": len(source_rows) - len(rows_to_add),
+        "duplicates_removed": duplicates_removed,
         "annual_leave_rows": annual_count,
         "source_rows": len(source_rows),
         "ose_only": ose_only,

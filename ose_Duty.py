@@ -2910,6 +2910,97 @@ def scan_sheet_leave_codes_to_original_shift(
     return result
 
 
+def suppress_leave_marking(
+    *,
+    person: str | None = None,
+    record_id: str | None = None,
+    month: Optional[tuple[int, int]] = None,
+    apply: bool = False,
+    unsuppress: bool = False,
+    json_out: bool = False,
+) -> dict[str, Any]:
+    """Flag approved leave records so the roster keeps the ORIGINAL ``D``/``N`` shift.
+
+    Restoring a cell with ``--scan-sheet-leave`` only fixes the sheet; the periodic
+    ``scan_bitable_approved_leave_for_shift_sheet`` would re-mark it while the leave is
+    still approved. Flagging the record makes ``apply_leave_shift_sheet_for_record``
+    return early forever, so the shift stays put.
+
+    DRY RUN unless ``apply=True``. ``unsuppress=True`` removes the flag again.
+    """
+    token = get_tenant_access_token()
+    items = _ose_leave_items_for_shift_sheet(token)
+    want_person = _title_name(person).strip().lower() if person else ""
+    want_rid = (record_id or "").strip()
+    flagged_now = leave_shift_sheet_edited_records()
+
+    matched: list[dict[str, Any]] = []
+    for it in items:
+        parsed = _parse_ose_leave_bitable_item(it)
+        if not parsed:
+            continue
+        rid = parsed["record_id"]
+        nm = _title_name(parsed.get("person") or "")
+        if want_rid and rid != want_rid:
+            continue
+        if want_person and nm.strip().lower() != want_person:
+            continue
+        if month:
+            if not _overlaps_month_dates(parsed["start"], parsed["end"], month[0], month[1]):
+                continue
+        matched.append(
+            {
+                "record_id": rid,
+                "person": nm,
+                "start": parsed["start"].isoformat(),
+                "end": parsed["end"].isoformat(),
+                "leave_type": parsed.get("leave_type") or "",
+                "already_flagged": rid in flagged_now,
+            }
+        )
+
+    changed = 0
+    if apply:
+        for m in matched:
+            if m["already_flagged"] == (not unsuppress):
+                continue
+            _set_leave_edited_flag(m["record_id"], edited=not unsuppress)
+            changed += 1
+    result = {
+        "matched": len(matched),
+        "changed": changed,
+        "dry_run": not apply,
+        "unsuppress": unsuppress,
+        "records": matched,
+    }
+    if json_out:
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    else:
+        verb = "UN-SUPPRESS" if unsuppress else "SUPPRESS"
+        mode = "APPLY" if apply else "DRY RUN"
+        print(
+            f"[ose_Duty] {verb} leave marking ({mode}): {len(matched)} record(s) matched, "
+            f"{changed} flag(s) changed",
+            flush=True,
+        )
+        for m in matched:
+            state = "already suppressed" if m["already_flagged"] else "marked as leave"
+            print(
+                f"   {m['person']:<22} {m['start']} → {m['end']} "
+                f"{m['leave_type']:<14} [{state}] {m['record_id']}",
+                flush=True,
+            )
+        if not apply and matched:
+            print("   (add --apply to write the flags)", flush=True)
+    return result
+
+
+def _overlaps_month_dates(start: date, end: date, year: int, month: int) -> bool:
+    first = date(year, month, 1)
+    last = (first + timedelta(days=31)).replace(day=1) - timedelta(days=1)
+    return not (end < first or start > last)
+
+
 def probe_leave_shift_sheet_sync(*, apply: bool = False, json_out: bool = False) -> dict[str, Any]:
     """
     Debug leaveose → OSE shift sheet ``L`` sync.
@@ -5490,12 +5581,49 @@ if __name__ == "__main__":
                 print(f"❌ bad --month {_m!r}; expected YYYY-MM", flush=True)
                 sys.exit(2)
         _codes = _opt2("--codes")
-        scan_sheet_leave_codes_to_original_shift(
+        _scan_res = scan_sheet_leave_codes_to_original_shift(
             months=months,
             apply=apply,
             json_out=json_out,
             person=_opt2("--person"),
             codes=set(_codes.split(",")) if _codes else None,
+        )
+        if apply and _scan_res.get("written"):
+            print(
+                "\n⚠️  The sheet is fixed, but the leave is still APPROVED in the Bitable, "
+                "so the periodic sync will re-mark these cells. Make it permanent with:\n"
+                f"   --suppress-leave --person \"{_opt2('--person') or '<name>'}\" --apply",
+                flush=True,
+            )
+    elif "--suppress-leave" in sys.argv or "--unsuppress-leave" in sys.argv:
+        # Flag approved leave records so the roster keeps the original D/N shift.
+        json_out = "--json" in sys.argv
+        apply = "--apply" in sys.argv
+        undo = "--unsuppress-leave" in sys.argv
+
+        def _opt3(flag: str) -> Optional[str]:
+            if flag in sys.argv:
+                i = sys.argv.index(flag)
+                if i + 1 < len(sys.argv):
+                    return sys.argv[i + 1]
+            return None
+
+        _mo = _opt3("--month")
+        _month = None
+        if _mo:
+            try:
+                _y, _m2 = _mo.split("-")[:2]
+                _month = (int(_y), int(_m2))
+            except (ValueError, IndexError):
+                print(f"❌ bad --month {_mo!r}; expected YYYY-MM", flush=True)
+                sys.exit(2)
+        suppress_leave_marking(
+            person=_opt3("--person"),
+            record_id=_opt3("--record"),
+            month=_month,
+            apply=apply,
+            unsuppress=undo,
+            json_out=json_out,
         )
     elif len(sys.argv) > 1:
         print(osedate(sys.argv[1]))
