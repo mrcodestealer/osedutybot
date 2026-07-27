@@ -2620,21 +2620,37 @@ def _leave_snapshot_on_current_sheet(snap: dict[str, Any]) -> bool:
     return sid in ("", SHEET_ID, LEAVE_SHEET_ID)
 
 
-def find_leave_records_needing_restore() -> list[dict[str, Any]]:
+def find_leave_records_needing_restore(
+    *, include_all: bool = False
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Tracked leave records whose roster cells should show the original shift.
 
-    Two sources: records already flagged edited, and records with a cell stuck on a
-    leave code whose stored original is missing — the fingerprint of the pre-fix edit
-    path, which saved ``prev=""`` and could never be reverted.
+    Auto scope (``include_all=False``): records already flagged edited, plus records with
+    a cell stuck on a leave code whose stored original is missing — the fingerprint of
+    the pre-fix edit path, which saved ``prev=""`` and could never be reverted.
+
+    ``include_all=True`` returns EVERY tracked record that currently shows a leave code,
+    including correctly-marked approved leave. Use only with explicit targeting
+    (``--record`` / ``--person``), because restoring a valid leave removes it from the
+    roster. Also returns counters so a "0 records" result is self-explaining.
     """
     values, err = _get_cached_ose_leave_sheet_values()
     if not values:
         raise RuntimeError(err or f"Could not load OSE sheet {SHEET_ID!r}")
     state = _load_leave_shift_sheet_state()
     flagged = set(state.get("edited_records") or [])
+    by_record = state.get("by_record") or {}
+    stats = {
+        "tracked_records": len(by_record),
+        "flagged_edited": len(flagged),
+        "skipped_other_sheet": 0,
+        "cells_on_leave_code": 0,
+        "skipped_valid_leave": 0,
+    }
     out: list[dict[str, Any]] = []
-    for rid, snap in sorted((state.get("by_record") or {}).items()):
+    for rid, snap in sorted(by_record.items()):
         if not _leave_snapshot_on_current_sheet(snap):
+            stats["skipped_other_sheet"] += 1
             continue
         cells: list[dict[str, Any]] = []
         lost = False
@@ -2646,6 +2662,7 @@ def find_leave_records_needing_restore() -> list[dict[str, Any]]:
             current = _shift_sheet_cell_value(values, row, col)
             if current not in _OSE_SHIFT_SHEET_LEAVE_CODES:
                 continue  # already a shift — nothing to restore
+            stats["cells_on_leave_code"] += 1
             prev = str(c.get("prev") or "").strip().upper()
             if prev in ("D", "N", "*"):
                 target, confidence = prev, "stored"
@@ -2666,34 +2683,52 @@ def find_leave_records_needing_restore() -> list[dict[str, Any]]:
             )
         if not cells:
             continue
-        if rid not in flagged and not lost:
-            continue  # a normal, correctly-marked approved leave — leave it alone
+        if rid not in flagged and not lost and not include_all:
+            # A normal, correctly-marked approved leave — never touched automatically.
+            stats["skipped_valid_leave"] += 1
+            continue
         out.append(
             {
                 "record_id": rid,
                 "person": snap.get("person") or "",
                 "leave_type": snap.get("leave_type") or "",
                 "flagged_edited": rid in flagged,
+                "lost_original": lost,
                 "cells": cells,
             }
         )
-    return out
+    return out, stats
 
 
 def restore_leave_cells_to_original_shift(
-    *, apply: bool = False, json_out: bool = False, record_id: str | None = None
+    *,
+    apply: bool = False,
+    json_out: bool = False,
+    record_id: str | None = None,
+    person: str | None = None,
+    include_all: bool = False,
 ) -> dict[str, Any]:
     """Report (default) or restore leave-coded cells back to the original ``D``/``N``.
 
-    DRY RUN unless ``apply=True``. Only cells with a stored original or a high/medium
-    pattern match are written; undecidable ones are listed for manual fixing. Restored
-    records are flagged edited and their snapshot dropped, so the periodic scan neither
-    re-marks them nor treats them as still applied.
+    DRY RUN unless ``apply=True``. Only cells with a stored original or a clear
+    month-majority match are written; undecidable ones are listed for manual fixing.
+    Restored records are flagged edited and their snapshot dropped, so the periodic scan
+    neither re-marks them nor treats them as still applied.
+
+    ``record_id`` / ``person`` target specific leave explicitly and therefore widen the
+    scope to every tracked cell for that target (including a currently-valid leave —
+    that is the point when you want it off the roster). ``include_all`` lists everything.
     """
-    records = find_leave_records_needing_restore()
+    targeted = bool((record_id or "").strip() or (person or "").strip())
+    records, stats = find_leave_records_needing_restore(
+        include_all=include_all or targeted
+    )
     if record_id:
         rid_want = record_id.strip()
         records = [r for r in records if r["record_id"] == rid_want]
+    if person:
+        want = _title_name(person).strip().lower()
+        records = [r for r in records if _title_name(r["person"]).strip().lower() == want]
     total_cells = sum(len(r["cells"]) for r in records)
     writable = [
         (r, [c for c in r["cells"] if c["restore_to"]]) for r in records
@@ -2706,6 +2741,8 @@ def restore_leave_cells_to_original_shift(
         "unresolved": unresolved,
         "written": 0,
         "dry_run": not apply,
+        "targeted": targeted,
+        "stats": stats,
         "detail": records,
     }
     if apply and result["restorable"]:
@@ -2741,8 +2778,24 @@ def restore_leave_cells_to_original_shift(
             f"{result['written']} written",
             flush=True,
         )
+        # Explain a 0-record result instead of leaving you guessing.
+        print(
+            f"   scanned {stats['tracked_records']} tracked leave record(s); "
+            f"{stats['cells_on_leave_code']} cell(s) currently show a leave code; "
+            f"{stats['flagged_edited']} flagged edited; "
+            f"{stats['skipped_valid_leave']} skipped as valid leave; "
+            f"{stats['skipped_other_sheet']} on another tab",
+            flush=True,
+        )
+        if not records and stats["skipped_valid_leave"]:
+            print(
+                "   → nothing matched automatically. Those cells belong to leave that is "
+                "still approved and correctly marked. Target them explicitly with "
+                "--person \"Name\" or --record recXXXX (or --list to see them all).",
+                flush=True,
+            )
         for r in records:
-            tag = " [edited]" if r["flagged_edited"] else " [lost original]"
+            tag = " [edited]" if r["flagged_edited"] else (" [lost original]" if r.get("lost_original") else " [valid leave — explicit target]")
             print(f"  {r['person']} ({r['leave_type']}){tag}", flush=True)
             for c in r["cells"]:
                 to = f"{c['restore_to']} ({c['confidence']})" if c["restore_to"] else "?? undecidable — fix by hand"
@@ -5283,15 +5336,28 @@ if __name__ == "__main__":
         apply = "--apply" in sys.argv
         probe_leave_shift_sheet_sync(apply=apply, json_out=json_out)
     elif "--restore-leave-shift" in sys.argv:
-        # DRY RUN by default; add --apply to write. --record recXXXX limits to one leave.
+        # DRY RUN by default; add --apply to write.
+        #   --list                 show every tracked cell currently on a leave code
+        #   --record recXXXX       target one leave record
+        #   --person "Kheng Kwan"  target one person's tracked leave
         json_out = "--json" in sys.argv
         apply = "--apply" in sys.argv
-        rid = None
-        if "--record" in sys.argv:
-            _i = sys.argv.index("--record")
-            if _i + 1 < len(sys.argv):
-                rid = sys.argv[_i + 1]
-        restore_leave_cells_to_original_shift(apply=apply, json_out=json_out, record_id=rid)
+        list_all = "--list" in sys.argv
+
+        def _opt(flag: str) -> Optional[str]:
+            if flag in sys.argv:
+                i = sys.argv.index(flag)
+                if i + 1 < len(sys.argv):
+                    return sys.argv[i + 1]
+            return None
+
+        restore_leave_cells_to_original_shift(
+            apply=apply,
+            json_out=json_out,
+            record_id=_opt("--record"),
+            person=_opt("--person"),
+            include_all=list_all,
+        )
     elif len(sys.argv) > 1:
         print(osedate(sys.argv[1]))
     else:
