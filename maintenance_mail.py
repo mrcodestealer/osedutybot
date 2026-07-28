@@ -367,6 +367,12 @@ MAIL_IMAP_FOLDERS = [
     ).split(",")
     if f.strip()
 ]
+# After the watcher replies to an EVO maintenance mail (forward for CP games, or the
+# internal NOT IN CP reply), move the original out of its folder (e.g. OSE Pending)
+# back to INBOX so the Lark Mail UI shows it as handled. 0/false disables.
+MOVE_TO_INBOX_AFTER_REPLY = (
+    os.getenv("MAINT_MOVE_TO_INBOX", "").strip() or "1"
+) not in ("0", "false", "no", "off")
 def _order_jenkins_reply_folders(folders: list[str]) -> list[str]:
     """``OSE Pending`` first (where update threads usually live); dedupe."""
     prefer = (
@@ -512,6 +518,64 @@ def _select_mail_folder(mail: imaplib.IMAP4, folder: str, *, readonly: bool = Fa
         print(f"[maint-mail] SELECT {folder!r} not OK: {data!r}", flush=True)
         return False
     return True
+
+
+def _folder_is_inbox(folder: str) -> bool:
+    return (folder or "").strip().strip('"').casefold() == "inbox"
+
+
+def _move_uid_to_inbox(mail: imaplib.IMAP4, uid: bytes, *, from_folder: str) -> bool:
+    """Move a replied EVO maintenance mail from ``from_folder`` back to INBOX.
+
+    No-op when it is already in INBOX. Prefers ``UID MOVE`` (RFC 6851); falls back
+    to ``COPY`` + ``\\Deleted`` + expunge for servers without MOVE. Re-processing of
+    the moved copy (new UID in INBOX) is prevented by the existing Message-ID /
+    content-hash dedupe. Failure is non-fatal — the reply already went out.
+    """
+    if _folder_is_inbox(from_folder):
+        return False
+    uid_s = uid.decode() if isinstance(uid, bytes) else str(uid)
+    try:
+        typ, _data = mail.uid("MOVE", uid, "INBOX")
+        if typ == "OK":
+            print(
+                f"[maint-mail] moved {from_folder} uid={uid_s} → INBOX (MOVE)",
+                flush=True,
+            )
+            return True
+    except (imaplib.IMAP4.error, OSError) as ex:
+        if _imap_connection_broken(ex):
+            raise ImapStaleConnectionError(
+                f"IMAP connection lost during MOVE uid={uid_s}"
+            ) from ex
+        print(
+            f"[maint-mail] UID MOVE unsupported/failed uid={uid_s} ({ex!r}); COPY fallback",
+            flush=True,
+        )
+    try:
+        typ, data = mail.uid("COPY", uid, "INBOX")
+        if typ != "OK":
+            print(f"[maint-mail] COPY → INBOX failed uid={uid_s}: {data!r}", flush=True)
+            return False
+        mail.uid("store", uid, "+FLAGS", "(\\Deleted)")
+        try:
+            typ, _d = mail.uid("EXPUNGE", uid)  # UIDPLUS — expunge only this uid
+            if typ != "OK":
+                mail.expunge()
+        except (imaplib.IMAP4.error, OSError):
+            mail.expunge()
+        print(
+            f"[maint-mail] moved {from_folder} uid={uid_s} → INBOX (COPY+EXPUNGE)",
+            flush=True,
+        )
+        return True
+    except (imaplib.IMAP4.error, OSError) as ex:
+        if _imap_connection_broken(ex):
+            raise ImapStaleConnectionError(
+                f"IMAP connection lost during COPY uid={uid_s}"
+            ) from ex
+        print(f"[maint-mail] move → INBOX failed uid={uid_s}: {ex!r}", flush=True)
+        return False
 
 
 def _uid_key(folder: str, uid: str) -> str:
@@ -6270,6 +6334,21 @@ class MaintenanceMailWatcher:
                 state, message_id=message_id, content_key=content_key
             )
         mail.uid("store", uid, "+FLAGS", "(\\Seen)")
+
+        # Replied (CP forward or NOT-IN-CP internal reply) → move the original back
+        # to INBOX so the Lark Mail UI shows the thread as handled. \Seen is set
+        # first so it arrives read. A failed move is non-fatal and simply leaves the
+        # mail where it was — the reply itself already went out.
+        if email_action_ok and MOVE_TO_INBOX_AFTER_REPLY:
+            try:
+                _move_uid_to_inbox(mail, uid, from_folder=folder)
+            except ImapStaleConnectionError:
+                raise
+            except Exception as _mv_ex:
+                print(
+                    f"[maint-mail] move-to-inbox error uid={uid_s}: {_mv_ex!r}",
+                    flush=True,
+                )
 
         kind = (
             "cancelled"
