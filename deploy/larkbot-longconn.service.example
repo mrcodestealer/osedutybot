@@ -10,14 +10,6 @@ WorkingDirectory=/root/osedutybot
 EnvironmentFile=/root/osedutybot/.env
 Environment=LARK_EVENT_MODE=websocket
 Environment=PORT=5000
-# Warm Jenkins /update pool — force on regardless of .env (these override EnvironmentFile above).
-Environment=JU_WARM_POOL=1
-Environment=JU_WARM_ALLOW_COLD_FALLBACK=0
-# Warm VPN-creation browser — keep it logged in + form-ready so "create vpn" fills instantly
-# (no ~20s cold Chromium launch). Same guarantee as the /update pool.
-Environment=VPN_WARM_BROWSER=1
-Environment=VPN_WARM_PREWARM_ON_STARTUP=1
-Environment=VPN_WARM_ALLOW_COLD_FALLBACK=0
 ExecStart=/root/miniconda3/envs/fpmsbot/bin/python /root/osedutybot/main.py
 Restart=always
 RestartSec=10

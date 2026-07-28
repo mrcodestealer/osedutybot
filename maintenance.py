@@ -4404,44 +4404,6 @@ def build_checkemail_error_card(
     }
 
 
-def build_jenkins_manual_reply_email_card(
-    message_md: str,
-    *,
-    title: str = "Kindly manual reply email",
-    completions: list[tuple[str, str]] | None = None,
-) -> dict[str, Any]:
-    """Orange Lark card when Jenkins auto-reply cannot find the mail thread."""
-    parts = [message_md.strip()]
-    if completions:
-        blocks = [
-            f"**Done {env.strip()}**\nRemarks : {when.strip()}"
-            for env, when in completions
-        ]
-        parts.append(
-            "**Suggested manual reply** (paste into Reply-All on the original mail):\n\n"
-            + "\n\n".join(blocks)
-        )
-    return {
-        "schema": "2.0",
-        "config": {"update_multi": True, "width_mode": "fill"},
-        "header": {
-            "template": "orange",
-            "title": {"tag": "plain_text", "content": title[:200]},
-        },
-        "body": {
-            "elements": [
-                {
-                    "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": lark_md_for_card("\n\n".join(p for p in parts if p)),
-                    },
-                }
-            ]
-        },
-    }
-
-
 def build_maintenance_email_check_card(
     *,
     email_subject: str,

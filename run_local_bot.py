@@ -22,13 +22,11 @@ def _apply_local_playwright_defaults() -> None:
     if headless in ("0", "false", "no", "off"):
         return
     for key, val in (
-        ("JENKINSUPDATE_BOT_HEADLESS", "1"),
         ("SMACHINE_HEADLESS", "1"),
         ("CHECKCREDIT_HEADLESS", "1"),
         ("NP_BACKEND_HEADLESS", "1"),
         ("PROD_WARM_POOL", "0"),
         ("WEBMACHINE_WARM_POOL", "0"),
-        ("JU_WARM_POOL", "0"),
         ("VPN_WARM_BROWSER", "0"),
         ("THIRD_HTTP_WARM_POOL", "0"),
     ):

@@ -142,7 +142,6 @@ def lark_webhook():
         clean_text,
         chat_id=chat_id,
         send_message=send_message,
-        jenkins_available=False,
     ):
         return jsonify({"success": True})
 

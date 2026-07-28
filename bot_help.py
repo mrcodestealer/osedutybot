@@ -1,7 +1,7 @@
 """
 Bot command catalogue for Lark /help (interactive message cards).
 
-Keep in sync with handlers in main.py (and offsetleave / jenkinsupdate flows).
+Keep in sync with handlers in main.py (and offsetleave flows).
 """
 
 from __future__ import annotations
@@ -21,13 +21,12 @@ _SECTION_ICONS = {
     "ose": "📅",
     "machines": "🎰",
     "logs": "📊",
-    "jenkins": "🔧",
     "ops": "⚙️",
     "reminders": "⏰",
 }
 
 
-def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
+def _help_sections() -> list[HelpSection]:
     sections: list[HelpSection] = [
         (
             "general",
@@ -36,7 +35,6 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
             "blue",
             [
                 ("/help", "Command list (this card)", "命令列表（本卡片）"),
-                ("/help jenkins", "Jenkins job keywords card", "Jenkins 关键字卡片"),
                 ("/s <name>", "Search duty roster", "按姓名查值班表"),
                 ("/date", "Today's date", "今天日期"),
                 ("/holiday", "Upcoming public holidays", "即将到来的公共假期"),
@@ -166,22 +164,6 @@ def _help_sections(*, jenkins_available: bool) -> list[HelpSection]:
         ),
     ]
 
-    if jenkins_available:
-        sections.append(
-            (
-                "jenkins",
-                "Jenkins",
-                _SECTION_ICONS["jenkins"],
-                "indigo",
-                [
-                    ("/update <keyword>", "Match job → confirm → build", "匹配任务→确认→构建"),
-                    ("/updatemore …", "Multiple updates (each UPDATE … line)", "批量更新（每段 UPDATE 行）"),
-                    ("/jenkinsupdate …", "Alias of /update", "同上（别名）"),
-                    ("/updatejenkins …", "Alias of /update", "同上（别名）"),
-                ],
-            )
-        )
-
     sections.extend(
         [
             (
@@ -266,7 +248,6 @@ def _pack_sections_into_cards(sections: list[HelpSection]) -> list[dict[str, Any
     intro = (
         "**Group chats:** @mention the bot, then type a command.\n"
         "**群聊：** 先 **@ 机器人**，再输入命令。\n"
-        "Tip: `/help jenkins` for build keywords · `/help jenkins` 查看构建关键字"
     )
 
     elements: list[dict[str, Any]] = []
@@ -292,56 +273,19 @@ def _pack_sections_into_cards(sections: list[HelpSection]) -> list[dict[str, Any
     ]
 
 
-def _jenkins_keywords() -> list[str]:
-    try:
-        from jenkinsupdate import JENKINS_UPDATE_JOB_REGISTRY
-
-        return sorted({k.strip() for k in JENKINS_UPDATE_JOB_REGISTRY if k.strip()})
-    except Exception:
-        return []
-
-
-def build_jenkins_help_card() -> dict[str, Any]:
-    keys = _jenkins_keywords()
-    if keys:
-        rows_md: list[str] = []
-        for i in range(0, len(keys), 4):
-            row = keys[i : i + 4]
-            rows_md.append(" · ".join(f"`{k}`" for k in row))
-        body = (
-            "**Usage** · `@Bot /update <keyword>` → confirm on card\n"
-            "**用法** · `@机器人 /update 关键字` → 卡片确认\n\n"
-            + "\n".join(rows_md)
-        )
-    else:
-        body = "_Jenkins module not loaded on this server._"
-
-    return _card_shell(
-        title="Jenkins — job keywords",
-        template="blue",
-        subtitle="",
-        elements=[
-            {
-                "tag": "div",
-                "text": {"tag": "lark_md", "content": body},
-            }
-        ],
-    )
-
-
-def build_help_cards(*, jenkins_available: bool = True) -> list[dict[str, Any]]:
-    sections = _help_sections(jenkins_available=jenkins_available)
+def build_help_cards() -> list[dict[str, Any]]:
+    sections = _help_sections()
     return _pack_sections_into_cards(sections)
 
 
-def build_help_plain_text(*, jenkins_available: bool = True) -> str:
+def build_help_plain_text() -> str:
     """Fallback when the interactive card API rejects the payload."""
     lines = [
         "📖 Duty Bot — commands",
         "Group: @mention bot first · 群聊请先 @ 机器人",
         "",
     ]
-    for _key, title, emoji, _tpl, rows in _help_sections(jenkins_available=jenkins_available):
+    for _key, title, emoji, _tpl, rows in _help_sections():
         lines.append(_section_markdown(title, emoji, rows))
         lines.append("")
     return "\n".join(lines).strip()
@@ -373,7 +317,6 @@ def handle_help_command(
     *,
     chat_id: str,
     send_message: Callable[..., dict],
-    jenkins_available: bool = True,
 ) -> bool:
     """Handle /help and /commands. Returns True if handled."""
     raw = (clean_text or "").strip()
@@ -385,15 +328,12 @@ def handle_help_command(
     if low.startswith("/help "):
         topic = raw.split(maxsplit=1)[1].strip().lower()
 
-    fallback = build_help_plain_text(jenkins_available=jenkins_available)
+    fallback = build_help_plain_text()
 
-    if topic in ("jenkins", "jenkinsupdate", "ju"):
-        _send_help_card(chat_id, build_jenkins_help_card(), send_message, plain_fallback=fallback)
-        return True
 
     _send_help_card(
         chat_id,
-        build_help_cards(jenkins_available=jenkins_available)[0],
+        build_help_cards()[0],
         send_message,
         plain_fallback=fallback,
     )

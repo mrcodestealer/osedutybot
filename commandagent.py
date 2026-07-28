@@ -293,7 +293,7 @@ def _simple_intent(tag: str, command: str, *pattern_groups: str) -> IntentSpec:
     return IntentSpec(tag=tag, command=command, patterns=list(dict.fromkeys(pats)))
 
 
-def build_intent_catalog(*, jenkins_available: bool = True) -> list[IntentSpec]:
+def build_intent_catalog() -> list[IntentSpec]:
     intents: list[IntentSpec] = []
 
     intents.append(
@@ -597,17 +597,6 @@ def build_intent_catalog(*, jenkins_available: bool = True) -> list[IntentSpec]:
             arg_kind="rest",
         )
     )
-
-    if jenkins_available:
-        intents.append(
-            _simple_intent(
-                "cmd_update",
-                "/update",
-                "run jenkins update|trigger jenkins job|start jenkins build|deploy via jenkins|"
-                "i want update jenkins|update jenkins pms|update jenkins fpms|"
-                "want to update pms|deploy pms uat|jenkins pms update",
-            )
-        )
 
     # Timed/message reminder: "remind me in 30 minutes ...". Requires an argument
     # (a time/duration + message); build_slash_command returns None without one.
@@ -1045,7 +1034,7 @@ def detect_checkperson_command(text: str) -> Optional[str]:
     raw = (text or "").strip()
     if not raw or _looks_like_slash_command(raw):
         return None
-    # Don't collide with the maintenance / credit / jenkins structured flows.
+    # Don't collide with the maintenance / credit structured flows.
     if detect_prod_batch_command(raw) or detect_stuck_credit_command(raw) or detect_checkmachinelog_command(raw) or detect_checkcredit_command(raw):
         return None
     try:
@@ -1091,7 +1080,7 @@ _MULTI_DUTY_CONTEXT_RE = re.compile(
 )
 _MULTI_DUTY_SKIP_RE = re.compile(
     r"(?i)\b("
-    r"leave|wfh|holiday|jenkins|maintenance|machine|checkcredit|machineerror|"
+    r"leave|wfh|holiday|maintenance|machine|checkcredit|machineerror|"
     r"update|deploy|reminder|offset|cctv|credit"
     r")\b|/"
 )
@@ -1288,7 +1277,7 @@ _COMMAND_LLM_SIGNAL_RE = re.compile(
     r"duty|roster|on[\s-]?call|leave|wfh|holiday|offset|"
     r"fpms|pms|bi|fe|cpms|sre|dba|db|liveslot|ote|ft|ose|"
     r"machine|asset|egm|encoders?|nch|nwr|winford|tbr|tbp|mdr|dhs|osm|"
-    r"maintenance|maint|test|credit|cctv|jenkins|deploy|update|"
+    r"maintenance|maint|test|credit|cctv|deploy|update|"
     r"reminder|help|restart|cashout|sms|pid|provider|"
     r"who is|find|look ?up|search|phone|contact|check"
     r")\b|/"
@@ -2102,14 +2091,6 @@ def detect_multi_duty_commands(text: str) -> Optional[list[str]]:
         return None
     if detect_prod_batch_command(raw) or detect_stuck_credit_command(raw) or detect_checkmachinelog_command(raw) or detect_checkcredit_command(raw):
         return None
-    try:
-        import jenkinsupdate as _jenkins_gate
-
-        if _jenkins_gate.looks_like_natural_jenkins_update(raw):
-            return None
-    except Exception:
-        pass
-
     found_depts: list[str] = []
     for dept in _MULTI_DUTY_DEPT_ORDER:
         if re.search(rf"(?i)\b{re.escape(dept)}\b", raw):
@@ -2253,20 +2234,6 @@ def translate_if_enabled(text: str) -> Optional[str]:
         cmd = det["command"]
         print(f"[commandagent] {src} map: {raw[:80]!r} -> {str(cmd).splitlines()[0]!r}", flush=True)
         return cmd
-
-    try:
-        import jenkinsupdate as _jenkins_gate
-
-        if _jenkins_gate.looks_like_natural_jenkins_update(raw):
-            print(f"[commandagent] Skip NL map — Jenkins update request: {raw[:120]!r}", flush=True)
-            return None
-    except Exception:
-        if re.search(
-            r"(?i)(?:update|deploy|trigger|run).*(?:jenkins|\bfpms\b|\bpms\b|\bbi\b)"
-            r"|\bbranch\s*:.*\bservices?\s*:|\bservices?\s*:.*\bbranch\s*:",
-            raw,
-        ):
-            return None
 
     fuzzy = _resolve_fuzzy_intent(raw)
     if fuzzy.get("route") == "chat":

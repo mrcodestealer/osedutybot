@@ -117,10 +117,6 @@ _EXTRA_ALIASES: dict[str, tuple[str, ...]] = {
     "/checkemail": ("check email", "邮件"),
     "/checkerror": ("check error", "service error", "bot error", "服务错误", "查错误"),
     "/checkevo": ("check evo", "evo game", "gamelist", "game list", "查游戏", "游戏上线", "check game"),
-    "/update": ("jenkins", "update jenkins", "构建", "build", "更新服务"),
-    "/updatemore": ("update more", "multiple update", "多环境更新"),
-    "/jenkinsupdate": ("jenkins update", "jenkins job"),
-    "/warmstatus": ("warm status", "warm pool"),
     "/dutycheckall": ("duty check all", "值班检查"),
 }
 
@@ -147,9 +143,7 @@ def _build_registry() -> list[dict[str, Any]]:
     try:
         import bot_help
 
-        for _key, _title, _emoji, _tpl, rows in bot_help._help_sections(
-            jenkins_available=True
-        ):
+        for _key, _title, _emoji, _tpl, rows in bot_help._help_sections():
             for usage, desc_en, desc_zh in rows:
                 base = (usage or "").split()[0].strip().lower()
                 if not base.startswith("/") or base in entries:

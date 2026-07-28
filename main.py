@@ -18,7 +18,7 @@ _CHBOX_DIR = os.path.dirname(os.path.abspath(__file__))
 if _CHBOX_DIR not in sys.path:
     sys.path.insert(0, _CHBOX_DIR)
 
-# ``python main.py`` loads this file as ``__main__``. Lazy ``import main`` (e.g. jenkinsupdate)
+# ``python main.py`` loads this file as ``__main__``. Lazy ``import main`` (e.g. smmachine)
 # would otherwise execute module-level code again and start a second APScheduler → duplicate cron.
 if __name__ == "__main__":
     sys.modules.setdefault("main", sys.modules["__main__"])
@@ -26,32 +26,6 @@ if __name__ == "__main__":
 # Load .env from the project directory (works under systemd when CWD is not the app folder)
 _ENV_PATH = os.path.join(_CHBOX_DIR, ".env")
 load_dotenv(_ENV_PATH)
-
-
-def _apply_warm_pool_env_from_dotenv() -> None:
-    """Repo ``.env`` wins over systemd ``EnvironmentFile`` for Jenkins warm-pool keys."""
-    if not os.path.isfile(_ENV_PATH):
-        return
-    keys = (
-        "JU_WARM_POOL",
-        "JU_WARM_ALLOW_COLD_FALLBACK",
-        "JU_WARM_PREWARM_ON_STARTUP",
-        "JENKINS_WARM_STARTUP_WAIT_SEC",
-        "JENKINS_WARM_STARTUP_BLOCK",
-    )
-    try:
-        from dotenv import dotenv_values
-
-        vals = dotenv_values(_ENV_PATH)
-    except Exception:
-        return
-    for key in keys:
-        raw = vals.get(key)
-        if raw is not None and str(raw).strip() != "":
-            os.environ[key] = str(raw).strip()
-
-
-_apply_warm_pool_env_from_dotenv()
 
 from flask import Flask, request, jsonify, Response
 from datetime import datetime, timedelta
@@ -98,28 +72,7 @@ import ecsre
 import bot_help
 import list_range
 
-# amountloss / jenkinsupdate pull playwright — avoid top-level import so startup survives flaky browsers.
-
-_jenkins_mod = None  # None = not loaded yet; False = import failed
-
-
-def _get_jenkinsupdate():
-    """Return jenkinsupdate module or None if import failed (logged once)."""
-    global _jenkins_mod
-    if _jenkins_mod is False:
-        return None
-    if _jenkins_mod is not None:
-        return _jenkins_mod
-    try:
-        import jenkinsupdate as ju
-
-        _jenkins_mod = ju
-        return ju
-    except Exception as e:
-        print(f"[jenkinsupdate] lazy import failed (FPMS /jenkins flows disabled): {e!r}")
-        _jenkins_mod = False
-        return None
-
+# amountloss pulls playwright — avoid top-level import so startup survives flaky browsers.
 
 _DUTY_LEAVE_WFH_FOOTER_COMMANDS: dict[str, str] = {
     "/fpms": "fpms",
@@ -1790,129 +1743,6 @@ def _get_checkcredit_np_pending(chat_id: str, max_age_sec: float = 3600.0):
         return None
     return ent["payload"]
 
-# ``/update`` / ``/jenkinsupdate`` — thread replies under the user's command message.
-UPDATE_THREAD_ROOT: dict[str, dict] = {}
-
-
-def _set_update_thread_root(session_key: str, message_id: str) -> None:
-    sk = (session_key or "").strip()
-    mid = (message_id or "").strip()
-    if not sk or not mid:
-        return
-    UPDATE_THREAD_ROOT[sk] = {"message_id": mid, "ts": time.time()}
-
-
-def _get_update_thread_root(session_key: str, max_age_sec: float = 7200.0) -> Optional[str]:
-    ent = UPDATE_THREAD_ROOT.get((session_key or "").strip())
-    if not ent:
-        return None
-    if time.time() - ent["ts"] > max_age_sec:
-        del UPDATE_THREAD_ROOT[(session_key or "").strip()]
-        return None
-    return str(ent.get("message_id") or "").strip() or None
-
-
-def update_thread_summary(body: str) -> str:
-    for line in (body or "").replace("\r\n", "\n").split("\n"):
-        s = line.strip()
-        if not s or s.lower().startswith("email:"):
-            continue
-        s = re.sub(
-            r"^/?(?:update|jenkinsupdate|updatejenkins|updatemore)\b\s*",
-            "",
-            s,
-            count=1,
-            flags=re.I,
-        ).strip()
-        return s[:200] if s else "/update"
-    return "/update"
-
-
-def _build_update_thread_starter_card(summary: str) -> dict:
-    title = "🔧 /update"
-    body = (summary or "").strip()[:500] or "Jenkins update"
-    return {
-        "schema": "2.0",
-        "config": {"width_mode": "fill"},
-        "header": {
-            "template": "blue",
-            "title": {"tag": "plain_text", "content": title},
-        },
-        "body": {
-            "elements": [
-                {"tag": "div", "text": {"tag": "lark_md", "content": body}},
-            ]
-        },
-    }
-
-
-def update_begin_thread(
-    chat_id: str,
-    session_key: str,
-    summary: str,
-    *,
-    fallback_parent_id: Optional[str] = None,
-    force_new: bool = False,
-) -> Optional[str]:
-    """Bind ``/update`` replies to the user's command message (thread only, no starter card)."""
-    sk = (session_key or "").strip()
-    if not force_new:
-        existing = _get_update_thread_root(sk)
-        if existing:
-            return existing
-    parent = (fallback_parent_id or "").strip() or None
-    if parent and sk:
-        _set_update_thread_root(sk, parent)
-        return parent
-    # Already bound on an earlier step (e.g. CPMS pick → multi-env split) — never replace
-    # with a main-chat ``🔧 /update`` starter card when ``message_id`` was missing later.
-    existing = _get_update_thread_root(sk)
-    if existing:
-        return existing
-    # No incoming message_id (e.g. tests) — post a starter card as last resort.
-    card = _build_update_thread_starter_card(summary)
-    resp = send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
-    if isinstance(resp, dict) and resp.get("code") not in (None, 0):
-        print(f"[update] starter card failed chat={chat_id}: {resp}", flush=True)
-    else:
-        parent = _extract_lark_message_id(resp) or None
-    if parent and sk:
-        _set_update_thread_root(sk, parent)
-    return parent
-
-
-def make_update_thread_send(chat_id: str, session_key: str, base_send=None):
-    if base_send is None:
-        base_send = send_message
-
-    def _send(cid, text, msg_type="text", mentions=None, **kwargs):
-        root = _get_update_thread_root((session_key or "").strip())
-        if root and cid == chat_id:
-            return reply_message_in_thread(root, text, msg_type=msg_type, mentions=mentions)
-        try:
-            return base_send(cid, text, msg_type=msg_type, mentions=mentions, **kwargs)
-        except TypeError:
-            try:
-                return base_send(cid, text, msg_type=msg_type)
-            except TypeError:
-                return base_send(cid, text)
-
-    return _send
-
-
-def make_update_thread_send_image(chat_id: str, session_key: str, base_send=None):
-    if base_send is None:
-        base_send = send_image_message
-
-    def _send_img(cid, image_key):
-        root = _get_update_thread_root((session_key or "").strip())
-        if root and cid == chat_id:
-            return reply_message_in_thread(root, image_key, msg_type="image")
-        return base_send(cid, image_key)
-
-    return _send_img
-
-
 # ``/nchsetmaintenance`` etc. — thread replies under the user's command message only.
 PROD_BATCH_THREAD_ROOT: dict[str, dict] = {}
 
@@ -2544,23 +2374,6 @@ _add_scheduler_job("evening_reminder", evening_reminder, "cron", hour=19, minute
 _add_scheduler_job("reminder_sheet_daily_sync", reminder_sheet_daily_sync, "cron", hour=0, minute=5)
 
 
-def _jenkinsupdate_history_midnight_reset() -> None:
-    """Clear jenkinsupdate.json (today's rebuild history) at 00:00."""
-    try:
-        ju = _get_jenkinsupdate()
-        if ju and hasattr(ju, "clear_run_history_file"):
-            ju.clear_run_history_file()
-    except Exception as e:
-        print(f"[jenkinsupdate] midnight history reset failed: {e!r}", flush=True)
-
-
-_add_scheduler_job(
-    "jenkinsupdate_history_midnight_reset",
-    _jenkinsupdate_history_midnight_reset,
-    "cron",
-    hour=0,
-    minute=0,
-)
 _offset_approver_poll_min = int(os.getenv("OSE_OFFSET_APPROVER_POLL_MIN", "3"))
 _add_scheduler_job(
     "poll_offset_approver_notifications",
@@ -2746,6 +2559,8 @@ BOT_OPEN_ID = (
     os.getenv("BOT_OPEN_ID") or os.getenv("DUTY_BOT_OPEN_ID") or "ou_1f6596a9923a2a835918e7e2513595d5"
 ).strip()
 
+# Open_id of the STANDALONE jenkins bot. The Jenkins /update feature itself lives in
+# its own bot now; this is only used to ignore that bot's messages in shared groups.
 _JENKINS_BOT_OPEN_ID_DEFAULT = "ou_45cc096780a23354f0719c9635765985"
 
 
@@ -2762,7 +2577,7 @@ if not (os.getenv("BOT_OPEN_ID") or os.getenv("DUTY_BOT_OPEN_ID")):
 if not (os.getenv("JENKINS_BOT_OPEN_ID") or "").strip():
     print(
         f"[lark] WARNING: JENKINS_BOT_OPEN_ID unset — using default {_JENKINS_BOT_OPEN_ID_DEFAULT!r}. "
-        "Jenkinsbot → duty `/replyupdateemail` will fail if this open_id is wrong.",
+        "Messages from the standalone jenkins bot will NOT be ignored if this open_id is wrong.",
         flush=True,
     )
 
@@ -2919,87 +2734,6 @@ def _handle_git_pull_restart_deploy(chat_id: str) -> None:
     start_lark_background_thread(_run_git_pull_and_restart, chat_id)
 
 
-def _run_jenkins_warm_status_check(chat_id: str) -> None:
-    try:
-        import jenkinsupdate as _ju_status
-
-        report = _ju_status.jenkins_warm_pool_status_report()
-    except Exception as exc:
-        send_message(chat_id, f"❌ warm status check failed: {exc!r}")
-        return
-    send_message(chat_id, f"🌡️ **Jenkins warm browser status**\n{report}")
-
-
-def _handle_jenkins_warm_status(chat_id: str) -> None:
-    start_lark_background_thread(_run_jenkins_warm_status_check, chat_id)
-
-
-def _dispatch_jenkins_duty_command(
-    chat_id: str,
-    sender_id: str,
-    duty_clean: str,
-    duty_orig: str,
-    send,
-    *,
-    message_content_raw: str = "",
-) -> bool:
-    """Handle jenkinsbot → duty bot (``/replyupdateemail``, etc.) with or without jenkinsupdate."""
-    ju = _get_jenkinsupdate()
-    if ju is None:
-        try:
-            import updatemore as um
-
-            if um.is_jenkinsbot_duty_command(duty_orig or duty_clean or message_content_raw):
-                send(
-                    chat_id,
-                    "⚠️ **jenkinsupdate** is not loaded (e.g. Playwright missing). "
-                    "`/replyupdateemail` can still send a **single** email if parsed, but "
-                    "**`/updatemore` batching** needs jenkinsupdate. Fix the server import error "
-                    "and set `JENKINS_BOT_OPEN_ID` in `.env`.",
-                )
-        except Exception:
-            pass
-    if ju:
-        try:
-            import updatemore as um
-
-            return um.handle_jenkinsbot_callback(
-                chat_id,
-                sender_id,
-                duty_clean,
-                duty_orig,
-                send,
-                sessions=ju._fpms_lark_sessions,
-                sessions_lock=ju._fpms_lark_sessions_lock,
-                session_key_fn=ju._fpms_lark_session_key,
-                dispatch_update_body=lambda cid, sk, body, snd, **kw: ju._dispatch_lark_update_command_body(
-                    cid, sk, body, snd, **kw
-                ),
-                message_content_raw=message_content_raw,
-            )
-        except Exception as ex:
-            print(f"[lark] jenkins duty via jenkinsupdate failed: {ex!r}", flush=True)
-    try:
-        import updatemore as um
-
-        empty_lock = threading.Lock()
-        return um.handle_jenkinsbot_callback(
-            chat_id,
-            sender_id,
-            duty_clean,
-            duty_orig,
-            send,
-            sessions={},
-            sessions_lock=empty_lock,
-            session_key_fn=lambda cid, sid: f"{(cid or '').strip()}:{(sid or '').strip()}",
-            dispatch_update_body=lambda *a, **kw: False,
-            message_content_raw=message_content_raw,
-        )
-    except Exception as ex:
-        print(f"[lark] jenkins duty fallback failed: {ex!r}", flush=True)
-        return False
-
-
 def _lark_flatten_rich_content(obj) -> str:
     """Collect plain text from Lark post / rich ``content`` JSON."""
     parts: list[str] = []
@@ -3130,24 +2864,6 @@ def _parse_missing_credit_alert(text: str) -> Optional[dict]:
     if m:
         out["proposal"] = m.group(1)
     return out or None
-
-
-def _looks_like_jenkins_nl_update(text: str) -> bool:
-    try:
-        ju = _get_jenkinsupdate()
-        if ju is not None:
-            return bool(ju.looks_like_natural_jenkins_update(text))
-        import jenkinsupdate as _ju
-
-        return bool(_ju.looks_like_natural_jenkins_update(text))
-    except Exception:
-        raw = (text or "").replace("\r\n", "\n")
-        low = raw.casefold()
-        return bool(
-            re.search(r"(?im)^\s*branch\s*:", raw)
-            and re.search(r"(?im)^\s*services?\s*:", raw)
-            and re.search(r"(?i)update|uat|jenkins|rc[\s-]*uat|部署|更新", raw)
-        )
 
 
 def _try_missing_credit_inquiry(
@@ -4631,11 +4347,9 @@ def lark_webhook():
                 (os.getenv("LARK_ENCRYPT_KEY") or os.getenv("ENCRYPT_KEY") or os.getenv("FEISHU_ENCRYPT_KEY") or "")
                 .strip()
             )
-            ju = _get_jenkinsupdate()
             payload["diag"] = {
                 "verification_token_configured": bool(VERIFICATION_TOKEN),
                 "encrypt_key_configured": bool(ek),
-                "jenkinsupdate_import_ok": ju is not None,
                 "extra_webhook_paths": [
                     p.strip()
                     for p in (os.getenv("LARK_WEBHOOK_EXTRA_PATHS") or "").split(",")
@@ -5113,76 +4827,6 @@ def lark_webhook():
 
                     threading.Thread(target=_run_findmachine_job, daemon=True).start()
                     return
-                if (
-                    isinstance(parsed_ca, dict)
-                    and str(parsed_ca.get("k") or "").strip().lower() == "vpn_create_submit"
-                ):
-                    act_ca = ev_ca.get("action") if isinstance(ev_ca.get("action"), dict) else {}
-                    vpn_users_raw = _lark_get_card_form_field(act_ca, "vpn_users")
-                    vpn_location_raw = _lark_get_card_form_field(act_ca, "vpn_location")
-                    fv_vpn = parsed_ca.get("form_value")
-                    if isinstance(fv_vpn, dict):
-                        vpn_users_raw = vpn_users_raw or _lark_form_field_text(fv_vpn.get("vpn_users"))
-                        vpn_location_raw = vpn_location_raw or _lark_form_field_text(
-                            fv_vpn.get("vpn_location")
-                        )
-                    vpn_users_raw = vpn_users_raw or _lark_form_field_text(parsed_ca.get("vpn_users"))
-                    vpn_location_raw = vpn_location_raw or _lark_form_field_text(
-                        parsed_ca.get("vpn_location")
-                    )
-                    vpn_users_raw = vpn_users_raw or _lark_find_field_deep(ev_ca, "vpn_users")
-                    vpn_location_raw = vpn_location_raw or _lark_find_field_deep(ev_ca, "vpn_location")
-                    ju = _get_jenkinsupdate()
-                    if not ju:
-                        send_message(chat_id_ca, "❌ jenkinsupdate unavailable.")
-                        return
-                    sender_use = ju.resolve_lark_jenkins_card_sender(
-                        chat_id_ca, sender_id_ca or "", op_ca
-                    )
-                    ju.begin_vpn_run_from_card(
-                        chat_id_ca,
-                        sender_use or sender_id_ca or "",
-                        vpn_users_raw,
-                        vpn_location_raw,
-                        send_message,
-                        lark_message_id=(
-                            str(
-                                (
-                                    (ev_ca.get("context") or {})
-                                    if isinstance(ev_ca.get("context"), dict)
-                                    else {}
-                                ).get("open_message_id")
-                                or ev_ca.get("open_message_id")
-                                or ""
-                            ).strip()
-                            or None
-                        ),
-                    )
-                    return
-                ju = _get_jenkinsupdate()
-                if not ju:
-                    print(
-                        f"⚠️ card action skipped: jenkinsupdate unavailable chat_id={chat_id_ca!r} "
-                        f"event_type={hdr_et!r}",
-                        flush=True,
-                    )
-                    return
-                sender_use = ju.resolve_lark_jenkins_card_sender(
-                    chat_id_ca, sender_id_ca or "", op_ca
-                )
-                if not sender_use:
-                    print(
-                        f"⚠️ card action skipped: could not resolve sender "
-                        f"chat_id={chat_id_ca!r} raw_sender={sender_id_ca!r} event_type={hdr_et!r}",
-                        flush=True,
-                    )
-                    return
-                ctx_ca = ev_ca.get("context") if isinstance(ev_ca.get("context"), dict) else {}
-                card_omid = str(ctx_ca.get("open_message_id") or ev_ca.get("open_message_id") or "").strip() or None
-                ju.handle_lark_jenkins_card_action(
-                    chat_id_ca, sender_use, val_ca, send_message, operator=op_ca,
-                    lark_message_id=card_omid,
-                )
             except Exception as ex:
                 print(f"❌ card callback worker: {ex!r}", flush=True)
                 try:
@@ -5337,14 +4981,6 @@ def lark_webhook():
     is_jenkins_bot_sender = bool(
         sender_id and jenkins_bot_oid and sender_id == jenkins_bot_oid
     )
-    try:
-        import updatemore as _updatemore
-
-        duty_blob = _updatemore.resolve_duty_command_body(
-            original_text, clean_text, message_content_raw
-        )
-    except Exception:
-        duty_blob = (clean_text or original_text or message_content_raw or "").strip()
 
     # Group (and unknown chat_type): require @Duty Bot; p2p: always respond.
     bot_mentioned = chat_type == "p2p"
@@ -5367,24 +5003,6 @@ def lark_webhook():
             bot_mentioned = True
             print("✅ Bot mentioned (old schema via is_mention flag)")
 
-    # Duty commands from any sender (human or bot) — e.g. ``/replyupdateemail`` without strict @ parsing.
-    if chat_type == "group" and not bot_mentioned:
-        try:
-            import updatemore as _updatemore
-
-            if _updatemore.is_jenkinsbot_duty_command(duty_blob):
-                bot_mentioned = True
-                print("✅ Jenkins/duty email command — treat as mentioned (any sender)")
-            elif is_jenkins_bot_sender and (
-                _updatemore.is_reply_update_email_text(message_content_raw or "")
-                or _updatemore.is_jenkinsbot_duty_command(message_content_raw or "")
-            ):
-                bot_mentioned = True
-                print("✅ Jenkinsbot sender duty command — treat as mentioned")
-        except Exception:
-            if re.search(r"/?replyupdateemail\b", duty_blob or "", re.I):
-                bot_mentioned = True
-
     # Reply **1**–**4** after `/checkcreditdate` NP prompt — works in group **without** @bot
     stripped_choice = clean_text.strip()
     if stripped_choice in ("1", "2", "3", "4"):
@@ -5395,65 +5013,11 @@ def lark_webhook():
             start_lark_background_thread(run_np_third_http_by_choice, chat_id, idx_np)
             return _lark_im_done()
 
-    # jenkinsbot / any sender → duty email callbacks — no @duty required when command is present.
-    try:
-        import updatemore as _updatemore
-
-        _jb_duty_cmd = _updatemore.is_jenkinsbot_duty_command(duty_blob)
-        if not _jb_duty_cmd:
-            _jb_duty_cmd = _updatemore.is_reply_update_email_text(duty_blob or "")
-        if not _jb_duty_cmd:
-            for _scan in (clean_text, original_text, message_content_raw):
-                if _scan and (
-                    _updatemore.is_jenkinsbot_duty_command(_scan)
-                    or _updatemore.is_reply_update_email_text(_scan)
-                ):
-                    _jb_duty_cmd = True
-                    break
-        if not _jb_duty_cmd and is_jenkins_bot_sender:
-            _jb_duty_cmd = (
-                _updatemore.is_jenkinsbot_duty_command(message_content_raw or "")
-                or _updatemore.is_reply_update_email_text(message_content_raw or "")
-            )
-        if not _jb_duty_cmd and is_jenkins_bot_sender and _mention_includes_duty_bot(mentions):
-            _jb_duty_cmd = _updatemore.is_reply_update_email_text(message_content_raw or "")
-    except Exception:
-        _jb_duty_cmd = bool(re.search(r"/?replyupdateemail\b", duty_blob or "", re.I))
-
-    if _jb_duty_cmd:
-        _duty_orig = duty_blob or original_text
-        _duty_clean = duty_blob or clean_text
-        print(
-            f"[lark] jenkins duty cmd sender={sender_id!r} jenkinsbot={is_jenkins_bot_sender} "
-            f"body={_duty_orig!r}",
-            flush=True,
-        )
-        if _dispatch_jenkins_duty_command(
-            chat_id,
-            sender_id or "",
-            _duty_clean,
-            _duty_orig,
-            send_message,
-            message_content_raw=message_content_raw,
-        ):
-            return _lark_im_done()
-        if is_jenkins_bot_sender or _jb_duty_cmd:
-            send_message(
-                chat_id,
-                "❌ **Duty bot** saw a jenkinsbot command but could not handle it.\n"
-                f"Body: `{(_duty_orig or '')[:200]}`",
-            )
-            return _lark_im_done()
-
-    ju = _get_jenkinsupdate()
-    jenkins_sess_active = (
-        ju.jenkins_update_has_active_lark_session(chat_id, sender_id) if ju else False
-    )
-
-    if chat_type != "p2p" and not bot_mentioned and not jenkins_sess_active:
+    if chat_type != "p2p" and not bot_mentioned:
         if is_jenkins_bot_sender:
+            # The standalone jenkins bot posts in shared groups — never act on its messages.
             print(
-                f"⏭️ Jenkinsbot message ignored (no duty command) text={original_text!r} "
+                f"⏭️ Jenkinsbot message ignored text={original_text!r} "
                 f"content={message_content_raw[:240]!r}",
                 flush=True,
             )
@@ -5538,44 +5102,10 @@ def lark_webhook():
     ):
         return _lark_im_done()
 
-    update_thread_root = None
-    if data.get("header", {}).get("event_type") == "im.message.receive_v1":
-        msg_obj = (data.get("event") or {}).get("message") or {}
-        update_thread_root = _prod_batch_thread_root_from_incoming_message(
-            msg_obj, message_id=message_id
-        )
-    else:
-        update_thread_root = (message_id or "").strip() or None
-    if ju and ju.handle_lark_jenkins_update_message(
-        chat_id,
-        sender_id,
-        _full_body,
-        _full_body,
-        send_message,
-        allow_start=bot_mentioned,
-        lark_sender_union_id=sender_union_id,
-        lark_message_id=(message_id or "").strip() or None,
-        lark_thread_root_id=update_thread_root,
-    ):
-        return _lark_im_done()
-
-    if ju is None and _looks_like_jenkins_nl_update(_full_body):
-        send_message(
-            chat_id,
-            "⚠️ **Jenkins `/update` is not available on this PC.**\n"
-            "Install Playwright so the bot can fill the form and show **Confirm / Cancel** "
-            "(it will **not** auto-build without your click):\n"
-            "```\npip install playwright\nplaywright install chromium\n```\n"
-            "Then restart `python main.py` (with LARK_EVENT_MODE=websocket if using long connection).\n"
-            "Or paste: `@Duty Bot /jenkinsupdate rc uat master` + Branch/Version/Services block.",
-        )
-        return _lark_im_done()
-
     if bot_help.handle_help_command(
         clean_text,
         chat_id=chat_id,
         send_message=send_message,
-        jenkins_available=_get_jenkinsupdate() is not None,
     ):
         return _lark_im_done()
 
@@ -7106,9 +6636,6 @@ def lark_webhook():
             return _lark_im_done()
         _handle_git_pull_restart_deploy(chat_id)
         return _lark_im_done()
-    elif clean_text.lower() in ("/warmstatus", "/jenkinswarmstatus"):
-        _handle_jenkins_warm_status(chat_id)
-        return _lark_im_done()
     elif (
         (bot_mentioned or chat_type == "p2p")
         and _secret_command_allowed(sender_id)
@@ -7493,39 +7020,7 @@ def lark_webhook():
                 _is_chatty = _chitchat_probe.looks_like_chitchat(_chat_source)
         except Exception:
             pass
-        if _looks_like_jenkins_nl_update(_full_body):
-            _jenkins_nl_reply = None
-            try:
-                import chatagent as _notice_ca
-
-                _jenkins_nl_reply = _notice_ca.llm_notice_reply(
-                    "The user pasted a Jenkins update request, but the update flow did NOT "
-                    "start — nothing was filled or built. The most common cause: a previous "
-                    "update in this chat is still waiting on its Confirm/Cancel card. What "
-                    "the user should do: reply `cancel` first, then resend the same full "
-                    "request (environment + Branch/Version/Services); or start it explicitly "
-                    "with `/jenkinsupdate` plus the same block. The bot only fills the "
-                    "Jenkins form and shows a screenshot with Confirm/Cancel buttons — it "
-                    "never builds without the user's click.",
-                    user_text=_chat_source,
-                    must_contain=("cancel",),
-                )
-            except Exception as _notice_err:
-                print(f"[jenkins-fallback] notice LLM skipped: {_notice_err!r}", flush=True)
-            send_message(
-                chat_id,
-                _jenkins_nl_reply
-                or (
-                    "⚠️ Jenkins **update** was not started from that message.\n"
-                    "A previous update may still be waiting on **Confirm / Cancel** — say "
-                    "**cancel**, then send the full block again, or use "
-                    "`/jenkinsupdate <environment>` + Branch/Version/Services.\n"
-                    "The bot fills the form + screenshot — you tap **Confirm** or **Cancel** "
-                    "(no auto-build)."
-                ),
-            )
-            print(f"💬 Jenkins NL fallback hint for chat {chat_id}", flush=True)
-        elif (mc := _parse_missing_credit_alert(_full_body)) and bot_mentioned:
+        if (mc := _parse_missing_credit_alert(_full_body)) and bot_mentioned:
             send_message(
                 chat_id,
                 "Use the **checkcredit** card above, or `@Duty Bot /checkcreditdate <machine>` "
@@ -7699,184 +7194,6 @@ def lark_webhook():
                     print(f"⚠️ NL hint failed: {_nl_hint_err!r}", flush=True)
 
     return _lark_im_done()
-
-def _handle_reply_update_email_internal(payload: dict) -> tuple[bool, str, int]:
-    """
-    Shared handler for ``POST /internal/reply-update-email`` (jenkinsbot → duty bot).
-    Returns ``(ok, message, http_status)``.
-    """
-    chat_id = (payload.get("chat_id") or DUTY_CHAT_ID or "").strip()
-    email_title = (payload.get("email_title") or "").strip()
-    environment = (payload.get("environment") or "").strip()
-    when = (payload.get("when") or "").strip()
-    if not chat_id:
-        return False, "missing chat_id", 400
-    if not email_title or not environment or not when:
-        return False, "missing email_title, environment, or when", 400
-    ju = _get_jenkinsupdate()
-    if ju is None:
-        return False, "jenkinsupdate module unavailable", 503
-    try:
-        import updatemore as um
-    except Exception as ex:
-        return False, f"updatemore import failed: {ex}", 503
-    um.process_reply_update_email(
-        chat_id,
-        email_title,
-        environment,
-        when,
-        send_message,
-        sessions=ju._fpms_lark_sessions,
-        sessions_lock=ju._fpms_lark_sessions_lock,
-        session_key_fn=ju._fpms_lark_session_key,
-        dispatch_update_body=lambda cid, sk, body, snd, **kw: ju._dispatch_lark_update_command_body(
-            cid, sk, body, snd, **kw
-        ),
-    )
-    return True, "processed", 200
-
-
-def _run_reply_update_email_background(payload: dict) -> None:
-    """Run IMAP reply off the HTTP thread so jenkinsbot does not hit its POST timeout."""
-    try:
-        ok, msg, code = _handle_reply_update_email_internal(payload)
-        if not ok:
-            chat_id = (payload.get("chat_id") or DUTY_CHAT_ID or "").strip()
-            if chat_id:
-                send_message(
-                    chat_id,
-                    f"❌ Jenkins email callback failed ({code}): {msg}",
-                )
-    except Exception as ex:
-        chat_id = (payload.get("chat_id") or DUTY_CHAT_ID or "").strip()
-        print(f"❌ reply-update-email background error: {ex}")
-        if chat_id:
-            send_message(chat_id, f"❌ Jenkins email callback error: {ex}")
-
-
-@app.route("/internal/reply-update-email", methods=["POST"])
-def internal_reply_update_email():
-    """
-    jenkinsbot calls this when Lark bot→bot @mention does not reach duty bot.
-    Optional header ``X-Duty-Internal-Token`` must match ``DUTY_INTERNAL_TOKEN``.
-    """
-    token_need = (os.getenv("DUTY_INTERNAL_TOKEN") or "").strip()
-    if token_need:
-        got = (
-            (request.headers.get("X-Duty-Internal-Token") or "").strip()
-            or (request.headers.get("Authorization") or "").replace("Bearer", "").strip()
-        )
-        if got != token_need:
-            return jsonify({"ok": False, "error": "unauthorized"}), 403
-    payload = request.get_json(silent=True) or {}
-    chat_id = (payload.get("chat_id") or DUTY_CHAT_ID or "").strip()
-    email_title = (payload.get("email_title") or "").strip()
-    environment = (payload.get("environment") or "").strip()
-    when = (payload.get("when") or "").strip()
-    if not chat_id:
-        return jsonify({"ok": False, "error": "missing chat_id"}), 400
-    if not email_title or not environment or not when:
-        return jsonify({"ok": False, "error": "missing email_title, environment, or when"}), 400
-    ju = _get_jenkinsupdate()
-    if ju is None:
-        return jsonify({"ok": False, "error": "jenkinsupdate module unavailable"}), 503
-    try:
-        import updatemore  # noqa: F401
-    except Exception as ex:
-        return jsonify({"ok": False, "error": f"updatemore import failed: {ex}"}), 503
-    threading.Thread(
-        target=_run_reply_update_email_background,
-        args=(payload,),
-        daemon=True,
-    ).start()
-    return jsonify({"ok": True, "message": "accepted", "accepted": True}), 202
-
-
-def _handle_updatemore_jenkins_callback_internal(payload: dict) -> tuple[bool, str, int]:
-    """Shared handler for ``POST /internal/updatemore-jenkins-callback``."""
-    chat_id = (payload.get("chat_id") or DUTY_CHAT_ID or "").strip()
-    command = (payload.get("command") or "").strip()
-    if not chat_id:
-        return False, "missing chat_id", 400
-    if not command:
-        return False, "missing command", 400
-    ju = _get_jenkinsupdate()
-    if ju is None:
-        return False, "jenkinsupdate module unavailable", 503
-    try:
-        import updatemore as um
-    except Exception as ex:
-        return False, f"updatemore import failed: {ex}", 503
-    if not (
-        um.is_failed_stop_message(command) or um.is_success_proceed_message(command)
-    ):
-        return False, "command must be /FailedStop or /SuccessProceedNext", 400
-    um.process_updatemore_jenkins_command(
-        chat_id,
-        command,
-        send_message,
-        sessions=ju._fpms_lark_sessions,
-        sessions_lock=ju._fpms_lark_sessions_lock,
-        session_key_fn=ju._fpms_lark_session_key,
-        dispatch_update_body=lambda cid, sk, body, snd, **kw: ju._dispatch_lark_update_command_body(
-            cid, sk, body, snd, **kw
-        ),
-    )
-    return True, "processed", 200
-
-
-def _run_updatemore_jenkins_callback_background(payload: dict) -> None:
-    try:
-        ok, msg, code = _handle_updatemore_jenkins_callback_internal(payload)
-        if not ok:
-            chat_id = (payload.get("chat_id") or DUTY_CHAT_ID or "").strip()
-            if chat_id:
-                send_message(
-                    chat_id,
-                    f"❌ Jenkins updatemore callback failed ({code}): {msg}",
-                )
-    except Exception as ex:
-        chat_id = (payload.get("chat_id") or DUTY_CHAT_ID or "").strip()
-        print(f"❌ updatemore-jenkins-callback background error: {ex}")
-        if chat_id:
-            send_message(chat_id, f"❌ Jenkins updatemore callback error: {ex}")
-
-
-@app.route("/internal/updatemore-jenkins-callback", methods=["POST"])
-def internal_updatemore_jenkins_callback():
-    """
-    jenkinsbot calls this when Lark bot→bot delivery for ``/FailedStop`` or
-    ``/SuccessProceedNext`` is unreliable (same pattern as ``/internal/reply-update-email``).
-    """
-    token_need = (os.getenv("DUTY_INTERNAL_TOKEN") or "").strip()
-    if token_need:
-        got = (
-            (request.headers.get("X-Duty-Internal-Token") or "").strip()
-            or (request.headers.get("Authorization") or "").replace("Bearer", "").strip()
-        )
-        if got != token_need:
-            return jsonify({"ok": False, "error": "unauthorized"}), 403
-    payload = request.get_json(silent=True) or {}
-    chat_id = (payload.get("chat_id") or DUTY_CHAT_ID or "").strip()
-    command = (payload.get("command") or "").strip()
-    if not chat_id:
-        return jsonify({"ok": False, "error": "missing chat_id"}), 400
-    if not command:
-        return jsonify({"ok": False, "error": "missing command"}), 400
-    ju = _get_jenkinsupdate()
-    if ju is None:
-        return jsonify({"ok": False, "error": "jenkinsupdate module unavailable"}), 503
-    try:
-        import updatemore  # noqa: F401
-    except Exception as ex:
-        return jsonify({"ok": False, "error": f"updatemore import failed: {ex}"}), 503
-    threading.Thread(
-        target=_run_updatemore_jenkins_callback_background,
-        args=(payload,),
-        daemon=True,
-    ).start()
-    return jsonify({"ok": True, "message": "accepted", "accepted": True}), 202
-
 
 def _register_lark_webhook_duplicate_paths():
     """
@@ -8419,12 +7736,6 @@ def _run_main_entry() -> int:
             _boot_offsetai.startup_status()
         except Exception as _boot_offsetai_err:
             print(f"[offsetai] startup check skipped: {_boot_offsetai_err!r}", flush=True)
-        try:
-            import jenkinsupdate as _boot_ju
-
-            _boot_ju.prewarm_all_jenkins_browsers_on_startup()
-        except Exception as _boot_ju_err:
-            print(f"[warm] startup pre-warm skipped: {_boot_ju_err!r}", flush=True)
         try:
             import prod_machine_batch as _boot_pmb
 
