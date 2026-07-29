@@ -1468,6 +1468,25 @@ def start_lark_background_thread(fn, *args, **kwargs) -> None:
     threading.Thread(target=_target, daemon=True).start()
 
 
+# Who may run ``/log``. Journal output can carry internal detail (chat ids, file
+# paths, request bodies), so it is restricted to explicit open_ids rather than any
+# group member. Override/extend with a comma-separated LOG_ALLOWED_OPEN_IDS.
+_LOG_ALLOWED_OPEN_IDS = frozenset(
+    x.strip()
+    for x in (
+        (os.getenv("LOG_ALLOWED_OPEN_IDS") or "").strip()
+        or "ou_5f660c0fb0769d184aca635d02209272"
+    ).split(",")
+    if x.strip()
+)
+
+
+def _may_read_service_log(open_id: Optional[str]) -> bool:
+    """True only for explicitly allow-listed open_ids (never a blanket allow)."""
+    oid = (open_id or "").strip()
+    return bool(oid) and oid in _LOG_ALLOWED_OPEN_IDS
+
+
 # "who am i" — the asker's own ids. Tolerates /whoami, spacing and the zh form.
 _WHOAMI_RE = re.compile(r"^\s*/?\s*(?:who\s*am\s*i|whoami|我是谁)\s*[?？]?\s*$", re.I)
 
@@ -6385,6 +6404,18 @@ def lark_webhook():
         return _lark_im_done()
     elif cmd == '/log':
         # Raw journal tail + grep (no AI). `/log [window] [-n N] [pattern]`.
+        # Restricted: the journal can expose internals, so only allow-listed
+        # open_ids may read it. Checked before any journal read happens.
+        if not _may_read_service_log(sender_id):
+            print(
+                f"⛔ /log denied for sender={sender_id!r} chat={chat_id!r}",
+                flush=True,
+            )
+            send_message(
+                chat_id,
+                "🚫 `/log` is restricted to the bot admin.",
+            )
+            return _lark_im_done()
         _lg_args = " ".join(cmd_parts[1:]).strip()
 
         def _run_log_job(chat_id_lg=chat_id, args_lg=_lg_args):

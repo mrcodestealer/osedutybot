@@ -423,10 +423,15 @@ def parse_log_args(args_text: str) -> dict[str, Any]:
     toks = (args_text or "").split()
     window, label = _parse_window(_LOG_DEFAULT_WINDOW)  # type: ignore[misc]
     lines = _LOG_DEFAULT_LINES
+    whole_word = False
     rest: list[str] = []
     i = 0
     while i < len(toks):
         t = toks[i]
+        if t in ("-w", "--word") and not rest:
+            whole_word = True
+            i += 1
+            continue
         if t in ("-n", "--lines") and i + 1 < len(toks) and toks[i + 1].isdigit():
             lines = int(toks[i + 1])
             i += 2
@@ -451,30 +456,49 @@ def parse_log_args(args_text: str) -> dict[str, Any]:
         "window": window,
         "label": label,
         "lines": max(1, min(_LOG_MAX_LINES, lines)),
+        "whole_word": whole_word,
         "pattern": " ".join(rest).strip(),
     }
 
 
-def _compile_pattern(pattern: str) -> tuple[Optional[re.Pattern], bool]:
-    """(compiled, is_regex). Invalid regex degrades to a literal search."""
+def _compile_pattern(
+    pattern: str, *, whole_word: bool = False
+) -> tuple[Optional[re.Pattern], bool]:
+    """(compiled, is_regex). Invalid regex degrades to a literal search.
+
+    ``whole_word`` wraps the pattern in ``\\b`` like ``grep -w`` — so ``moved``
+    stops matching inside ``Removed``.
+    """
     pat = (pattern or "").strip()
     if not pat:
         return None, False
     try:
-        return re.compile(pat, re.I), True
+        return re.compile(rf"\b(?:{pat})\b" if whole_word else pat, re.I), True
     except re.error:
-        return re.compile(re.escape(pat), re.I), False
+        lit = re.escape(pat)
+        return re.compile(rf"\b{lit}\b" if whole_word else lit, re.I), False
+
+
+# The bot logs every incoming message verbatim ("📝 Original text: '/log …'",
+# router/pipeline lines, …). Searching for a term therefore matches the /log
+# command that contains it, burying the real hits under echoes of the question.
+# Those lines are dropped unless the user is explicitly grepping for "/log".
+_SELF_ECHO_RE = re.compile(r"['\"]/log\b")
 
 
 def filter_log_lines(
-    journal_text: str, pattern: str, *, lines: int
+    journal_text: str, pattern: str, *, lines: int, whole_word: bool = False
 ) -> tuple[list[str], int, bool]:
     """(kept_lines_newest_last, total_matched, pattern_was_regex)."""
-    rx, is_regex = _compile_pattern(pattern)
+    rx, is_regex = _compile_pattern(pattern, whole_word=whole_word)
+    want_self = "/log" in (pattern or "")
     matched = [
         ln.rstrip()
         for ln in (journal_text or "").splitlines()
-        if ln.strip() and not ln.startswith("--") and (rx is None or rx.search(ln))
+        if ln.strip()
+        and not ln.startswith("--")
+        and (want_self or not _SELF_ECHO_RE.search(ln))
+        and (rx is None or rx.search(ln))
     ]
     return matched[-lines:], len(matched), is_regex
 
@@ -485,12 +509,14 @@ def handle_log_command(args_text: str, *, chat_id: str, send_message) -> None:
     if raw in ("-h", "--help", "help", "?"):
         send_message(
             chat_id,
-            "📜 `/log [window] [-n N] [pattern]`\n"
+            "📜 `/log [window] [-n N] [-w] [pattern]`\n"
             f"• `/log` — last {_LOG_DEFAULT_LINES} lines ({_LOG_DEFAULT_WINDOW})\n"
             "• `/log timeout` — lines containing `timeout`\n"
+            "• `/log -w moved` — whole word only (skips `Removed`)\n"
             "• `/log 6h -n 100 evo` — last 6h, up to 100 matching lines\n"
             "• pattern is a regex (falls back to plain text if invalid)\n"
-            f"Reads the `{_unit()}` journal. Credentials are masked.",
+            f"Reads the `{_unit()}` journal. Credentials are masked, and the "
+            "bot's own `/log` command lines are hidden.",
         )
         return
     opts = parse_log_args(raw)
@@ -500,12 +526,17 @@ def handle_log_command(args_text: str, *, chat_id: str, send_message) -> None:
         return
 
     kept, total, is_regex = filter_log_lines(
-        journal, opts["pattern"], lines=opts["lines"]
+        journal,
+        opts["pattern"],
+        lines=opts["lines"],
+        whole_word=opts["whole_word"],
     )
     pat = opts["pattern"]
     head = f"📜 **{_unit()}** — last {opts['label']}"
     if pat:
         kind = "regex" if is_regex else "text"
+        if opts["whole_word"]:
+            kind += ", whole word"
         head += f", matching `{pat}` ({kind})"
     if not kept:
         send_message(chat_id, f"{head}\n_No matching lines._")
