@@ -116,6 +116,7 @@ _EXTRA_ALIASES: dict[str, tuple[str, ...]] = {
     "/deletereminder": ("delete reminder", "删提醒", "show reminder"),
     "/checkemail": ("check email", "邮件"),
     "/checkerror": ("check error", "service error", "bot error", "服务错误", "查错误"),
+    "/log": ("log", "logs", "journal", "journalctl", "日志", "查日志", "grep log"),
     "/checkevo": ("check evo", "evo game", "gamelist", "game list", "查游戏", "游戏上线", "check game"),
     "/dutycheckall": ("duty check all", "值班检查"),
 }

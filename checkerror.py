@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import os
 import re
+from typing import Any, Optional
 import subprocess
 
 import requests
@@ -378,6 +379,146 @@ def format_groups_for_llm(groups: list[dict]) -> tuple[str, int]:
         kept.append(chunk)
     kept.reverse()
     return "\n---\n".join(kept), dropped
+
+
+# ---------------------------------------------------------------------------
+# ``/log`` — raw journal tail + grep (no LLM)
+# ---------------------------------------------------------------------------
+
+_LOG_DEFAULT_WINDOW = "2h"
+_LOG_DEFAULT_LINES = 40
+_LOG_MAX_LINES = 300
+_LOG_MAX_CHARS = 3200  # Lark message budget for the code block
+
+# Credentials that must never be echoed into a chat, even from our own journal.
+_SECRET_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
+    (re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._\-]{8,}"), r"\1 ***"),
+    (
+        re.compile(
+            r"(?i)\b(password|passwd|pwd|secret|token|app_secret|api[_-]?key|"
+            r"authorization)\b(\s*[=:]\s*|\"\s*:\s*\"?)([^\s,;\"'}\]]{4,})"
+        ),
+        r"\1\2***",
+    ),
+    (re.compile(r"\b([ut]_[A-Za-z0-9]{6})[A-Za-z0-9]{10,}"), r"\1***"),  # Lark tokens
+)
+
+
+def _redact_secrets(text: str) -> str:
+    out = text or ""
+    for pat, repl in _SECRET_PATTERNS:
+        out = pat.sub(repl, out)
+    return out
+
+
+def parse_log_args(args_text: str) -> dict[str, Any]:
+    """``/log`` arguments → {window, label, lines, pattern}.
+
+    Accepts, in any order before the pattern:
+      * a window token — ``30m`` / ``2h`` / ``3d``
+      * a line count — ``-n 100``, ``n=100`` or a bare integer
+    Everything left over is the grep pattern (regex; falls back to a literal
+    substring when it does not compile).
+    """
+    toks = (args_text or "").split()
+    window, label = _parse_window(_LOG_DEFAULT_WINDOW)  # type: ignore[misc]
+    lines = _LOG_DEFAULT_LINES
+    rest: list[str] = []
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t in ("-n", "--lines") and i + 1 < len(toks) and toks[i + 1].isdigit():
+            lines = int(toks[i + 1])
+            i += 2
+            continue
+        m_n = re.match(r"^(?:-n|n=|lines=)(\d{1,4})$", t, re.I)
+        if m_n:
+            lines = int(m_n.group(1))
+            i += 1
+            continue
+        parsed = _parse_window(t)
+        if parsed:
+            window, label = parsed
+            i += 1
+            continue
+        if t.isdigit() and not rest:  # bare count only before the pattern
+            lines = int(t)
+            i += 1
+            continue
+        rest.append(t)
+        i += 1
+    return {
+        "window": window,
+        "label": label,
+        "lines": max(1, min(_LOG_MAX_LINES, lines)),
+        "pattern": " ".join(rest).strip(),
+    }
+
+
+def _compile_pattern(pattern: str) -> tuple[Optional[re.Pattern], bool]:
+    """(compiled, is_regex). Invalid regex degrades to a literal search."""
+    pat = (pattern or "").strip()
+    if not pat:
+        return None, False
+    try:
+        return re.compile(pat, re.I), True
+    except re.error:
+        return re.compile(re.escape(pat), re.I), False
+
+
+def filter_log_lines(
+    journal_text: str, pattern: str, *, lines: int
+) -> tuple[list[str], int, bool]:
+    """(kept_lines_newest_last, total_matched, pattern_was_regex)."""
+    rx, is_regex = _compile_pattern(pattern)
+    matched = [
+        ln.rstrip()
+        for ln in (journal_text or "").splitlines()
+        if ln.strip() and not ln.startswith("--") and (rx is None or rx.search(ln))
+    ]
+    return matched[-lines:], len(matched), is_regex
+
+
+def handle_log_command(args_text: str, *, chat_id: str, send_message) -> None:
+    """``/log [window] [-n N] [pattern]`` — raw journal tail, optionally grepped."""
+    raw = (args_text or "").strip()
+    if raw in ("-h", "--help", "help", "?"):
+        send_message(
+            chat_id,
+            "📜 `/log [window] [-n N] [pattern]`\n"
+            f"• `/log` — last {_LOG_DEFAULT_LINES} lines ({_LOG_DEFAULT_WINDOW})\n"
+            "• `/log timeout` — lines containing `timeout`\n"
+            "• `/log 6h -n 100 evo` — last 6h, up to 100 matching lines\n"
+            "• pattern is a regex (falls back to plain text if invalid)\n"
+            f"Reads the `{_unit()}` journal. Credentials are masked.",
+        )
+        return
+    opts = parse_log_args(raw)
+    ok, journal = _read_journal(opts["window"])
+    if not ok:
+        send_message(chat_id, f"❌ /log: {journal}")
+        return
+
+    kept, total, is_regex = filter_log_lines(
+        journal, opts["pattern"], lines=opts["lines"]
+    )
+    pat = opts["pattern"]
+    head = f"📜 **{_unit()}** — last {opts['label']}"
+    if pat:
+        kind = "regex" if is_regex else "text"
+        head += f", matching `{pat}` ({kind})"
+    if not kept:
+        send_message(chat_id, f"{head}\n_No matching lines._")
+        return
+
+    body = _redact_secrets("\n".join(kept))
+    if len(body) > _LOG_MAX_CHARS:
+        body = "…\n" + body[-_LOG_MAX_CHARS:]
+    shown = len(kept)
+    head += f"\n{total} line(s) matched"
+    if shown < total:
+        head += f", showing the last {shown}"
+    send_message(chat_id, f"{head}\n```\n{body}\n```")
 
 
 # ---------------------------------------------------------------------------

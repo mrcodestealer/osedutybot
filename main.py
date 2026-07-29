@@ -6383,6 +6383,26 @@ def lark_webhook():
 
         threading.Thread(target=_run_checkerror_job, daemon=True).start()
         return _lark_im_done()
+    elif cmd == '/log':
+        # Raw journal tail + grep (no AI). `/log [window] [-n N] [pattern]`.
+        _lg_args = " ".join(cmd_parts[1:]).strip()
+
+        def _run_log_job(chat_id_lg=chat_id, args_lg=_lg_args):
+            try:
+                import checkerror as _lg_mod
+
+                _lg_mod.handle_log_command(
+                    args_lg, chat_id=chat_id_lg, send_message=send_message
+                )
+            except Exception as _lg_err:
+                print(f"❌ log job: {_lg_err!r}", flush=True)
+                try:
+                    send_message(chat_id_lg, f"❌ /log failed: {_lg_err}")
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run_log_job, daemon=True).start()
+        return _lark_im_done()
     elif cmd == '/checkevo':
         # Look up one game by 游戏名称/Games Name in the EVO gamelist sheet and
         # show its row. If the bot lacks sheet permission → explicit 91403 notice.
