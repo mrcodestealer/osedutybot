@@ -1468,6 +1468,58 @@ def start_lark_background_thread(fn, *args, **kwargs) -> None:
     threading.Thread(target=_target, daemon=True).start()
 
 
+# "who am i" — the asker's own ids. Tolerates /whoami, spacing and the zh form.
+_WHOAMI_RE = re.compile(r"^\s*/?\s*(?:who\s*am\s*i|whoami|我是谁)\s*[?？]?\s*$", re.I)
+
+
+def _lookup_lark_user_name(open_id: str) -> str:
+    """Display name for an open_id (best effort — blank when unavailable)."""
+    oid = (open_id or "").strip()
+    if not oid:
+        return ""
+    token = get_tenant_access_token()
+    if not token:
+        return ""
+    host = (os.getenv("LARK_HOST") or "https://open.larksuite.com").rstrip("/")
+    try:
+        resp = requests.get(
+            f"{host}/open-apis/contact/v3/users/{oid}",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"user_id_type": "open_id"},
+            timeout=15,
+        ).json()
+    except Exception as exc:  # noqa: BLE001 — name is a nicety, ids are the point
+        print(f"[whoami] name lookup failed for {oid}: {exc!r}", flush=True)
+        return ""
+    if resp.get("code") != 0:
+        print(f"[whoami] name lookup code={resp.get('code')} msg={resp.get('msg')!r}", flush=True)
+        return ""
+    user = ((resp.get("data") or {}).get("user")) or {}
+    return str(user.get("name") or user.get("en_name") or "").strip()
+
+
+def _build_whoami_reply(
+    sender_open_id: Optional[str], chat_id: Optional[str], chat_type: Optional[str]
+) -> str:
+    oid = (sender_open_id or "").strip()
+    if not oid:
+        return (
+            "❌ Could not read your open_id from this event.\n"
+            "Try again in a direct message to the bot."
+        )
+    name = _lookup_lark_user_name(oid)
+    lines = ["🪪 **Who am I**"]
+    if name:
+        lines.append(f"• Name: {name}")
+    lines.append(f"• Your open_id: `{oid}`")
+    if chat_id:
+        kind = "direct message" if (chat_type or "") == "p2p" else (chat_type or "group")
+        lines.append(f"• This chat_id: `{chat_id}` ({kind})")
+    lines.append("")
+    lines.append("_open_id identifies you to this bot; chat_id identifies this chat._")
+    return "\n".join(lines)
+
+
 def _lark_im_ack():
     """HTTP 200 for Lark without GotIt/Done reactions (ignored messages)."""
     return jsonify({"success": True})
@@ -5028,6 +5080,13 @@ def lark_webhook():
     set_lark_incoming_message(message_id, chat_id)
     if message_id and (chat_type == "p2p" or bot_mentioned):
         remember_gotit_reaction(add_gotit_reaction(message_id))
+
+    # "who am i" / "whoami" / 我是谁 → show the ASKER's own ids. Handy for filling in
+    # the ou_… env vars (approvers, QA/CS tags, reminder targets) without digging
+    # through the developer console. Only ever reveals the sender's own ids.
+    if _WHOAMI_RE.match(clean_text or ""):
+        send_message(chat_id, _build_whoami_reply(sender_id, chat_id, chat_type))
+        return _lark_im_done()
 
     if text == "我要验牌":
         reply = f'<at user_id="{sender_id}"></at> 给我擦皮鞋'

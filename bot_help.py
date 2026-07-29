@@ -59,6 +59,7 @@ def _help_sections() -> list[HelpSection]:
                     "@bot — who is on leave today (OSE leave Bitable)",
                     "@机器人 — 今日谁请假（OSE 请假多维表）",
                 ),
+                ("who am i", "@bot — show your own open_id + this chat_id", "@机器人 — 显示你的 open_id 与本群 chat_id"),
                 ("/restart", "Restart bot process", "重启机器人"),
             ],
         ),
