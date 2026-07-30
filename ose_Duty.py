@@ -16,6 +16,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
@@ -1614,6 +1615,19 @@ def revert_approved_offset_shift_sheet_for_record(record_id: str) -> dict[str, A
             row = get_ose_offset_record_admin_row(rid)
         except KeyError:
             row = None
+        if row is None:
+            # Row already gone and no usable snapshot (legacy state written before
+            # snapshots were stored). We cannot know which cells to undo, so stop
+            # retrying forever — otherwise this id is polled for good and its ``*``
+            # marks sit on the roster with no way to clear them.
+            _unmark_offset_shift_sheet_applied(rid)
+            print(
+                f"[ose_Duty] offset {rid} deleted with no stored snapshot — cannot "
+                f"revert its duty-sheet cells; clearing the applied flag. Check the "
+                f"roster by hand if a stray '*' remains.",
+                flush=True,
+            )
+            return {"ok": False, "record_id": rid, "skipped": "missing_snapshot_row_gone"}
         if row is not None:
             if bool(row.get("pending")):
                 return {"ok": False, "record_id": rid, "skipped": "still_pending"}
@@ -5297,6 +5311,12 @@ def delete_ose_offset_record(*, record_id: str, skip_cache_invalidate: bool = Fa
     rid = (record_id or "").strip()
     if not rid:
         raise ValueError("record_id is required")
+    # Tell the guard this deletion is sanctioned (menu or retention purge) BEFORE
+    # the row disappears, otherwise the next poll would restore it.
+    try:
+        mark_offset_delete_authorized(rid)
+    except Exception as exc:  # noqa: BLE001 — never block a legitimate delete
+        print(f"[ose_Duty] offset guard authorize failed for {rid!r}: {exc!r}", flush=True)
     shift_revert: dict[str, Any] = {}
     try:
         shift_revert = revert_approved_offset_shift_sheet_for_record(rid)
@@ -5344,6 +5364,184 @@ def _offset_row_original_exchange_dates(fields: dict[str, Any]) -> tuple[Optiona
     od = _bitable_field_original_date(f)
     xd = _bitable_field_exchange_date(f)
     return od, xd
+
+
+# ---------------------------------------------------------------------------
+# Offset row guard — offsets must be deleted through the bot menu, not by hand.
+#
+# Every poll mirrors the live offset rows here. A row that disappears WITHOUT the
+# bot having deleted it (see :func:`mark_offset_delete_authorized`, called by
+# ``delete_ose_offset_record`` — the single sanctioned delete path, used by both
+# the menu and the retention purge) was removed straight from the Base. That row
+# is restored from the mirror and the approvers are told who to talk to.
+#
+# The mirror also carries the fields needed to revert the duty sheet, which the
+# old path could not do once the row was gone (it tried to re-read the deleted
+# row and gave up with "missing_snapshot", leaving ``*`` marks stuck forever).
+# ---------------------------------------------------------------------------
+_OFFSET_GUARD_PATH = os.path.join(_OSE_DIR, "offset_row_guard.json")
+_OFFSET_GUARD_LOCK = threading.Lock()
+# Keep authorised-delete markers this long, so a slow poll still sees them.
+_OFFSET_GUARD_AUTH_TTL_SEC = 7 * 24 * 3600
+
+
+def _load_offset_guard_state() -> dict[str, Any]:
+    empty = {"rows": {}, "authorized": {}}
+    try:
+        with open(_OFFSET_GUARD_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return dict(empty)
+    if not isinstance(data, dict):
+        return dict(empty)
+    rows = data.get("rows") if isinstance(data.get("rows"), dict) else {}
+    auth = data.get("authorized") if isinstance(data.get("authorized"), dict) else {}
+    return {"rows": dict(rows), "authorized": dict(auth)}
+
+
+def _save_offset_guard_state(state: dict[str, Any]) -> None:
+    tmp = _OFFSET_GUARD_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(state, fh, ensure_ascii=False, indent=2, default=str)
+        fh.write("\n")
+    os.replace(tmp, _OFFSET_GUARD_PATH)
+
+
+def mark_offset_delete_authorized(record_id: str) -> None:
+    """Record that the BOT is deleting this row, so the guard won't restore it."""
+    rid = (record_id or "").strip()
+    if not rid:
+        return
+    with _OFFSET_GUARD_LOCK:
+        state = _load_offset_guard_state()
+        state.setdefault("authorized", {})[rid] = datetime.now().isoformat(timespec="seconds")
+        _save_offset_guard_state(state)
+
+
+def _offset_guard_writable_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    """Drop values Bitable computes itself; those cannot be written back."""
+    out: dict[str, Any] = {}
+    for k, v in (fields or {}).items():
+        if v is None or v == "" or v == []:
+            continue
+        name = str(k).strip().lower()
+        if name in ("record id", "record_id", "created time", "created by", "auto number"):
+            continue
+        # Person/link cells come back as rich objects; keep only plain values and
+        # the {text/link} shapes Bitable accepts on write.
+        if isinstance(v, (dict, list)) and name not in ("request person", "exchange person"):
+            continue
+        out[k] = v
+    return out
+
+
+def scan_restore_directly_deleted_offsets(
+    *, notify: Optional[Any] = None
+) -> dict[str, Any]:
+    """Mirror live offsets; restore any row deleted straight from the Base.
+
+    Returns counts plus ``restored`` details so the caller can notify approvers.
+    Never restores a row the bot itself deleted (menu delete or retention purge).
+    """
+    token = get_tenant_access_token()
+    try:
+        items = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_OFFSET_TABLE_ID)
+    except Exception as exc:  # noqa: BLE001 — a fetch blip must not look like mass deletion
+        print(f"[ose_Duty] offset guard skipped (fetch failed): {exc!r}", flush=True)
+        return {"ok": False, "error": str(exc), "restored": [], "checked": 0}
+    live: dict[str, dict[str, Any]] = {}
+    for it in items:
+        rid = str(it.get("record_id") or "").strip()
+        if rid:
+            live[rid] = dict(it.get("fields") or {})
+
+    with _OFFSET_GUARD_LOCK:
+        state = _load_offset_guard_state()
+        rows: dict[str, Any] = dict(state.get("rows") or {})
+        auth: dict[str, Any] = dict(state.get("authorized") or {})
+        known = set(rows)
+        first_run = not known
+
+        missing = [rid for rid in known if rid not in live]
+        restored: list[dict[str, Any]] = []
+        errors: list[str] = []
+        for rid in missing:
+            snap = rows.get(rid) or {}
+            if rid in auth:  # bot-initiated delete → expected, just forget it
+                rows.pop(rid, None)
+                continue
+            fields = _offset_guard_writable_fields(snap.get("fields") or {})
+            if not fields:
+                rows.pop(rid, None)
+                continue
+            try:
+                res = _bitable_create_record(token, OSE_OFFSET_TABLE_ID, fields)
+                new_id = str(((res.get("data") or {}).get("record") or {}).get("record_id") or "").strip()
+                restored.append(
+                    {
+                        "old_record_id": rid,
+                        "new_record_id": new_id,
+                        "fields": fields,
+                        "summary": snap.get("summary") or "",
+                    }
+                )
+                rows.pop(rid, None)
+                if new_id:
+                    rows[new_id] = {"fields": fields, "summary": snap.get("summary") or ""}
+                print(
+                    f"[ose_Duty] offset guard RESTORED {rid} → {new_id} "
+                    f"({snap.get('summary') or 'offset'})",
+                    flush=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{rid}: {exc}")
+                print(f"[ose_Duty] offset guard restore failed {rid}: {exc!r}", flush=True)
+
+        # Refresh the mirror from what is live now.
+        for rid, fields in live.items():
+            rows[rid] = {
+                "fields": fields,
+                "summary": _offset_guard_summary(fields),
+            }
+        cutoff = datetime.now() - timedelta(seconds=_OFFSET_GUARD_AUTH_TTL_SEC)
+        for rid, ts in list(auth.items()):
+            if rid in live:
+                continue
+            try:
+                if datetime.fromisoformat(str(ts)) < cutoff:
+                    auth.pop(rid, None)
+            except ValueError:
+                auth.pop(rid, None)
+        _save_offset_guard_state({"rows": rows, "authorized": auth})
+
+    if first_run:
+        print(f"[ose_Duty] offset guard seeded with {len(live)} row(s)", flush=True)
+        return {"ok": True, "seeded": len(live), "restored": [], "checked": len(live)}
+    if restored and notify is not None:
+        try:
+            notify(restored)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ose_Duty] offset guard notify failed: {exc!r}", flush=True)
+    return {
+        "ok": not errors,
+        "checked": len(live),
+        "restored": restored,
+        "errors": errors,
+    }
+
+
+def _offset_guard_summary(fields: dict[str, Any]) -> str:
+    """Short human label for guard logs / approver notices."""
+    f = fields or {}
+    who = _field_text(_get_field_by_aliases(f, ["Request Person", "Requester", "Name"]))
+    od_d = _bitable_field_original_date(f)
+    xd_d = _bitable_field_exchange_date(f)
+    st = _field_text(_get_field_by_aliases(f, ["Shift Type", "Shift"]))
+    bits = [b for b in [who, st] if b]
+    when = " → ".join([d.isoformat() for d in (od_d, xd_d) if d])
+    if when:
+        bits.append(when)
+    return " · ".join(bits) or "offset row"
 
 
 def purge_stale_ose_offset_bitable_rows(*, ref_date: Optional[date] = None) -> dict[str, Any]:

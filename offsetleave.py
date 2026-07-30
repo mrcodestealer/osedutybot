@@ -4885,6 +4885,61 @@ def _notify_offset_approvers_requester_deleted(
             print(f"[offsetleave] requester-delete notify failed for {aid!r}: {r!r}", flush=True)
 
 
+def build_offset_direct_delete_card(restored: list[dict[str, Any]]) -> dict[str, Any]:
+    """Red notice: offsets were deleted straight from the Base and put back."""
+    n = len(restored)
+    lines = [
+        f"**{n} offset row(s) were deleted directly from the Base** and have been "
+        "**restored** automatically.",
+        "",
+        "Offsets must be removed with the bot menu (`deleteoffset`), not by deleting "
+        "the row in the sheet — a direct delete skips the approval trail and leaves "
+        "the duty roster out of sync.",
+        "",
+        "**Kindly ask whoever removed these to use `deleteoffset` instead.**",
+        "",
+        "**Restored:**",
+    ]
+    for r in restored[:12]:
+        summary = str(r.get("summary") or "").strip() or "offset row"
+        lines.append(f"• {summary}")
+    if n > 12:
+        lines.append(f"• …and {n - 12} more")
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "red",
+            "title": {"tag": "plain_text", "content": "⚠️ Offset deleted directly from the sheet"},
+        },
+        "body": {
+            "elements": [
+                {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}}
+            ]
+        },
+    }
+
+
+def notify_offset_direct_delete_restored(restored: list[dict[str, Any]]) -> None:
+    """Tell every offset approver that a direct delete was undone."""
+    if not restored:
+        return
+    card = build_offset_direct_delete_card(restored)
+    payload = json.dumps(card, ensure_ascii=False)
+    for oid in sorted(OFFSET_APPROVER_OPEN_IDS):
+        if not oid:
+            continue
+        try:
+            _lark_im_send_message(
+                oid, payload, msg_type="interactive", receive_id_type="open_id"
+            )
+        except Exception as exc:  # noqa: BLE001 — one bad id must not stop the rest
+            print(
+                f"[offsetleave] direct-delete notice failed for {oid}: {exc!r}",
+                flush=True,
+            )
+
+
 def _notify_offset_approvers_deleted(
     row: dict[str, Any],
     *,

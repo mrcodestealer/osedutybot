@@ -2221,6 +2221,25 @@ def poll_offset_approver_notifications_from_bitable():
             )
         import ose_Duty as od
 
+        # Offsets must be removed through the bot menu. A row deleted straight from
+        # the Base is restored here and the approvers are told who to ask. Runs
+        # BEFORE the shift-sheet scans so a restored row is re-applied in the same
+        # pass rather than briefly looking deleted.
+        try:
+            import offsetleave as _ol_guard
+
+            _guard = od.scan_restore_directly_deleted_offsets(
+                notify=_ol_guard.notify_offset_direct_delete_restored
+            )
+            _n_restored = len((_guard or {}).get("restored") or [])
+            if _n_restored:
+                print(
+                    f"[ose_Duty] offset guard: restored {_n_restored} directly-deleted offset(s)",
+                    flush=True,
+                )
+        except Exception as exc:
+            print(f"[ose_Duty] offset guard failed: {exc!r}", flush=True)
+
         sh = od.scan_bitable_approved_offsets_for_shift_sheet()
         sa = int((sh or {}).get("applied") or 0)
         if sa:
