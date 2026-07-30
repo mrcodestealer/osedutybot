@@ -98,10 +98,17 @@ OFFSET_APPROVAL_CALLBACK_KEYS = frozenset({_OFFSET_APPR_PICK_KEY, _OFFSET_APPR_C
 _OFFSET_EDIT_PICK_KEY = "offsetleave_offset_edit_pick"
 _OFFSET_EDIT_SUBMIT_KEY = "offsetleave_offset_edit_submit"
 _OFFSET_DELETE_KEY = "offsetleave_offset_delete"
+# Approver deleteoffset step 1: pick a month, then see only that month's rows.
+_OFFSET_DELETE_MONTH_KEY = "offsetleave_offset_delete_month"
 
 OFFSETLEAVE_CARD_CALLBACK_KEYS = frozenset(
     set(OFFSET_APPROVAL_CALLBACK_KEYS)
-    | {_OFFSET_EDIT_PICK_KEY, _OFFSET_EDIT_SUBMIT_KEY, _OFFSET_DELETE_KEY}
+    | {
+        _OFFSET_EDIT_PICK_KEY,
+        _OFFSET_EDIT_SUBMIT_KEY,
+        _OFFSET_DELETE_KEY,
+        _OFFSET_DELETE_MONTH_KEY,
+    }
 )
 
 # Mirror OSE offset rows from the bot Base table into the wiki duty-shift Offset2026 bitable.
@@ -1874,6 +1881,84 @@ def build_offset_edit_list_card(
     }
 
 
+def _offset_months_present(rows: list[dict[str, Any]]) -> list[tuple[int, int, int]]:
+    """Months that actually have offsets → ``[(year, month, row_count)]``, newest first.
+
+    A row is counted under EVERY month it touches (original / exchange / request
+    date), matching :func:`_offset_row_touches_month`, so clicking any of those
+    months finds the row. Months with no offsets never appear.
+    """
+    counts: dict[tuple[int, int], int] = {}
+    for r in rows:
+        seen: set[tuple[int, int]] = set()
+        for key in ("original_date", "exchange_date", "request_date"):
+            d = od._parse_date_value(r.get(key))
+            if d:
+                seen.add((d.year, d.month))
+        for ym in seen:
+            counts[ym] = counts.get(ym, 0) + 1
+    return [(y, m, c) for (y, m), c in sorted(counts.items(), reverse=True)]
+
+
+def build_offset_delete_month_picker_card(
+    owner_open_id: str, rows: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Approver deleteoffset step 1 — one button per month that has offsets.
+
+    Replaces the old flat list, which was capped at 15 rows and silently hid the
+    rest. Picking a month shows only that month, so the cap stops mattering.
+    """
+    months = _offset_months_present(rows)
+    total = len(rows)
+    elements: list[dict[str, Any]] = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": (
+                    f"**Approver** — pick a **month** to delete offsets from.\n"
+                    f"{total} offset record(s) across {len(months)} month(s)."
+                ),
+            },
+        }
+    ]
+    if not months:
+        elements.append(
+            {"tag": "div", "text": {"tag": "lark_md", "content": "_No offset records._"}}
+        )
+    for y, m, c in months:
+        elements.append(
+            {
+                "tag": "button",
+                "text": {
+                    "tag": "plain_text",
+                    "content": f"{_month_filter_label(y, m)}  ({c})",
+                },
+                "type": "primary",
+                "behaviors": [
+                    {
+                        "type": "callback",
+                        "value": {
+                            "k": _OFFSET_DELETE_MONTH_KEY,
+                            "owner": (owner_open_id or "").strip(),
+                            "y": y,
+                            "m": m,
+                        },
+                    }
+                ],
+            }
+        )
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "orange",
+            "title": {"tag": "plain_text", "content": "OSE offset — delete (approver)"},
+        },
+        "body": {"elements": elements},
+    }
+
+
 def build_offset_delete_list_card(
     owner_open_id: str,
     request_person: str,
@@ -3000,12 +3085,18 @@ def handle_deleteoffset_command(
                     hint = f" matching **{filter_note}**" + hint
                 send_message(chat_id, f"No offset records found to delete{hint}.")
                 return True
-            intro_filter = f"\n_Filter: {filter_note}_" if filter_note else ""
-            card = build_offset_delete_list_card(
-                oid, "", rows, is_admin=True, month_label=month_label
-            )
-            if intro_filter and card.get("body", {}).get("elements"):
-                card["body"]["elements"][0]["text"]["content"] += intro_filter
+            if not month_target and not filter_note:
+                # Plain `deleteoffset` → pick a month first, then that month's rows.
+                # Avoids the 15-row cap hiding records. An explicit month/person/status
+                # filter still jumps straight to the matching list.
+                card = build_offset_delete_month_picker_card(oid, rows)
+            else:
+                intro_filter = f"\n_Filter: {filter_note}_" if filter_note else ""
+                card = build_offset_delete_list_card(
+                    oid, "", rows, is_admin=True, month_label=month_label
+                )
+                if intro_filter and card.get("body", {}).get("elements"):
+                    card["body"]["elements"][0]["text"]["content"] += intro_filter
         else:
             request_person = resolve_request_person(oid, token)
             rows = _pending_offsets_for_request_person(request_person)
@@ -4935,6 +5026,54 @@ def _patch_my_offset_list_after_change(
         print(f"[offsetleave] list refresh patch skipped ({m})", flush=True)
 
 
+def _handle_offset_delete_month(
+    parsed: dict[str, Any],
+    event_obj: dict[str, Any],
+    *,
+    sender_open_id: str,
+    chat_id: str,
+    send_message: Callable[..., Any],
+    webhook_data: Optional[dict[str, Any]],
+) -> bool:
+    """Approver picked a month → replace the picker with that month's delete list."""
+    cid = (chat_id or "").strip()
+    mid = _event_message_id(event_obj, webhook_data)
+    try:
+        oid = (sender_open_id or "").strip()
+        if not _is_offset_approver_open_id(oid):
+            _toast_approval_problem(
+                send_message, cid, "Only an offset approver can use this menu."
+            )
+            return True
+        try:
+            year = int(parsed.get("y"))
+            month = int(parsed.get("m"))
+        except (TypeError, ValueError):
+            raise ValueError("missing month")
+        # Re-read live rather than trusting the card: rows may have been deleted or
+        # approved since the picker was built.
+        rows = _filter_offsets_by_month(_all_offsets_for_approver_delete(), year, month)
+        label = _month_filter_label(year, month)
+        if not rows:
+            _toast_approval_problem(
+                send_message, cid, f"No offset records left for {label}."
+            )
+            return True
+        card = build_offset_delete_list_card(
+            oid, "", rows, is_admin=True, month_label=label
+        )
+        if not (mid and _try_patch_interactive_card_message(mid, card)):
+            token = od.get_tenant_access_token()
+            if cid:
+                _send_ephemeral_card(cid, oid, card, token)
+            else:
+                raise ValueError("Could not open the month list — run deleteoffset again.")
+    except Exception as exc:  # noqa: BLE001 — surface as a toast, never 500 the callback
+        print(f"[offsetleave] delete month pick failed: {exc!r}", flush=True)
+        _toast_approval_problem(send_message, cid, f"deleteoffset: {exc}")
+    return True
+
+
 def _handle_offset_edit_pick(
     parsed: dict[str, Any],
     event_obj: dict[str, Any],
@@ -5348,6 +5487,15 @@ def handle_card_callback(
         )
     if key == _OFFSET_EDIT_SUBMIT_KEY:
         return _handle_offset_edit_submit(
+            parsed,
+            event_obj,
+            sender_open_id=sender_open_id,
+            chat_id=chat_id,
+            send_message=send_message,
+            webhook_data=webhook_data,
+        )
+    if key == _OFFSET_DELETE_MONTH_KEY:
+        return _handle_offset_delete_month(
             parsed,
             event_obj,
             sender_open_id=sender_open_id,
