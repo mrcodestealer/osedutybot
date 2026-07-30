@@ -2186,16 +2186,33 @@ _leave_wfh_sync_lock = threading.Lock()
 _holiday_sync_lock = threading.Lock()
 
 
+def _poll_step(label: str, fn, *args, **kwargs):
+    """Run one poll step in isolation.
+
+    The offset/leave poll used to be a single ``try``: the first step that raised
+    skipped every step after it. That silently disabled the shift-sheet revert
+    scan for a long time (15 deleted offsets never reverted on the roster). Each
+    step now fails on its own and the rest still run.
+    """
+    try:
+        return fn(*args, **kwargs)
+    except Exception as exc:  # noqa: BLE001 — one broken step must not stop the poll
+        print(f"[poll] {label} failed: {exc!r}", flush=True)
+        return None
+
+
 def poll_offset_approver_notifications_from_bitable():
     """Notify approvers + mirror manual Base offset edits to wiki Offset2026."""
     try:
         import offsetleave as ol
 
-        stats = ol.scan_bitable_pending_offsets_for_approver_notify()
+        stats = _poll_step(
+            "approver notify", ol.scan_bitable_pending_offsets_for_approver_notify
+        )
         n = int((stats or {}).get("notified") or 0)
         if n:
             print(f"[offsetleave] bitable poll: notified approvers for {n} pending offset(s)", flush=True)
-        wiki = ol.scan_bitable_offsets_for_duty_wiki_sync()
+        wiki = _poll_step("duty wiki sync", ol.scan_bitable_offsets_for_duty_wiki_sync)
         ws = int((wiki or {}).get("synced") or 0)
         wd = int((wiki or {}).get("deleted") or 0)
         if ws or wd:
@@ -2204,14 +2221,17 @@ def poll_offset_approver_notifications_from_bitable():
                 f"(scanned {(wiki or {}).get('scanned')})",
                 flush=True,
             )
-        dele = ol.scan_bitable_offsets_for_deletion_notify()
+        dele = _poll_step("deletion notify", ol.scan_bitable_offsets_for_deletion_notify)
         dn = int((dele or {}).get("notified") or 0)
         if dn:
             print(
                 f"[offsetleave] deletion poll: notified approvers for {dn} deleted offset(s)",
                 flush=True,
             )
-        req = ol.scan_bitable_offsets_for_requester_approval_notify()
+        req = _poll_step(
+            "requester approval notify",
+            ol.scan_bitable_offsets_for_requester_approval_notify,
+        )
         rn = int((req or {}).get("notified") or 0)
         pn = int((req or {}).get("peer_notified") or 0)
         if rn or pn:
@@ -2225,30 +2245,35 @@ def poll_offset_approver_notifications_from_bitable():
         # the Base is restored here and the approvers are told who to ask. Runs
         # BEFORE the shift-sheet scans so a restored row is re-applied in the same
         # pass rather than briefly looking deleted.
-        try:
-            import offsetleave as _ol_guard
+        import offsetleave as _ol_guard
 
-            _guard = od.scan_restore_directly_deleted_offsets(
-                notify=_ol_guard.notify_offset_direct_delete_restored
+        _guard = _poll_step(
+            "offset guard (restore direct deletes)",
+            od.scan_restore_directly_deleted_offsets,
+            notify=_ol_guard.notify_offset_direct_delete_restored,
+        )
+        _n_restored = len((_guard or {}).get("restored") or [])
+        if _n_restored:
+            print(
+                f"[ose_Duty] offset guard: restored {_n_restored} directly-deleted offset(s)",
+                flush=True,
             )
-            _n_restored = len((_guard or {}).get("restored") or [])
-            if _n_restored:
-                print(
-                    f"[ose_Duty] offset guard: restored {_n_restored} directly-deleted offset(s)",
-                    flush=True,
-                )
-        except Exception as exc:
-            print(f"[ose_Duty] offset guard failed: {exc!r}", flush=True)
 
-        sh = od.scan_bitable_approved_offsets_for_shift_sheet()
+        sh = _poll_step(
+            "offset → shift sheet apply", od.scan_bitable_approved_offsets_for_shift_sheet
+        )
         sa = int((sh or {}).get("applied") or 0)
         if sa:
             print(f"[ose_Duty] shift sheet poll: applied {sa} approved offset(s)", flush=True)
-        rv = od.scan_revert_deleted_offsets_from_shift_sheet()
+        rv = _poll_step(
+            "offset shift-sheet revert", od.scan_revert_deleted_offsets_from_shift_sheet
+        )
         sr = int((rv or {}).get("reverted") or 0)
         if sr:
             print(f"[ose_Duty] shift sheet poll: reverted {sr} deleted offset(s)", flush=True)
-        lv = od.scan_bitable_approved_leave_for_shift_sheet()
+        lv = _poll_step(
+            "leave → shift sheet", od.scan_bitable_approved_leave_for_shift_sheet
+        )
         la = int((lv or {}).get("applied") or 0)
         lr = int((lv or {}).get("restyled") or 0)
         if la or lr:
@@ -2256,7 +2281,9 @@ def poll_offset_approver_notifications_from_bitable():
                 f"[ose_Duty] leave shift sheet poll: applied {la} leave row(s), restyled {lr}",
                 flush=True,
             )
-        lrv = od.scan_revert_deleted_leave_from_shift_sheet()
+        lrv = _poll_step(
+            "leave shift-sheet revert", od.scan_revert_deleted_leave_from_shift_sheet
+        )
         lsr = int((lrv or {}).get("reverted") or 0)
         if lsr:
             print(f"[ose_Duty] leave shift sheet poll: reverted {lsr} deleted/unapproved leave(s)", flush=True)
