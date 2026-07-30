@@ -1784,6 +1784,8 @@ def _callback_payload_row_action(
     request_person: str,
     record_id: str,
     admin: bool = False,
+    month_ym: Optional[tuple[int, int]] = None,
+    start: int = 0,
 ) -> dict[str, Any]:
     d: dict[str, Any] = {
         "k": kind,
@@ -1793,6 +1795,12 @@ def _callback_payload_row_action(
     }
     if admin:
         d["admin"] = 1
+    # Carry the month/page so the card rebuilt AFTER a delete stays on the same
+    # month and page instead of falling back to the unfiltered list.
+    if month_ym:
+        d["y"], d["m"] = int(month_ym[0]), int(month_ym[1])
+    if start:
+        d["off"] = int(start)
     return d
 
 
@@ -1881,6 +1889,12 @@ def build_offset_edit_list_card(
     }
 
 
+# Rows per delete card. A month with more than this gets "Show next" paging, so
+# nothing is hidden; keeping it bounded keeps the card payload well inside Lark's
+# size limit (each row is a summary div + a Delete button).
+_OFFSET_DELETE_PAGE = 25
+
+
 def _offset_months_present(rows: list[dict[str, Any]]) -> list[tuple[int, int, int]]:
     """Months that actually have offsets → ``[(year, month, row_count)]``, newest first.
 
@@ -1967,9 +1981,15 @@ def build_offset_delete_list_card(
     is_admin: bool = False,
     month_label: Optional[str] = None,
     filter_label: Optional[str] = None,
+    month_ym: Optional[tuple[int, int]] = None,
+    start: int = 0,
 ) -> dict[str, Any]:
-    cap = 15
-    sliced = rows[:cap]
+    # One card holds a page of rows; anything beyond gets a "Show next" button, so
+    # a month with more offsets than fit is never silently truncated.
+    page = _OFFSET_DELETE_PAGE
+    total = len(rows)
+    start = max(0, min(int(start or 0), max(0, total - 1)))
+    sliced = rows[start : start + page]
     month_note = f" ({month_label})" if month_label else ""
     filter_note = f"\n_Filter: **{filter_label}**_" if filter_label else ""
     if is_admin:
@@ -1985,14 +2005,18 @@ def build_offset_delete_list_card(
         )
         cap_note = "pending"
     elements: list[dict[str, Any]] = [{"tag": "div", "text": {"tag": "lark_md", "content": intro}}]
-    if len(rows) > cap:
+    if total > len(sliced):
+        first, last = start + 1, start + len(sliced)
         elements.append(
             {
                 "tag": "div",
-                "text": {"tag": "plain_text", "content": f"(Showing first {cap} of {len(rows)} {cap_note}.)"},
+                "text": {
+                    "tag": "plain_text",
+                    "content": f"Showing {first}–{last} of {total} {cap_note}.",
+                },
             }
         )
-    for i, r in enumerate(sliced, start=1):
+    for i, r in enumerate(sliced, start=start + 1):
         rid = str(r.get("record_id") or "").strip()
         if not rid:
             continue
@@ -2012,11 +2036,79 @@ def build_offset_delete_list_card(
                             request_person=request_person,
                             record_id=rid,
                             admin=is_admin,
+                            month_ym=month_ym,
+                            start=start,
                         ),
                     }
                 ],
             }
         )
+    # Paging / back controls need a month to re-query, so they only apply to the
+    # approver month flow.
+    if month_ym:
+        nav: list[dict[str, Any]] = []
+        if start + page < total:
+            remaining = total - (start + page)
+            nav.append(
+                {
+                    "tag": "button",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": f"Show next {min(page, remaining)} ▶",
+                    },
+                    "type": "primary",
+                    "behaviors": [
+                        {
+                            "type": "callback",
+                            "value": {
+                                "k": _OFFSET_DELETE_MONTH_KEY,
+                                "owner": (owner_open_id or "").strip(),
+                                "y": int(month_ym[0]),
+                                "m": int(month_ym[1]),
+                                "off": start + page,
+                            },
+                        }
+                    ],
+                }
+            )
+        if start > 0:
+            nav.append(
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "◀ Previous"},
+                    "type": "default",
+                    "behaviors": [
+                        {
+                            "type": "callback",
+                            "value": {
+                                "k": _OFFSET_DELETE_MONTH_KEY,
+                                "owner": (owner_open_id or "").strip(),
+                                "y": int(month_ym[0]),
+                                "m": int(month_ym[1]),
+                                "off": max(0, start - page),
+                            },
+                        }
+                    ],
+                }
+            )
+        nav.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "◀ All months"},
+                "type": "default",
+                "behaviors": [
+                    {
+                        "type": "callback",
+                        "value": {
+                            "k": _OFFSET_DELETE_MONTH_KEY,
+                            "owner": (owner_open_id or "").strip(),
+                            "all": 1,
+                        },
+                    }
+                ],
+            }
+        )
+        elements.extend(nav)
     title = "OSE offset — delete (approver)" if is_admin else "OSE offset — delete"
     return {
         "schema": "2.0",
@@ -5045,23 +5137,40 @@ def _handle_offset_delete_month(
                 send_message, cid, "Only an offset approver can use this menu."
             )
             return True
-        try:
-            year = int(parsed.get("y"))
-            month = int(parsed.get("m"))
-        except (TypeError, ValueError):
-            raise ValueError("missing month")
         # Re-read live rather than trusting the card: rows may have been deleted or
         # approved since the picker was built.
-        rows = _filter_offsets_by_month(_all_offsets_for_approver_delete(), year, month)
-        label = _month_filter_label(year, month)
-        if not rows:
-            _toast_approval_problem(
-                send_message, cid, f"No offset records left for {label}."
+        all_rows = _all_offsets_for_approver_delete()
+        if parsed.get("all"):  # "◀ All months" → back to the month picker
+            if not all_rows:
+                _toast_approval_problem(send_message, cid, "No offset records left.")
+                return True
+            card = build_offset_delete_month_picker_card(oid, all_rows)
+        else:
+            try:
+                year = int(parsed.get("y"))
+                month = int(parsed.get("m"))
+            except (TypeError, ValueError):
+                raise ValueError("missing month")
+            try:
+                start = max(0, int(parsed.get("off") or 0))
+            except (TypeError, ValueError):
+                start = 0
+            rows = _filter_offsets_by_month(all_rows, year, month)
+            label = _month_filter_label(year, month)
+            if not rows:
+                _toast_approval_problem(
+                    send_message, cid, f"No offset records left for {label}."
+                )
+                return True
+            card = build_offset_delete_list_card(
+                oid,
+                "",
+                rows,
+                is_admin=True,
+                month_label=label,
+                month_ym=(year, month),
+                start=start,
             )
-            return True
-        card = build_offset_delete_list_card(
-            oid, "", rows, is_admin=True, month_label=label
-        )
         if not (mid and _try_patch_interactive_card_message(mid, card)):
             token = od.get_tenant_access_token()
             if cid:
@@ -5334,8 +5443,32 @@ def _handle_offset_delete_row(
                 except Exception as exc:
                     print(f"[offsetleave] approver-delete requester notify failed: {exc!r}", flush=True)
             rows = _all_offsets_for_approver_delete()
+            # Stay on the month/page the approver was working in (the delete button
+            # carries y/m/off); without this the rebuild fell back to the unfiltered
+            # list and appeared to "lose" the month.
+            _ym: Optional[tuple[int, int]] = None
+            _label = None
+            _start = 0
+            try:
+                if parsed.get("y") and parsed.get("m"):
+                    _ym = (int(parsed["y"]), int(parsed["m"]))
+                    _label = _month_filter_label(*_ym)
+                    rows = _filter_offsets_by_month(rows, *_ym)
+                    _start = max(0, int(parsed.get("off") or 0))
+                    if _start >= len(rows):  # last row on the page was deleted
+                        _start = max(0, ((len(rows) - 1) // _OFFSET_DELETE_PAGE) * _OFFSET_DELETE_PAGE)
+            except (TypeError, ValueError):
+                _ym, _label, _start = None, None, 0
             card = (
-                build_offset_delete_list_card(owner, "", rows, is_admin=True)
+                build_offset_delete_list_card(
+                    owner,
+                    "",
+                    rows,
+                    is_admin=True,
+                    month_label=_label,
+                    month_ym=_ym,
+                    start=_start,
+                )
                 if rows
                 else _build_offset_delete_approver_empty_patch_card()
             )
