@@ -373,6 +373,15 @@ MAIL_IMAP_FOLDERS = [
 MOVE_TO_INBOX_AFTER_REPLY = (
     os.getenv("MAINT_MOVE_TO_INBOX", "").strip() or "1"
 ) not in ("0", "false", "no", "off")
+# How far back the sweep looks for our own already-sent Fw:/Re: maintenance copies.
+# Wider than the processing window on purpose, so an existing backlog is cleared
+# instead of only newly-arriving copies.
+try:
+    MAINT_SWEEP_SINCE_DAYS = max(1, int(os.getenv("MAINT_SWEEP_SINCE_DAYS", "30")))
+except ValueError:
+    MAINT_SWEEP_SINCE_DAYS = 30
+# UIDs per FETCH round-trip in the sweep (one request instead of one per message).
+_SWEEP_FETCH_CHUNK = 50
 def _order_jenkins_reply_folders(folders: list[str]) -> list[str]:
     """``OSE Pending`` first (where update threads usually live); dedupe."""
     prefer = (
@@ -5553,6 +5562,9 @@ class MaintenanceMailWatcher:
         self._send = send_message_func
         self._get_token = get_token_func
         self._stop = threading.Event()
+        # folder -> uids the sweep already looked at and deliberately left alone,
+        # so a 3-second poll does not re-fetch the same headers forever.
+        self._sweep_checked: dict[str, set[bytes]] = {}
 
     def _send_lark(self, chat_id: str, text: str) -> None:
         try:
@@ -6180,7 +6192,7 @@ class MaintenanceMailWatcher:
         state: dict[str, Any],
         *,
         folder: str,
-        since: str,
+        since: Optional[str] = None,
     ) -> int:
         """Move the bot's OWN ``Fw:``/``Re:`` copy of an already-replied EVO
         maintenance mail from ``folder`` to INBOX.
@@ -6194,53 +6206,75 @@ class MaintenanceMailWatcher:
           * not already in INBOX;
           * From is our own mailbox (i.e. the bot sent it);
           * subject is a maintenance subject (``TINC-`` / ``[Service Desk]``);
-          * subject is a ``Fw:``/``Re:`` copy, not an original;
-          * its ticket id appears in the processed state — meaning the bot really
-            did reply to that maintenance mail.
+          * subject is a ``Fw:``/``Re:`` copy, not an original.
+
+        Those four are sufficient: such a copy only EXISTS because the watcher
+        forwarded (CP) or replied (NOT IN CP) to that maintenance mail. Note the
+        processed-state ``ticket_id`` is deliberately NOT required — it is written
+        only on the ``to_cp`` branch, so requiring it would silently skip every
+        NOT-IN-CP ``Re:`` copy. Other bot mail (``/egs``, ``/m`` batches) carries a
+        different subject shape and never matches ``subject_matches``.
         """
         if not MOVE_TO_INBOX_AFTER_REPLY or _folder_is_inbox(folder):
             return 0
-        replied: set[str] = set()
-        for ent in state.get("entries") or []:
-            tid = str(ent.get("ticket_id") or "").strip().upper()
-            if tid:
-                replied.add(tid)
-        if not replied:
-            return 0
+        if not since:
+            since = (
+                datetime.now(_local_tz()).date() - timedelta(days=MAINT_SWEEP_SINCE_DAYS)
+            ).strftime("%d-%b-%Y")
+        me = (MAIL_USER or "").strip().lower()
+        # This runs on every poll (POLL_SECONDS=3), so it must stay cheap:
+        #  1. narrow to maintenance subjects SERVER-side (Lark ignores a FROM filter);
+        #  2. skip uids already examined and left in place;
+        #  3. batch the header fetch instead of one round-trip per message;
+        #  4. cap the work per poll — a backlog drains over successive polls.
         try:
-            uids = _uid_search(mail, f"(SINCE {since})")
+            uids = self._uids_maintenance_subject_search(mail, since)
         except Exception as exc:  # noqa: BLE001
             if _imap_connection_broken(exc):
                 raise ImapStaleConnectionError("IMAP lost during sweep search") from exc
             return 0
-        me = (MAIL_USER or "").strip().lower()
+        if not uids:
+            return 0
+        checked: set[bytes] = self._sweep_checked.setdefault(folder, set())
+        todo = [u for u in uids if u not in checked][-POLL_LIMIT:]
+        if not todo:
+            return 0
+
         moved = 0
-        for uid in uids[-POLL_LIMIT:]:
+        for chunk_start in range(0, len(todo), _SWEEP_FETCH_CHUNK):
+            chunk = todo[chunk_start : chunk_start + _SWEEP_FETCH_CHUNK]
+            uid_set = b",".join(chunk)
             try:
                 typ, data = mail.uid(
-                    "fetch", uid, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM)])"
+                    "fetch", uid_set, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM)])"
                 )
             except imaplib.IMAP4.error:
                 continue
-            if typ != "OK" or not data or not data[0]:
+            if typ != "OK" or not data:
                 continue
-            raw = data[0][1]
-            if not isinstance(raw, (bytes, bytearray)):
-                continue
-            hdr = email.message_from_bytes(raw)
-            from_hdr = _decode_mime_header(hdr.get("From"))
-            if me and me not in (from_hdr or "").lower():
-                continue  # not ours → leave it alone
-            subject = _decode_mime_header(hdr.get("Subject"))
-            if not re.match(r"^\s*(?:fw|fwd|re)\s*:", subject or "", re.I):
-                continue  # only our forward/reply copies
-            if not subject_matches(subject):
-                continue  # not a maintenance mail
-            tid = (_maint_mod.extract_ticket_card_title(subject) or "").strip().upper()
-            if not tid or tid not in replied:
-                continue  # we never replied to this ticket → don't touch it
-            if _move_uid_to_inbox(mail, uid, from_folder=folder):
-                moved += 1
+            for part in data:
+                if not isinstance(part, tuple) or len(part) < 2:
+                    continue
+                meta, raw = part[0], part[1]
+                if not isinstance(raw, (bytes, bytearray)):
+                    continue
+                m_uid = re.search(rb"UID\s+(\d+)", meta or b"")
+                if not m_uid:
+                    continue
+                uid = m_uid.group(1)
+                checked.add(uid)
+                hdr = email.message_from_bytes(raw)
+                from_hdr = _decode_mime_header(hdr.get("From"))
+                if me and me not in (from_hdr or "").lower():
+                    continue  # not ours → leave it alone
+                subject = _decode_mime_header(hdr.get("Subject"))
+                if not re.match(r"^\s*(?:fw|fwd|re)\s*:", subject or "", re.I):
+                    continue  # only our forward/reply copies
+                if not subject_matches(subject):
+                    continue  # not a maintenance mail
+                if _move_uid_to_inbox(mail, uid, from_folder=folder):
+                    moved += 1
+                    checked.discard(uid)  # it left this folder; uid is meaningless now
         if moved:
             print(
                 f"[maint-mail] swept {moved} replied maintenance copy(ies) "
@@ -6482,8 +6516,10 @@ class MaintenanceMailWatcher:
             try:
                 with _state_lock:
                     _sweep_state = _load_state()
+                # No `since` → the sweep's own wider window (MAINT_SWEEP_SINCE_DAYS),
+                # so an existing backlog is cleared, not just today's copies.
                 self._sweep_replied_maintenance_copies(
-                    mail, _sweep_state, folder=folder, since=since
+                    mail, _sweep_state, folder=folder
                 )
             except ImapStaleConnectionError:
                 raise
