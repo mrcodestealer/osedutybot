@@ -6174,6 +6174,81 @@ class MaintenanceMailWatcher:
             flush=True,
         )
 
+    def _sweep_replied_maintenance_copies(
+        self,
+        mail: imaplib.IMAP4,
+        state: dict[str, Any],
+        *,
+        folder: str,
+        since: str,
+    ) -> int:
+        """Move the bot's OWN ``Fw:``/``Re:`` copy of an already-replied EVO
+        maintenance mail from ``folder`` to INBOX.
+
+        The original Evolution mail is moved by :meth:`_process_one` right after the
+        reply. Its forward comes back into om@ as a NEW message and a mail rule files
+        it here, where the watcher ignores it (sender is our own mailbox) — so it sat
+        in OSE Pending forever.
+
+        Deliberately narrow, so unrelated mail is never touched. ALL must hold:
+          * not already in INBOX;
+          * From is our own mailbox (i.e. the bot sent it);
+          * subject is a maintenance subject (``TINC-`` / ``[Service Desk]``);
+          * subject is a ``Fw:``/``Re:`` copy, not an original;
+          * its ticket id appears in the processed state — meaning the bot really
+            did reply to that maintenance mail.
+        """
+        if not MOVE_TO_INBOX_AFTER_REPLY or _folder_is_inbox(folder):
+            return 0
+        replied: set[str] = set()
+        for ent in state.get("entries") or []:
+            tid = str(ent.get("ticket_id") or "").strip().upper()
+            if tid:
+                replied.add(tid)
+        if not replied:
+            return 0
+        try:
+            uids = _uid_search(mail, f"(SINCE {since})")
+        except Exception as exc:  # noqa: BLE001
+            if _imap_connection_broken(exc):
+                raise ImapStaleConnectionError("IMAP lost during sweep search") from exc
+            return 0
+        me = (MAIL_USER or "").strip().lower()
+        moved = 0
+        for uid in uids[-POLL_LIMIT:]:
+            try:
+                typ, data = mail.uid(
+                    "fetch", uid, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM)])"
+                )
+            except imaplib.IMAP4.error:
+                continue
+            if typ != "OK" or not data or not data[0]:
+                continue
+            raw = data[0][1]
+            if not isinstance(raw, (bytes, bytearray)):
+                continue
+            hdr = email.message_from_bytes(raw)
+            from_hdr = _decode_mime_header(hdr.get("From"))
+            if me and me not in (from_hdr or "").lower():
+                continue  # not ours → leave it alone
+            subject = _decode_mime_header(hdr.get("Subject"))
+            if not re.match(r"^\s*(?:fw|fwd|re)\s*:", subject or "", re.I):
+                continue  # only our forward/reply copies
+            if not subject_matches(subject):
+                continue  # not a maintenance mail
+            tid = (_maint_mod.extract_ticket_card_title(subject) or "").strip().upper()
+            if not tid or tid not in replied:
+                continue  # we never replied to this ticket → don't touch it
+            if _move_uid_to_inbox(mail, uid, from_folder=folder):
+                moved += 1
+        if moved:
+            print(
+                f"[maint-mail] swept {moved} replied maintenance copy(ies) "
+                f"{folder} → INBOX",
+                flush=True,
+            )
+        return moved
+
     def _prefilter_uids(
         self,
         mail: imaplib.IMAP4,
@@ -6402,6 +6477,18 @@ class MaintenanceMailWatcher:
                 label=f"{folder} today ({len(uids)})",
                 folder=folder,
             )
+            # Our own Fw:/Re: copy of an already-replied ticket lands here via a mail
+            # rule and the watcher skips it (own sender), so move it to INBOX too.
+            try:
+                with _state_lock:
+                    _sweep_state = _load_state()
+                self._sweep_replied_maintenance_copies(
+                    mail, _sweep_state, folder=folder, since=since
+                )
+            except ImapStaleConnectionError:
+                raise
+            except Exception as _sweep_err:  # noqa: BLE001
+                print(f"[maint-mail] sweep failed in {folder}: {_sweep_err!r}", flush=True)
         if not any_folder_opened:
             print(
                 f"[maint-mail] could not SELECT any folder (not empty — check names / IMAP): "
