@@ -3670,6 +3670,53 @@ def _extract_leave_entries_for_date(
     return sorted(out, key=lambda x: x["name"])
 
 
+def _extract_offset_entries_for_date(
+    target_date: date,
+    token: str,
+    *,
+    items: Optional[list[dict[str, Any]]] = None,
+) -> list[dict[str, str]]:
+    """Approved offsets touching ``target_date`` as ``{"shift": "D"/"N", "line": …}``.
+
+    ``shift`` comes from the row's Shift Type, so the card can list morning (``D``)
+    and night (``N``) offsets under their own shift instead of one flat block.
+    """
+    if items is None:
+        items = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_OFFSET_TABLE_ID)
+    out: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for it in items:
+        f = it.get("fields") or {}
+        approval_v = _get_field_by_aliases(f, ["Approval Status", "Status"])
+        if not _is_approved(approval_v):
+            continue
+        req = _title_name(
+            _field_text(_get_field_by_aliases(f, ["Request Person", "Requester", "Requester Person", "Name"]))
+        )
+        exc = _title_name(
+            _field_text(_get_field_by_aliases(f, ["Exchange Person", "Replacement", "Swap Person"]))
+        )
+        od = _bitable_field_original_date(f)
+        xd = _bitable_field_exchange_date(f)
+        if not req or not exc or not od or not xd:
+            continue
+        if target_date != od and target_date != xd:
+            continue
+        shift = _field_text(_get_field_by_aliases(f, ["Shift Type", "Shift"])).strip().upper()
+        if shift not in ("D", "N"):
+            shift = ""  # unknown → listed without a shift heading rather than dropped
+        if req.lower() == exc.lower():
+            line = f"• {req} is offset with him/herself."
+        else:
+            line = f"• {req}({_format_ddmmyyyy(od)}) offset with {exc}({_format_ddmmyyyy(xd)})"
+        key = (shift, line)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"shift": shift, "line": line})
+    return sorted(out, key=lambda e: (e["shift"], e["line"]))
+
+
 def _extract_offset_lines_for_date(
     target_date: date,
     token: str,
@@ -3703,6 +3750,60 @@ def _extract_offset_lines_for_date(
             f"• {req}({_format_ddmmyyyy(od)}) offset with {exc}({_format_ddmmyyyy(xd)})"
         )
     return sorted(set(lines))
+
+
+def build_offset_shift_columns(
+    offset_entries: list[dict[str, str]],
+    *,
+    first_title: str = "🌅 Morning shift",
+    second_title: str = "🌙 Night Shift",
+) -> list[dict[str, Any]]:
+    """``🔁 Offset`` split by shift — morning on the left, night beside it.
+
+    Only shifts that actually have an offset are rendered: no morning offset → no
+    morning column, and no offsets at all → no elements (caller shows nothing).
+    Offsets whose row has no usable Shift Type are listed underneath so they can
+    never silently disappear.
+    """
+    morning = [e["line"] for e in offset_entries if e.get("shift") == "D"]
+    night = [e["line"] for e in offset_entries if e.get("shift") == "N"]
+    other = [e["line"] for e in offset_entries if e.get("shift") not in ("D", "N")]
+    if not (morning or night or other):
+        return []
+
+    elements: list[dict[str, Any]] = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": "🔁 **Offset**"}}
+    ]
+    columns: list[dict[str, Any]] = []
+    for title, rows in ((first_title, morning), (second_title, night)):
+        if not rows:
+            continue  # that shift has no offset today → omit the column entirely
+        columns.append(
+            {
+                "tag": "column",
+                "width": "weighted",
+                "weight": 1,
+                "vertical_align": "top",
+                "elements": [
+                    {
+                        "tag": "div",
+                        "text": {
+                            "tag": "lark_md",
+                            "content": "**" + title + "**\n" + "\n".join(rows),
+                        },
+                    }
+                ],
+            }
+        )
+    if columns:
+        elements.append(
+            {"tag": "column_set", "flex_mode": "bisect", "columns": columns}
+        )
+    if other:
+        elements.append(
+            {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(other)}}
+        )
+    return elements
 
 
 def _section_lines(title: str, rows: list[str], *, empty_text: str = "• -") -> list[str]:
@@ -3802,6 +3903,7 @@ def build_ose_message_card(
     first_section_title: str = "🌅 Morning shift",
     second_section_title: str = "🌙 Night Shift",
     dutylist_attendance: Optional[dict[str, Any]] = None,
+    offset_entries: Optional[list[dict[str, str]]] = None,
 ) -> dict[str, Any]:
     lines: list[str] = []
     if include_tag and TARGET_USER_OPEN_ID:
@@ -3810,7 +3912,18 @@ def build_ose_message_card(
     lines.append("")
     lines.extend(_section_lines(first_section_title, [f"• {n}" for n in rest_names]))
     lines.extend(_section_lines(second_section_title, [f"• {n}" for n in luck_names]))
-    if offset_lines:
+    # Offsets are rendered per shift (morning | night) as their own card elements
+    # below; only fall back to the flat text block when shift info is unavailable.
+    offset_shift_elements = (
+        build_offset_shift_columns(
+            offset_entries,
+            first_title=first_section_title,
+            second_title=second_section_title,
+        )
+        if offset_entries
+        else []
+    )
+    if not offset_shift_elements and offset_lines:
         lines.extend(_section_lines("🔁 Offset", offset_lines))
     if leave_entries:
         leave_lines: list[str] = []
@@ -3832,6 +3945,8 @@ def build_ose_message_card(
             "text": {"tag": "lark_md", "content": "\n".join(lines).strip()},
         }
     ]
+    if offset_shift_elements:
+        body_elements.extend(offset_shift_elements)
     if dutylist_attendance:
         try:
             import leavewfh as lw
@@ -3938,8 +4053,18 @@ def get_ose_payload_for_date(target_date: date, mode: str = "date", *, include_t
             first_section_title=first_title_card,
             second_section_title=second_title_card,
             dutylist_attendance=dutylist_attendance,
+            offset_entries=_offset_entries_for_card(target_date),
         ),
     }
+
+
+def _offset_entries_for_card(target_date: date) -> list[dict[str, str]]:
+    """Shift-tagged offsets for the card; never breaks the card if it fails."""
+    try:
+        return _extract_offset_entries_for_date(target_date, get_tenant_access_token())
+    except Exception as exc:  # noqa: BLE001 — fall back to the flat offset block
+        print(f"[ose_Duty] offset shift split unavailable: {exc!r}", flush=True)
+        return []
 
 
 def get_ose_payload_for_now(now_dt: Optional[datetime] = None, *, include_tag: bool = False) -> dict[str, Any]:
