@@ -164,8 +164,23 @@ _SYSTEM = (
     "Anything else — chit-chat, thanks, acknowledgements, questions, status updates\n"
     "about work already announced, greetings, reminders with no new schedule — is\n"
     "  other.\n\n"
-    'Reply with ONLY a compact JSON object, no prose and no code fences:\n'
-    '{"kind": "stress_test" | "machine_pullout" | "other", '
+    "First decide the SPEECH ACT, then the kind. A message can name the right\n"
+    "machines, counts, dates and times and still be other — repeating a notice is\n"
+    "not making one.\n"
+    "  announces_new    — the sender is telling the group about work not yet announced.\n"
+    "  asks             — the sender wants to be told: a question, or a request for\n"
+    '                     advice, confirmation or instructions ("kindly advise",\n'
+    '                     "please confirm", "do we still need", "what time").\n'
+    '  reports_done     — the work is finished or already under way ("completed",\n'
+    '                     "were pulled out", "has been done", "yesterday", "already").\n'
+    "  amends_announced — changes a detail of something already announced.\n"
+    "  other_talk       — anything else.\n"
+    "If the speech act is asks or reports_done, kind MUST be other, no matter how\n"
+    "many machines, counts or dates the message repeats.\n\n"
+    "Reply with ONLY a compact JSON object, no prose and no code fences, with the\n"
+    "keys in exactly this order:\n"
+    '{"speech_act": "announces_new" | "asks" | "reports_done" | "amends_announced" | "other_talk", '
+    '"kind": "stress_test" | "machine_pullout" | "other", '
     '"confidence": 0.0-1.0, '
     '"title": "<short headline, max 60 chars>", '
     '"summary": "<1-3 short bullet lines of the key facts: machines, counts, dates, times>"}\n\n'
@@ -249,10 +264,37 @@ def _min_confidence() -> float:
         return 0.6
 
 
+# Only a genuine announcement is posted. The model reliably identifies the speech
+# act — its summaries say "Completed yesterday", "Inquiry regarding…", "previously
+# 8am-10am" — but used to still label those machine_pullout/stress_test, because
+# `kind` was emitted BEFORE that observation existed. Asking for speech_act first,
+# then gating on it here, is what makes the distinction stick.
+#
+# ``amends_announced`` (a retime, a postponement, a CANCELLATION) is excluded on
+# purpose: those restate work the group already knows about, and a cancellation
+# posted as "New stress test information" would be actively misleading. Set
+# NEWPORT_POST_AMENDMENTS=1 to have amendments posted as well.
+_ANNOUNCING = ("announces_new",)
+
+
+def _post_amendments() -> bool:
+    return (os.getenv("NEWPORT_POST_AMENDMENTS") or "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def is_new_activity(result: dict[str, Any]) -> bool:
     kind = str((result or {}).get("kind") or "").strip().lower()
     if kind not in ("stress_test", "machine_pullout"):
         return False
+    act = str((result or {}).get("speech_act") or "").strip().lower()
+    if act:  # absent → fail OPEN: a swapped NEWPORT_MODEL must not mute everything
+        allowed = _ANNOUNCING + (("amends_announced",) if _post_amendments() else ())
+        if act not in allowed:
+            return False
     try:
         conf = float((result or {}).get("confidence") or 0)
     except (TypeError, ValueError):
@@ -318,6 +360,24 @@ def build_activity_card(
 # ---------------------------------------------------------------------------
 
 
+_CLASS_HINT = re.compile(
+    r"(?is)pull\s*-?\s*out|pullout|uninstall|stress\s*test|launch|ram\s*clear|denom"
+)
+
+
+def _worth_classifying(body: str) -> bool:
+    """Cheap pre-filter before spending an LLM call.
+
+    Long messages always pass. A short one must carry a class word AND a number:
+    a terse real notice has counts or dates ("Pull out 19 JJBX Gold Aug 5", 27
+    chars), while a bare mention ("Pullout tomorrow.") does not. The old flat
+    ``len < 40`` floor dropped the former silently.
+    """
+    if len(body) >= 40:
+        return True
+    return bool(_CLASS_HINT.search(body)) and bool(re.search(r"\d", body))
+
+
 def handle_source_message(
     *,
     chat_id: str,
@@ -335,7 +395,11 @@ def handle_source_message(
     if already_handled(message_id):
         return False
     body = (text or "").strip()
-    if len(body) < 40:  # greetings / one-liners are never a full notice
+    if not _worth_classifying(body):
+        print(
+            f"[newport] skipped msg {message_id} — no signal ({len(body)} chars)",
+            flush=True,
+        )
         mark_handled(message_id)
         return False
 
