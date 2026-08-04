@@ -4,6 +4,7 @@ import http
 import json
 import re
 import sys
+import tempfile
 import threading
 import uuid
 from typing import Any, Optional
@@ -1466,6 +1467,95 @@ def start_lark_background_thread(fn, *args, **kwargs) -> None:
         ctx.run(lark_background_task, fn, *args, **kwargs)
 
     threading.Thread(target=_target, daemon=True).start()
+
+
+def _newport_is_silent_source(chat_id: Optional[str]) -> bool:
+    """True for the read-only Newport group (module import kept cheap + safe)."""
+    try:
+        import newportwatch as _npw
+
+        return _npw.is_enabled() and _npw.is_silent_source_chat(chat_id)
+    except Exception as exc:  # noqa: BLE001 — never break normal message handling
+        print(f"[newport] source check failed: {exc!r}", flush=True)
+        return False
+
+
+def _newport_message_text(message_content_raw: str, fallback: str) -> str:
+    """Message text with line breaks preserved (post/rich-text kept readable)."""
+    try:
+        data = json.loads(message_content_raw or "{}")
+    except (TypeError, ValueError):
+        return fallback or ""
+    if isinstance(data, dict):
+        if isinstance(data.get("text"), str) and data["text"].strip():
+            return data["text"]
+        # ``post`` = rich text: [[{tag:text,text:..}, ..], ..] — one list per line.
+        content = data.get("content")
+        if isinstance(content, list):
+            lines: list[str] = []
+            for row in content:
+                if not isinstance(row, list):
+                    continue
+                parts = [
+                    str(seg.get("text") or "")
+                    for seg in row
+                    if isinstance(seg, dict) and seg.get("tag") in ("text", "a", "at")
+                ]
+                lines.append("".join(parts))
+            joined = "\n".join(lines).strip()
+            if joined:
+                title = str(data.get("title") or "").strip()
+                return f"{title}\n{joined}".strip() if title else joined
+    return fallback or ""
+
+
+def _newport_image_keys(message_id: Optional[str], message_content_raw: str) -> list[str]:
+    """Image keys from the message, re-uploaded so they render in OUR card.
+
+    A key from an incoming message is not reusable as a card ``img_key``; the
+    resource is downloaded and re-uploaded to get one we own.
+    """
+    try:
+        data = json.loads(message_content_raw or "{}")
+    except (TypeError, ValueError):
+        return []
+    raw_keys: list[str] = []
+    if isinstance(data, dict):
+        if isinstance(data.get("image_key"), str):
+            raw_keys.append(data["image_key"])
+        content = data.get("content")
+        if isinstance(content, list):  # rich text can embed images per line
+            for row in content:
+                if not isinstance(row, list):
+                    continue
+                for seg in row:
+                    if isinstance(seg, dict) and seg.get("tag") == "img":
+                        k = seg.get("image_key") or seg.get("file_key")
+                        if isinstance(k, str) and k:
+                            raw_keys.append(k)
+    out: list[str] = []
+    for key in raw_keys[:6]:  # a notice with more images than this is unusual
+        try:
+            got = download_lark_message_image(message_id or "", key)
+            if not got:
+                continue
+            _mime, blob = got
+            suffix = ".png" if "png" in _mime else ".jpg"
+            tmp = os.path.join(
+                tempfile.gettempdir(), f"newport_{abs(hash(key)) % 10**8}{suffix}"
+            )
+            with open(tmp, "wb") as fh:
+                fh.write(blob)
+            new_key = upload_image_lark(tmp)
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            if new_key:
+                out.append(new_key)
+        except Exception as exc:  # noqa: BLE001 — a picture must not block the notice
+            print(f"[newport] image passthrough failed for {key!r}: {exc!r}", flush=True)
+    return out
 
 
 # Who may run ``/log``. Journal output can carry internal detail (chat ids, file
@@ -5047,6 +5137,29 @@ def lark_webhook():
     if message_id and _remember_processed_message_id(message_id):
         print(f"⏭️ Duplicate message {message_id} ignored")
         return _lark_im_done()
+
+    # ── Silent watch group ────────────────────────────────────────────────
+    # Newport activities group: read only. Handled here — BEFORE the GotIt
+    # reaction, the command router, chat AI and every other reply path — so the
+    # bot can never react, answer or forward anything back into that group. Any
+    # detected notice is posted to a DIFFERENT group by the watcher itself.
+    if _newport_is_silent_source(chat_id):
+        try:
+            import newportwatch as _npw
+
+            _npw.handle_source_message(
+                chat_id=chat_id,
+                message_id=message_id or "",
+                # Raw content keeps the newlines/rich-text of a pasted notice,
+                # which the flattened ``text`` loses.
+                text=_newport_message_text(message_content_raw, text),
+                send_message=send_message,
+                image_keys=_newport_image_keys(message_id, message_content_raw),
+            )
+        except Exception as _np_err:
+            print(f"[newport] watch failed: {_np_err!r}", flush=True)
+        # _lark_im_ack(): HTTP 200 with NO reactions and no reply.
+        return _lark_im_ack()
 
     if not chat_id or text is None:
         # Card callbacks can be mis-parsed as ``im.message`` shape but lack chat/text — **400 breaks the client**.
