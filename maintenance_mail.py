@@ -587,6 +587,33 @@ def _move_uid_to_inbox(mail: imaplib.IMAP4, uid: bytes, *, from_folder: str) -> 
         return False
 
 
+def _fetch_part_uid(data: list[Any], idx: int) -> bytes | None:
+    """UID of FETCH response part ``data[idx]`` — meta line first, then its tail.
+
+    A batched ``UID FETCH`` reply is a flat list: ``(meta, literal)`` tuples, each
+    optionally followed by the bytes that close that message's parenthesis. Lark
+    puts ``UID n`` in *that closing element*, not in the meta line::
+
+        (b'25564 (BODY[HEADER.FIELDS (SUBJECT FROM)] {76}', b'Subject: ...')
+        b' UID 622342)'
+
+    Reading only the meta line therefore finds no UID on Lark and every message is
+    skipped. Both spots are checked so either server layout works.
+    """
+    part = data[idx]
+    meta = part[0] if isinstance(part, tuple) and part else b""
+    if isinstance(meta, (bytes, bytearray)):
+        m = re.search(rb"UID\s+(\d+)", bytes(meta))
+        if m:
+            return m.group(1)
+    tail = data[idx + 1] if idx + 1 < len(data) else None
+    if isinstance(tail, (bytes, bytearray)):
+        m = re.search(rb"UID\s+(\d+)", bytes(tail))
+        if m:
+            return m.group(1)
+    return None
+
+
 def _uid_key(folder: str, uid: str) -> str:
     return f"{folder}:{uid}"
 
@@ -6245,23 +6272,24 @@ class MaintenanceMailWatcher:
             chunk = todo[chunk_start : chunk_start + _SWEEP_FETCH_CHUNK]
             uid_set = b",".join(chunk)
             try:
+                # Ask for UID explicitly — without it Lark returns the UID only in
+                # the closing element after the literal (see _fetch_part_uid).
                 typ, data = mail.uid(
-                    "fetch", uid_set, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM)])"
+                    "fetch", uid_set, "(UID BODY.PEEK[HEADER.FIELDS (SUBJECT FROM)])"
                 )
             except imaplib.IMAP4.error:
                 continue
             if typ != "OK" or not data:
                 continue
-            for part in data:
+            for idx, part in enumerate(data):
                 if not isinstance(part, tuple) or len(part) < 2:
                     continue
                 meta, raw = part[0], part[1]
                 if not isinstance(raw, (bytes, bytearray)):
                     continue
-                m_uid = re.search(rb"UID\s+(\d+)", meta or b"")
-                if not m_uid:
+                uid = _fetch_part_uid(data, idx)
+                if not uid:
                     continue
-                uid = m_uid.group(1)
                 checked.add(uid)
                 hdr = email.message_from_bytes(raw)
                 from_hdr = _decode_mime_header(hdr.get("From"))
