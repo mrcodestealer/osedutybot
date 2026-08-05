@@ -1509,6 +1509,43 @@ def _newport_message_text(message_content_raw: str, fallback: str) -> str:
     return fallback or ""
 
 
+def _newport_quoted_text(parent_id: Optional[str]) -> str:
+    """Text of the message a watched-group message replies to ("" when unavailable).
+
+    A reply carries no antecedent of its own: "also these machines need to be
+    maintenance, today 9am-11am" reads as a brand-new notice until you can see the
+    notice it hangs off. GET the parent so the classifier can tell an addition from
+    an announcement.
+    """
+    pid = (parent_id or "").strip()
+    if not pid:
+        return ""
+    token = get_tenant_access_token()
+    if not token:
+        return ""
+    try:
+        resp = requests.get(
+            f"https://open.larksuite.com/open-apis/im/v1/messages/{pid}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            print(
+                f"[newport] parent fetch HTTP {resp.status_code} parent_id={pid!r}",
+                flush=True,
+            )
+            return ""
+        items = ((resp.json() or {}).get("data") or {}).get("items") or []
+    except Exception as exc:  # noqa: BLE001 — context is a bonus, never a blocker
+        print(f"[newport] parent fetch failed: {exc!r}", flush=True)
+        return ""
+    if not items or not isinstance(items[0], dict):
+        return ""
+    body = items[0].get("body") or {}
+    raw = body.get("content") if isinstance(body, dict) else ""
+    return _newport_message_text(str(raw or "{}"), "").strip()
+
+
 def _newport_image_keys(message_id: Optional[str], message_content_raw: str) -> list[str]:
     """Image keys from the message, re-uploaded so they render in OUR card.
 
@@ -5080,6 +5117,7 @@ def lark_webhook():
     message_id = None
     is_mention_old = False
     lark_message_type = None
+    parent_message_id = None
 
     if data.get("header", {}).get("event_type") == "im.message.receive_v1":
         event = data.get("event", {})
@@ -5087,6 +5125,7 @@ def lark_webhook():
         chat_id = message.get("chat_id")
         message_id = message.get("message_id")
         chat_type = message.get("chat_type")
+        parent_message_id = message.get("parent_id") or message.get("root_id")
         lark_message_type = (message.get("message_type") or "").strip() or None
         mentions = message.get("mentions", [])
         message_content_raw = message.get("content") or "{}"
@@ -5100,6 +5139,7 @@ def lark_webhook():
         chat_id = event.get("open_chat_id") or event.get("chat_id")
         message_id = event.get("open_message_id") or event.get("message_id")
         chat_type = event.get("chat_type")
+        parent_message_id = event.get("parent_id") or event.get("root_id")
         lark_message_type = (
             event.get("message_type") or event.get("msg_type") or ""
         ).strip() or None
@@ -5155,6 +5195,10 @@ def lark_webhook():
                 text=_newport_message_text(message_content_raw, text),
                 send_message=send_message,
                 image_keys=_newport_image_keys(message_id, message_content_raw),
+                # A reply that merely piles onto an existing notice must not be
+                # posted as new — the classifier needs the thread to see that.
+                is_reply=bool((parent_message_id or "").strip()),
+                quoted_text=_newport_quoted_text(parent_message_id),
             )
         except Exception as _np_err:
             print(f"[newport] watch failed: {_np_err!r}", flush=True)

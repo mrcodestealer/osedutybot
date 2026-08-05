@@ -173,10 +173,22 @@ _SYSTEM = (
     '                     "please confirm", "do we still need", "what time").\n'
     '  reports_done     — the work is finished or already under way ("completed",\n'
     '                     "were pulled out", "has been done", "yesterday", "already").\n'
-    "  amends_announced — changes a detail of something already announced.\n"
+    "  amends_announced — changes or extends a detail of something already announced.\n"
     "  other_talk       — anything else.\n"
     "If the speech act is asks or reports_done, kind MUST be other, no matter how\n"
     "many machines, counts or dates the message repeats.\n\n"
+    "REPLIES. The message may be a reply to an earlier message in the group. When it\n"
+    "is, you are told so, and the earlier message is quoted when available. Judge the\n"
+    "reply itself, but read it as a continuation of what it replies to:\n"
+    "  - A reply that adds to, extends, repeats or adjusts the work in the quoted\n"
+    "    message — more machines, another time window, another date, a different\n"
+    "    shift — is amends_announced, NOT announces_new. It rides on a notice the\n"
+    "    group already has.\n"
+    "  - Words like \"also\", \"as well\", \"plus\", \"same for\", \"and\", or a bare\n"
+    '    "these/those/the above" with no machine list of its own are that pattern:\n'
+    "    the reply cannot stand alone, so it is not the announcement.\n"
+    "  - Choose announces_new for a reply only when it announces work that is\n"
+    "    genuinely separate from what it replies to, and names it in full.\n\n"
     "Reply with ONLY a compact JSON object, no prose and no code fences, with the\n"
     "keys in exactly this order:\n"
     '{"speech_act": "announces_new" | "asks" | "reports_done" | "amends_announced" | "other_talk", '
@@ -207,7 +219,37 @@ def _extract_json(text: str) -> dict[str, Any]:
         return {}
 
 
-def classify_message(text: str) -> dict[str, Any]:
+def _build_user_content(
+    body: str, *, quoted_text: str = "", is_reply: bool = False
+) -> str:
+    """The classification prompt body, with reply context when the message is one.
+
+    Without this, a reply is judged standing alone — and "also these machines need
+    maintenance, today 9am-11am" standing alone looks exactly like a fresh notice:
+    it carries work, a date and a time. Only the quoted parent shows that "these"
+    points at machines the group was already told about.
+    """
+    if not is_reply and not quoted_text:
+        return body[:6000]
+    head = (
+        "This message is a REPLY to an earlier message in the group.\n\n"
+    )
+    if quoted_text:
+        head += (
+            "[EARLIER MESSAGE IT REPLIES TO — context only, do not classify this]\n"
+            f"{quoted_text[:2500]}\n\n"
+        )
+    else:
+        head += (
+            "The earlier message could not be read, so decide from the reply's own\n"
+            "wording whether it stands alone or continues something already said.\n\n"
+        )
+    return head + "[MESSAGE TO CLASSIFY]\n" + body[:6000]
+
+
+def classify_message(
+    text: str, *, quoted_text: str = "", is_reply: bool = False
+) -> dict[str, Any]:
     """Ask the LLM what this message is. Returns {} when it cannot decide."""
     body = (text or "").strip()
     if not body:
@@ -217,7 +259,12 @@ def classify_message(text: str) -> dict[str, Any]:
         "model": _model(),
         "messages": [
             {"role": "system", "content": _SYSTEM},
-            {"role": "user", "content": body[:6000]},
+            {
+                "role": "user",
+                "content": _build_user_content(
+                    body, quoted_text=(quoted_text or "").strip(), is_reply=is_reply
+                ),
+            },
         ],
         "max_tokens": 400,
         "temperature": 0,
@@ -385,8 +432,13 @@ def handle_source_message(
     text: str,
     send_message: Callable[..., Any],
     image_keys: Optional[list[str]] = None,
+    quoted_text: str = "",
+    is_reply: bool = False,
 ) -> bool:
     """Classify a message from the watched group; post to the target when it is new.
+
+    ``is_reply`` / ``quoted_text`` carry the thread context: a reply that only adds
+    to an existing notice is an amendment, not a new announcement.
 
     Returns True when a card was sent. NEVER sends to ``chat_id`` (the source).
     """
@@ -403,7 +455,9 @@ def handle_source_message(
         mark_handled(message_id)
         return False
 
-    result = classify_message(body)
+    result = classify_message(
+        body, quoted_text=quoted_text, is_reply=is_reply or bool(quoted_text)
+    )
     if not is_new_activity(result):
         mark_handled(message_id)
         return False
