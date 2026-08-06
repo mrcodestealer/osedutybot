@@ -4059,6 +4059,31 @@ def _lark_ack_only_event_type(het: str) -> bool:
     return False
 
 
+def _evo_batch_result_reply(chat_id: str, payload: str) -> dict:
+    """Post the ``/m`` 维护通知处理结果 card as a THREAD reply under the user's ``/m``.
+
+    ``reply_in_thread=true`` keeps the result out of the main chat stream and tied to
+    the message that triggered it. Two fallbacks, so a result is never lost:
+      * no triggering message id (called outside an inbound Lark event) → normal post;
+      * the reply API returns non-zero → retry as a plain post to the chat.
+    """
+    mid = (_lark_user_message_id.get() or "").strip()
+    if not mid:
+        return send_message(chat_id, payload, msg_type="interactive")
+    resp = reply_message_in_thread(mid, payload, msg_type="interactive")
+    code = (resp or {}).get("code")
+    if code not in (None, 0):
+        print(
+            f"[evo-batch] thread reply failed code={code!r} msg={(resp or {}).get('msg')!r} "
+            f"— falling back to a direct post",
+            flush=True,
+        )
+        return send_message(
+            chat_id, payload, msg_type="interactive", reply_to_message_id=""
+        )
+    return resp
+
+
 def _process_evo_sd_batch_paste(chat_id: str, email_text: str) -> None:
     """Run the EVO Service Desk batch pipeline (same as ``/m``) and post the cards.
 
@@ -4104,10 +4129,8 @@ def _process_evo_sd_batch_paste(chat_id: str, email_text: str) -> None:
                     msg_type="interactive",
                     reply_to_message_id="",  # direct post to the QA/CS group, never a reply
                 )
-        send_message(
-            chat_id,
-            json.dumps(batch["result_card"], ensure_ascii=False),
-            msg_type="interactive",
+        _evo_batch_result_reply(
+            chat_id, json.dumps(batch["result_card"], ensure_ascii=False)
         )
     except Exception as ex:
         send_message(chat_id, f"❌ EVO 批量 `/m` 处理失败: `{ex}`")
