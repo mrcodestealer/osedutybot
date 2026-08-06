@@ -382,6 +382,10 @@ except ValueError:
     MAINT_SWEEP_SINCE_DAYS = 30
 # UIDs per FETCH round-trip in the sweep (one request instead of one per message).
 _SWEEP_FETCH_CHUNK = 50
+# Subjects listed in the "moved back to Inbox" notice; the rest becomes a count.
+_MOVED_NOTIFY_MAX_TITLES = 5
+
+
 def _order_jenkins_reply_folders(folders: list[str]) -> list[str]:
     """``OSE Pending`` first (where update threads usually live); dedupe."""
     prefer = (
@@ -5621,6 +5625,44 @@ class MaintenanceMailWatcher:
             get_token_func=self._get_token,
         )
 
+    def _notify_moved_to_inbox(
+        self,
+        subjects: list[str],
+        *,
+        from_folder: str,
+        moved: int | None = None,
+    ) -> None:
+        """Tell the notify group that replied maintenance mail is now in Inbox.
+
+        One message per call, never one per mail: the sweep can move a whole
+        backlog in a single pass (≈200 on the first poll after a restart), so the
+        subject list is capped and the rest is summarised as a count. Failure to
+        send is swallowed — the mail has already moved.
+        """
+        chat_id = _maint_mod.maint_moved_notify_chat_id()
+        if not chat_id:
+            return
+        titles = [
+            _maint_mod.normalize_display_subject(s).strip()
+            for s in subjects
+            if (s or "").strip()
+        ]
+        total = moved if moved is not None else len(titles)
+        if total <= 0:
+            return
+        head = (
+            "📥 Maintenance email moved back to Inbox"
+            if total == 1
+            else f"📥 {total} maintenance emails moved back to Inbox"
+        )
+        lines = [head, f"{from_folder} → INBOX (already handled)"]
+        shown = titles[:_MOVED_NOTIFY_MAX_TITLES]
+        lines += [f"• {t}" for t in shown]
+        rest = total - len(shown)
+        if rest > 0:
+            lines.append(f"• …and {rest} more")
+        self._send_lark(chat_id, "\n".join(lines))
+
     def _send_lark_card(self, chat_id: str, card: dict[str, Any]) -> None:
         try:
             payload = json.dumps(card, ensure_ascii=False)
@@ -6189,7 +6231,10 @@ class MaintenanceMailWatcher:
         # mail where it was — the reply itself already went out.
         if email_action_ok and MOVE_TO_INBOX_AFTER_REPLY:
             try:
-                _move_uid_to_inbox(mail, uid, from_folder=folder)
+                if _move_uid_to_inbox(mail, uid, from_folder=folder):
+                    self._notify_moved_to_inbox(
+                        [display_subj], from_folder=folder
+                    )
             except ImapStaleConnectionError:
                 raise
             except Exception as _mv_ex:
@@ -6268,6 +6313,7 @@ class MaintenanceMailWatcher:
             return 0
 
         moved = 0
+        moved_subjects: list[str] = []
         for chunk_start in range(0, len(todo), _SWEEP_FETCH_CHUNK):
             chunk = todo[chunk_start : chunk_start + _SWEEP_FETCH_CHUNK]
             uid_set = b",".join(chunk)
@@ -6302,12 +6348,17 @@ class MaintenanceMailWatcher:
                     continue  # not a maintenance mail
                 if _move_uid_to_inbox(mail, uid, from_folder=folder):
                     moved += 1
+                    moved_subjects.append(subject)
                     checked.discard(uid)  # it left this folder; uid is meaningless now
         if moved:
             print(
                 f"[maint-mail] swept {moved} replied maintenance copy(ies) "
                 f"{folder} → INBOX",
                 flush=True,
+            )
+            # One notice for the whole pass, not one per mail.
+            self._notify_moved_to_inbox(
+                moved_subjects, from_folder=folder, moved=moved
             )
         return moved
 
