@@ -863,6 +863,7 @@ def _content_hash(body: str) -> str:
 
 
 _FORWARD_SEP = "---------- Forwarded message ----------"
+_REPLY_SEP = "---------- Original message ----------"
 _FORWARD_SIGNOFF_HTML = (
     '<div style="word-break:break-word;line-height:1.6;'
     'font-size:14px;color:rgb(0,0,0);">Best Regards,<br>JC<br><br></div>'
@@ -870,6 +871,9 @@ _FORWARD_SIGNOFF_HTML = (
 _LARK_QUOTE_WRAPPER = "history-quote-wrapper"
 # Lark forward uses ``--header`` (not ``--collapsed``, which is for Re: quotes).
 _LARK_FORWARD_BLOCK = "adit-html-block--header"
+# ``/egsreply`` is a Re:, so it uses the collapsed block — same wrapper, so Lark Mail
+# still renders **Show/Hide email thread**, but folded like a manual reply quote.
+_LARK_REPLY_BLOCK = "adit-html-block--collapsed"
 _LARK_QUOTE_BORDER = "border-left: none; padding-left: 0px;"
 _LARK_META_STYLE = (
     "padding: 12px; background: rgb(245, 246, 247); color: rgb(31, 35, 41); "
@@ -930,6 +934,7 @@ def _quote_labels(subject: str) -> dict[str, str]:
                 "to": "收件人",
                 "cc": "抄送",
                 "sep": "--------- 转发消息 ---------",
+                "sep_reply": "--------- 原始邮件 ---------",
             }
     return {
         "from": "From",
@@ -938,6 +943,7 @@ def _quote_labels(subject: str) -> dict[str, str]:
         "to": "To",
         "cc": "Cc",
         "sep": _FORWARD_SEP,
+        "sep_reply": _REPLY_SEP,
     }
 
 
@@ -1038,13 +1044,21 @@ def build_forwarded_message_body(msg: email.message.Message) -> str:
     return "\n".join(header) + (original or "")
 
 
-def _build_lark_forward_quote_html(msg: email.message.Message) -> str:
+def _build_lark_quote_html(
+    msg: email.message.Message,
+    *,
+    block_class: str = _LARK_FORWARD_BLOCK,
+    reply: bool = False,
+) -> str:
     """
-    Forward quote block per Lark composer (``history-quote-wrapper`` +
-    ``adit-html-block--header``). See larksuite/cli ``mail_quote.go``.
+    Quote block per Lark composer (``history-quote-wrapper`` + block class).
+    See larksuite/cli ``mail_quote.go``. ``reply=True`` swaps the "Forwarded
+    message" separator for the reply one; pass ``block_class`` to match
+    (``--header`` for Fw:, ``--collapsed`` for Re:).
     """
     subj = _decode_mime_header(msg.get("Subject")) or ""
     labels = _quote_labels(subj)
+    sep_label = labels["sep_reply"] if reply else labels["sep"]
     from_hdr = _decode_mime_header(msg.get("From")) or "Unknown"
     to_hdr = _decode_mime_header(msg.get("To")) or ""
     cc_hdr = _decode_mime_header(msg.get("Cc")) or ""
@@ -1070,7 +1084,7 @@ def _build_lark_forward_quote_html(msg: email.message.Message) -> str:
 
     sep_html = (
         f'<div class="history-quote-forward-title lme-line-signal history-quote-gap-tag" '
-        f'style="{_LARK_SEP_STYLE}">{_html_escape(labels["sep"])}</div>'
+        f'style="{_LARK_SEP_STYLE}">{_html_escape(sep_label)}</div>'
     )
 
     body_raw = extract_body_html_raw(msg)
@@ -1090,11 +1104,16 @@ def _build_lark_forward_quote_html(msg: email.message.Message) -> str:
     return (
         f'<div id="{outer_id}" class="{_LARK_QUOTE_WRAPPER}">'
         f'<div data-html-block="quote" data-mail-html-ignore="">'
-        f'<div class="adit-html-block {_LARK_FORWARD_BLOCK}" '
+        f'<div class="adit-html-block {block_class}" '
         f'style="{_LARK_QUOTE_BORDER}">'
         f'<div id="{inner_id}">{sep_html}{meta_html}{body_part}</div>'
         f"</div></div></div>"
     )
+
+
+def _build_lark_forward_quote_html(msg: email.message.Message) -> str:
+    """``Fw:`` quote block (``--header``) — unchanged behaviour for the forward path."""
+    return _build_lark_quote_html(msg, block_class=_LARK_FORWARD_BLOCK)
 
 
 def build_forwarded_message_html(msg: email.message.Message) -> str:
@@ -1117,6 +1136,35 @@ def build_forwarded_message_html(msg: email.message.Message) -> str:
         '<meta http-equiv="Content-Type" content="text/html; charset=utf-8">'
         "</head><body>"
         f"{inner}"
+        "</body></html>"
+    )
+
+
+def build_reply_message_html(text: str, msg: email.message.Message) -> str:
+    """``Re:`` reply HTML: our text on top, the original quoted below it.
+
+    Same Lark ``history-quote-wrapper`` machinery as :func:`build_forwarded_message_html`
+    so Lark Mail renders **Show/Hide email thread**, but with the ``--collapsed`` block
+    a reply uses instead of ``--header``. Sent as a single ``text/html`` part — adding a
+    plain alternative makes Lark Mail expand the quote as raw text instead.
+    """
+    body_html = "<br>".join(
+        _html_escape(line) for line in (text or "").replace("\r\n", "\n").split("\n")
+    )
+    top = (
+        '<div style="word-break:break-word;line-height:1.6;'
+        f'font-size:14px;color:rgb(0,0,0);">{body_html}</div>'
+    )
+    gap = (
+        '<div style="word-break:break-word;line-height:1.6;'
+        'font-size:14px;color:rgb(0,0,0);"><br></div>'
+    )
+    quote = _build_lark_quote_html(msg, block_class=_LARK_REPLY_BLOCK, reply=True)
+    return (
+        "<!DOCTYPE html><html><head>"
+        '<meta http-equiv="Content-Type" content="text/html; charset=utf-8">'
+        "</head><body>"
+        f'<div dir="ltr">{top}{gap}{quote}</div>'
         "</body></html>"
     )
 
@@ -5035,6 +5083,52 @@ def find_egs_reply_message_fuzzy(
             pass
 
 
+def find_message_by_message_id(
+    message_id: str, folders: list[str] | None = None
+) -> email.message.Message | None:
+    """Fetch a message by its ``Message-ID`` (first folder hit wins).
+
+    ``/egsreply`` threads off a **stored** send via ``egs.json``, which keeps the
+    Message-ID but not the body — so the original has to be re-read from IMAP before it
+    can be quoted. Returns ``None`` on any failure: the reply goes out either way, just
+    without the quote.
+    """
+    mid = (message_id or "").strip()
+    if not mid:
+        return None
+    safe = mid.replace('"', "").replace("\\", "")
+    try:
+        mail = _connect_imap_simple(timeout=_JENKINS_REPLY_IMAP_TIMEOUT)
+    except Exception as ex:  # noqa: BLE001 — quoting is best-effort
+        print(f"[maint-mail] quote lookup connect failed: {ex!r}", flush=True)
+        return None
+    try:
+        for folder in folders or list(EGS_REPLY_IMAP_FOLDERS):
+            try:
+                if not _select_mail_folder(mail, folder, readonly=True):
+                    continue
+                uids = _uid_search(mail, f'(HEADER Message-ID "{safe}")')
+                if not uids:
+                    continue
+                msg = _fetch_uid_message(mail, uids[-1])
+                if msg is not None:
+                    print(
+                        f"[maint-mail] quote source for {mid} found in {folder!r}",
+                        flush=True,
+                    )
+                    return msg
+            except (imaplib.IMAP4.error, OSError, ImapStaleConnectionError) as ex:
+                print(f"[maint-mail] quote lookup {folder!r} failed: {ex!r}", flush=True)
+                continue
+    finally:
+        try:
+            mail.logout()
+        except Exception:
+            pass
+    print(f"[maint-mail] quote source not found for {mid}", flush=True)
+    return None
+
+
 def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[str, Any]:
     """``/egsreply``: find the email whose subject matches ``email_title`` and Reply-All
     inside its thread — To/Cc taken from the original (``In-Reply-To`` set for threading).
@@ -5114,7 +5208,18 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
             via = "fallback"
             to_addrs, cc_addrs, recipients = _test_recipients()
 
-    msg = MIMEText(text, "plain", "utf-8")
+    # Quote the original underneath the reply, like the Fw: forward does, so Lark Mail
+    # shows **Show/Hide email thread**. Tier 2 already holds the original; Tier 1 only
+    # stored its Message-ID, so re-read it from IMAP. No original → plain text as before.
+    quote_src = orig
+    if quote_src is None and orig_mid:
+        quote_src = find_message_by_message_id(orig_mid)
+    if quote_src is not None:
+        # HTML-only: a plain alternative makes Lark Mail expand the quote as raw text.
+        msg = MIMEText(build_reply_message_html(text, quote_src), "html", "utf-8")
+        msg.replace_header("Content-Type", 'text/html; charset="utf-8"')
+    else:
+        msg = MIMEText(text, "plain", "utf-8")
     msg["Subject"] = Header(subj, "utf-8")
     msg["From"] = formataddr((FORWARD_FROM_NAME, MAIL_USER))
     msg["To"] = ", ".join(to_addrs)
@@ -5131,7 +5236,8 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
         smtp.sendmail(MAIL_USER, recipients, msg.as_string())
     print(
         f"[maint-mail] /egsreply{'test' if test else ''} via={via} title={title!r} "
-        f"threaded={bool(orig_mid)} To={to_addrs!r} Cc={cc_addrs!r} → {', '.join(recipients)}",
+        f"threaded={bool(orig_mid)} quoted={quote_src is not None} "
+        f"To={to_addrs!r} Cc={cc_addrs!r} → {', '.join(recipients)}",
         flush=True,
     )
     return {
@@ -5142,6 +5248,7 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
         "folder": orig_folder,
         "found": via in ("store", "imap"),
         "threaded": bool(orig_mid),
+        "quoted": quote_src is not None,
     }
 
 
