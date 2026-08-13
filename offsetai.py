@@ -37,7 +37,7 @@ _OFFSET_TOPIC_RE = re.compile(
     r")\b"
 )
 _SLASH_OFFSET_RE = re.compile(
-    r"(?i)^(?:/)?(?:showoffset|deleteoffset|editoffset|pendingoffset)\b"
+    r"(?i)^(?:/)?(?:showoffset|myoffset|deleteoffset|editoffset|pendingoffset)\b"
 )
 _MAX_ROWS_FOR_LLM = 80
 _AGENT_MAX_TURNS = int(os.getenv("OSE_OFFSET_AGENT_MAX_TURNS", "6"))

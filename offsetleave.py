@@ -758,7 +758,7 @@ _DELETE_OFFSET_RULE_RE = re.compile(
 )
 
 _OFFSET_COMMAND_WORDS = frozenset(
-    {"offset", "deleteoffset", "editoffset", "pendingoffset", "showoffset"}
+    {"offset", "deleteoffset", "editoffset", "pendingoffset", "showoffset", "myoffset"}
 )
 
 
@@ -785,6 +785,7 @@ _EDIT_OFFSET_SLASH_RE = re.compile(r"^(?:/)?editoffset\b", re.I)
 _DELETE_OFFSET_SLASH_RE = re.compile(r"^(?:/)?deleteoffset\b", re.I)
 _PENDING_OFFSET_SLASH_RE = re.compile(r"^(?:/)?pendingoffset\b", re.I)
 _SHOW_OFFSET_SLASH_RE = re.compile(r"^(?:/)?showoffset\b", re.I)
+_MY_OFFSET_SLASH_RE = re.compile(r"^(?:/)?myoffset\b", re.I)
 
 _PENDING_OFFSET_RULE_RE = re.compile(
     r"(?i)^(?:/)?pendingoffset\s*$"
@@ -2413,6 +2414,12 @@ def handle_offset_slash_commands(
             get_token_func=get_token_func,
             force=True,
         )
+    if _MY_OFFSET_SLASH_RE.match(text):
+        return handle_myoffset_command(
+            text,
+            chat_id=chat_id,
+            send_message=send_message,
+        )
     if _SHOW_OFFSET_SLASH_RE.match(text):
         return handle_showoffset(
             text,
@@ -2452,6 +2459,30 @@ def _showoffset_view_for_sender(
     if request_person:
         return request_person, False
     return None, False
+
+
+def handle_myoffset_command(
+    clean_text: str,
+    *,
+    chat_id: str,
+    send_message: Callable[..., dict[str, Any]],
+) -> bool:
+    """``myoffset [month]`` — MY OSE offsets as a Name / Original / Exchange table."""
+    text = normalize_offset_command_text(clean_text)
+    try:
+        target = od.parse_myoffset_command(text)
+    except ValueError as exc:
+        send_message(chat_id, f"❌ {exc}")
+        return True
+    if target is None:
+        return False
+    year, month = target
+    try:
+        card = od.build_ose_myoffset_card(year, month)
+        send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
+    except Exception as exc:
+        send_message(chat_id, f"❌ myoffset failed: {exc}")
+    return True
 
 
 def handle_showoffset(

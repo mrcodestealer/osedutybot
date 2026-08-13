@@ -5018,8 +5018,18 @@ def parse_showoffset_command(text: str) -> Optional[tuple[int, int]]:
     )
     if not m:
         return None
+    return _resolve_offset_command_month(m.group(1) or "")
+
+
+def _resolve_offset_command_month(arg: str) -> tuple[int, int]:
+    """Month argument of an offset command → ``(year, month)``; empty = this month.
+
+    Accepts ``august`` / ``8`` / ``this month`` / ``next month`` / ``last month``,
+    with decorations like ``for``/``calendar`` stripped. Raises ``ValueError`` on a
+    month it cannot read, so the caller can answer with the reason.
+    """
     today = date.today()
-    arg = (m.group(1) or "").strip()
+    arg = (arg or "").strip()
     # Drop trailing decorations like "calendar"/"schedule"/"list".
     arg = re.sub(r"\b(?:calendar|schedule|list|summary|sheet|table)\b", "", arg, flags=re.I).strip()
     # Strip leading "for"/"in" (e.g. "for this month", "in June").
@@ -5044,6 +5054,19 @@ def parse_showoffset_command(text: str) -> Optional[tuple[int, int]]:
         if name.lower() == arg.lower():
             return today.year, num
     raise ValueError(f"Unknown month {arg!r}. Use a month name or number (1–12).")
+
+
+def parse_myoffset_command(text: str) -> Optional[tuple[int, int]]:
+    """``myoffset`` / ``/myoffset august`` → ``(year, month)``; ``None`` if not it."""
+    s = (text or "").strip()
+    if s.startswith("/"):
+        s = s[1:].lstrip()
+    # Glued form only — "my offset" with a space stays a natural-language lookup
+    # (``show my offset`` is the requester's own calendar, not the MY OSE table).
+    m = re.match(r"^myoffsets?(?:\s+(.+?))?\s*$", s, re.I)
+    if not m:
+        return None
+    return _resolve_offset_command_month(m.group(1) or "")
 
 
 def _showoffset_my_person(name: str) -> Optional[str]:
@@ -5177,36 +5200,26 @@ def _collect_offset_month_pair_lines(
     return lines
 
 
-def _collect_offset_month_my_lines(
+def _collect_offset_month_my_moves(
     year: int,
     month: int,
     *,
     items: Optional[list[dict[str, Any]]] = None,
-) -> list[str]:
-    """Approver listing — **one line per person**, MY OSE only, name and days only::
+) -> list[tuple[str, list[tuple[date, date]]]]:
+    """MY OSE offsets for the month as ``[(person, [(moved off, moved to), ...])]``.
 
-        Augustine Si Yew 1/8, 2/8, 7/8, 23/8 --> 11/8, 20/8, 21/8, 21/8
-        Jun Chen 28/8, 29/8 --> 1/9, 2/9
-        Kheng Kwan 21/8 --> 23/8
-
-    Every approved offset a person has that month lands on their single line: days
-    they move off on the left, the day each one moves to in the same position on
-    the right (``7/8 --> 21/8`` and ``23/8 --> 21/8`` above are two separate offsets,
-    so 21/8 is listed twice). Days are never sorted apart from their partner, and
-    each carries its month so a swap into the next month is unambiguous.
-
-    A swap is written from both sides — the requester moves ``original -> exchange``,
-    the exchange person moves the other way — so Kheng Kwan's ``21/8 --> 23/8`` above
-    is Augustine's ``23/8 --> 21/8``. Swaps with a non-MY colleague keep only the MY side;
-    rows with no MY person at all are left out entirely.
+    People come in roster order, each person's moves in date order. A swap counts
+    for both sides — the requester moves ``original -> exchange``, the exchange
+    person the other way — so a swap between two MY people appears under both, and
+    a swap with a non-MY colleague appears under the MY side only. Exchange person
+    = Myself is one move, not two. Duplicated rows in the table collapse to one
+    move. Shared by the MY Offset text lines and the ``myoffset`` table card.
     """
     if month < 1 or month > 12:
         raise ValueError("month must be 1–12")
     if items is None:
         token = get_tenant_access_token()
         _, items = _get_bitable_raw_pair(token)
-    # person -> {(date moved off, date moved to)}; a set so a row duplicated in the
-    # table does not print the same move twice.
     by_person: dict[str, set[tuple[date, date]]] = {}
     for it in items:
         f = it.get("fields") or {}
@@ -5228,17 +5241,118 @@ def _collect_offset_month_my_lines(
         exc_my = _showoffset_my_person(exc)
         if req_my:
             by_person.setdefault(req_my, set()).add((od, xd))
-        # Exchange person = Myself is one move, not two — only mirror a real swap.
         if exc_my and exc_my != req_my:
             by_person.setdefault(exc_my, set()).add((xd, od))
+    return [
+        (person, sorted(by_person[person]))
+        for person in sorted(by_person, key=lambda n: (_showoffset_my_index(n), n.lower()))
+    ]
 
+
+def _collect_offset_month_my_lines(
+    year: int,
+    month: int,
+    *,
+    items: Optional[list[dict[str, Any]]] = None,
+) -> list[str]:
+    """Approver listing — **one line per person**, MY OSE only, name and days only::
+
+        Augustine Si Yew 1/8, 2/8, 7/8, 23/8 --> 11/8, 20/8, 21/8, 21/8
+        Jun Chen 28/8, 29/8 --> 1/9, 2/9
+        Kheng Kwan 21/8 --> 23/8
+
+    Every approved offset a person has that month lands on their single line: days
+    they move off on the left, the day each one moves to in the same position on
+    the right (``7/8 --> 21/8`` and ``23/8 --> 21/8`` above are two separate offsets,
+    so 21/8 is listed twice). Days are never sorted apart from their partner, and
+    each carries its month so a swap into the next month is unambiguous.
+    """
     lines: list[str] = []
-    for person in sorted(by_person, key=lambda n: (_showoffset_my_index(n), n.lower())):
-        moves = sorted(by_person[person])
+    for person, moves in _collect_offset_month_my_moves(year, month, items=items):
         from_s = ", ".join(_offset_date_label(a) for a, _b in moves)
         to_s = ", ".join(_offset_date_label(b) for _a, b in moves)
         lines.append(f"{person} {from_s} --> {to_s}")
     return lines
+
+
+def build_ose_myoffset_card(
+    year: int,
+    month: int,
+    *,
+    items: Optional[list[dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    """``myoffset`` card — MY OSE offsets as a Name / Original Date / Exchange Date table.
+
+    One row per offset, so a person with several offsets is listed once per move.
+    """
+    month_label = date(year, month, 1).strftime("%B")
+    rows: list[dict[str, str]] = []
+    for person, moves in _collect_offset_month_my_moves(year, month, items=items):
+        for moved_off, moved_to in moves:
+            rows.append(
+                {
+                    "person": person,
+                    "original": _offset_date_label(moved_off),
+                    "exchange": _offset_date_label(moved_to),
+                }
+            )
+    title = f"MY Offset {month_label}"
+    if not rows:
+        elements: list[dict[str, Any]] = [
+            {
+                "tag": "div",
+                "text": {"tag": "plain_text", "content": f"No MY OSE offsets in {month_label}."},
+            }
+        ]
+    else:
+        elements = [
+            # The table pages at page_size, so state the total above it — a reader
+            # must never mistake page 1 for the whole month.
+            {
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": f"**{len(rows)}** offset(s) — MY OSE."},
+            },
+            {
+                "tag": "table",
+                "page_size": 10,
+                "row_height": "low",
+                "header_style": {
+                    "text_align": "left",
+                    "text_size": "normal",
+                    "background_style": "grey",
+                    "text_color": "default",
+                    "bold": True,
+                    "lines": 1,
+                },
+                "columns": [
+                    {
+                        "name": "person",
+                        "display_name": "Name",
+                        "data_type": "text",
+                        "horizontal_align": "left",
+                    },
+                    {
+                        "name": "original",
+                        "display_name": "Original Date",
+                        "data_type": "text",
+                        "horizontal_align": "left",
+                    },
+                    {
+                        "name": "exchange",
+                        "display_name": "Exchange Date",
+                        "data_type": "text",
+                        "horizontal_align": "left",
+                    },
+                ],
+                "rows": rows,
+            },
+        ]
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {"template": "blue", "title": {"tag": "plain_text", "content": title}},
+        "body": {"elements": elements},
+    }
 
 
 def _offset_all_and_my_sections(

@@ -108,6 +108,7 @@ def _help_sections() -> list[HelpSection]:
             "green",
             [
                 ("showoffset [month]", "Monthly offset calendar; e.g. 五月有谁offset", "月度调休；如「五月有谁offset」"),
+                ("myoffset [month]", "MY OSE offset table: name / original / exchange", "MY OSE 调休表：姓名/原班/换班"),
                 ("@bot offset", "Offset form; or “swap my duty shift”", "调休申请表"),
                 ("@bot leave", "Leave form; or “apply for annual leave”", "请假申请表"),
                 ("editoffset", "Edit pending offset; or “change my offset”", "编辑待审调休"),
