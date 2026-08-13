@@ -5200,23 +5200,23 @@ def _collect_offset_month_pair_lines(
     return lines
 
 
-def _collect_offset_month_my_moves(
-    year: int,
-    month: int,
+def _collect_offset_range_my_moves(
+    start: date,
+    end: date,
     *,
     items: Optional[list[dict[str, Any]]] = None,
 ) -> list[tuple[str, list[tuple[date, date]]]]:
-    """MY OSE offsets for the month as ``[(person, [(moved off, moved to), ...])]``.
+    """MY OSE offsets touching ``start``–``end`` as ``[(person, [(moved off, moved to)])]``.
 
-    People come in roster order, each person's moves in date order. A swap counts
-    for both sides — the requester moves ``original -> exchange``, the exchange
-    person the other way — so a swap between two MY people appears under both, and
-    a swap with a non-MY colleague appears under the MY side only. Exchange person
-    = Myself is one move, not two. Duplicated rows in the table collapse to one
-    move. Shared by the MY Offset text lines and the ``myoffset`` table card.
+    A move is in range when **either** of its two dates falls inside the window, and
+    both dates are then reported — so a swap that reaches out of the window still
+    shows where it lands. People come in roster order, each person's moves in date
+    order. A swap counts for both sides — the requester moves ``original ->
+    exchange``, the exchange person the other way — so a swap between two MY people
+    appears under both, and a swap with a non-MY colleague appears under the MY side
+    only. Exchange person = Myself is one move, not two. Rows duplicated in the
+    table collapse to one move.
     """
-    if month < 1 or month > 12:
-        raise ValueError("month must be 1–12")
     if items is None:
         token = get_tenant_access_token()
         _, items = _get_bitable_raw_pair(token)
@@ -5235,7 +5235,7 @@ def _collect_offset_month_my_moves(
         xd = _bitable_field_exchange_date(f)
         if not od or not xd:
             continue
-        if not _offset_row_touches_month(od, xd, year, month):
+        if not (start <= od <= end or start <= xd <= end):
             continue
         req_my = _showoffset_my_person(req)
         exc_my = _showoffset_my_person(exc)
@@ -5247,6 +5247,33 @@ def _collect_offset_month_my_moves(
         (person, sorted(by_person[person]))
         for person in sorted(by_person, key=lambda n: (_showoffset_my_index(n), n.lower()))
     ]
+
+
+def _collect_offset_month_my_moves(
+    year: int,
+    month: int,
+    *,
+    items: Optional[list[dict[str, Any]]] = None,
+) -> list[tuple[str, list[tuple[date, date]]]]:
+    """:func:`_collect_offset_range_my_moves` over one calendar month."""
+    if month < 1 or month > 12:
+        raise ValueError("month must be 1–12")
+    _, last = calendar.monthrange(year, month)
+    return _collect_offset_range_my_moves(
+        date(year, month, 1), date(year, month, last), items=items
+    )
+
+
+def next_week_range(ref: Optional[date] = None) -> tuple[date, date]:
+    """Monday–Sunday of the week AFTER ``ref`` (weekend included).
+
+    Friday 14/08 → ``(17/08, 23/08)``. Used by the Friday push so the team sees the
+    whole coming week, whichever weekday the job actually fires on.
+    """
+    d = ref or date.today()
+    monday_this_week = d - timedelta(days=d.weekday())
+    start = monday_this_week + timedelta(days=7)
+    return start, start + timedelta(days=6)
 
 
 def _collect_offset_month_my_lines(
@@ -5275,23 +5302,21 @@ def _collect_offset_month_my_lines(
     return lines
 
 
-def build_ose_myoffset_card(
-    year: int,
-    month: int,
+def _my_offset_table_elements(
+    moves_by_person: list[tuple[str, list[tuple[date, date]]]],
     *,
-    items: Optional[list[dict[str, Any]]] = None,
-) -> dict[str, Any]:
-    """``myoffset`` card — MY OSE offsets as a Name / Original Date / Exchange Date table.
+    empty_note: str,
+) -> list[dict[str, Any]]:
+    """Name / Original Date / Exchange Date table — **one row per person**.
 
-    **One row per person**: all their offsets that month are comma-joined in the two
-    date columns, e.g. ``Augustine Si Yew | 1/8, 2/8, 7/8, 23/8 | 11/8, 20/8, 21/8, 21/8``.
-    Position *i* in Original Date pairs with position *i* in Exchange Date — the two
-    columns are ordered together, never sorted apart (same rule as the MY Offset lines).
+    All of a person's offsets are comma-joined in the two date columns, e.g.
+    ``Augustine Si Yew | 1/8, 2/8, 7/8, 23/8 | 20/7, 21/7, 11/8, 21/8``. Position
+    *i* in Original Date pairs with position *i* in Exchange Date — the columns are
+    ordered together, never sorted apart (same rule as the MY Offset text lines).
     """
-    month_label = date(year, month, 1).strftime("%B")
     rows: list[dict[str, str]] = []
     offsets = 0
-    for person, moves in _collect_offset_month_my_moves(year, month, items=items):
+    for person, moves in moves_by_person:
         offsets += len(moves)
         rows.append(
             {
@@ -5300,65 +5325,115 @@ def build_ose_myoffset_card(
                 "exchange": ", ".join(_offset_date_label(b) for _a, b in moves),
             }
         )
-    title = f"MY Offset {month_label}"
     if not rows:
-        elements: list[dict[str, Any]] = [
-            {
-                "tag": "div",
-                "text": {"tag": "plain_text", "content": f"No MY OSE offsets in {month_label}."},
-            }
-        ]
-    else:
-        elements = [
-            # The table pages at page_size, so state the totals above it — a reader
-            # must never mistake page 1 for the whole month.
-            {
-                "tag": "div",
-                "text": {
-                    "tag": "lark_md",
-                    "content": f"**{len(rows)}** person(s) · **{offsets}** offset(s) — MY OSE.",
-                },
+        return [{"tag": "div", "text": {"tag": "plain_text", "content": empty_note}}]
+    return [
+        # The table pages at page_size, so state the totals above it — a reader must
+        # never mistake page 1 for everything there is.
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"**{len(rows)}** person(s) · **{offsets}** offset(s) — MY OSE.",
             },
-            {
-                "tag": "table",
-                "page_size": 10,
-                # A cell can hold several dates — "low" would clip the longer ones.
-                "row_height": "middle",
-                "header_style": {
-                    "text_align": "left",
-                    "text_size": "normal",
-                    "background_style": "grey",
-                    "text_color": "default",
-                    "bold": True,
-                    "lines": 1,
-                },
-                "columns": [
-                    {
-                        "name": "person",
-                        "display_name": "Name",
-                        "data_type": "text",
-                        "horizontal_align": "left",
-                    },
-                    {
-                        "name": "original",
-                        "display_name": "Original Date",
-                        "data_type": "text",
-                        "horizontal_align": "left",
-                    },
-                    {
-                        "name": "exchange",
-                        "display_name": "Exchange Date",
-                        "data_type": "text",
-                        "horizontal_align": "left",
-                    },
-                ],
-                "rows": rows,
+        },
+        {
+            "tag": "table",
+            "page_size": 10,
+            # A cell can hold several dates — "low" would clip the longer ones.
+            "row_height": "middle",
+            "header_style": {
+                "text_align": "left",
+                "text_size": "normal",
+                "background_style": "grey",
+                "text_color": "default",
+                "bold": True,
+                "lines": 1,
             },
-        ]
+            "columns": [
+                {
+                    "name": "person",
+                    "display_name": "Name",
+                    "data_type": "text",
+                    "horizontal_align": "left",
+                },
+                {
+                    "name": "original",
+                    "display_name": "Original Date",
+                    "data_type": "text",
+                    "horizontal_align": "left",
+                },
+                {
+                    "name": "exchange",
+                    "display_name": "Exchange Date",
+                    "data_type": "text",
+                    "horizontal_align": "left",
+                },
+            ],
+            "rows": rows,
+        },
+    ]
+
+
+def build_ose_myoffset_card(
+    year: int,
+    month: int,
+    *,
+    items: Optional[list[dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    """``myoffset`` card — one month of MY OSE offsets as a table, one row per person."""
+    month_label = date(year, month, 1).strftime("%B")
     return {
         "schema": "2.0",
         "config": {"update_multi": True, "width_mode": "fill"},
-        "header": {"template": "blue", "title": {"tag": "plain_text", "content": title}},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": f"MY Offset {month_label}"},
+        },
+        "body": {
+            "elements": _my_offset_table_elements(
+                _collect_offset_month_my_moves(year, month, items=items),
+                empty_note=f"No MY OSE offsets in {month_label}.",
+            )
+        },
+    }
+
+
+def build_ose_weekly_myoffset_card(
+    start: date,
+    end: date,
+    *,
+    items: Optional[list[dict[str, Any]]] = None,
+    mention_open_ids: tuple[str, ...] = (),
+    greeting: str = "Hi",
+) -> dict[str, Any]:
+    """Weekly push card — MY OSE offsets touching ``start``–``end``.
+
+    Same table as ``myoffset``, titled with the week and led by a greeting that
+    @-mentions ``mention_open_ids``. An offset counts when its original **or** its
+    exchange date falls in the week, weekend included.
+    """
+    span = f"{start.strftime('%d/%m')} - {end.strftime('%d/%m')}"
+    ats = " ".join(f"<at id={oid}></at>" for oid in mention_open_ids if (oid or "").strip())
+    elements: list[dict[str, Any]] = []
+    if ats:
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"{greeting} {ats}"}})
+    elements.extend(
+        _my_offset_table_elements(
+            _collect_offset_range_my_moves(start, end, items=items),
+            empty_note=f"No MY OSE offsets for {span}.",
+        )
+    )
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "blue",
+            "title": {
+                "tag": "plain_text",
+                "content": f"MY Offset for next week {span}",
+            },
+        },
         "body": {"elements": elements},
     }
 

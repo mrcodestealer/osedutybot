@@ -2079,6 +2079,17 @@ REMINDER_TARGET_CHAT_ID = os.getenv(
     "oc_9de3d63fc589df6feeb9b0bee9c45b72",
 ).strip() or "oc_9de3d63fc589df6feeb9b0bee9c45b72"
 
+# Friday 09:00 "MY Offset for next week" card — target group and the people it tags.
+MY_OFFSET_WEEKLY_CHAT_ID = os.getenv(
+    "MY_OFFSET_WEEKLY_CHAT_ID",
+    "oc_c79c172f03c2c42f8f64179c933c7d12",
+).strip() or "oc_c79c172f03c2c42f8f64179c933c7d12"
+MY_OFFSET_WEEKLY_MENTION_OPEN_IDS: tuple[str, ...] = (
+    "ou_f2505a9a97566499e874587ffdf4db1f",
+    "ou_583f32fa1c2d6161e4430eb694cf79c4",
+    "ou_dd5344736571d11b4bff92d479b5b826",
+)
+
 # OSE offset approvers (Lark open_id) — each receives pending approval message cards.
 OFFSET_APPROVER_OPEN_IDS: frozenset[str] = frozenset(
     {
@@ -2540,6 +2551,29 @@ def public_holiday_csv_sync():
 #     msg = mention_line + "\n" + "Hi Morning Shift kindly reminder to do Amount Loss~"
 #     send_shift_reminder(DUTY_CHAT_ID, msg)
     
+def myoffset_next_week_reminder():
+    """Friday 09:00 — MY OSE offsets for the coming Mon–Sun, tagged to the group."""
+    start, end = ose_Duty.next_week_range(datetime.now().date())
+    span = f"{start.strftime('%d/%m')} - {end.strftime('%d/%m')}"
+    try:
+        card = ose_Duty.build_ose_weekly_myoffset_card(
+            start,
+            end,
+            mention_open_ids=MY_OFFSET_WEEKLY_MENTION_OPEN_IDS,
+        )
+        resp = send_message(
+            MY_OFFSET_WEEKLY_CHAT_ID,
+            json.dumps(card, ensure_ascii=False),
+            msg_type="interactive",
+        )
+        if isinstance(resp, dict) and int(resp.get("code", -1)) != 0:
+            print(f"[MY Offset] weekly card failed ({span}): {resp!r}", flush=True)
+        else:
+            print(f"⏰ MY Offset weekly card sent to {MY_OFFSET_WEEKLY_CHAT_ID} ({span})", flush=True)
+    except Exception as exc:
+        print(f"[MY Offset] weekly card error ({span}): {exc!r}", flush=True)
+
+
 def myoseweeklymeeting():
     mention_line = f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>'
     msg = mention_line + "\n" + "MY OSE WEEKLY MEETING"
@@ -2638,6 +2672,14 @@ try:
 except ImportError:
     print("[Amount Loss] 9:00 cron not registered (amountloss unavailable)", flush=True)
 _add_scheduler_job("myoseweeklymeeting", myoseweeklymeeting, "cron", day_of_week="tue", hour=17, minute=0)
+_add_scheduler_job(
+    "myoffset_next_week",
+    myoffset_next_week_reminder,
+    "cron",
+    day_of_week="fri",
+    hour=9,
+    minute=0,
+)
 # PLDT prefix rotation — every Tuesday 05:55 Asia/Manila (UTC+8, no DST).
 _add_scheduler_job(
     "pldt_prefix_weekly_rotate",

@@ -786,6 +786,9 @@ _DELETE_OFFSET_SLASH_RE = re.compile(r"^(?:/)?deleteoffset\b", re.I)
 _PENDING_OFFSET_SLASH_RE = re.compile(r"^(?:/)?pendingoffset\b", re.I)
 _SHOW_OFFSET_SLASH_RE = re.compile(r"^(?:/)?showoffset\b", re.I)
 _MY_OFFSET_SLASH_RE = re.compile(r"^(?:/)?myoffset\b", re.I)
+# ``myoffset next week`` previews exactly what the Friday 09:00 push will send
+# (minus the @-mentions), so the card can be checked without waiting for Friday.
+_MY_OFFSET_WEEK_RE = re.compile(r"^(?:/)?myoffset\s+(?:next\s*week|week)\s*$", re.I)
 
 _PENDING_OFFSET_RULE_RE = re.compile(
     r"(?i)^(?:/)?pendingoffset\s*$"
@@ -2467,8 +2470,16 @@ def handle_myoffset_command(
     chat_id: str,
     send_message: Callable[..., dict[str, Any]],
 ) -> bool:
-    """``myoffset [month]`` — MY OSE offsets as a Name / Original / Exchange table."""
+    """``myoffset [month | next week]`` — MY OSE offsets as a Name / Original / Exchange table."""
     text = normalize_offset_command_text(clean_text)
+    if _MY_OFFSET_WEEK_RE.match(text) or _MY_OFFSET_WEEK_RE.match(clean_text.strip()):
+        try:
+            start, end = od.next_week_range()
+            card = od.build_ose_weekly_myoffset_card(start, end)
+            send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
+        except Exception as exc:
+            send_message(chat_id, f"❌ myoffset failed: {exc}")
+        return True
     try:
         target = od.parse_myoffset_command(text)
     except ValueError as exc:
