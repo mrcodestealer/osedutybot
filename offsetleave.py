@@ -2853,19 +2853,21 @@ def execute_offset_action(
             y, m = month_target or (today.year, today.month)
             involved, show_all = _showoffset_view_for_sender(sender_open_id, get_token_func)
             label = _month_filter_label(y, m)
+            # Same sections as the card: the whole team, then MY Offset under it
+            # (see od.build_ose_showoffset_card), rendered as a bullet list.
+            def _bullets(items: list[str]) -> list[str]:
+                return [f"• {line}" for line in items] or ["_None_"]
+
             if show_all and involved:
                 mine = od._collect_offset_month_pair_lines(y, m, involved_person=involved)
-                all_lines = od._collect_offset_month_my_lines(y, m)
+                all_lines = od._collect_offset_month_pair_lines(y, m)
+                my_lines = od._collect_offset_month_my_lines(y, m)
                 lines = [f"**OSE offset — {label}**\n", "**Your offsets**"]
-                if mine:
-                    lines.extend(f"• {line}" for line in mine)
-                else:
-                    lines.append("_None_")
+                lines.extend(_bullets(mine))
                 lines.extend(["", "**All offsets**"])
-                if all_lines:
-                    lines.extend(f"• {line}" for line in all_lines)
-                else:
-                    lines.append("_None_")
+                lines.extend(_bullets(all_lines))
+                lines.extend(["", "**MY Offset**"])
+                lines.extend(_bullets(my_lines))
                 reply = "\n".join(lines)
             else:
                 pair_lines = od._collect_offset_month_pair_lines(
@@ -2878,7 +2880,13 @@ def execute_offset_action(
                         reply = f"No offset requests for **{label}**."
                 else:
                     lines = [f"**OSE offset — {label}**\n"]
-                    lines.extend(f"• {line}" for line in pair_lines)
+                    if involved:  # requester only — their own rows, no team sections
+                        lines.extend(_bullets(pair_lines))
+                    else:  # approver only
+                        lines.append("**All offsets**")
+                        lines.extend(_bullets(pair_lines))
+                        lines.extend(["", "**MY Offset**"])
+                        lines.extend(_bullets(od._collect_offset_month_my_lines(y, m)))
                     reply = "\n".join(lines)
         send_message(chat_id, reply)
         return True

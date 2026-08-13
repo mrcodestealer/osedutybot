@@ -5114,6 +5114,11 @@ def _showoffset_person_key(name: str) -> Optional[str]:
     return nm or None
 
 
+def _offset_date_label(d: date) -> str:
+    """Offset day as ``date/month`` — spells out the month a swap lands in."""
+    return f"{d.day}/{d.month}"
+
+
 def _collect_offset_month_pair_lines(
     year: int,
     month: int,
@@ -5122,7 +5127,7 @@ def _collect_offset_month_pair_lines(
     involved_person: Optional[str] = None,
     request_person_only: Optional[str] = None,
 ) -> list[str]:
-    """Build display lines: ``Man Chung 20, 21 --> Si Yew 15, 17`` (per swap pair)."""
+    """Build display lines: ``Man Chung 20/8, 21/8 --> Si Yew 15/8, 17/8`` (per swap pair)."""
     if month < 1 or month > 12:
         raise ValueError("month must be 1–12")
     if items is None:
@@ -5130,7 +5135,8 @@ def _collect_offset_month_pair_lines(
         _, items = _get_bitable_raw_pair(token)
     person_raw = involved_person or request_person_only
     filter_person = _showoffset_person_key(person_raw or "") if person_raw else None
-    pairs: dict[tuple[str, str], dict[str, set[int]]] = {}
+    # Whole dates, not day numbers — a line must read 28/8 --> 1/9, never 28 --> 1.
+    pairs: dict[tuple[str, str], dict[str, set[date]]] = {}
     for it in items:
         f = it.get("fields") or {}
         # Only approved offsets are real swaps — skip pending / rejected rows
@@ -5160,13 +5166,13 @@ def _collect_offset_month_pair_lines(
             continue
         key = (req_person, exc_person)
         slot = pairs.setdefault(key, {"orig": set(), "exc": set()})
-        slot["orig"].add(od.day)
-        slot["exc"].add(xd.day)
+        slot["orig"].add(od)
+        slot["exc"].add(xd)
 
     lines: list[str] = []
     for (req_p, exc_p), days in sorted(pairs.items(), key=lambda kv: _showoffset_pair_sort_key(kv[0][0], kv[0][1])):
-        orig_s = ", ".join(str(d) for d in sorted(days["orig"]))
-        exc_s = ", ".join(str(d) for d in sorted(days["exc"]))
+        orig_s = ", ".join(_offset_date_label(d) for d in sorted(days["orig"]))
+        exc_s = ", ".join(_offset_date_label(d) for d in sorted(days["exc"]))
         lines.append(f"{_showoffset_display_name(req_p)} {orig_s} --> {_showoffset_display_name(exc_p)} {exc_s}")
     return lines
 
@@ -5179,18 +5185,19 @@ def _collect_offset_month_my_lines(
 ) -> list[str]:
     """Approver listing — **one line per person**, MY OSE only, name and days only::
 
-        Augustine Si Yew 1, 2, 7, 23 --> 11, 20, 21, 21
-        Jun Chen 28, 29 --> 1, 2
-        Kheng Kwan 21 --> 23
+        Augustine Si Yew 1/8, 2/8, 7/8, 23/8 --> 11/8, 20/8, 21/8, 21/8
+        Jun Chen 28/8, 29/8 --> 1/9, 2/9
+        Kheng Kwan 21/8 --> 23/8
 
     Every approved offset a person has that month lands on their single line: days
     they move off on the left, the day each one moves to in the same position on
-    the right (``7 --> 21`` and ``23 --> 21`` above are two separate offsets, so 21
-    is listed twice). Days are never sorted apart from their partner.
+    the right (``7/8 --> 21/8`` and ``23/8 --> 21/8`` above are two separate offsets,
+    so 21/8 is listed twice). Days are never sorted apart from their partner, and
+    each carries its month so a swap into the next month is unambiguous.
 
     A swap is written from both sides — the requester moves ``original -> exchange``,
-    the exchange person moves the other way — so Kheng Kwan's ``21 --> 23`` above is
-    Augustine's ``23 --> 21``. Swaps with a non-MY colleague keep only the MY side;
+    the exchange person moves the other way — so Kheng Kwan's ``21/8 --> 23/8`` above
+    is Augustine's ``23/8 --> 21/8``. Swaps with a non-MY colleague keep only the MY side;
     rows with no MY person at all are left out entirely.
     """
     if month < 1 or month > 12:
@@ -5198,9 +5205,9 @@ def _collect_offset_month_my_lines(
     if items is None:
         token = get_tenant_access_token()
         _, items = _get_bitable_raw_pair(token)
-    # person -> {(day moved off, day moved to)}; a set so a row duplicated in the
+    # person -> {(date moved off, date moved to)}; a set so a row duplicated in the
     # table does not print the same move twice.
-    by_person: dict[str, set[tuple[int, int]]] = {}
+    by_person: dict[str, set[tuple[date, date]]] = {}
     for it in items:
         f = it.get("fields") or {}
         # Only approved offsets are real swaps — skip pending / rejected rows
@@ -5220,18 +5227,43 @@ def _collect_offset_month_my_lines(
         req_my = _showoffset_my_person(req)
         exc_my = _showoffset_my_person(exc)
         if req_my:
-            by_person.setdefault(req_my, set()).add((od.day, xd.day))
+            by_person.setdefault(req_my, set()).add((od, xd))
         # Exchange person = Myself is one move, not two — only mirror a real swap.
         if exc_my and exc_my != req_my:
-            by_person.setdefault(exc_my, set()).add((xd.day, od.day))
+            by_person.setdefault(exc_my, set()).add((xd, od))
 
     lines: list[str] = []
     for person in sorted(by_person, key=lambda n: (_showoffset_my_index(n), n.lower())):
         moves = sorted(by_person[person])
-        from_s = ", ".join(str(a) for a, _b in moves)
-        to_s = ", ".join(str(b) for _a, b in moves)
+        from_s = ", ".join(_offset_date_label(a) for a, _b in moves)
+        to_s = ", ".join(_offset_date_label(b) for _a, b in moves)
         lines.append(f"{person} {from_s} --> {to_s}")
     return lines
+
+
+def _offset_all_and_my_sections(
+    year: int,
+    month: int,
+    *,
+    items: Optional[list[dict[str, Any]]] = None,
+) -> list[str]:
+    """The approver block: **All offsets** (whole team) then **MY Offset** below it.
+
+    Empty when the month has no offsets at all, so the caller can print its own
+    "nothing this month" line. Both sections read the same snapshot of rows.
+    """
+    if items is None:
+        token = get_tenant_access_token()
+        _, items = _get_bitable_raw_pair(token)
+    all_lines = _collect_offset_month_pair_lines(year, month, items=items)
+    if not all_lines:
+        return []
+    out = ["**All offsets**", ""]
+    out.extend(all_lines)
+    my_lines = _collect_offset_month_my_lines(year, month, items=items)
+    out.extend(["", "**MY Offset**", ""])
+    out.extend(my_lines or ["_No MY OSE offsets this month._"])
+    return out
 
 
 def _collect_offset_month_summary(
@@ -5287,14 +5319,13 @@ def build_ose_showoffset_card(
     """
     Offset calendar card.
 
-    - Approver only → all team rows
+    - Approver only → **All offsets** + **MY Offset**
     - Requester only → rows where they are requester **or** exchange person
-    - Both roles → **Your offsets** section + **All offsets** section
+    - Both roles → **Your offsets** section on top of the approver sections
 
-    The team listing (what an approver sees) is MY OSE only, one line per person
-    holding all their offsets — see :func:`_collect_offset_month_my_lines`. A
-    requester's own section keeps the per-swap pair lines, so they still see who
-    they swapped with.
+    **All offsets** is the whole OSE team, one line per swap pair, unchanged.
+    **MY Offset** sits under it and condenses the MY OSE members to one line each
+    — see :func:`_collect_offset_month_my_lines`.
     """
     person = involved_person or request_person_only
     month_label = date(year, month, 1).strftime("%B")
@@ -5302,7 +5333,6 @@ def build_ose_showoffset_card(
 
     if include_all_team and person:
         mine = _collect_offset_month_pair_lines(year, month, involved_person=person)
-        all_lines = _collect_offset_month_my_lines(year, month)
         who = _showoffset_display_name(person)
         lines.append(f"**Your offsets** ({who})")
         lines.append("")
@@ -5310,24 +5340,21 @@ def build_ose_showoffset_card(
             lines.extend(mine)
         else:
             lines.append("_No offset requests involving you this month._")
-        lines.extend(["", "**All offsets**", ""])
-        if all_lines:
-            lines.extend(all_lines)
-        else:
-            lines.append("_No offset requests this month._")
-    else:
-        pair_lines = (
-            _collect_offset_month_pair_lines(year, month, involved_person=person)
-            if person
-            else _collect_offset_month_my_lines(year, month)
+        lines.append("")
+        lines.extend(
+            _offset_all_and_my_sections(year, month)
+            or ["**All offsets**", "", "_No offset requests this month._"]
         )
-        if not pair_lines:
-            if person:
-                lines.append("No offset requests this month involving you.")
-            else:
-                lines.append("No offset requests this month.")
-        else:
+    elif person:
+        pair_lines = _collect_offset_month_pair_lines(year, month, involved_person=person)
+        if pair_lines:
             lines.extend(pair_lines)
+        else:
+            lines.append("No offset requests this month involving you.")
+    else:
+        lines.extend(
+            _offset_all_and_my_sections(year, month) or ["No offset requests this month."]
+        )
 
     content = "\n".join(lines).strip()
     title = f"OSE offset — {month_label} {year}"
