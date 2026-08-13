@@ -5283,19 +5283,23 @@ def build_ose_myoffset_card(
 ) -> dict[str, Any]:
     """``myoffset`` card — MY OSE offsets as a Name / Original Date / Exchange Date table.
 
-    One row per offset, so a person with several offsets is listed once per move.
+    **One row per person**: all their offsets that month are comma-joined in the two
+    date columns, e.g. ``Augustine Si Yew | 1/8, 2/8, 7/8, 23/8 | 11/8, 20/8, 21/8, 21/8``.
+    Position *i* in Original Date pairs with position *i* in Exchange Date — the two
+    columns are ordered together, never sorted apart (same rule as the MY Offset lines).
     """
     month_label = date(year, month, 1).strftime("%B")
     rows: list[dict[str, str]] = []
+    offsets = 0
     for person, moves in _collect_offset_month_my_moves(year, month, items=items):
-        for moved_off, moved_to in moves:
-            rows.append(
-                {
-                    "person": person,
-                    "original": _offset_date_label(moved_off),
-                    "exchange": _offset_date_label(moved_to),
-                }
-            )
+        offsets += len(moves)
+        rows.append(
+            {
+                "person": person,
+                "original": ", ".join(_offset_date_label(a) for a, _b in moves),
+                "exchange": ", ".join(_offset_date_label(b) for _a, b in moves),
+            }
+        )
     title = f"MY Offset {month_label}"
     if not rows:
         elements: list[dict[str, Any]] = [
@@ -5306,16 +5310,20 @@ def build_ose_myoffset_card(
         ]
     else:
         elements = [
-            # The table pages at page_size, so state the total above it — a reader
+            # The table pages at page_size, so state the totals above it — a reader
             # must never mistake page 1 for the whole month.
             {
                 "tag": "div",
-                "text": {"tag": "lark_md", "content": f"**{len(rows)}** offset(s) — MY OSE."},
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**{len(rows)}** person(s) · **{offsets}** offset(s) — MY OSE.",
+                },
             },
             {
                 "tag": "table",
                 "page_size": 10,
-                "row_height": "low",
+                # A cell can hold several dates — "low" would clip the longer ones.
+                "row_height": "middle",
                 "header_style": {
                     "text_align": "left",
                     "text_size": "normal",
