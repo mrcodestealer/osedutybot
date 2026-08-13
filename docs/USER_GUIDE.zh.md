@@ -156,7 +156,6 @@ OSE Lark 机器人逐步操作说明。分群命令列表见 [各群文档](READ
 |------|------|
 | 看月度调休 | `showoffset` 或 `五月有谁offset` |
 | 改待审申请 | `editoffset` |
-| 删申请 | `deleteoffset` |
 | 审批人看待审 | `pendingoffset` |
 
 ### 4.5 假期

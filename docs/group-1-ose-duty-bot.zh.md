@@ -84,7 +84,6 @@
 | `@bot offset` | 调休申请表 |
 | `@bot leave` | 请假申请表 |
 | `editoffset` | 编辑待审调休 |
-| `deleteoffset` | 删除调休 |
 | `pendingoffset` | 审批人待审列表 |
 
 ### 调休 / 请假表单 — 逐步操作
@@ -93,7 +92,7 @@
 2. 出现**表单卡片** — 群聊里通常**仅你可见**。
 3. 填写日期、班次、调休交换对象、原因等。
 4. 点 **Submit**。
-5. **待审中：** 用 `editoffset` / `deleteoffset` 修改或删除。
+5. **待审中：** 用 `editoffset` 修改（调休记录不再删除）。
 6. **审批人：** 用 `pendingoffset` 看待审并在卡片上审批。
 
 也支持斜杠：`/editoffset`、`/pendingoffset`、`/showoffset`。

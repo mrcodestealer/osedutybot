@@ -11,7 +11,7 @@ Toggle: ``BOT_USE_OFFSETAI=0`` disables entirely.
 
 CLI:
     python offsetai.py "show me man chung offset which is approved"
-    python offsetai.py --dry "i want to delete one of those"
+    python offsetai.py --dry "i want to edit one of those"
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ _AGENT_SESSIONS: dict[str, list[dict[str, Any]]] = {}
 
 _AGENT_SYSTEM = (
     "You are the OSE Duty Bot offset assistant on Lark/Feishu.\n"
-    "Users talk naturally about duty shift swaps (offset): lookups, submit, delete, edit.\n"
+    "Users talk naturally about duty shift swaps (offset): lookups, submit, edit.\n"
     "You MUST use the provided tools — do not invent sheet data.\n"
     "Today's date and a sheet snapshot are in the user context.\n\n"
     "How to work:\n"
@@ -55,16 +55,16 @@ _AGENT_SYSTEM = (
     "2. Call tools to read data or perform actions.\n"
     "3. For lookups: call list_offset_records with filters YOU infer, then send_chat_reply "
     "with a clear summary (only matching rows).\n"
-    "4. To let user pick a row to delete: call show_delete_picker with the SAME filters "
-    "(person, status, year, month) — never show the whole sheet unless they asked.\n"
-    "5. To submit a new offset: gather fields from conversation; if anything missing, "
+    "4. To submit a new offset: gather fields from conversation; if anything missing, "
     "send_chat_reply asking ONE question; when complete call submit_offset_record.\n"
-    "6. If the message is clearly NOT about OSE offset/swap, call pass_not_offset.\n"
-    "7. Approvers can delete any status; requesters only delete their own pending rows.\n"
-    "8. inferred_filters in context are AI-extracted from the user message — "
-    "you MUST pass them to list_offset_records / show_delete_picker "
+    "5. If the message is clearly NOT about OSE offset/swap, call pass_not_offset.\n"
+    "6. Offset records are NEVER deleted — there is no delete tool. If the user asks to "
+    "delete / cancel an offset, send_chat_reply telling them to use editoffset instead "
+    "(an approver can also reject the row).\n"
+    "7. inferred_filters in context are AI-extracted from the user message — "
+    "you MUST pass them to list_offset_records "
     "(person, status, person_role, year, month).\n"
-    "9. When user names someone (e.g. Man Chung) use person_role=requester unless they "
+    "8. When user names someone (e.g. Man Chung) use person_role=requester unless they "
     "ask about swap partner.\n"
     "Roster names: use exact names from exchange_roster when submitting.\n"
     "Shift type: D (day) or N (night).\n"
@@ -121,32 +121,6 @@ _TOOL_SPECS: list[dict[str, Any]] = [
                     "text": {"type": "string", "description": "Markdown message for the user"},
                 },
                 "required": ["text"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "show_delete_picker",
-            "description": (
-                "Open interactive card so user can pick one offset row to delete. "
-                "Apply filters so the list matches what the user asked for."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "person": {"type": "string"},
-                    "person_role": {
-                        "type": "string",
-                        "enum": ["requester", "any"],
-                    },
-                    "status": {
-                        "type": "string",
-                        "enum": ["approved", "pending", "rejected"],
-                    },
-                    "year": {"type": "integer"},
-                    "month": {"type": "integer", "minimum": 1, "maximum": 12},
-                },
             },
         },
     },
@@ -645,17 +619,6 @@ def _merge_tool_args(ctx: _AgentCtx, args: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _filter_label_from_args(args: dict[str, Any]) -> str:
-    bits: list[str] = []
-    if args.get("person"):
-        bits.append(str(args["person"]))
-    if args.get("status"):
-        bits.append(str(args["status"]))
-    if args.get("year") and args.get("month"):
-        bits.append(f"{args['year']}-{int(args['month']):02d}")
-    return " · ".join(bits)
-
-
 def _filter_kwargs(args: dict[str, Any]) -> dict[str, Any]:
     return {
         "person": args.get("person"),
@@ -695,70 +658,11 @@ def _execute_tool(ctx: _AgentCtx, name: str, args: dict[str, Any]) -> tuple[str,
         return json.dumps({"ok": True, "sent": True}), True
 
     if name == "show_delete_picker":
-        mt = _month_target_from_args(args)
-        month_label = ol._month_filter_label(mt[0], mt[1]) if mt else None
-        filter_label = _filter_label_from_args(args)
-        oid = ctx.sender_open_id
-
-        if not fk.get("person") and not fk.get("status"):
-            return json.dumps({
-                "ok": False,
-                "error": (
-                    "Refusing to show full delete list — call show_delete_picker with "
-                    "person and/or status from inferred_filters or user message."
-                ),
-                "inferred_filters": ctx.inferred_filters,
-            }), None
-
-        if ol._is_offset_approver_open_id(oid):
-            rows = ol._all_offsets_for_approver_delete()
-            if mt:
-                rows = ol._filter_offsets_by_month(rows, *mt)
-            rows = filter_rows_by_args(rows, **fk)
-            if not rows:
-                msg = f"No offset records match filter: **{filter_label or 'none'}**."
-                if not ctx.dry_run:
-                    ctx.send_message(ctx.chat_id, msg)
-                return json.dumps({"ok": False, "error": msg}), True
-            card = ol.build_offset_delete_list_card(
-                oid,
-                "",
-                rows,
-                is_admin=True,
-                month_label=month_label,
-                filter_label=filter_label,
-            )
-        else:
-            rp = ctx.request_person or ol.resolve_request_person(
-                oid, ctx.get_token_func()
-            )
-            rows = ol._pending_offsets_for_request_person(rp)
-            if mt:
-                rows = ol._filter_offsets_by_month(rows, *mt)
-            rows = filter_rows_by_args(rows, **fk)
-            if not rows:
-                msg = f"No pending rows match filter: **{filter_label or 'none'}**."
-                if not ctx.dry_run:
-                    ctx.send_message(ctx.chat_id, msg)
-                return json.dumps({"ok": False, "error": msg}), True
-            card = ol.build_offset_delete_list_card(
-                oid,
-                rp,
-                rows,
-                is_admin=False,
-                month_label=month_label,
-                filter_label=filter_label,
-            )
+        # Deleting offsets is retired — the tool is gone from the schema, but answer
+        # politely if an older session still asks for it.
         if not ctx.dry_run:
-            ol._deliver_private_card(
-                owner_open_id=oid,
-                group_chat_id=ctx.chat_id,
-                chat_type=ctx.chat_type,
-                card=card,
-                send_message=ctx.send_message,
-                token=ctx.get_token_func(),
-            )
-        return json.dumps({"ok": True, "picker": True, "count": len(rows), "filters": fk}), True
+            ctx.send_message(ctx.chat_id, ol.OFFSET_DELETE_RETIRED_NOTE)
+        return json.dumps({"ok": False, "error": "offset delete is retired"}), True
 
     if name == "show_offset_calendar":
         today = date.today()
@@ -1124,7 +1028,7 @@ def handle(
             send_message(
                 chat_id,
                 "⚠️ Offset assistant could not reach the AI. "
-                "Check API key / model, or use slash commands like **deleteoffset**.",
+                "Check API key / model, or use slash commands like **editoffset**.",
             )
             return True
         return handled

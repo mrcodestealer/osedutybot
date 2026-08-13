@@ -84,7 +84,6 @@ Use **@mention + phrase** (no slash required for forms):
 | `@bot offset` | Offset (调休) application form |
 | `@bot leave` | Leave application form |
 | `editoffset` | Edit pending offset |
-| `deleteoffset` | Delete offset (approvers can delete pending) |
 | `pendingoffset` | Approver queue |
 
 ### Offset / leave form — step by step
@@ -93,7 +92,7 @@ Use **@mention + phrase** (no slash required for forms):
 2. A **form card** appears — in groups it is usually **only visible to you**.
 3. Fill required fields (dates, shift type, exchange person for offset, reason).
 4. Tap **Submit**.
-5. **Pending:** use `editoffset` or `deleteoffset` to change your request.
+5. **Pending:** use `editoffset` to change your request — offset records are never deleted.
 6. **Approvers:** use `pendingoffset` to see the queue and approve on the card.
 
 Slash optional: `/editoffset`, `/pendingoffset`, `/showoffset` also work.

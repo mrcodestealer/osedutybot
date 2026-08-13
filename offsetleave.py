@@ -34,10 +34,11 @@ _OFFSET_PEER_APPROVER_APPROVAL_NOTIFIED_PATH = os.path.join(
 _OFFSET_PEER_APPROVER_APPROVAL_NOTIFIED_LOCK = threading.Lock()
 
 # Snapshot of every known offset row (record_id -> row dict), refreshed each poll. Used to
-# detect deletions by ANY method (manual Base delete, bot delete, API) and notify approvers.
+# detect deletions (manual Base delete or API — the bot itself no longer deletes rows)
+# and notify approvers.
 _OFFSET_ROWS_SNAPSHOT_PATH = os.path.join(_CHBOX_DIR, "offset_rows_snapshot.json")
 _OFFSET_ROWS_SNAPSHOT_LOCK = threading.Lock()
-# Who deleted a row via the bot (record_id -> {open_id, name, ts}); best-effort attribution.
+# Deleter attribution carried between poll retries (record_id -> {open_id, name, ts}).
 _OFFSET_DELETE_ACTOR_PATH = os.path.join(_CHBOX_DIR, "offset_delete_actors.json")
 _OFFSET_DELETE_ACTOR_LOCK = threading.Lock()
 # Dedupe so the deletion poll DMs approvers only once per deleted row (record_id -> ts).
@@ -49,10 +50,6 @@ _OFFSET_DELETE_STATE_TTL_SEC = int(os.getenv("OSE_OFFSET_DELETE_STATE_TTL_SEC", 
 # Prevent opening multiple edit forms for the same pending record (double-tap Edit).
 _OFFSET_EDIT_OPEN_LOCK = threading.Lock()
 _OFFSET_EDIT_OPEN: dict[str, str] = {}
-
-# Prevent double-tap Delete on the same row (duplicate callbacks / impatient clicks).
-_OFFSET_DELETE_LOCK = threading.Lock()
-_OFFSET_DELETE_IN_FLIGHT: set[str] = set()
 
 # Prevent double-tap Submit creating duplicate Bitable rows (Lark + web).
 _OFFSET_SUBMIT_LOCK = threading.Lock()
@@ -97,9 +94,19 @@ OFFSET_APPROVAL_CALLBACK_KEYS = frozenset({_OFFSET_APPR_PICK_KEY, _OFFSET_APPR_C
 
 _OFFSET_EDIT_PICK_KEY = "offsetleave_offset_edit_pick"
 _OFFSET_EDIT_SUBMIT_KEY = "offsetleave_offset_edit_submit"
+# Deleting offset records is retired — a row is never removed by the bot any more.
+# The two delete callback keys are still routed so an old delete card left in a chat
+# answers with ``OFFSET_DELETE_RETIRED_NOTE`` instead of silently doing nothing.
 _OFFSET_DELETE_KEY = "offsetleave_offset_delete"
-# Approver deleteoffset step 1: pick a month, then see only that month's rows.
 _OFFSET_DELETE_MONTH_KEY = "offsetleave_offset_delete_month"
+
+# Every delete entry point (bot menu, /deleteoffset, "cancel my offset", old cards)
+# answers with this.
+OFFSET_DELETE_RETIRED_NOTE = (
+    "🚫 **Offset records are no longer deleted.**\n"
+    "Use **editoffset** to correct a row — an approver can also reject it. "
+    "Every request stays in the table for the approval trail."
+)
 
 OFFSETLEAVE_CARD_CALLBACK_KEYS = frozenset(
     set(OFFSET_APPROVAL_CALLBACK_KEYS)
@@ -1143,27 +1150,6 @@ def _clear_edit_form_open(owner_open_id: str, record_id: str) -> None:
         _OFFSET_EDIT_OPEN.pop(key, None)
 
 
-def _delete_session_key(owner_open_id: str, record_id: str) -> str:
-    return f"{(owner_open_id or '').strip()}:{(record_id or '').strip()}"
-
-
-def _try_begin_offset_delete(owner_open_id: str, record_id: str) -> Optional[str]:
-    key = _delete_session_key(owner_open_id, record_id)
-    if not key or key == ":":
-        return "missing record"
-    with _OFFSET_DELETE_LOCK:
-        if key in _OFFSET_DELETE_IN_FLIGHT:
-            return "Delete already in progress for this request — please wait."
-        _OFFSET_DELETE_IN_FLIGHT.add(key)
-    return None
-
-
-def _end_offset_delete(owner_open_id: str, record_id: str) -> None:
-    key = _delete_session_key(owner_open_id, record_id)
-    with _OFFSET_DELETE_LOCK:
-        _OFFSET_DELETE_IN_FLIGHT.discard(key)
-
-
 def _deliver_requester_offset_edit_menu(
     *,
     owner_open_id: str,
@@ -1249,26 +1235,6 @@ def _non_pending_offsets_all() -> list[dict[str, Any]]:
         key=lambda r: (r.get("request_date") or "", r.get("record_id") or ""),
         reverse=True,
     )
-    return out
-
-
-def _all_offsets_for_approver_delete() -> list[dict[str, Any]]:
-    """All offset rows approvers may delete (pending + approved + rejected)."""
-    od.invalidate_ose_bitable_cache()
-    data = od.get_ose_offset_records_admin()
-    out: list[dict[str, Any]] = [dict(it) for it in (data or {}).get("items") or []]
-    out.sort(
-        key=lambda r: (
-            0 if bool(r.get("pending")) else 1,
-            str(r.get("request_date") or ""),
-            str(r.get("record_id") or ""),
-        ),
-    )
-    out.sort(
-        key=lambda r: str(r.get("request_date") or ""),
-        reverse=True,
-    )
-    out.sort(key=lambda r: 0 if bool(r.get("pending")) else 1)
     return out
 
 
@@ -1716,47 +1682,6 @@ def _short_cell(s: Any) -> str:
     return t or "—"
 
 
-def _offset_shift_labels(shift_type: Any) -> tuple[str, str]:
-    """Return (short D/N, long Day Shift / Night Shift)."""
-    code = str(shift_type or "").strip().upper()
-    if code == "D":
-        return "D", "Day Shift"
-    if code == "N":
-        return "N", "Night Shift"
-    return code or "—", code or "—"
-
-
-def _format_offset_delete_row_summary(
-    index: int,
-    row: dict[str, Any],
-    *,
-    is_admin: bool,
-) -> str:
-    """Human-readable swap line for the delete picker card."""
-    req = _short_cell(row.get("request_person"))
-    exc = _short_cell(row.get("exchange_person"))
-    orig = _short_cell(row.get("original_date"))
-    exch = _short_cell(row.get("exchange_date"))
-    shift_short, shift_long = _offset_shift_labels(row.get("shift_type"))
-    reason = _short_cell(row.get("reason"))
-    self_swap = od._names_same_person(
-        str(row.get("request_person") or ""),
-        str(row.get("exchange_person") or ""),
-    )
-    if self_swap:
-        headline = f"**{index}.** {req} changed himself · {shift_short} · {orig} → {exch}"
-        lines = [headline, f"**Reason:** {reason}"]
-    else:
-        headline = f"**{index}.** {req} changed his {orig} → {exc} {exch}"
-        lines = [headline, shift_long, f"**Reason:** {reason}"]
-    if is_admin:
-        st = _short_cell(row.get("approval_status"))
-        if bool(row.get("pending")) and not st:
-            st = "Pending"
-        lines.append(f"**Requester:** {req} · **Status:** {st}")
-    return "\n".join(lines)
-
-
 def _callback_payload_edit_submit(
     *,
     owner_open_id: str,
@@ -1795,7 +1720,7 @@ def _callback_payload_row_action(
     }
     if admin:
         d["admin"] = 1
-    # Carry the month/page so the card rebuilt AFTER a delete stays on the same
+    # Carry the month/page so a card rebuilt after a row action stays on the same
     # month and page instead of falling back to the unfiltered list.
     if month_ym:
         d["y"], d["m"] = int(month_ym[0]), int(month_ym[1])
@@ -1885,235 +1810,6 @@ def build_offset_edit_list_card(
         "schema": "2.0",
         "config": {"update_multi": True, "width_mode": "fill"},
         "header": {"template": "blue", "title": {"tag": "plain_text", "content": title}},
-        "body": {"elements": elements},
-    }
-
-
-# Rows per delete card. A month with more than this gets "Show next" paging, so
-# nothing is hidden; keeping it bounded keeps the card payload well inside Lark's
-# size limit (each row is a summary div + a Delete button).
-_OFFSET_DELETE_PAGE = 25
-
-
-def _offset_months_present(rows: list[dict[str, Any]]) -> list[tuple[int, int, int]]:
-    """Months that actually have offsets → ``[(year, month, row_count)]``, newest first.
-
-    A row is counted under EVERY month it touches (original / exchange / request
-    date), matching :func:`_offset_row_touches_month`, so clicking any of those
-    months finds the row. Months with no offsets never appear.
-    """
-    counts: dict[tuple[int, int], int] = {}
-    for r in rows:
-        seen: set[tuple[int, int]] = set()
-        for key in ("original_date", "exchange_date", "request_date"):
-            d = od._parse_date_value(r.get(key))
-            if d:
-                seen.add((d.year, d.month))
-        for ym in seen:
-            counts[ym] = counts.get(ym, 0) + 1
-    return [(y, m, c) for (y, m), c in sorted(counts.items(), reverse=True)]
-
-
-def build_offset_delete_month_picker_card(
-    owner_open_id: str, rows: list[dict[str, Any]]
-) -> dict[str, Any]:
-    """Approver deleteoffset step 1 — one button per month that has offsets.
-
-    Replaces the old flat list, which was capped at 15 rows and silently hid the
-    rest. Picking a month shows only that month, so the cap stops mattering.
-    """
-    months = _offset_months_present(rows)
-    total = len(rows)
-    elements: list[dict[str, Any]] = [
-        {
-            "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": (
-                    f"**Approver** — pick a **month** to delete offsets from.\n"
-                    f"{total} offset record(s) across {len(months)} month(s)."
-                ),
-            },
-        }
-    ]
-    if not months:
-        elements.append(
-            {"tag": "div", "text": {"tag": "lark_md", "content": "_No offset records._"}}
-        )
-    for y, m, c in months:
-        elements.append(
-            {
-                "tag": "button",
-                "text": {
-                    "tag": "plain_text",
-                    "content": f"{_month_filter_label(y, m)}  ({c})",
-                },
-                "type": "primary",
-                "behaviors": [
-                    {
-                        "type": "callback",
-                        "value": {
-                            "k": _OFFSET_DELETE_MONTH_KEY,
-                            "owner": (owner_open_id or "").strip(),
-                            "y": y,
-                            "m": m,
-                        },
-                    }
-                ],
-            }
-        )
-    return {
-        "schema": "2.0",
-        "config": {"update_multi": True, "width_mode": "fill"},
-        "header": {
-            "template": "orange",
-            "title": {"tag": "plain_text", "content": "OSE offset — delete (approver)"},
-        },
-        "body": {"elements": elements},
-    }
-
-
-def build_offset_delete_list_card(
-    owner_open_id: str,
-    request_person: str,
-    rows: list[dict[str, Any]],
-    *,
-    is_admin: bool = False,
-    month_label: Optional[str] = None,
-    filter_label: Optional[str] = None,
-    month_ym: Optional[tuple[int, int]] = None,
-    start: int = 0,
-) -> dict[str, Any]:
-    # One card holds a page of rows; anything beyond gets a "Show next" button, so
-    # a month with more offsets than fit is never silently truncated.
-    page = _OFFSET_DELETE_PAGE
-    total = len(rows)
-    start = max(0, min(int(start or 0), max(0, total - 1)))
-    sliced = rows[start : start + page]
-    month_note = f" ({month_label})" if month_label else ""
-    filter_note = f"\n_Filter: **{filter_label}**_" if filter_label else ""
-    if is_admin:
-        intro = (
-            f"**Approver** — pick an offset to **delete**{month_note}{filter_note}\n"
-            "(pending, approved, or rejected — removes the Bitable row)."
-        )
-        cap_note = "record(s)"
-    else:
-        intro = (
-            f"**{request_person}** — pending offset requests{month_note} you can **delete**.\n"
-            "Approved / rejected rows are not listed."
-        )
-        cap_note = "pending"
-    elements: list[dict[str, Any]] = [{"tag": "div", "text": {"tag": "lark_md", "content": intro}}]
-    if total > len(sliced):
-        first, last = start + 1, start + len(sliced)
-        elements.append(
-            {
-                "tag": "div",
-                "text": {
-                    "tag": "plain_text",
-                    "content": f"Showing {first}–{last} of {total} {cap_note}.",
-                },
-            }
-        )
-    for i, r in enumerate(sliced, start=start + 1):
-        rid = str(r.get("record_id") or "").strip()
-        if not rid:
-            continue
-        summary = _format_offset_delete_row_summary(i, r, is_admin=is_admin)
-        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": summary}})
-        elements.append(
-            {
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": "Delete"},
-                "type": "danger",
-                "behaviors": [
-                    {
-                        "type": "callback",
-                        "value": _callback_payload_row_action(
-                            _OFFSET_DELETE_KEY,
-                            owner_open_id=owner_open_id,
-                            request_person=request_person,
-                            record_id=rid,
-                            admin=is_admin,
-                            month_ym=month_ym,
-                            start=start,
-                        ),
-                    }
-                ],
-            }
-        )
-    # Paging / back controls need a month to re-query, so they only apply to the
-    # approver month flow.
-    if month_ym:
-        nav: list[dict[str, Any]] = []
-        if start + page < total:
-            remaining = total - (start + page)
-            nav.append(
-                {
-                    "tag": "button",
-                    "text": {
-                        "tag": "plain_text",
-                        "content": f"Show next {min(page, remaining)} ▶",
-                    },
-                    "type": "primary",
-                    "behaviors": [
-                        {
-                            "type": "callback",
-                            "value": {
-                                "k": _OFFSET_DELETE_MONTH_KEY,
-                                "owner": (owner_open_id or "").strip(),
-                                "y": int(month_ym[0]),
-                                "m": int(month_ym[1]),
-                                "off": start + page,
-                            },
-                        }
-                    ],
-                }
-            )
-        if start > 0:
-            nav.append(
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "◀ Previous"},
-                    "type": "default",
-                    "behaviors": [
-                        {
-                            "type": "callback",
-                            "value": {
-                                "k": _OFFSET_DELETE_MONTH_KEY,
-                                "owner": (owner_open_id or "").strip(),
-                                "y": int(month_ym[0]),
-                                "m": int(month_ym[1]),
-                                "off": max(0, start - page),
-                            },
-                        }
-                    ],
-                }
-            )
-        nav.append(
-            {
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": "◀ All months"},
-                "type": "default",
-                "behaviors": [
-                    {
-                        "type": "callback",
-                        "value": {
-                            "k": _OFFSET_DELETE_MONTH_KEY,
-                            "owner": (owner_open_id or "").strip(),
-                            "all": 1,
-                        },
-                    }
-                ],
-            }
-        )
-        elements.extend(nav)
-    title = "OSE offset — delete (approver)" if is_admin else "OSE offset — delete"
-    return {
-        "schema": "2.0",
-        "config": {"update_multi": True, "width_mode": "fill"},
-        "header": {"template": "orange", "title": {"tag": "plain_text", "content": title}},
         "body": {"elements": elements},
     }
 
@@ -2427,14 +2123,8 @@ def handle_bot_menu_event(
         return True
 
     if event_key in BOT_MENU_EVENT_KEYS_OFFSET_DELETE:
-        print(f"[offsetleave] bot menu {event_key!r} → delete offset for {oid}", flush=True)
-        _open_offset_delete_picker(
-            sender_open_id=oid,
-            chat_id=oid,
-            chat_type="p2p",
-            send_message=_send_open_id,
-            get_token_func=get_token_func,
-        )
+        print(f"[offsetleave] bot menu {event_key!r} → delete retired for {oid}", flush=True)
+        _send_open_id(oid, OFFSET_DELETE_RETIRED_NOTE)
         return True
 
     if event_key in BOT_MENU_EVENT_KEYS_SHOW_OFFSET:
@@ -2481,14 +2171,11 @@ def handle_bot_menu_event(
         return True
 
     if event_key in BOT_MENU_EVENT_KEYS_APPROVER_OFFSET_DELETE:
-        print(f"[offsetleave] bot menu {event_key!r} → approver delete offset for {oid}", flush=True)
-        _open_approver_offset_delete_picker(
-            sender_open_id=oid,
-            chat_id=oid,
-            chat_type="p2p",
-            send_message=_send_open_id,
-            get_token_func=get_token_func,
+        print(
+            f"[offsetleave] bot menu {event_key!r} → approver delete retired for {oid}",
+            flush=True,
         )
+        _send_open_id(oid, OFFSET_DELETE_RETIRED_NOTE)
         return True
 
     if event_key in BOT_MENU_EVENT_KEYS_APPROVER_SHOW_OFFSET:
@@ -2556,32 +2243,6 @@ def _open_approver_offset_edit_picker(
     )
 
 
-def _open_approver_offset_delete_picker(
-    *,
-    sender_open_id: str,
-    chat_id: str,
-    chat_type: Optional[str],
-    send_message: Callable[..., dict[str, Any]],
-    get_token_func: Callable[[], str],
-) -> bool:
-    """Approver menu: delete any offset row (approver-only delete list)."""
-    oid = (sender_open_id or "").strip()
-    if not _is_offset_approver_open_id(oid):
-        send_message(chat_id, "As checked you are not Approver")
-        return True
-    return handle_deleteoffset_command(
-        "deleteoffset",
-        sender_open_id=oid,
-        chat_id=chat_id,
-        chat_type=chat_type,
-        send_message=send_message,
-        get_token_func=get_token_func,
-        force=True,
-        person_filter="",
-        status_filter="",
-    )
-
-
 def _open_approver_show_offset(
     *,
     sender_open_id: str,
@@ -2599,28 +2260,6 @@ def _open_approver_show_offset(
         chat_id=chat_id,
         send_message=send_message,
         get_token_func=get_token_func,
-    )
-
-
-def _open_offset_delete_picker(
-    *,
-    sender_open_id: str,
-    chat_id: str,
-    chat_type: Optional[str],
-    send_message: Callable[..., dict[str, Any]],
-    get_token_func: Callable[[], str],
-) -> bool:
-    """Open the offset delete list card (same as ``deleteoffset`` without NL filters)."""
-    return handle_deleteoffset_command(
-        "deleteoffset",
-        sender_open_id=sender_open_id,
-        chat_id=chat_id,
-        chat_type=chat_type,
-        send_message=send_message,
-        get_token_func=get_token_func,
-        force=True,
-        person_filter="",
-        status_filter="",
     )
 
 
@@ -3130,107 +2769,15 @@ def handle_deleteoffset_command(
     person_filter: Optional[str] = None,
     status_filter: Optional[str] = None,
 ) -> bool:
+    """Deleting offsets is retired — answer with the notice instead of a delete list.
+
+    Kept as the single choke point every delete route still calls (``/deleteoffset``,
+    the bot menus, ``offsetai`` delete actions, natural talk like "cancel my offset"),
+    so all of them give the same answer. Unrelated text still falls through untouched.
+    """
     if not force and not wants_deleteoffset(clean_text):
         return False
-    oid = (sender_open_id or "").strip()
-    if not oid:
-        send_message(chat_id, "❌ Could not identify your Lark user.")
-        return True
-    if person_filter is None and status_filter is None:
-        person_filter, status_filter, inferred_month = _resolve_nl_offset_filters(
-            clean_text, month_target=month_target
-        )
-        if month_target is None:
-            month_target = inferred_month
-    if month_target is None:
-        month_target = _parse_offset_month_filter(clean_text)
-    month_label = (
-        _month_filter_label(month_target[0], month_target[1]) if month_target else None
-    )
-    filter_note = ""
-    if person_filter or status_filter:
-        bits = []
-        if person_filter:
-            bits.append(str(person_filter))
-        if status_filter:
-            bits.append(str(status_filter))
-        filter_note = " · ".join(bits)
-    try:
-        token = get_token_func()
-        if _is_offset_approver_open_id(oid):
-            rows = _all_offsets_for_approver_delete()
-            if month_target:
-                rows = _filter_offsets_by_month(rows, *month_target)
-            if person_filter or status_filter:
-                import offsetai as oai
-
-                rows = oai.filter_offset_rows(
-                    rows,
-                    clean_text,
-                    person_filter=person_filter,
-                    status_filter=status_filter,
-                    month_target=month_target,
-                )
-            if not rows:
-                hint = f" for **{month_label}**" if month_label else ""
-                if filter_note:
-                    hint = f" matching **{filter_note}**" + hint
-                send_message(chat_id, f"No offset records found to delete{hint}.")
-                return True
-            if not month_target and not filter_note:
-                # Plain `deleteoffset` → pick a month first, then that month's rows.
-                # Avoids the 15-row cap hiding records. An explicit month/person/status
-                # filter still jumps straight to the matching list.
-                card = build_offset_delete_month_picker_card(oid, rows)
-            else:
-                intro_filter = f"\n_Filter: {filter_note}_" if filter_note else ""
-                card = build_offset_delete_list_card(
-                    oid, "", rows, is_admin=True, month_label=month_label
-                )
-                if intro_filter and card.get("body", {}).get("elements"):
-                    card["body"]["elements"][0]["text"]["content"] += intro_filter
-        else:
-            request_person = resolve_request_person(oid, token)
-            rows = _pending_offsets_for_request_person(request_person)
-            if month_target:
-                rows = _filter_offsets_by_month(rows, *month_target)
-            if person_filter or status_filter:
-                import offsetai as oai
-
-                rows = oai.filter_offset_rows(
-                    rows,
-                    clean_text,
-                    person_filter=person_filter,
-                    status_filter=status_filter,
-                    month_target=month_target,
-                )
-            if not rows:
-                if month_label:
-                    send_message(
-                        chat_id,
-                        f"No **pending** offset requests for **{month_label}** that you can delete. "
-                        "Approved / rejected rows must be removed by an approver.",
-                    )
-                else:
-                    send_message(
-                        chat_id,
-                        "No offset found that you requested (no pending rows). "
-                        "Ask an approver if an approved/rejected row must be removed.",
-                    )
-                return True
-            card = build_offset_delete_list_card(
-                oid, request_person, rows, is_admin=False, month_label=month_label
-            )
-        _deliver_private_card(
-            owner_open_id=oid,
-            group_chat_id=chat_id,
-            chat_type=chat_type,
-            card=card,
-            send_message=send_message,
-            token=token,
-        )
-    except Exception as e:
-        send_message(chat_id, f"❌ deleteoffset: {e}")
+    send_message(chat_id, OFFSET_DELETE_RETIRED_NOTE)
     return True
 
 
@@ -3308,7 +2855,7 @@ def execute_offset_action(
             label = _month_filter_label(y, m)
             if show_all and involved:
                 mine = od._collect_offset_month_pair_lines(y, m, involved_person=involved)
-                all_lines = od._collect_offset_month_pair_lines(y, m)
+                all_lines = od._collect_offset_month_my_lines(y, m)
                 lines = [f"**OSE offset — {label}**\n", "**Your offsets**"]
                 if mine:
                     lines.extend(f"• {line}" for line in mine)
@@ -3990,74 +3537,6 @@ def build_offset_requester_responded_card(
     }
 
 
-def build_offset_requester_approver_deleted_card(
-    row: dict[str, Any],
-    *,
-    approver_name: str,
-) -> dict[str, Any]:
-    """Read-only card DM'd to the requester when an approver deletes their pending offset."""
-    an = _lark_md_cell(approver_name)
-    intro = (
-        f"**{an}** deleted your **pending** offset request. "
-        "The row has been removed — submit again with **offset** if you still need a swap."
-    )
-    md = _offset_approval_table_md(row, status="Deleted", intro=intro)
-    return {
-        "schema": "2.0",
-        "config": {"width_mode": "fill"},
-        "header": {
-            "template": "orange",
-            "title": {"tag": "plain_text", "content": "OSE offset — request deleted"},
-        },
-        "body": {"elements": [{"tag": "div", "text": {"tag": "lark_md", "content": md}}]},
-    }
-
-
-def build_offset_requester_deleted_notify_card(
-    row: dict[str, Any],
-    *,
-    requester_name: str,
-) -> dict[str, Any]:
-    """Read-only card for approvers when a requester deletes a pending offset."""
-    rn = _lark_md_cell(requester_name)
-    intro = (
-        f"**{rn}** **deleted** a **pending** offset request. "
-        "No approval action is needed — the request was withdrawn and removed from the table."
-    )
-    md = _offset_approval_table_md(row, status="Withdrawn", intro=intro)
-    return {
-        "schema": "2.0",
-        "config": {"width_mode": "fill"},
-        "header": {
-            "template": "grey",
-            "title": {"tag": "plain_text", "content": "OSE offset — pending request deleted"},
-        },
-        "body": {"elements": [{"tag": "div", "text": {"tag": "lark_md", "content": md}}]},
-    }
-
-
-def build_offset_deleted_actor_confirm_card(row: dict[str, Any]) -> dict[str, Any]:
-    """Confirmation DM for the approver who deleted the row (same record details as peer alert)."""
-    status_was = str(row.get("approval_status") or "").strip().title()
-    if bool(row.get("pending")) and not status_was:
-        status_was = "Pending"
-    intro = (
-        "✅ **You deleted** this offset record successfully. "
-        "The row has been removed from the table and other approvers have been notified."
-    )
-    status_cell = f"Deleted (was {status_was})" if status_was else "Deleted"
-    md = _offset_approval_table_md(row, status=status_cell, intro=intro)
-    return {
-        "schema": "2.0",
-        "config": {"width_mode": "fill"},
-        "header": {
-            "template": "green",
-            "title": {"tag": "plain_text", "content": "OSE offset — record deleted"},
-        },
-        "body": {"elements": [{"tag": "div", "text": {"tag": "lark_md", "content": md}}]},
-    }
-
-
 def build_offset_deleted_notify_card(
     row: dict[str, Any],
     *,
@@ -4321,23 +3800,6 @@ def _mark_offset_record_notified(record_id: str) -> None:
         if rid in known:
             return
         known.add(rid)
-        tmp = f"{_OFFSET_APPROVER_NOTIFIED_PATH}.tmp"
-        payload = {"record_ids": sorted(known)}
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, ensure_ascii=False, indent=2)
-        os.replace(tmp, _OFFSET_APPROVER_NOTIFIED_PATH)
-
-
-def _unmark_offset_record_notified(record_id: str) -> None:
-    """Drop record from poll dedupe file after requester deletes a pending row."""
-    rid = (record_id or "").strip()
-    if not rid:
-        return
-    with _OFFSET_APPROVER_NOTIFIED_LOCK:
-        known = _load_notified_offset_record_ids_unlocked()
-        if rid not in known:
-            return
-        known.discard(rid)
         tmp = f"{_OFFSET_APPROVER_NOTIFIED_PATH}.tmp"
         payload = {"record_ids": sorted(known)}
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -4841,50 +4303,6 @@ def _notify_offset_approvers_requester_edited(
             print(f"[offsetleave] requester-edit notify failed for {aid!r}: {r!r}", flush=True)
 
 
-def _notify_requester_offset_deleted_by_approver(
-    send_message: Callable[..., Any],
-    row: dict[str, Any],
-    *,
-    approver_name: str,
-) -> None:
-    request_person = str(row.get("request_person") or "").strip()
-    if not request_person:
-        return
-    rid = str(row.get("record_id") or "").strip()
-    oid = _requester_open_id_for_offset_row(request_person, record_id=rid)
-    if not oid:
-        print(
-            f"[offsetleave] could not DM requester {request_person!r} about approver delete "
-            f"(record {rid or '?'})",
-            flush=True,
-        )
-        return
-    card = build_offset_requester_approver_deleted_card(row, approver_name=approver_name)
-    body = json.dumps(card, ensure_ascii=False)
-    r = send_message(oid, body, msg_type="interactive", receive_id_type="open_id")
-    if isinstance(r, dict) and int(r.get("code", -1)) != 0:
-        print(f"[offsetleave] requester approver-delete DM failed: {r!r}", flush=True)
-
-
-def _notify_offset_approvers_requester_deleted(
-    send_message: Callable[..., Any],
-    row: dict[str, Any],
-    *,
-    requester_name: str,
-) -> None:
-    if not OFFSET_APPROVER_OPEN_IDS:
-        return
-    card = build_offset_requester_deleted_notify_card(row, requester_name=requester_name)
-    body = json.dumps(card, ensure_ascii=False)
-    for oid in OFFSET_APPROVER_OPEN_IDS:
-        aid = (oid or "").strip()
-        if not aid:
-            continue
-        r = send_message(aid, body, msg_type="interactive", receive_id_type="open_id")
-        if isinstance(r, dict) and int(r.get("code", -1)) != 0:
-            print(f"[offsetleave] requester-delete notify failed for {aid!r}: {r!r}", flush=True)
-
-
 def build_offset_direct_delete_card(restored: list[dict[str, Any]]) -> dict[str, Any]:
     """Red notice: offsets were deleted straight from the Base and put back."""
     n = len(restored)
@@ -4892,11 +4310,12 @@ def build_offset_direct_delete_card(restored: list[dict[str, Any]]) -> dict[str,
         f"**{n} offset row(s) were deleted directly from the Base** and have been "
         "**restored** automatically.",
         "",
-        "Offsets must be removed with the bot menu (`deleteoffset`), not by deleting "
-        "the row in the sheet — a direct delete skips the approval trail and leaves "
-        "the duty roster out of sync.",
+        "Offset records are not deleted any more — every request stays in the table "
+        "for the approval trail. Deleting the row in the sheet skips that trail and "
+        "leaves the duty roster out of sync.",
         "",
-        "**Kindly ask whoever removed these to use `deleteoffset` instead.**",
+        "**Kindly ask whoever removed these to use `editoffset` (or reject the row) "
+        "instead.**",
         "",
         "**Restored:**",
     ]
@@ -4970,23 +4389,6 @@ def _notify_offset_approvers_deleted(
             all_ok = False
             print(f"[offsetleave] deletion notify failed for {aid!r}: {r!r}", flush=True)
     return all_ok
-
-
-def _notify_offset_deleter_confirm(
-    send_message: Callable[..., Any],
-    row: dict[str, Any],
-    *,
-    deleter_open_id: str,
-) -> None:
-    """DM the approver who deleted the row — peers get the alert card; actor gets this confirm."""
-    oid = (deleter_open_id or "").strip()
-    if not oid:
-        return
-    card = build_offset_deleted_actor_confirm_card(row)
-    body = json.dumps(card, ensure_ascii=False)
-    r = send_message(oid, body, msg_type="interactive", receive_id_type="open_id")
-    if isinstance(r, dict) and int(r.get("code", -1)) != 0:
-        print(f"[offsetleave] deleter confirm DM failed for {oid!r}: {r!r}", flush=True)
 
 
 def _notify_other_offset_approvers_responded(
@@ -5071,25 +4473,6 @@ def _build_offset_edit_approver_empty_patch_card() -> dict[str, Any]:
     }
 
 
-def _build_offset_delete_approver_empty_patch_card() -> dict[str, Any]:
-    return {
-        "schema": "2.0",
-        "config": {"update_multi": True, "width_mode": "fill"},
-        "header": {"template": "grey", "title": {"tag": "plain_text", "content": "OSE offset — delete (approver)"}},
-        "body": {
-            "elements": [
-                {
-                    "tag": "div",
-                    "text": {
-                        "tag": "plain_text",
-                        "content": "No offset records left to delete.",
-                    },
-                }
-            ]
-        },
-    }
-
-
 def _build_offset_edit_empty_patch_card(request_person: str) -> dict[str, Any]:
     return {
         "schema": "2.0",
@@ -5102,25 +4485,6 @@ def _build_offset_edit_empty_patch_card(request_person: str) -> dict[str, Any]:
                     "text": {
                         "tag": "plain_text",
                         "content": f"No pending offset found that you requested ({request_person}).",
-                    },
-                }
-            ]
-        },
-    }
-
-
-def _build_offset_delete_empty_patch_card(request_person: str) -> dict[str, Any]:
-    return {
-        "schema": "2.0",
-        "config": {"update_multi": True, "width_mode": "fill"},
-        "header": {"template": "grey", "title": {"tag": "plain_text", "content": "OSE offset — delete"}},
-        "body": {
-            "elements": [
-                {
-                    "tag": "div",
-                    "text": {
-                        "tag": "plain_text",
-                        "content": f"No pending offset requests left to delete ({request_person}).",
                     },
                 }
             ]
@@ -5146,13 +4510,6 @@ def _patch_my_offset_list_after_change(
             if rows
             else _build_offset_edit_approver_empty_patch_card()
         )
-    elif m == "delete_admin":
-        rows = _all_offsets_for_approver_delete()
-        card = (
-            build_offset_delete_list_card(owner_open_id, "", rows, is_admin=True)
-            if rows
-            else _build_offset_delete_approver_empty_patch_card()
-        )
     elif m == "edit":
         rows = _pending_offsets_for_request_person(request_person)
         card = (
@@ -5160,20 +4517,13 @@ def _patch_my_offset_list_after_change(
             if rows
             else _build_offset_edit_empty_patch_card(request_person)
         )
-    elif m == "delete":
-        rows = _pending_offsets_for_request_person(request_person)
-        card = (
-            build_offset_delete_list_card(owner_open_id, request_person, rows, is_admin=False)
-            if rows
-            else _build_offset_delete_empty_patch_card(request_person)
-        )
     else:
         return
     if not _try_patch_interactive_card_message(mid, card):
         print(f"[offsetleave] list refresh patch skipped ({m})", flush=True)
 
 
-def _handle_offset_delete_month(
+def _handle_offset_delete_retired(
     parsed: dict[str, Any],
     event_obj: dict[str, Any],
     *,
@@ -5182,59 +4532,8 @@ def _handle_offset_delete_month(
     send_message: Callable[..., Any],
     webhook_data: Optional[dict[str, Any]],
 ) -> bool:
-    """Approver picked a month → replace the picker with that month's delete list."""
-    cid = (chat_id or "").strip()
-    mid = _event_message_id(event_obj, webhook_data)
-    try:
-        oid = (sender_open_id or "").strip()
-        if not _is_offset_approver_open_id(oid):
-            _toast_approval_problem(
-                send_message, cid, "Only an offset approver can use this menu."
-            )
-            return True
-        # Re-read live rather than trusting the card: rows may have been deleted or
-        # approved since the picker was built.
-        all_rows = _all_offsets_for_approver_delete()
-        if parsed.get("all"):  # "◀ All months" → back to the month picker
-            if not all_rows:
-                _toast_approval_problem(send_message, cid, "No offset records left.")
-                return True
-            card = build_offset_delete_month_picker_card(oid, all_rows)
-        else:
-            try:
-                year = int(parsed.get("y"))
-                month = int(parsed.get("m"))
-            except (TypeError, ValueError):
-                raise ValueError("missing month")
-            try:
-                start = max(0, int(parsed.get("off") or 0))
-            except (TypeError, ValueError):
-                start = 0
-            rows = _filter_offsets_by_month(all_rows, year, month)
-            label = _month_filter_label(year, month)
-            if not rows:
-                _toast_approval_problem(
-                    send_message, cid, f"No offset records left for {label}."
-                )
-                return True
-            card = build_offset_delete_list_card(
-                oid,
-                "",
-                rows,
-                is_admin=True,
-                month_label=label,
-                month_ym=(year, month),
-                start=start,
-            )
-        if not (mid and _try_patch_interactive_card_message(mid, card)):
-            token = od.get_tenant_access_token()
-            if cid:
-                _send_ephemeral_card(cid, oid, card, token)
-            else:
-                raise ValueError("Could not open the month list — run deleteoffset again.")
-    except Exception as exc:  # noqa: BLE001 — surface as a toast, never 500 the callback
-        print(f"[offsetleave] delete month pick failed: {exc!r}", flush=True)
-        _toast_approval_problem(send_message, cid, f"deleteoffset: {exc}")
+    """A delete card left over in an old chat — say deleting is retired, change nothing."""
+    _toast_approval_problem(send_message, (chat_id or "").strip(), OFFSET_DELETE_RETIRED_NOTE)
     return True
 
 
@@ -5406,173 +4705,6 @@ def _handle_offset_edit_submit(
     return True
 
 
-def _handle_offset_delete_row(
-    parsed: dict[str, Any],
-    event_obj: dict[str, Any],
-    *,
-    sender_open_id: str,
-    chat_id: str,
-    send_message: Callable[..., Any],
-    webhook_data: Optional[dict[str, Any]],
-) -> bool:
-    cid = (chat_id or "").strip()
-    mid = _event_message_id(event_obj, webhook_data)
-    owner = ""
-    rid = ""
-    try:
-        token = od.get_tenant_access_token()
-        owner, rp_live, is_admin = _assert_offset_card_actor(parsed, sender_open_id, token)
-        rid = str(parsed.get("record_id") or "").strip()
-        if not rid:
-            raise ValueError("missing record id")
-        busy = _try_begin_offset_delete(owner, rid)
-        if busy:
-            _toast_approval_problem(send_message, cid, f"⏳ {busy}")
-            return True
-        row_chk = _lookup_offset_row(rid, bust_cache=True)
-        if row_chk is None:
-            raise ValueError(
-                "This record was already deleted or is no longer in the table. "
-                "Run **deleteoffset** to refresh the list."
-            )
-        if is_admin:
-            was_pending = bool(row_chk.get("pending"))
-        else:
-            was_pending = False
-            if not bool(row_chk.get("pending")):
-                raise ValueError(
-                    "This request is no longer pending (already approved or rejected). "
-                    "Run deleteoffset again to refresh the list."
-                )
-            if od._title_name(str(row_chk.get("request_person") or "")) != od._title_name(rp_live or ""):
-                raise ValueError("Not your request to delete.")
-        deleted_snapshot = dict(row_chk)
-        if is_admin:
-            try:
-                actor_name = _approver_display_for_bitable(owner)
-            except Exception:
-                actor_name = ""
-        else:
-            actor_name = rp_live or str(row_chk.get("request_person") or "")
-        # Remember who deleted it so the deletion poll can attribute the operator if the
-        # immediate approver DM below fails (best-effort; manual Base deletes stay unknown).
-        _record_offset_delete_actor(rid, owner, actor_name)
-        try:
-            od.delete_ose_offset_record(record_id=rid)
-        except RuntimeError as exc:
-            err = str(exc).lower()
-            if "not found" in err or "record not exist" in err or "125404" in err:
-                od.invalidate_ose_bitable_cache()
-            else:
-                raise
-        od.invalidate_ose_bitable_cache()
-        if is_admin:
-            # Approver deleted it — alert OTHER approvers (not the actor), then confirm to actor.
-            try:
-                _notify_offset_approvers_deleted(
-                    deleted_snapshot,
-                    deleter_label=actor_name or "an approver",
-                    deleter_known=True,
-                    exclude_open_id=owner,
-                    send_message=send_message,
-                )
-                _mark_offset_deletion_notified(rid)
-            except Exception as exc:
-                print(f"[offsetleave] approver-delete peer notify failed: {exc!r}", flush=True)
-            try:
-                _notify_offset_deleter_confirm(
-                    send_message,
-                    deleted_snapshot,
-                    deleter_open_id=owner,
-                )
-            except Exception as exc:
-                print(f"[offsetleave] approver-delete deleter confirm failed: {exc!r}", flush=True)
-            if was_pending:
-                try:
-                    _unmark_offset_record_notified(rid)
-                    _notify_requester_offset_deleted_by_approver(
-                        send_message,
-                        deleted_snapshot,
-                        approver_name=actor_name or "Approver",
-                    )
-                except Exception as exc:
-                    print(f"[offsetleave] approver-delete requester notify failed: {exc!r}", flush=True)
-            rows = _all_offsets_for_approver_delete()
-            # Stay on the month/page the approver was working in (the delete button
-            # carries y/m/off); without this the rebuild fell back to the unfiltered
-            # list and appeared to "lose" the month.
-            _ym: Optional[tuple[int, int]] = None
-            _label = None
-            _start = 0
-            try:
-                if parsed.get("y") and parsed.get("m"):
-                    _ym = (int(parsed["y"]), int(parsed["m"]))
-                    _label = _month_filter_label(*_ym)
-                    rows = _filter_offsets_by_month(rows, *_ym)
-                    _start = max(0, int(parsed.get("off") or 0))
-                    if _start >= len(rows):  # last row on the page was deleted
-                        _start = max(0, ((len(rows) - 1) // _OFFSET_DELETE_PAGE) * _OFFSET_DELETE_PAGE)
-            except (TypeError, ValueError):
-                _ym, _label, _start = None, None, 0
-            card = (
-                build_offset_delete_list_card(
-                    owner,
-                    "",
-                    rows,
-                    is_admin=True,
-                    month_label=_label,
-                    month_ym=_ym,
-                    start=_start,
-                )
-                if rows
-                else _build_offset_delete_approver_empty_patch_card()
-            )
-            fallback = "✅ Offset record deleted."
-        else:
-            rp = rp_live or str(row_chk.get("request_person") or "")
-            try:
-                _notify_offset_approvers_requester_deleted(
-                    send_message,
-                    deleted_snapshot,
-                    requester_name=rp,
-                )
-                _unmark_offset_record_notified(rid)
-                _mark_offset_deletion_notified(rid)
-            except Exception as exc:
-                print(f"[offsetleave] requester-delete approver notify failed: {exc!r}", flush=True)
-            rows = _pending_offsets_for_request_person(rp)
-            card = (
-                build_offset_delete_list_card(owner, rp, rows, is_admin=False)
-                if rows
-                else _build_offset_delete_empty_patch_card(rp)
-            )
-            fallback = f"✅ Deleted pending offset for {rp}."
-        _finish_ephemeral_card_ui(
-            owner_open_id=owner,
-            chat_id=cid,
-            card=card,
-            message_id=mid,
-            send_message=send_message,
-            token=token,
-            fallback_text=fallback,
-        )
-    except KeyError:
-        _toast_approval_problem(
-            send_message,
-            cid,
-            "❌ This record is no longer available (may already be deleted). Run **deleteoffset** again.",
-        )
-    except Exception as e:
-        if cid:
-            send_message(chat_id, f"❌ Delete failed: {e}")
-        else:
-            print(f"[offsetleave] delete: {e!r}", flush=True)
-    finally:
-        if owner and rid:
-            _end_offset_delete(owner, rid)
-    return True
-
-
 def _handle_offset_approval_callback(
     parsed: dict[str, Any],
     event_obj: dict[str, Any],
@@ -5682,17 +4814,8 @@ def handle_card_callback(
             send_message=send_message,
             webhook_data=webhook_data,
         )
-    if key == _OFFSET_DELETE_MONTH_KEY:
-        return _handle_offset_delete_month(
-            parsed,
-            event_obj,
-            sender_open_id=sender_open_id,
-            chat_id=chat_id,
-            send_message=send_message,
-            webhook_data=webhook_data,
-        )
-    if key == _OFFSET_DELETE_KEY:
-        return _handle_offset_delete_row(
+    if key in (_OFFSET_DELETE_MONTH_KEY, _OFFSET_DELETE_KEY):
+        return _handle_offset_delete_retired(
             parsed,
             event_obj,
             sender_open_id=sender_open_id,

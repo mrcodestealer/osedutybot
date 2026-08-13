@@ -156,7 +156,6 @@ Valid department keys: `fpms`, `ote`, `bi`, `fe`, `sre`, `db`, `dba`, `cpms`, `p
 |------|---------|
 | View monthly offset calendar | `showoffset` or `五月有谁offset` |
 | Edit your pending request | `editoffset` |
-| Delete your request | `deleteoffset` |
 | Approver: pending queue | `pendingoffset` |
 
 ### 4.5 Holidays

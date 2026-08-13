@@ -322,14 +322,24 @@ def looks_like_offset_lookup_query(text: str) -> bool:
         return True
     return False
 
-OSE_SHOWOFFSET_NAMES: tuple[str, ...] = (
-    "Bryan Peh",
-    "Augustine Si yew",
-    "Man Chung",
-    "Chun Chee",
-    "Jun Chen",
-    "Kheng Kwan",
-    "Kris Ng",
+# MY OSE team — the only people listed on the approver's offset view, in display order.
+# Each entry is ``(display name, other spellings the offset table may carry)``: the sheet
+# and HRMS write some of them differently (``Augustine Si yew``, ``Jeno``), and those
+# variants must resolve to the one name shown here.
+OSE_SHOWOFFSET_MY_ROSTER: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Kwang Ming", ()),
+    ("Man Chung", ()),
+    ("Augustine Si Yew", ("Augustine Si yew", "Augustine")),
+    ("Jiun Hou Jeno", ("Jeno", "Jiun Hou")),
+    ("Bryan Peh", ("Bryan",)),
+    ("Chun Chee", ()),
+    ("Jun Chen", ()),
+    ("Kheng Kwan", ()),
+    ("Kris Ng", ()),
+)
+
+OSE_SHOWOFFSET_NAMES: tuple[str, ...] = tuple(
+    display for display, _aliases in OSE_SHOWOFFSET_MY_ROSTER
 )
 
 # Short names / chat nicknames → OSE roster key (word-boundary match in NL).
@@ -5036,14 +5046,33 @@ def parse_showoffset_command(text: str) -> Optional[tuple[int, int]]:
     raise ValueError(f"Unknown month {arg!r}. Use a month name or number (1–12).")
 
 
-def _showoffset_canonical_name(name: str) -> Optional[str]:
+def _showoffset_my_person(name: str) -> Optional[str]:
+    """Display name when ``name`` is one of the MY OSE people, else ``None``."""
     nm = _title_name(name)
     if not nm:
         return None
-    for allowed in OSE_SHOWOFFSET_NAMES:
-        if _names_same_person(allowed, nm):
-            return _title_name(allowed)
+    for display, aliases in OSE_SHOWOFFSET_MY_ROSTER:
+        if _names_same_person(display, nm):
+            return display
+        for alias in aliases:
+            if _names_same_person(alias, nm):
+                return display
     return None
+
+
+def _showoffset_my_index(name: str) -> int:
+    """Position on the MY roster (sort order); 999 for everyone else."""
+    display = _showoffset_my_person(name)
+    if not display:
+        return 999
+    for i, (allowed, _aliases) in enumerate(OSE_SHOWOFFSET_MY_ROSTER):
+        if allowed == display:
+            return i
+    return 999
+
+
+def _showoffset_canonical_name(name: str) -> Optional[str]:
+    return _showoffset_my_person(name)
 
 
 def _add_showoffset_days(
@@ -5063,13 +5092,12 @@ def _showoffset_display_name(name: str) -> str:
 
 
 def _showoffset_pair_sort_key(req: str, exc: str) -> tuple[Any, ...]:
-    def _idx(n: str) -> int:
-        for i, allowed in enumerate(OSE_SHOWOFFSET_NAMES):
-            if _names_same_person(allowed, n):
-                return i
-        return 999
-
-    return (_idx(req), _idx(exc), req.lower(), exc.lower())
+    return (
+        _showoffset_my_index(req),
+        _showoffset_my_index(exc),
+        req.lower(),
+        exc.lower(),
+    )
 
 
 def _offset_row_touches_month(od: date, xd: date, year: int, month: int) -> bool:
@@ -5143,6 +5171,77 @@ def _collect_offset_month_pair_lines(
     return lines
 
 
+def _collect_offset_month_my_lines(
+    year: int,
+    month: int,
+    *,
+    items: Optional[list[dict[str, Any]]] = None,
+) -> list[str]:
+    """Approver listing — one line per person, **MY OSE only**, name and days only.
+
+    Someone who offset their own days (Exchange person = Myself) gets one line::
+
+        Augustine Si Yew 1, 2, 7 --> 11, 20, 21
+
+    A swap with someone else is written from both sides, requester first::
+
+        Kheng Kwan 21 --> 23
+        Augustine Si Yew 23 --> 21
+
+    Swaps with a non-MY colleague keep only the MY side's line; rows with no MY
+    person at all are left out entirely.
+    """
+    if month < 1 or month > 12:
+        raise ValueError("month must be 1–12")
+    if items is None:
+        token = get_tenant_access_token()
+        _, items = _get_bitable_raw_pair(token)
+    # (requester, exchange person) -> days, so several rows between the same two
+    # people collapse into one line per side.
+    pairs: dict[tuple[str, str], dict[str, set[int]]] = {}
+    for it in items:
+        f = it.get("fields") or {}
+        # Only approved offsets are real swaps — skip pending / rejected rows
+        # (same rule as _collect_offset_month_pair_lines).
+        if not _is_approved(_get_field_by_aliases(f, ["Approval Status", "Status"])):
+            continue
+        req = _field_text(
+            _get_field_by_aliases(f, ["Request Person", "Requester", "Requester Person", "Name"])
+        )
+        exc = _field_text(_get_field_by_aliases(f, ["Exchange Person", "Replacement", "Swap Person"]))
+        od = _bitable_field_original_date(f)
+        xd = _bitable_field_exchange_date(f)
+        if not od or not xd:
+            continue
+        if not _offset_row_touches_month(od, xd, year, month):
+            continue
+        req_my = _showoffset_my_person(req)
+        exc_my = _showoffset_my_person(exc)
+        if not req_my and not exc_my:
+            continue
+        key = (req_my or _title_name(req), exc_my or _title_name(exc))
+        slot = pairs.setdefault(key, {"orig": set(), "exc": set()})
+        slot["orig"].add(od.day)
+        slot["exc"].add(xd.day)
+
+    lines: list[str] = []
+    for (req_p, exc_p), days in sorted(
+        pairs.items(), key=lambda kv: _showoffset_pair_sort_key(kv[0][0], kv[0][1])
+    ):
+        orig_s = ", ".join(str(d) for d in sorted(days["orig"]))
+        exc_s = ", ".join(str(d) for d in sorted(days["exc"]))
+        req_my = _showoffset_my_person(req_p)
+        exc_my = _showoffset_my_person(exc_p)
+        if req_my and req_my == exc_my:  # offset with himself / herself
+            lines.append(f"{req_my} {orig_s} --> {exc_s}")
+            continue
+        if req_my:
+            lines.append(f"{req_my} {orig_s} --> {exc_s}")
+        if exc_my:
+            lines.append(f"{exc_my} {exc_s} --> {orig_s}")
+    return lines
+
+
 def _collect_offset_month_summary(
     year: int,
     month: int,
@@ -5199,6 +5298,10 @@ def build_ose_showoffset_card(
     - Approver only → all team rows
     - Requester only → rows where they are requester **or** exchange person
     - Both roles → **Your offsets** section + **All offsets** section
+
+    The team listing (what an approver sees) is MY OSE only, one line per person —
+    see :func:`_collect_offset_month_my_lines`. A requester's own section keeps the
+    per-swap pair lines, so they still see who they swapped with.
     """
     person = involved_person or request_person_only
     month_label = date(year, month, 1).strftime("%B")
@@ -5206,7 +5309,7 @@ def build_ose_showoffset_card(
 
     if include_all_team and person:
         mine = _collect_offset_month_pair_lines(year, month, involved_person=person)
-        all_lines = _collect_offset_month_pair_lines(year, month)
+        all_lines = _collect_offset_month_my_lines(year, month)
         who = _showoffset_display_name(person)
         lines.append(f"**Your offsets** ({who})")
         lines.append("")
@@ -5220,8 +5323,10 @@ def build_ose_showoffset_card(
         else:
             lines.append("_No offset requests this month._")
     else:
-        pair_lines = _collect_offset_month_pair_lines(
-            year, month, involved_person=person
+        pair_lines = (
+            _collect_offset_month_pair_lines(year, month, involved_person=person)
+            if person
+            else _collect_offset_month_my_lines(year, month)
         )
         if not pair_lines:
             if person:
@@ -5436,7 +5541,7 @@ def delete_ose_offset_record(*, record_id: str, skip_cache_invalidate: bool = Fa
     rid = (record_id or "").strip()
     if not rid:
         raise ValueError("record_id is required")
-    # Tell the guard this deletion is sanctioned (menu or retention purge) BEFORE
+    # Tell the guard this deletion is sanctioned (the retention purge) BEFORE
     # the row disappears, otherwise the next poll would restore it.
     try:
         mark_offset_delete_authorized(rid)
@@ -5492,13 +5597,13 @@ def _offset_row_original_exchange_dates(fields: dict[str, Any]) -> tuple[Optiona
 
 
 # ---------------------------------------------------------------------------
-# Offset row guard — offsets must be deleted through the bot menu, not by hand.
+# Offset row guard — offset rows must not be deleted by hand.
 #
 # Every poll mirrors the live offset rows here. A row that disappears WITHOUT the
 # bot having deleted it (see :func:`mark_offset_delete_authorized`, called by
-# ``delete_ose_offset_record`` — the single sanctioned delete path, used by both
-# the menu and the retention purge) was removed straight from the Base. That row
-# is restored from the mirror and the approvers are told who to talk to.
+# ``delete_ose_offset_record`` — the single sanctioned delete path, now only the
+# retention purge) was removed straight from the Base. That row is restored from
+# the mirror and the approvers are told who to talk to.
 #
 # The mirror also carries the fields needed to revert the duty sheet, which the
 # old path could not do once the row was gone (it tried to re-read the deleted
@@ -5566,7 +5671,7 @@ def scan_restore_directly_deleted_offsets(
     """Mirror live offsets; restore any row deleted straight from the Base.
 
     Returns counts plus ``restored`` details so the caller can notify approvers.
-    Never restores a row the bot itself deleted (menu delete or retention purge).
+    Never restores a row the bot itself deleted (the retention purge).
     """
     token = get_tenant_access_token()
     try:
