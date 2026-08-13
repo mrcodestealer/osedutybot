@@ -5177,28 +5177,30 @@ def _collect_offset_month_my_lines(
     *,
     items: Optional[list[dict[str, Any]]] = None,
 ) -> list[str]:
-    """Approver listing — one line per person, **MY OSE only**, name and days only.
+    """Approver listing — **one line per person**, MY OSE only, name and days only::
 
-    Someone who offset their own days (Exchange person = Myself) gets one line::
-
-        Augustine Si Yew 1, 2, 7 --> 11, 20, 21
-
-    A swap with someone else is written from both sides, requester first::
-
+        Augustine Si Yew 1, 2, 7, 23 --> 11, 20, 21, 21
+        Jun Chen 28, 29 --> 1, 2
         Kheng Kwan 21 --> 23
-        Augustine Si Yew 23 --> 21
 
-    Swaps with a non-MY colleague keep only the MY side's line; rows with no MY
-    person at all are left out entirely.
+    Every approved offset a person has that month lands on their single line: days
+    they move off on the left, the day each one moves to in the same position on
+    the right (``7 --> 21`` and ``23 --> 21`` above are two separate offsets, so 21
+    is listed twice). Days are never sorted apart from their partner.
+
+    A swap is written from both sides — the requester moves ``original -> exchange``,
+    the exchange person moves the other way — so Kheng Kwan's ``21 --> 23`` above is
+    Augustine's ``23 --> 21``. Swaps with a non-MY colleague keep only the MY side;
+    rows with no MY person at all are left out entirely.
     """
     if month < 1 or month > 12:
         raise ValueError("month must be 1–12")
     if items is None:
         token = get_tenant_access_token()
         _, items = _get_bitable_raw_pair(token)
-    # (requester, exchange person) -> days, so several rows between the same two
-    # people collapse into one line per side.
-    pairs: dict[tuple[str, str], dict[str, set[int]]] = {}
+    # person -> {(day moved off, day moved to)}; a set so a row duplicated in the
+    # table does not print the same move twice.
+    by_person: dict[str, set[tuple[int, int]]] = {}
     for it in items:
         f = it.get("fields") or {}
         # Only approved offsets are real swaps — skip pending / rejected rows
@@ -5217,28 +5219,18 @@ def _collect_offset_month_my_lines(
             continue
         req_my = _showoffset_my_person(req)
         exc_my = _showoffset_my_person(exc)
-        if not req_my and not exc_my:
-            continue
-        key = (req_my or _title_name(req), exc_my or _title_name(exc))
-        slot = pairs.setdefault(key, {"orig": set(), "exc": set()})
-        slot["orig"].add(od.day)
-        slot["exc"].add(xd.day)
+        if req_my:
+            by_person.setdefault(req_my, set()).add((od.day, xd.day))
+        # Exchange person = Myself is one move, not two — only mirror a real swap.
+        if exc_my and exc_my != req_my:
+            by_person.setdefault(exc_my, set()).add((xd.day, od.day))
 
     lines: list[str] = []
-    for (req_p, exc_p), days in sorted(
-        pairs.items(), key=lambda kv: _showoffset_pair_sort_key(kv[0][0], kv[0][1])
-    ):
-        orig_s = ", ".join(str(d) for d in sorted(days["orig"]))
-        exc_s = ", ".join(str(d) for d in sorted(days["exc"]))
-        req_my = _showoffset_my_person(req_p)
-        exc_my = _showoffset_my_person(exc_p)
-        if req_my and req_my == exc_my:  # offset with himself / herself
-            lines.append(f"{req_my} {orig_s} --> {exc_s}")
-            continue
-        if req_my:
-            lines.append(f"{req_my} {orig_s} --> {exc_s}")
-        if exc_my:
-            lines.append(f"{exc_my} {exc_s} --> {orig_s}")
+    for person in sorted(by_person, key=lambda n: (_showoffset_my_index(n), n.lower())):
+        moves = sorted(by_person[person])
+        from_s = ", ".join(str(a) for a, _b in moves)
+        to_s = ", ".join(str(b) for _a, b in moves)
+        lines.append(f"{person} {from_s} --> {to_s}")
     return lines
 
 
@@ -5299,9 +5291,10 @@ def build_ose_showoffset_card(
     - Requester only → rows where they are requester **or** exchange person
     - Both roles → **Your offsets** section + **All offsets** section
 
-    The team listing (what an approver sees) is MY OSE only, one line per person —
-    see :func:`_collect_offset_month_my_lines`. A requester's own section keeps the
-    per-swap pair lines, so they still see who they swapped with.
+    The team listing (what an approver sees) is MY OSE only, one line per person
+    holding all their offsets — see :func:`_collect_offset_month_my_lines`. A
+    requester's own section keeps the per-swap pair lines, so they still see who
+    they swapped with.
     """
     person = involved_person or request_person_only
     month_label = date(year, month, 1).strftime("%B")
