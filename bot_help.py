@@ -60,6 +60,7 @@ def _help_sections() -> list[HelpSection]:
                     "@机器人 — 今日谁请假（OSE 请假多维表）",
                 ),
                 ("who am i", "@bot — show your own open_id + this chat_id", "@机器人 — 显示你的 open_id 与本群 chat_id"),
+                ("/allgroup", "Every group the bot is in + each chat_id", "机器人所在的所有群与 chat_id"),
                 ("/restart", "Restart bot process", "重启机器人"),
             ],
         ),

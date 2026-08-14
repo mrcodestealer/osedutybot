@@ -45,7 +45,9 @@ MAINTENANCE_STATE_PATH = os.path.join(_CHBOX_DIR, "maintenance.json")
 
 # Lark @mentions for maintenance cards (display names come from open_id).
 _CS_TEAM_OPEN_ID = "ou_c927a378e9b464741c67b61c1641577b"
-_QA_SUPPORT_OPEN_ID = "ou_0342007237c6c1aa262acae839acb7c6"
+# QA Support is no longer @-tagged on maintenance cards. Empty = nobody tagged; set
+# ``MAINTENANCE_QA_OPEN_ID`` to bring the mention back without a code change.
+_QA_SUPPORT_OPEN_ID = os.getenv("MAINTENANCE_QA_OPEN_ID", "").strip()
 
 # Substrings in email subject/title → skip (no card, no pipeline).
 _SUBJECT_IGNORE_MARKERS = ("c88live_ow.ph",)
@@ -1709,10 +1711,7 @@ def build_cancelled_card_elements(
             "text": {"tag": "lark_md", "content": notice},
         },
         {"tag": "hr"},
-        {
-            "tag": "div",
-            "text": {"tag": "lark_md", "content": f"**CC:** {_at_qa_support()}"},
-        },
+        *_cc_qa_elements(),
         {
             "tag": "div",
             "text": {
@@ -1878,19 +1877,18 @@ def build_cancelled_summary(
         original = str(prior["title"]).strip()
     else:
         original = resolve_maintenance_subject(ref_email, email_body) or ref_email
-    return "\n".join(
-        [
-            f"Hi {_at_cs_team()}",
-            "",
-            f"**Date:**\n{date}",
-            f"**Table:**\n{table}",
-            "",
-            notice,
-            "",
-            f"**CC:** {_at_qa_support()}",
-            f"📧 Original: {original}",
-        ]
-    )
+    lines = [
+        f"Hi {_at_cs_team()}",
+        "",
+        f"**Date:**\n{date}",
+        f"**Table:**\n{table}",
+        "",
+        notice,
+        "",
+    ]
+    lines.extend(_cc_qa_lines())
+    lines.append(f"📧 Original: {original}")
+    return "\n".join(lines)
 
 
 def _at_cs_team() -> str:
@@ -1899,6 +1897,18 @@ def _at_cs_team() -> str:
 
 def _at_qa_support() -> str:
     return lark_card_at_open_id(_QA_SUPPORT_OPEN_ID)
+
+
+def _cc_qa_elements() -> list[dict[str, Any]]:
+    """``**CC:** @QA`` card element, or nothing while QA Support is untagged."""
+    qa = _at_qa_support()
+    return [{"tag": "div", "text": {"tag": "lark_md", "content": f"**CC:** {qa}"}}] if qa else []
+
+
+def _cc_qa_lines() -> list[str]:
+    """``**CC:** @QA`` text line, or nothing while QA Support is untagged."""
+    qa = _at_qa_support()
+    return [f"**CC:** {qa}"] if qa else []
 
 
 def find_tinc_reference_line(text: str) -> str | None:
@@ -2680,10 +2690,7 @@ def build_in_progress_card_elements(
         _card_labeled_field("Table", table),
         _card_labeled_field("Reason", reason),
         {"tag": "hr"},
-        {
-            "tag": "div",
-            "text": {"tag": "lark_md", "content": f"**CC:** {_at_qa_support()}"},
-        },
+        *_cc_qa_elements(),
         {
             "tag": "div",
             "text": {"tag": "lark_md", "content": f"📧 Email: {email_ref}"},
@@ -2721,7 +2728,7 @@ def build_in_progress_card_body(
             f"**Table:**\n{table}",
             f"**Reason:**\n{reason}",
             "",
-            f"**CC:** {_at_qa_support()}",
+            *_cc_qa_lines(),
             f"📧 Email: {email_ref}",
         ]
     )
@@ -2787,10 +2794,7 @@ def build_fixed_card_elements(
         _card_labeled_field("Time of resolution", resolution),
         _card_labeled_field("Reason", reason),
         {"tag": "hr"},
-        {
-            "tag": "div",
-            "text": {"tag": "lark_md", "content": f"**CC:** {_at_qa_support()}"},
-        },
+        *_cc_qa_elements(),
         {
             "tag": "div",
             "text": {"tag": "lark_md", "content": f"📧 Email: {email_ref}"},
@@ -2827,7 +2831,7 @@ def build_fixed_card_body(
             f"**Time of resolution:**\n{resolution}",
             f"**Reason:**\n{reason}",
             "",
-            f"**CC:** {_at_qa_support()}",
+            *_cc_qa_lines(),
             f"📧 Email: {email_ref}",
         ]
     )
@@ -3869,9 +3873,8 @@ def generate_output(
     affected_tables: list[str] | None = None,
 ) -> str:
     """Format the extracted info into the desired output with user mentions."""
-    # Use the provided open IDs for the two roles
-    qa_os_local_id = "ou_0342007237c6c1aa262acae839acb7c6"
-    cs_team_id = "ou_c927a378e9b464741c67b61c1641577b"
+    # Whoever is still tagged on the summary line (QA Support was dropped).
+    mention_ids = [_QA_SUPPORT_OPEN_ID, _CS_TEAM_OPEN_ID]
 
     names = (
         list(affected_tables)
@@ -3887,10 +3890,12 @@ def generate_output(
     reason = (info.get("reason") or "").strip()
     show_reason = bool(reason) and reason.lower() != "unknown"
 
+    ats = " ".join(
+        at for at in (lark_card_at_open_id(oid) for oid in mention_ids) if at
+    )
     output = [
-        "Hi "
-        f'{lark_card_at_open_id(qa_os_local_id)} '
-        f'{lark_card_at_open_id(cs_team_id)} , kindly check this email. Thank you.',
+        f"Hi {ats} , kindly check this email. Thank you." if ats
+        else "Hi , kindly check this email. Thank you.",
         "",
         *affected_lines,
     ]
@@ -5606,9 +5611,11 @@ def evo_batch_check_email_chat_id() -> str:
     return cid
 
 
-# Users @-tagged in the forward group after ``/m`` sends the email (QA Support Team, CS).
+# Users @-tagged in the forward group after ``/m`` sends the email. QA Support was
+# dropped — the empty open_id means nobody is tagged for that slot unless the env
+# override below is set.
 EVO_BATCH_CHECK_TAG_DEFAULTS = (
-    ("ou_0342007237c6c1aa262acae839acb7c6", "QA Support Team"),
+    ("", "QA Support Team"),
     ("ou_c927a378e9b464741c67b61c1641577b", "CS (Team)"),
 )
 
@@ -5965,10 +5972,12 @@ def build_evo_batch_forward_card(
     if len(title) > _CARD_HEADER_TITLE_MAX:
         title = title[: _CARD_HEADER_TITLE_MAX - 3] + "..."
     mention_line = " ".join(
-        [
+        at
+        for at in (
             lark_card_at_open_id(_QA_SUPPORT_OPEN_ID),
             lark_card_at_open_id(_CS_TEAM_OPEN_ID),
-        ]
+        )
+        if at
     ).strip()
     elements: list[dict[str, Any]] = [
         {

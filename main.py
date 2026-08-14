@@ -1666,6 +1666,167 @@ def _build_whoami_reply(
     return "\n".join(lines)
 
 
+# "/allgroup" — every group the bot is in, with the chat_id to copy into config.
+_ALLGROUP_RE = re.compile(r"^\s*/?\s*all\s*groups?\s*$", re.I)
+
+# Cards get long fast; past this the list is trimmed and the card says by how much.
+_ALLGROUP_MAX_ROWS = 60
+
+
+def _lark_list_bot_groups() -> list[dict[str, str]]:
+    """Every group the bot belongs to — ``[{chat_id, name, description}]``, API order.
+
+    Raises ``RuntimeError`` with Lark's own message so the caller can show why the
+    list is missing instead of an empty card.
+    """
+    token = get_tenant_access_token()
+    if not token:
+        raise RuntimeError("no tenant access token")
+    host = (os.getenv("LARK_HOST") or "https://open.larksuite.com").rstrip("/")
+    out: list[dict[str, str]] = []
+    page_token = ""
+    # Paginate — a bot in more groups than one page must not silently show page 1.
+    for _ in range(20):
+        params = {"page_size": 100}
+        if page_token:
+            params["page_token"] = page_token
+        resp = requests.get(
+            f"{host}/open-apis/im/v1/chats",
+            headers={"Authorization": f"Bearer {token}"},
+            params=params,
+            timeout=20,
+        ).json()
+        if resp.get("code") != 0:
+            raise RuntimeError(f"{resp.get('msg') or 'chat list failed'} (code {resp.get('code')})")
+        data = resp.get("data") or {}
+        for it in data.get("items") or []:
+            cid = str(it.get("chat_id") or "").strip()
+            if not cid:
+                continue
+            out.append(
+                {
+                    "chat_id": cid,
+                    "name": str(it.get("name") or "").strip(),
+                    "description": str(it.get("description") or "").strip(),
+                }
+            )
+        page_token = str(data.get("page_token") or "").strip()
+        if not data.get("has_more") or not page_token:
+            break
+    return out
+
+
+def _chat_role_labels() -> dict[str, list[str]]:
+    """chat_id → what this bot uses that group for, so the ids are self-explaining.
+
+    Reads the live constants rather than a hand-kept list, so a group re-pointed by
+    env shows its new role. Optional modules are probed defensively — a missing one
+    costs a label, never the command.
+    """
+    roles: dict[str, list[str]] = {}
+
+    def tag(chat_id: Optional[str], label: str) -> None:
+        cid = (chat_id or "").strip()
+        if cid and label not in roles.setdefault(cid, []):
+            roles[cid].append(label)
+
+    tag(DUTY_CHAT_ID, "🗓 duty cards")
+    tag(REMINDER_TARGET_CHAT_ID, "⏰ reminders")
+    tag(MY_OFFSET_WEEKLY_CHAT_ID, "🔁 MY offset weekly")
+    tag(PLDT_SCREENSHOT_GROUP_CHAT_ID, "📸 PLDT screenshots")
+    tag(PLDT_CARD_GROUP_CHAT_ID, "📣 PLDT card")
+    for cid in ANNOUNCE_ONLY_CHAT_IDS:
+        tag(cid, "🔇 announce-only")
+    try:
+        import maintenance as _mx_roles
+
+        tag(_mx_roles.evo_batch_command_chat_id(), "🛠 /m EVO batch")
+        tag(_mx_roles.evo_batch_forward_chat_id(), "📧 EVO forward")
+        tag(_mx_roles.evo_batch_check_email_chat_id(), "✉️ check-email ping")
+    except Exception as exc:  # noqa: BLE001 — labels are a nicety, ids are the point
+        print(f"[allgroup] maintenance roles unavailable: {exc!r}", flush=True)
+    try:
+        import newportwatch as _nw_roles
+
+        tag(_nw_roles.source_chat_id(), "👀 newport watch (read)")
+        tag(_nw_roles.target_chat_id(), "🛰 newport watch (post)")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[allgroup] newport roles unavailable: {exc!r}", flush=True)
+    return roles
+
+
+def build_all_groups_card(
+    groups: list[dict[str, str]],
+    roles: dict[str, list[str]],
+    *,
+    current_chat_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Numbered groups, each with its role tags and a copyable ``chat_id``."""
+    here = (current_chat_id or "").strip()
+    shown = groups[:_ALLGROUP_MAX_ROWS]
+    blocks: list[str] = []
+    for i, g in enumerate(shown, start=1):
+        cid = g["chat_id"]
+        name = g["name"] or "(unnamed group)"
+        tags = list(roles.get(cid) or [])
+        if here and cid == here:
+            tags.insert(0, "📍 this chat")
+        tag_str = ("  ·  " + "  ·  ".join(tags)) if tags else ""
+        blocks.append(f"**{i}. 👥 {name}**{tag_str}\n`{cid}`")
+    body = "\n\n".join(blocks) if blocks else "_The bot is not in any group yet._"
+    elements: list[dict[str, Any]] = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": body}}
+    ]
+    if len(groups) > len(shown):
+        elements.append(
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"_…and {len(groups) - len(shown)} more group(s) not shown._",
+                },
+            }
+        )
+    elements.append({"tag": "hr"})
+    elements.append(
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": (
+                    "💡 _Tap a_ `chat_id` _to copy it — that's what config keys like_ "
+                    "`DUTY_CHAT_ID` _/_ `MY_OFFSET_WEEKLY_CHAT_ID` _and the menu commands expect._"
+                ),
+            },
+        }
+    )
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "turquoise",
+            "title": {"tag": "plain_text", "content": f"👥 Groups · {len(groups)}"},
+        },
+        "body": {"elements": elements},
+    }
+
+
+def send_all_groups_card(chat_id: str, *, current_chat_id: Optional[str] = None) -> None:
+    """``/allgroup`` — list every group the bot is in, or say why the list failed."""
+    try:
+        groups = _lark_list_bot_groups()
+    except Exception as exc:  # noqa: BLE001 — surface the reason in chat
+        print(f"[allgroup] list failed: {exc!r}", flush=True)
+        send_message(chat_id, f"❌ Could not read the bot's group list: {exc}")
+        return
+    card = build_all_groups_card(
+        groups, _chat_role_labels(), current_chat_id=current_chat_id
+    )
+    resp = send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
+    if isinstance(resp, dict) and int(resp.get("code", -1)) != 0:
+        print(f"[allgroup] card send failed: {resp!r}", flush=True)
+
+
 def _lark_im_ack():
     """HTTP 200 for Lark without GotIt/Done reactions (ignored messages)."""
     return jsonify({"success": True})
@@ -5373,6 +5534,12 @@ def lark_webhook():
     # through the developer console. Only ever reveals the sender's own ids.
     if _WHOAMI_RE.match(clean_text or ""):
         send_message(chat_id, _build_whoami_reply(sender_id, chat_id, chat_type))
+        return _lark_im_done()
+
+    # "/allgroup" — every group the bot is in, each chat_id ready to copy into an
+    # env key. Same purpose as "who am i", one level up: which chat is which.
+    if _ALLGROUP_RE.match(clean_text or ""):
+        send_all_groups_card(chat_id, current_chat_id=chat_id)
         return _lark_im_done()
 
     if text == "我要验牌":
