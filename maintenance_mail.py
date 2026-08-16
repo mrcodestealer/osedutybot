@@ -1046,11 +1046,45 @@ def build_forwarded_message_body(msg: email.message.Message) -> str:
     return "\n".join(header) + (original or "")
 
 
+def _strip_quote_blocks(html: str) -> str:
+    """Remove every nested ``history-quote-wrapper`` subtree from a message body.
+
+    Used when REBUILDING a thread chain: each message is re-nested explicitly, so any
+    history a message already carries inside itself would otherwise appear twice. Regex
+    alone cannot do this (the wrappers nest), so this scans ``<div>`` depth to find each
+    wrapper's true closing tag.
+    """
+    s = html or ""
+    open_wrapper = re.compile(r"<div\b[^>]*history-quote-wrapper[^>]*>", re.I)
+    any_div = re.compile(r"</?div\b", re.I)
+    out: list[str] = []
+    i = 0
+    while True:
+        m = open_wrapper.search(s, i)
+        if not m:
+            out.append(s[i:])
+            return "".join(out)
+        out.append(s[i : m.start()])
+        depth = 1
+        j = m.end()
+        while depth > 0 and j < len(s):
+            t = any_div.search(s, j)
+            if not t:
+                j = len(s)
+                break
+            depth += -1 if s.startswith("</", t.start()) else 1
+            gt = s.find(">", t.end())
+            j = len(s) if gt == -1 else gt + 1
+        i = j
+
+
 def _build_lark_quote_html(
     msg: email.message.Message,
     *,
     block_class: str = _LARK_FORWARD_BLOCK,
     reply: bool = False,
+    inner_html: str = "",
+    strip_nested: bool = False,
 ) -> str:
     """
     Quote block per Lark composer (``history-quote-wrapper`` + block class).
@@ -1067,6 +1101,10 @@ def _build_lark_quote_html(
     ``reply=False`` (``--header``) — forward separator, meta wrapper
     ``adit-html-block__header history-quote-meta-after-forward-title …``, ids on the wrapper
     and the inner div. Left byte-for-byte as it was.
+
+    ``inner_html`` is nested after this message's body — that is how a real client stacks a
+    conversation, each older message inside the one above it. ``strip_nested`` drops any
+    quote blocks the message already carries, so a rebuilt chain cannot show a message twice.
     """
     subj = _decode_mime_header(msg.get("Subject")) or ""
     labels = _quote_labels(subj)
@@ -1088,6 +1126,8 @@ def _build_lark_quote_html(
     body_raw = extract_body_html_raw(msg)
     if body_raw and _body_is_html(body_raw):
         body_html = _sanitize_embedded_html(body_raw)
+        if strip_nested:
+            body_html = _strip_quote_blocks(body_html)
     else:
         plain = extract_body_from_message(msg)
         body_html = (
@@ -1109,7 +1149,7 @@ def _build_lark_quote_html(
             f'<div data-html-block="quote" data-mail-html-ignore="">'
             f'<div class="adit-html-block {block_class}" '
             f'style="{_LARK_QUOTE_BORDER}">'
-            f"<div>{meta_html}{body_part}</div>"
+            f"<div>{meta_html}{body_part}{inner_html}</div>"
             f"</div></div></div>"
         )
 
@@ -1167,13 +1207,39 @@ def build_forwarded_message_html(msg: email.message.Message) -> str:
     )
 
 
-def build_reply_message_html(text: str, msg: email.message.Message) -> str:
-    """``Re:`` reply HTML: our text on top, the original quoted below it.
+def build_reply_thread_quote_html(messages: list[email.message.Message]) -> str:
+    """Nest a whole conversation into one quote block. ``messages`` is NEWEST FIRST.
+
+    Builds from the oldest outward so the newest message ends up outermost, each older one
+    nested inside it — the structure a mail client produces after a long Reply All chain.
+    Every message's own embedded history is stripped first, so a message that already
+    carried a quote block cannot appear twice in the rebuilt chain.
+    """
+    inner = ""
+    for msg in reversed(messages):  # oldest → newest, wrapping outward
+        inner = _build_lark_quote_html(
+            msg,
+            block_class=_LARK_REPLY_BLOCK,
+            reply=True,
+            inner_html=inner,
+            strip_nested=True,
+        )
+    return inner
+
+
+def build_reply_message_html(
+    text: str, msg: email.message.Message | list[email.message.Message]
+) -> str:
+    """``Re:`` reply HTML: our text on top, the conversation quoted below it.
 
     Same Lark ``history-quote-wrapper`` machinery as :func:`build_forwarded_message_html`
     so Lark Mail renders **Show/Hide email thread**, but with the ``--collapsed`` block
     a reply uses instead of ``--header``. Sent as a single ``text/html`` part — adding a
     plain alternative makes Lark Mail expand the quote as raw text instead.
+
+    ``msg`` may be a single message or a NEWEST-FIRST list of the whole thread. A list is
+    nested into one chain (:func:`build_reply_thread_quote_html`) so Show/Hide unfolds every
+    earlier message, not just the one directly above.
     """
     body_html = "<br>".join(
         _html_escape(line) for line in (text or "").replace("\r\n", "\n").split("\n")
@@ -1186,7 +1252,10 @@ def build_reply_message_html(text: str, msg: email.message.Message) -> str:
         '<div style="word-break:break-word;line-height:1.6;'
         'font-size:14px;color:rgb(0,0,0);"><br></div>'
     )
-    quote = _build_lark_quote_html(msg, block_class=_LARK_REPLY_BLOCK, reply=True)
+    if isinstance(msg, list):
+        quote = build_reply_thread_quote_html(msg)
+    else:
+        quote = _build_lark_quote_html(msg, block_class=_LARK_REPLY_BLOCK, reply=True)
     return (
         "<!DOCTYPE html><html><head>"
         '<meta http-equiv="Content-Type" content="text/html; charset=utf-8">'
@@ -5161,10 +5230,17 @@ def find_message_by_message_id(
 # that mail's HTML already nests every earlier round — so quoting IT is what makes Lark render
 # **Show/Hide email thread** over the full history. Quoting the thread ROOT (our own ``/egs``
 # send, which is what ``/egsreply`` used to do) can only ever render ONE message, which is why
-# replies showed no previous content. Ported from updatejenkinsbot's ``_thread_newest_quote``.
+# replies showed no previous content. Ported from updatejenkinsbot's ``_thread_newest_quote``,
+# then extended: that quotes only the newest message and relies on IT carrying the history,
+# which is false for anything we sent unquoted — so the chain is rebuilt from every member.
 EGS_REPLY_QUOTE_THREAD = (
     os.getenv("EGS_REPLY_QUOTE_THREAD", "").strip() or "1"
 ) not in ("0", "false", "no", "off")
+# Cap on how many messages get nested into one reply — a long thread would otherwise grow
+# the outgoing mail without bound (each level carries the full body of one message).
+EGS_REPLY_QUOTE_MAX_MESSAGES = min(
+    50, max(1, int(os.getenv("EGS_REPLY_QUOTE_MAX_MESSAGES", "").strip() or "15"))
+)
 
 
 def _thread_subject_key(subject: str) -> str:
@@ -5176,19 +5252,6 @@ def _thread_subject_key(subject: str) -> str:
             break
         s = stripped
     return re.sub(r"\s+", " ", s).strip().casefold()
-
-
-def _message_date_ts(msg: email.message.Message) -> float:
-    """Epoch seconds from ``Date``; 0.0 when missing or unparseable."""
-    try:
-        dt = parsedate_to_datetime((msg.get("Date") or "").strip())
-        if dt is None:
-            return 0.0
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.timestamp()
-    except Exception:  # noqa: BLE001 — a bad Date only costs the newer-than-anchor guard
-        return 0.0
 
 
 def _allemail_thread_members(
@@ -5247,53 +5310,77 @@ def _quote_source_is_bounce(msg: email.message.Message) -> bool:
     return _body_is_failed_send_notification(body)
 
 
-def _thread_newest_quote(
-    *,
-    message_id: str,
-    subject: str,
-    references: str = "",
-    not_older_than: float = 0.0,
-) -> email.message.Message | None:
-    """The NEWEST message in this conversation, re-read from IMAP — or ``None``.
+def _thread_quote_messages(
+    *, message_id: str, subject: str, references: str = ""
+) -> list[email.message.Message]:
+    """EVERY message in this conversation, NEWEST FIRST, re-read from IMAP.
 
-    ``not_older_than`` is the anchor's own timestamp: never swap in something OLDER than the
-    message the caller already holds. Returns ``None`` on any failure so the caller keeps its
-    existing quote source — quoting is best-effort and must never cost the reply itself.
+    Quoting only the newest message assumes that message already nests the history — true
+    after a manual Reply All, false for anything the bot sent unquoted. So the chain is
+    rebuilt from the index instead: every member is fetched and stacked, which reproduces
+    the full thread no matter how any individual message was composed.
+
+    One IMAP connection for the lot, grouped by folder — a connect per message turned a
+    9-message thread into 9 logins. Returns ``[]`` on any failure so the caller keeps its
+    single-message fallback; quoting is best-effort and must never cost the reply itself.
     """
     if not EGS_REPLY_QUOTE_THREAD:
-        return None
+        return []
     try:
         members = _allemail_thread_members(
             message_id=message_id, subject=subject, references=references
         )
     except Exception as ex:  # noqa: BLE001 — falling back to the anchor is always valid
-        print(f"[allemail] thread-latest lookup failed: {ex!r}", flush=True)
-        return None
-    skip = _normalize_message_id(message_id)
+        print(f"[allemail] thread lookup failed: {ex!r}", flush=True)
+        return []
+    if not members:
+        return []
+    members = members[:EGS_REPLY_QUOTE_MAX_MESSAGES]
+    by_folder: dict[str, list[dict[str, Any]]] = {}
     for m in members:
-        mid = (m.get("message_id") or "").strip()
-        if _normalize_message_id(mid) == skip:
-            continue  # the anchor itself — we already hold it
-        if float(m.get("date_ts") or 0.0) < not_older_than:
-            break  # newest-first: everything below is older than what we already have
-        folder = (m.get("folder") or "").strip()
-        # Direct (folder, uid) fetch — Lark's IMAP SEARCH cannot find a message by
-        # Message-ID, so the index's recorded location is the only reliable route.
-        msg = _fetch_cached_entry_message(
-            folder, (m.get("uid") or "").strip(), expect_subject=m.get("subject") or ""
-        )
-        if msg is None and mid:
-            msg = find_message_by_message_id(mid, [folder] if folder else None)
-        if msg is None or _quote_source_is_bounce(msg):
-            continue
+        by_folder.setdefault((m.get("folder") or "").strip(), []).append(m)
+
+    fetched: dict[str, email.message.Message] = {}
+    try:
+        mail = _connect_imap_simple(timeout=_JENKINS_REPLY_IMAP_TIMEOUT)
+    except Exception as ex:  # noqa: BLE001 — quoting is best-effort
+        print(f"[allemail] thread quote connect failed: {ex!r}", flush=True)
+        return []
+    try:
+        for folder, entries in by_folder.items():
+            if not folder or not _select_mail_folder(mail, folder, readonly=True):
+                continue
+            for e in entries:
+                uid = (e.get("uid") or "").strip()
+                if not uid:
+                    continue
+                try:
+                    msg = _fetch_uid_message(mail, _uid_as_bytes(uid))
+                except (imaplib.IMAP4.error, OSError, ImapStaleConnectionError, ValueError) as ex:
+                    print(f"[allemail] thread fetch {folder!r}:{uid} failed: {ex!r}", flush=True)
+                    continue
+                if msg is None:
+                    continue
+                want = (e.get("subject") or "").strip()
+                if want and _decode_msg_subject(msg).strip() != want:
+                    continue  # UID reuse after expunge — never quote a stranger
+                if _quote_source_is_bounce(msg):
+                    continue
+                fetched[_allemail_entry_key(e)] = msg
+    finally:
+        try:
+            mail.logout()
+        except Exception:
+            pass
+
+    out = [fetched[k] for k in (_allemail_entry_key(m) for m in members) if k in fetched]
+    if out:
         print(
-            f"[allemail] quoting the newest message in the thread "
-            f"({(m.get('date') or '?')[:10]} {folder!r}/{m.get('uid')!r}) "
-            f"instead of the root so the full history is included",
+            f"[allemail] quoting {len(out)}/{len(members)} thread message(s) newest-first "
+            f"so Show/Hide unfolds the whole conversation",
             flush=True,
         )
-        return msg
-    return None
+    return out
 
 
 def _fetch_cached_entry_message(
@@ -5459,21 +5546,25 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
     quote_src = orig
     if quote_src is None and orig_mid:
         quote_src = _quote_source_by_message_id(orig_mid, subj)
-    # …then upgrade the quote to the NEWEST message in the conversation. The anchor above is
-    # the thread ROOT (our own /egs send), whose HTML nests nothing — quoting it renders a
-    # single message. The latest mail already nests every earlier round, so quoting it is what
-    # reproduces a manual **Reply All**: Show/Hide unfolds the whole conversation. Best-effort:
-    # any miss leaves ``quote_src`` exactly as it was.
-    _newest = _thread_newest_quote(
-        message_id=orig_mid,
-        subject=subj,
-        references=orig_refs,
-        not_older_than=_message_date_ts(quote_src) if quote_src is not None else 0.0,
+    # …then quote the WHOLE conversation, newest first, instead of just that anchor. The
+    # anchor is the thread ROOT (our own /egs send), which nests nothing — quoting it alone
+    # renders a single message. Rebuilding the chain from the index reproduces a manual
+    # **Reply All** even when earlier rounds were sent unquoted. Best-effort: an empty chain
+    # leaves ``quote_src`` exactly as it was.
+    _chain = _thread_quote_messages(
+        message_id=orig_mid, subject=subj, references=orig_refs
     )
-    if _newest is not None:
-        quote_src = _newest
-    if quote_src is not None:
+    if quote_src is not None and not any(
+        _normalize_message_id(m.get("Message-ID") or "")
+        == _normalize_message_id(quote_src.get("Message-ID") or "")
+        for m in _chain
+    ):
+        _chain.append(quote_src)  # anchor wasn't indexed — keep it as the oldest link
+    if _chain:
         # HTML-only: a plain alternative makes Lark Mail expand the quote as raw text.
+        msg = MIMEText(build_reply_message_html(text, _chain), "html", "utf-8")
+        msg.replace_header("Content-Type", 'text/html; charset="utf-8"')
+    elif quote_src is not None:
         msg = MIMEText(build_reply_message_html(text, quote_src), "html", "utf-8")
         msg.replace_header("Content-Type", 'text/html; charset="utf-8"')
     else:
@@ -5494,8 +5585,8 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
         smtp.sendmail(MAIL_USER, recipients, msg.as_string())
     print(
         f"[maint-mail] /egsreply{'test' if test else ''} via={via} title={title!r} "
-        f"threaded={bool(orig_mid)} quoted={quote_src is not None} "
-        f"quote_src={'thread-newest' if _newest is not None else 'root'} "
+        f"threaded={bool(orig_mid)} quoted={bool(_chain) or quote_src is not None} "
+        f"quoted_msgs={len(_chain) if _chain else (1 if quote_src is not None else 0)} "
         f"To={to_addrs!r} Cc={cc_addrs!r} → {', '.join(recipients)}",
         flush=True,
     )
@@ -5507,8 +5598,8 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
         "folder": orig_folder,
         "found": via in ("store", "imap"),
         "threaded": bool(orig_mid),
-        "quoted": quote_src is not None,
-        "quoted_newest": _newest is not None,
+        "quoted": bool(_chain) or quote_src is not None,
+        "quoted_messages": len(_chain) if _chain else (1 if quote_src is not None else 0),
     }
 
 

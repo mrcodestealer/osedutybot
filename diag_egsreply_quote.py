@@ -118,27 +118,32 @@ except Exception as ex:
 
 hr("5. THE ROUTE THAT MATTERS — direct (folder, uid) fetch")
 got = mm._quote_source_by_message_id(stored_mid, TITLE) if stored_mid else None
-print(f"_quote_source_by_message_id -> {'MESSAGE' if got is not None else 'None'}")
+print(f"anchor via _quote_source_by_message_id -> {'MESSAGE' if got is not None else 'None'}")
 if got is not None:
     print(f"   subject : {mm._decode_msg_subject(got)!r}")
     print(f"   date    : {got.get('Date')!r}")
-newest = mm._thread_newest_quote(
-    message_id=stored_mid, subject=TITLE, references="",
-    not_older_than=mm._message_date_ts(got) if got is not None else 0.0,
-)
-print(f"_thread_newest_quote        -> {'MESSAGE' if newest is not None else 'None'}")
-if newest is not None:
-    print(f"   subject : {mm._decode_msg_subject(newest)!r}")
-    print(f"   date    : {newest.get('Date')!r}")
-    print(f"   from    : {newest.get('From')!r}")
+
+chain = mm._thread_quote_messages(message_id=stored_mid, subject=TITLE, references="")
+print(f"\nfull chain via _thread_quote_messages  -> {len(chain)} message(s)")
+for c in chain:
+    print(f"   {c.get('Date')!r}  from={c.get('From')!r}")
 
 hr("VERDICT")
-final = newest or got
-if final is None:
+if not chain and got is None:
     print("No quote source resolvable -> replies will still send unquoted.")
 else:
-    html = mm.build_reply_message_html("TESTING", final)
-    ok = "adit-html-block--collapsed" in html and "history-quote-wrapper" in html
-    print(f"Quote source resolved; reply HTML carries the Lark reply shape: {ok}")
-    print(f"Quoting: {mm._decode_msg_subject(final)!r} ({final.get('Date')})")
-    print("-> /egsreply(test) should now render Show/Hide email thread.")
+    src = chain or got
+    html = mm.build_reply_message_html("TESTING", src)
+    shape_ok = (
+        "adit-html-block--collapsed" in html and "adit-html-block__header" not in html
+    )
+    levels = html.count("history-quote-wrapper")
+    print(f"reply shape correct (collapsed, no forward markers): {shape_ok}")
+    print(f"nested quote levels in the outgoing mail          : {levels}")
+    print(f"outgoing HTML size                                : {len(html):,} bytes")
+    if levels <= 1:
+        print("\n!! only one level — the thread index sees a single message.")
+        print("   Check section 3: if 'same-thread' is 1, earlier mail is outside the")
+        print("   allemail window (ALLEMAIL_WINDOW_DAYS / weekly reset).")
+    else:
+        print(f"\n-> Show/Hide will unfold all {levels} messages.")
