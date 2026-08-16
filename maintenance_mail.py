@@ -5129,6 +5129,142 @@ def find_message_by_message_id(
     return None
 
 
+# ===================== quote the NEWEST message in the thread =====================
+# A manual **Reply All** in Lark Mail is composed on the LATEST mail in a conversation, and
+# that mail's HTML already nests every earlier round — so quoting IT is what makes Lark render
+# **Show/Hide email thread** over the full history. Quoting the thread ROOT (our own ``/egs``
+# send, which is what ``/egsreply`` used to do) can only ever render ONE message, which is why
+# replies showed no previous content. Ported from updatejenkinsbot's ``_thread_newest_quote``.
+EGS_REPLY_QUOTE_THREAD = (
+    os.getenv("EGS_REPLY_QUOTE_THREAD", "").strip() or "1"
+) not in ("0", "false", "no", "off")
+
+
+def _thread_subject_key(subject: str) -> str:
+    """Conversation key: every ``Re:``/``Fw:`` prefix stripped, whitespace + case folded."""
+    s = (subject or "").strip()
+    while True:
+        stripped = re.sub(r"^\s*(?:re|fw|fwd|aw)\s*:\s*", "", s, flags=re.I)
+        if stripped == s:
+            break
+        s = stripped
+    return re.sub(r"\s+", " ", s).strip().casefold()
+
+
+def _message_date_ts(msg: email.message.Message) -> float:
+    """Epoch seconds from ``Date``; 0.0 when missing or unparseable."""
+    try:
+        dt = parsedate_to_datetime((msg.get("Date") or "").strip())
+        if dt is None:
+            return 0.0
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:  # noqa: BLE001 — a bad Date only costs the newer-than-anchor guard
+        return 0.0
+
+
+def _allemail_thread_members(
+    *, message_id: str, subject: str, references: str = ""
+) -> list[dict[str, Any]]:
+    """Every indexed message in the same conversation, NEWEST FIRST.
+
+    Matched on the *conversation* rather than the subject alone: the ``References`` chain
+    first, then the root ``Message-ID`` that later replies point back at, then the
+    reply-prefix-stripped subject. A ``Re:`` reply and its original land in one list.
+    """
+    root_mid = _normalize_message_id(message_id)
+    root_refs = {
+        _normalize_message_id(x) for x in (references or "").split() if x.strip()
+    } - {""}
+    root_key = _thread_subject_key(subject)
+    with _allemail_lock:
+        entries = _allemail_load().get("emails", [])
+    out: list[dict[str, Any]] = []
+    for e in entries:
+        mid = _normalize_message_id(e.get("message_id") or "")
+        refs = {
+            _normalize_message_id(x) for x in (e.get("references") or "").split() if x.strip()
+        }
+        if root_mid and (mid == root_mid or root_mid in refs):
+            pass
+        elif mid and mid in root_refs:
+            pass
+        elif root_key and _thread_subject_key(e.get("subject") or "") == root_key:
+            pass
+        else:
+            continue
+        out.append(e)
+    out.sort(key=lambda e: float(e.get("date_ts") or 0.0), reverse=True)
+    return out
+
+
+def _quote_source_is_bounce(msg: email.message.Message) -> bool:
+    """Bounce / auto-responder screen for a message picked as the QUOTE SOURCE.
+
+    Screens by what a message *is* (a bounce), never by how it was selected. In particular
+    our own ``Re:`` sends are NOT excluded: the newest message in a thread we participate in
+    is usually our own previous reply, and that is exactly the one carrying the nested
+    history. Excluding it would collapse the quote back to a single message.
+    """
+    from_hdr = _decode_mime_header(msg.get("From")) or ""
+    if _should_skip_jenkins_reply_thread(from_hdr=from_hdr, subject=_decode_msg_subject(msg)):
+        return True
+    auto = (_decode_mime_header(msg.get("Auto-Submitted")) or "").strip().casefold()
+    if auto and auto != "no":
+        return True
+    try:
+        body = _message_plain_text_snippet(msg, limit=_JENKINS_REPLY_BODY_PEEK).casefold()
+    except Exception:  # noqa: BLE001 — an unreadable body must not veto the quote
+        body = ""
+    return _body_is_failed_send_notification(body)
+
+
+def _thread_newest_quote(
+    *,
+    message_id: str,
+    subject: str,
+    references: str = "",
+    not_older_than: float = 0.0,
+) -> email.message.Message | None:
+    """The NEWEST message in this conversation, re-read from IMAP — or ``None``.
+
+    ``not_older_than`` is the anchor's own timestamp: never swap in something OLDER than the
+    message the caller already holds. Returns ``None`` on any failure so the caller keeps its
+    existing quote source — quoting is best-effort and must never cost the reply itself.
+    """
+    if not EGS_REPLY_QUOTE_THREAD:
+        return None
+    try:
+        members = _allemail_thread_members(
+            message_id=message_id, subject=subject, references=references
+        )
+    except Exception as ex:  # noqa: BLE001 — falling back to the anchor is always valid
+        print(f"[allemail] thread-latest lookup failed: {ex!r}", flush=True)
+        return None
+    skip = _normalize_message_id(message_id)
+    for m in members:
+        mid = (m.get("message_id") or "").strip()
+        if _normalize_message_id(mid) == skip:
+            continue  # the anchor itself — we already hold it
+        if float(m.get("date_ts") or 0.0) < not_older_than:
+            break  # newest-first: everything below is older than what we already have
+        if not mid:
+            continue
+        folder = (m.get("folder") or "").strip()
+        msg = find_message_by_message_id(mid, [folder] if folder else None)
+        if msg is None or _quote_source_is_bounce(msg):
+            continue
+        print(
+            f"[allemail] quoting the newest message in the thread "
+            f"({(m.get('date') or '?')[:10]} {folder!r}/{m.get('uid')!r}) "
+            f"instead of the root so the full history is included",
+            flush=True,
+        )
+        return msg
+    return None
+
+
 def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[str, Any]:
     """``/egsreply``: find the email whose subject matches ``email_title`` and Reply-All
     inside its thread — To/Cc taken from the original (``In-Reply-To`` set for threading).
@@ -5214,6 +5350,19 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
     quote_src = orig
     if quote_src is None and orig_mid:
         quote_src = find_message_by_message_id(orig_mid)
+    # …then upgrade the quote to the NEWEST message in the conversation. The anchor above is
+    # the thread ROOT (our own /egs send), whose HTML nests nothing — quoting it renders a
+    # single message. The latest mail already nests every earlier round, so quoting it is what
+    # reproduces a manual **Reply All**: Show/Hide unfolds the whole conversation. Best-effort:
+    # any miss leaves ``quote_src`` exactly as it was.
+    _newest = _thread_newest_quote(
+        message_id=orig_mid,
+        subject=subj,
+        references=orig_refs,
+        not_older_than=_message_date_ts(quote_src) if quote_src is not None else 0.0,
+    )
+    if _newest is not None:
+        quote_src = _newest
     if quote_src is not None:
         # HTML-only: a plain alternative makes Lark Mail expand the quote as raw text.
         msg = MIMEText(build_reply_message_html(text, quote_src), "html", "utf-8")
@@ -5237,6 +5386,7 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
     print(
         f"[maint-mail] /egsreply{'test' if test else ''} via={via} title={title!r} "
         f"threaded={bool(orig_mid)} quoted={quote_src is not None} "
+        f"quote_src={'thread-newest' if _newest is not None else 'root'} "
         f"To={to_addrs!r} Cc={cc_addrs!r} → {', '.join(recipients)}",
         flush=True,
     )
@@ -5249,6 +5399,7 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
         "found": via in ("store", "imap"),
         "threaded": bool(orig_mid),
         "quoted": quote_src is not None,
+        "quoted_newest": _newest is not None,
     }
 
 
