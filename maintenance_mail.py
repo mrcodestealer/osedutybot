@@ -5276,10 +5276,14 @@ def _thread_newest_quote(
             continue  # the anchor itself — we already hold it
         if float(m.get("date_ts") or 0.0) < not_older_than:
             break  # newest-first: everything below is older than what we already have
-        if not mid:
-            continue
         folder = (m.get("folder") or "").strip()
-        msg = find_message_by_message_id(mid, [folder] if folder else None)
+        # Direct (folder, uid) fetch — Lark's IMAP SEARCH cannot find a message by
+        # Message-ID, so the index's recorded location is the only reliable route.
+        msg = _fetch_cached_entry_message(
+            folder, (m.get("uid") or "").strip(), expect_subject=m.get("subject") or ""
+        )
+        if msg is None and mid:
+            msg = find_message_by_message_id(mid, [folder] if folder else None)
         if msg is None or _quote_source_is_bounce(msg):
             continue
         print(
@@ -5290,6 +5294,84 @@ def _thread_newest_quote(
         )
         return msg
     return None
+
+
+def _fetch_cached_entry_message(
+    folder: str, uid: str, *, expect_subject: str = ""
+) -> email.message.Message | None:
+    """Fetch an indexed message straight by ``(folder, uid)`` — no IMAP SEARCH involved.
+
+    This is the route that actually works on this mailbox. Lark's IMAP implements only the
+    date criteria the allemail scanner uses (``SINCE``); ``HEADER Message-ID`` and ``SUBJECT``
+    searches return an empty set even for messages sitting in the selected folder, so
+    :func:`find_message_by_message_id` can never hit here. The index already recorded the
+    folder and UID at scan time, so we SELECT and FETCH directly instead of searching.
+
+    The subject is verified against the indexed one: quoting the WRONG mail underneath a
+    reply is worse than quoting nothing (UIDs are per-folder and can be reused after an
+    expunge). Returns ``None`` on any failure — quoting is best-effort.
+    """
+    fold = (folder or "").strip()
+    u = (uid or "").strip()
+    if not fold or not u:
+        return None
+    try:
+        mail = _connect_imap_simple(timeout=_JENKINS_REPLY_IMAP_TIMEOUT)
+    except Exception as ex:  # noqa: BLE001 — quoting is best-effort
+        print(f"[maint-mail] quote uid fetch connect failed: {ex!r}", flush=True)
+        return None
+    try:
+        if not _select_mail_folder(mail, fold, readonly=True):
+            return None
+        msg = _fetch_uid_message(mail, _uid_as_bytes(u))
+        if msg is None:
+            return None
+        want = (expect_subject or "").strip()
+        if want and _decode_msg_subject(msg).strip() != want:
+            print(
+                f"[maint-mail] quote uid fetch {fold!r}:{u} subject mismatch — discarding",
+                flush=True,
+            )
+            return None
+        return msg
+    except (imaplib.IMAP4.error, OSError, ImapStaleConnectionError, ValueError) as ex:
+        print(f"[maint-mail] quote uid fetch {fold!r}:{u} failed: {ex!r}", flush=True)
+        return None
+    finally:
+        try:
+            mail.logout()
+        except Exception:
+            pass
+
+
+def _quote_source_by_message_id(
+    message_id: str, subject: str = ""
+) -> email.message.Message | None:
+    """Re-read a message we only hold the ``Message-ID`` for, cheapest route first.
+
+    ``(folder, uid)`` from the allemail index first — the only route that works on Lark's
+    IMAP — then the ``HEADER Message-ID`` search as a fallback for mail the index missed
+    (outside its window, or in a folder it does not scan).
+    """
+    mid_n = _normalize_message_id(message_id)
+    if not mid_n:
+        return None
+    try:
+        with _allemail_lock:
+            entries = _allemail_load().get("emails", [])
+        for e in entries:
+            if _normalize_message_id(e.get("message_id") or "") != mid_n:
+                continue
+            msg = _fetch_cached_entry_message(
+                (e.get("folder") or "").strip(),
+                (e.get("uid") or "").strip(),
+                expect_subject=e.get("subject") or "",
+            )
+            if msg is not None:
+                return msg
+    except Exception as ex:  # noqa: BLE001 — fall through to the search
+        print(f"[allemail] quote index lookup failed: {ex!r}", flush=True)
+    return find_message_by_message_id(message_id)
 
 
 def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[str, Any]:
@@ -5376,7 +5458,7 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
     # stored its Message-ID, so re-read it from IMAP. No original → plain text as before.
     quote_src = orig
     if quote_src is None and orig_mid:
-        quote_src = find_message_by_message_id(orig_mid)
+        quote_src = _quote_source_by_message_id(orig_mid, subj)
     # …then upgrade the quote to the NEWEST message in the conversation. The anchor above is
     # the thread ROOT (our own /egs send), whose HTML nests nothing — quoting it renders a
     # single message. The latest mail already nests every earlier round, so quoting it is what

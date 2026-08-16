@@ -88,10 +88,11 @@ try:
 except Exception as ex:
     print(f"!! allemail read failed: {ex!r}")
 
-hr("4. LIVE IMAP — does the mail exist, and what is its REAL Message-ID?")
+hr("4. DOES IMAP SEARCH WORK ON THIS SERVER?")
+# Lark implements only the date criteria the indexer uses. If SUBJECT/HEADER searches come
+# back empty on a folder the index says holds these mails, SEARCH is the broken part — not
+# the mailbox — and every search-based lookup is dead on arrival.
 needle = TITLE.split(" - ")[0][:48]
-print(f"searching SUBJECT ~ {needle!r} in {mm.EGS_REPLY_IMAP_FOLDERS}\n")
-found_any = False
 try:
     m = mm._connect_imap_simple(timeout=30)
     try:
@@ -100,39 +101,44 @@ try:
                 print(f"   {folder!r}: SELECT failed (folder missing?)")
                 continue
             safe = needle.replace('"', "").replace("\\", "")
-            uids = mm._uid_search(m, f'(SUBJECT "{safe}")')
-            print(f"   {folder!r}: {len(uids or [])} match(es)")
-            for uid in (uids or [])[-5:]:
-                msg = mm._fetch_uid_message(m, uid)
-                if msg is None:
-                    continue
-                found_any = True
-                real_mid = (msg.get("Message-ID") or "").strip()
-                same = (
-                    mm._normalize_message_id(real_mid)
-                    == mm._normalize_message_id(stored_mid)
-                )
-                print(f"      uid={uid!r} date={msg.get('Date')!r}")
-                print(f"        real Message-ID : {real_mid!r}")
-                print(f"        matches stored  : {same}"
-                      + ("" if same else "   <-- REWRITTEN BY LARK ON SEND"))
+            n_subj = len(mm._uid_search(m, f'(SUBJECT "{safe}")') or [])
+            n_mid = 0
+            if stored_mid:
+                s = stored_mid.replace('"', "").replace("\\", "")
+                n_mid = len(mm._uid_search(m, f'(HEADER Message-ID "{s}")') or [])
+            n_since = len(mm._uid_search(m, "(SINCE 01-Aug-2026)") or [])
+            print(f"   {folder!r}: SUBJECT={n_subj}  HEADER-Message-ID={n_mid}  SINCE={n_since}")
     finally:
         try:
             m.logout()
         except Exception:
             pass
 except Exception as ex:
-    print(f"!! live search failed: {ex!r}")
+    print(f"!! search probe failed: {ex!r}")
+
+hr("5. THE ROUTE THAT MATTERS — direct (folder, uid) fetch")
+got = mm._quote_source_by_message_id(stored_mid, TITLE) if stored_mid else None
+print(f"_quote_source_by_message_id -> {'MESSAGE' if got is not None else 'None'}")
+if got is not None:
+    print(f"   subject : {mm._decode_msg_subject(got)!r}")
+    print(f"   date    : {got.get('Date')!r}")
+newest = mm._thread_newest_quote(
+    message_id=stored_mid, subject=TITLE, references="",
+    not_older_than=mm._message_date_ts(got) if got is not None else 0.0,
+)
+print(f"_thread_newest_quote        -> {'MESSAGE' if newest is not None else 'None'}")
+if newest is not None:
+    print(f"   subject : {mm._decode_msg_subject(newest)!r}")
+    print(f"   date    : {newest.get('Date')!r}")
+    print(f"   from    : {newest.get('From')!r}")
 
 hr("VERDICT")
-if not found_any:
-    print("The mail is NOT in any searched folder of this mailbox.")
-    print("-> Lark is not keeping a copy we can read (no Sent copy / no self-delivery of Cc).")
-    print("-> Nothing to quote: the only copy lives in the recipient's mailbox.")
-elif stored_mid and not TEST:
-    print("Mail found. Compare 'matches stored' above.")
+final = newest or got
+if final is None:
+    print("No quote source resolvable -> replies will still send unquoted.")
 else:
-    print("Mail found — if 'matches stored' is False, the stored Message-ID is stale:")
-    print("   find_message_by_message_id() can never hit, and threading headers point at")
-    print("   an id no client will recognise. Fix = store the id the SERVER assigned,")
-    print("   or resolve the quote source by subject instead of by Message-ID.")
+    html = mm.build_reply_message_html("TESTING", final)
+    ok = "adit-html-block--collapsed" in html and "history-quote-wrapper" in html
+    print(f"Quote source resolved; reply HTML carries the Lark reply shape: {ok}")
+    print(f"Quoting: {mm._decode_msg_subject(final)!r} ({final.get('Date')})")
+    print("-> /egsreply(test) should now render Show/Hide email thread.")
