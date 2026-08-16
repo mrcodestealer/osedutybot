@@ -880,6 +880,8 @@ _LARK_META_STYLE = (
     "border-radius: 4px; margin-bottom: 12px;"
 )
 _LARK_FWD_META_MARGIN = "margin-top: 2px;"
+# A reply has no separator line above the meta block, so the gap lives on the meta wrapper.
+_LARK_REPLY_META_MARGIN = "margin-top: 24px;"
 _LARK_SEP_STYLE = "color: rgb(100, 106, 115); margin-top: 24px; margin-bottom: 8px;"
 _LARK_ADDR_STYLE = (
     "overflow-wrap: break-word; color: inherit; text-decoration: none; "
@@ -1052,13 +1054,22 @@ def _build_lark_quote_html(
 ) -> str:
     """
     Quote block per Lark composer (``history-quote-wrapper`` + block class).
-    See larksuite/cli ``mail_quote.go``. ``reply=True`` swaps the "Forwarded
-    message" separator for the reply one; pass ``block_class`` to match
-    (``--header`` for Fw:, ``--collapsed`` for Re:).
+
+    Mirrors larksuite/cli ``shortcuts/mail/mail_quote.go``. The two shapes are genuinely
+    different, not one shape with a different separator string — emitting the forward shape
+    for a ``Re:`` is why Lark Mail refused to render **Show/Hide email thread** on replies:
+
+    ``reply=True`` (``--collapsed``) — **no** separator line at all, meta wrapper
+    ``adit-html-block__attr history-quote-meta-wrapper history-quote-gap-tag``, and **no**
+    ``id`` attributes (upstream calls ``genID`` only on the forward path, and its ``-cli``
+    prefix is a provenance marker for CLI-generated mail that a reply must not carry).
+
+    ``reply=False`` (``--header``) — forward separator, meta wrapper
+    ``adit-html-block__header history-quote-meta-after-forward-title …``, ids on the wrapper
+    and the inner div. Left byte-for-byte as it was.
     """
     subj = _decode_mime_header(msg.get("Subject")) or ""
     labels = _quote_labels(subj)
-    sep_label = labels["sep_reply"] if reply else labels["sep"]
     from_hdr = _decode_mime_header(msg.get("From")) or "Unknown"
     to_hdr = _decode_mime_header(msg.get("To")) or ""
     cc_hdr = _decode_mime_header(msg.get("Cc")) or ""
@@ -1074,19 +1085,6 @@ def _build_lark_quote_html(
         meta_rows.append(_meta_row(labels["cc"], _html_escape(cc_hdr)))
     meta_inner = "".join(meta_rows)
 
-    meta_id = _gen_lark_id("lark-mail-meta-cli")
-    meta_html = (
-        f'<div id="{meta_id}" class="adit-html-block__header '
-        f"history-quote-meta-after-forward-title history-quote-meta-wrapper\" "
-        f'style="{_LARK_FWD_META_MARGIN} {_LARK_META_STYLE}">'
-        f'<div style="word-break: break-word;">{meta_inner}</div></div>'
-    )
-
-    sep_html = (
-        f'<div class="history-quote-forward-title lme-line-signal history-quote-gap-tag" '
-        f'style="{_LARK_SEP_STYLE}">{_html_escape(sep_label)}</div>'
-    )
-
     body_raw = extract_body_html_raw(msg)
     if body_raw and _body_is_html(body_raw):
         body_html = _sanitize_embedded_html(body_raw)
@@ -1098,6 +1096,35 @@ def _build_lark_quote_html(
             else ""
         )
     body_part = f"<div>{body_html}</div>" if body_html else ""
+
+    if reply:
+        # Collapsed reply quote: no separator, no ids, ``__attr`` meta wrapper.
+        meta_html = (
+            f'<div class="adit-html-block__attr history-quote-meta-wrapper '
+            f'history-quote-gap-tag" style="{_LARK_REPLY_META_MARGIN} {_LARK_META_STYLE}">'
+            f'<div style="word-break: break-word;">{meta_inner}</div></div>'
+        )
+        return (
+            f'<div class="{_LARK_QUOTE_WRAPPER}">'
+            f'<div data-html-block="quote" data-mail-html-ignore="">'
+            f'<div class="adit-html-block {block_class}" '
+            f'style="{_LARK_QUOTE_BORDER}">'
+            f"<div>{meta_html}{body_part}</div>"
+            f"</div></div></div>"
+        )
+
+    meta_id = _gen_lark_id("lark-mail-meta-cli")
+    meta_html = (
+        f'<div id="{meta_id}" class="adit-html-block__header '
+        f"history-quote-meta-after-forward-title history-quote-meta-wrapper\" "
+        f'style="{_LARK_FWD_META_MARGIN} {_LARK_META_STYLE}">'
+        f'<div style="word-break: break-word;">{meta_inner}</div></div>'
+    )
+
+    sep_html = (
+        f'<div class="history-quote-forward-title lme-line-signal history-quote-gap-tag" '
+        f'style="{_LARK_SEP_STYLE}">{_html_escape(labels["sep"])}</div>'
+    )
 
     outer_id = _gen_lark_id("lark-mail-quote-cli")
     inner_id = _gen_lark_id("lark-mail-quote-cli")
