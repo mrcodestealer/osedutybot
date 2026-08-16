@@ -5558,6 +5558,32 @@ def is_evo_batch_command_chat(chat_id: str | None) -> bool:
     return bool(cid) and bool(want) and cid == want
 
 
+# Extra groups allowed to run ``/egsreplytest`` ONLY. That command replies solely to the
+# test address (junchen@), so widening it cannot reach a real recipient — the live
+# ``/egsreply`` stays pinned to the ``/m`` command group above. Add more with a
+# comma-separated EGSREPLY_TEST_EXTRA_CHAT_IDS (extends, never replaces, these defaults).
+EGSREPLY_TEST_EXTRA_CHAT_ID_DEFAULTS = ("oc_ad9b5bdbb2826ba2ee9730920ef25432",)
+
+
+def egsreply_test_chat_ids() -> set[str]:
+    """Groups where ``/egsreplytest`` may run — ``/m`` command group + test-only extras."""
+    ids = {evo_batch_command_chat_id(), *EGSREPLY_TEST_EXTRA_CHAT_ID_DEFAULTS}
+    ids.update(
+        c.strip()
+        for c in (
+            os.getenv("EGSREPLY_TEST_EXTRA_CHAT_IDS", "").strip()
+            or os.getenv("egsreply_test_extra_chat_ids", "").strip()
+        ).split(",")
+    )
+    return {c for c in ids if c}
+
+
+def is_egsreply_test_chat(chat_id: str | None) -> bool:
+    """True when ``/egsreplytest`` (test reply → junchen@ only) may run in this chat."""
+    cid = (chat_id or "").strip()
+    return bool(cid) and cid in egsreply_test_chat_ids()
+
+
 def maint_moved_notify_chat_id() -> str:
     """Lark group for the "maintenance email moved back to Inbox" notice.
 

@@ -4534,9 +4534,18 @@ def _process_egsreply_paste(chat_id: str, content: str = "", *, test: bool = Fal
     off the stored Message-ID (no fuzzy search, no "email not found"). ``content`` is the body
     pasted with the command — stashed here and pre-filled into the preview once the user picks
     an email (so it isn't retyped). ``test=True`` replies only to the test address (junchen@).
+
+    Group gate: ``/egsreply`` (real recipients) is pinned to the ``/m`` command group;
+    ``/egsreplytest`` also runs in the test groups (:func:`maintenance.egsreply_test_chat_ids`)
+    since it can only ever deliver to junchen@.
     """
     _cmd = "/egsreplytest" if test else "/egsreply"
-    if not maintenance.is_evo_batch_command_chat(chat_id):
+    _allowed = (
+        maintenance.is_egsreply_test_chat(chat_id)
+        if test
+        else maintenance.is_evo_batch_command_chat(chat_id)
+    )
+    if not _allowed:
         send_message(chat_id, maintenance.EVO_BATCH_WRONG_GROUP_MESSAGE)
         return
     reply_mid = (_lark_user_message_id.get() or "").strip()
