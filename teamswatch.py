@@ -542,54 +542,98 @@ def _error_text(page) -> str:
 
 
 _TEXT_OPTION_JS = """
-    ([includeRe, excludeRe, doClick]) => {
+    ([includeRe, excludeRe, skip, mark]) => {
         // Find a clickable choice by its visible label. MSA moves these between
         // buttons, links and list rows between rollouts, so match on text rather
-        // than on structure.
+        // than on structure. Marks the pick instead of clicking it — see
+        // _click_text_option for why the click has to happen in Playwright.
         const inc = new RegExp(includeRe, 'i');
         const exc = excludeRe ? new RegExp(excludeRe, 'i') : null;
-        const els = [...document.querySelectorAll(
-            'button,a,[role=button],[role=listitem],[role=option],div[data-testid]')];
-        for (const el of els) {
+        document.querySelectorAll('[data-teamswatch-pick]').forEach(
+            el => el.removeAttribute('data-teamswatch-pick'));
+        const hits = [];
+        for (const el of document.querySelectorAll(
+                'button,a,[role=button],[role=listitem],[role=option],div[data-testid]')) {
             const t = (el.innerText || '').trim();
             if (!t || t.length > 70) continue;
             if (!inc.test(t)) continue;
             if (exc && exc.test(t)) continue;
             if (!(el.offsetParent || el.offsetWidth || el.offsetHeight)) continue;
-            if (doClick) el.click();
-            return t;
+            hits.push({el: el, t: t});
         }
-        return '';
+        // Most specific first: real controls before generic containers, then the
+        // shortest label. A wrapper div inherits its children's text, and
+        // clicking a wrapper usually reaches no handler at all.
+        const rank = (el) => (el.tagName === 'BUTTON' || el.tagName === 'A'
+                              || el.getAttribute('role') === 'button') ? 0 : 1;
+        hits.sort((a, b) => rank(a.el) - rank(b.el) || a.t.length - b.t.length);
+        const pick = hits[skip || 0];
+        if (!pick) return '';
+        if (mark) pick.el.setAttribute('data-teamswatch-pick', '1');
+        return pick.t;
     }
 """
 
+_PASSWORD_INC = r"password"
+# "Forgot your password" / "Create one" are not the way forward.
+_PASSWORD_EXC = r"forgot|reset|create|change"
+_OTHER_WAYS_INC = (
+    r"other ways to sign in|sign in another way|more ways to sign in|other ways"
+)
 
-def _text_option(page, include: str, *, exclude: str = "", click: bool = False) -> str:
+
+def _text_option(page, include: str, *, exclude: str = "", skip: int = 0,
+                 mark: bool = False) -> str:
     try:
-        return (page.evaluate(_TEXT_OPTION_JS, [include, exclude, click]) or "").strip()
+        return (page.evaluate(
+            _TEXT_OPTION_JS, [include, exclude, int(skip), bool(mark)]
+        ) or "").strip()
     except Exception:
         return ""
 
 
-def _password_option(page, *, click: bool = False) -> str:
+def _click_text_option(page, include: str, *, exclude: str = "", skip: int = 0) -> str:
+    """Mark the best match in JS, then click it *with Playwright*.
+
+    A raw ``el.click()`` inside ``page.evaluate`` is not enough. These option
+    rows are React components whose handler often sits on a different node, so a
+    synthetic click on the matched wrapper silently does nothing — which showed
+    up as the driver logging "chose password option" over and over while the page
+    never moved. Playwright dispatches real trusted input events, which React
+    honours. ``skip`` walks to the next-best candidate when the first is inert.
+    """
+    label = _text_option(page, include, exclude=exclude, skip=skip, mark=True)
+    if not label:
+        return ""
+    try:
+        page.locator("[data-teamswatch-pick='1']").first.click(timeout=15000)
+        return label
+    except Exception as err:
+        print(f"[teams] click {label!r} failed: {err!r}", flush=True)
+        return ""
+
+
+def _password_option(page, *, skip: int = 0) -> str:
     """The "use your password" / "Password" choice, wherever MSA hid it."""
-    # "Forgot your password" / "Create one" are not the way forward.
-    return _text_option(page, r"password",
-                        exclude=r"forgot|reset|create|change", click=click)
+    return _text_option(page, _PASSWORD_INC, exclude=_PASSWORD_EXC, skip=skip)
 
 
-def _other_ways_option(page, *, click: bool = False) -> str:
+def _click_password_option(page, *, skip: int = 0) -> str:
+    return _click_text_option(page, _PASSWORD_INC, exclude=_PASSWORD_EXC, skip=skip)
+
+
+def _other_ways_option(page) -> str:
     """The "Other ways to sign in" escape hatch on the send-a-code page.
 
     Deliberately specific: that page's PRIMARY button is "Send code", which
     would email a one-time code no unattended process can read. The only safe
     control on it is this link.
     """
-    return _text_option(
-        page,
-        r"other ways to sign in|sign in another way|more ways to sign in|other ways",
-        click=click,
-    )
+    return _text_option(page, _OTHER_WAYS_INC)
+
+
+def _click_other_ways(page) -> str:
+    return _click_text_option(page, _OTHER_WAYS_INC)
 
 
 def _stage_of(page) -> str:
@@ -709,7 +753,7 @@ def do_login(*, headless: bool = True, report_chat: str | None = None) -> dict:
     deadline = time.monotonic() + _login_timeout_s()
     result: dict[str, Any] = {"ok": False, "stage": "start", "reason": None, "shot": None}
     typed_email = typed_password = False
-    passkey_tries = other_ways_tries = 0
+    passkey_tries = other_ways_tries = password_option_tries = 0
 
     with sync_playwright() as p:
         ctx, page = _open(p, headless=headless)
@@ -787,29 +831,43 @@ def do_login(*, headless: bool = True, report_chat: str | None = None) -> dict:
                                    "account' for this Microsoft account",
                         )
                         break
-                    if _password_option(page, click=True):
+                    if _click_password_option(page):
                         page.wait_for_timeout(4000)
                     elif _click_first(page, _BACK_SELS):
                         page.wait_for_timeout(4000)
                     else:
                         page.wait_for_timeout(3000)
                 elif stage == "use_password_option":
-                    label = _password_option(page, click=True)
-                    print(f"[teams] chose password option: {label!r}", flush=True)
+                    # Retry once on the same element (it may just be slow), then
+                    # walk to the next-best candidate — the first match can be an
+                    # inert wrapper.
+                    label = _click_password_option(
+                        page, skip=max(0, password_option_tries - 1)
+                    )
+                    password_option_tries += 1
+                    if password_option_tries > 5:
+                        result.update(
+                            ok=False, stage="password_option_stuck",
+                            reason="'Use your password' is present but clicking it "
+                                   "never reaches the password form",
+                        )
+                        break
+                    print(f"[teams] chose password option: {label!r} "
+                          f"(attempt {password_option_tries})", flush=True)
                     page.wait_for_timeout(4000)
                 elif stage == "other_ways":
                     other_ways_tries += 1
                     if other_ways_tries > 3:
                         result.update(
                             ok=False, stage="no_password_option",
-                            reason="MSA offers only a emailed code — no password "
+                            reason="MSA offers only an emailed code — no password "
                                    "option behind 'Other ways to sign in'. This "
                                    "account is passwordless: turn that off at "
                                    "account.live.com > Security > Advanced "
                                    "security options.",
                         )
                         break
-                    label = _other_ways_option(page, click=True)
+                    label = _click_other_ways(page)
                     print(f"[teams] opening sign-in options: {label!r}", flush=True)
                     page.wait_for_timeout(4000)
                 elif stage == "pick_personal":
