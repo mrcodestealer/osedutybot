@@ -1707,13 +1707,74 @@ def _looks_system(text: str) -> bool:
     return bool(_SYSTEM_EVENT_RE.search(body))
 
 
+# The conversation header, which names the chat that is ACTUALLY open.
+_CHAT_TITLE_SELS = [
+    "[data-tid='chat-header-title']",
+    "[data-tid='chatHeaderTitle']",
+    "[data-tid='conversation-header'] [role='heading']",
+    "[role='heading'][aria-level='1']",
+    "main h1",
+    "h1",
+]
+
+
+def _open_chat_title(page) -> str:
+    try:
+        return (page.evaluate(
+            """(sels) => {
+                for (const s of sels) {
+                    for (const el of document.querySelectorAll(s)) {
+                        const t = (el.innerText || '').trim();
+                        if (t && (el.offsetParent || el.offsetWidth || el.offsetHeight))
+                            return t.split('\\n')[0];
+                    }
+                }
+                return '';
+            }""",
+            _CHAT_TITLE_SELS,
+        ) or "").strip()
+    except Exception:
+        return ""
+
+
+def _norm_title(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "")).strip().lower()
+
+
+def _titles_match(want: str, got: str) -> bool:
+    """Compare on a normalised prefix — the header may truncate a long title."""
+    a, b = _norm_title(want), _norm_title(got)
+    if not a or not b:
+        return False
+    head = a[:20]
+    return b.startswith(head) or a.startswith(b[:20]) or head in b
+
+
 def _open_group(page, title: str) -> bool:
-    """Click the sidebar row for ``title``. Trusted click — see _click_text_option."""
+    """Open the sidebar row for ``title`` and CONFIRM it is the chat now showing.
+
+    The confirmation is the whole point. Teams restores the last-viewed chat on
+    load, so a message pane is already on screen before we click anything — an
+    earlier version merely waited for "a pane exists", which succeeded whether or
+    not the click landed, and silently scraped whatever chat happened to be open
+    (it read 【关闭】ZF918(B) and reported it as the EVO group). Reading the wrong
+    group could email the wrong notice, so a mismatch is a hard failure.
+    """
     needle = (title or "").strip()
     if not needle:
         return False
+
+    before = _open_chat_title(page)
+    if before:
+        print(f"[teams] chat open on arrival: {before!r}", flush=True)
+    if _titles_match(needle, before):
+        print("[teams] target chat already open", flush=True)
+        page.wait_for_timeout(3000)
+        return True
+
     # Match on a prefix: sidebar rows append the preview text and timestamp to
-    # the title, so an equality test never matches.
+    # the title, so an equality test never matches. scrollIntoView first — the
+    # sidebar is virtualised and an off-screen row cannot be clicked.
     found = page.evaluate(
         """(needle) => {
             const n = needle.toLowerCase().slice(0, 24);
@@ -1726,6 +1787,7 @@ def _open_group(page, title: str) -> bool:
                     const t = (el.innerText || '').trim().toLowerCase();
                     if (!t || !t.includes(n)) continue;
                     el.setAttribute('data-teamswatch-chat', '1');
+                    try { el.scrollIntoView({block: 'center'}); } catch (e) {}
                     return (el.innerText || '').trim().split('\\n')[0];
                 }
             }
@@ -1736,20 +1798,26 @@ def _open_group(page, title: str) -> bool:
     if not found:
         print(f"[teams] sidebar row not found for {needle!r}", flush=True)
         return False
+    print(f"[teams] clicking sidebar row: {found!r}", flush=True)
     try:
         page.locator("[data-teamswatch-chat='1']").first.click(timeout=15000)
     except Exception as err:  # noqa: BLE001
         print(f"[teams] clicking chat row failed: {err!r}", flush=True)
         return False
-    print(f"[teams] opened chat: {found!r}", flush=True)
 
+    # Wait for the HEADER to become the target, not merely for a pane to exist.
     deadline = time.monotonic() + 45
+    seen = ""
     while time.monotonic() < deadline:
-        if _any_visible(page, _MSG_PANE_SELS) or _any_visible(page, _MSG_ROW_SELS):
+        seen = _open_chat_title(page)
+        if _titles_match(needle, seen):
             page.wait_for_timeout(4000)  # let the virtualised list settle
+            print(f"[teams] confirmed open: {seen!r}", flush=True)
             return True
         page.wait_for_timeout(1500)
-    print("[teams] message pane never appeared", flush=True)
+
+    print(f"[teams] chat did not switch — header still {seen!r}, wanted {needle!r}",
+          flush=True)
     return False
 
 
@@ -1896,7 +1964,8 @@ def read_latest_messages(*, group: str | None = None, limit: int = 3,
     target = (group or os.getenv("EVOTEAMS_GROUP")
               or "@EVO C88live/slot_ow.ph (RTS) CS Group NE RT FP")
     res: dict[str, Any] = {"ok": False, "group": target, "matched": None,
-                           "counts": {}, "messages": [], "shot": None, "error": None}
+                           "counts": {}, "messages": [], "shot": None, "error": None,
+                           "opened_title": ""}
 
     with _profile_lock("read-latest"), sync_playwright() as p:
         ctx, page = _open(p, headless=headless)
@@ -1917,8 +1986,24 @@ def read_latest_messages(*, group: str | None = None, limit: int = 3,
                 return res
 
             if not _open_group(page, target):
-                res["error"] = f"could not open group {target!r}"
+                res["opened_title"] = _open_chat_title(page)
+                res["error"] = (
+                    f"could not open the target group — Teams is showing "
+                    f"{res['opened_title']!r}"
+                    if res["opened_title"] else "could not open the target group"
+                )
                 res["shot"] = _shot(page, "read_no_group")
+                return res
+
+            # Belt and braces: re-read the header immediately before scraping, so
+            # a chat that switches underneath us can never be reported as this one.
+            res["opened_title"] = _open_chat_title(page)
+            if not _titles_match(target, res["opened_title"]):
+                res["error"] = (
+                    f"chat changed before reading — showing "
+                    f"{res['opened_title']!r}, wanted {target!r}"
+                )
+                res["shot"] = _shot(page, "read_wrong_chat")
                 return res
 
             # Scan well past `limit`: the newest rows are often system events, so
@@ -1979,6 +2064,8 @@ def _fmt_messages(res: dict) -> str:
                 f"• Reason: {res.get('error') or 'unknown'}"
                 + (f"\n• Selector counts: {counts}" if counts else ""))
     lines = [f"📥 Latest in Teams group\n• Group: {res.get('group')}",
+             # Echo the chat Teams actually had open — proof we read the right one.
+             f"• Confirmed open: {res.get('opened_title') or '—'}",
              f"• Matched selector: {res.get('matched')}"]
     skipped = res.get("skipped_system") or []
     if skipped:
