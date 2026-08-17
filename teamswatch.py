@@ -1656,6 +1656,56 @@ _MSG_PANE_SELS = [
     "[role='log']",
 ]
 
+# `chat-pane-item` — the selector that actually matches on this Teams build —
+# covers membership/call/system rows as well as real messages, and the newest row
+# in the list is frequently one of those ("X left the chat"). Filtering them out
+# is what makes "latest message" mean the latest *message*.
+_SYSTEM_EVENT_RE = re.compile(
+    r"(?i)\b(?:left|joined|rejoined)\s+the\s+(?:chat|conversation|group|meeting|team)"
+    r"|\badded\b.{0,40}?\bto\s+the\s+(?:chat|conversation|group)"
+    r"|\bremoved\b.{0,40}?\bfrom\s+the\s+(?:chat|conversation|group)"
+    r"|\b(?:changed|renamed)\b.{0,30}?\b(?:name|picture|photo|image)"
+    r"|\b(?:started|ended|missed|declined)\b.{0,12}?\bcall\b"
+    r"|\b(?:pinned|unpinned)\s+a\s+message"
+    r"|\bcreated\s+the\s+(?:chat|group)"
+    r"|\bnow\s+has\s+access\s+to"
+    r"|加入了聊天|离开了聊天|退出了聊天|已加入|已离开"
+)
+# A real EVO notice runs to hundreds of characters; a system event is one short
+# line. The guard stops a genuine notice that happens to contain e.g. "left the
+# chat" from being discarded.
+_SYSTEM_MAX_CHARS = 300
+
+
+def _dedupe_lines(text: str) -> str:
+    """Collapse Teams' doubled innerText.
+
+    Each row carries a visually-hidden accessibility copy next to the rendered
+    one, so ``innerText`` returns every line twice ("X left the chat." printed
+    twice in the first live read). Handles both a repeated adjacent line and a
+    wholesale duplicated block.
+    """
+    lines = [ln.rstrip() for ln in (text or "").splitlines()]
+    out: list[str] = []
+    for line in lines:
+        if out and line.strip() and line.strip() == out[-1].strip():
+            continue
+        out.append(line)
+    # A B A B -> A B
+    n = len(out)
+    if n >= 2 and n % 2 == 0 and out[: n // 2] == out[n // 2:]:
+        out = out[: n // 2]
+    return "\n".join(out).strip()
+
+
+def _looks_system(text: str) -> bool:
+    body = (text or "").strip()
+    if not body:
+        return True
+    if len(body) > _SYSTEM_MAX_CHARS:
+        return False
+    return bool(_SYSTEM_EVENT_RE.search(body))
+
 
 def _open_group(page, title: str) -> bool:
     """Click the sidebar row for ``title``. Trusted click — see _click_text_option."""
@@ -1703,8 +1753,49 @@ def _open_group(page, title: str) -> bool:
     return False
 
 
-def _scrape_rows(page, limit: int) -> dict[str, Any]:
-    """Extract the last ``limit`` message rows, reporting which selector worked."""
+def _scroll_pane_up(page, px: int = 1200) -> bool:
+    """Scroll the message list up to render older rows.
+
+    The list is virtualised: only what is near the viewport exists in the DOM. So
+    when the visible tail is all "X left the chat" there is no message to find
+    without scrolling — which is exactly the case that returned a leave notice as
+    the "latest message".
+    """
+    try:
+        return bool(page.evaluate(
+            """([sels, px]) => {
+                const cands = [];
+                for (const s of sels) {
+                    for (const el of document.querySelectorAll(s)) cands.push(el);
+                }
+                // Also consider any ancestor that actually scrolls, since the
+                // scrollable node is often a wrapper, not the labelled pane.
+                document.querySelectorAll('div').forEach(el => {
+                    if (el.scrollHeight > el.clientHeight + 200
+                        && el.clientHeight > 200) cands.push(el);
+                });
+                for (const el of cands) {
+                    if (el.scrollHeight > el.clientHeight + 50) {
+                        const before = el.scrollTop;
+                        el.scrollTop = Math.max(0, before - px);
+                        if (el.scrollTop !== before) return true;
+                    }
+                }
+                return false;
+            }""",
+            [_MSG_PANE_SELS, int(px)],
+        ))
+    except Exception as err:  # noqa: BLE001
+        print(f"[teams] scroll up failed: {err!r}", flush=True)
+        return False
+
+
+def _scrape_rows(page, scan: int) -> dict[str, Any]:
+    """Extract the last ``scan`` rows verbatim, reporting which selector worked.
+
+    Deliberately returns everything including system events — filtering happens
+    in Python where it is testable, and the counts tell us what was dropped.
+    """
     return page.evaluate(
         """([sels, limit]) => {
             const out = {matched: null, counts: {}, rows: []};
@@ -1729,6 +1820,12 @@ def _scrape_rows(page, limit: int) -> dict[str, Any]:
                                  || pick('[itemprop=name]') || '',
                             time: (tEl ? (tEl.getAttribute('datetime')
                                           || tEl.innerText || '') : '').trim(),
+                            // The body alone, when Teams exposes it as its own
+                            // node. This is what gets emailed, so the author name
+                            // and timestamp must not be glued onto the front.
+                            body: pick("[data-tid='message-body']")
+                               || pick("[data-tid='messageBodyContent']")
+                               || pick('.fui-ChatMessage__body') || '',
                             text: (el.innerText || '').trim(),
                         });
                     }
@@ -1736,8 +1833,54 @@ def _scrape_rows(page, limit: int) -> dict[str, Any]:
             }
             return out;
         }""",
-        [_MSG_ROW_SELS, int(limit)],
+        [_MSG_ROW_SELS, int(scan)],
     ) or {}
+
+
+def _strip_meta(text: str, author: str, when: str) -> str:
+    """Drop a leading author/timestamp line from a row's innerText.
+
+    Teams concatenates the author and time into the row text ("Justin9:49\\nSD-…"),
+    and that prefix would otherwise be carried into the generated email.
+    """
+    lines = (text or "").splitlines()
+    author = (author or "").strip()
+    when = (when or "").strip()
+    if not lines or not (author or when):
+        return (text or "").strip()
+    head = lines[0].strip()
+    # Only strip when the first line is *nothing but* metadata — never touch a
+    # line that also carries notice content.
+    residue = head
+    for piece in (author, when):
+        if piece:
+            residue = residue.replace(piece, "")
+    if head != residue and not re.sub(r"[\s:,\-–|]", "", residue):
+        return "\n".join(lines[1:]).strip()
+    return (text or "").strip()
+
+
+def _pick_messages(rows: list[dict[str, Any]], limit: int) -> dict[str, Any]:
+    """Dedupe each row's text, drop system events, return the newest ``limit``."""
+    kept: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    for row in rows or []:
+        row = dict(row)
+        body = _dedupe_lines(str(row.get("body") or ""))
+        if body:
+            row["text"] = body
+        else:
+            row["text"] = _strip_meta(
+                _dedupe_lines(str(row.get("text") or "")),
+                str(row.get("author") or ""), str(row.get("time") or ""),
+            )
+        if _looks_system(row["text"]):
+            first = (row["text"].splitlines() or [""])[0]
+            skipped.append(first[:60])
+            continue
+        kept.append(row)
+    return {"messages": kept[-limit:] if limit > 0 else kept,
+            "skipped_system": skipped, "scanned": len(rows or [])}
 
 
 def read_latest_messages(*, group: str | None = None, limit: int = 3,
@@ -1778,14 +1921,41 @@ def read_latest_messages(*, group: str | None = None, limit: int = 3,
                 res["shot"] = _shot(page, "read_no_group")
                 return res
 
-            scraped = _scrape_rows(page, limit)
+            # Scan well past `limit`: the newest rows are often system events, so
+            # a window of exactly `limit` can contain no real message at all.
+            scan = max(30, limit * 10)
+            scraped = _scrape_rows(page, scan)
+            picked = _pick_messages(scraped.get("rows") or [], limit)
+
+            # Still nothing but "X left the chat"? Scroll up for older rows —
+            # virtualisation means they are not in the DOM until we do.
+            for attempt in range(1, 4):
+                if picked["messages"]:
+                    break
+                if not _scroll_pane_up(page):
+                    print("[teams] nothing scrollable — cannot reach older rows",
+                          flush=True)
+                    break
+                print(f"[teams] only system events so far; scrolled up "
+                      f"({attempt}/3)", flush=True)
+                page.wait_for_timeout(2500)
+                scraped = _scrape_rows(page, scan)
+                picked = _pick_messages(scraped.get("rows") or [], limit)
+
             res["matched"] = scraped.get("matched")
             res["counts"] = scraped.get("counts") or {}
-            res["messages"] = scraped.get("rows") or []
+            res["messages"] = picked["messages"]
+            res["skipped_system"] = picked["skipped_system"]
+            res["scanned"] = picked["scanned"]
             res["ok"] = bool(res["messages"])
             res["shot"] = _shot(page, "read_latest")
             if not res["ok"]:
-                res["error"] = "opened the chat but matched no message rows"
+                res["error"] = (
+                    f"scanned {picked['scanned']} row(s); all were system events "
+                    f"or empty ({len(picked['skipped_system'])} skipped)"
+                    if picked["skipped_system"]
+                    else "opened the chat but matched no message rows"
+                )
         except Exception as err:  # noqa: BLE001
             res["error"] = repr(err)
             try:
@@ -1809,7 +1979,13 @@ def _fmt_messages(res: dict) -> str:
                 f"• Reason: {res.get('error') or 'unknown'}"
                 + (f"\n• Selector counts: {counts}" if counts else ""))
     lines = [f"📥 Latest in Teams group\n• Group: {res.get('group')}",
-             f"• Matched selector: {res.get('matched')}", ""]
+             f"• Matched selector: {res.get('matched')}"]
+    skipped = res.get("skipped_system") or []
+    if skipped:
+        # Say what was passed over, so a surprising "latest" is explainable.
+        lines.append(f"• Skipped {len(skipped)} system event(s): "
+                     + "; ".join(skipped[:3]))
+    lines.append("")
     for i, msg in enumerate(res["messages"], 1):
         body = (msg.get("text") or "").strip()
         if len(body) > 1500:
