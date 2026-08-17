@@ -126,7 +126,94 @@ def _creds() -> tuple[str, str]:
             "TEAMS_EMAIL / TEAMS_PASSWORD not set in .env — add them on the "
             "server (.env is gitignored; never commit the password)."
         )
+
+    # A .env written on Windows and copied to the server leaves a trailing CR on
+    # every value. Microsoft then rejects the password as wrong, which looks
+    # exactly like a genuinely wrong password. A CR/LF is never part of a real
+    # password, so strip it — but say so, because it means the .env needs fixing.
+    cleaned = password.replace("\r", "").replace("\n", "")
+    if cleaned != password:
+        print("[teams] WARNING: stripped CR/LF from TEAMS_PASSWORD — .env has "
+              "Windows line endings (run: dos2unix .env)", flush=True)
+        password = cleaned
+    # Not stripped: a space could in principle be part of the password, so this
+    # is flagged rather than silently changed.
+    if password != password.strip():
+        print("[teams] WARNING: TEAMS_PASSWORD has leading/trailing whitespace — "
+              "if that is not deliberate, it is why the password is rejected",
+              flush=True)
     return email, password
+
+
+def _fingerprint(val: str) -> str:
+    """Identify a secret without revealing it: length, short hash, odd characters."""
+    import hashlib
+
+    if val == "":
+        return "EMPTY"
+    flags = []
+    if val != val.lstrip():
+        flags.append("LEADING-SPACE")
+    if val != val.rstrip():
+        flags.append("TRAILING-SPACE")
+    if "\r" in val:
+        flags.append("HAS-CR")
+    if "\n" in val:
+        flags.append("HAS-LF")
+    if "\t" in val:
+        flags.append("HAS-TAB")
+    if len(val) > 1 and val[0] == val[-1] and val[0] in "\"'":
+        flags.append("WRAPPED-IN-QUOTES")
+    if "#" in val:
+        flags.append("HAS-HASH(inline comment?)")
+    return (f"len={len(val)} sha8={hashlib.sha256(val.encode()).hexdigest()[:8]}"
+            + ("  ⚠ " + " ".join(flags) if flags else ""))
+
+
+def check_env() -> int:
+    """Print a safe fingerprint of the credentials and where they came from.
+
+    Answers "why is my correct password rejected?" without printing the secret.
+    Two things it catches that nothing else does: stray characters picked up from
+    the .env line, and a value in the real environment shadowing the .env one —
+    ``load_dotenv`` does not override variables already in ``os.environ``.
+    """
+    print(f".env path : {_ENV_PATH}  "
+          f"({'exists' if _ENV_PATH.exists() else 'MISSING'})")
+
+    raw: dict[str, str] = {}
+    try:
+        for line in _ENV_PATH.read_text(encoding="utf-8", errors="replace").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, val = stripped.split("=", 1)
+            if key.strip() in ("TEAMS_EMAIL", "TEAMS_PASSWORD"):
+                raw[key.strip()] = val
+    except Exception as err:
+        print(f"  .env unreadable: {err!r}")
+
+    for key in ("TEAMS_EMAIL", "TEAMS_PASSWORD"):
+        effective = os.getenv(key) or ""
+        print(f"\n{key}")
+        print(f"  effective : {_fingerprint(effective)}")
+        if key not in raw:
+            print("  .env line : NOT FOUND")
+            continue
+        print(f"  .env line : {_fingerprint(raw[key])}")
+        if raw[key].strip().strip("\"'") != effective:
+            print("  ⚠ the effective value does NOT match the .env line — "
+                  "something in the real environment is shadowing it "
+                  "(load_dotenv never overrides os.environ)")
+
+    email = os.getenv("TEAMS_EMAIL") or ""
+    if email:
+        print(f"\nEmail (not secret): {email}")
+    print("\nCount the characters of the password you believe is correct and "
+          "compare it to len= above. A mismatch means .env picked up a stray "
+          "character; an exact match means the value is fine and the account "
+          "itself is rejecting it.")
+    return 0
 
 
 def _login_timeout_s() -> int:
@@ -1107,11 +1194,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--login", action="store_true", help="sign in and save the profile")
     ap.add_argument("--check", action="store_true", help="is the saved profile still signed in?")
     ap.add_argument("--status", action="store_true", help="print the status summary")
+    ap.add_argument("--check-env", action="store_true",
+                    help="fingerprint the .env credentials (no secrets printed)")
     ap.add_argument("--headed", action="store_true", help="visible browser (local debug)")
     ap.add_argument("--report-chat", default=None,
                     help="Lark chat_id to send the result + screenshot to")
     args = ap.parse_args(argv)
 
+    if args.check_env:
+        return check_env()
     if args.status:
         print("\n".join(status_lines()))
         return 0
