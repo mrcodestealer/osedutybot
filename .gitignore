@@ -92,3 +92,9 @@ teamswatch_profile/
 teamswatch_profile.lock
 teamswatch_shots/
 teamswatch_state.json
+teamswatch_frames.jsonl
+teamswatch_chats.json
+
+# ---- EVO maintenance detector (ledger: what was seen / emailed / cancelled) ----
+detectevomaintenance.json
+detectevomaintenance.json.tmp

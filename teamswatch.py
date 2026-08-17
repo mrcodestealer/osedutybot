@@ -43,6 +43,7 @@ import contextlib
 import json
 import mimetypes
 import os
+import re
 import sys
 import threading
 import time
@@ -1188,6 +1189,170 @@ def check_session(*, headless: bool = True) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Phase-2 discovery: what does the wire actually look like?
+# ---------------------------------------------------------------------------
+FRAMES_PATH = _ROOT_DIR / "teamswatch_frames.jsonl"
+CHATS_PATH = _ROOT_DIR / "teamswatch_chats.json"
+
+# Frames are recorded whole but capped: a single Teams frame can carry an entire
+# conversation backfill and would otherwise blow up the log.
+_FRAME_CHARS_MAX = 20000
+_FRAMES_MAX = 4000
+
+# Keys that suggest a frame carries a chat message rather than presence/typing
+# noise. Used only to summarise the dump, never to filter what gets written.
+_MSG_HINT = re.compile(
+    r"(?i)\"messagetype\"|newmessage|\"content\"\s*:|clientmessageid|imdisplayname"
+)
+
+
+def dump_frames(*, seconds: int = 300, headless: bool = True) -> dict:
+    """Record websocket frames from a live Teams session to teamswatch_frames.jsonl.
+
+    Teams pushes new messages over a long-lived socket (trouter) — that is what
+    drives unread badges and toast previews, so the frames carry sender and body.
+    Reading them is what lets the watcher see messages WITHOUT opening the chat,
+    which keeps everything unread in Teams.
+
+    The frame schema is not documented and changes, so phase 2's parser is built
+    against a real capture rather than a guess. Somebody must post in the watched
+    group while this runs, or there will be no message frame to learn from.
+    """
+    from playwright.sync_api import sync_playwright
+
+    stats: dict[str, Any] = {"sockets": [], "frames": 0, "msg_like": 0,
+                             "path": str(FRAMES_PATH), "loaded": False}
+    with _profile_lock("dump-frames"), sync_playwright() as p:
+        ctx, page = _open(p, headless=headless)
+        fh = FRAMES_PATH.open("w", encoding="utf-8")
+
+        def _write(kind: str, url: str, payload: Any) -> None:
+            if stats["frames"] >= _FRAMES_MAX:
+                return
+            if isinstance(payload, (bytes, bytearray)):
+                body = payload.decode("utf-8", errors="replace")
+                binary = True
+            else:
+                body = str(payload)
+                binary = False
+            stats["frames"] += 1
+            if _MSG_HINT.search(body):
+                stats["msg_like"] += 1
+            try:
+                fh.write(json.dumps({
+                    "at": _now_str(),
+                    "kind": kind,
+                    "url": url[:200],
+                    "binary": binary,
+                    "chars": len(body),
+                    "payload": body[:_FRAME_CHARS_MAX],
+                }, ensure_ascii=False) + "\n")
+                fh.flush()
+            except Exception as err:  # noqa: BLE001
+                print(f"[teams] frame write failed: {err!r}", flush=True)
+
+        def _on_ws(ws) -> None:
+            stats["sockets"].append(ws.url[:200])
+            print(f"[teams] websocket opened: {ws.url[:130]}", flush=True)
+            ws.on("framereceived", lambda pl: _write("recv", ws.url, pl))
+            ws.on("framesent", lambda pl: _write("sent", ws.url, pl))
+
+        page.on("websocket", _on_ws)
+        try:
+            page.goto(TEAMS_URL, wait_until="domcontentloaded", timeout=60000)
+            deadline = time.monotonic() + max(60, int(os.getenv("TEAMS_BOOT_WAIT", "90")))
+            while time.monotonic() < deadline:
+                if _stage_of(page) == "teams_loaded":
+                    stats["loaded"] = True
+                    break
+                page.wait_for_timeout(2000)
+            if not stats["loaded"]:
+                print("[teams] never reached teams_loaded — capture may be empty",
+                      flush=True)
+            print(f"[teams] recording frames for {seconds}s — POST IN THE WATCHED "
+                  f"GROUP NOW so a real message frame is captured", flush=True)
+            end = time.monotonic() + seconds
+            while time.monotonic() < end:
+                page.wait_for_timeout(2000)
+            _shot(page, "dump_frames_end")
+        finally:
+            try:
+                fh.close()
+            except Exception:
+                pass
+            try:
+                ctx.close()
+            except Exception:
+                pass
+
+    print(f"[teams] {stats['frames']} frames ({stats['msg_like']} look message-like) "
+          f"-> {FRAMES_PATH}", flush=True)
+    return stats
+
+
+def list_chats(*, headless: bool = True) -> dict:
+    """Dump the sidebar's conversation titles to teamswatch_chats.json.
+
+    Phase 2 should pin the watched group by conversation id, not by title — a
+    rename would silently stop detection. This is how we learn both.
+    """
+    from playwright.sync_api import sync_playwright
+
+    out: dict[str, Any] = {"titles": [], "loaded": False, "path": str(CHATS_PATH)}
+    with _profile_lock("list-chats"), sync_playwright() as p:
+        ctx, page = _open(p, headless=headless)
+        try:
+            page.goto(TEAMS_URL, wait_until="domcontentloaded", timeout=60000)
+            deadline = time.monotonic() + max(60, int(os.getenv("TEAMS_BOOT_WAIT", "90")))
+            while time.monotonic() < deadline:
+                if _stage_of(page) == "teams_loaded":
+                    out["loaded"] = True
+                    break
+                page.wait_for_timeout(2000)
+            page.wait_for_timeout(6000)
+            # Cast wide: report every plausible chat row with whatever id-ish
+            # attributes it carries, rather than betting on one selector.
+            out["titles"] = page.evaluate(
+                """() => {
+                    const rows = new Map();
+                    const sels = ["[data-tid='chat-list-item']",
+                                  "[data-tid^='chat-list-item']",
+                                  "[role='treeitem']", "[role='listitem']"];
+                    for (const s of sels) {
+                        for (const el of document.querySelectorAll(s)) {
+                            const t = (el.innerText || '').trim().split('\\n')[0];
+                            if (!t) continue;
+                            if (!rows.has(t)) rows.set(t, {
+                                title: t,
+                                sel: s,
+                                id: el.getAttribute('data-tid')
+                                    || el.getAttribute('id')
+                                    || el.getAttribute('aria-labelledby') || '',
+                            });
+                        }
+                    }
+                    return [...rows.values()];
+                }"""
+            ) or []
+            _shot(page, "list_chats")
+        finally:
+            try:
+                ctx.close()
+            except Exception:
+                pass
+
+    try:
+        CHATS_PATH.write_text(json.dumps(out["titles"], ensure_ascii=False, indent=2),
+                              encoding="utf-8")
+    except Exception as err:  # noqa: BLE001
+        print(f"[teams] chat list write failed: {err!r}", flush=True)
+    print(f"[teams] {len(out['titles'])} chat rows -> {CHATS_PATH}", flush=True)
+    for row in out["titles"]:
+        print(f"   - {row.get('title')}", flush=True)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # /teamstatus
 # ---------------------------------------------------------------------------
 def _profile_state() -> str:
@@ -1250,7 +1415,17 @@ def status_lines() -> list[str]:
             "• IDLE means no login has completed yet — nothing is running, so "
             "waiting will not change this. Run `python teamswatch.py --login`."
         )
-    lines.append("• Phase: login only — message capture not built yet")
+    lines.append("• Phase: login done; websocket capture pending real frames")
+
+    # The EVO detector is a separate module but the same operational question, so
+    # /teamstatus reports both rather than making anyone run two commands.
+    try:
+        import detectevomaintenance as _evom
+
+        lines.append("")
+        lines.extend(_evom.status_lines())
+    except Exception as err:  # noqa: BLE001
+        lines.append(f"• EVO detector: unavailable ({err!r})")
     return lines
 
 
@@ -1299,6 +1474,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--status", action="store_true", help="print the status summary")
     ap.add_argument("--check-env", action="store_true",
                     help="fingerprint the .env credentials (no secrets printed)")
+    ap.add_argument("--list-chats", action="store_true",
+                    help="dump sidebar conversation titles to teamswatch_chats.json")
+    ap.add_argument("--dump-frames", action="store_true",
+                    help="record websocket frames to teamswatch_frames.jsonl (phase-2 recon)")
+    ap.add_argument("--seconds", type=int, default=300,
+                    help="how long --dump-frames records for (default 300)")
     ap.add_argument("--headed", action="store_true", help="visible browser (local debug)")
     ap.add_argument("--report-chat", default=None,
                     help="Lark chat_id to send the result + screenshot to")
@@ -1306,6 +1487,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.check_env:
         return check_env()
+    if args.list_chats:
+        res = list_chats(headless=not args.headed)
+        return 0 if res.get("titles") else 1
+    if args.dump_frames:
+        res = dump_frames(seconds=args.seconds, headless=not args.headed)
+        print(json.dumps({k: v for k, v in res.items() if k != "sockets"}, indent=2))
+        return 0 if res.get("frames") else 1
     if args.status:
         print("\n".join(status_lines()))
         return 0

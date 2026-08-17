@@ -4997,6 +4997,25 @@ def lark_webhook():
                 if eid_ca:
                     _remember_processed_message_id(eid_ca)
                 return _lark_http_card_callback_response(egs_sync)
+            # Generate Email / Cancel on the "detected new EVO maintenance
+            # message" card that the Teams watcher posts. Synchronous like the
+            # /egs pair above: it answers with a toast immediately and does the
+            # /m run in a thread.
+            try:
+                import detectevomaintenance as _evom_mod
+
+                evom_sync = _evom_mod.handle_card_callback(
+                    parsed_sync,
+                    ev_sync,
+                    chat_id_ca or "",
+                )
+            except Exception as _evom_err:  # noqa: BLE001
+                print(f"❌ evoteams card callback: {_evom_err!r}", flush=True)
+                evom_sync = None
+            if evom_sync is not None:
+                if eid_ca:
+                    _remember_processed_message_id(eid_ca)
+                return _lark_http_card_callback_response(evom_sync)
         # Never wait on ``processed_lock`` in this thread — Lark times out ~3s; lock contention → ``code: undefined``.
         def _run_card_callback_worker() -> None:
             if eid_ca and _remember_processed_message_id(eid_ca):
