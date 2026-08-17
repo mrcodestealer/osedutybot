@@ -352,6 +352,91 @@ def send_text(chat_id: str, text: str) -> dict:
     ).json()
 
 
+# The house budget for one Lark message. Not invented here: findmachine.py has
+# `_MAX_CHARS_PER_MESSAGE = 3500` with a `- 300` line reserve, and osmwatch.py
+# packs blocks to the same 3500 — and both SPLIT into successive messages rather
+# than truncating, which is exactly the behaviour needed here.
+_LARK_TEXT_MAX = int(os.getenv("TEAMS_LARK_TEXT_MAX", "3500"))
+_LARK_TEXT_RESERVE = 300
+
+# A batch notice is separated by a run of equals signs on its own line — the same
+# separator maintenance.split_evo_sd_batch_blocks keys on (r"\n={10,}\s*\n").
+# Breaking THERE keeps every part a whole notice.
+_EQ_SEP_RE = re.compile(r"^={10,}\s*$")
+
+
+def _split_for_lark(text: str, *, limit: int | None = None) -> list[str]:
+    """Split ``text`` into Lark-sized parts, losing nothing.
+
+    Preference order for a break: an equals-run separator line, then a blank
+    line, then any line boundary, then — only for a single line longer than the
+    budget — a hard character slice. Splitting mid-line is the last resort
+    because that is precisely the damage the old 1500-char cap did, severing a
+    notice at "维护时间：2".
+    """
+    budget = max(500, (limit or _LARK_TEXT_MAX) - _LARK_TEXT_RESERVE)
+    src = text or ""
+    if len(src) <= budget:
+        return [src] if src else []
+
+    # Explode any over-long single line up front, so the packer below never has
+    # to make that decision.
+    units: list[str] = []
+    for line in src.split("\n"):
+        while len(line) > budget:
+            units.append(line[:budget])
+            line = line[budget:]
+        units.append(line)
+
+    parts: list[str] = []
+    cur: list[str] = []
+    cur_len = 0
+    last_sep = -1    # index in `cur` just past the newest equals-run line
+    last_blank = -1  # index in `cur` just past the newest blank line
+    for unit in units:
+        add = len(unit) + (1 if cur else 0)
+        if cur and cur_len + add > budget:
+            cut = (last_sep if last_sep > 0 else
+                   last_blank if last_blank > 0 else len(cur))
+            parts.append("\n".join(cur[:cut]).rstrip())
+            cur = cur[cut:]
+            cur_len = sum(len(x) + 1 for x in cur)
+            last_sep = last_blank = -1
+        cur.append(unit)
+        cur_len += add
+        if _EQ_SEP_RE.match(unit):
+            last_sep = len(cur)
+        elif not unit.strip():
+            last_blank = len(cur)
+    if cur:
+        parts.append("\n".join(cur).rstrip())
+    return [p for p in parts if p]
+
+
+def send_text_parts(chat_id: str, text: str, *, label: str = "") -> list[dict]:
+    """Send ``text`` as one or more Lark messages, checking every response.
+
+    Lark reports an oversized or invalid body as HTTP 200 with ``code != 0`` and
+    raises nothing, so an unchecked send fails completely silently — no group
+    message and no journal line. alert_login_failed already checks ``code``;
+    this follows it.
+    """
+    parts = _split_for_lark(text) or [""]
+    total = len(parts)
+    out: list[dict] = []
+    for n, part in enumerate(parts, 1):
+        # A single part is posted verbatim, so the common case (one notice, one
+        # message) reads exactly as before — just no longer truncated.
+        body = part if total == 1 else (
+            f"{label or 'Latest in Teams group'} — part {n}/{total}\n{part}"
+        )
+        resp = send_text(chat_id, body)
+        if not isinstance(resp, dict) or resp.get("code") != 0:
+            print(f"[teams] part {n}/{total} send failed: {resp}", flush=True)
+        out.append(resp)
+    return out
+
+
 def upload_image_lark(image_path: str) -> str | None:
     token = _tenant_token()
     mime, _ = mimetypes.guess_type(image_path)
@@ -2532,10 +2617,38 @@ def _scrape_rows(page, scan: int) -> dict[str, Any]:
                     out.matched = s;
                     // Virtualised list: the DOM tail is the newest.
                     for (const el of els.slice(-limit)) {
+                        // MUST be the first statement: `byId` below closes over
+                        // `mid`, and a `const` is in its temporal dead zone until
+                        // declared — declaring it later throws ReferenceError,
+                        // which escapes page.evaluate and turns /latestevo into
+                        // the "could not read" branch instead of a message.
+                        const mid = el.getAttribute('data-mid') || '';
                         const pick = (q) => {
                             const n = el.querySelector(q);
                             return n ? (n.innerText || '').trim() : '';
                         };
+                        // Resolve a node by the id Teams names in the row's own
+                        // aria-labelledby ("author-<mid> … timestamp-<mid>").
+                        // Needed because querySelector is descendant-only and the
+                        // author span is a SIBLING subtree of this row, not a
+                        // child — which is why the author printed empty. Guarded
+                        // by pane.contains() to keep this function's hard "never
+                        // read outside the conversation pane" invariant; the same
+                        // document-lookup-plus-guard idiom is used in
+                        // _scroll_pane_up.
+                        const byId = (prefix) => {
+                            if (!mid) return null;
+                            const n = document.getElementById(prefix + mid);
+                            return (n && pane.contains(n)) ? n : null;
+                        };
+                        // Grouped-message wrapper, as a second chance only. NOT
+                        // first: wrap.querySelector returns the FIRST match in the
+                        // subtree, so if Teams ever groups consecutive messages it
+                        // would silently stamp a NEIGHBOUR's name on this notice.
+                        // The id embeds this row's own data-mid, so it cannot
+                        // mis-attribute.
+                        const wrap = (el.closest && el.closest('.fui-ChatMessage'))
+                                     || el.parentElement || el;
                         // The body alone. This is what gets emailed, so the author
                         // name, timestamp, "Translate" button and reaction summary
                         // must not be glued onto the front or the back.
@@ -2544,8 +2657,17 @@ def _scrape_rows(page, scan: int) -> dict[str, Any]:
                             body = pick(q);
                             if (body) break;
                         }
-                        const tEl = el.querySelector('time');
-                        const mid = el.getAttribute('data-mid') || '';
+                        const aEl = byId('author-')
+                            || wrap.querySelector("[data-tid='message-author-name']")
+                            || wrap.querySelector('[itemprop=name]');
+                        const tEl = byId('timestamp-')
+                            || el.querySelector('time')
+                            || wrap.querySelector('time');
+                        // innerText is layout-aware and returns '' for a node that
+                        // is not rendered — this file has already been burned by
+                        // that in _open_chat_title — so fall back to textContent.
+                        const txt = (n) => n
+                            ? ((n.innerText || n.textContent || '').trim()) : '';
                         out.rows.push({
                             // data-mid is Teams' own message id — a stable key for
                             // "have we already handled this message?", which a text
@@ -2553,10 +2675,17 @@ def _scrape_rows(page, scan: int) -> dict[str, Any]:
                             mid: mid,
                             id: mid || el.getAttribute('data-tid')
                                 || el.getAttribute('id') || '',
-                            author: pick("[data-tid='message-author-name']")
-                                 || pick('[itemprop=name]') || '',
-                            time: (tEl ? (tEl.getAttribute('datetime')
-                                          || tEl.innerText || '') : '').trim(),
+                            author: txt(aEl),
+                            // Which signal answered, so the next Teams rename is
+                            // diagnosable from a single /latestevo run rather than
+                            // from another round of DOM guessing.
+                            author_src: aEl ? (byId('author-') ? 'id' : 'wrap') : 'none',
+                            time: (tEl ? (tEl.getAttribute('datetime') || '').trim()
+                                       : ''),
+                            // What the reader actually sees in Teams ("6:19 AM").
+                            time_text: txt(tEl) || (tEl
+                                ? (tEl.getAttribute('title') || '').trim() : ''),
+                            time_src: tEl ? (byId('timestamp-') ? 'id' : 'dom') : 'none',
                             // Teams flags the newest rendered row; useful to prove
                             // we scraped the tail and not a scrolled-back window.
                             last: el.getAttribute('data-last-visible') === 'true',
@@ -2751,16 +2880,36 @@ def _fmt_messages(res: dict) -> str:
                      + "; ".join(skipped[:3]))
     lines.append("")
     for i, msg in enumerate(res["messages"], 1):
-        body = (msg.get("text") or "").strip()
-        if len(body) > 1500:
-            body = body[:1500] + f"\n… (+{len(msg['text']) - 1500} chars)"
-        head = " | ".join(x for x in (msg.get("author"), msg.get("time"),
-                                     # Teams' own message id — the key the
-                                     # detection ledger dedupes on.
-                                     f"id {msg['mid']}" if msg.get("mid") else "")
-                          if x)
-        lines.append(f"--- {i}/{len(res['messages'])}"
-                     + (f"  ({head})" if head else "") + f" ---\n{body}")
+        # Display-only tidy. The notice's <p>&nbsp;</p> spacer paragraphs come
+        # through as blank lines (_dedupe_lines rstrips each line and Python
+        # treats U+00A0 as whitespace), which is what produced the big gaps in
+        # the posted message. Collapse runs to ONE blank line — never to zero:
+        # maintenance.py's table-block walker uses a single blank as its block
+        # terminator, and the ={10,} batch separator must stay on its own line.
+        #
+        # This rewrites a LOCAL only. It must never touch msg["text"], because
+        # that text is the future detection input and detectevomaintenance keys
+        # its ledger on sha1(text) — re-keying it would mean duplicate cards and
+        # a duplicate maintenance email on one tap.
+        body = re.sub(r"\n{3,}", "\n\n", (msg.get("text") or "").strip())
+        # No length cap. A 1500-char cap here was silently dropping 5251 chars of
+        # a real notice (severing it mid-value at "维护时间：2"); oversize is now
+        # handled by splitting across messages in send_text_parts, which loses
+        # nothing. '—' rather than omission for a field that did not resolve, so
+        # a Teams rename shows up as a visible gap instead of a silent one.
+        when = (msg.get("time_text") or msg.get("time") or "").strip()
+        head_bits = [msg.get("author") or "—", when or "—"]
+        if msg.get("mid"):
+            # Teams' own message id — the key the detection ledger dedupes on.
+            head_bits.append(f"id {msg['mid']}")
+        if msg.get("last") is False:
+            # Not the newest RENDERED row. Legitimate whenever _pick_messages
+            # correctly dropped a newer system event, so state it as a fact.
+            head_bits.append("not tail row")
+        head = " | ".join(head_bits) + (
+            f" | meta {msg.get('author_src') or '?'}/{msg.get('time_src') or '?'}"
+        )
+        lines.append(f"--- {i}/{len(res['messages'])}  ({head}) ---\n{body}")
     return "\n".join(lines)
 
 
@@ -2769,7 +2918,9 @@ def send_latest_to_lark(chat_id: str, *, group: str | None = None,
     """``/latestevo`` — read the group and post what we found back to ``chat_id``."""
     res = read_latest_messages(group=group, limit=limit)
     try:
-        send_text(chat_id, _fmt_messages(res))
+        # Parts, not a truncation: a real EVO batch notice runs to thousands of
+        # characters and /latestevo N concatenates up to ten of them.
+        send_text_parts(chat_id, _fmt_messages(res), label="📥 /latestevo")
     except Exception as err:  # noqa: BLE001
         print(f"[teams] /latestevo text send failed: {err!r}", flush=True)
     # The screenshot is the fastest way to see WHY a read came back empty.
@@ -2911,8 +3062,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--read-latest", action="store_true",
                     help="open the watched group and print its latest messages")
     ap.add_argument("--group", default=None, help="override the group title to read")
-    ap.add_argument("--limit", type=int, default=3,
-                    help="how many recent messages --read-latest returns")
+    # 1, matching /latestevo's own default (main.py clamps its argument to 1..10),
+    # so the CLI and the bot command answer the same question by default.
+    ap.add_argument("--limit", type=int, default=1,
+                    help="how many recent messages --read-latest returns (default 1)")
     ap.add_argument("--seconds", type=int, default=300,
                     help="max seconds --dump-frames records for (default 300)")
     ap.add_argument("--min-messages", type=int, default=1,
@@ -2942,7 +3095,8 @@ def main(argv: list[str] | None = None) -> int:
         print()
         print(_fmt_messages(res))
         if args.report_chat:
-            send_text(args.report_chat, _fmt_messages(res))
+            send_text_parts(args.report_chat, _fmt_messages(res),
+                            label="📥 /latestevo (cli)")
             send_shot(args.report_chat, res.get("shot"))
         return 0 if res.get("ok") else 1
     if args.dump_frames:
