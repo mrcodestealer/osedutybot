@@ -789,18 +789,38 @@ def check_session(*, headless: bool = True) -> dict:
 # ---------------------------------------------------------------------------
 # /teamstatus
 # ---------------------------------------------------------------------------
+def _profile_state() -> str:
+    """'missing' | 'empty' | 'present'.
+
+    The directory existing proves nothing: ``_open()`` mkdirs it before Chromium
+    starts, so a login that died at the password step still leaves one behind.
+    Chromium only writes ``Default/`` once it has really initialised a profile,
+    so that is the honest test.
+    """
+    if not PROFILE_DIR.exists():
+        return "missing"
+    return "present" if (PROFILE_DIR / "Default").is_dir() else "empty"
+
+
+_PROFILE_NOTE = {
+    "missing": "MISSING — run `python teamswatch.py --login`",
+    "empty": "EMPTY — a browser started but never finished signing in",
+    "present": "present (a profile exists; not proof it is still signed in)",
+}
+
+
 def status_lines() -> list[str]:
     snap = _snapshot()
     phase = snap["phase"]
     emoji = _PHASE_EMOJI.get(phase, "⚪")
     monitoring = phase == "monitoring"
+    prof = _profile_state()
 
     lines = [
         f"{emoji} Teams watcher: {'MONITORING' if monitoring else phase.upper()}",
         f"• Detail: {snap['detail']}",
         f"• Logged in as: {snap['account'] or '— not authorised —'}",
-        f"• Profile: {PROFILE_DIR.name} "
-        f"({'present' if PROFILE_DIR.exists() else 'MISSING'})",
+        f"• Profile: {PROFILE_DIR.name} ({_PROFILE_NOTE[prof]})",
     ]
     if snap["connected_at"]:
         lines.append(f"• Last confirmed: {snap['connected_at']}")
@@ -808,20 +828,30 @@ def status_lines() -> list[str]:
         lines.append(f"• Last stage: {snap['last_stage']}")
     if snap["last_error"]:
         lines.append(f"• Last error: {snap['last_error']}")
+
+    if phase == "idle":
+        # IDLE is not a "wait for it" state — nothing runs in the background.
+        lines.append(
+            "• IDLE means no login has completed yet — nothing is running, so "
+            "waiting will not change this. Run `python teamswatch.py --login`."
+        )
     lines.append("• Phase: login only — message capture not built yet")
     return lines
 
 
 def send_status_to_lark(chat_id: str) -> dict:
-    """/teamstatus — text summary, plus the latest screenshot when monitoring.
+    """/teamstatus — text summary, plus a fresh screenshot when signed in.
 
-    A stale PNG would be misleading, so when we think we're monitoring this
-    re-opens the profile and takes a *fresh* shot to prove the session is live.
+    Whenever a real profile exists this re-opens it and probes the live session,
+    rather than trusting the stored phase. Two reasons: a stale PNG or a stale
+    "monitoring" would both be misleading, and the stored phase is only written
+    when a --login/--check *finishes* — so a status read from a different
+    process (the bot vs. your shell) would otherwise report IDLE forever.
     """
-    monitoring = is_monitoring()
     shot = None
+    monitoring = is_monitoring()
 
-    if monitoring:
+    if _profile_state() == "present":
         try:
             res = check_session()
             monitoring = bool(res.get("ok"))
@@ -835,8 +865,9 @@ def send_status_to_lark(chat_id: str) -> dict:
     except Exception as err:
         print(f"[teams] status text send failed: {err!r}", flush=True)
 
-    if monitoring:
-        send_shot(chat_id, shot or _snapshot().get("last_shot"))
+    # Always send the shot when we have one: on failure it shows *where* the
+    # session died, which is the whole point of asking.
+    send_shot(chat_id, shot or _snapshot().get("last_shot"))
 
     return {"monitoring": monitoring, "screenshot": shot}
 
