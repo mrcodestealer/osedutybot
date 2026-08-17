@@ -541,19 +541,20 @@ def _error_text(page) -> str:
         return ""
 
 
-_PASSWORD_OPTION_JS = """
-    (doClick) => {
-        // A clickable "use your password" / "Password" choice, wherever MSA has
-        // hidden it this week: the passkey page's escape hatch, the "other ways
-        // to sign in" list, or a credential-picker row.
+_TEXT_OPTION_JS = """
+    ([includeRe, excludeRe, doClick]) => {
+        // Find a clickable choice by its visible label. MSA moves these between
+        // buttons, links and list rows between rollouts, so match on text rather
+        // than on structure.
+        const inc = new RegExp(includeRe, 'i');
+        const exc = excludeRe ? new RegExp(excludeRe, 'i') : null;
         const els = [...document.querySelectorAll(
             'button,a,[role=button],[role=listitem],[role=option],div[data-testid]')];
         for (const el of els) {
             const t = (el.innerText || '').trim();
             if (!t || t.length > 70) continue;
-            if (!/password/i.test(t)) continue;
-            // "Forgot your password" / "Create one" are not the way forward.
-            if (/forgot|reset|create|change/i.test(t)) continue;
+            if (!inc.test(t)) continue;
+            if (exc && exc.test(t)) continue;
             if (!(el.offsetParent || el.offsetWidth || el.offsetHeight)) continue;
             if (doClick) el.click();
             return t;
@@ -563,11 +564,32 @@ _PASSWORD_OPTION_JS = """
 """
 
 
-def _password_option(page, *, click: bool = False) -> str:
+def _text_option(page, include: str, *, exclude: str = "", click: bool = False) -> str:
     try:
-        return (page.evaluate(_PASSWORD_OPTION_JS, click) or "").strip()
+        return (page.evaluate(_TEXT_OPTION_JS, [include, exclude, click]) or "").strip()
     except Exception:
         return ""
+
+
+def _password_option(page, *, click: bool = False) -> str:
+    """The "use your password" / "Password" choice, wherever MSA hid it."""
+    # "Forgot your password" / "Create one" are not the way forward.
+    return _text_option(page, r"password",
+                        exclude=r"forgot|reset|create|change", click=click)
+
+
+def _other_ways_option(page, *, click: bool = False) -> str:
+    """The "Other ways to sign in" escape hatch on the send-a-code page.
+
+    Deliberately specific: that page's PRIMARY button is "Send code", which
+    would email a one-time code no unattended process can read. The only safe
+    control on it is this link.
+    """
+    return _text_option(
+        page,
+        r"other ways to sign in|sign in another way|more ways to sign in|other ways",
+        click=click,
+    )
 
 
 def _stage_of(page) -> str:
@@ -584,12 +606,22 @@ def _stage_of(page) -> str:
     if on_teams and _any_visible(page, _TEAMS_IN_SELS):
         return "teams_loaded"
 
+    # A visible password box is unambiguous whatever else the page shows, so it
+    # is settled before the marketing-page probe below — whose
+    # `button:has-text('Sign in')` ALSO matches the submit button on the real
+    # password form, which would otherwise be misread as the landing page and
+    # get its submit clicked with an empty password.
+    if _any_visible(page, _PASSWORD_SELS):
+        return "password"
+
     # --- the logged-out marketing page ---------------------------------------
     # teams.live.com/v2/ does NOT bounce to the login page when signed out; it
     # serves /gather, whose "Sign in" button is what makes MSAL mint a fresh
     # authorize URL. Checked before `teams_booting` or the landing page would be
     # mistaken for a still-painting app shell and the loop would spin to timeout.
-    if _any_visible(page, _LANDING_SIGNIN_SELS) and not _any_visible(page, _EMAIL_SELS):
+    # Gated on on_teams: the marketing page only ever comes from teams.live.com,
+    # never from login.live.com.
+    if on_teams and _any_visible(page, _LANDING_SIGNIN_SELS):
         return "landing"
 
     if on_teams and "login" not in url:
@@ -606,9 +638,17 @@ def _stage_of(page) -> str:
         return "passkey"
 
     # A password choice offered anywhere is always preferable to any prompt
-    # below, so take it before the 2FA checks claim the page.
-    if not _any_visible(page, _PASSWORD_SELS) and _password_option(page):
+    # below, so take it before the 2FA checks claim the page. (No need to re-test
+    # for a password box — that already returned above.)
+    if _password_option(page):
         return "use_password_option"
+
+    # "Get a code to sign in": MSA's passwordless-first page. No element on it
+    # mentions "password", so the check above cannot see a way forward — the
+    # route to the password form is the "Other ways to sign in" link. Its
+    # primary button is "Send code", which we must never press.
+    if _other_ways_option(page):
+        return "other_ways"
 
     # --- terminal: needs a human --------------------------------------------
     if _any_visible(page, _OTC_SELS):
@@ -630,10 +670,7 @@ def _stage_of(page) -> str:
             return stage
 
     # --- actionable steps ----------------------------------------------------
-    # Password before email: on the password step the email box is sometimes
-    # still in the DOM (read-only), and password is the more advanced state.
-    if _any_visible(page, _PASSWORD_SELS):
-        return "password"
+    # ("password" is settled near the top — it must beat the landing probe.)
     if _any_visible(page, _MSA_TILE_SELS):
         return "pick_personal"
     if _text_seen(page, "use your password", body):
@@ -672,7 +709,7 @@ def do_login(*, headless: bool = True, report_chat: str | None = None) -> dict:
     deadline = time.monotonic() + _login_timeout_s()
     result: dict[str, Any] = {"ok": False, "stage": "start", "reason": None, "shot": None}
     typed_email = typed_password = False
-    passkey_tries = 0
+    passkey_tries = other_ways_tries = 0
 
     with sync_playwright() as p:
         ctx, page = _open(p, headless=headless)
@@ -759,6 +796,21 @@ def do_login(*, headless: bool = True, report_chat: str | None = None) -> dict:
                 elif stage == "use_password_option":
                     label = _password_option(page, click=True)
                     print(f"[teams] chose password option: {label!r}", flush=True)
+                    page.wait_for_timeout(4000)
+                elif stage == "other_ways":
+                    other_ways_tries += 1
+                    if other_ways_tries > 3:
+                        result.update(
+                            ok=False, stage="no_password_option",
+                            reason="MSA offers only a emailed code — no password "
+                                   "option behind 'Other ways to sign in'. This "
+                                   "account is passwordless: turn that off at "
+                                   "account.live.com > Security > Advanced "
+                                   "security options.",
+                        )
+                        break
+                    label = _other_ways_option(page, click=True)
+                    print(f"[teams] opening sign-in options: {label!r}", flush=True)
                     page.wait_for_timeout(4000)
                 elif stage == "pick_personal":
                     # Custom domain registered as both work and personal: this
