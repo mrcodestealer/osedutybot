@@ -150,7 +150,21 @@ _state: dict[str, Any] = {
     "last_stage": None,
     "last_shot": None,
     "alerted": False,
+    # Written ONLY by do_login(). check_session() runs far more often (every
+    # /teamstatus), and without a separate slot its generic "not signed in"
+    # would overwrite the one message that says *why* the login failed —
+    # "2FA required", "password rejected" — which is the actionable part.
+    "last_login_ok": None,
+    "last_login_stage": None,
+    "last_login_reason": None,
+    "last_login_at": None,
 }
+
+_PERSIST_KEYS = (
+    "phase", "detail", "account", "connected_at", "last_error", "last_stage",
+    "last_shot", "last_login_ok", "last_login_stage", "last_login_reason",
+    "last_login_at",
+)
 
 _PHASE_EMOJI = {
     "idle": "⚪",
@@ -178,23 +192,10 @@ def is_monitoring() -> bool:
 
 def _persist() -> None:
     snap = _snapshot()
+    payload = {k: snap.get(k) for k in _PERSIST_KEYS}
+    payload["saved_at"] = _now_str()
     try:
-        _STATE_PATH.write_text(
-            json.dumps(
-                {
-                    "phase": snap["phase"],
-                    "detail": snap["detail"],
-                    "account": snap["account"],
-                    "connected_at": snap["connected_at"],
-                    "last_error": snap["last_error"],
-                    "last_stage": snap["last_stage"],
-                    "last_shot": snap["last_shot"],
-                    "saved_at": _now_str(),
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        _STATE_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except Exception as err:
         print(f"[teams] state persist failed: {err!r}", flush=True)
 
@@ -205,8 +206,7 @@ def _load_persisted() -> None:
     except Exception:
         return
     with _lock:
-        for key in ("phase", "detail", "account", "connected_at",
-                    "last_error", "last_stage", "last_shot"):
+        for key in _PERSIST_KEYS:
             if data.get(key) is not None:
                 _state[key] = data[key]
 
@@ -707,6 +707,10 @@ def do_login(*, headless: bool = True, report_chat: str | None = None) -> dict:
             except Exception:
                 pass
 
+    # Recorded before anything else can overwrite it — see _state's comment.
+    _set(last_login_ok=bool(result["ok"]), last_login_stage=result["stage"],
+         last_login_reason=result["reason"], last_login_at=_now_str())
+
     if result["ok"]:
         print(f"✅ Teams login OK — profile saved to {PROFILE_DIR}", flush=True)
         if report_chat:
@@ -828,6 +832,20 @@ def status_lines() -> list[str]:
         lines.append(f"• Last stage: {snap['last_stage']}")
     if snap["last_error"]:
         lines.append(f"• Last error: {snap['last_error']}")
+
+    # Kept distinct from the line above: this survives every /teamstatus probe.
+    if snap.get("last_login_at"):
+        mark = "✅" if snap.get("last_login_ok") else "❌"
+        lines.append(
+            f"• Last LOGIN attempt: {mark} {snap['last_login_at']} "
+            f"(stage: {snap.get('last_login_stage')})"
+        )
+        if not snap.get("last_login_ok") and snap.get("last_login_reason"):
+            lines.append(f"   ↳ {snap['last_login_reason']}")
+    else:
+        lines.append(
+            "• Last LOGIN attempt: none recorded — `--login` has not completed yet"
+        )
 
     if phase == "idle":
         # IDLE is not a "wait for it" state — nothing runs in the background.
