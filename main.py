@@ -6530,6 +6530,23 @@ def lark_webhook():
 
         threading.Thread(target=_run_osmwatch_shot, daemon=True).start()
         return _lark_im_done()
+    elif cmd == '/telegramstatus':
+        # Is the read-only Telegram group watcher still monitoring? Replies with a
+        # text summary, plus a PNG snapshot of the board when it IS monitoring.
+        def _run_telegram_status(chat_id_tg=chat_id):
+            try:
+                import telegramwatch as _tg_mod
+
+                _tg_mod.send_status_to_lark(chat_id_tg)
+            except Exception as _tg_err:
+                print(f"❌ telegramstatus: {_tg_err!r}", flush=True)
+                try:
+                    send_message(chat_id_tg, f"❌ /telegramstatus failed: {_tg_err}")
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run_telegram_status, daemon=True).start()
+        return _lark_im_done()
     elif cmd == '/encoder':
         # Look up encoder/TRTC info (MAIN/POOL/CCTV IPs) for one or more machines
         # from latestencoder.json (kept fresh by the osmwatch warm browser).
@@ -8320,6 +8337,12 @@ def _run_main_entry() -> int:
             _boot_ow.prewarm_osmwatch_on_startup()
         except Exception as _boot_ow_err:
             print(f"[osmwatch-warm] startup pre-warm skipped: {_boot_ow_err!r}", flush=True)
+        try:
+            import telegramwatch as _boot_tg
+
+            _boot_tg.start_monitor_on_startup()
+        except Exception as _boot_tg_err:
+            print(f"[telegram-watch] startup skipped: {_boot_tg_err!r}", flush=True)
         if _lark_ws_uses_persistent_connection():
             def _flask_bg() -> None:
                 app.run(host="127.0.0.1", port=port, debug=False, threaded=True, use_reloader=False)

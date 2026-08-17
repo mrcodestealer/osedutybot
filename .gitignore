@@ -81,3 +81,8 @@ miniconda.sh
 *.tar.xz
 wireguard-go-*/
 .pldt_prefix_state.json
+
+# ---- Telegram watcher (session file IS the credential) ----
+*.session
+*.session-journal
+telegramwatch_state.json
