@@ -1219,6 +1219,17 @@ _MSG_STRONG = re.compile(
     rf"|{_Q}messagetype{_Q}\s*:\s*{_Q}(?:RichText|Text)"
 )
 
+# HTTP endpoints that carry chat content. Teams fetches messages from the
+# regional messaging host (…msg.teams.microsoft.com/v1/users/ME/conversations/
+# {id}/messages) and long-polls trouter at /v4/f/…/poll.
+_HTTP_HINT = re.compile(
+    r"(?i)/v1/users/ME/conversations"
+    r"|/messages(?:\?|$|/)"
+    r"|/poll(?:\?|$)"
+    r"|msg\.teams\.microsoft\.com"
+    r"|/threads/"
+)
+
 
 def dump_frames(*, seconds: int = 300, min_messages: int = 1,
                 headless: bool = True) -> dict:
@@ -1236,7 +1247,8 @@ def dump_frames(*, seconds: int = 300, min_messages: int = 1,
     from playwright.sync_api import sync_playwright
 
     stats: dict[str, Any] = {"sockets": [], "frames": 0, "msg_like": 0,
-                             "messages": 0, "path": str(FRAMES_PATH), "loaded": False}
+                             "messages": 0, "http": 0,
+                             "path": str(FRAMES_PATH), "loaded": False}
     with _profile_lock("dump-frames"), sync_playwright() as p:
         ctx, page = _open(p, headless=headless)
         fh = FRAMES_PATH.open("w", encoding="utf-8")
@@ -1253,12 +1265,14 @@ def dump_frames(*, seconds: int = 300, min_messages: int = 1,
             stats["frames"] += 1
             if _MSG_HINT.search(body):
                 stats["msg_like"] += 1
-            if kind == "recv" and _MSG_STRONG.search(body):
+            if kind == "http":
+                stats["http"] += 1
+            if kind in ("recv", "http") and _MSG_STRONG.search(body):
                 stats["messages"] += 1
                 # Print immediately: waiting 5 minutes to find out whether the
                 # capture worked is what made this look hung.
-                print(f"[teams] ★ message frame #{stats['messages']} "
-                      f"({len(body)} chars)", flush=True)
+                print(f"[teams] ★ message payload #{stats['messages']} "
+                      f"via {kind.upper()} ({len(body)} chars)", flush=True)
             try:
                 fh.write(json.dumps({
                     "at": _now_str(),
@@ -1279,6 +1293,30 @@ def dump_frames(*, seconds: int = 300, min_messages: int = 1,
             ws.on("framesent", lambda pl: _write("sent", ws.url, pl))
 
         page.on("websocket", _on_ws)
+
+        def _on_response(resp) -> None:
+            """Capture message-bearing HTTP responses too.
+
+            Trouter frequently acts as a doorbell: it pushes a small "something
+            changed" notification and the client then GETs the actual message
+            over HTTPS. When that is what is happening, the websocket capture
+            alone stays empty no matter how long it runs.
+            """
+            url = resp.url
+            if not _HTTP_HINT.search(url):
+                return
+            try:
+                if resp.status >= 300:
+                    return
+                body = resp.text()
+            except Exception:
+                return  # non-text, already consumed, or still streaming
+            if not body:
+                return
+            if _MSG_STRONG.search(body) or _MSG_HINT.search(body):
+                _write("http", url, body)
+
+        page.on("response", _on_response)
         try:
             page.goto(TEAMS_URL, wait_until="domcontentloaded", timeout=60000)
             deadline = time.monotonic() + max(60, int(os.getenv("TEAMS_BOOT_WAIT", "90")))
@@ -1302,9 +1340,10 @@ def dump_frames(*, seconds: int = 300, min_messages: int = 1,
                 now = time.monotonic()
                 if now >= next_beat:
                     next_beat = now + 15
-                    print(f"[teams] {stats['frames']} frames | "
+                    print(f"[teams] {stats['frames']} frames "
+                          f"({stats['http']} http) | "
                           f"{stats['msg_like']} message-like | "
-                          f"{stats['messages']} ★ messages | "
+                          f"{stats['messages']} ★ | "
                           f"{int(end - now)}s left", flush=True)
                 # Grace period after the first real message so its follow-up
                 # frames (edits, receipts, the conversation update) land too.
@@ -1420,16 +1459,27 @@ def scan_frames(*, limit: int = 3) -> dict:
         print(f"   {count:6d}  {host}")
 
     if not strong:
-        print("\nNo strong message frames. Either nobody posted in a chat during "
-              "the capture, or Teams pushes messages in a shape these patterns "
-              "miss — the raw file still holds everything.")
-        return {"frames": total, "weak": weak, "strong": 0}
+        print("\nNo strong message frames. Falling back to showing what IS "
+              "flowing — if these are all tiny pings, Teams is using the socket "
+              "as a doorbell only and the message body arrives over HTTP.")
 
-    # Biggest first: a real message frame carries the body, so it is the fattest.
-    strong.sort(key=lambda r: -int(r.get("chars") or 0))
-    for i, rec in enumerate(strong[:limit], 1):
-        print(f"\n{'=' * 70}\n★ message frame {i}  "
-              f"({rec.get('chars')} chars, at {rec.get('at')})\n{'=' * 70}")
+    # Biggest first: a frame carrying a message body is the fattest one there is.
+    # When nothing matched, sample the largest frames anyway — that is how we find
+    # out whether the traffic is keepalive noise or a shape the patterns miss.
+    sample = strong or [r for r in _all_frames() if r.get("kind") != "sent"]
+    sample.sort(key=lambda r: -int(r.get("chars") or 0))
+
+    print("\nlargest frames (chars | kind | host | opening bytes):")
+    for rec in sample[:12]:
+        host = re.sub(r"^\w+://([^/]+).*", r"\1", str(rec.get("url") or ""))[:38]
+        head = re.sub(r"\s+", " ", str(rec.get("payload") or ""))[:70]
+        print(f"  {rec.get('chars'):>7} | {str(rec.get('kind')):4} | {host:<38} | {head}")
+
+    for i, rec in enumerate(sample[:limit], 1):
+        label = "★ message frame" if strong else "frame sample"
+        print(f"\n{'=' * 70}\n{label} {i}  "
+              f"({rec.get('chars')} chars, {rec.get('kind')}, at {rec.get('at')})"
+              f"\n{'=' * 70}")
         try:
             parsed = json.loads(str(rec.get("payload") or ""))
         except Exception:
@@ -1439,7 +1489,24 @@ def scan_frames(*, limit: int = 3) -> dict:
         for path, kind in sorted(_shape(parsed).items()):
             print(f"  {path:<62} {kind}")
 
-    return {"frames": total, "weak": weak, "strong": len(strong)}
+    return {"frames": total, "weak": weak, "strong": len(strong),
+            "http": sum(1 for r in _all_frames() if r.get("kind") == "http")}
+
+
+def _all_frames() -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    if not FRAMES_PATH.exists():
+        return out
+    with FRAMES_PATH.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except Exception:
+                continue
+    return out
 
 
 def list_chats(*, headless: bool = True) -> dict:
