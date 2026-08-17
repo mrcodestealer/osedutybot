@@ -86,3 +86,8 @@ wireguard-go-*/
 *.session
 *.session-journal
 telegramwatch_state.json
+
+# ---- Teams watcher (Chromium profile IS the credential) ----
+teamswatch_profile/
+teamswatch_shots/
+teamswatch_state.json

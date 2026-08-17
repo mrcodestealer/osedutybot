@@ -6547,6 +6547,24 @@ def lark_webhook():
 
         threading.Thread(target=_run_telegram_status, daemon=True).start()
         return _lark_im_done()
+    elif cmd == '/teamstatus':
+        # Is the read-only Teams (personal / teams.live.com) watcher still signed
+        # in? Replies with a text summary, plus a fresh screenshot of the Teams
+        # web shell when the saved profile is still alive.
+        def _run_teams_status(chat_id_tm=chat_id):
+            try:
+                import teamswatch as _tm_mod
+
+                _tm_mod.send_status_to_lark(chat_id_tm)
+            except Exception as _tm_err:
+                print(f"❌ teamstatus: {_tm_err!r}", flush=True)
+                try:
+                    send_message(chat_id_tm, f"❌ /teamstatus failed: {_tm_err}")
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run_teams_status, daemon=True).start()
+        return _lark_im_done()
     elif cmd == '/encoder':
         # Look up encoder/TRTC info (MAIN/POOL/CCTV IPs) for one or more machines
         # from latestencoder.json (kept fresh by the osmwatch warm browser).
