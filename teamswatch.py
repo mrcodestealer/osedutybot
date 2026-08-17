@@ -354,8 +354,34 @@ def _open(p, *, headless: bool):
         ignore_https_errors=True,
     )
     try:
+        # Two separate jobs in one init script.
+        #
+        # 1. navigator.webdriver — light touch so trivial bot checks don't flag
+        #    us; NOT an anti-bot bypass.
+        # 2. WebAuthn removal — this account is passkey-first, so MSA feature-
+        #    detects `window.PublicKeyCredential` and routes to its FIDO bridge
+        #    ("Signing in with your passkey…"), which waits on a real platform
+        #    authenticator (Windows Hello / Touch ID). Headless Chromium has
+        #    none, so the page hangs on "Verifying …" until the login times out.
+        #    Hiding the API makes MSA fall back to the password form. Deleting it
+        #    is not enough on its own — some flows keep a reference to
+        #    navigator.credentials.get, so that is stubbed to reject too.
         ctx.add_init_script(
-            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
+            """
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            try { delete window.PublicKeyCredential; } catch (e) {}
+            try {
+                Object.defineProperty(window, 'PublicKeyCredential', {
+                    get: () => undefined, configurable: true,
+                });
+            } catch (e) {}
+            try {
+                if (navigator.credentials) {
+                    navigator.credentials.get = () => Promise.reject(
+                        new DOMException('no authenticator', 'NotAllowedError'));
+                }
+            } catch (e) {}
+            """
         )
     except Exception:
         pass
@@ -424,6 +450,12 @@ _SUBMIT_SELS = [
 ]
 _OTC_SELS = ["input[autocomplete='one-time-code']", "#idTxtBx_SAOTCC_OTC"]
 _MSA_TILE_SELS = ["#msaTile"]             # "Personal account" when a domain is both
+_BACK_SELS = [
+    "[data-testid='backButton']",
+    "button[aria-label='Back']",
+    "#backButton",
+    "#idBtn_Back",
+]
 _LANDING_SIGNIN_SELS = ["button[data-onclick='signIn']", "button:has-text('Sign in')"]
 _PROOFS_SELS = ["#idDiv_SAOTCS_Proofs"]   # "how do you want to sign in" 2FA list
 _NUMBER_MATCH_SELS = ["#idRichContext_DisplaySign"]
@@ -509,6 +541,35 @@ def _error_text(page) -> str:
         return ""
 
 
+_PASSWORD_OPTION_JS = """
+    (doClick) => {
+        // A clickable "use your password" / "Password" choice, wherever MSA has
+        // hidden it this week: the passkey page's escape hatch, the "other ways
+        // to sign in" list, or a credential-picker row.
+        const els = [...document.querySelectorAll(
+            'button,a,[role=button],[role=listitem],[role=option],div[data-testid]')];
+        for (const el of els) {
+            const t = (el.innerText || '').trim();
+            if (!t || t.length > 70) continue;
+            if (!/password/i.test(t)) continue;
+            // "Forgot your password" / "Create one" are not the way forward.
+            if (/forgot|reset|create|change/i.test(t)) continue;
+            if (!(el.offsetParent || el.offsetWidth || el.offsetHeight)) continue;
+            if (doClick) el.click();
+            return t;
+        }
+        return '';
+    }
+"""
+
+
+def _password_option(page, *, click: bool = False) -> str:
+    try:
+        return (page.evaluate(_PASSWORD_OPTION_JS, click) or "").strip()
+    except Exception:
+        return ""
+
+
 def _stage_of(page) -> str:
     """Classify the current page so the driver loop knows what to do next.
 
@@ -535,6 +596,19 @@ def _stage_of(page) -> str:
         return "teams_booting"
 
     body = _body_text(page)
+
+    # --- passkey / FIDO bridge ----------------------------------------------
+    # Checked before everything below: this page sits on login.microsoft.com and
+    # matches none of the other probes, so it used to fall through to "unknown"
+    # and spin until the timeout. It IS recoverable — there is a password escape
+    # hatch — so it must not be lumped in with the 2FA dead ends.
+    if "/bridge/fido" in url or _text_seen(page, "signing in with your passkey", body):
+        return "passkey"
+
+    # A password choice offered anywhere is always preferable to any prompt
+    # below, so take it before the 2FA checks claim the page.
+    if not _any_visible(page, _PASSWORD_SELS) and _password_option(page):
+        return "use_password_option"
 
     # --- terminal: needs a human --------------------------------------------
     if _any_visible(page, _OTC_SELS):
@@ -598,6 +672,7 @@ def do_login(*, headless: bool = True, report_chat: str | None = None) -> dict:
     deadline = time.monotonic() + _login_timeout_s()
     result: dict[str, Any] = {"ok": False, "stage": "start", "reason": None, "shot": None}
     typed_email = typed_password = False
+    passkey_tries = 0
 
     with sync_playwright() as p:
         ctx, page = _open(p, headless=headless)
@@ -661,6 +736,30 @@ def do_login(*, headless: bool = True, report_chat: str | None = None) -> dict:
                         break
                     _click_first(page, _SUBMIT_SELS)
                     typed_password = True
+                elif stage == "passkey":
+                    # Should be unreachable now that WebAuthn is hidden in
+                    # _open(), but Microsoft can still land here from a cached
+                    # preference — so escape to the password form rather than
+                    # waiting on a security window that will never open.
+                    passkey_tries += 1
+                    if passkey_tries > 4:
+                        result.update(
+                            ok=False, stage="passkey",
+                            reason="account is passkey-first and offered no "
+                                   "password fallback — turn off 'passwordless "
+                                   "account' for this Microsoft account",
+                        )
+                        break
+                    if _password_option(page, click=True):
+                        page.wait_for_timeout(4000)
+                    elif _click_first(page, _BACK_SELS):
+                        page.wait_for_timeout(4000)
+                    else:
+                        page.wait_for_timeout(3000)
+                elif stage == "use_password_option":
+                    label = _password_option(page, click=True)
+                    print(f"[teams] chose password option: {label!r}", flush=True)
+                    page.wait_for_timeout(4000)
                 elif stage == "pick_personal":
                     # Custom domain registered as both work and personal: this
                     # account is the consumer one (tenant=consumers).
