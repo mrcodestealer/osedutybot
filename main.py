@@ -6584,6 +6584,44 @@ def lark_webhook():
 
         threading.Thread(target=_run_teams_status, daemon=True).start()
         return _lark_im_done()
+    elif cmd == '/latestevo':
+        # Read the watched Teams group's newest message(s) live and post them
+        # back here. Group-gated: this drives a browser and marks the Teams chat
+        # read, so it is not something any chat should be able to trigger.
+        _latestevo_allowed = {
+            c.strip() for c in os.getenv(
+                "EVOTEAMS_COMMAND_CHAT_IDS",
+                "oc_ad9b5bdbb2826ba2ee9730920ef25432,"
+                "oc_51b6fbf2636525acfb4ead3afa3c93ce",
+            ).split(",") if c.strip()
+        }
+        if chat_id not in _latestevo_allowed:
+            send_message(
+                chat_id,
+                "⚠️ `/latestevo` is not enabled for this group.",
+            )
+            return _lark_im_done()
+
+        def _run_latestevo(chat_id_le=chat_id, text_le=clean_text):
+            try:
+                import teamswatch as _tw_mod
+
+                # Optional trailing count: `/latestevo 5`.
+                parts = (text_le or "").split()
+                try:
+                    limit_le = max(1, min(10, int(parts[1]))) if len(parts) > 1 else 1
+                except ValueError:
+                    limit_le = 1
+                _tw_mod.send_latest_to_lark(chat_id_le, limit=limit_le)
+            except Exception as _le_err:
+                print(f"❌ latestevo: {_le_err!r}", flush=True)
+                try:
+                    send_message(chat_id_le, f"❌ /latestevo failed: {_le_err}")
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run_latestevo, daemon=True).start()
+        return _lark_im_done()
     elif cmd == '/encoder':
         # Look up encoder/TRTC info (MAIN/POOL/CCTV IPs) for one or more machines
         # from latestencoder.json (kept fresh by the osmwatch warm browser).

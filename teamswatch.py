@@ -1627,6 +1627,214 @@ def list_chats(*, headless: bool = True) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Reading a group's messages from the DOM
+# ---------------------------------------------------------------------------
+# Why the DOM and not the websocket: two 300s trouter captures delivered only
+# `unifiedPresenceService` plus `trouter.message_loss` carrying droppedIndicators
+# — the socket is connected but discarding message notifications, most likely
+# because this session never opens a conversation and so never subscribes.
+#
+# The cost is real and worth stating: opening a chat MARKS IT READ for this
+# account. That is acceptable only because OM DUTY is a dedicated account which
+# already shows permanently online — never point this at a person's own account.
+
+# Candidate selectors for one message row. Teams renames these between releases,
+# so every read reports which one matched (see read_latest_messages) and the
+# order here is "most specific first".
+_MSG_ROW_SELS = [
+    "[data-tid='chat-pane-message']",
+    "[data-tid='chat-pane-item']",
+    "div[data-tid^='chat-pane']",
+    ".fui-ChatMessage",
+    "[data-tid='message-body']",
+    "[role='listitem']",
+]
+_MSG_PANE_SELS = [
+    "[data-tid='message-pane']",
+    "[data-tid='messages-pane']",
+    "[data-tid='chat-pane-list']",
+    "[role='log']",
+]
+
+
+def _open_group(page, title: str) -> bool:
+    """Click the sidebar row for ``title``. Trusted click — see _click_text_option."""
+    needle = (title or "").strip()
+    if not needle:
+        return False
+    # Match on a prefix: sidebar rows append the preview text and timestamp to
+    # the title, so an equality test never matches.
+    found = page.evaluate(
+        """(needle) => {
+            const n = needle.toLowerCase().slice(0, 24);
+            document.querySelectorAll('[data-teamswatch-chat]').forEach(
+                el => el.removeAttribute('data-teamswatch-chat'));
+            const sels = ["[data-tid='chat-list-item']", "[data-tid^='chat-list-item']",
+                          "[role='treeitem']", "[role='listitem']"];
+            for (const s of sels) {
+                for (const el of document.querySelectorAll(s)) {
+                    const t = (el.innerText || '').trim().toLowerCase();
+                    if (!t || !t.includes(n)) continue;
+                    el.setAttribute('data-teamswatch-chat', '1');
+                    return (el.innerText || '').trim().split('\\n')[0];
+                }
+            }
+            return '';
+        }""",
+        needle,
+    )
+    if not found:
+        print(f"[teams] sidebar row not found for {needle!r}", flush=True)
+        return False
+    try:
+        page.locator("[data-teamswatch-chat='1']").first.click(timeout=15000)
+    except Exception as err:  # noqa: BLE001
+        print(f"[teams] clicking chat row failed: {err!r}", flush=True)
+        return False
+    print(f"[teams] opened chat: {found!r}", flush=True)
+
+    deadline = time.monotonic() + 45
+    while time.monotonic() < deadline:
+        if _any_visible(page, _MSG_PANE_SELS) or _any_visible(page, _MSG_ROW_SELS):
+            page.wait_for_timeout(4000)  # let the virtualised list settle
+            return True
+        page.wait_for_timeout(1500)
+    print("[teams] message pane never appeared", flush=True)
+    return False
+
+
+def _scrape_rows(page, limit: int) -> dict[str, Any]:
+    """Extract the last ``limit`` message rows, reporting which selector worked."""
+    return page.evaluate(
+        """([sels, limit]) => {
+            const out = {matched: null, counts: {}, rows: []};
+            for (const s of sels) {
+                let els;
+                try { els = [...document.querySelectorAll(s)]; } catch (e) { continue; }
+                out.counts[s] = els.length;
+                if (!out.matched && els.length) {
+                    out.matched = s;
+                    // Virtualised list: the DOM tail is the newest.
+                    for (const el of els.slice(-limit)) {
+                        const pick = (q) => {
+                            const n = el.querySelector(q);
+                            return n ? (n.innerText || '').trim() : '';
+                        };
+                        const tEl = el.querySelector('time');
+                        out.rows.push({
+                            id: el.getAttribute('data-mid')
+                                || el.getAttribute('data-tid')
+                                || el.getAttribute('id') || '',
+                            author: pick("[data-tid='message-author-name']")
+                                 || pick('[itemprop=name]') || '',
+                            time: (tEl ? (tEl.getAttribute('datetime')
+                                          || tEl.innerText || '') : '').trim(),
+                            text: (el.innerText || '').trim(),
+                        });
+                    }
+                }
+            }
+            return out;
+        }""",
+        [_MSG_ROW_SELS, int(limit)],
+    ) or {}
+
+
+def read_latest_messages(*, group: str | None = None, limit: int = 3,
+                         headless: bool = True) -> dict:
+    """Open ``group`` in Teams and return its most recent messages.
+
+    Returns ``{"ok", "group", "matched", "counts", "messages", "shot", "error"}``.
+    ``counts`` reports every candidate selector and how many nodes it matched, so
+    a Teams UI change is diagnosable from one run instead of guesswork.
+    """
+    from playwright.sync_api import sync_playwright
+
+    target = (group or os.getenv("EVOTEAMS_GROUP")
+              or "@EVO C88live/slot_ow.ph (RTS) CS Group NE RT FP")
+    res: dict[str, Any] = {"ok": False, "group": target, "matched": None,
+                           "counts": {}, "messages": [], "shot": None, "error": None}
+
+    with _profile_lock("read-latest"), sync_playwright() as p:
+        ctx, page = _open(p, headless=headless)
+        try:
+            page.goto(TEAMS_URL, wait_until="domcontentloaded", timeout=60000)
+            deadline = time.monotonic() + max(60, int(os.getenv("TEAMS_BOOT_WAIT", "90")))
+            stage = "unknown"
+            while time.monotonic() < deadline:
+                stage = _stage_of(page)
+                if stage == "teams_loaded":
+                    break
+                if stage in _NEEDS_HUMAN or stage in ("landing", "email", "password"):
+                    break
+                page.wait_for_timeout(2000)
+            if stage != "teams_loaded":
+                res["error"] = f"not signed in (stage: {stage}) — run --login"
+                res["shot"] = _shot(page, f"read_{stage}")
+                return res
+
+            if not _open_group(page, target):
+                res["error"] = f"could not open group {target!r}"
+                res["shot"] = _shot(page, "read_no_group")
+                return res
+
+            scraped = _scrape_rows(page, limit)
+            res["matched"] = scraped.get("matched")
+            res["counts"] = scraped.get("counts") or {}
+            res["messages"] = scraped.get("rows") or []
+            res["ok"] = bool(res["messages"])
+            res["shot"] = _shot(page, "read_latest")
+            if not res["ok"]:
+                res["error"] = "opened the chat but matched no message rows"
+        except Exception as err:  # noqa: BLE001
+            res["error"] = repr(err)
+            try:
+                res["shot"] = _shot(page, "read_exception")
+            except Exception:
+                pass
+        finally:
+            try:
+                ctx.close()
+            except Exception:
+                pass
+    return res
+
+
+def _fmt_messages(res: dict) -> str:
+    """Human-readable summary for /latestevo."""
+    if not res.get("ok"):
+        counts = ", ".join(f"{k}={v}" for k, v in (res.get("counts") or {}).items())
+        return (f"❌ Could not read latest message from Teams\n"
+                f"• Group: {res.get('group')}\n"
+                f"• Reason: {res.get('error') or 'unknown'}"
+                + (f"\n• Selector counts: {counts}" if counts else ""))
+    lines = [f"📥 Latest in Teams group\n• Group: {res.get('group')}",
+             f"• Matched selector: {res.get('matched')}", ""]
+    for i, msg in enumerate(res["messages"], 1):
+        body = (msg.get("text") or "").strip()
+        if len(body) > 1500:
+            body = body[:1500] + f"\n… (+{len(msg['text']) - 1500} chars)"
+        head = " | ".join(x for x in (msg.get("author"), msg.get("time")) if x)
+        lines.append(f"--- {i}/{len(res['messages'])}"
+                     + (f"  ({head})" if head else "") + f" ---\n{body}")
+    return "\n".join(lines)
+
+
+def send_latest_to_lark(chat_id: str, *, group: str | None = None,
+                        limit: int = 1) -> dict:
+    """``/latestevo`` — read the group and post what we found back to ``chat_id``."""
+    res = read_latest_messages(group=group, limit=limit)
+    try:
+        send_text(chat_id, _fmt_messages(res))
+    except Exception as err:  # noqa: BLE001
+        print(f"[teams] /latestevo text send failed: {err!r}", flush=True)
+    # The screenshot is the fastest way to see WHY a read came back empty.
+    if not res.get("ok"):
+        send_shot(chat_id, res.get("shot"))
+    return res
+
+
+# ---------------------------------------------------------------------------
 # /teamstatus
 # ---------------------------------------------------------------------------
 def _profile_state() -> str:
@@ -1754,6 +1962,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="record websocket frames to teamswatch_frames.jsonl (phase-2 recon)")
     ap.add_argument("--scan-frames", action="store_true",
                     help="summarise an existing capture: shape only, no secrets")
+    ap.add_argument("--read-latest", action="store_true",
+                    help="open the watched group and print its latest messages")
+    ap.add_argument("--group", default=None, help="override the group title to read")
+    ap.add_argument("--limit", type=int, default=3,
+                    help="how many recent messages --read-latest returns")
     ap.add_argument("--seconds", type=int, default=300,
                     help="max seconds --dump-frames records for (default 300)")
     ap.add_argument("--min-messages", type=int, default=1,
@@ -1771,6 +1984,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.scan_frames:
         res = scan_frames()
         return 0 if res.get("frames") else 1
+    if args.read_latest:
+        res = read_latest_messages(group=args.group, limit=args.limit,
+                                   headless=not args.headed)
+        print("\nselector counts (which message-row selector matched):")
+        for sel, count in (res.get("counts") or {}).items():
+            print(f"   {count:6d}  {sel}")
+        print()
+        print(_fmt_messages(res))
+        if args.report_chat:
+            send_text(args.report_chat, _fmt_messages(res))
+            send_shot(args.report_chat, res.get("shot"))
+        return 0 if res.get("ok") else 1
     if args.dump_frames:
         res = dump_frames(seconds=args.seconds, min_messages=args.min_messages,
                           headless=not args.headed)
