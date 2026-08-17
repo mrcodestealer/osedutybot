@@ -1469,28 +1469,83 @@ def scan_frames(*, limit: int = 3) -> dict:
     sample = strong or [r for r in _all_frames() if r.get("kind") != "sent"]
     sample.sort(key=lambda r: -int(r.get("chars") or 0))
 
-    print("\nlargest frames (chars | kind | host | opening bytes):")
+    # THE diagnostic: which trouter routes are actually delivering anything. If
+    # only presence shows up, this account's socket is not subscribed to chat
+    # messages and no amount of waiting will produce one.
+    routes: dict[str, int] = {}
+    for rec in _all_frames():
+        route, _ = _decode_frame(str(rec.get("payload") or ""))
+        routes[route] = routes.get(route, 0) + 1
+    print("\nroutes seen (what the sockets actually delivered):")
+    for route, count in sorted(routes.items(), key=lambda kv: -kv[1]):
+        print(f"   {count:6d}  {route}")
+
+    print("\nlargest frames (chars | kind | host | route):")
     for rec in sample[:12]:
-        host = re.sub(r"^\w+://([^/]+).*", r"\1", str(rec.get("url") or ""))[:38]
-        head = re.sub(r"\s+", " ", str(rec.get("payload") or ""))[:70]
-        print(f"  {rec.get('chars'):>7} | {str(rec.get('kind')):4} | {host:<38} | {head}")
+        host = re.sub(r"^\w+://([^/]+).*", r"\1", str(rec.get("url") or ""))[:36]
+        route, _ = _decode_frame(str(rec.get("payload") or ""))
+        print(f"  {rec.get('chars'):>7} | {str(rec.get('kind')):4} | {host:<36} | {route}")
 
     for i, rec in enumerate(sample[:limit], 1):
         label = "★ message frame" if strong else "frame sample"
         print(f"\n{'=' * 70}\n{label} {i}  "
               f"({rec.get('chars')} chars, {rec.get('kind')}, at {rec.get('at')})"
               f"\n{'=' * 70}")
-        try:
-            parsed = json.loads(str(rec.get("payload") or ""))
-        except Exception:
+        route, parsed = _decode_frame(str(rec.get("payload") or ""))
+        print(f"  route: {route}")
+        if parsed is None:
             head = str(rec.get("payload"))[:300]
-            print(f"  (not JSON at the top level) head: {head!r}")
+            print(f"  (undecodable) head: {head!r}")
             continue
         for path, kind in sorted(_shape(parsed).items()):
             print(f"  {path:<62} {kind}")
 
     return {"frames": total, "weak": weak, "strong": len(strong),
             "http": sum(1 for r in _all_frames() if r.get("kind") == "http")}
+
+
+# Trouter speaks Socket.IO 0.9 framing: "<type>:<id>:<endpoint>:<data>", e.g.
+# `3:::{json}` for a message and `5:1::{"name":...,"args":[...]}` for an event.
+# Without stripping this prefix json.loads fails on every single frame, which is
+# why the first shape dumps all reported "not JSON at the top level".
+_SIO_RE = re.compile(r"^(\d):(\d*):([^:]*):(.*)$", re.S)
+
+
+def _decode_frame(payload: str) -> tuple[str, Any]:
+    """Return ``(route, parsed)`` for a captured frame.
+
+    ``route`` is a short label of what the frame IS — the trouter path for a
+    delivered request, or the event name — which is what tells us whether chat
+    messaging is actually subscribed on this socket or only presence is.
+    """
+    body = str(payload or "").strip()
+    if not body:
+        return "(empty)", None
+
+    inner = body
+    m = _SIO_RE.match(body)
+    if m:
+        inner = m.group(4).strip()
+        if not inner:
+            return f"sio:{m.group(1)}(no-data)", None
+
+    try:
+        parsed = json.loads(inner)
+    except Exception:
+        return "(not json)", None
+
+    if isinstance(parsed, dict):
+        # A trouter-delivered request: the url names the service.
+        url = str(parsed.get("url") or "")
+        if url:
+            return "trouter:" + (url.rsplit("/", 1)[-1] or url)[:48], parsed
+        name = str(parsed.get("name") or "")
+        if name:
+            return "event:" + name[:48], parsed
+        for key in ("annotationType", "sessionUrlBase", "tokenExpirationTime"):
+            if key in parsed:
+                return "augloop:" + key, parsed
+    return "json", parsed
 
 
 def _all_frames() -> list[dict[str, Any]]:
