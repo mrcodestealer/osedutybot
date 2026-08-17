@@ -439,12 +439,29 @@ def _post_card_and_thread(key: str, *, group: str, sender: str, text: str,
 # ---------------------------------------------------------------------------
 # Entry point from teamswatch
 # ---------------------------------------------------------------------------
+_GROUP_MIN_CHARS = 12
+
+
 def in_watched_group(group: str) -> bool:
-    """Substring match, case-insensitive — the sidebar truncates long titles and
-    a rename of the tail should not silently stop detection."""
-    needle = WATCH_GROUP.lower()
-    hay = (group or "").lower()
-    return bool(needle) and (needle in hay or hay in needle)
+    """Anchored, case-insensitive title comparison that fails CLOSED.
+
+    The previous version returned **True** for an empty group name: ``hay in
+    needle`` with ``hay == ""`` is trivially true, so a message whose group could
+    not be determined was treated as the watched group and could be emailed.
+    Both sides must now be substantial, and one must be an anchored prefix of the
+    other — a bare "@" or an archived clone no longer qualifies.
+    """
+    try:
+        import teamswatch as _tw
+
+        return _tw._titles_match(WATCH_GROUP, group)
+    except Exception:
+        # Self-contained fallback so detection never depends on teamswatch importing.
+        needle = (WATCH_GROUP or "").strip().lower()
+        hay = (group or "").strip().lower()
+        if len(needle) < _GROUP_MIN_CHARS or len(hay) < _GROUP_MIN_CHARS:
+            return False
+        return needle.startswith(hay) or hay.startswith(needle)
 
 
 def handle_teams_message(*, group: str, message_id: str, text: str,

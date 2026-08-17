@@ -1730,9 +1730,46 @@ _TITLE_CHROME = {
 }
 
 
-def _open_chat_title(page) -> str:
+def _selected_chat_title(page) -> str:
+    """Title of the sidebar row Teams marks as active.
+
+    An independent read on "which conversation is open" that needs no knowledge
+    of the header's markup — the header lookup returned an empty string on the
+    live build, so relying on it alone left us blind. Only row-sized nodes are
+    considered, for the same container reason as _click_chat_row.
+    """
     try:
         return (page.evaluate(
+            """(maxH) => {
+                const sels = ["[aria-selected='true']", "[aria-current='page']",
+                              "[aria-current='true']", "[aria-current='location']",
+                              "[class*='selected']", "[class*='isSelected']"];
+                for (const s of sels) {
+                    for (const el of document.querySelectorAll(s)) {
+                        const r = el.getBoundingClientRect();
+                        if (!r.height || r.height > maxH) continue;
+                        const t = (el.innerText || '').trim().split('\\n')[0].trim();
+                        if (t) return t;
+                    }
+                }
+                return '';
+            }""",
+            _MAX_ROW_HEIGHT,
+        ) or "").strip()
+    except Exception:
+        return ""
+
+
+def _open_chat_title(page) -> str:
+    """Best available answer to "which chat is on screen?".
+
+    Tries the conversation header first, then falls back to the selected sidebar
+    row. Two independent signals, because each has failed on its own: the header
+    selectors matched nothing on the live build, and the generic ones matched the
+    sidebar's own "Chat" heading.
+    """
+    try:
+        found = (page.evaluate(
             """([sels, chrome]) => {
                 for (const s of sels) {
                     for (const el of document.querySelectorAll(s)) {
@@ -1749,20 +1786,60 @@ def _open_chat_title(page) -> str:
             [_CHAT_TITLE_SELS, sorted(_TITLE_CHROME)],
         ) or "").strip()
     except Exception:
-        return ""
+        found = ""
+    if found:
+        return found
+    picked = _selected_chat_title(page)
+    if picked:
+        print(f"[teams] header not found; using selected sidebar row: {picked!r}",
+              flush=True)
+    return picked
+
+
+_TITLE_MIN_CHARS = 12
+# Archived/closed clones of a group carry these markers and are DIFFERENT chats.
+# This account demonstrably has 【关闭】ZF918(B) variants alongside live ones, so a
+# title differing only by such a marker must never be treated as a match.
+_CLOSED_MARKER_RE = re.compile(r"(?i)【关闭】|\[关闭\]|closed|停用|已关闭|archived")
 
 
 def _norm_title(text: str) -> str:
-    return re.sub(r"\s+", " ", (text or "")).strip().lower()
+    # Strip bidi marks and a trailing ellipsis: Teams truncates long titles and
+    # RTL/LRM marks ride along invisibly, both of which break naive comparison.
+    cleaned = re.sub(r"[‎‏‪-‮⁦-⁩]", "", text or "")
+    cleaned = re.sub(r"[\s ]+", " ", cleaned).strip()
+    cleaned = re.sub(r"(?:\.{3}|…)\s*$", "", cleaned).strip()
+    return cleaned.lower()
 
 
 def _titles_match(want: str, got: str) -> bool:
-    """Compare on a normalised prefix — the header may truncate a long title."""
+    """Anchored prefix comparison, failing CLOSED.
+
+    Previously ended in ``head in b or a.startswith(b[:20])``, which accepted a
+    header of just ``"@"`` and accepted 「【关闭】@EVO …」 — the archived clone of
+    the target — as the target itself. Since a false match here means emailing
+    another group's maintenance notice, both sides must now be substantial and
+    one must be an anchored prefix of the other.
+    """
     a, b = _norm_title(want), _norm_title(got)
-    if not a or not b:
+    if len(a) < _TITLE_MIN_CHARS or len(b) < _TITLE_MIN_CHARS:
         return False
-    head = a[:20]
-    return b.startswith(head) or a.startswith(b[:20]) or head in b
+    # A closed/archived marker on one side only makes these different chats.
+    if bool(_CLOSED_MARKER_RE.search(a)) != bool(_CLOSED_MARKER_RE.search(b)):
+        return False
+    return a.startswith(b) or b.startswith(a)
+
+
+def _row_needle(title: str) -> str:
+    """Longest whitespace-free fragment of a title, for text matching.
+
+    e.g. "@EVO C88live/slot_ow.ph (RTS) CS Group…" -> "c88live/slot_ow.ph".
+    Distinctive, and free of the whitespace that makes Playwright's has_text and
+    inner_text disagree.
+    """
+    parts = re.split(r"[\s ]+", _norm_title(title))
+    parts = [p for p in parts if len(p) >= 6]
+    return max(parts, key=len) if parts else _norm_title(title)[:20]
 
 
 def _open_group(page, title: str) -> bool:
@@ -1787,14 +1864,20 @@ def _open_group(page, title: str) -> bool:
         page.wait_for_timeout(3000)
         return True
 
-    # Match on a prefix: sidebar rows append the preview and timestamp to the
-    # title, so an equality test never matches.
-    prefix = needle[:24]
+    # Match on a distinctive whitespace-free fragment, not needle[:24].
+    # `has_text` and `inner_text()` use different text models — has_text includes
+    # hidden text and normalises NBSP, inner_text excludes hidden text and keeps
+    # NBSP/LRM — so a needle carrying spaces can make the filter and the
+    # verification disagree and skip the row we actually want.
+    prefix = _row_needle(needle)
     seen = before
-    for attempt in range(1, 4):
-        if not _click_chat_row(page, prefix):
+    # Alternate activation: Enter first (geometry-free), then a real click, then
+    # Enter again. press() silently does nothing on a node that ignores the key,
+    # so the only honest test is whether the conversation actually changed.
+    for attempt, method in enumerate(("enter", "click", "enter"), start=1):
+        if not _click_chat_row(page, prefix, method=method):
             print(f"[teams] sidebar row not found for {prefix!r} "
-                  f"(attempt {attempt}/3)", flush=True)
+                  f"(attempt {attempt}/3, method={method})", flush=True)
             page.wait_for_timeout(2000)
             continue
         # Wait for the HEADER to become the target — not merely for a pane to
@@ -1823,60 +1906,151 @@ _CHAT_ROW_SELS = [
 ]
 
 
-def _click_chat_row(page, prefix: str) -> bool:
-    """Click the sidebar row whose text contains ``prefix``.
+# A real chat row is one avatar tall (~50-72px observed). Anything much taller is
+# a container, not a row.
+_MAX_ROW_HEIGHT = 140
 
-    Uses a Playwright locator filtered by text rather than tagging a node in JS
-    and clicking the tag later. The chat list is virtualised and Teams RECYCLES
-    its DOM nodes: scrolling a tagged node into view re-renders it with a
-    different conversation's content, so the tag-then-click approach clicked
-    whatever chat had been recycled into that node (it opened
-    「【关闭】ZF918(B) / CP /PG Integration」 while aiming for the EVO group).
-    A locator re-resolves at action time, and the text is re-verified in the
-    instant before the click.
+
+def _click_chat_row(page, prefix: str, method: str = "enter") -> bool:
+    """Click the sidebar row for ``prefix`` — the ROW, never its container.
+
+    This was the bug that kept opening the wrong conversation, and it needs three
+    independent checks, because each alone is fooled:
+
+    1. ``filter(has_text=…)`` matches ANY element whose subtree contains the
+       text, so an outer ``[role=listitem]`` wrapping the whole chat list matches
+       too — and ``.first`` is that wrapper (measured: 1040px tall).
+    2. Playwright clicks an element's CENTRE. Clicking a 1040px wrapper therefore
+       clicks whatever row sits at the list's vertical middle — reproducibly a
+       mid-list chat (measured: hit "Ecomm|TELNOVO" while aiming 4 rows away).
+    3. Re-reading the node's text does NOT catch this, because the wrapper's text
+       legitimately contains the target title.
+
+    So: reject anything too tall to be a row, and require the title to be in the
+    row's FIRST line — a wrapper's first line is the first chat's name, not ours.
     """
+    needle = (prefix or "").strip().lower()
+    if not needle:
+        return False
+
     for sel in _CHAT_ROW_SELS:
         try:
             rows = page.locator(sel).filter(has_text=prefix)
-            if rows.count() == 0:
-                continue
-            row = rows.first
-            row.scroll_into_view_if_needed(timeout=10000)
-            page.wait_for_timeout(600)  # let the list settle after scrolling
-            # Confirm the node still shows our chat: recycling happens exactly here.
-            text = (row.inner_text(timeout=5000) or "").strip()
-            if prefix.lower() not in text.lower():
-                print(f"[teams] row recycled under us "
-                      f"(now {text.splitlines()[0][:48]!r}) — retrying", flush=True)
-                continue
-            print(f"[teams] clicking sidebar row: "
-                  f"{text.splitlines()[0][:60]!r} via {sel}", flush=True)
-            row.click(timeout=15000)
-            return True
+            count = rows.count()
         except Exception as err:  # noqa: BLE001
-            print(f"[teams] row click via {sel} failed: {err!r}", flush=True)
+            print(f"[teams] locating {sel} failed: {err!r}", flush=True)
             continue
+        if not count:
+            continue
+
+        for i in range(min(count, 12)):
+            try:
+                cand = rows.nth(i)
+                box = cand.bounding_box()
+                if not box:
+                    continue
+                height = box.get("height") or 0
+                if height > _MAX_ROW_HEIGHT:
+                    print(f"[teams] skipping container match via {sel} "
+                          f"(height {int(height)}px > {_MAX_ROW_HEIGHT})", flush=True)
+                    continue
+                text = (cand.inner_text(timeout=5000) or "").strip()
+                first = (text.splitlines() or [""])[0].strip()
+                if needle not in first.lower():
+                    print(f"[teams] skipping match whose title line is "
+                          f"{first[:44]!r} (not our chat)", flush=True)
+                    continue
+
+                cand.scroll_into_view_if_needed(timeout=10000)
+                page.wait_for_timeout(600)  # settle; the list is virtualised
+                # Re-read after scrolling: Teams recycles row nodes, so the node
+                # can now be showing a different conversation entirely.
+                again = (cand.inner_text(timeout=5000) or "").strip()
+                again_first = (again.splitlines() or [""])[0].strip()
+                if needle not in again_first.lower():
+                    print(f"[teams] row recycled under us (now "
+                          f"{again_first[:44]!r}) — retrying", flush=True)
+                    continue
+
+                print(f"[teams] activating sidebar row {first[:60]!r} "
+                      f"via {sel} (h={int(height)}px, method={method})", flush=True)
+                if method == "enter":
+                    # Keyboard activation takes geometry out of the equation —
+                    # a click targets the element's CENTRE, which is what let a
+                    # container match open a mid-list chat. But press() does NOT
+                    # raise when the node ignores the key, so success cannot be
+                    # inferred here; _open_group alternates methods across its
+                    # attempts and judges by whether the chat actually changed.
+                    cand.press("Enter", timeout=10000)
+                else:
+                    cand.click(timeout=15000)
+                return True
+            except Exception as err:  # noqa: BLE001
+                print(f"[teams] candidate {i} via {sel} failed: {err!r}", flush=True)
+                continue
     return False
+
+
+# The conversation region. [data-tid='app-layout-area--main'] is this build's
+# main area — proven by _TEAMS_IN_SELS already matching it — and `role=main` is
+# NOT guaranteed here, so it cannot be the only candidate.
+_MAIN_REGION_SELS = [
+    "[data-tid='app-layout-area--main']",
+    "[role='main']",
+    "[data-tid='chat-pane']",
+    "main",
+]
+# Anything that identifies the LEFT SIDEBAR. A resolved pane containing one of
+# these is the chat list, not the message list.
+_SIDEBAR_MARK_SELS = [
+    "[data-tid='chat-list']",
+    "[data-tid='chat-list-item']",
+    "[data-tid='app-bar']",
+]
+
+# JS helper shared by the scrape and the scroll: resolve the message pane INSIDE
+# the main region, and refuse to return anything that contains the chat list.
+_RESOLVE_PANE_JS = """
+    (mainSels, paneSels, sidebarSels) => {
+        let main = null;
+        for (const s of mainSels) {
+            const el = document.querySelector(s);
+            if (el) { main = el; break; }
+        }
+        if (!main) return null;
+        const bad = (el) => sidebarSels.some(s => el.querySelector(s));
+        for (const s of paneSels) {
+            for (const el of main.querySelectorAll(s)) {
+                if (!bad(el)) return el;
+            }
+        }
+        // No labelled pane: fall back to the main region itself, but only if it
+        // does not contain the sidebar.
+        return bad(main) ? null : main;
+    }
+"""
 
 
 def _scroll_pane_up(page, px: int = 1200) -> bool:
     """Scroll the message list up to render older rows.
 
-    The list is virtualised: only what is near the viewport exists in the DOM. So
+    The list is virtualised: only what is near the viewport exists in the DOM, so
     when the visible tail is all "X left the chat" there is no message to find
-    without scrolling — which is exactly the case that returned a leave notice as
-    the "latest message".
+    without scrolling.
+
+    Scoped to the conversation pane. The previous version scanned EVERY div in the
+    document for something scrollable, which would happily scroll the left chat
+    list instead of the message list — and the chat list is exactly the thing we
+    must not touch, since scrolling it recycles the row we are trying to click.
     """
     try:
         return bool(page.evaluate(
-            """([sels, px]) => {
-                const cands = [];
-                for (const s of sels) {
-                    for (const el of document.querySelectorAll(s)) cands.push(el);
-                }
-                // Also consider any ancestor that actually scrolls, since the
-                // scrollable node is often a wrapper, not the labelled pane.
-                document.querySelectorAll('div').forEach(el => {
+            """([mainSels, paneSels, sidebarSels, px, resolveSrc]) => {
+                const resolve = eval(resolveSrc);
+                const pane = resolve(mainSels, paneSels, sidebarSels);
+                if (!pane) return false;
+                const cands = [pane];
+                pane.querySelectorAll('div').forEach(el => {
                     if (el.scrollHeight > el.clientHeight + 200
                         && el.clientHeight > 200) cands.push(el);
                 });
@@ -1889,7 +2063,8 @@ def _scroll_pane_up(page, px: int = 1200) -> bool:
                 }
                 return false;
             }""",
-            [_MSG_PANE_SELS, int(px)],
+            [_MAIN_REGION_SELS, _MSG_PANE_SELS, _SIDEBAR_MARK_SELS, int(px),
+             _RESOLVE_PANE_JS],
         ))
     except Exception as err:  # noqa: BLE001
         print(f"[teams] scroll up failed: {err!r}", flush=True)
@@ -1903,11 +2078,20 @@ def _scrape_rows(page, scan: int) -> dict[str, Any]:
     in Python where it is testable, and the counts tell us what was dropped.
     """
     return page.evaluate(
-        """([sels, limit]) => {
-            const out = {matched: null, counts: {}, rows: []};
+        """([sels, limit, mainSels, paneSels, sidebarSels, resolveSrc]) => {
+            const out = {matched: null, counts: {}, rows: [], pane: null};
+            const resolve = eval(resolveSrc);
+            const pane = resolve(mainSels, paneSels, sidebarSels);
+            // HARD FAIL rather than falling back to the document. [role=listitem]
+            // is in BOTH the chat-row and message-row selector lists, so a
+            // document-wide query can return SIDEBAR CHAT ROWS as "messages" —
+            // and els.slice(-limit) would take the document tail, not the
+            // conversation's. That path could email another group's text.
+            if (!pane) { out.error = 'no message pane inside the main region'; return out; }
+            out.pane = pane.getAttribute('data-tid') || pane.tagName;
             for (const s of sels) {
                 let els;
-                try { els = [...document.querySelectorAll(s)]; } catch (e) { continue; }
+                try { els = [...pane.querySelectorAll(s)]; } catch (e) { continue; }
                 out.counts[s] = els.length;
                 if (!out.matched && els.length) {
                     out.matched = s;
@@ -1939,7 +2123,8 @@ def _scrape_rows(page, scan: int) -> dict[str, Any]:
             }
             return out;
         }""",
-        [_MSG_ROW_SELS, int(scan)],
+        [_MSG_ROW_SELS, int(scan), _MAIN_REGION_SELS, _MSG_PANE_SELS,
+         _SIDEBAR_MARK_SELS, _RESOLVE_PANE_JS],
     ) or {}
 
 
@@ -2048,6 +2233,13 @@ def read_latest_messages(*, group: str | None = None, limit: int = 3,
             # a window of exactly `limit` can contain no real message at all.
             scan = max(30, limit * 10)
             scraped = _scrape_rows(page, scan)
+            if scraped.get("error"):
+                # Never read outside the conversation pane — see _scrape_rows.
+                res["error"] = f"pane not resolved: {scraped['error']}"
+                res["counts"] = scraped.get("counts") or {}
+                res["shot"] = _shot(page, "read_no_pane")
+                return res
+            res["pane"] = scraped.get("pane")
             picked = _pick_messages(scraped.get("rows") or [], limit)
 
             # Still nothing but "X left the chat"? Scroll up for older rows —
