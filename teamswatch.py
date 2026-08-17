@@ -39,6 +39,7 @@ Exposed to main.py:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import mimetypes
 import os
@@ -182,16 +183,29 @@ def check_env() -> int:
           f"({'exists' if _ENV_PATH.exists() else 'MISSING'})")
 
     raw: dict[str, str] = {}
+    seen_lines: dict[str, list[int]] = {}
     try:
-        for line in _ENV_PATH.read_text(encoding="utf-8", errors="replace").splitlines():
+        for lineno, line in enumerate(
+            _ENV_PATH.read_text(encoding="utf-8", errors="replace").splitlines(), 1
+        ):
             stripped = line.strip()
             if not stripped or stripped.startswith("#") or "=" not in stripped:
                 continue
             key, val = stripped.split("=", 1)
-            if key.strip() in ("TEAMS_EMAIL", "TEAMS_PASSWORD"):
-                raw[key.strip()] = val
+            key = key.strip()
+            if key in ("TEAMS_EMAIL", "TEAMS_PASSWORD"):
+                # Last occurrence wins, matching python-dotenv.
+                raw[key] = val
+                seen_lines.setdefault(key, []).append(lineno)
     except Exception as err:
         print(f"  .env unreadable: {err!r}")
+
+    for key in ("TEAMS_EMAIL", "TEAMS_PASSWORD"):
+        hits = seen_lines.get(key, [])
+        if len(hits) > 1:
+            print(f"\n⚠ {key} is defined {len(hits)} times in .env "
+                  f"(lines {', '.join(map(str, hits))}) — python-dotenv keeps the "
+                  f"LAST one (line {hits[-1]}). Delete the stale ones.")
 
     for key in ("TEAMS_EMAIL", "TEAMS_PASSWORD"):
         effective = os.getenv(key) or ""
@@ -421,6 +435,50 @@ def alert_login_failed(reason: str, *, stage: str = "?", shot: str | None = None
 # ---------------------------------------------------------------------------
 # Browser
 # ---------------------------------------------------------------------------
+_LOCK_PATH = _ROOT_DIR / (PROFILE_DIR.name + ".lock")
+_LOCK_STALE_S = 300
+
+
+@contextlib.contextmanager
+def _profile_lock(what: str):
+    """Serialise access to the Chromium profile.
+
+    Two Chromium processes on one user-data-dir is unsupported: the second either
+    refuses to start or writes over the first's session, which loses the login.
+    That collision is easy to hit here because /teamstatus opens the profile on a
+    timer while someone may be running --login by hand. Stale locks (older than
+    _LOCK_STALE_S, e.g. left by a killed process) are reclaimed.
+    """
+    acquired = False
+    try:
+        for _ in range(60):
+            try:
+                fd = os.open(str(_LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, f"{os.getpid()} {what} {_now_str()}".encode())
+                os.close(fd)
+                acquired = True
+                break
+            except FileExistsError:
+                try:
+                    age = time.time() - _LOCK_PATH.stat().st_mtime
+                except OSError:
+                    continue
+                if age > _LOCK_STALE_S:
+                    print(f"[teams] reclaiming stale profile lock ({int(age)}s old)",
+                          flush=True)
+                    _LOCK_PATH.unlink(missing_ok=True)
+                    continue
+                time.sleep(2)
+        if not acquired:
+            raise RuntimeError(
+                f"profile is busy — another teamswatch run holds {_LOCK_PATH.name}"
+            )
+        yield
+    finally:
+        if acquired:
+            _LOCK_PATH.unlink(missing_ok=True)
+
+
 def _open(p, *, headless: bool):
     """Persistent-context Chromium. The profile dir carries the Teams session."""
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
@@ -560,6 +618,12 @@ _TEAMS_IN_SELS = [
 
 def _any_visible(page, sels: list[str]) -> bool:
     return any(_visible(page, s) for s in sels)
+
+
+def _shell_selectors_present(page) -> list[str]:
+    """Which app-shell selectors actually matched — logged so phase 2 can rely
+    on the ones this account's Teams build really uses, instead of guesses."""
+    return [s for s in _TEAMS_IN_SELS if _visible(page, s)]
 
 
 def _first_visible(page, sels: list[str]) -> str | None:
@@ -735,6 +799,13 @@ def _stage_of(page) -> str:
 
     # --- terminal: signed in -------------------------------------------------
     if on_teams and _any_visible(page, _TEAMS_IN_SELS):
+        # The app-bar frame paints while Teams is still booting behind its
+        # "We're setting things up for you…" splash, so the selectors alone
+        # report success too early — the success screenshot then shows a spinner
+        # instead of the signed-in UI, and phase 2 would start reading an empty
+        # chat list. Treat the splash as still-booting.
+        if "setting things up" in _body_text(page):
+            return "teams_booting"
         return "teams_loaded"
 
     # A visible password box is unambiguous whatever else the page shows, so it
@@ -842,7 +913,7 @@ def do_login(*, headless: bool = True, report_chat: str | None = None) -> dict:
     typed_email = typed_password = False
     passkey_tries = other_ways_tries = password_option_tries = 0
 
-    with sync_playwright() as p:
+    with _profile_lock("login"), sync_playwright() as p:
         ctx, page = _open(p, headless=headless)
         try:
             page.goto(TEAMS_URL, wait_until="domcontentloaded", timeout=60000)
@@ -858,8 +929,11 @@ def do_login(*, headless: bool = True, report_chat: str | None = None) -> dict:
                     last_stage = stage
 
                 if stage == "teams_loaded":
-                    # Give the shell a moment to settle before the success shot.
-                    page.wait_for_timeout(4000)
+                    # Splash is already gone by here (see _stage_of); this is
+                    # just letting the chat list paint before the success shot.
+                    page.wait_for_timeout(8000)
+                    print(f"[teams] shell selectors matched: "
+                          f"{_shell_selectors_present(page)}", flush=True)
                     result.update(ok=True, stage=stage,
                                   shot=_shot(page, "teams_loaded_final"))
                     _set(phase="monitoring", detail="signed in, session saved",
@@ -968,8 +1042,22 @@ def do_login(*, headless: bool = True, report_chat: str | None = None) -> dict:
                     except Exception:
                         _click_first(page, _SUBMIT_SELS)
                 elif stage == "stay_signed_in":
-                    # "Yes" is what makes the session survive a service restart.
-                    _click_first(page, _SUBMIT_SELS)
+                    # Click "Yes" by LABEL, never "whatever the primary button
+                    # is". "Yes" is what issues the persistent cookie; if this
+                    # rollout makes "No" the primary, clicking it still lands in
+                    # Teams but with a session-only login that dies with the
+                    # browser — i.e. a fresh --login needed after every service
+                    # restart, which is precisely the symptom that showed up.
+                    picked = _click_text_option(page, r"^yes")
+                    print(
+                        "[teams] stay-signed-in: "
+                        + (f"clicked {picked!r}" if picked
+                           else "no 'Yes' found — FELL BACK to primary button, "
+                                "session may not persist"),
+                        flush=True,
+                    )
+                    if not picked:
+                        _click_first(page, _SUBMIT_SELS)
                 elif stage == "use_web_app":
                     try:
                         page.get_by_text("Use the web app").first.click(timeout=10000)
@@ -1035,6 +1123,13 @@ def check_session(*, headless: bool = True) -> dict:
     """
     from playwright.sync_api import sync_playwright
 
+    # Pick up anything a --login in another process wrote since this process
+    # started. Without this the long-lived bot re-persists the stale state it
+    # loaded at import, wiping the successful-login record every /teamstatus —
+    # which is why a status could still report "bad_password" after a login
+    # that plainly worked.
+    _load_persisted()
+
     if not PROFILE_DIR.exists():
         _set(phase="login_failed", detail="no profile — never logged in",
              last_error="profile missing")
@@ -1044,16 +1139,22 @@ def check_session(*, headless: bool = True) -> dict:
                 "shot": None}
 
     result: dict[str, Any] = {"ok": False, "stage": "start", "reason": None, "shot": None}
-    with sync_playwright() as p:
+    with _profile_lock("check"), sync_playwright() as p:
         ctx, page = _open(p, headless=headless)
         try:
             page.goto(TEAMS_URL, wait_until="domcontentloaded", timeout=60000)
-            # The shell boots slowly on a CPU-only box; poll instead of one wait.
-            deadline = time.monotonic() + 60
+            # The shell boots slowly on a CPU-only box, and must get past the
+            # "setting things up" splash before the chat list exists — poll
+            # rather than waiting a fixed period.
+            deadline = time.monotonic() + max(60, int(os.getenv("TEAMS_BOOT_WAIT", "90")))
             stage = "unknown"
             while time.monotonic() < deadline:
                 stage = _stage_of(page)
                 if stage == "teams_loaded":
+                    # Let the chat list paint so the screenshot is worth sending.
+                    page.wait_for_timeout(6000)
+                    print(f"[teams] shell selectors matched: "
+                          f"{_shell_selectors_present(page)}", flush=True)
                     break
                 # "landing" is the logged-out marketing page — a dead session.
                 if stage in _NEEDS_HUMAN or stage in (
@@ -1193,6 +1294,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Teams (personal) watcher — login phase")
     ap.add_argument("--login", action="store_true", help="sign in and save the profile")
     ap.add_argument("--check", action="store_true", help="is the saved profile still signed in?")
+    ap.add_argument("--shot", action="store_true",
+                    help="fresh screenshot of the live session (add --report-chat to send it)")
     ap.add_argument("--status", action="store_true", help="print the status summary")
     ap.add_argument("--check-env", action="store_true",
                     help="fingerprint the .env credentials (no secrets printed)")
@@ -1210,9 +1313,12 @@ def main(argv: list[str] | None = None) -> int:
         res = do_login(headless=not args.headed, report_chat=args.report_chat)
         print(json.dumps(res, indent=2))
         return 0 if res["ok"] else 1
-    if args.check:
+    if args.check or args.shot:
         res = check_session(headless=not args.headed)
         print(json.dumps(res, indent=2))
+        if args.shot and args.report_chat:
+            sent = send_shot(args.report_chat, res.get("shot"))
+            print(f"screenshot sent to {args.report_chat}: {sent}")
         return 0 if res["ok"] else 1
 
     ap.print_help()
