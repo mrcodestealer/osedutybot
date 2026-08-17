@@ -1564,6 +1564,173 @@ def _all_frames() -> list[dict[str, Any]]:
     return out
 
 
+DOM_PATH = _ROOT_DIR / "teamswatch_dom.json"
+
+_DUMP_DOM_JS = r"""
+(maxRowH) => {
+    const out = {url: location.href, hash: location.hash, title: document.title,
+                 sidebar: [], selected: [], header: [], main: [], pane: []};
+    const attrs = (el) => {
+        const o = {tag: el.tagName.toLowerCase()};
+        for (const a of el.attributes) {
+            if (/^(class|style)$/i.test(a.name)) continue;
+            o[a.name] = String(a.value).slice(0, 90);
+        }
+        const cls = (el.className || '').toString();
+        if (cls) o._class = cls.slice(0, 120);
+        const r = el.getBoundingClientRect();
+        o._box = [Math.round(r.width), Math.round(r.height)];
+        o._text = (el.innerText || '').trim().split('\n')[0].slice(0, 70);
+        return o;
+    };
+
+    // (a) every candidate chat row, flagged for nesting
+    const rowSels = ["[data-tid='chat-list-item']", "[data-tid^='chat-list-item']",
+                     "[role='treeitem']", "[role='listitem']", "[role='option']"];
+    for (const s of rowSels) {
+        const all = [...document.querySelectorAll(s)];
+        out.sidebar.push({selector: s, total: all.length});
+        for (const el of all.slice(0, 40)) {
+            const a = attrs(el);
+            a._selector = s;
+            a._nestedMatches = el.querySelectorAll(s).length;
+            out.sidebar.push(a);
+        }
+    }
+
+    // (c) whatever marks the ACTIVE conversation
+    const selSels = ["[aria-selected='true']", "[aria-current]", "[data-selected]",
+                     "[class*='selected']", "[class*='Selected']",
+                     "[class*='active']", "[class*='Active']"];
+    for (const s of selSels) {
+        for (const el of [...document.querySelectorAll(s)].slice(0, 8)) {
+            const a = attrs(el); a._selector = s; out.selected.push(a);
+        }
+    }
+
+    // (b) the header, found STRUCTURALLY: walk up from the rename/edit control,
+    // since the title is a rename button here, not a heading.
+    const pencils = [...document.querySelectorAll(
+        "button,[role='button'],[contenteditable='true']")].filter(el => {
+        const lab = ((el.getAttribute('aria-label') || '') + ' ' +
+                     (el.getAttribute('title') || '')).toLowerCase();
+        return /edit|rename|name/.test(lab);
+    });
+    for (const pen of pencils.slice(0, 4)) {
+        let node = pen, hops = 0;
+        while (node && hops < 5) {
+            const a = attrs(node);
+            a._hopsFromEditControl = hops;
+            out.header.push(a);
+            node = node.parentElement; hops++;
+        }
+    }
+    // Any big-font visible text near the top of the main area is a title candidate.
+    for (const el of [...document.querySelectorAll('h1,h2,[role="heading"],span,div')]) {
+        const r = el.getBoundingClientRect();
+        if (r.top > 160 || r.height < 18 || r.height > 60 || r.width < 80) continue;
+        const fs = parseFloat(getComputedStyle(el).fontSize || '0');
+        if (fs < 17) continue;
+        const t = (el.innerText || '').trim();
+        if (!t || t.length > 90 || el.children.length > 2) continue;
+        const a = attrs(el); a._fontSize = fs; a._byFontSize = true;
+        out.header.push(a);
+        if (out.header.length > 60) break;
+    }
+
+    // (d) main region + message pane candidates
+    for (const s of ["[data-tid='app-layout-area--main']", "[role='main']", 'main',
+                     "[data-tid='chat-pane']"]) {
+        for (const el of [...document.querySelectorAll(s)].slice(0, 3)) {
+            const a = attrs(el); a._selector = s;
+            a._hasChatList = !!el.querySelector("[data-tid='chat-list'],[data-tid='chat-list-item']");
+            out.main.push(a);
+        }
+    }
+    for (const s of ["[data-tid='message-pane']", "[data-tid='messages-pane']",
+                     "[role='log']", "[data-tid='chat-pane-list']",
+                     "[data-tid='chat-pane-item']", "[data-tid='chat-pane-message']"]) {
+        const all = [...document.querySelectorAll(s)];
+        out.pane.push({selector: s, total: all.length});
+        for (const el of all.slice(0, 3)) {
+            const a = attrs(el); a._selector = s; out.pane.push(a);
+        }
+    }
+    return out;
+}
+"""
+
+
+def dump_dom(*, group: str | None = None, headless: bool = True) -> dict:
+    """Dump the live sidebar / header / pane structure to teamswatch_dom.json.
+
+    Exists because this DOM has been guessed at four times and been wrong four
+    times: the header title turned out to be a rename control rather than a
+    heading, and both the header and selected-row lookups returned empty. This
+    reports what is actually there — including the conversation id to put in
+    EVOTEAMS_THREAD_ID, which removes title matching from the critical path.
+    """
+    from playwright.sync_api import sync_playwright
+
+    target = (group or os.getenv("EVOTEAMS_GROUP")
+              or "@EVO C88live/slot_ow.ph (RTS) CS Group NE RT FP")
+    out: dict[str, Any] = {"ok": False, "target": target}
+
+    with _profile_lock("dump-dom"), sync_playwright() as p:
+        ctx, page = _open(p, headless=headless)
+        try:
+            page.goto(TEAMS_URL, wait_until="domcontentloaded", timeout=60000)
+            deadline = time.monotonic() + max(60, int(os.getenv("TEAMS_BOOT_WAIT", "90")))
+            while time.monotonic() < deadline:
+                if _stage_of(page) == "teams_loaded":
+                    break
+                page.wait_for_timeout(2000)
+            page.wait_for_timeout(5000)
+
+            # Try to open the target, but dump either way — a failed open is
+            # exactly the state we need to inspect.
+            opened = _open_group(page, target)
+            page.wait_for_timeout(3000)
+            data = page.evaluate(_DUMP_DOM_JS, _MAX_ROW_HEIGHT) or {}
+            data["opened_ok"] = opened
+            data["thread_id_seen"] = _open_thread_id(page)
+            data["confirm"] = list(_confirm_open_chat(page, target))
+            out.update(data)
+            out["ok"] = True
+            out["shot"] = _shot(page, "dump_dom")
+        except Exception as err:  # noqa: BLE001
+            out["error"] = repr(err)
+        finally:
+            try:
+                ctx.close()
+            except Exception:
+                pass
+
+    try:
+        DOM_PATH.write_text(json.dumps(out, ensure_ascii=False, indent=2),
+                            encoding="utf-8")
+    except Exception as err:  # noqa: BLE001
+        print(f"[teams] dom dump write failed: {err!r}", flush=True)
+
+    print(f"\n[teams] URL      : {out.get('url', '')[:150]}")
+    print(f"[teams] THREAD ID: {out.get('thread_id_seen') or '<none in URL>'}")
+    print(f"[teams] opened_ok: {out.get('opened_ok')}")
+    print(f"[teams] confirm  : {(out.get('confirm') or ['', ''])[1]}")
+    for section in ("sidebar", "selected", "header", "main", "pane"):
+        rows = out.get(section) or []
+        print(f"\n--- {section} ({len(rows)} entries) ---")
+        for row in rows[:14]:
+            if "selector" in row and "total" in row:
+                print(f"   COUNT {row['total']:>4}  {row['selector']}")
+                continue
+            bits = {k: v for k, v in row.items()
+                    if k in ("tag", "_text", "_box", "_nestedMatches", "_selector",
+                             "_hopsFromEditControl", "_fontSize", "_hasChatList")}
+            print(f"   {bits}")
+    print(f"\n[teams] full dump -> {DOM_PATH}")
+    return out
+
+
 def list_chats(*, headless: bool = True) -> dict:
     """Dump the sidebar's conversation titles to teamswatch_chats.json.
 
@@ -1649,11 +1816,39 @@ _MSG_ROW_SELS = [
     "[data-tid='message-body']",
     "[role='listitem']",
 ]
+# Confirmed against a DOM capture of the live build (2026-08-18). `#chat-pane-list`
+# is the message RUNWAY and is listed first on purpose: the pinned-message banner
+# ("Ina Huang … 親愛的團隊您好 …", pinned back in May) lives in the pane *outside* the
+# runway, so anchoring here drops it without needing a text rule. Everything after
+# is a fallback for older/renamed builds.
 _MSG_PANE_SELS = [
+    "#chat-pane-list",
+    "[data-tid='message-pane-list-runway']",
+    "[data-tid='message-pane-list-viewport']",
+    "[data-tid='message-pane-body']",
+    "[data-tid='message-pane-layout']",
     "[data-tid='message-pane']",
     "[data-tid='messages-pane']",
     "[data-tid='chat-pane-list']",
     "[role='log']",
+]
+# The element that actually scrolls. The runway does not — it is the full-height
+# content — so scrolling must target its viewport ancestor.
+_MSG_SCROLL_SELS = [
+    "[data-tid='message-pane-list-viewport']",
+    "[data-view='message-pane-list-viewport']",
+]
+# The message body as its own node. `[data-message-content]` is this build's marker
+# (`<div id="content-1786918775349" data-message-content aria-label="…">`); taking
+# the body from here rather than the row's innerText is what keeps the author name,
+# the timestamp, the "Translate" button and the reaction summary
+# ("1 Like reaction with light skin tone.") out of the generated email.
+_MSG_BODY_SELS = [
+    "[data-message-content]",
+    "[id^='content-']",
+    "[data-tid='message-body']",
+    "[data-tid='messageBodyContent']",
+    ".fui-ChatMessage__body",
 ]
 
 # `chat-pane-item` — the selector that actually matches on this Teams build —
@@ -1712,8 +1907,13 @@ def _looks_system(text: str) -> bool:
 # sidebar's own "Chat" heading — which is exactly what an earlier version
 # returned, making every comparison fail with "Teams is showing 'Chat'".
 _CHAT_TITLE_SELS = [
+    # This build's real header, confirmed from a DOM capture: an <h2>, not an <h1>
+    # — which is why every h1-based guess came back empty and the generic ones
+    # matched the sidebar's own "Chat" heading instead.
+    "[data-tid='chat-title']",
     "[data-tid='chat-header-title']",
     "[data-tid='chatHeaderTitle']",
+    "[data-tid='entity-header'] [role='heading']",
     "[data-tid='chat-pane-header'] [role='heading']",
     "[data-tid='conversation-header'] [role='heading']",
     "[role='main'] [role='heading']",
@@ -1730,6 +1930,82 @@ _TITLE_CHROME = {
 }
 
 
+# A Teams conversation id, e.g. 19:abc...@thread.v2 or 19:abc...@unq.gbl.spaces.
+# Opaque, unique, unlocalised, untruncated, and unchanged by a rename — so unlike
+# a 20-char title prefix it has no partial-match failure mode. This is the signal
+# to trust; the title is a fallback.
+_THREAD_ID_RE = re.compile(r"19:[A-Za-z0-9_\-+=/.]+@(?:thread\.v2|thread\.skype|unq\.gbl\.spaces)")
+
+
+# Where the open conversation's id is written into the DOM on this build. Taken
+# from a real capture rather than guessed:
+#   <div id="chat-header-19:29c60453c7fa48b59d142e97f7272963@thread.skype">
+#   <button data-tid="sendMessageCommands-send" data-track-thread-id="19:…">
+# The compose send button is the strongest of the two: it names the thread a
+# message would actually be posted to, so it cannot be stale relative to the pane.
+_OPEN_THREAD_JS = r"""
+    () => {
+        const send = document.querySelector('[data-track-thread-id]');
+        const fromSend = send ? (send.getAttribute('data-track-thread-id') || '') : '';
+        if (fromSend) return fromSend;
+        const hdr = document.querySelector("[id^='chat-header-19:']");
+        if (hdr) return hdr.id.slice('chat-header-'.length);
+        return '';
+    }
+"""
+
+
+def _open_thread_id(page) -> str:
+    """Conversation id of the chat currently on screen.
+
+    Reads the DOM first and the URL second. The URL is not reliable here — Teams
+    keeps `teams.live.com/v2/` in the address bar while switching conversations
+    client-side, so a URL-only read returns nothing and made id verification
+    impossible to satisfy.
+    """
+    from urllib.parse import unquote
+
+    try:
+        found = (page.evaluate(_OPEN_THREAD_JS) or "").strip()
+    except Exception:
+        found = ""
+    if found:
+        match = _THREAD_ID_RE.search(found)
+        if match:
+            return match.group(0)
+
+    try:
+        url = unquote(page.url or "")
+    except Exception:
+        url = page.url or ""
+    match = _THREAD_ID_RE.search(url)
+    return match.group(0) if match else ""
+
+
+# Conversation ids we have positively identified, keyed by normalised title. An id
+# is opaque and unchanged by a rename, so verifying against one removes every
+# partial-match failure mode the title comparison had (truncation, the archived
+# 【关闭】 clone, a header that read as just "@").
+_KNOWN_THREAD_IDS = {
+    "@evo c88live/slot_ow.ph (rts) cs group ne rt fp":
+        "19:29c60453c7fa48b59d142e97f7272963@thread.skype",
+}
+
+
+def _wanted_thread_id(title: str = "") -> str:
+    """The id we require the open chat to have, or "" to fall back to titles.
+
+    EVOTEAMS_THREAD_ID overrides, so a renamed or re-created group can be pointed
+    at without a code change. Otherwise this only answers for titles we have
+    actually confirmed — asking for an arbitrary --group must not inherit the EVO
+    group's id.
+    """
+    env = (os.getenv("EVOTEAMS_THREAD_ID", "") or "").strip()
+    if env:
+        return env
+    return _KNOWN_THREAD_IDS.get(_norm_title(title), "")
+
+
 def _selected_chat_title(page) -> str:
     """Title of the sidebar row Teams marks as active.
 
@@ -1741,13 +2017,24 @@ def _selected_chat_title(page) -> str:
     try:
         return (page.evaluate(
             """(maxH) => {
-                const sels = ["[aria-selected='true']", "[aria-current='page']",
+                // LeftRailSelectedItem is how this build tags the active row (it
+                // is listed in the row's data-tabster "observed names"); the rest
+                // are fallbacks for other builds.
+                const sels = ["[data-tabster*='LeftRailSelectedItem']",
+                              "[aria-selected='true']", "[aria-current='page']",
                               "[aria-current='true']", "[aria-current='location']",
                               "[class*='selected']", "[class*='isSelected']"];
                 for (const s of sels) {
                     for (const el of document.querySelectorAll(s)) {
                         const r = el.getBoundingClientRect();
                         if (!r.height || r.height > maxH) continue;
+                        // The row carries the untruncated chat name in a dedicated
+                        // span: <span id="title-chat-list-item_19:…">@EVO …</span>.
+                        const named = el.querySelector("[id^='title-chat-list-item_']");
+                        if (named) {
+                            const n = (named.innerText || '').trim();
+                            if (n) return n;
+                        }
                         const t = (el.innerText || '').trim().split('\\n')[0].trim();
                         if (t) return t;
                     }
@@ -1775,7 +2062,15 @@ def _open_chat_title(page) -> str:
                     for (const el of document.querySelectorAll(s)) {
                         if (!(el.offsetParent || el.offsetWidth || el.offsetHeight))
                             continue;
-                        const t = (el.innerText || '').trim().split('\\n')[0].trim();
+                        // Teams truncates the rendered header with an ellipsis but
+                        // keeps the full name in title=, and a truncated title is
+                        // exactly what an anchored prefix comparison cannot judge.
+                        const withTitle = el.matches('[title]')
+                            ? el : el.querySelector('[title]');
+                        let t = withTitle
+                            ? (withTitle.getAttribute('title') || '').trim() : '';
+                        if (!t)
+                            t = (el.innerText || '').trim().split('\\n')[0].trim();
                         if (!t) continue;
                         if (chrome.includes(t.toLowerCase())) continue;
                         return t;
@@ -1830,6 +2125,60 @@ def _titles_match(want: str, got: str) -> bool:
     return a.startswith(b) or b.startswith(a)
 
 
+def _confirm_open_chat(page, title: str) -> tuple[bool, str]:
+    """Is ``title`` the conversation on screen? Returns ``(ok, human_reason)``.
+
+    Three independent signals, because every single one of them has already
+    failed on this build:
+      - thread id from the URL vs EVOTEAMS_THREAD_ID — the only one that cannot
+        half-match; authoritative when configured
+      - the conversation header title — its selectors matched nothing here
+      - the selected sidebar row — also came back empty here
+
+    The reason string is always populated, so a failure names what was tried
+    instead of reporting a bare empty title (which is what "could not open the
+    target group" with no chat name meant).
+    """
+    thread = _open_thread_id(page)
+    wanted = _wanted_thread_id(title)
+    if wanted and thread:
+        # Both known: this is decisive in BOTH directions. A mismatch is a hard
+        # failure — it is precisely the case where we would otherwise scrape and
+        # email another group's maintenance notice.
+        if thread == wanted:
+            return True, f"thread id matches ({thread[:28]}…)"
+        return False, (f"thread id mismatch: on {thread[:28]}…, "
+                       f"want {wanted[:28]}…")
+    if wanted and not thread:
+        # We know which id to want but the page exposes none. Do NOT hard-fail:
+        # that would make a single Teams markup rename break reading entirely,
+        # even with a correct chat on screen. Fall through to the title checks —
+        # no worse than before ids existed, and those are now fail-closed.
+        print(f"[teams] no conversation id in the DOM (want {wanted[:28]}…); "
+              f"falling back to title comparison", flush=True)
+
+    header = _open_chat_title(page)
+    if _titles_match(title, header):
+        return True, f"header title matches ({header!r})"
+
+    picked = _selected_chat_title(page)
+    if _titles_match(title, picked):
+        return True, f"selected sidebar row matches ({picked!r})"
+
+    bits = [
+        f"header={header!r}" if header else "header=<none found>",
+        f"selected-row={picked!r}" if picked else "selected-row=<none found>",
+        f"url-thread={thread[:28] + '…' if thread else '<none>'}",
+    ]
+    hint = ""
+    if thread and not wanted:
+        # We are plainly inside *a* conversation but have nothing to compare it
+        # against — this is the case to fix by storing the id once.
+        hint = (f"  -> set EVOTEAMS_THREAD_ID={thread} in .env to verify by id "
+                f"(run --dump-dom to confirm it is the right chat)")
+    return False, "; ".join(bits) + hint
+
+
 def _row_needle(title: str) -> str:
     """Longest whitespace-free fragment of a title, for text matching.
 
@@ -1856,13 +2205,13 @@ def _open_group(page, title: str) -> bool:
     if not needle:
         return False
 
-    before = _open_chat_title(page)
-    if before:
-        print(f"[teams] chat open on arrival: {before!r}", flush=True)
-    if _titles_match(needle, before):
+    ok, why = _confirm_open_chat(page, needle)
+    print(f"[teams] on arrival: {why}", flush=True)
+    if ok:
         print("[teams] target chat already open", flush=True)
         page.wait_for_timeout(3000)
         return True
+    before = _open_chat_title(page)
 
     # Match on a distinctive whitespace-free fragment, not needle[:24].
     # `has_text` and `inner_text()` use different text models — has_text includes
@@ -1871,39 +2220,101 @@ def _open_group(page, title: str) -> bool:
     # verification disagree and skip the row we actually want.
     prefix = _row_needle(needle)
     seen = before
-    # Alternate activation: Enter first (geometry-free), then a real click, then
-    # Enter again. press() silently does nothing on a node that ignores the key,
-    # so the only honest test is whether the conversation actually changed.
-    for attempt, method in enumerate(("enter", "click", "enter"), start=1):
-        if not _click_chat_row(page, prefix, method=method):
-            print(f"[teams] sidebar row not found for {prefix!r} "
-                  f"(attempt {attempt}/3, method={method})", flush=True)
+    thread = _wanted_thread_id(needle)
+    # Activation, best signal first:
+    #   1. click the row keyed on the conversation id — no text matching at all
+    #   2. Enter on a text-matched row (geometry-free)
+    #   3. a real click on a text-matched row
+    # press() silently does nothing on a node that ignores the key, so the only
+    # honest test of any of these is whether the conversation actually changed.
+    methods = (("thread", "enter", "click", "enter") if thread
+               else ("enter", "click", "enter"))
+    for attempt, method in enumerate(methods, start=1):
+        if method == "thread":
+            activated = _click_chat_row_by_thread(page, thread)
+        else:
+            activated = _click_chat_row(page, prefix, method=method)
+        if not activated:
+            label = thread[:28] + "…" if method == "thread" else repr(prefix)
+            print(f"[teams] sidebar row not found for {label} "
+                  f"(attempt {attempt}/{len(methods)}, method={method})", flush=True)
             page.wait_for_timeout(2000)
             continue
         # Wait for the HEADER to become the target — not merely for a pane to
         # exist. A pane is already on screen from the restored chat, so "a pane
         # appeared" proves nothing about which chat we are looking at.
         deadline = time.monotonic() + 25
+        why = ""
         while time.monotonic() < deadline:
-            seen = _open_chat_title(page)
-            if _titles_match(needle, seen):
+            ok, why = _confirm_open_chat(page, needle)
+            if ok:
                 page.wait_for_timeout(4000)  # let the virtualised list settle
-                print(f"[teams] confirmed open: {seen!r}", flush=True)
+                print(f"[teams] confirmed open — {why}", flush=True)
                 return True
             page.wait_for_timeout(1500)
-        print(f"[teams] still {seen!r} after attempt {attempt}/3", flush=True)
+        seen = why
+        print(f"[teams] attempt {attempt}/{len(methods)} unconfirmed — {why}",
+              flush=True)
 
-    print(f"[teams] chat did not switch — header shows {seen!r}, "
-          f"wanted {needle!r}", flush=True)
+    print(f"[teams] could not confirm the target chat — {seen}", flush=True)
     return False
 
 
 _CHAT_ROW_SELS = [
     "[data-tid='chat-list-item']",
     "[data-tid^='chat-list-item']",
+    "[role='treeitem'][data-item-type='chat']",
+    "[data-testid='list-item']",
     "[role='treeitem']",
     "[role='listitem']",
 ]
+
+
+def _click_chat_row_by_thread(page, thread: str) -> bool:
+    """Activate the sidebar row for a CONVERSATION ID, not for text.
+
+    Every sidebar row on this build is keyed on the thread id — confirmed from a
+    DOM capture:
+
+      <div role="treeitem" data-item-type="chat"
+           data-fui-tree-item-value="…|OneGQL_GroupChatConversation|19:29c6…@thread.skype"
+           data-tabster='{"observed":{"names":["19:29c6…@thread.skype"]}}'>
+        <div data-inp="simple-collab-chat-switch"> … </div>
+
+    That removes every failure mode the text path had: no truncated title, no
+    NBSP/LRM mismatch between has_text and inner_text, no archived 【关闭】 clone
+    sharing a prefix, and no outer container that merely *contains* the title and
+    whose centre lands on a mid-list chat.
+    """
+    thread = (thread or "").strip()
+    if not thread:
+        return False
+    esc = thread.replace("\\", "\\\\").replace('"', '\\"')
+    sels = [
+        f'[role="treeitem"][data-fui-tree-item-value$="{esc}"]',
+        f'[data-testid="list-item"][data-fui-tree-item-value$="{esc}"]',
+        f'[role="treeitem"][data-tabster*="{esc}"]',
+        f'[data-fui-tree-item-value$="{esc}"]',
+    ]
+    for sel in sels:
+        try:
+            row = page.locator(sel).first
+            if not row.count():
+                continue
+            row.scroll_into_view_if_needed(timeout=10000)
+            page.wait_for_timeout(500)
+            # Click the row's own switch element when present: the treeitem is the
+            # focus/DnD wrapper, the switch is what Teams binds the navigation to.
+            inner = row.locator("[data-inp='simple-collab-chat-switch']").first
+            target = inner if inner.count() else row
+            target.click(timeout=15000)
+            print(f"[teams] activated sidebar row by conversation id "
+                  f"({thread[:28]}…) via {sel}", flush=True)
+            return True
+        except Exception as err:  # noqa: BLE001
+            print(f"[teams] id click via {sel} failed: {err!r}", flush=True)
+            continue
+    return False
 
 
 # A real chat row is one avatar tall (~50-72px observed). Anything much taller is
@@ -2003,6 +2414,14 @@ _MAIN_REGION_SELS = [
 # Anything that identifies the LEFT SIDEBAR. A resolved pane containing one of
 # these is the chat list, not the message list.
 _SIDEBAR_MARK_SELS = [
+    # Real markers on this build, from the DOM capture.
+    "[data-testid='simple-collab-dnd-rail']",
+    "[data-tid='simple-collab-dnd-rail']",
+    "[data-testid='simple-collab-rail']",
+    "[data-tid='app-layout-area--mid-nav']",
+    "[data-tid='app-layout-area--nav']",
+    "[data-testid='list-item']",
+    "[data-inp='simple-collab-chat-switch']",
     "[data-tid='chat-list']",
     "[data-tid='chat-list-item']",
     "[data-tid='app-bar']",
@@ -2045,15 +2464,31 @@ def _scroll_pane_up(page, px: int = 1200) -> bool:
     """
     try:
         return bool(page.evaluate(
-            """([mainSels, paneSels, sidebarSels, px, resolveSrc]) => {
+            """([mainSels, paneSels, sidebarSels, scrollSels, px, resolveSrc]) => {
                 const resolve = eval(resolveSrc);
                 const pane = resolve(mainSels, paneSels, sidebarSels);
                 if (!pane) return false;
-                const cands = [pane];
+                const cands = [];
+                // The named viewport first. The resolved pane is usually the
+                // RUNWAY (#chat-pane-list), which is full-height and therefore
+                // never scrolls — its viewport ancestor is what moves.
+                for (const s of scrollSels) {
+                    for (const el of document.querySelectorAll(s)) {
+                        if (pane.contains(el) || el.contains(pane)) cands.push(el);
+                    }
+                }
+                cands.push(pane);
                 pane.querySelectorAll('div').forEach(el => {
                     if (el.scrollHeight > el.clientHeight + 200
                         && el.clientHeight > 200) cands.push(el);
                 });
+                // Then scrollable ancestors, stopping at the main region so this
+                // can never reach the left chat list.
+                for (let el = pane.parentElement; el; el = el.parentElement) {
+                    if (sidebarSels.some(s => el.matches && el.matches(s))) break;
+                    if (el.scrollHeight > el.clientHeight + 50) cands.push(el);
+                    if (mainSels.some(s => el.matches && el.matches(s))) break;
+                }
                 for (const el of cands) {
                     if (el.scrollHeight > el.clientHeight + 50) {
                         const before = el.scrollTop;
@@ -2063,8 +2498,8 @@ def _scroll_pane_up(page, px: int = 1200) -> bool:
                 }
                 return false;
             }""",
-            [_MAIN_REGION_SELS, _MSG_PANE_SELS, _SIDEBAR_MARK_SELS, int(px),
-             _RESOLVE_PANE_JS],
+            [_MAIN_REGION_SELS, _MSG_PANE_SELS, _SIDEBAR_MARK_SELS,
+             _MSG_SCROLL_SELS, int(px), _RESOLVE_PANE_JS],
         ))
     except Exception as err:  # noqa: BLE001
         print(f"[teams] scroll up failed: {err!r}", flush=True)
@@ -2078,7 +2513,7 @@ def _scrape_rows(page, scan: int) -> dict[str, Any]:
     in Python where it is testable, and the counts tell us what was dropped.
     """
     return page.evaluate(
-        """([sels, limit, mainSels, paneSels, sidebarSels, resolveSrc]) => {
+        """([sels, limit, mainSels, paneSels, sidebarSels, bodySels, resolveSrc]) => {
             const out = {matched: null, counts: {}, rows: [], pane: null};
             const resolve = eval(resolveSrc);
             const pane = resolve(mainSels, paneSels, sidebarSels);
@@ -2101,21 +2536,31 @@ def _scrape_rows(page, scan: int) -> dict[str, Any]:
                             const n = el.querySelector(q);
                             return n ? (n.innerText || '').trim() : '';
                         };
+                        // The body alone. This is what gets emailed, so the author
+                        // name, timestamp, "Translate" button and reaction summary
+                        // must not be glued onto the front or the back.
+                        let body = '';
+                        for (const q of bodySels) {
+                            body = pick(q);
+                            if (body) break;
+                        }
                         const tEl = el.querySelector('time');
+                        const mid = el.getAttribute('data-mid') || '';
                         out.rows.push({
-                            id: el.getAttribute('data-mid')
-                                || el.getAttribute('data-tid')
+                            // data-mid is Teams' own message id — a stable key for
+                            // "have we already handled this message?", which a text
+                            // hash only approximates.
+                            mid: mid,
+                            id: mid || el.getAttribute('data-tid')
                                 || el.getAttribute('id') || '',
                             author: pick("[data-tid='message-author-name']")
                                  || pick('[itemprop=name]') || '',
                             time: (tEl ? (tEl.getAttribute('datetime')
                                           || tEl.innerText || '') : '').trim(),
-                            // The body alone, when Teams exposes it as its own
-                            // node. This is what gets emailed, so the author name
-                            // and timestamp must not be glued onto the front.
-                            body: pick("[data-tid='message-body']")
-                               || pick("[data-tid='messageBodyContent']")
-                               || pick('.fui-ChatMessage__body') || '',
+                            // Teams flags the newest rendered row; useful to prove
+                            // we scraped the tail and not a scrolled-back window.
+                            last: el.getAttribute('data-last-visible') === 'true',
+                            body: body,
                             text: (el.innerText || '').trim(),
                         });
                     }
@@ -2124,7 +2569,7 @@ def _scrape_rows(page, scan: int) -> dict[str, Any]:
             return out;
         }""",
         [_MSG_ROW_SELS, int(scan), _MAIN_REGION_SELS, _MSG_PANE_SELS,
-         _SIDEBAR_MARK_SELS, _RESOLVE_PANE_JS],
+         _SIDEBAR_MARK_SELS, _MSG_BODY_SELS, _RESOLVE_PANE_JS],
     ) or {}
 
 
@@ -2218,14 +2663,16 @@ def read_latest_messages(*, group: str | None = None, limit: int = 3,
                 res["shot"] = _shot(page, "read_no_group")
                 return res
 
-            # Belt and braces: re-read the header immediately before scraping, so
-            # a chat that switches underneath us can never be reported as this one.
+            # Belt and braces: re-confirm immediately before scraping, so a chat
+            # that switches underneath us can never be reported as this one. Uses
+            # the same id-first check as opening did — re-checking the TITLE alone
+            # would reject a correctly-open chat whenever the header read comes
+            # back empty, which is exactly what happened on this build.
             res["opened_title"] = _open_chat_title(page)
-            if not _titles_match(target, res["opened_title"]):
-                res["error"] = (
-                    f"chat changed before reading — showing "
-                    f"{res['opened_title']!r}, wanted {target!r}"
-                )
+            res["thread_id"] = _open_thread_id(page)
+            still_ok, still_why = _confirm_open_chat(page, target)
+            if not still_ok:
+                res["error"] = f"chat changed before reading — {still_why}"
                 res["shot"] = _shot(page, "read_wrong_chat")
                 return res
 
@@ -2307,7 +2754,11 @@ def _fmt_messages(res: dict) -> str:
         body = (msg.get("text") or "").strip()
         if len(body) > 1500:
             body = body[:1500] + f"\n… (+{len(msg['text']) - 1500} chars)"
-        head = " | ".join(x for x in (msg.get("author"), msg.get("time")) if x)
+        head = " | ".join(x for x in (msg.get("author"), msg.get("time"),
+                                     # Teams' own message id — the key the
+                                     # detection ledger dedupes on.
+                                     f"id {msg['mid']}" if msg.get("mid") else "")
+                          if x)
         lines.append(f"--- {i}/{len(res['messages'])}"
                      + (f"  ({head})" if head else "") + f" ---\n{body}")
     return "\n".join(lines)
@@ -2455,6 +2906,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="record websocket frames to teamswatch_frames.jsonl (phase-2 recon)")
     ap.add_argument("--scan-frames", action="store_true",
                     help="summarise an existing capture: shape only, no secrets")
+    ap.add_argument("--dump-dom", action="store_true",
+                    help="dump the live sidebar/header/pane structure + thread id")
     ap.add_argument("--read-latest", action="store_true",
                     help="open the watched group and print its latest messages")
     ap.add_argument("--group", default=None, help="override the group title to read")
@@ -2477,6 +2930,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.scan_frames:
         res = scan_frames()
         return 0 if res.get("frames") else 1
+    if args.dump_dom:
+        res = dump_dom(group=args.group, headless=not args.headed)
+        return 0 if res.get("ok") else 1
     if args.read_latest:
         res = read_latest_messages(group=args.group, limit=args.limit,
                                    headless=not args.headed)
