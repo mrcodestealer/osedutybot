@@ -1707,31 +1707,46 @@ def _looks_system(text: str) -> bool:
     return bool(_SYSTEM_EVENT_RE.search(body))
 
 
-# The conversation header, which names the chat that is ACTUALLY open.
+# The conversation header, which names the chat that is ACTUALLY open. Ordered
+# specific-first, because the generic heading selectors also match the left
+# sidebar's own "Chat" heading — which is exactly what an earlier version
+# returned, making every comparison fail with "Teams is showing 'Chat'".
 _CHAT_TITLE_SELS = [
     "[data-tid='chat-header-title']",
     "[data-tid='chatHeaderTitle']",
+    "[data-tid='chat-pane-header'] [role='heading']",
     "[data-tid='conversation-header'] [role='heading']",
+    "[role='main'] [role='heading']",
+    "[role='main'] h1",
     "[role='heading'][aria-level='1']",
-    "main h1",
     "h1",
 ]
+
+# App chrome that is never a chat name. Any of these means we matched the shell
+# rather than the conversation header.
+_TITLE_CHROME = {
+    "chat", "chats", "teams", "activity", "calendar", "calls", "files", "apps",
+    "more", "search", "communities", "feed", "microsoft teams",
+}
 
 
 def _open_chat_title(page) -> str:
     try:
         return (page.evaluate(
-            """(sels) => {
+            """([sels, chrome]) => {
                 for (const s of sels) {
                     for (const el of document.querySelectorAll(s)) {
-                        const t = (el.innerText || '').trim();
-                        if (t && (el.offsetParent || el.offsetWidth || el.offsetHeight))
-                            return t.split('\\n')[0];
+                        if (!(el.offsetParent || el.offsetWidth || el.offsetHeight))
+                            continue;
+                        const t = (el.innerText || '').trim().split('\\n')[0].trim();
+                        if (!t) continue;
+                        if (chrome.includes(t.toLowerCase())) continue;
+                        return t;
                     }
                 }
                 return '';
             }""",
-            _CHAT_TITLE_SELS,
+            [_CHAT_TITLE_SELS, sorted(_TITLE_CHROME)],
         ) or "").strip()
     except Exception:
         return ""
@@ -1772,52 +1787,75 @@ def _open_group(page, title: str) -> bool:
         page.wait_for_timeout(3000)
         return True
 
-    # Match on a prefix: sidebar rows append the preview text and timestamp to
-    # the title, so an equality test never matches. scrollIntoView first — the
-    # sidebar is virtualised and an off-screen row cannot be clicked.
-    found = page.evaluate(
-        """(needle) => {
-            const n = needle.toLowerCase().slice(0, 24);
-            document.querySelectorAll('[data-teamswatch-chat]').forEach(
-                el => el.removeAttribute('data-teamswatch-chat'));
-            const sels = ["[data-tid='chat-list-item']", "[data-tid^='chat-list-item']",
-                          "[role='treeitem']", "[role='listitem']"];
-            for (const s of sels) {
-                for (const el of document.querySelectorAll(s)) {
-                    const t = (el.innerText || '').trim().toLowerCase();
-                    if (!t || !t.includes(n)) continue;
-                    el.setAttribute('data-teamswatch-chat', '1');
-                    try { el.scrollIntoView({block: 'center'}); } catch (e) {}
-                    return (el.innerText || '').trim().split('\\n')[0];
-                }
-            }
-            return '';
-        }""",
-        needle,
-    )
-    if not found:
-        print(f"[teams] sidebar row not found for {needle!r}", flush=True)
-        return False
-    print(f"[teams] clicking sidebar row: {found!r}", flush=True)
-    try:
-        page.locator("[data-teamswatch-chat='1']").first.click(timeout=15000)
-    except Exception as err:  # noqa: BLE001
-        print(f"[teams] clicking chat row failed: {err!r}", flush=True)
-        return False
+    # Match on a prefix: sidebar rows append the preview and timestamp to the
+    # title, so an equality test never matches.
+    prefix = needle[:24]
+    seen = before
+    for attempt in range(1, 4):
+        if not _click_chat_row(page, prefix):
+            print(f"[teams] sidebar row not found for {prefix!r} "
+                  f"(attempt {attempt}/3)", flush=True)
+            page.wait_for_timeout(2000)
+            continue
+        # Wait for the HEADER to become the target — not merely for a pane to
+        # exist. A pane is already on screen from the restored chat, so "a pane
+        # appeared" proves nothing about which chat we are looking at.
+        deadline = time.monotonic() + 25
+        while time.monotonic() < deadline:
+            seen = _open_chat_title(page)
+            if _titles_match(needle, seen):
+                page.wait_for_timeout(4000)  # let the virtualised list settle
+                print(f"[teams] confirmed open: {seen!r}", flush=True)
+                return True
+            page.wait_for_timeout(1500)
+        print(f"[teams] still {seen!r} after attempt {attempt}/3", flush=True)
 
-    # Wait for the HEADER to become the target, not merely for a pane to exist.
-    deadline = time.monotonic() + 45
-    seen = ""
-    while time.monotonic() < deadline:
-        seen = _open_chat_title(page)
-        if _titles_match(needle, seen):
-            page.wait_for_timeout(4000)  # let the virtualised list settle
-            print(f"[teams] confirmed open: {seen!r}", flush=True)
+    print(f"[teams] chat did not switch — header shows {seen!r}, "
+          f"wanted {needle!r}", flush=True)
+    return False
+
+
+_CHAT_ROW_SELS = [
+    "[data-tid='chat-list-item']",
+    "[data-tid^='chat-list-item']",
+    "[role='treeitem']",
+    "[role='listitem']",
+]
+
+
+def _click_chat_row(page, prefix: str) -> bool:
+    """Click the sidebar row whose text contains ``prefix``.
+
+    Uses a Playwright locator filtered by text rather than tagging a node in JS
+    and clicking the tag later. The chat list is virtualised and Teams RECYCLES
+    its DOM nodes: scrolling a tagged node into view re-renders it with a
+    different conversation's content, so the tag-then-click approach clicked
+    whatever chat had been recycled into that node (it opened
+    「【关闭】ZF918(B) / CP /PG Integration」 while aiming for the EVO group).
+    A locator re-resolves at action time, and the text is re-verified in the
+    instant before the click.
+    """
+    for sel in _CHAT_ROW_SELS:
+        try:
+            rows = page.locator(sel).filter(has_text=prefix)
+            if rows.count() == 0:
+                continue
+            row = rows.first
+            row.scroll_into_view_if_needed(timeout=10000)
+            page.wait_for_timeout(600)  # let the list settle after scrolling
+            # Confirm the node still shows our chat: recycling happens exactly here.
+            text = (row.inner_text(timeout=5000) or "").strip()
+            if prefix.lower() not in text.lower():
+                print(f"[teams] row recycled under us "
+                      f"(now {text.splitlines()[0][:48]!r}) — retrying", flush=True)
+                continue
+            print(f"[teams] clicking sidebar row: "
+                  f"{text.splitlines()[0][:60]!r} via {sel}", flush=True)
+            row.click(timeout=15000)
             return True
-        page.wait_for_timeout(1500)
-
-    print(f"[teams] chat did not switch — header still {seen!r}, wanted {needle!r}",
-          flush=True)
+        except Exception as err:  # noqa: BLE001
+            print(f"[teams] row click via {sel} failed: {err!r}", flush=True)
+            continue
     return False
 
 
