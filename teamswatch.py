@@ -1199,14 +1199,29 @@ CHATS_PATH = _ROOT_DIR / "teamswatch_chats.json"
 _FRAME_CHARS_MAX = 20000
 _FRAMES_MAX = 4000
 
+# A JSON quote that may be backslash-escaped. Trouter puts the interesting
+# document in the envelope's `body` as a JSON *string*, so on the wire the keys
+# appear as \"resourceType\" — matching only plain quotes finds nothing at all.
+_Q = r"\\?\""
+
 # Keys that suggest a frame carries a chat message rather than presence/typing
 # noise. Used only to summarise the dump, never to filter what gets written.
 _MSG_HINT = re.compile(
-    r"(?i)\"messagetype\"|newmessage|\"content\"\s*:|clientmessageid|imdisplayname"
+    rf"(?i){_Q}messagetype{_Q}|newmessage|{_Q}content{_Q}\s*:"
+    rf"|clientmessageid|imdisplayname"
+)
+
+# Stronger: trouter wraps a genuinely new chat message in a NewMessage envelope,
+# and chat bodies carry messagetype RichText/Text. The weak hint above also fires
+# on presence and typing traffic, so early-exit keys off this one instead.
+_MSG_STRONG = re.compile(
+    rf"(?i){_Q}resourceType{_Q}\s*:\s*{_Q}NewMessage"
+    rf"|{_Q}messagetype{_Q}\s*:\s*{_Q}(?:RichText|Text)"
 )
 
 
-def dump_frames(*, seconds: int = 300, headless: bool = True) -> dict:
+def dump_frames(*, seconds: int = 300, min_messages: int = 1,
+                headless: bool = True) -> dict:
     """Record websocket frames from a live Teams session to teamswatch_frames.jsonl.
 
     Teams pushes new messages over a long-lived socket (trouter) — that is what
@@ -1221,7 +1236,7 @@ def dump_frames(*, seconds: int = 300, headless: bool = True) -> dict:
     from playwright.sync_api import sync_playwright
 
     stats: dict[str, Any] = {"sockets": [], "frames": 0, "msg_like": 0,
-                             "path": str(FRAMES_PATH), "loaded": False}
+                             "messages": 0, "path": str(FRAMES_PATH), "loaded": False}
     with _profile_lock("dump-frames"), sync_playwright() as p:
         ctx, page = _open(p, headless=headless)
         fh = FRAMES_PATH.open("w", encoding="utf-8")
@@ -1238,6 +1253,12 @@ def dump_frames(*, seconds: int = 300, headless: bool = True) -> dict:
             stats["frames"] += 1
             if _MSG_HINT.search(body):
                 stats["msg_like"] += 1
+            if kind == "recv" and _MSG_STRONG.search(body):
+                stats["messages"] += 1
+                # Print immediately: waiting 5 minutes to find out whether the
+                # capture worked is what made this look hung.
+                print(f"[teams] ★ message frame #{stats['messages']} "
+                      f"({len(body)} chars)", flush=True)
             try:
                 fh.write(json.dumps({
                     "at": _now_str(),
@@ -1269,11 +1290,29 @@ def dump_frames(*, seconds: int = 300, headless: bool = True) -> dict:
             if not stats["loaded"]:
                 print("[teams] never reached teams_loaded — capture may be empty",
                       flush=True)
-            print(f"[teams] recording frames for {seconds}s — POST IN THE WATCHED "
-                  f"GROUP NOW so a real message frame is captured", flush=True)
+            print(f"[teams] recording up to {seconds}s — POST IN THE WATCHED GROUP "
+                  f"NOW. Stops early once {min_messages} message frame(s) are "
+                  f"captured; Ctrl-C is safe (every frame is flushed as it lands).",
+                  flush=True)
             end = time.monotonic() + seconds
+            next_beat = time.monotonic() + 15
+            stop_at: float | None = None
             while time.monotonic() < end:
-                page.wait_for_timeout(2000)
+                page.wait_for_timeout(1000)
+                now = time.monotonic()
+                if now >= next_beat:
+                    next_beat = now + 15
+                    print(f"[teams] {stats['frames']} frames | "
+                          f"{stats['msg_like']} message-like | "
+                          f"{stats['messages']} ★ messages | "
+                          f"{int(end - now)}s left", flush=True)
+                # Grace period after the first real message so its follow-up
+                # frames (edits, receipts, the conversation update) land too.
+                if stats["messages"] >= min_messages and stop_at is None:
+                    stop_at = now + 12
+                    print("[teams] got what we need — stopping in 12s", flush=True)
+                if stop_at is not None and now >= stop_at:
+                    break
             _shot(page, "dump_frames_end")
         finally:
             try:
@@ -1288,6 +1327,119 @@ def dump_frames(*, seconds: int = 300, headless: bool = True) -> dict:
     print(f"[teams] {stats['frames']} frames ({stats['msg_like']} look message-like) "
           f"-> {FRAMES_PATH}", flush=True)
     return stats
+
+
+# Values safe to echo when reporting a frame's shape — these identify the schema.
+_SHAPE_SHOW = {
+    "resourcetype", "messagetype", "type", "threadtype", "eventtype",
+    "imdisplayname", "composetime", "originalarrivaltime", "clientmessageid",
+    "id", "version", "conversationid",
+}
+# Never echoed, at any depth: credentials, and the long opaque routing blobs.
+_SHAPE_REDACT = re.compile(
+    r"(?i)token|auth|cookie|password|secret|signature|key$|registrationid|surl|ssurl"
+)
+
+
+def _shape(node: Any, path: str = "", out: dict[str, str] | None = None,
+           depth: int = 0) -> dict[str, str]:
+    """Flatten a frame to ``path -> type(+safe sample)``.
+
+    Reports the schema so a parser can be written against it, without echoing
+    message bodies or credentials. Strings that are themselves JSON are recursed
+    into: trouter nests a JSON document inside the envelope's ``body`` string.
+    """
+    if out is None:
+        out = {}
+    if depth > 6 or len(out) > 400:
+        return out
+    if isinstance(node, dict):
+        for key, val in node.items():
+            _shape(val, f"{path}.{key}" if path else str(key), out, depth + 1)
+    elif isinstance(node, list):
+        out[f"{path}[]"] = f"list({len(node)})"
+        if node:
+            _shape(node[0], f"{path}[0]", out, depth + 1)
+    elif isinstance(node, str):
+        leaf = path.rsplit(".", 1)[-1].split("[")[0].lower()
+        stripped = node.strip()
+        if stripped[:1] in ("{", "[") and len(stripped) > 2:
+            try:
+                _shape(json.loads(stripped), path + "(json)", out, depth + 1)
+                return out
+            except Exception:
+                pass
+        if _SHAPE_REDACT.search(leaf):
+            out[path] = f"str({len(node)}) <redacted>"
+        elif leaf in _SHAPE_SHOW:
+            out[path] = f"str = {node[:60]!r}"
+        else:
+            out[path] = f"str({len(node)})"
+    else:
+        out[path] = type(node).__name__
+    return out
+
+
+def scan_frames(*, limit: int = 3) -> dict:
+    """Summarise an existing teamswatch_frames.jsonl capture.
+
+    Prints per-socket counts and, for the strongest message candidates, the frame
+    SHAPE rather than its contents — so the capture can be shared to design the
+    parser without leaking Skype tokens or message text.
+    """
+    if not FRAMES_PATH.exists():
+        print(f"[teams] no capture at {FRAMES_PATH} — run --dump-frames first",
+              flush=True)
+        return {"frames": 0}
+
+    per_socket: dict[str, int] = {}
+    strong: list[dict[str, Any]] = []
+    weak = total = 0
+    with FRAMES_PATH.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            total += 1
+            host = re.sub(r"^wss?://([^/]+).*", r"\1", str(rec.get("url") or ""))
+            per_socket[host] = per_socket.get(host, 0) + 1
+            body = str(rec.get("payload") or "")
+            if _MSG_HINT.search(body):
+                weak += 1
+            if rec.get("kind") == "recv" and _MSG_STRONG.search(body):
+                strong.append(rec)
+
+    print(f"\n[teams] {total} frames in {FRAMES_PATH.name}")
+    print(f"[teams] {weak} message-like, {len(strong)} ★ strong message frames")
+    print("\nframes per socket:")
+    for host, count in sorted(per_socket.items(), key=lambda kv: -kv[1]):
+        print(f"   {count:6d}  {host}")
+
+    if not strong:
+        print("\nNo strong message frames. Either nobody posted in a chat during "
+              "the capture, or Teams pushes messages in a shape these patterns "
+              "miss — the raw file still holds everything.")
+        return {"frames": total, "weak": weak, "strong": 0}
+
+    # Biggest first: a real message frame carries the body, so it is the fattest.
+    strong.sort(key=lambda r: -int(r.get("chars") or 0))
+    for i, rec in enumerate(strong[:limit], 1):
+        print(f"\n{'=' * 70}\n★ message frame {i}  "
+              f"({rec.get('chars')} chars, at {rec.get('at')})\n{'=' * 70}")
+        try:
+            parsed = json.loads(str(rec.get("payload") or ""))
+        except Exception:
+            head = str(rec.get("payload"))[:300]
+            print(f"  (not JSON at the top level) head: {head!r}")
+            continue
+        for path, kind in sorted(_shape(parsed).items()):
+            print(f"  {path:<62} {kind}")
+
+    return {"frames": total, "weak": weak, "strong": len(strong)}
 
 
 def list_chats(*, headless: bool = True) -> dict:
@@ -1478,8 +1630,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="dump sidebar conversation titles to teamswatch_chats.json")
     ap.add_argument("--dump-frames", action="store_true",
                     help="record websocket frames to teamswatch_frames.jsonl (phase-2 recon)")
+    ap.add_argument("--scan-frames", action="store_true",
+                    help="summarise an existing capture: shape only, no secrets")
     ap.add_argument("--seconds", type=int, default=300,
-                    help="how long --dump-frames records for (default 300)")
+                    help="max seconds --dump-frames records for (default 300)")
+    ap.add_argument("--min-messages", type=int, default=1,
+                    help="stop --dump-frames early after N message frames (default 1)")
     ap.add_argument("--headed", action="store_true", help="visible browser (local debug)")
     ap.add_argument("--report-chat", default=None,
                     help="Lark chat_id to send the result + screenshot to")
@@ -1490,8 +1646,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.list_chats:
         res = list_chats(headless=not args.headed)
         return 0 if res.get("titles") else 1
+    if args.scan_frames:
+        res = scan_frames()
+        return 0 if res.get("frames") else 1
     if args.dump_frames:
-        res = dump_frames(seconds=args.seconds, headless=not args.headed)
+        res = dump_frames(seconds=args.seconds, min_messages=args.min_messages,
+                          headless=not args.headed)
         print(json.dumps({k: v for k, v in res.items() if k != "sockets"}, indent=2))
         return 0 if res.get("frames") else 1
     if args.status:
