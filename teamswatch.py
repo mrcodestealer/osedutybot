@@ -356,8 +356,16 @@ def send_text(chat_id: str, text: str) -> dict:
 # `_MAX_CHARS_PER_MESSAGE = 3500` with a `- 300` line reserve, and osmwatch.py
 # packs blocks to the same 3500 — and both SPLIT into successive messages rather
 # than truncating, which is exactly the behaviour needed here.
-_LARK_TEXT_MAX = int(os.getenv("TEAMS_LARK_TEXT_MAX", "3500"))
+# 0 means NEVER split: /latestevo must arrive as exactly ONE Lark message, however
+# long. Lark's text limit is far above a notice (an EVO batch runs ~7k chars), so a
+# single post is the normal path. Splitting survives only as a RECOVERY route for
+# the case where Lark actually rejects the body — arriving in two pieces beats
+# losing content silently. Set TEAMS_LARK_TEXT_MAX to a positive size to force it.
+_LARK_TEXT_MAX = int(os.getenv("TEAMS_LARK_TEXT_MAX", "0"))
 _LARK_TEXT_RESERVE = 300
+# Consulted only after a single send has already been rejected. 3500 is the house
+# budget: findmachine.py's _MAX_CHARS_PER_MESSAGE, and osmwatch.py packs to it.
+_LARK_RECOVERY_MAX = 3500
 
 # A batch notice is separated by a run of equals signs on its own line — the same
 # separator maintenance.split_evo_sd_batch_blocks keys on (r"\n={10,}\s*\n").
@@ -374,8 +382,13 @@ def _split_for_lark(text: str, *, limit: int | None = None) -> list[str]:
     because that is precisely the damage the old 1500-char cap did, severing a
     notice at "维护时间：2".
     """
-    budget = max(500, (limit or _LARK_TEXT_MAX) - _LARK_TEXT_RESERVE)
+    cap = _LARK_TEXT_MAX if limit is None else limit
     src = text or ""
+    # cap <= 0 -> one message, unconditionally. This guard has to be explicit:
+    # max(500, 0 - 300) would otherwise quietly split every notice at 500 chars.
+    if cap <= 0:
+        return [src] if src else []
+    budget = max(500, cap - _LARK_TEXT_RESERVE)
     if len(src) <= budget:
         return [src] if src else []
 
@@ -413,20 +426,12 @@ def _split_for_lark(text: str, *, limit: int | None = None) -> list[str]:
     return [p for p in parts if p]
 
 
-def send_text_parts(chat_id: str, text: str, *, label: str = "") -> list[dict]:
-    """Send ``text`` as one or more Lark messages, checking every response.
-
-    Lark reports an oversized or invalid body as HTTP 200 with ``code != 0`` and
-    raises nothing, so an unchecked send fails completely silently — no group
-    message and no journal line. alert_login_failed already checks ``code``;
-    this follows it.
-    """
-    parts = _split_for_lark(text) or [""]
+def _send_parts(chat_id: str, parts: list[str], label: str) -> list[dict]:
+    """Post already-split parts, checking every response code."""
     total = len(parts)
     out: list[dict] = []
     for n, part in enumerate(parts, 1):
-        # A single part is posted verbatim, so the common case (one notice, one
-        # message) reads exactly as before — just no longer truncated.
+        # A single part is posted verbatim — no label, no part counter.
         body = part if total == 1 else (
             f"{label or 'Latest in Teams group'} — part {n}/{total}\n{part}"
         )
@@ -434,6 +439,30 @@ def send_text_parts(chat_id: str, text: str, *, label: str = "") -> list[dict]:
         if not isinstance(resp, dict) or resp.get("code") != 0:
             print(f"[teams] part {n}/{total} send failed: {resp}", flush=True)
         out.append(resp)
+    return out
+
+
+def send_text_parts(chat_id: str, text: str, *, label: str = "",
+                    limit: int | None = None) -> list[dict]:
+    """Send ``text`` as one or more Lark messages, checking every response.
+
+    Lark reports an oversized or invalid body as HTTP 200 with ``code != 0`` and
+    raises nothing, so an unchecked send fails completely silently — no group
+    message and no journal line. alert_login_failed already checks ``code``;
+    this follows it.
+    """
+    parts = _split_for_lark(text, limit=limit) or [""]
+    out = _send_parts(chat_id, parts, label)
+    # One message is the goal, but content must never be lost. If that single
+    # post was rejected AND it was big enough for size to be a plausible cause,
+    # retry it split rather than leaving the group with nothing at all.
+    failed = not isinstance(out[0], dict) or out[0].get("code") != 0
+    if len(parts) == 1 and failed and len(parts[0]) > _LARK_RECOVERY_MAX:
+        print(f"[teams] single {len(parts[0])}-char send rejected; retrying it "
+              f"split so nothing is lost", flush=True)
+        return _send_parts(chat_id,
+                           _split_for_lark(text, limit=_LARK_RECOVERY_MAX),
+                           label)
     return out
 
 
@@ -2535,6 +2564,101 @@ _RESOLVE_PANE_JS = """
 """
 
 
+# Resolve the element that actually scrolls, then report where it sits and the
+# largest data-mid rendered. `atBottom` is the ONLY trustworthy answer to "am I
+# looking at the newest message?": data-last-visible means last *visible*, so
+# Teams sets it on the last RENDERED row — it reads true even when the newest
+# message is far below the viewport and absent from the DOM entirely.
+_PANE_BOTTOM_JS = """
+    ([mainSels, paneSels, sidebarSels, scrollSels, doScroll, resolveSrc]) => {
+        const resolve = eval(resolveSrc);
+        const pane = resolve(mainSels, paneSels, sidebarSels);
+        if (!pane) return null;
+        let box = null;
+        for (const s of scrollSels) {
+            for (const el of document.querySelectorAll(s)) {
+                if (pane.contains(el) || el.contains(pane)) { box = el; break; }
+            }
+            if (box) break;
+        }
+        if (!box) {
+            // Walk up from the pane, stopping at the main region so this can never
+            // grab the left chat list.
+            for (let el = pane; el; el = el.parentElement) {
+                if (sidebarSels.some(s => el.matches && el.matches(s))) break;
+                if (el.scrollHeight > el.clientHeight + 50) { box = el; break; }
+                if (mainSels.some(s => el.matches && el.matches(s))) break;
+            }
+        }
+        if (!box) box = pane;
+        if (doScroll) box.scrollTop = box.scrollHeight;
+        let maxMid = 0, rows = 0;
+        pane.querySelectorAll('[data-mid]').forEach((el) => {
+            rows++;
+            const v = parseInt(el.getAttribute('data-mid') || '0', 10);
+            if (Number.isFinite(v) && v > maxMid) maxMid = v;
+        });
+        return {
+            top: box.scrollTop, view: box.clientHeight, full: box.scrollHeight,
+            rows: rows, maxMid: maxMid ? String(maxMid) : '',
+            atBottom: box.scrollTop + box.clientHeight >= box.scrollHeight - 4,
+        };
+    }
+"""
+
+
+def _pane_bottom_step(page, *, scroll: bool) -> dict[str, Any] | None:
+    try:
+        return page.evaluate(
+            _PANE_BOTTOM_JS,
+            [_MAIN_REGION_SELS, _MSG_PANE_SELS, _SIDEBAR_MARK_SELS,
+             _MSG_SCROLL_SELS, bool(scroll), _RESOLVE_PANE_JS],
+        )
+    except Exception as err:  # noqa: BLE001
+        print(f"[teams] pane bottom step failed: {err!r}", flush=True)
+        return None
+
+
+def _scroll_pane_to_bottom(page, *, rounds: int = 12) -> dict[str, Any]:
+    """Scroll the message list to the very bottom, so the NEWEST row is rendered.
+
+    Without this the read returns whatever Teams happened to render. The list is
+    virtualised and Teams restores its own scroll position on load (at the unread
+    marker, not necessarily the end), so the newest message can be missing from
+    the DOM — and then the DOM tail is an OLDER message. That is exactly how a
+    yesterday notice was posted as "latest" while a newer one existed.
+
+    Loops because each scroll lazily loads more rows, which grows scrollHeight and
+    moves the bottom; it settles once the position is at the end and the largest
+    rendered data-mid has stopped changing.
+    """
+    state = _pane_bottom_step(page, scroll=False) or {}
+    seen = str(state.get("maxMid") or "")
+    stable = 0
+    for i in range(1, rounds + 1):
+        state = _pane_bottom_step(page, scroll=True) or {}
+        page.wait_for_timeout(900)
+        now = str(state.get("maxMid") or "")
+        stable = stable + 1 if now == seen else 0
+        if now != seen:
+            print(f"[teams] scrolled down ({i}/{rounds}); newest rendered id "
+                  f"{seen or '-'} -> {now or '-'}", flush=True)
+        seen = now
+        if state.get("atBottom") and stable >= 2:
+            break
+    at_bottom = bool(state.get("atBottom"))
+    print(f"[teams] message list at bottom: {at_bottom} "
+          f"(rendered rows {state.get('rows')}, newest id {seen or '-'})",
+          flush=True)
+    if not at_bottom:
+        # Say so loudly: this is the condition under which "latest" is a lie.
+        print("[teams] WARNING: could not reach the end of the message list - "
+              "the newest message may not be rendered", flush=True)
+    return {"at_bottom": at_bottom, "newest_mid": seen,
+            "rows": state.get("rows"), "top": state.get("top"),
+            "full": state.get("full")}
+
+
 def _scroll_pane_up(page, px: int = 1200) -> bool:
     """Scroll the message list up to render older rows.
 
@@ -2744,6 +2868,15 @@ def _pick_messages(rows: list[dict[str, Any]], limit: int) -> dict[str, Any]:
             skipped.append(first[:60])
             continue
         kept.append(row)
+    # Order by Teams' own message id. data-mid is the send time in epoch millis
+    # — verified: 1786918775349 is 2026-08-16T22:19:35.349Z, matching that row's
+    # <time datetime> to the millisecond — so it is a true newest-last key that
+    # does not depend on the rendered rows happening to be in document order.
+    # ONLY when every kept row has a numeric mid: under the fallback row
+    # selectors data-mid is absent, and sorting all-equal keys would silently
+    # redefine "newest" as "first rendered".
+    if kept and all(str(r.get("mid") or "").isdigit() for r in kept):
+        kept.sort(key=lambda r: int(r["mid"]))
     return {"messages": kept[-limit:] if limit > 0 else kept,
             "skipped_system": skipped, "scanned": len(rows or [])}
 
@@ -2805,6 +2938,14 @@ def read_latest_messages(*, group: str | None = None, limit: int = 3,
                 res["shot"] = _shot(page, "read_wrong_chat")
                 return res
 
+            # Render the END of the conversation before scraping. The list is
+            # virtualised, so without this the newest message may not be in the
+            # DOM at all and the tail of what IS rendered is an older message.
+            bottom = _scroll_pane_to_bottom(page)
+            res["at_bottom"] = bottom["at_bottom"]
+            res["newest_mid"] = bottom["newest_mid"]
+            res["rendered_rows"] = bottom["rows"]
+
             # Scan well past `limit`: the newest rows are often system events, so
             # a window of exactly `limit` can contain no real message at all.
             scan = max(30, limit * 10)
@@ -2839,6 +2980,16 @@ def read_latest_messages(*, group: str | None = None, limit: int = 3,
             res["skipped_system"] = picked["skipped_system"]
             res["scanned"] = picked["scanned"]
             res["ok"] = bool(res["messages"])
+            # Did we actually return the newest rendered message? If not, say
+            # which one we skipped instead of quietly presenting an older notice
+            # as "latest" — the failure mode that posted a yesterday message.
+            if res["messages"]:
+                shown_mid = str(res["messages"][-1].get("mid") or "")
+                res["shown_mid"] = shown_mid
+                res["is_newest"] = bool(
+                    shown_mid and res.get("newest_mid")
+                    and shown_mid == res["newest_mid"]
+                )
             res["shot"] = _shot(page, "read_latest")
             if not res["ok"]:
                 res["error"] = (
@@ -2873,6 +3024,20 @@ def _fmt_messages(res: dict) -> str:
              # Echo the chat Teams actually had open — proof we read the right one.
              f"• Confirmed open: {res.get('opened_title') or '—'}",
              f"• Matched selector: {res.get('matched')}"]
+    # Proof that this really is the newest message and not the tail of a
+    # part-rendered virtualised list.
+    if res.get("at_bottom") is not None:
+        lines.append(
+            f"• Reached end of chat: {'yes' if res.get('at_bottom') else 'NO'}"
+            f" (rendered {res.get('rendered_rows') or '?'} rows,"
+            f" newest id {res.get('newest_mid') or '—'})"
+        )
+    if res.get("messages") and res.get("is_newest") is False:
+        lines.append(
+            f"⚠️ Showing id {res.get('shown_mid') or '—'}, but the newest"
+            f" rendered message is id {res.get('newest_mid') or '—'} — it was"
+            f" filtered as a system event, or the list did not finish loading."
+        )
     skipped = res.get("skipped_system") or []
     if skipped:
         # Say what was passed over, so a surprising "latest" is explainable.
