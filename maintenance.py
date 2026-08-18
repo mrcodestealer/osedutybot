@@ -3099,6 +3099,35 @@ def _cell_norm(c: Any) -> str:
     return str(c).replace("\r", " ").replace("\n", " ").strip().lower()
 
 
+# ---------------------------------------------------------------------------
+# ``<Game Name>-<TableId>`` -> ``<Game Name>``
+# ---------------------------------------------------------------------------
+# Evolution's Service Desk notices append the studio table id to every affected
+# table: ``Funky Time-FunkyTime0000001``, ``Türkçe Crazy Time-TRCrazyTime00001``.
+# The gamelist sheet stores the game name alone, so the id has to come off
+# before anything is matched or displayed — otherwise 游戏名称 never matches and
+# every table is reported as not on CP.
+#
+# Guarded so real names survive: the trailing token must be a single word (no
+# spaces), 8+ characters, hold 2+ digits and end on a digit. Evolution's 16-char
+# table ids always are; a hyphenated game name never is (``Cash-or-Crash`` keeps
+# its tail, ``Blackjack-VIP1`` is too short to look like an id).
+_EVO_TABLE_ID_TAIL_RE = re.compile(
+    r"^(.*\S)\s*[-–—]\s*([A-Za-z][A-Za-z0-9_]{6,23}\d)$"
+)
+
+
+def strip_evo_table_id(name: Any) -> str:
+    """``Funky Time-FunkyTime0000001`` -> ``Funky Time``; other names unchanged."""
+    t = str(name or "").strip()
+    m = _EVO_TABLE_ID_TAIL_RE.match(t)
+    if not m:
+        return t
+    if sum(c.isdigit() for c in m.group(2)) < 2:
+        return t
+    return m.group(1).strip() or t
+
+
 def _game_name_key(s: Any) -> str:
     """NFKC + strip accents + remove spaces/punctuation for stable match."""
     t = unicodedata.normalize("NFKC", str(s or ""))
@@ -3116,7 +3145,7 @@ _SQUEEZE_BACCARAT_NAME_KEYS = frozenset({"squeezebaccarat", "baccaratsqueeze"})
 
 def _canonical_game_name_key(s: Any) -> str:
     """Gamelist match key; only alias: ``Squeeze Baccarat`` ↔ ``Baccarat Squeeze``."""
-    k = _game_name_key(s)
+    k = _game_name_key(strip_evo_table_id(s))
     if k in _SQUEEZE_BACCARAT_NAME_KEYS:
         return "squeezebaccarat"
     return k
@@ -3296,11 +3325,14 @@ def lookup_evo_gamelist_row(
 ) -> dict[str, Any]:
     """Find a game in the gamelist by **游戏名称 / Games Name** and return its row.
 
+    Matching is exact on 游戏名称 (case / accent / space insensitive) — a variant
+    table such as ``Türkçe Crazy Time`` is never answered with ``Crazy Time``.
+
     Status values: ``empty``, ``unconfigured``, ``forbidden`` (bot can't view the
-    sheet), ``fetch_error``, ``no_header``, ``not_found``, ``suggest`` (close but
-    not exact — lists candidates), ``found``.
+    sheet), ``fetch_error``, ``no_header``, ``not_found``, ``suggest`` (the typed
+    name is a fragment of one or more sheet names — lists them), ``found``.
     """
-    q = (game_name or "").strip()
+    q = strip_evo_table_id(game_name)
     if not q:
         return {"status": "empty"}
     tok = (tenant_access_token or "").strip()
@@ -3333,14 +3365,17 @@ def lookup_evo_gamelist_row(
         if nkey == qkey or _names_match_gamelist(name_cell, q):
             exact = (ridx, row)
             break
-        if qkey and (qkey in nkey or nkey in qkey):
+        # Hint candidates are collected in ONE direction only: what was typed is
+        # contained in the sheet name (``Funky`` -> ``Funky time``), i.e. a
+        # part-typed name. Never the reverse — a notice naming a language /
+        # variant table (``Türkçe Crazy Time``) must not be answered with the base
+        # table ``Crazy Time``: they are different tables, and the gamelist simply
+        # does not list that one. Those queries fall through to ``not_found``.
+        if qkey and qkey in nkey:
             substr.append((ridx, row, str(name_cell).strip()))
 
-    fuzzy = False
-    if exact is None and len(substr) == 1:
-        exact = (substr[0][0], substr[0][1])
-        fuzzy = True
-
+    # No promotion of a lone hint to a match: a row is returned only on an exact
+    # 游戏名称 match, exactly like the ``/m`` CP filter.
     if exact is not None:
         ridx, row = exact
         launched = (
@@ -3348,7 +3383,6 @@ def lookup_evo_gamelist_row(
         )
         return {
             "status": "found",
-            "fuzzy": fuzzy,
             "row_number": ridx + 1,  # 1-based sheet row
             "name": _cellstr(row[ci_name]) if len(row) > ci_name else "",
             "launched": launched,
@@ -3369,7 +3403,7 @@ def _cellstr(cell: Any) -> str:
 
 def build_checkevo_reply(game_name: str, result: dict[str, Any]) -> str:
     """Plain-text reply for ``/checkevo`` from :func:`lookup_evo_gamelist_row`."""
-    q = re.sub(r"\s+", " ", (game_name or "").strip())
+    q = re.sub(r"\s+", " ", strip_evo_table_id(game_name))
     st = result.get("status")
     if st == "empty":
         return "❌ 用法：`/checkevo <游戏名>` — 例如 `/checkevo Funky Time`"
@@ -3400,8 +3434,6 @@ def build_checkevo_reply(game_name: str, result: dict[str, Any]) -> str:
         )
         title = result.get("name") or q
         head = f"🎮 Gamelist — {title}"
-        if result.get("fuzzy"):
-            head += "（近似匹配）"
         lines = [head, f"状态：{status_line}", f"表行号：第 {result.get('row_number')} 行", ""]
         # Only real, NAMED columns — the sheet is fetched over A1:ZZ, so every row
         # carries hundreds of trailing empty cells; a column with no header is not
@@ -3552,7 +3584,7 @@ def _parse_table_block_after_heading(
         j += 1
     names: list[str] = []
     while j < n:
-        chunk = _clean_email_line(lines[j])
+        chunk = strip_evo_table_id(_clean_email_line(lines[j]))
         if not chunk:
             break
         if _table_block_stop_line(chunk):
@@ -3590,7 +3622,7 @@ def _parse_following_unavailable_tables(text: str) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for line in block.splitlines() if "\n" in block else [block]:
-        chunk = _clean_email_line(line)
+        chunk = strip_evo_table_id(_clean_email_line(line))
         if not _is_plausible_game_name(chunk):
             continue
         key = _cell_norm(chunk).replace(" ", "")
@@ -3621,7 +3653,7 @@ def _parse_downtime_schedule_tables(text: str) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for line in m.group(1).splitlines():
-        chunk = _clean_email_line(line)
+        chunk = strip_evo_table_id(_clean_email_line(line))
         if not _is_plausible_game_name(chunk):
             continue
         key = _cell_norm(chunk).replace(" ", "")
@@ -3650,7 +3682,7 @@ def _extract_table_name_from_sentence(fragment: str) -> str | None:
         m = re.search(pat, hay, re.IGNORECASE)
         if not m:
             continue
-        name = m.group(1).strip()
+        name = strip_evo_table_id(m.group(1))
         if _is_plausible_game_name(name):
             return name
     return None
@@ -4821,7 +4853,7 @@ def _evo_block_game_lists(block: str) -> tuple[list[str], list[str]]:
     )
     if m_en:
         for line in m_en.group(1).splitlines():
-            chunk = _clean_evo_game_line(line)
+            chunk = strip_evo_table_id(_clean_evo_game_line(line))
             if chunk and _is_plausible_game_name(chunk):
                 en.append(chunk)
     m_zh = re.search(
@@ -4831,7 +4863,7 @@ def _evo_block_game_lists(block: str) -> tuple[list[str], list[str]]:
     )
     if m_zh:
         for line in m_zh.group(1).splitlines():
-            chunk = _clean_evo_game_line(line)
+            chunk = strip_evo_table_id(_clean_evo_game_line(line))
             if chunk and not re.match(r"^[\.\-–—]+$", chunk):
                 zh.append(chunk)
     return en, zh
@@ -4849,9 +4881,24 @@ def _evo_block_downtime_utc(block: str) -> tuple[str, str]:
         block or "",
         re.IGNORECASE,
     )
-    if not m:
-        return "", ""
-    return m.group(1).strip(), m.group(2).strip()
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    # Some notices leave the word UTC out — ``downtime from 21/August/26 6:30
+    # till 21/August/26 7:00, during which …``. The times are still UTC (the
+    # ● UTC+8 line is exactly +8h), so take them from the sentence, and from the
+    # ● Start Time / ● End Time fields as a last resort. Without this the
+    # outbound English block reads "downtime from  UTC till  UTC".
+    m = re.search(
+        r"downtime from\s+(.+?)\s+till\s+(.+?)\s*(?:,|\.|during|$)",
+        block or "",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    return (
+        _evo_block_field(block, "Start Time"),
+        _evo_block_field(block, "End Time"),
+    )
 
 
 def _evo_block_beijing_line(block: str) -> str:
@@ -4929,13 +4976,38 @@ def _format_evo_outbound_block(
     )
 
 
+_EVO_MONTH_NUMBERS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+_EVO_DMY_NAME_RE = re.compile(r"(\d{1,2})\s*/\s*([A-Za-z]{3,9})\s*/\s*(\d{2,4})")
+
+
+def _evo_downtime_date_iso(text: str) -> str:
+    """``2026-08-21`` or ``21/August/26`` → ``2026-08-21`` (``""`` when neither)."""
+    s = (text or "").strip()
+    m = re.match(r"(\d{4}-\d{2}-\d{2})", s)
+    if m:
+        return m.group(1)
+    m = _EVO_DMY_NAME_RE.search(s)
+    if not m:
+        return ""
+    mon = _EVO_MONTH_NUMBERS.get(m.group(2)[:3].lower())
+    if not mon:
+        return ""
+    year = int(m.group(3))
+    if year < 100:
+        year += 2000
+    return f"{year:04d}-{mon:02d}-{int(m.group(1)):02d}"
+
+
 def _evo_email_subject_date(blocks_out: list[str]) -> str:
     dates: list[str] = []
     for block in blocks_out:
         uf, _ut = _evo_block_downtime_utc(block)
-        m = re.match(r"(\d{4}-\d{2}-\d{2})", uf or "")
-        if m:
-            dates.append(m.group(1))
+        iso = _evo_downtime_date_iso(uf)
+        if iso:
+            dates.append(iso)
     if dates:
         return min(dates).replace("-", "")
     return datetime.now(_display_tz()).strftime("%Y%m%d")
