@@ -43,10 +43,12 @@ import contextlib
 import json
 import mimetypes
 import os
+import queue
 import re
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -552,6 +554,121 @@ def alert_login_failed(reason: str, *, stage: str = "?", shot: str | None = None
 # ---------------------------------------------------------------------------
 _LOCK_PATH = _ROOT_DIR / (PROFILE_DIR.name + ".lock")
 _LOCK_STALE_S = 300
+# Created by whoever WANTS the profile while a long-lived holder has it. The warm
+# watcher checks it every tick and stands down; see _yield_requested(). This is
+# the only way a hand-run `python teamswatch.py --login` in a SEPARATE process
+# can get the bot's watcher to let go of the browser without killing the bot.
+_YIELD_PATH = _ROOT_DIR / (PROFILE_DIR.name + ".yield")
+
+
+def _lock_holder() -> str:
+    """Who holds the lock, for error messages. '' when nobody does."""
+    try:
+        return _LOCK_PATH.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def _touch_profile_lock() -> None:
+    """Refresh the lock's mtime — the warm watcher's heartbeat.
+
+    The watcher holds the lock for days while _LOCK_STALE_S is 300s, so without
+    this its own lock would look abandoned after five minutes and the next caller
+    would RECLAIM it. That is the one outcome _profile_lock exists to prevent:
+    two Chromiums on one user-data-dir lose the login.
+    """
+    holder = _lock_holder()
+    if _lock_token and holder and not holder.startswith(_lock_token):
+        # Someone reclaimed it. Touching now would keep THEIR lock looking fresh
+        # while we carry on believing it is ours.
+        return
+    try:
+        os.utime(_LOCK_PATH, None)
+    except OSError:
+        pass
+
+
+def _yield_requested() -> bool:
+    return _YIELD_PATH.exists()
+
+
+# Our own token, so _release_profile_lock can tell "my lock" from "the lock
+# someone reclaimed from me". Without this, a release unlinks whatever file is
+# present — so after one reclaim the two holders' releases delete each other's
+# locks and the mutex silently stops mutexing.
+_lock_token = ""
+
+
+def _acquire_profile_lock(what: str, *, wait_s: int = 120, ask: bool = True) -> bool:
+    """Take the profile lock. Returns True on success, False on timeout.
+
+    ``ask`` creates _YIELD_PATH so a long-lived holder stands down. The warm
+    watcher acquires with ``ask=False``: it is the polite party, and a watcher
+    that asked the CLI holding the lock to yield would ping-pong forever.
+    """
+    global _lock_token
+    deadline = time.monotonic() + max(0, wait_s)
+    asked = False
+    while True:
+        token = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
+        try:
+            fd = os.open(str(_LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, f"{token} {what} {_now_str()}".encode())
+            os.close(fd)
+            _lock_token = token
+            if asked:
+                _YIELD_PATH.unlink(missing_ok=True)
+            return True
+        except FileExistsError:
+            pass
+        if ask and not _YIELD_PATH.exists():
+            try:
+                _YIELD_PATH.write_text(f"{os.getpid()} {what} {_now_str()}\n",
+                                       encoding="utf-8")
+                if not asked:
+                    print(f"[teams] profile held by {_lock_holder()!r} — asked it "
+                          f"to yield for {what}", flush=True)
+                asked = True
+            except OSError:
+                pass
+        try:
+            age = time.time() - _LOCK_PATH.stat().st_mtime
+        except OSError:
+            continue    # vanished between the two calls — retry immediately
+        if age > _LOCK_STALE_S:
+            # Only reachable once the holder stopped heartbeating, i.e. it really
+            # died: a live warm watcher touches the file every _HEARTBEAT_S.
+            print(f"[teams] reclaiming stale profile lock ({int(age)}s old, held by "
+                  f"{_lock_holder()!r})", flush=True)
+            _LOCK_PATH.unlink(missing_ok=True)
+            continue
+        if time.monotonic() >= deadline:
+            if asked:
+                _YIELD_PATH.unlink(missing_ok=True)
+            return False
+        time.sleep(2)
+
+
+def _release_profile_lock() -> None:
+    """Drop the lock, but only if it is still OURS.
+
+    A reclaim (see _LOCK_STALE_S) hands the lock to someone else while we still
+    think we hold it. Unlinking unconditionally would then delete THEIR lock and
+    leave two Chromiums free to open the same profile — the exact failure the lock
+    exists to prevent, made permanent.
+    """
+    global _lock_token
+    mine = _lock_token
+    _lock_token = ""
+    if not mine:
+        return
+    holder = _lock_holder()
+    if holder and not holder.startswith(mine):
+        print(f"[teams] NOT releasing {_LOCK_PATH.name}: it now belongs to "
+              f"{holder!r}, not to us ({mine}) — our lock was reclaimed",
+              flush=True)
+        return
+    _LOCK_PATH.unlink(missing_ok=True)
 
 
 @contextlib.contextmanager
@@ -564,34 +681,15 @@ def _profile_lock(what: str):
     timer while someone may be running --login by hand. Stale locks (older than
     _LOCK_STALE_S, e.g. left by a killed process) are reclaimed.
     """
-    acquired = False
+    if not _acquire_profile_lock(what):
+        raise RuntimeError(
+            f"profile is busy — {_lock_holder() or 'another teamswatch run'} holds "
+            f"{_LOCK_PATH.name}"
+        )
     try:
-        for _ in range(60):
-            try:
-                fd = os.open(str(_LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(fd, f"{os.getpid()} {what} {_now_str()}".encode())
-                os.close(fd)
-                acquired = True
-                break
-            except FileExistsError:
-                try:
-                    age = time.time() - _LOCK_PATH.stat().st_mtime
-                except OSError:
-                    continue
-                if age > _LOCK_STALE_S:
-                    print(f"[teams] reclaiming stale profile lock ({int(age)}s old)",
-                          flush=True)
-                    _LOCK_PATH.unlink(missing_ok=True)
-                    continue
-                time.sleep(2)
-        if not acquired:
-            raise RuntimeError(
-                f"profile is busy — another teamswatch run holds {_LOCK_PATH.name}"
-            )
         yield
     finally:
-        if acquired:
-            _LOCK_PATH.unlink(missing_ok=True)
+        _release_profile_lock()
 
 
 def _open(p, *, headless: bool):
@@ -650,21 +748,75 @@ def _open(p, *, headless: bool):
 
 
 _shot_n = 0
+_shot_lock = threading.Lock()
+# SHOTS_DIR had no pruning anywhere and _shot_n never resets, so every login
+# attempt and every watcher failure added PNGs that nothing ever removed.
+_SHOTS_KEEP = int(os.getenv("TEAMS_SHOTS_KEEP", "60"))
+
+
+def _prune_shots() -> None:
+    """Keep only the newest _SHOTS_KEEP screenshots."""
+    if _SHOTS_KEEP <= 0:
+        return
+    try:
+        pngs = sorted(SHOTS_DIR.glob("*.png"), key=lambda f: f.stat().st_mtime)
+    except OSError:
+        return
+    for stale in pngs[:-_SHOTS_KEEP]:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
 
 
 def _shot(page, label: str) -> str | None:
     """Screenshot every stage so a failed login is diagnosable from the PNGs."""
     global _shot_n
-    _shot_n += 1
+    with _shot_lock:
+        _shot_n += 1
+        n = _shot_n
     SHOTS_DIR.mkdir(parents=True, exist_ok=True)
-    path = SHOTS_DIR / f"{_shot_n:02d}_{label}.png"
+    path = SHOTS_DIR / f"{n:02d}_{label}.png"
     try:
         page.screenshot(path=str(path), full_page=False)
         _set(last_shot=str(path))
+        _prune_shots()
         return str(path)
     except Exception as err:
         print(f"[teams] screenshot '{label}' failed: {err!r}", flush=True)
         return None
+
+
+def _shot_fixed(page, label: str) -> str | None:
+    """Screenshot to a STABLE filename, overwriting the previous one.
+
+    _shot() numbers every PNG and never deletes — right for a one-shot login
+    trace, wrong for a loop: a 60s poll that shot each cycle would leave 1,440
+    files a day on the server. The warm watcher passes this instead, so a
+    persistent failure keeps exactly one current PNG per failure kind.
+    """
+    SHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = SHOTS_DIR / f"warm_{label}.png"
+    try:
+        page.screenshot(path=str(path), full_page=False)
+        _set(last_shot=str(path))
+        _prune_shots()
+        return str(path)
+    except Exception as err:
+        print(f"[teams] screenshot '{label}' failed: {err!r}", flush=True)
+        return None
+
+
+# The warm watcher reads the pane once a minute, and the routine progress prints
+# below would be ~3,000 journal lines a day. Set while a warm poll is in flight so
+# only the abnormal ones survive; WARNINGs are never suppressed.
+_quiet_reads = False
+
+
+def _rprint(msg: str) -> None:
+    """print() for the read path's routine progress lines."""
+    if not _quiet_reads:
+        print(msg, flush=True)
 
 
 def _visible(page, selector: str) -> bool:
@@ -1020,15 +1172,21 @@ def do_login(*, headless: bool = True, report_chat: str | None = None) -> dict:
     from playwright.sync_api import sync_playwright
 
     email, password = _creds()
-    _set(phase="logging_in", detail="starting browser", started_at=time.monotonic(),
-         last_error=None, alerted=False)
+    _set(phase="logging_in", detail="waiting for the profile", last_error=None,
+         alerted=False)
 
-    deadline = time.monotonic() + _login_timeout_s()
     result: dict[str, Any] = {"ok": False, "stage": "start", "reason": None, "shot": None}
     typed_email = typed_password = False
     passkey_tries = other_ways_tries = password_option_tries = 0
+    # `deadline` is set INSIDE the with-block, after the lock is in hand. The warm
+    # watcher holds the profile until it notices the yield request, and billing
+    # that wait against the login budget produced a "timed out" result — plus a
+    # LOGIN FAILED alert — for a login that had not started typing yet.
+    deadline = 0.0
 
     with _profile_lock("login"), sync_playwright() as p:
+        _set(detail="starting browser", started_at=time.monotonic())
+        deadline = time.monotonic() + _login_timeout_s()
         ctx, page = _open(p, headless=headless)
         try:
             page.goto(TEAMS_URL, wait_until="domcontentloaded", timeout=60000)
@@ -2631,25 +2789,34 @@ def _scroll_pane_to_bottom(page, *, rounds: int = 12) -> dict[str, Any]:
     Loops because each scroll lazily loads more rows, which grows scrollHeight and
     moves the bottom; it settles once the position is at the end and the largest
     rendered data-mid has stopped changing.
+
+    Each round SCROLLS, waits for the lazy load, then MEASURES in a *separate*
+    evaluate. Measuring in the same tick that writes scrollTop is what made
+    ``atBottom`` unconditionally true: the assignment clamps to
+    ``scrollHeight - clientHeight``, so ``scrollTop + clientHeight`` equals
+    ``scrollHeight`` the instant it returns. The guarantee this function exists to
+    provide was therefore vacuous and the WARNING below was unreachable — which
+    matters because detectevomaintenance refuses to advance its cursor on a read
+    that did not reach the end.
     """
     state = _pane_bottom_step(page, scroll=False) or {}
     seen = str(state.get("maxMid") or "")
     stable = 0
     for i in range(1, rounds + 1):
-        state = _pane_bottom_step(page, scroll=True) or {}
+        _pane_bottom_step(page, scroll=True)          # write only
         page.wait_for_timeout(900)
+        state = _pane_bottom_step(page, scroll=False) or {}   # then measure
         now = str(state.get("maxMid") or "")
         stable = stable + 1 if now == seen else 0
         if now != seen:
-            print(f"[teams] scrolled down ({i}/{rounds}); newest rendered id "
-                  f"{seen or '-'} -> {now or '-'}", flush=True)
+            _rprint(f"[teams] scrolled down ({i}/{rounds}); newest rendered id "
+                    f"{seen or '-'} -> {now or '-'}")
         seen = now
         if state.get("atBottom") and stable >= 2:
             break
     at_bottom = bool(state.get("atBottom"))
-    print(f"[teams] message list at bottom: {at_bottom} "
-          f"(rendered rows {state.get('rows')}, newest id {seen or '-'})",
-          flush=True)
+    _rprint(f"[teams] message list at bottom: {at_bottom} "
+            f"(rendered rows {state.get('rows')}, newest id {seen or '-'})")
     if not at_bottom:
         # Say so loudly: this is the condition under which "latest" is a lie.
         print("[teams] WARNING: could not reach the end of the message list - "
@@ -2881,18 +3048,172 @@ def _pick_messages(rows: list[dict[str, Any]], limit: int) -> dict[str, Any]:
             "skipped_system": skipped, "scanned": len(rows or [])}
 
 
+def _watch_target(group: str | None = None) -> str:
+    """The group title every reader agrees on: argument, then env, then default.
+
+    One resolver, because a poll and a /latestevo that resolved the group
+    differently would be comparing message ids across two different chats.
+    """
+    return (group or os.getenv("EVOTEAMS_GROUP")
+            or "@EVO C88live/slot_ow.ph (RTS) CS Group NE RT FP")
+
+
+def _wait_teams_loaded(page) -> str:
+    """Poll ``_stage_of`` until the Teams shell is up; return the final stage.
+
+    The shell boots slowly on a CPU-only box and must clear the "setting things
+    up" splash before the chat list exists, so this polls instead of sleeping a
+    fixed period. The break set is the one read_latest_messages used inline:
+    anything needing a human, plus the three logged-out login stages.
+    """
+    deadline = time.monotonic() + max(60, int(os.getenv("TEAMS_BOOT_WAIT", "90")))
+    stage = "unknown"
+    while time.monotonic() < deadline:
+        stage = _stage_of(page)
+        if stage == "teams_loaded":
+            break
+        if stage in _NEEDS_HUMAN or stage in ("landing", "email", "password"):
+            break
+        page.wait_for_timeout(2000)
+    return stage
+
+
+def _read_on_page(page, target: str, limit: int, *, shooter=None) -> dict:
+    """Scrape ``target``'s newest messages from an ALREADY-BOOTED Teams page.
+
+    Split out of read_latest_messages so the warm watcher can re-read one
+    long-lived page every minute instead of cold-booting Chromium per poll. The
+    cold path calls this too — one copy of the tricky part (confirm the right
+    chat is open, render the end of a virtualised list, scrape, filter) so a
+    poll and a /latestevo can never disagree about the group's newest message.
+
+    ``limit=0`` returns EVERY real message in the scanned window instead of the
+    newest one. That is what the poll uses: two notices can land inside one poll
+    interval and _pick_messages' tail slice would drop all but the last.
+
+    ``shooter`` overrides the screenshot function. The warm watcher passes
+    _shot_fixed so a failure that repeats every minute overwrites one PNG rather
+    than filling the disk with numbered ones.
+    """
+    shot = shooter or _shot
+    res: dict[str, Any] = {"ok": False, "group": target, "matched": None,
+                           "counts": {}, "messages": [], "shot": None,
+                           "error": None, "opened_title": ""}
+
+    # Already open? The warm page holds the chat open between polls, so
+    # re-clicking the sidebar row every minute is wasted work — and every click is
+    # another chance to land on the wrong row. A cold page fails this and opens the
+    # group the normal way.
+    #
+    # Compares the URL's conversation id directly rather than calling
+    # _confirm_open_chat: on a cold page with no chat open at all, that function's
+    # title fallback logs "no conversation id in the DOM" before we have even tried
+    # to open the group. Only a positive id match short-circuits; everything else
+    # (no id configured, no id on the page, a different chat) falls through to
+    # _open_group, and the authoritative check still runs below.
+    wanted_thread = _wanted_thread_id(target)
+    already_ok = bool(wanted_thread) and _open_thread_id(page) == wanted_thread
+    if not already_ok and not _open_group(page, target):
+        res["opened_title"] = _open_chat_title(page)
+        res["error"] = (
+            f"could not open the target group — Teams is showing "
+            f"{res['opened_title']!r}"
+            if res["opened_title"] else "could not open the target group"
+        )
+        res["shot"] = shot(page, "read_no_group")
+        return res
+
+    # Belt and braces: re-confirm immediately before scraping, so a chat that
+    # switches underneath us can never be reported as this one. Uses the same
+    # id-first check as opening did — re-checking the TITLE alone would reject a
+    # correctly-open chat whenever the header read comes back empty, which is
+    # exactly what happened on this build.
+    res["opened_title"] = _open_chat_title(page)
+    res["thread_id"] = _open_thread_id(page)
+    still_ok, still_why = _confirm_open_chat(page, target)
+    if not still_ok:
+        res["error"] = f"chat changed before reading — {still_why}"
+        res["shot"] = shot(page, "read_wrong_chat")
+        return res
+
+    # Render the END of the conversation before scraping. The list is
+    # virtualised, so without this the newest message may not be in the DOM at
+    # all and the tail of what IS rendered is an older message.
+    bottom = _scroll_pane_to_bottom(page)
+    res["at_bottom"] = bottom["at_bottom"]
+    res["newest_mid"] = bottom["newest_mid"]
+    res["rendered_rows"] = bottom["rows"]
+
+    # Scan well past `limit`: the newest rows are often system events, so a
+    # window of exactly `limit` can contain no real message at all. limit=0 (the
+    # poll) still gets the 30-row floor.
+    scan = max(30, limit * 10)
+    scraped = _scrape_rows(page, scan)
+    if scraped.get("error"):
+        # Never read outside the conversation pane — see _scrape_rows.
+        res["error"] = f"pane not resolved: {scraped['error']}"
+        res["counts"] = scraped.get("counts") or {}
+        res["shot"] = shot(page, "read_no_pane")
+        return res
+    res["pane"] = scraped.get("pane")
+    picked = _pick_messages(scraped.get("rows") or [], limit)
+
+    # Still nothing but "X left the chat"? Scroll up for older rows —
+    # virtualisation means they are not in the DOM until we do.
+    for attempt in range(1, 4):
+        if picked["messages"]:
+            break
+        if not _scroll_pane_up(page):
+            print("[teams] nothing scrollable — cannot reach older rows",
+                  flush=True)
+            break
+        print(f"[teams] only system events so far; scrolled up "
+              f"({attempt}/3)", flush=True)
+        page.wait_for_timeout(2500)
+        scraped = _scrape_rows(page, scan)
+        picked = _pick_messages(scraped.get("rows") or [], limit)
+
+    res["matched"] = scraped.get("matched")
+    res["counts"] = scraped.get("counts") or {}
+    res["messages"] = picked["messages"]
+    res["skipped_system"] = picked["skipped_system"]
+    res["scanned"] = picked["scanned"]
+    res["ok"] = bool(res["messages"])
+    # Did we actually return the newest rendered message? If not, say which one
+    # we skipped instead of quietly presenting an older notice as "latest" — the
+    # failure mode that posted a yesterday message.
+    if res["messages"]:
+        shown_mid = str(res["messages"][-1].get("mid") or "")
+        res["shown_mid"] = shown_mid
+        res["is_newest"] = bool(
+            shown_mid and res.get("newest_mid")
+            and shown_mid == res["newest_mid"]
+        )
+    if not res["ok"]:
+        res["error"] = (
+            f"scanned {picked['scanned']} row(s); all were system events "
+            f"or empty ({len(picked['skipped_system'])} skipped)"
+            if picked["skipped_system"]
+            else "opened the chat but matched no message rows"
+        )
+    return res
+
+
 def read_latest_messages(*, group: str | None = None, limit: int = 3,
                          headless: bool = True) -> dict:
-    """Open ``group`` in Teams and return its most recent messages.
+    """Open ``group`` in a COLD browser and return its most recent messages.
 
     Returns ``{"ok", "group", "matched", "counts", "messages", "shot", "error"}``.
     ``counts`` reports every candidate selector and how many nodes it matched, so
     a Teams UI change is diagnosable from one run instead of guesswork.
+
+    The warm watcher does not use this — it holds one page open and calls
+    ``_read_on_page`` directly. This is the CLI / no-watcher path, and it holds
+    the exclusive profile lock for the whole Chromium boot.
     """
     from playwright.sync_api import sync_playwright
 
-    target = (group or os.getenv("EVOTEAMS_GROUP")
-              or "@EVO C88live/slot_ow.ph (RTS) CS Group NE RT FP")
+    target = _watch_target(group)
     res: dict[str, Any] = {"ok": False, "group": target, "matched": None,
                            "counts": {}, "messages": [], "shot": None, "error": None,
                            "opened_title": ""}
@@ -2901,103 +3222,17 @@ def read_latest_messages(*, group: str | None = None, limit: int = 3,
         ctx, page = _open(p, headless=headless)
         try:
             page.goto(TEAMS_URL, wait_until="domcontentloaded", timeout=60000)
-            deadline = time.monotonic() + max(60, int(os.getenv("TEAMS_BOOT_WAIT", "90")))
-            stage = "unknown"
-            while time.monotonic() < deadline:
-                stage = _stage_of(page)
-                if stage == "teams_loaded":
-                    break
-                if stage in _NEEDS_HUMAN or stage in ("landing", "email", "password"):
-                    break
-                page.wait_for_timeout(2000)
+            stage = _wait_teams_loaded(page)
             if stage != "teams_loaded":
                 res["error"] = f"not signed in (stage: {stage}) — run --login"
                 res["shot"] = _shot(page, f"read_{stage}")
                 return res
-
-            if not _open_group(page, target):
-                res["opened_title"] = _open_chat_title(page)
-                res["error"] = (
-                    f"could not open the target group — Teams is showing "
-                    f"{res['opened_title']!r}"
-                    if res["opened_title"] else "could not open the target group"
-                )
-                res["shot"] = _shot(page, "read_no_group")
-                return res
-
-            # Belt and braces: re-confirm immediately before scraping, so a chat
-            # that switches underneath us can never be reported as this one. Uses
-            # the same id-first check as opening did — re-checking the TITLE alone
-            # would reject a correctly-open chat whenever the header read comes
-            # back empty, which is exactly what happened on this build.
-            res["opened_title"] = _open_chat_title(page)
-            res["thread_id"] = _open_thread_id(page)
-            still_ok, still_why = _confirm_open_chat(page, target)
-            if not still_ok:
-                res["error"] = f"chat changed before reading — {still_why}"
-                res["shot"] = _shot(page, "read_wrong_chat")
-                return res
-
-            # Render the END of the conversation before scraping. The list is
-            # virtualised, so without this the newest message may not be in the
-            # DOM at all and the tail of what IS rendered is an older message.
-            bottom = _scroll_pane_to_bottom(page)
-            res["at_bottom"] = bottom["at_bottom"]
-            res["newest_mid"] = bottom["newest_mid"]
-            res["rendered_rows"] = bottom["rows"]
-
-            # Scan well past `limit`: the newest rows are often system events, so
-            # a window of exactly `limit` can contain no real message at all.
-            scan = max(30, limit * 10)
-            scraped = _scrape_rows(page, scan)
-            if scraped.get("error"):
-                # Never read outside the conversation pane — see _scrape_rows.
-                res["error"] = f"pane not resolved: {scraped['error']}"
-                res["counts"] = scraped.get("counts") or {}
-                res["shot"] = _shot(page, "read_no_pane")
-                return res
-            res["pane"] = scraped.get("pane")
-            picked = _pick_messages(scraped.get("rows") or [], limit)
-
-            # Still nothing but "X left the chat"? Scroll up for older rows —
-            # virtualisation means they are not in the DOM until we do.
-            for attempt in range(1, 4):
-                if picked["messages"]:
-                    break
-                if not _scroll_pane_up(page):
-                    print("[teams] nothing scrollable — cannot reach older rows",
-                          flush=True)
-                    break
-                print(f"[teams] only system events so far; scrolled up "
-                      f"({attempt}/3)", flush=True)
-                page.wait_for_timeout(2500)
-                scraped = _scrape_rows(page, scan)
-                picked = _pick_messages(scraped.get("rows") or [], limit)
-
-            res["matched"] = scraped.get("matched")
-            res["counts"] = scraped.get("counts") or {}
-            res["messages"] = picked["messages"]
-            res["skipped_system"] = picked["skipped_system"]
-            res["scanned"] = picked["scanned"]
-            res["ok"] = bool(res["messages"])
-            # Did we actually return the newest rendered message? If not, say
-            # which one we skipped instead of quietly presenting an older notice
-            # as "latest" — the failure mode that posted a yesterday message.
-            if res["messages"]:
-                shown_mid = str(res["messages"][-1].get("mid") or "")
-                res["shown_mid"] = shown_mid
-                res["is_newest"] = bool(
-                    shown_mid and res.get("newest_mid")
-                    and shown_mid == res["newest_mid"]
-                )
-            res["shot"] = _shot(page, "read_latest")
-            if not res["ok"]:
-                res["error"] = (
-                    f"scanned {picked['scanned']} row(s); all were system events "
-                    f"or empty ({len(picked['skipped_system'])} skipped)"
-                    if picked["skipped_system"]
-                    else "opened the chat but matched no message rows"
-                )
+            res.update(_read_on_page(page, target, limit))
+            # _read_on_page shoots only its own failure branches; the success
+            # (and "all system events") paths still want the PNG that
+            # /latestevo sends when a read comes back empty.
+            if res.get("shot") is None:
+                res["shot"] = _shot(page, "read_latest")
         except Exception as err:  # noqa: BLE001
             res["error"] = repr(err)
             try:
@@ -3078,10 +3313,431 @@ def _fmt_messages(res: dict) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Warm watcher — one long-lived Chromium, polled for new messages
+# ---------------------------------------------------------------------------
+# Playwright's sync API is thread-confined, so EVERY browser call runs on one
+# worker thread; other threads submit jobs through a queue and block on an Event
+# when they need the answer. Same shape as osmwatch._OsmWatchWarm, which solves
+# the same problem for the OSM dashboard.
+#
+# Why warm and not a cold read per poll: read_latest_messages boots Chromium and
+# waits up to 90s for the Teams shell. Doing that every minute on a CPU-only box
+# is untenable, and each cold read takes the exclusive profile lock — so a poll
+# in flight would make /latestevo fail with "profile is busy". The watcher owns
+# the browser AND the lock for its whole life, and /latestevo + /teamstatus are
+# served from the same page (which also makes them fast).
+_HEARTBEAT_S = 60
+# How long a blocking caller waits. Generous because the very first job may have
+# to boot Teams from cold (TEAMS_BOOT_WAIT is 90s by itself).
+_WARM_CALL_TIMEOUT_S = 240
+
+
+def _watch_enabled() -> bool:
+    """Master switch for auto-detection. Unset means OFF, so deploying this file
+    changes nothing until .env says so. Shared with detectevomaintenance._enabled
+    on purpose: a watcher that polls but cannot card, or a detector with nothing
+    feeding it, are both half-configured states not worth supporting."""
+    return _truthy(os.getenv("EVOTEAMS_ENABLED"))
+
+
+def _poll_seconds() -> int:
+    try:
+        return max(15, int(os.getenv("EVOTEAMS_POLL_SECONDS", "60")))
+    except ValueError:
+        return 60
+
+
+def _headless() -> bool:
+    return not _truthy(os.getenv("TEAMS_HEADED"))
+
+
+class _TeamsWarm:
+    """The long-lived Teams session, plus the poll loop that feeds detection."""
+
+    def __init__(self) -> None:
+        self._tasks: queue.Queue[dict] = queue.Queue()
+        self._p = None
+        self._ctx = None
+        self._page = None
+        self._holding_lock = False
+        self._started = False
+        self._polling = False
+        self._start_lock = threading.Lock()
+        self._st_lock = threading.Lock()
+        self._st: dict[str, Any] = {
+            "launched_at": None, "stage": None, "polls": 0, "new_msgs": 0,
+            "cards": 0, "last_poll_at": None, "last_poll_ok": None,
+            "last_poll_error": None, "last_new_at": None, "consec_fail": 0,
+            "yielded_at": None, "relaunches": 0,
+        }
+
+    # -- little state box (read by /teamstatus from another thread) -----------
+    def _note(self, **kw: Any) -> None:
+        with self._st_lock:
+            self._st.update(kw)
+
+    def _bump(self, key: str, by: int = 1) -> None:
+        with self._st_lock:
+            self._st[key] = int(self._st.get(key) or 0) + by
+
+    def stats(self) -> dict[str, Any]:
+        with self._st_lock:
+            return dict(self._st)
+
+    def started(self) -> bool:
+        return self._started
+
+    # -- lifecycle -----------------------------------------------------------
+    def start(self, *, poll: bool = True) -> None:
+        with self._start_lock:
+            if self._started:
+                return
+            self._started = True
+            threading.Thread(target=self._loop, name="teams-warm",
+                             daemon=True).start()
+            threading.Thread(target=self._heartbeat_loop, name="teams-warm-hb",
+                             daemon=True).start()
+            if poll and not self._polling:
+                self._polling = True
+                threading.Thread(target=self._poll_loop, name="teams-warm-poll",
+                                 daemon=True).start()
+
+    def _heartbeat_loop(self) -> None:
+        """Keep our own lock from ageing into 'stale' — see _touch_profile_lock."""
+        while True:
+            time.sleep(_HEARTBEAT_S)
+            if self._holding_lock:
+                _touch_profile_lock()
+
+    def _poll_loop(self) -> None:
+        """Submit a poll on the interval, backing off while the read is failing.
+
+        Backoff matters: with a dead session every poll costs a Teams boot attempt
+        and an error line, and hammering that once a minute buries the one log
+        line that says what to fix.
+        """
+        while True:
+            if self._tasks.empty():
+                self._tasks.put({"kind": "poll"})
+            else:
+                # The worker is still busy with the previous cycle — a cold Teams
+                # boot alone can take 90s. Queueing another poll behind it would
+                # build a backlog that never drains and would keep re-reading the
+                # same rows. Skip this tick; the next one is 60s away.
+                print("[teams-warm] previous job still running — skipping this "
+                      "poll tick", flush=True)
+            fails = int(self.stats().get("consec_fail") or 0)
+            delay = _poll_seconds() * (2 ** min(fails, 4))
+            time.sleep(min(max(delay, _poll_seconds()), 900))
+
+    def _launch(self) -> bool:
+        """Take the lock, start Chromium, boot Teams. False if it did not come up."""
+        from playwright.sync_api import sync_playwright
+
+        self._teardown()
+        # ask=False: the watcher is the polite party. If it asked whoever holds
+        # the lock (a hand-run --login) to yield, the two would ping-pong.
+        if not _acquire_profile_lock("warm-watch", wait_s=0, ask=False):
+            self._note(last_poll_error=f"profile busy ({_lock_holder()})")
+            print(f"[teams-warm] profile held by {_lock_holder()!r} — will retry",
+                  flush=True)
+            return False
+        self._holding_lock = True
+        _touch_profile_lock()
+        try:
+            self._p = sync_playwright().start()
+            self._ctx, self._page = _open(self._p, headless=_headless())
+            self._page.goto(TEAMS_URL, wait_until="domcontentloaded", timeout=60000)
+            stage = _wait_teams_loaded(self._page)
+            self._note(stage=stage)
+            if stage != "teams_loaded":
+                reason = f"profile is not signed in (stage: {stage})"
+                shot = _shot_fixed(self._page, f"launch_{stage}")
+                _set(phase="login_failed", detail=f"warm watcher: {reason}",
+                     last_error=reason, last_stage=stage)
+                _persist()
+                # Once per death, not once per poll: alert_login_failed checks the
+                # `alerted` flag itself, and do_login clears it on success.
+                alert_login_failed(reason, stage=stage, shot=shot)
+                self._teardown()
+                return False
+            self._bump("relaunches")
+            self._note(launched_at=_now_str())
+            _set(phase="monitoring",
+                 detail=f"warm watcher on {_watch_target()} "
+                        f"(every {_poll_seconds()}s)",
+                 connected_at=_now_str(), last_error=None, last_stage=stage,
+                 account=os.getenv("TEAMS_EMAIL") or None)
+            _persist()
+            print(f"[teams-warm] browser up; watching {_watch_target()!r}",
+                  flush=True)
+            return True
+        except Exception as err:  # noqa: BLE001
+            print(f"[teams-warm] launch failed: {err!r}", flush=True)
+            self._note(last_poll_error=repr(err))
+            _set(phase="login_failed", detail="warm launch raised",
+                 last_error=repr(err))
+            self._teardown()
+            return False
+
+    def _teardown(self) -> None:
+        for closer in (
+            lambda: self._ctx.close() if self._ctx else None,
+            lambda: self._p.stop() if self._p else None,
+        ):
+            try:
+                closer()
+            except Exception:
+                pass
+        self._p = self._ctx = self._page = None
+        if self._holding_lock:
+            _release_profile_lock()
+            self._holding_lock = False
+
+    def _healthy(self) -> bool:
+        try:
+            return self._page is not None and not self._page.is_closed()
+        except Exception:
+            return False
+
+    def _stand_down(self) -> None:
+        """Release the browser + lock because something else asked for the profile.
+
+        The sentinel is NOT deleted here — the asker removes it when it takes the
+        lock. Deleting it ourselves would let us relaunch straight into the fight.
+        """
+        if not self._healthy() and not self._holding_lock:
+            return
+        print(f"[teams-warm] yielding the profile to {_YIELD_PATH.name} "
+              f"({_lock_holder() or 'a waiting caller'})", flush=True)
+        self._teardown()
+        self._note(yielded_at=_now_str())
+        _set(phase="stopped", detail="yielded the profile to another run")
+
+    def _ready(self) -> bool:
+        """Ensure a booted page, honouring a pending yield. False = not now."""
+        if _yield_requested():
+            self._stand_down()
+            return False
+        if self._healthy():
+            # Cheap path: no re-probe every minute. A session that died since the
+            # last poll surfaces as a read failure, which _do_poll diagnoses.
+            return True
+        return self._launch()
+
+    # -- jobs ----------------------------------------------------------------
+    def _do_read(self, group: str | None, limit: int, *, quiet: bool) -> dict:
+        global _quiet_reads
+        target = _watch_target(group)
+        if not self._ready():
+            # `yielded` matters: standing aside for a --login is NORMAL, and
+            # counting it as a failed poll would back the interval off to 16
+            # minutes over four ticks, so the watcher would crawl back long after
+            # the login finished.
+            yielded = _yield_requested()
+            return {"ok": False, "group": target, "messages": [], "counts": {},
+                    "shot": _snapshot().get("last_shot"), "yielded": yielded,
+                    "error": ("standing aside — another run holds the Teams "
+                              "profile" if yielded else
+                              self.stats().get("last_poll_error")
+                              or "warm watcher has no signed-in Teams page")}
+        was_quiet = _quiet_reads
+        _quiet_reads = quiet
+        try:
+            return _read_on_page(self._page, target, limit, shooter=_shot_fixed)
+        finally:
+            _quiet_reads = was_quiet
+
+    def _do_poll(self) -> None:
+        res = self._do_read(None, 0, quiet=True)
+        self._bump("polls")
+        self._note(last_poll_at=_now_str(), last_poll_ok=bool(res.get("ok")))
+
+        if res.get("yielded"):
+            # Not a failure: hold at the normal interval and pick straight back up
+            # once whoever asked for the profile is done with it.
+            self._note(last_poll_error=res.get("error"), consec_fail=0)
+            return
+
+        if not res.get("ok"):
+            err = res.get("error") or "unknown read failure"
+            self._note(last_poll_error=err)
+            self._bump("consec_fail")
+            print(f"[teams-warm] poll failed: {err}", flush=True)
+            # Is the SESSION gone, or was that just a bad frame? Only a dead
+            # session justifies dropping the browser; rebuilding it for a transient
+            # DOM miss would cost a 90s boot every time Teams re-rendered slowly.
+            if self._healthy():
+                try:
+                    stage = _stage_of(self._page)
+                except Exception as probe_err:  # noqa: BLE001
+                    stage = f"probe_failed:{probe_err!r}"
+                self._note(stage=stage)
+                if not str(stage).startswith("teams_loaded"):
+                    print(f"[teams-warm] session looks dead (stage {stage}) — "
+                          f"dropping the browser so the next poll relaunches",
+                          flush=True)
+                    self._teardown()
+            return
+
+        self._note(last_poll_error=None, consec_fail=0)
+        msgs = res.get("messages") or []
+        try:
+            import detectevomaintenance as _evom
+
+            # `group` is the TARGET, not the scraped header text. That is
+            # deliberate: the "is this the right chat" question was already
+            # answered decisively inside _read_on_page, which calls
+            # _confirm_open_chat twice and compares the URL's conversation id
+            # against the pinned one for this group — a check that cannot
+            # half-match. The header title, by contrast, comes back empty on this
+            # Teams build, and feeding that to in_watched_group (which fails
+            # closed) would silently drop every real notice.
+            out = _evom.handle_new_messages(
+                group=res.get("group") or _watch_target(),
+                messages=msgs,
+                newest_mid=str(res.get("newest_mid") or ""),
+                at_bottom=res.get("at_bottom"),
+            ) or {}
+        except Exception as err:  # noqa: BLE001
+            self._note(last_poll_error=f"detector raised: {err!r}")
+            print(f"[teams-warm] detector raised: {err!r}", flush=True)
+            return
+
+        if out.get("new"):
+            self._bump("new_msgs", int(out.get("new") or 0))
+            self._bump("cards", int(out.get("cards") or 0))
+            self._note(last_new_at=_now_str())
+
+    # -- worker loop ---------------------------------------------------------
+    def _loop(self) -> None:
+        while True:
+            try:
+                task = self._tasks.get(timeout=2)
+            except queue.Empty:
+                # Idle tick: notice a yield request even when no job is queued,
+                # so a hand-run --login is not stuck behind the poll interval.
+                if _yield_requested():
+                    self._stand_down()
+                continue
+            kind = str(task.get("kind") or "")
+            done = task.get("done")
+            box = task.get("box")
+            try:
+                if kind == "poll":
+                    self._do_poll()
+                elif kind == "read":
+                    out = self._do_read(task.get("group"),
+                                        int(task.get("limit") or 0), quiet=False)
+                    if box is not None:
+                        box.update(out)
+                elif kind == "shot":
+                    ready = self._ready()
+                    if box is not None:
+                        box.update({
+                            "ok": ready and self._healthy(),
+                            "shot": (_shot_fixed(self._page, "status")
+                                     if self._healthy() else
+                                     _snapshot().get("last_shot")),
+                            "stage": self.stats().get("stage"),
+                        })
+                else:
+                    print(f"[teams-warm] unknown job {kind!r}", flush=True)
+            except Exception as err:  # noqa: BLE001
+                print(f"[teams-warm] job {kind!r} raised: {err!r}", flush=True)
+                self._note(last_poll_error=repr(err))
+                if box is not None and not box:
+                    box.update({"ok": False, "error": repr(err), "messages": [],
+                                "counts": {}, "shot": None})
+                # A raised job means the page is suspect. Drop it; the next job
+                # relaunches. Without this a half-dead page is reused forever.
+                self._teardown()
+            finally:
+                # ALWAYS, or a blocking caller waits out its full timeout.
+                if done is not None:
+                    done.set()
+
+    # -- public, thread-safe -------------------------------------------------
+    def read_latest(self, *, group: str | None = None, limit: int = 1,
+                    timeout_s: int = _WARM_CALL_TIMEOUT_S) -> dict:
+        self.start(poll=_watch_enabled())
+        done = threading.Event()
+        box: dict[str, Any] = {}
+        self._tasks.put({"kind": "read", "group": group, "limit": limit,
+                         "done": done, "box": box})
+        if not done.wait(timeout=timeout_s):
+            return {"ok": False, "group": _watch_target(group), "messages": [],
+                    "counts": {}, "shot": None,
+                    "error": f"the warm Teams watcher did not answer within "
+                             f"{timeout_s}s — it may still be booting Teams"}
+        return box
+
+    def probe(self, *, timeout_s: int = _WARM_CALL_TIMEOUT_S) -> dict:
+        """A fresh screenshot + liveness of the warm page, for /teamstatus."""
+        self.start(poll=_watch_enabled())
+        done = threading.Event()
+        box: dict[str, Any] = {}
+        self._tasks.put({"kind": "shot", "done": done, "box": box})
+        if not done.wait(timeout=timeout_s):
+            return {"ok": False, "shot": _snapshot().get("last_shot"),
+                    "stage": "timeout"}
+        return box
+
+    def poll_now(self) -> None:
+        self.start(poll=_watch_enabled())
+        self._tasks.put({"kind": "poll"})
+
+
+_warm: _TeamsWarm | None = None
+_warm_lock = threading.Lock()
+
+
+def warm() -> _TeamsWarm:
+    global _warm
+    with _warm_lock:
+        if _warm is None:
+            _warm = _TeamsWarm()
+        return _warm
+
+
+def warm_running() -> bool:
+    """True once the worker thread exists — the signal for /latestevo and
+    /teamstatus to go through it instead of taking the profile lock themselves.
+    Deliberately not `_healthy()`: a watcher that is mid-boot still owns the
+    lock, so a cold read would only fail."""
+    return _warm is not None and _warm.started()
+
+
+def start_watch_on_startup() -> None:
+    """Boot hook for main.py. No-op unless EVOTEAMS_ENABLED is truthy."""
+    if not _watch_enabled():
+        print("[teams-warm] EVOTEAMS_ENABLED not set — Teams auto-detect is OFF",
+              flush=True)
+        return
+    if _profile_state() != "present":
+        detail = (f"no Teams profile ({_profile_state()}) — run "
+                  f"`python teamswatch.py --login` before auto-detect can work")
+        _set(phase="login_failed", detail=detail, last_error=detail)
+        _persist()
+        print(f"[teams-warm] ❌ {detail}", flush=True)
+        return
+    warm().start(poll=True)
+    print(f"[teams-warm] auto-detect ON — {_watch_target()!r} every "
+          f"{_poll_seconds()}s, cards to "
+          f"{os.getenv('EVOTEAMS_CARD_CHAT_ID') or 'the /m group'}", flush=True)
+
+
 def send_latest_to_lark(chat_id: str, *, group: str | None = None,
                         limit: int = 1) -> dict:
     """``/latestevo`` — read the group and post what we found back to ``chat_id``."""
-    res = read_latest_messages(group=group, limit=limit)
+    if warm_running():
+        # Reuse the watcher's already-booted page. Not an optimisation: the
+        # watcher holds the profile lock for its whole life, so a cold read here
+        # would sit for 120s and then fail with "profile is busy".
+        res = warm().read_latest(group=group, limit=limit)
+    else:
+        res = read_latest_messages(group=group, limit=limit)
     try:
         # Parts, not a truncation: a real EVO batch notice runs to thousands of
         # characters and /latestevo N concatenates up to ten of them.
@@ -3115,6 +3771,43 @@ _PROFILE_NOTE = {
     "empty": "EMPTY — a browser started but never finished signing in",
     "present": "present (a profile exists; not proof it is still signed in)",
 }
+
+
+def _warm_status_lines() -> list[str]:
+    """What the poll loop is actually doing, for /teamstatus.
+
+    Reports the DIFFERENCE between "configured" and "running": a watcher that is
+    enabled but has never completed a poll is the state most likely to be
+    mistaken for working, so the poll count and last-poll time are always shown.
+    """
+    if not _watch_enabled():
+        return ["• Auto-detect: OFF (set EVOTEAMS_ENABLED=1 in .env)"]
+    if not warm_running():
+        return ["🔴 Auto-detect: ENABLED but the watcher thread is NOT running — "
+                "main.py's boot hook did not start it (profile missing?)"]
+    st = warm().stats()
+    ok = st.get("last_poll_ok")
+    lines = [
+        f"• Auto-detect: ON — polling every {_poll_seconds()}s",
+        f"• Polls: {st.get('polls') or 0} "
+        f"(last {st.get('last_poll_at') or 'never'}: "
+        f"{'ok' if ok else 'FAILED' if ok is False else 'not yet'})",
+        f"• New messages seen: {st.get('new_msgs') or 0}; cards posted: "
+        f"{st.get('cards') or 0}"
+        + (f"; last new at {st['last_new_at']}" if st.get("last_new_at") else ""),
+    ]
+    if st.get("last_poll_error"):
+        lines.append(f"• Last poll error: {st['last_poll_error']}")
+    if int(st.get("consec_fail") or 0) > 1:
+        lines.append(f"⚠️ {st['consec_fail']} consecutive failed polls — the "
+                     f"interval is backing off")
+    if st.get("relaunches"):
+        lines.append(f"• Browser launches: {st['relaunches']} "
+                     f"(up since {st.get('launched_at') or '—'})")
+    if st.get("yielded_at"):
+        lines.append(f"• Last yielded the profile at {st['yielded_at']} "
+                     f"(a --login or CLI read asked for it)")
+    return lines
 
 
 def status_lines() -> list[str]:
@@ -3157,7 +3850,7 @@ def status_lines() -> list[str]:
             "• IDLE means no login has completed yet — nothing is running, so "
             "waiting will not change this. Run `python teamswatch.py --login`."
         )
-    lines.append("• Phase: login done; websocket capture pending real frames")
+    lines.extend(_warm_status_lines())
 
     # The EVO detector is a separate module but the same operational question, so
     # /teamstatus reports both rather than making anyone run two commands.
@@ -3183,7 +3876,24 @@ def send_status_to_lark(chat_id: str) -> dict:
     shot = None
     monitoring = is_monitoring()
 
-    if _profile_state() == "present":
+    if warm_running():
+        # Ask the watcher, don't open a second browser: check_session takes the
+        # profile lock the watcher is holding, so it would stall then fail — and
+        # asking the live page is a *better* probe than a cold re-login anyway.
+        try:
+            probe = warm().probe()
+            monitoring = bool(probe.get("ok"))
+            shot = probe.get("shot")
+        except Exception as err:  # noqa: BLE001
+            print(f"[teams] warm status probe failed: {err!r}", flush=True)
+            _set(last_error=repr(err))
+    elif _profile_state() == "present" and _LOCK_PATH.exists():
+        # Something else holds the profile (a --login, a --read-latest). Do NOT
+        # queue behind it: _profile_lock waits 120s and then raises, and that
+        # generic lock error would overwrite the real diagnostic the caller asked
+        # for. Say who has it instead.
+        _set(detail=f"profile busy — not re-probed ({_lock_holder()})")
+    elif _profile_state() == "present":
         try:
             res = check_session()
             monitoring = bool(res.get("ok"))
@@ -3226,6 +3936,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="dump the live sidebar/header/pane structure + thread id")
     ap.add_argument("--read-latest", action="store_true",
                     help="open the watched group and print its latest messages")
+    ap.add_argument("--watch", action="store_true",
+                    help="run the warm watcher + poll loop in the FOREGROUND "
+                         "(what the bot does at boot); Ctrl-C to stop")
+    ap.add_argument("--detect-now", action="store_true",
+                    help="read the group's newest message and push it through "
+                         "detection right now, ignoring the cursor — the way to "
+                         "test the card without waiting for a new notice")
     ap.add_argument("--group", default=None, help="override the group title to read")
     # 1, matching /latestevo's own default (main.py clamps its argument to 1..10),
     # so the CLI and the bot command answer the same question by default.
@@ -3251,6 +3968,41 @@ def main(argv: list[str] | None = None) -> int:
     if args.dump_dom:
         res = dump_dom(group=args.group, headless=not args.headed)
         return 0 if res.get("ok") else 1
+    if args.detect_now:
+        # Cold read on purpose: --detect-now is run by hand, usually with the bot
+        # (and therefore the warm watcher) either stopped or holding the profile —
+        # _profile_lock asks it to yield, which is exactly what we want here.
+        res = read_latest_messages(group=args.group, limit=1,
+                                   headless=not args.headed)
+        print(_fmt_messages(res))
+        if not res.get("ok") or not res.get("messages"):
+            print("\nnothing to detect — see the read error above")
+            return 1
+        import detectevomaintenance as _evom
+
+        msg = res["messages"][-1]
+        status = _evom.force_card(group=res.get("group"), message=msg)
+        print(f"\ndetection status: {status}")
+        if status == "duplicate":
+            print("(already in the ledger — remove its record from "
+                  "detectevomaintenance.json to card it again)")
+        print("\n".join(_evom.status_lines()))
+        return 0 if status in ("carded", "dry_run", "duplicate") else 1
+    if args.watch:
+        if not _watch_enabled():
+            print("EVOTEAMS_ENABLED is not set — the poll loop would do nothing. "
+                  "Set EVOTEAMS_ENABLED=1 in .env first.")
+            return 2
+        warm().start(poll=True)
+        print(f"watching {_watch_target(args.group)!r} every "
+              f"{_poll_seconds()}s — Ctrl-C to stop")
+        try:
+            while True:
+                time.sleep(30)
+                print("\n".join(status_lines()))
+        except KeyboardInterrupt:
+            print("\nstopping")
+            return 0
     if args.read_latest:
         res = read_latest_messages(group=args.group, limit=args.limit,
                                    headless=not args.headed)

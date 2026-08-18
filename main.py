@@ -4287,15 +4287,23 @@ def _evo_batch_result_reply(chat_id: str, payload: str) -> dict:
     return resp
 
 
-def _process_evo_sd_batch_paste(chat_id: str, email_text: str) -> None:
+def _process_evo_sd_batch_paste(chat_id: str, email_text: str) -> dict:
     """Run the EVO Service Desk batch pipeline (same as ``/m``) and post the cards.
 
     Shared by the explicit ``/m`` command and the no-command auto-detection so both
     paths behave identically. Only allowed in the OSE BOT - Ops & Maintenance group.
+
+    Returns ``{"ok", "email_sent", "reason"}``. Behaviour is unchanged for the
+    typed paths, which ignore it: every failure is still reported into the chat
+    rather than raised. The Teams auto-detect card is the caller that needs the
+    answer — it used to record "emailed" and grey out its own button on the
+    strength of this function merely RETURNING, which permanently buried any
+    notice whose mail was skipped (wrong group, no CP-launched games) or errored.
     """
     if not maintenance.is_evo_batch_command_chat(chat_id):
         send_message(chat_id, maintenance.EVO_BATCH_WRONG_GROUP_MESSAGE)
-        return
+        return {"ok": False, "email_sent": False,
+                "reason": f"{chat_id} is not the EVO batch command group"}
     try:
         token = get_tenant_access_token()
         batch = maintenance.process_evo_sd_batch_maintenance(email_text, token)
@@ -4335,8 +4343,18 @@ def _process_evo_sd_batch_paste(chat_id: str, email_text: str) -> None:
         _evo_batch_result_reply(
             chat_id, json.dumps(batch["result_card"], ensure_ascii=False)
         )
+        sent = bool(batch.get("email_sent"))
+        return {
+            "ok": True,
+            "email_sent": sent,
+            "reason": "" if sent else (
+                "the pipeline produced no outbound content — every table in the "
+                "notice was filtered out (no CP-launched games), so no mail was sent"
+            ),
+        }
     except Exception as ex:
         send_message(chat_id, f"❌ EVO 批量 `/m` 处理失败: `{ex}`")
+        return {"ok": False, "email_sent": False, "reason": f"{ex}"}
 
 
 def _egs_reply(chat_id: str, reply_mid: str, payload, *, msg_type: str = "text") -> dict:
@@ -8418,6 +8436,15 @@ def _run_main_entry() -> int:
             _boot_tg.start_monitor_on_startup()
         except Exception as _boot_tg_err:
             print(f"[telegram-watch] startup skipped: {_boot_tg_err!r}", flush=True)
+        try:
+            import teamswatch as _boot_tw
+
+            # Warm Teams session + the poll loop that feeds detectevomaintenance.
+            # No-op unless EVOTEAMS_ENABLED is set, so this line alone changes
+            # nothing on a deploy.
+            _boot_tw.start_watch_on_startup()
+        except Exception as _boot_tw_err:
+            print(f"[teams-warm] startup skipped: {_boot_tw_err!r}", flush=True)
         if _lark_ws_uses_persistent_connection():
             def _flask_bg() -> None:
                 app.run(host="127.0.0.1", port=port, debug=False, threaded=True, use_reloader=False)
