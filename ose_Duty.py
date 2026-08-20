@@ -133,7 +133,7 @@ OSE_LEAVE_SHEET_ROSTER: tuple[tuple[str, str], ...] = (
     ("Reuben Jherico Silerio", "Reuben Jherico Silerio"),
     ("Alexandra Del Rosario", "Alexandra Del Rosario"),
     ("Clint Nathan Calumpad", "Clint Nathan Calumpad"),
-    ("Sarah Jean Sulit", "Sarah Jean Sulit"),
+    ("Sarah Jean Sulit", "Sarah Jean Sulit [QA]"),
     ("Kheng Kwan", "Kheng Kwan [Platform]"),
     ("Kris Ng", "Kris Ng [Game]"),
 )
