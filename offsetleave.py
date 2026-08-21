@@ -61,6 +61,12 @@ _OFFSET_SUBMIT_KEY = "offsetleave_offset_submit"
 _LEAVE_SUBMIT_KEY = "offsetleave_leave_submit"
 _OFFSET_APPR_PICK_KEY = "offsetleave_offset_appr_pick"
 _OFFSET_APPR_CONFIRM_KEY = "offsetleave_offset_appr_confirm"
+# "Approve ALL" on the pending queue — approves every pending row, no remarks.
+_OFFSET_APPR_ALL_KEY = "offsetleave_offset_appr_all"
+
+# One bulk approval per approver at a time, so a double-tap cannot run the sweep twice.
+_OFFSET_APPR_ALL_LOCK = threading.Lock()
+_OFFSET_APPR_ALL_IN_FLIGHT: set[str] = set()
 
 # Lark open_ids — each receives the interactive approval card for new offset submissions.
 # Keep in sync with ``main.OFFSET_APPROVER_OPEN_IDS``.
@@ -90,7 +96,9 @@ BOT_MENU_EVENT_KEYS_APPROVER_OFFSET_DELETE: frozenset[str] = frozenset({BOT_MENU
 BOT_MENU_EVENT_KEY_APPROVER_SHOW_OFFSET = "7632487287468163123"
 BOT_MENU_EVENT_KEYS_APPROVER_SHOW_OFFSET: frozenset[str] = frozenset({BOT_MENU_EVENT_KEY_APPROVER_SHOW_OFFSET})
 
-OFFSET_APPROVAL_CALLBACK_KEYS = frozenset({_OFFSET_APPR_PICK_KEY, _OFFSET_APPR_CONFIRM_KEY})
+OFFSET_APPROVAL_CALLBACK_KEYS = frozenset(
+    {_OFFSET_APPR_PICK_KEY, _OFFSET_APPR_CONFIRM_KEY, _OFFSET_APPR_ALL_KEY}
+)
 
 _OFFSET_EDIT_PICK_KEY = "offsetleave_offset_edit_pick"
 _OFFSET_EDIT_SUBMIT_KEY = "offsetleave_offset_edit_submit"
@@ -1825,7 +1833,9 @@ def build_offset_pending_list_card(rows: list[dict[str, Any]]) -> dict[str, Any]
     sliced = rows[:cap]
     intro = (
         f"**{total} pending offset request(s)** awaiting approval.\n"
-        "Tap **Approve** or **Reject** on a row, add optional **Remarks**, then **Confirm**."
+        "Tap **Approve** or **Reject** on a row, add optional **Remarks**, then **Confirm**.\n"
+        "**Approve ALL** approves every pending row at once — no remarks, no confirm step, "
+        "including any not listed below."
     )
     elements: list[dict[str, Any]] = [{"tag": "div", "text": {"tag": "lark_md", "content": intro}}]
     if total > cap:
@@ -1868,6 +1878,18 @@ def build_offset_pending_list_card(rows: list[dict[str, Any]]) -> dict[str, Any]
         elements.append({"tag": "hr"})
     if elements and elements[-1].get("tag") == "hr":
         elements.pop()
+    if total:
+        # Bottom of the card, past the rows it will act on. The count says ALL pending,
+        # not just the ``cap`` rows rendered above.
+        elements.append({"tag": "hr"})
+        elements.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": f"✅ Approve ALL ({total})"},
+                "type": "primary",
+                "behaviors": [{"type": "callback", "value": {"k": _OFFSET_APPR_ALL_KEY}}],
+            }
+        )
     return {
         "schema": "2.0",
         "config": {"update_multi": True, "width_mode": "fill"},
@@ -4755,6 +4777,149 @@ def _handle_offset_edit_submit(
     return True
 
 
+def build_offset_approved_all_card(
+    approved: list[dict[str, Any]],
+    failures: list[tuple[dict[str, Any], str]],
+    *,
+    approver_name: str,
+) -> dict[str, Any]:
+    """Result of **Approve ALL** — what went through, and anything that did not."""
+    cap = 15
+    an = _lark_md_cell(approver_name or "Approver")
+    lines = [f"**{len(approved)} offset request(s) approved** by {an} — no remarks."]
+    if approved:
+        lines.append("")
+        for r in approved[:cap]:
+            lines.append(
+                f"• {_short_cell(r.get('request_person'))} · "
+                f"{_short_cell(r.get('exchange_person'))} · "
+                f"{_short_cell(r.get('original_date'))} → {_short_cell(r.get('exchange_date'))}"
+            )
+        if len(approved) > cap:
+            lines.append(f"• …and {len(approved) - cap} more")
+    if failures:
+        lines.extend(["", f"⚠️ **{len(failures)} could not be approved — still pending:**"])
+        for r, err in failures[:cap]:
+            lines.append(f"• {_short_cell(r.get('request_person'))} — {_short_cell(err)}")
+        if len(failures) > cap:
+            lines.append(f"• …and {len(failures) - cap} more")
+        lines.append("_Run **pendingoffset** again to retry those._")
+    template = "green" if approved and not failures else ("orange" if approved else "red")
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": template,
+            "title": {"tag": "plain_text", "content": "OSE offset — approved all"},
+        },
+        "body": {
+            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}}]
+        },
+    }
+
+
+def _handle_offset_approve_all(
+    *,
+    operator: str,
+    message_id: str,
+    chat_id: str,
+    send_message: Callable[..., Any],
+) -> bool:
+    """Approve every pending offset in one tap — no remarks, no per-row confirm.
+
+    Re-reads the queue at click time, so rows approved or edited since the card was
+    built are not touched. Each row is applied and notified exactly as the single-row
+    Approve does; one bad row is reported and leaves the rest approved.
+    """
+    oid = (operator or "").strip()
+    with _OFFSET_APPR_ALL_LOCK:
+        if oid in _OFFSET_APPR_ALL_IN_FLIGHT:
+            _toast_approval_problem(
+                send_message, chat_id, "⏳ Approve ALL is already running — please wait."
+            )
+            return True
+        _OFFSET_APPR_ALL_IN_FLIGHT.add(oid)
+    try:
+        rows = _all_pending_offsets()
+        if not rows:
+            if message_id:
+                _patch_interactive_card_message(
+                    message_id, _build_offset_pending_empty_card()
+                )
+            else:
+                _toast_approval_problem(
+                    send_message, chat_id, "✅ No pending offset requests left."
+                )
+            return True
+        approver_name = _approver_display_for_bitable(oid)
+        approved: list[dict[str, Any]] = []
+        failures: list[tuple[dict[str, Any], str]] = []
+        for row in rows:
+            rid = str(row.get("record_id") or "").strip()
+            if not rid:
+                failures.append((row, "missing record id"))
+                continue
+            try:
+                od.update_ose_offset_approval(
+                    record_id=rid,
+                    status="Approved",
+                    approver=approver_name,
+                    remarks="",
+                    approver_open_id=oid,
+                )
+            except Exception as exc:  # noqa: BLE001 — one bad row must not stop the sweep
+                print(f"[offsetleave] approve-all failed for {rid!r}: {exc!r}", flush=True)
+                failures.append((row, str(exc)))
+                continue
+            approved.append(row)
+            try:
+                notify_offset_approval_decision(
+                    rid,
+                    send_message=send_message,
+                    approver_name=approver_name,
+                    decision="Approved",
+                    remarks="",
+                    acting_approver_open_id=oid,
+                )
+            except Exception as exc:  # noqa: BLE001 — the row IS approved; only the DM failed
+                print(f"[offsetleave] approve-all notify failed for {rid!r}: {exc!r}", flush=True)
+        print(
+            f"[offsetleave] approve-all by {oid}: {len(approved)} approved, {len(failures)} failed",
+            flush=True,
+        )
+        card = build_offset_approved_all_card(approved, failures, approver_name=approver_name)
+        if message_id:
+            _patch_interactive_card_message(message_id, card)
+        else:
+            send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
+        return True
+    finally:
+        with _OFFSET_APPR_ALL_LOCK:
+            _OFFSET_APPR_ALL_IN_FLIGHT.discard(oid)
+
+
+def _build_offset_pending_empty_card() -> dict[str, Any]:
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "grey",
+            "title": {"tag": "plain_text", "content": "OSE offset — pending queue"},
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "✅ No pending offset requests left — the queue is empty.",
+                    },
+                }
+            ]
+        },
+    }
+
+
 def _handle_offset_approval_callback(
     parsed: dict[str, Any],
     event_obj: dict[str, Any],
@@ -4776,6 +4941,13 @@ def _handle_offset_approval_callback(
         _toast_approval_problem(send_message, chat_id, "❌ Only the assigned approver can act on this card.")
         return True
     try:
+        if key == _OFFSET_APPR_ALL_KEY:
+            return _handle_offset_approve_all(
+                operator=operator,
+                message_id=mid,
+                chat_id=chat_id,
+                send_message=send_message,
+            )
         if key == _OFFSET_APPR_PICK_KEY:
             rid = str(parsed.get("record_id") or "").strip()
             dec = _norm_offset_decision(parsed.get("decision"))
