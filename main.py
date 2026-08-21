@@ -7263,6 +7263,13 @@ def lark_webhook():
             # parse_ips is pure and network-free, so bad arguments are rejected
             # here instead of after a pointless "please wait" ack.
             _isp_ips, _isp_bad = _ipisp.parse_ips(query)
+            if not _isp_ips:
+                # Lark auto-links every IP, and the generic `<…>` strip above
+                # deletes an angle-bracket autolink outright — so retry against
+                # the untouched body before declaring the argument unusable.
+                _isp_raw, _ = _ipisp.parse_ips(original_text or "")
+                if _isp_raw:
+                    _isp_ips, _isp_bad, query = _isp_raw, [], " ".join(_isp_raw)
         except Exception as _isp_err:
             send_message(chat_id, f"❌ ISP lookup unavailable: {_isp_err}")
             return _lark_im_done()

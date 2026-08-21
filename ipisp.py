@@ -765,31 +765,67 @@ class IpResult:
         return [f"{r.name}: {r.error}" for r in self.records if not r.ok and r.error]
 
 
+# Zero-width and bidi controls. Lark turns anything IP-shaped into a hyperlink,
+# and the round-trip through its rich-text editor can leave one of these glued
+# to the address — invisible in the client, fatal to ip_address().
+_INVISIBLE_RE = re.compile(r"[­​-‏‪-‮⁠⁦-⁩﻿]")
+# "[138.84.76.76](http://138.84.76.76)" — a linkified address pasted as markdown.
+_MD_LINK_RE = re.compile(r"^\[([^\]]*)\]\((.*)\)$")
+# Bracketed IPv6, optionally with a port: "[2001:db8::1]:443".
+_BRACKET_V6_RE = re.compile(r"^\[([0-9A-Fa-f:.]+)\](?::\d{1,5})?$")
+_SCHEME_RE = re.compile(r"(?i)^[a-z][a-z0-9+.-]*://")
+
+
+def _strip_ip_token(tok: str) -> str:
+    """Reduce one whitespace-delimited token to a bare address.
+
+    Written against what Lark actually delivers rather than what users type: it
+    auto-links every IP, so the same address can arrive bare, as
+    ``http://1.2.3.4``, as ``[1.2.3.4](http://1.2.3.4)``, as ``<http://1.2.3.4>``,
+    with a trailing slash, or with an invisible zero-width character attached."""
+    s = _INVISIBLE_RE.sub("", tok).strip()
+    link = _MD_LINK_RE.match(s)
+    if link:  # prefer the label, fall back to the href
+        s = link.group(1).strip() or link.group(2).strip()
+        s = _INVISIBLE_RE.sub("", s)
+    s = s.strip("{}()<>\"'`,;!")
+    s = _SCHEME_RE.sub("", s)  # http://, https://, even ftp://
+    bracket = _BRACKET_V6_RE.match(s)
+    if bracket:
+        # Unwrap before the host:port rule below, which only knows IPv4.
+        return bracket.group(1)
+    s = s.strip("[]")
+    s = s.split("/", 1)[0]  # path or CIDR suffix
+    s = s.split("?", 1)[0].split("#", 1)[0]
+    if s.count(":") == 1 and "." in s:
+        s = s.rsplit(":", 1)[0]  # IPv4 host:port
+    return s.strip().strip(".,;")
+
+
+def _visible(tok: str) -> str:
+    """Render a rejected token so invisible characters are actually visible —
+    otherwise a zero-width space reads as a perfectly good IP in the error."""
+    out = "".join(
+        f"\\u{ord(c):04x}" if _INVISIBLE_RE.match(c) or ord(c) < 32 else c for c in tok
+    )
+    return out or "(empty)"
+
+
 def parse_ips(query: str) -> tuple[list[str], list[str]]:
     """Split the text after ``/isp`` into (valid IPs, rejected tokens). Accepts
-    space, comma, semicolon and newline separators, and tolerates the wrapping
-    braces/brackets people copy from a usage line."""
+    space, comma, semicolon and newline separators, and tolerates the many shapes
+    a Lark-linkified address arrives in — see :func:`_strip_ip_token`."""
     tokens = [t for t in re.split(r"[\s,;]+", (query or "").strip()) if t]
     ips: list[str] = []
     bad: list[str] = []
     for tok in tokens:
-        cleaned = tok.strip("{}()<>\"'`").rstrip(".")
+        cleaned = _strip_ip_token(tok)
         if not cleaned:
             continue
-        # "[2001:db8::1]:443" / "[2001:db8::1]" — the bracketed form must be
-        # unwrapped before the host:port rule, which only understands IPv4.
-        bracketed = re.match(r"^\[([0-9A-Fa-f:.]+)\](?::\d{1,5})?$", cleaned)
-        if bracketed:
-            cleaned = bracketed.group(1)
-        cleaned = cleaned.strip("[]")
-        # Tolerate "1.2.3.4/24" and "8.8.4.4:53" style pastes.
-        cleaned = re.sub(r"/\d{1,3}$", "", cleaned)
-        if cleaned.count(":") == 1 and "." in cleaned:
-            cleaned = cleaned.rsplit(":", 1)[0]  # host:port
         try:
             addr = ipaddress.ip_address(cleaned)
         except ValueError:
-            bad.append(tok)
+            bad.append(_visible(tok))
             continue
         text = addr.compressed
         if text not in ips:
