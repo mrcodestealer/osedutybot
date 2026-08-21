@@ -87,9 +87,10 @@ order works, so `id` then `ip` pairs the same as `ip` then `id`:
 103.40.2.142
 ```
 
-`/isp` is restricted to its own group and that group accepts nothing else — any other
-command there gets a one-line refusal, and ordinary chat is ignored. Change the binding with
-`ISP_CHAT_IDS` in `.env`.
+`/isp` is restricted to its own group, and that group accepts nothing else — any other
+command there gets a one-line refusal, and ordinary chat is ignored. Admins in
+`ISP_PM_ADMIN_OPEN_IDS` can also run it in a DM with the bot (their DM keeps every other
+command). Change either binding in `.env` via `ISP_CHAT_IDS` / `ISP_PM_ADMIN_OPEN_IDS`.
 
 ---
 

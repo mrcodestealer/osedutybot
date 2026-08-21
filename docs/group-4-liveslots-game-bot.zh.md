@@ -83,7 +83,8 @@ iplocation.net），回复 **IP Details** 卡片。多个地址按**网络分组
 ```
 
 `/isp` 仅限其专用群使用，且该群**只**接受 `/isp`：其他命令会收到一行拒绝提示，普通聊天
-不作回应。如需调整绑定，改 `.env` 里的 `ISP_CHAT_IDS`。
+不作回应。`ISP_PM_ADMIN_OPEN_IDS` 中的管理员还可以在与机器人的**私聊**里使用（其私聊
+不受限制，其他命令照常可用）。如需调整，改 `.env` 里的 `ISP_CHAT_IDS` / `ISP_PM_ADMIN_OPEN_IDS`。
 
 ---
 

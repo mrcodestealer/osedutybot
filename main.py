@@ -2330,6 +2330,30 @@ def _is_isp_chat(chat_id: Optional[str]) -> bool:
     return (chat_id or "").strip() in ISP_CHAT_IDS
 
 
+# Admins who may also run `/isp` in a DM with the bot. This does NOT make their
+# DM isp-only — every other command still works there; it only adds `/isp` to
+# what they can reach privately.
+ISP_PM_ADMIN_OPEN_IDS = {
+    c.strip()
+    for c in (
+        os.getenv("ISP_PM_ADMIN_OPEN_IDS", "").strip()
+        or "ou_5f660c0fb0769d184aca635d02209272"
+    ).split(",")
+    if c.strip()
+}
+
+
+def _isp_command_allowed(
+    chat_id: Optional[str], chat_type: Optional[str], sender_id: Optional[str]
+) -> bool:
+    """`/isp` runs in its dedicated group, or in a DM with an allowed admin."""
+    if _is_isp_chat(chat_id):
+        return True
+    return (chat_type or "").strip() == "p2p" and (
+        sender_id or ""
+    ).strip() in ISP_PM_ADMIN_OPEN_IDS
+
+
 PLDT_CS_OPEN_ID = (
     os.getenv("PLDT_CS_OPEN_ID", "").strip()
     or "ou_c927a378e9b464741c67b61c1641577b"  # @CS (Team)
@@ -7284,9 +7308,9 @@ def lark_webhook():
             _send_machine_lookup_card(chat_id, nch.get_nch_info(query), title="NCH machine")
         return _lark_im_done()
     elif re.match(r"(?i)^/isp(?![a-z])", clean_text):
-        if not _is_isp_chat(chat_id):
-            # The other half of the exclusive binding — see ISP_CHAT_IDS.
-            send_message(chat_id, "❌ `/isp` is only available in its own group.")
+        if not _isp_command_allowed(chat_id, chat_type, sender_id):
+            # The other half of the binding — see ISP_CHAT_IDS / ISP_PM_ADMIN_OPEN_IDS.
+            send_message(chat_id, "❌ `/isp` is only available in its dedicated group.")
             return _lark_im_done()
         # Accepts "/isp 8.8.8.8", "/isp8.8.8.8" and several IPs (space or comma).
         # The (?![a-z]) keeps a future "/isp<word>" sibling from being swallowed,
