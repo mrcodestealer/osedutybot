@@ -347,12 +347,23 @@ IDs flexible: `2133`, `nwr2133`, comma or space separated.
 
 Then copy IDs into `/nwr` or maintenance commands.
 
-### 7.3 Provider ID
+### 7.3 Provider ID · IP / ISP lookup
 
 ```
 @Liveslots & Game Bot /pid 30
 @Liveslots & Game Bot /pid 30 31 32
 ```
+
+```
+@Liveslots & Game Bot /isp 112.198.1.1
+@Liveslots & Game Bot /isp 112.198.1.1 203.177.42.1 180.190.1.1
+@Liveslots & Game Bot /isp 8.8.8.8,1.1.1.1
+```
+
+`/isp` answers with an **IP Details** card — ISP / Organization, Country and ASN — merged
+across six public sources and across every IP you pass, so several IPs on different
+networks read as `AS4775 / AS132199`. IPv6 works. Private and reserved addresses are
+named as such instead of being looked up.
 
 ### 7.4 CCTV screenshot (no credit)
 
@@ -434,6 +445,7 @@ Need to know WHO is on duty?          → Group 1  /fpms, /ose, …
 Need PLAYER credit or LOG?            → Group 2  /checkcredit, /stuckcredit
 Need JENKINS or VPN?                  → Group 3  /update, /createvpn
 Need MACHINE asset info or CCTV?      → Group 4  /nwr, /cctv, /pid
+Need the ISP / country / ASN of an IP? → Group 4  /isp
 Need to SET maintenance on machines?  → Group 4  /sm, /nwrsetmaintenance
 Leave / offset application?           → Group 1  @bot leave, @bot offset
 ```
@@ -465,7 +477,7 @@ Print or pin in your group:
 Group 1: /fpms /leave /wholeave /osedate /offset
 Group 2: /checkcreditdate /stuckcredit /smsfail
 Group 3: /update /createvpn /findvpn /ms
-Group 4: /nwr /cctv /pid /sm
+Group 4: /nwr /cctv /pid /isp /sm
 ```
 
 More detail: [Group 1](group-1-ose-duty-bot.md) · [Group 2](group-2-log-credit-bot.md) · [Group 3](group-3-ops-maintenance-bot.md) · [Group 4](group-4-liveslots-game-bot.md)

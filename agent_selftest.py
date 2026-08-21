@@ -69,6 +69,14 @@ CASES: list[tuple[str, str, str | None]] = [
     ("check machine error DHS3077", "command", "/checkmachinelog"),
     ("NWR2938 stuck credit", "command", "/stuckcredit"),
     ("stuck credit DHS3077", "command", "/stuckcredit"),
+    # -- ip / isp lookup -----------------------------------------------------
+    # Expect the WHOLE address, not just "/isp": a bare-prefix assertion hides
+    # arg extraction clipping "112.198.1.1" down to its first octet.
+    ("isp lookup 8.8.8.8", "command", "/isp 8.8.8.8"),
+    ("who owns this ip address 112.198.1.1", "command", "/isp 112.198.1.1"),
+    ("asn lookup for ip 1.1.1.1", "command", "/isp 1.1.1.1"),
+    ("what isp is this ip on 203.177.42.1", "command", "/isp 203.177.42.1"),
+    ("who owns this ip address 2001:4860:4860::8888", "command", "/isp 2001:4860:4860::8888"),
     # -- search people -------------------------------------------------------
     ("who is David", "command", "/s"),
     ("find Henry in duty list", "command", "/s"),

@@ -943,6 +943,29 @@ def run_cctv_screenshot_job(chat_id: str, machine_query: str) -> None:
                 pass
 
 
+def run_isp_lookup_job(chat_id: str, query: str) -> None:
+    """`/isp <ip> ...` — multi-provider ISP / Country / ASN lookup → "IP Details" card.
+    Runs off the webhook thread: six providers per IP, so a slow one must not make
+    Lark retry the delivery."""
+    try:
+        import ipisp as _ipisp
+
+        card, text = _ipisp.handle_isp_command(query)
+    except Exception as ex:
+        print(f"[isp] lookup failed: {ex!r}", flush=True)
+        send_message(chat_id, f"❌ ISP lookup failed: {ex}")
+        return
+    if card:
+        try:
+            resp = send_message(chat_id, json.dumps(card, ensure_ascii=False), msg_type="interactive")
+            if isinstance(resp, dict) and resp.get("code") in (0, None):
+                return
+            print(f"[isp] interactive rejected: {resp!r}", flush=True)
+        except Exception as ex:
+            print(f"[isp] card send failed: {ex!r}", flush=True)
+    send_message(chat_id, text)
+
+
 def _third_http_warm_enabled_for_bot() -> bool:
     try:
         from third_http_warm_pool import third_http_warm_pool_enabled
@@ -7228,6 +7251,32 @@ def lark_webhook():
             send_message(chat_id, "❌ Usage: `/nch <asset_id(s)>`\nExamples: `/nch 1900`, `/nch1900`, `/nch nch2839 nch2378`, `/nch nch2839,nch2378`")
         else:
             _send_machine_lookup_card(chat_id, nch.get_nch_info(query), title="NCH machine")
+        return _lark_im_done()
+    elif re.match(r"(?i)^/isp(?![a-z])", clean_text):
+        # Accepts "/isp 8.8.8.8", "/isp8.8.8.8" and several IPs (space or comma).
+        # The (?![a-z]) keeps a future "/isp<word>" sibling from being swallowed,
+        # the way /cp has to exclude /cpms.
+        query = _machine_query_after_prefix(clean_text, '/isp')
+        try:
+            import ipisp as _ipisp
+
+            # parse_ips is pure and network-free, so bad arguments are rejected
+            # here instead of after a pointless "please wait" ack.
+            _isp_ips, _isp_bad = _ipisp.parse_ips(query)
+        except Exception as _isp_err:
+            send_message(chat_id, f"❌ ISP lookup unavailable: {_isp_err}")
+            return _lark_im_done()
+        if not _isp_ips:
+            _isp_usage = _ipisp.USAGE
+            if _isp_bad:
+                _isp_usage += f"\n⚠️ Not an IP address: {', '.join(_isp_bad[:5])}"
+            send_message(chat_id, _isp_usage)
+            return _lark_im_done()
+        send_message(
+            chat_id,
+            f"⏳ Checking ISP / Country / ASN for {len(_isp_ips)} IP(s), please wait...",
+        )
+        start_lark_background_thread(run_isp_lookup_job, chat_id, query)
         return _lark_im_done()
     elif clean_text.lower().startswith('/nwr'):
         query = _machine_query_after_prefix(clean_text, '/nwr')

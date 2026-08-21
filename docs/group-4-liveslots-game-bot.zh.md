@@ -46,12 +46,13 @@
 
 ---
 
-## Provider、CCTV
+## Provider、CCTV、IP
 
 | 命令 | 说明 |
 |------|------|
 | `/pid <id>` | Provider ID 查询 |
 | `/cctv <机台>` | 仅 EGM 监控截图（不查额度） |
+| `/isp <ip> [ip ...]` | IP 归属：ISP / 国家 / ASN（可查多个 IP） |
 
 **示例：**
 
@@ -59,7 +60,16 @@
 @Liveslots & Game Bot /pid 12345
 @Liveslots & Game Bot /cctv OSMCP181
 @Liveslots & Game Bot /cctv Dragons-0181
+@Liveslots & Game Bot /isp 112.198.1.1
+@Liveslots & Game Bot /isp 112.198.1.1 203.177.42.1 180.190.1.1
+@Liveslots & Game Bot /isp 8.8.8.8,1.1.1.1
 ```
+
+`/isp` 汇总 6 个公开 IP 情报源（IPinfo、ip-api、ipwho.is、ipapi.is、RIPEstat、
+iplocation.net），回复 **IP Details** 卡片。同一条命令里的多个 IP 会合并展示，
+所以分属两个 AS 的三个 Globe IP 会显示成 `AS4775 / AS132199`。每行的标签给出
+主要来源与其余认同的来源数（`IPinfo +2`）。内网、回环、保留地址不发起网络请求，
+直接说明原因。
 
 ---
 
@@ -169,6 +179,7 @@ Prod-batch 可在开关维护后附带**机台截图**（由服务器环境变�
 |------|--------|
 | `nwr 2133` | `/nwr 2133` |
 | `provider id …` | `/pid` |
+| `isp lookup 8.8.8.8` / `who owns this ip address …` | `/isp` |
 | `cctv Dragons-0181` | `/cctv` |
 | `nwr set maintenance NWR2113` | prod-batch |
 | `good fortune 全部 wf 开维护` | `/sm` 或公告解析 |

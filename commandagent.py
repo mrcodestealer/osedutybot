@@ -97,7 +97,7 @@ class IntentSpec:
     tag: str
     command: str  # e.g. "/fpms" or "/s"
     patterns: list[str] = field(default_factory=list)
-    arg_kind: Optional[str] = None  # search_name | machine_id | department | rest | date_dmy
+    arg_kind: Optional[str] = None  # search_name | machine_id | department | rest | ip_list | date_dmy
 
 
 # ---------------------------------------------------------------------------
@@ -541,6 +541,27 @@ def build_intent_catalog() -> list[IntentSpec]:
             command="/pid",
             patterns=["provider id lookup", "find provider id", "pid lookup"],
             arg_kind="rest",
+        )
+    )
+
+    # arg_kind="ip_list" pulls the addresses out verbatim; plain "rest" would
+    # let _MACHINE_ID_RE clip "112.198.1.1" to "112". Kept out of the
+    # machine-prefix families for the same reason.
+    intents.append(
+        IntentSpec(
+            tag="cmd_isp",
+            command="/isp",
+            patterns=[
+                "isp lookup",
+                "which isp owns this ip",
+                "which isp owns ip",
+                "what isp is this ip on",
+                "who owns this ip address",
+                "ip address isp country asn",
+                "asn lookup for ip",
+                "check isp for ip",
+            ],
+            arg_kind="ip_list",
         )
     )
 
@@ -1205,6 +1226,21 @@ def extract_argument(arg_kind: Optional[str], user_text: str, spec: IntentSpec) 
     if arg_kind == "optional_department":
         m = _DEPT_IN_TEXT_RE.search(text)
         return m.group(1).lower() if m else None
+    if arg_kind == "ip_list":
+        # IP arguments must survive verbatim. The "rest" branch below would let
+        # _MACHINE_ID_RE (\d{3,}) clip "112.198.1.1" down to "112", and
+        # "2001:4860:4860::8888" down to "2001".
+        ips = re.findall(
+            r"(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?"
+            r"|(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}",
+            text,
+        )
+        if ips:
+            return " ".join(dict.fromkeys(ips))
+        # No address in the text — hand the prose over; parse_ips tolerates it
+        # and answers with the usage hint.
+        cleaned = _SEARCH_PREFIX_RE.sub("", text).strip()
+        return cleaned or None
     if arg_kind == "rest":
         # Drop leading natural-language fluff; keep ids / remainder.
         m = _RANGE_RE.search(text)
@@ -1250,7 +1286,7 @@ def build_slash_command(spec: IntentSpec, user_text: str) -> Optional[str]:
         machine = _cc_extract_machine(user_text)
         return f"{base} {machine}" if machine else None
     arg = extract_argument(spec.arg_kind, user_text, spec)
-    if spec.arg_kind in ("search_name", "machine_id", "rest", "date_dmy") and not arg:
+    if spec.arg_kind in ("search_name", "machine_id", "rest", "ip_list", "date_dmy") and not arg:
         return None
     if spec.arg_kind == "department" and arg:
         return f"{base} {arg}"

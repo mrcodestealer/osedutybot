@@ -141,6 +141,11 @@ def _help_sections() -> list[HelpSection]:
                 ("/dhs <id>", "DHS asset", "DHS 资产"),
                 ("/mdr <id>", "MDR asset", "MDR 资产"),
                 ("/pid <id>", "Provider ID lookup", "Provider ID"),
+                (
+                    "/isp <ip> [ip ...]",
+                    "ISP / Organization, Country and ASN for one or more IPs",
+                    "IP 归属查询：ISP / 国家 / ASN（可查多个 IP）",
+                ),
                 ("/pldtprefix [id]", "Open Polylink UC Provider page (auto-login + captcha)", "登录 Polylink 打开 Provider 页"),
                 ("/pldtrotate", "PLDT prefix rotate: dry-run preview (no change)", "PLDT 前缀轮换：预览（不执行）"),
                 ("/pldtrun", "PLDT prefix rotate: really change + notify CS", "PLDT 前缀轮换：执行并通知 CS"),

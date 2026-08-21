@@ -49,12 +49,13 @@ Use `/list` when you have a **range** (e.g. `NWR2133-NWR2142`) and need each ID 
 
 ---
 
-## Provider, CCTV
+## Provider, CCTV, IP
 
 | Command | Description |
 |---------|-------------|
 | `/pid <id>` | Provider ID lookup |
 | `/cctv <machine>` | EGM CCTV screenshot only (no credit check) |
+| `/isp <ip> [ip ...]` | ISP / Organization, Country and ASN for one or more IPs |
 
 **Examples:**
 
@@ -62,7 +63,16 @@ Use `/list` when you have a **range** (e.g. `NWR2133-NWR2142`) and need each ID 
 @Liveslots & Game Bot /pid 12345
 @Liveslots & Game Bot /cctv OSMCP181
 @Liveslots & Game Bot /cctv Dragons-0181
+@Liveslots & Game Bot /isp 112.198.1.1
+@Liveslots & Game Bot /isp 112.198.1.1 203.177.42.1 180.190.1.1
+@Liveslots & Game Bot /isp 8.8.8.8,1.1.1.1
 ```
+
+`/isp` merges six public IP-intel sources (IPinfo, ip-api, ipwho.is, ipapi.is, RIPEstat,
+iplocation.net) and answers with an **IP Details** card. Values are merged across every IP
+in the command, so three Globe IPs on two autonomous systems read `AS4775 / AS132199`. The
+chip on each line names the leading source plus how many others agreed (`IPinfo +2`).
+Private, loopback and reserved addresses are reported as such without a network call.
 
 ---
 
@@ -172,6 +182,7 @@ Prod-batch jobs can attach **machine screenshots** after set/unset (enabled via 
 |---------|-----------|
 | `nwr 2133` | `/nwr 2133` |
 | `provider id for …` | `/pid` |
+| `isp lookup 8.8.8.8` / `who owns this ip address …` | `/isp` |
 | `cctv Dragons-0181` | `/cctv` |
 | `nwr set maintenance NWR2113` | prod-batch set maintenance |
 | `all wf machines good fortune set maintenance` | `/sm` or announcement parser |

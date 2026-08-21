@@ -328,12 +328,22 @@ UPDATE fpms
 @Liveslots & Game Bot /list NWR2133-NWR2142
 ```
 
-### 7.3 Provider ID
+### 7.3 Provider ID · IP / ISP 查询
 
 ```
 @Liveslots & Game Bot /pid 30
 @Liveslots & Game Bot /pid 30 31 32
 ```
+
+```
+@Liveslots & Game Bot /isp 112.198.1.1
+@Liveslots & Game Bot /isp 112.198.1.1 203.177.42.1 180.190.1.1
+@Liveslots & Game Bot /isp 8.8.8.8,1.1.1.1
+```
+
+`/isp` 回复 **IP Details** 卡片：ISP / 组织、国家、ASN，来自 6 个公开来源，并把命令里
+的所有 IP 合并展示，因此分属不同网络的多个 IP 会显示成 `AS4775 / AS132199`。支持 IPv6。
+内网与保留地址直接说明，不发起查询。
 
 ### 7.4 CCTV（不查额度）
 
@@ -399,6 +409,7 @@ Please set to maintain status and test mode July 14, 2026 at 2145H
 查玩家额度/日志？        → 群组 2   /checkcredit、/stuckcredit
 Jenkins / VPN？         → 群组 3   /update、/createvpn
 机台资产 / CCTV？       → 群组 4   /nwr、/cctv、/pid
+查 IP 的 ISP/国家/ASN？ → 群组 4   /isp
 现场开关维护？          → 群组 4   /sm、/nwrsetmaintenance
 请假 / 调休？           → 群组 1   @bot leave、@bot offset
 ```
@@ -428,7 +439,7 @@ Jenkins / VPN？         → 群组 3   /update、/createvpn
 群 1: /fpms /leave /wholeave /osedate /offset
 群 2: /checkcreditdate /stuckcredit /smsfail
 群 3: /update /createvpn /findvpn /ms
-群 4: /nwr /cctv /pid /sm
+群 4: /nwr /cctv /pid /isp /sm
 ```
 
 详细：[群 1](group-1-ose-duty-bot.zh.md) · [群 2](group-2-log-credit-bot.zh.md) · [群 3](group-3-ops-maintenance-bot.zh.md) · [群 4](group-4-liveslots-game-bot.zh.md)
