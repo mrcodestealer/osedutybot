@@ -62,7 +62,7 @@ import re
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Optional
 
 import requests
@@ -1000,21 +1000,71 @@ def _plain_bullet(label: str, merged: Merged) -> str:
     return f"• {label}: {merged.value}{extra}{chip}"
 
 
-def _per_ip_lines(res: IpResult) -> list[str]:
-    """One compact line per IP so a multi-IP command stays unambiguous."""
-    if res.note:
-        return [f"`{_md(res.ip)}` — _{_md(res.note)}_"]
-    if not res.resolved:
-        why = "; ".join(res.failures[:2]) or "no provider returned data"
-        return [f"`{_md(res.ip)}` — ❔ _{_md(why)}_"]
-    bits = [b for b in (res.isp.value, res.asn.value, res.country.value) if b]
-    detail = [b for b in (res.city_region, res.prefix, res.domain) if b]
-    lines = [f"`{_md(res.ip)}` — {_md(' · '.join(bits))}"]
-    if detail:
-        lines.append(f"  ↳ {_md(' · '.join(detail))}")
-    if res.traits:
-        lines.append("  ↳ " + " ".join(_md(_TRAIT_LABEL.get(t, t)) for t in res.traits))
-    return lines
+def _group_by_network(results: list[IpResult]) -> list[dict[str, Any]]:
+    """Bucket the resolved IPs by (ISP, ASN, country), keeping the order they
+    were typed. Grouping is what keeps a multi-IP card readable: an aggregate
+    line across networks reads 'Globe Telecoms / Kinahugan Bojol' and
+    'AS4775 / AS150450' with no way to tell which pairs with which."""
+    groups: list[dict[str, Any]] = []
+    index: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for res in results:
+        if not res.resolved:
+            continue
+        key = (res.isp.value, res.asn.value, res.country.value)
+        group = index.get(key)
+        if group is None:
+            group = {"isp": res.isp, "asn": res.asn, "country": res.country, "members": []}
+            index[key] = group
+            groups.append(group)
+        group["members"].append(res)
+    return groups
+
+
+def _network_block(group: dict[str, Any]) -> str:
+    """One network: carrier name + chip, a meta line, then its addresses."""
+    members: list[IpResult] = group["members"]
+    isp: Merged = group["isp"]
+    name = _md(isp.value) or "_unknown carrier_"
+    chip = f" {_tag(isp.chip)}" if isp.chip else ""
+    lines = [f"**{name}**{chip}"]
+
+    prefixes = {res.prefix for res in members if res.prefix}
+    domains = {res.domain for res in members if res.domain}
+    traits: list[str] = []
+    for res in members:
+        for t in res.traits:
+            if t not in traits:
+                traits.append(t)
+    meta = [group["asn"].value, group["country"].value]
+    if len(prefixes) == 1:  # shared by every member — say it once
+        meta.append(prefixes.pop())
+    if len(domains) == 1:
+        meta.append(domains.pop())
+    meta = [m for m in meta if m]
+    if meta:
+        lines.append(_md(" · ".join(meta)))
+    if traits:
+        lines.append(" ".join(_tag(_TRAIT_LABEL.get(t, t), "orange") for t in traits))
+
+    for res in members:
+        tail = [res.city_region]
+        if prefixes:  # only when members disagree, so it wasn't said above
+            tail.append(res.prefix)
+        tail = [t for t in tail if t]
+        suffix = f" — {_md(' · '.join(tail))}" if tail else ""
+        lines.append(f"`{_md(res.ip)}`{suffix}")
+    return "\n".join(lines)
+
+
+def _skipped_lines(results: list[IpResult]) -> list[str]:
+    """Addresses that were never looked up, and why."""
+    out: list[str] = []
+    for res in results:
+        if res.resolved:
+            continue
+        why = res.note or "; ".join(res.failures[:2]) or "no provider returned data"
+        out.append(f"`{_md(res.ip)}` — _{_md(why)}_")
+    return out
 
 
 def build_card(results: list[IpResult], *, elapsed: float = 0.0) -> dict[str, Any]:
@@ -1022,51 +1072,74 @@ def build_card(results: list[IpResult], *, elapsed: float = 0.0) -> dict[str, An
     chips render as real badges."""
     summary = summarise(results)
     resolved = [res for res in results if res.resolved]
+    groups = _group_by_network(results)
     elements: list[dict[str, Any]] = []
 
-    # The queried IPs go in the body, not header.subtitle: bot_help._card_shell
-    # takes a subtitle and renders it exactly this way, and header.subtitle has
-    # no precedent in this repo.
-    queried = ", ".join(res.ip for res in results)
-    if len(queried) > 120:
-        queried = f"{queried[:117]}…"
-    elements.append(_text_element(f"**Queried:** `{_md(queried)}`"))
+    if len(groups) <= 1:
+        # One network — the single-IP case and any set of IPs on the same
+        # carrier. The three-bullet block says everything, with the addresses
+        # on the heading rather than in a separate "Queried" line that the
+        # detail below would only repeat.
+        addrs = ", ".join(f"`{_md(res.ip)}`" for res in (resolved or results))
+        if len(addrs) > 140:
+            addrs = f"{len(resolved or results)} addresses"
+        details = [f"**IP Details** · {addrs}" if addrs else "**IP Details**"]
+        # When all three lines came from the same providers, one chip carries
+        # the provenance — three identical badges is just noise. Keeping it on
+        # the ASN line matches the reference card.
+        isp_m, country_m, asn_m = summary.isp, summary.country, summary.asn
+        if isp_m.chip and isp_m.chip == country_m.chip == asn_m.chip:
+            isp_m = replace(isp_m, chip="")
+            country_m = replace(country_m, chip="")
+        if isp_m:
+            details.append(_bullet("ISP / Organization", isp_m))
+        if country_m:
+            details.append(_bullet("Country", country_m))
+        if asn_m:
+            details.append(_bullet("ASN", asn_m))
+        if len(details) == 1:
+            details.append("_No public ISP data returned._")
+        elements.append(_text_element("\n".join(details)))
 
-    details = ["**IP Details**"]
-    if summary.isp:
-        details.append(_bullet("ISP / Organization", summary.isp))
-    if summary.country:
-        details.append(_bullet("Country", summary.country))
-    if summary.asn:
-        details.append(_bullet("ASN", summary.asn))
-    if len(details) == 1:
-        details.append("_No public ISP data returned for the IP(s) above._")
-    elements.append(_text_element("\n".join(details)))
+        aside = []
+        if summary.netname:
+            aside.append(_bullet("Netblock / Customer", summary.netname))
+        if summary.prefixes:
+            aside.append(f"- **Prefix:** {_md(' / '.join(summary.prefixes[:4]))}")
+        for res in resolved:
+            if res.city_region or res.domain:
+                bits = [b for b in (res.city_region, res.domain) if b]
+                aside.append(f"- **Location:** {_md(' · '.join(bits))}")
+                break
+        if summary.traits:
+            aside.append(
+                "- **Flags:** "
+                + " ".join(_tag(_TRAIT_LABEL.get(t, t), "orange") for t in summary.traits)
+            )
+        if aside:
+            elements.append(_text_element("\n".join(aside)))
+    else:
+        # Several networks: one block each, so carrier / ASN / country stay
+        # attached to the addresses they actually describe.
+        chips = {g["isp"].chip for g in groups}
+        shared = chips.pop() if len(chips) == 1 else ""
+        header = f"**IP Details** · {len(resolved)} addresses on {len(groups)} networks"
+        if shared:  # same provenance everywhere — state it once, up here
+            header += f" {_tag(shared)}"
+            groups = [{**g, "isp": replace(g["isp"], chip="")} for g in groups]
+        elements.append(_text_element(header))
+        elements.append(_text_element("\n\n".join(_network_block(g) for g in groups)))
 
-    aside = []
-    if summary.netname:
-        aside.append(_bullet("Netblock / Customer", summary.netname))
-    if summary.prefixes:
-        aside.append(f"- **Prefix:** {_md(' / '.join(summary.prefixes[:4]))}")
-    if summary.traits:
-        aside.append(
-            "- **Flags:** " + " ".join(_tag(_TRAIT_LABEL.get(t, t), "orange") for t in summary.traits)
-        )
-    if aside:
-        elements.append(_text_element("\n".join(aside)))
-
-    # With a single resolved IP the summary already says everything a per-IP
-    # block would repeat.
-    if len(results) > 1 or len(resolved) != len(results):
+    skipped = _skipped_lines(results)
+    if skipped:
         elements.append({"tag": "hr"})
-        per_ip = [f"**Per IP** ({len(resolved)}/{len(results)} resolved)"]
-        for res in results:
-            per_ip.extend(_per_ip_lines(res))
-        elements.append(_text_element("\n".join(per_ip)))
+        elements.append(_text_element("**Not looked up**\n" + "\n".join(skipped)))
 
     # Card JSON v2 has no "note" component — its component list is div / markdown
     # / hr / img / … — so the sources footer is an italic text block instead.
-    note = f"🔎 {_md(', '.join(summary.sources) or 'no source responded')}"
+    # A count, not six provider names: the names filled a whole line and only
+    # matter when one is missing, which the count already shows.
+    note = f"🔎 {len(summary.sources)}/{len(_PROVIDERS)} sources"
     if elapsed:
         note += f" · {elapsed:.1f}s"
     elements.append(_text_element(f"_{note}_"))
@@ -1083,34 +1156,52 @@ def build_card(results: list[IpResult], *, elapsed: float = 0.0) -> dict[str, An
 
 
 def build_text(results: list[IpResult], *, elapsed: float = 0.0) -> str:
-    """Plain-text mirror of the card, for when the interactive send is rejected."""
+    """Plain-text mirror of the card, for when the interactive send is rejected.
+    Follows the same one-block-per-network shape."""
     summary = summarise(results)
-    lines = ["🌐 IP Details"]
-    if summary.isp:
-        lines.append(_plain_bullet("ISP / Organization", summary.isp))
-    if summary.country:
-        lines.append(_plain_bullet("Country", summary.country))
-    if summary.asn:
-        lines.append(_plain_bullet("ASN", summary.asn))
-    if len(lines) == 1:
-        lines.append("• No public ISP data returned.")
-    if summary.netname:
-        lines.append(_plain_bullet("Netblock / Customer", summary.netname))
-    if summary.prefixes:
-        lines.append(f"• Prefix: {' / '.join(summary.prefixes[:4])}")
-    if summary.traits:
-        lines.append("• Flags: " + ", ".join(_TRAIT_LABEL.get(t, t) for t in summary.traits))
-    if len(results) > 1 or any(not res.resolved for res in results):
+    resolved = [res for res in results if res.resolved]
+    groups = _group_by_network(results)
+    lines: list[str] = []
+
+    if len(groups) <= 1:
+        addrs = ", ".join(res.ip for res in (resolved or results))
+        lines.append(f"🌐 IP Details — {addrs}" if addrs else "🌐 IP Details")
+        if summary.isp:
+            lines.append(_plain_bullet("ISP / Organization", summary.isp))
+        if summary.country:
+            lines.append(_plain_bullet("Country", summary.country))
+        if summary.asn:
+            lines.append(_plain_bullet("ASN", summary.asn))
+        if len(lines) == 1:
+            lines.append("• No public ISP data returned.")
+        if summary.netname:
+            lines.append(_plain_bullet("Netblock / Customer", summary.netname))
+        if summary.prefixes:
+            lines.append(f"• Prefix: {' / '.join(summary.prefixes[:4])}")
+        if summary.traits:
+            lines.append("• Flags: " + ", ".join(_TRAIT_LABEL.get(t, t) for t in summary.traits))
+    else:
+        lines.append(f"🌐 IP Details — {len(resolved)} addresses on {len(groups)} networks")
+        for group in groups:
+            lines.append("")
+            chip = f"  [{group['isp'].chip}]" if group["isp"].chip else ""
+            lines.append(f"▸ {group['isp'].value or 'unknown carrier'}{chip}")
+            meta = [m for m in (group["asn"].value, group["country"].value) if m]
+            if meta:
+                lines.append(f"  {' · '.join(meta)}")
+            for res in group["members"]:
+                tail = [t for t in (res.city_region, res.prefix, res.domain) if t]
+                lines.append(f"  {res.ip}" + (f" — {' · '.join(tail)}" if tail else ""))
+
+    unresolved = [res for res in results if not res.resolved]
+    if unresolved:
         lines.append("")
-        for res in results:
-            if res.note:
-                lines.append(f"• {res.ip} — {res.note}")
-            elif not res.resolved:
-                lines.append(f"• {res.ip} — no provider returned data")
-            else:
-                bits = [b for b in (res.isp.value, res.asn.value, res.country.value) if b]
-                lines.append(f"• {res.ip} — {' · '.join(bits)}")
-    tail = ", ".join(summary.sources) or "no source responded"
+        lines.append("Not looked up:")
+        for res in unresolved:
+            why = res.note or "; ".join(res.failures[:2]) or "no provider returned data"
+            lines.append(f"• {res.ip} — {why}")
+
+    tail = f"{len(summary.sources)}/{len(_PROVIDERS)} sources"
     if elapsed:
         tail += f" · {elapsed:.1f}s"
     lines.append("")
@@ -1136,8 +1227,16 @@ def handle_isp_command(query: str) -> tuple[Optional[dict[str, Any]], str]:
     warnings = []
     # Natural-language routing ("isp lookup 8.8.8.8") hands the prose through as
     # arguments, so once at least one IP parsed, only complain about tokens that
-    # were plainly *meant* to be addresses — never about ordinary words.
-    malformed = [t for t in bad if any(c.isdigit() for c in t) and ("." in t or ":" in t)]
+    # were plainly *meant* to be addresses — never about ordinary words. A long
+    # run of digits counts: pasting a log line mixes ids in with the addresses,
+    # and dropping them without a word makes the card look like it covered
+    # everything.
+    malformed = [
+        t
+        for t in bad
+        if any(c.isdigit() for c in t)
+        and ("." in t or ":" in t or (len(t) >= 5 and t.isdigit()))
+    ]
     if malformed:
         warnings.append(f"⚠️ Skipped (not a valid IP): {', '.join(malformed[:5])}")
     if dropped:
