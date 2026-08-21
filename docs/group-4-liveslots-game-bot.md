@@ -55,7 +55,7 @@ Use `/list` when you have a **range** (e.g. `NWR2133-NWR2142`) and need each ID 
 |---------|-------------|
 | `/pid <id>` | Provider ID lookup |
 | `/cctv <machine>` | EGM CCTV screenshot only (no credit check) |
-| `/isp <ip> [ip ...]` | ISP / Organization, Country and ASN for one or more IPs |
+| `/isp <ip> [ip ...]` | ISP / Organization, Country and ASN; pairs a pasted player id with its address |
 
 **Examples:**
 
@@ -69,10 +69,23 @@ Use `/list` when you have a **range** (e.g. `NWR2133-NWR2142`) and need each ID 
 ```
 
 `/isp` merges six public IP-intel sources (IPinfo, ip-api, ipwho.is, ipapi.is, RIPEstat,
-iplocation.net) and answers with an **IP Details** card. Values are merged across every IP
-in the command, so three Globe IPs on two autonomous systems read `AS4775 / AS132199`. The
-chip on each line names the leading source plus how many others agreed (`IPinfo +2`).
-Private, loopback and reserved addresses are reported as such without a network call.
+iplocation.net) and answers with an **IP Details** card. Several addresses are grouped by
+network, so carrier / ASN / country stay attached to the addresses they describe. The chip
+names the leading source plus how many others agreed (`IPinfo +2`). Private, loopback and
+reserved addresses are reported as such without a network call.
+
+Pasting from a log? A **player id** next to an address is paired with it and shown as
+`138.84.76.76 👤1081561491`. Keep each pair on its own line or blank-line block — either
+order works, so `id` then `ip` pairs the same as `ip` then `id`:
+
+```
+@Liveslots & Game Bot /isp
+138.84.76.76
+1081561491
+
+1075487320
+103.40.2.142
+```
 
 ---
 

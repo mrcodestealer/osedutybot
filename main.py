@@ -7256,7 +7256,12 @@ def lark_webhook():
         # Accepts "/isp 8.8.8.8", "/isp8.8.8.8" and several IPs (space or comma).
         # The (?![a-z]) keeps a future "/isp<word>" sibling from being swallowed,
         # the way /cp has to exclude /cpms.
-        query = _machine_query_after_prefix(clean_text, '/isp')
+        #
+        # Read the MULTILINE body: operators paste blank-line separated
+        # IP/player-id blocks straight out of a log, and clean_text collapses
+        # every run of whitespace, which would destroy that grouping.
+        _isp_src = clean_text_multiline or clean_text
+        query = _machine_query_after_prefix(_isp_src, '/isp')
         try:
             import ipisp as _ipisp
 

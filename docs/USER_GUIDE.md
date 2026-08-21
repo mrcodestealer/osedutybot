@@ -361,9 +361,21 @@ Then copy IDs into `/nwr` or maintenance commands.
 ```
 
 `/isp` answers with an **IP Details** card — ISP / Organization, Country and ASN — merged
-across six public sources and across every IP you pass, so several IPs on different
-networks read as `AS4775 / AS132199`. IPv6 works. Private and reserved addresses are
-named as such instead of being looked up.
+across six public sources. Several addresses are grouped by network, so you can see at a
+glance which ones share a carrier or a prefix. IPv6 works. Private and reserved addresses
+are named as such instead of being looked up.
+
+Pasting from a log, a **player id** beside an address is paired with it and shown as
+`138.84.76.76 👤1081561491`. One pair per line or blank-line block, in either order:
+
+```
+@Liveslots & Game Bot /isp
+138.84.76.76
+1081561491
+
+1075487320
+103.40.2.142
+```
 
 ### 7.4 CCTV screenshot (no credit)
 

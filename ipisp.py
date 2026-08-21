@@ -84,7 +84,9 @@ USAGE = (
     "❌ Usage: `/isp <ip> [ip ...]`\n"
     "Examples: `/isp 112.198.1.1`, `/isp 112.198.1.1 203.177.42.1 180.190.1.1`, "
     "`/isp 8.8.8.8,1.1.1.1`\n"
-    "IPv6 works too: `/isp 2001:4860:4860::8888`"
+    "IPv6 works too: `/isp 2001:4860:4860::8888`\n"
+    "Pasting from a log? A player id next to an address is paired with it — "
+    "keep each pair on its own line or block, in either order."
 )
 
 # "AS4775 Globe Telecoms" / "as132199" — the ASN and the name it is announced under.
@@ -706,6 +708,7 @@ class IpResult:
     ip: str
     records: list[Record] = field(default_factory=list)
     note: str = ""  # set instead of querying, e.g. "private range"
+    players: list[str] = field(default_factory=list)  # ids pasted with this IP
 
     @property
     def good(self) -> list[Record]:
@@ -811,26 +814,66 @@ def _visible(tok: str) -> str:
     return out or "(empty)"
 
 
+# A bare run of digits alongside addresses is a player id pasted from a log,
+# not an address in integer notation. Long enough not to catch stray numbers.
+_PLAYER_ID_RE = re.compile(r"^\d{5,15}$")
+
+
 def parse_ips(query: str) -> tuple[list[str], list[str]]:
     """Split the text after ``/isp`` into (valid IPs, rejected tokens). Accepts
     space, comma, semicolon and newline separators, and tolerates the many shapes
     a Lark-linkified address arrives in — see :func:`_strip_ip_token`."""
-    tokens = [t for t in re.split(r"[\s,;]+", (query or "").strip()) if t]
-    ips: list[str] = []
-    bad: list[str] = []
-    for tok in tokens:
-        cleaned = _strip_ip_token(tok)
-        if not cleaned:
-            continue
-        try:
-            addr = ipaddress.ip_address(cleaned)
-        except ValueError:
-            bad.append(_visible(tok))
-            continue
-        text = addr.compressed
-        if text not in ips:
-            ips.append(text)
+    ips, _players, bad = parse_ip_players(query)
     return ips, bad
+
+
+def parse_ip_players(query: str) -> tuple[list[str], dict[str, list[str]], list[str]]:
+    """Parse ``/isp`` arguments into (IPs, player ids per IP, rejected tokens).
+
+    Operators paste straight out of a log, so an address usually arrives with a
+    player id attached — and not always in that order::
+
+        138.84.76.76        103.40.2.176        1075487320
+        1081561491          1217238182          103.40.2.142
+
+    Pairing is therefore positional *within each blank-line separated block*,
+    which is what the paste above actually encodes: block three still pairs
+    correctly even though the id comes first. With everything on one line the
+    whole argument is a single block and pairing is positional over it, which
+    lands the same way for alternating input."""
+    blocks = [b for b in re.split(r"\n\s*\n", (query or "").strip()) if b.strip()]
+    ips: list[str] = []
+    players: dict[str, list[str]] = {}
+    bad: list[str] = []
+    for block in blocks or [""]:
+        block_ips: list[str] = []
+        block_players: list[str] = []
+        for tok in (t for t in re.split(r"[\s,;]+", block.strip()) if t):
+            cleaned = _strip_ip_token(tok)
+            if not cleaned:
+                continue
+            if _PLAYER_ID_RE.match(cleaned):
+                block_players.append(cleaned)
+                continue
+            try:
+                addr = ipaddress.ip_address(cleaned)
+            except ValueError:
+                bad.append(_visible(tok))
+                continue
+            text = addr.compressed
+            block_ips.append(text)
+            if text not in ips:
+                ips.append(text)
+        for i, ip in enumerate(block_ips):
+            # Extra ids beyond the address count pile onto the last address
+            # rather than being dropped silently.
+            mine = block_players[i::len(block_ips)] if block_ips else []
+            for pid in mine:
+                if pid not in players.setdefault(ip, []):
+                    players[ip].append(pid)
+        if block_players and not block_ips:
+            bad.extend(block_players)
+    return ips, players, bad
 
 
 def _reserved_note(ip: str) -> str:
@@ -856,9 +899,12 @@ def _reserved_note(ip: str) -> str:
     return ""
 
 
-def lookup(ips: list[str]) -> list[IpResult]:
+def lookup(
+    ips: list[str], players: Optional[dict[str, list[str]]] = None
+) -> list[IpResult]:
     """Query every provider for every IP in parallel, isolating each failure."""
-    results = {ip: IpResult(ip=ip) for ip in ips}
+    players = players or {}
+    results = {ip: IpResult(ip=ip, players=list(players.get(ip, ()))) for ip in ips}
     units: list[tuple[str, str]] = []
     for ip in ips:
         note = _reserved_note(ip)
@@ -1052,8 +1098,15 @@ def _network_block(group: dict[str, Any]) -> str:
             tail.append(res.prefix)
         tail = [t for t in tail if t]
         suffix = f" — {_md(' · '.join(tail))}" if tail else ""
-        lines.append(f"`{_md(res.ip)}`{suffix}")
+        lines.append(f"`{_md(res.ip)}`{_players_md(res)}{suffix}")
     return "\n".join(lines)
+
+
+def _players_md(res: IpResult) -> str:
+    """Player ids pasted with this address, kept inline and copyable."""
+    if not res.players:
+        return ""
+    return " " + " ".join(f"👤`{_md(p)}`" for p in res.players)
 
 
 def _skipped_lines(results: list[IpResult]) -> list[str]:
@@ -1080,9 +1133,10 @@ def build_card(results: list[IpResult], *, elapsed: float = 0.0) -> dict[str, An
         # carrier. The three-bullet block says everything, with the addresses
         # on the heading rather than in a separate "Queried" line that the
         # detail below would only repeat.
-        addrs = ", ".join(f"`{_md(res.ip)}`" for res in (resolved or results))
-        if len(addrs) > 140:
-            addrs = f"{len(resolved or results)} addresses"
+        shown_res = resolved or results
+        addrs = ", ".join(f"`{_md(res.ip)}`{_players_md(res)}" for res in shown_res)
+        if len(addrs) > 160:
+            addrs = f"{len(shown_res)} addresses"
         details = [f"**IP Details** · {addrs}" if addrs else "**IP Details**"]
         # When all three lines came from the same providers, one chip carries
         # the provenance — three identical badges is just noise. Keeping it on
@@ -1164,7 +1218,10 @@ def build_text(results: list[IpResult], *, elapsed: float = 0.0) -> str:
     lines: list[str] = []
 
     if len(groups) <= 1:
-        addrs = ", ".join(res.ip for res in (resolved or results))
+        addrs = ", ".join(
+            res.ip + (f" (player {', '.join(res.players)})" if res.players else "")
+            for res in (resolved or results)
+        )
         lines.append(f"🌐 IP Details — {addrs}" if addrs else "🌐 IP Details")
         if summary.isp:
             lines.append(_plain_bullet("ISP / Organization", summary.isp))
@@ -1191,7 +1248,10 @@ def build_text(results: list[IpResult], *, elapsed: float = 0.0) -> str:
                 lines.append(f"  {' · '.join(meta)}")
             for res in group["members"]:
                 tail = [t for t in (res.city_region, res.prefix, res.domain) if t]
-                lines.append(f"  {res.ip}" + (f" — {' · '.join(tail)}" if tail else ""))
+                pid = f" (player {', '.join(res.players)})" if res.players else ""
+                lines.append(
+                    f"  {res.ip}{pid}" + (f" — {' · '.join(tail)}" if tail else "")
+                )
 
     unresolved = [res for res in results if not res.resolved]
     if unresolved:
@@ -1212,7 +1272,7 @@ def build_text(results: list[IpResult], *, elapsed: float = 0.0) -> str:
 def handle_isp_command(query: str) -> tuple[Optional[dict[str, Any]], str]:
     """``/isp`` entry point. Returns ``(card, text)``; ``card`` is None for usage
     and argument errors, where ``text`` is the message to send as-is."""
-    ips, bad = parse_ips(query)
+    ips, players, bad = parse_ip_players(query)
     if not ips:
         extra = f"\n⚠️ Not an IP address: {', '.join(bad[:5])}" if bad else ""
         return None, USAGE + extra
@@ -1220,7 +1280,7 @@ def handle_isp_command(query: str) -> tuple[Optional[dict[str, Any]], str]:
     dropped = ips[limit:]
     ips = ips[:limit]
     started = time.monotonic()
-    results = lookup(ips)
+    results = lookup(ips, players)
     elapsed = time.monotonic() - started
     card = build_card(results, elapsed=elapsed)
     text = build_text(results, elapsed=elapsed)
