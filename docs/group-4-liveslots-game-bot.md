@@ -87,6 +87,10 @@ order works, so `id` then `ip` pairs the same as `ip` then `id`:
 103.40.2.142
 ```
 
+`/isp` is restricted to its own group and that group accepts nothing else — any other
+command there gets a one-line refusal, and ordinary chat is ignored. Change the binding with
+`ISP_CHAT_IDS` in `.env`.
+
 ---
 
 ## Machine encoder (web UI)

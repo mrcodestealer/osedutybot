@@ -2311,6 +2311,25 @@ def _is_announce_only_chat(chat_id: Optional[str]) -> bool:
     return (chat_id or "").strip() in ANNOUNCE_ONLY_CHAT_IDS
 
 
+# The `/isp` group. The binding is EXCLUSIVE in both directions: `/isp` runs
+# only in these chats, and these chats run nothing but `/isp` — no other
+# command, no duty routing, no AI chat. Override the whole set with
+# ISP_CHAT_IDS (comma-separated) to move or widen it.
+ISP_CHAT_IDS = {
+    c.strip()
+    for c in (
+        os.getenv("ISP_CHAT_IDS", "").strip()
+        or "oc_8c1c662b2e750a224a68bfc39d2d507f"
+    ).split(",")
+    if c.strip()
+}
+
+
+def _is_isp_chat(chat_id: Optional[str]) -> bool:
+    """True in a chat where `/isp` is the one available command."""
+    return (chat_id or "").strip() in ISP_CHAT_IDS
+
+
 PLDT_CS_OPEN_ID = (
     os.getenv("PLDT_CS_OPEN_ID", "").strip()
     or "ou_c927a378e9b464741c67b61c1641577b"  # @CS (Team)
@@ -5536,6 +5555,18 @@ def lark_webhook():
     clean_text = re.sub(r'\s+', ' ', clean_text_multiline).strip()
     print(f"🧹 Cleaned text (repr): {repr(clean_text)}")
 
+    # `/isp` group: nothing else runs here — no other command, no duty routing,
+    # no AI chat. Placed straight after clean_text so it short-circuits every
+    # handler below. A slash command gets a one-line refusal so the user knows
+    # why it did nothing; ordinary chat is ignored without a reply, which keeps
+    # the group quiet for the log pastes it exists to serve.
+    if _is_isp_chat(chat_id) and not re.match(r"(?i)^/isp(?![a-z])", clean_text):
+        if clean_text.lstrip().startswith("/"):
+            send_message(chat_id, "❌ Only `/isp <ip> [ip ...]` is available in this group.")
+            return _lark_im_done()
+        print(f"⏭️ /isp-only group — ignoring non-/isp message ({chat_id})", flush=True)
+        return _lark_im_ack()
+
     _pipeline_t0 = time.perf_counter()
 
     def _pipeline_mark(stage: str) -> None:
@@ -7253,6 +7284,10 @@ def lark_webhook():
             _send_machine_lookup_card(chat_id, nch.get_nch_info(query), title="NCH machine")
         return _lark_im_done()
     elif re.match(r"(?i)^/isp(?![a-z])", clean_text):
+        if not _is_isp_chat(chat_id):
+            # The other half of the exclusive binding — see ISP_CHAT_IDS.
+            send_message(chat_id, "❌ `/isp` is only available in its own group.")
+            return _lark_im_done()
         # Accepts "/isp 8.8.8.8", "/isp8.8.8.8" and several IPs (space or comma).
         # The (?![a-z]) keeps a future "/isp<word>" sibling from being swallowed,
         # the way /cp has to exclude /cpms.
