@@ -1134,9 +1134,14 @@ def build_card(results: list[IpResult], *, elapsed: float = 0.0) -> dict[str, An
         # on the heading rather than in a separate "Queried" line that the
         # detail below would only repeat.
         shown_res = resolved or results
-        addrs = ", ".join(f"`{_md(res.ip)}`{_players_md(res)}" for res in shown_res)
-        if len(addrs) > 160:
-            addrs = f"{len(shown_res)} addresses"
+        # Only ONE address goes on the heading. Several would run their ids
+        # together — "103.40.2.176 👤1081561491, 103.40.2.142 👤1075487320" makes
+        # you hunt for where each pair ends — so they get their own block below.
+        addrs = (
+            f"`{_md(shown_res[0].ip)}`{_players_md(shown_res[0])}"
+            if len(shown_res) == 1
+            else ""
+        )
         details = [f"**IP Details** · {addrs}" if addrs else "**IP Details**"]
         # When all three lines came from the same providers, one chip carries
         # the provenance — three identical badges is just noise. Keeping it on
@@ -1172,6 +1177,18 @@ def build_card(results: list[IpResult], *, elapsed: float = 0.0) -> dict[str, An
             )
         if aside:
             elements.append(_text_element("\n".join(aside)))
+
+        if len(shown_res) > 1:
+            # One address per line, so each id stays visibly attached to its own
+            # address instead of being separated by a comma from the next pair.
+            cities = {res.city_region for res in shown_res if res.city_region}
+            rows = [f"**Addresses** ({len(shown_res)})"]
+            for res in shown_res:
+                extra = ""
+                if len(cities) > 1 and res.city_region:  # differs, so worth saying
+                    extra = f" — {_md(res.city_region)}"
+                rows.append(f"`{_md(res.ip)}`{_players_md(res)}{extra}")
+            elements.append(_text_element("\n".join(rows)))
     else:
         # Several networks: one block each, so carrier / ASN / country stay
         # attached to the addresses they actually describe.
@@ -1218,17 +1235,25 @@ def build_text(results: list[IpResult], *, elapsed: float = 0.0) -> str:
     lines: list[str] = []
 
     if len(groups) <= 1:
-        addrs = ", ".join(
-            res.ip + (f" (player {', '.join(res.players)})" if res.players else "")
-            for res in (resolved or results)
-        )
-        lines.append(f"🌐 IP Details — {addrs}" if addrs else "🌐 IP Details")
-        if summary.isp:
-            lines.append(_plain_bullet("ISP / Organization", summary.isp))
-        if summary.country:
-            lines.append(_plain_bullet("Country", summary.country))
-        if summary.asn:
-            lines.append(_plain_bullet("ASN", summary.asn))
+        shown_res = resolved or results
+        head = ""
+        if len(shown_res) == 1:
+            res0 = shown_res[0]
+            head = res0.ip + (
+                f" (player {', '.join(res0.players)})" if res0.players else ""
+            )
+        lines.append(f"🌐 IP Details — {head}" if head else "🌐 IP Details")
+        # Same one-chip rule as the card, so both renderings read alike.
+        isp_m, country_m, asn_m = summary.isp, summary.country, summary.asn
+        if isp_m.chip and isp_m.chip == country_m.chip == asn_m.chip:
+            isp_m = replace(isp_m, chip="")
+            country_m = replace(country_m, chip="")
+        if isp_m:
+            lines.append(_plain_bullet("ISP / Organization", isp_m))
+        if country_m:
+            lines.append(_plain_bullet("Country", country_m))
+        if asn_m:
+            lines.append(_plain_bullet("ASN", asn_m))
         if len(lines) == 1:
             lines.append("• No public ISP data returned.")
         if summary.netname:
@@ -1237,6 +1262,14 @@ def build_text(results: list[IpResult], *, elapsed: float = 0.0) -> str:
             lines.append(f"• Prefix: {' / '.join(summary.prefixes[:4])}")
         if summary.traits:
             lines.append("• Flags: " + ", ".join(_TRAIT_LABEL.get(t, t) for t in summary.traits))
+        if len(shown_res) > 1:
+            lines.append("")
+            lines.append(f"Addresses ({len(shown_res)}):")
+            cities = {res.city_region for res in shown_res if res.city_region}
+            for res in shown_res:
+                pid = f" (player {', '.join(res.players)})" if res.players else ""
+                extra = f" — {res.city_region}" if len(cities) > 1 and res.city_region else ""
+                lines.append(f"• {res.ip}{pid}{extra}")
     else:
         lines.append(f"🌐 IP Details — {len(resolved)} addresses on {len(groups)} networks")
         for group in groups:
