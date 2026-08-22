@@ -2,13 +2,26 @@
 """
 ``/isp <ip> [ip ...]`` — ISP / Organization, Country and ASN for one or more IPs.
 
-The command renders a Lark card whose **IP Details** block is exactly three
-bullets, with a provenance chip on each line::
+The card leads with a plain-language verdict — whether the address is a relay
+whose geolocation describes a server rather than a person — and only then the
+detail, with a provenance chip per line::
 
-    IP Details
+    🏠 Consumer ISP address — the location below is most likely the user's own area.
+
+    IP Details · 112.198.1.1
     • ISP / Organization: Globe Telecom Inc.     [IPinfo +4]
-    • Country: 🇵🇭 Philippines                    [IPinfo +4]
-    • ASN: AS4775 / AS132199                     [IPinfo +4]
+    • Registered country: 🇵🇭 Philippines         [IPinfo +4]
+    • Location (approx.): Manila
+    Network: AS4775 / AS132199
+
+The verdict exists because the card is read to answer one question — "where is
+this player" — and for a VPN or datacenter address the true answer is "unknown".
+Flag chips alone never said that, so a Singapore exit node was read as a player
+in Singapore. Anything anonymising now says so above the geolocation, the
+geolocation is labelled "Server location", and a country the providers disagree
+on is reported as disputed rather than silently resolved. ASN, prefix and
+netname move to a "Network:" footer: useful for an abuse report, noise for
+everyone else.
 
 Values are merged across several key-free public IP-intel APIs, and across all
 the IPs in one command — which is where ``AS4775 / AS132199`` comes from: three
@@ -63,7 +76,7 @@ import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 import requests
 
@@ -107,6 +120,16 @@ _LEGAL_TOKENS = frozenset(
     """.split()
 )
 _NOISE_TOKENS = frozenset({"the", "a", "an", "and", "of"})
+
+
+def _flag(code: str) -> str:
+    """Flag emoji built from an ISO-3166 alpha-2 code via regional indicators.
+    Derived, never taken from a provider, so the flag cannot disagree with the
+    country name standing next to it."""
+    code = (code or "").strip().upper()
+    if len(code) != 2 or not code.isalpha():
+        return ""
+    return "".join(chr(0x1F1E6 + ord(ch) - ord("A")) for ch in code)
 _TRAIT_LABEL = {
     "mobile": "📱 mobile",
     "proxy": "🕵️ proxy",
@@ -115,6 +138,21 @@ _TRAIT_LABEL = {
     "tor": "🧅 tor",
     "abuser": "⚠️ abuser",
 }
+# Six lowercase chips told a reader who already knew what they meant nothing
+# they did not know, and told everyone else nothing at all. The card is read by
+# duty and support staff answering "where is this player", so each flag says in
+# words what it implies for that question.
+_TRAIT_MEANING = {
+    "mobile": "📱 **Mobile network** — a phone carrier's data connection.",
+    "proxy": "🕵️ **Proxy** — traffic is relayed, so the origin is hidden.",
+    "hosting": "🏢 **Datacenter** — a rented server, not a home or mobile line.",
+    "vpn": "🔒 **VPN** — traffic is relayed, so the real location is hidden.",
+    "tor": "🧅 **Tor** — routed through the Tor anonymity network.",
+    "abuser": "⚠️ **Abuse reports** — this address appears in abuse/threat feeds.",
+}
+# Traits that mean the geolocation describes a relay rather than a person.
+_ANON_TRAITS = ("vpn", "proxy", "tor")
+_TRAIT_WORD = {"vpn": "VPN", "proxy": "Proxy", "tor": "Tor"}
 # "datacenter" and "hosting" are the same claim wearing two provider vocabularies.
 _TRAIT_CANON = {"datacenter": "hosting"}
 
@@ -546,6 +584,9 @@ class Merged:
     sources: tuple[str, ...] = ()
     # Normalised keys of the groups shown, so a later line can skip repeats.
     keys: frozenset[str] = frozenset()
+    # Answers outvoted by the one shown, as (label, provider count). Only the
+    # country line fills this in.
+    alts: tuple[tuple[str, int], ...] = ()
 
     def __bool__(self) -> bool:
         return bool(self.value)
@@ -651,8 +692,6 @@ def _merge_country(recs: list[Record]) -> Merged:
         code, name = rec.country_code.upper(), rec.country_name
         if code and name and code not in code_to_name:
             code_to_name[code] = name
-    emoji = next((rec.flag_emoji for rec in recs if rec.flag_emoji), "")
-
     groups: dict[str, dict[str, Any]] = {}
     for rec in recs:
         code = rec.country_code.upper()
@@ -687,14 +726,23 @@ def _merge_country(recs: list[Record]) -> Merged:
     for _key, group in shown:
         used |= group["providers"]
     chip, names = _chip_for(used)
-    value = " / ".join(group["label"] for _key, group in shown)
-    if emoji and len(shown) == 1:
-        value = f"{emoji} {value}"
+    # The flag is derived from the ISO code of the answer that actually won the
+    # vote, not from whichever provider returned an emoji first. That mismatch
+    # is how a card came to read "🇸🇬 Philippines", which no reader could parse.
+    value = " / ".join(f"{_flag(key)} {group['label']}".strip() for key, group in shown)
+    # Countries the vote discarded, kept so they can be named. Dropping them in
+    # silence is what makes the card look self-contradictory when the Location
+    # line underneath still shows the outlier's city.
+    alts = tuple(
+        (f"{_flag(key)} {group['label']}".strip(), len(group["providers"]))
+        for key, group in ordered[len(shown) :]
+    )
     return Merged(
         value=value,
         chip=chip,
         sources=names,
         keys=frozenset(key for key, _group in shown),
+        alts=alts,
     )
 
 
@@ -1032,6 +1080,92 @@ def _text_element(content: str) -> dict[str, Any]:
     return {"tag": "div", "text": {"tag": "lark_md", "content": content}}
 
 
+def _verdict(summary: Summary) -> tuple[list[str], str]:
+    """The headline the card was missing: what this address *is*, and whether the
+    location on it can be read as the user's. Returns (lines, header colour).
+
+    Staff run ``/isp`` to answer one question — "where is this player" — and the
+    honest answer for a relay is "unknown", which four lowercase chips never
+    said out loud. Anything anonymising is called out before the geolocation, so
+    nobody reads the relay's city as the person's."""
+    traits = set(summary.traits)
+    anon = [t for t in _ANON_TRAITS if t in traits]
+    if anon:
+        what = " / ".join(_TRAIT_WORD[t] for t in anon)
+        lines = [
+            f"🚩 **{what} address — the real user location is UNKNOWN**",
+            "_Whatever location is shown below is the relay server. "
+            "The person could be anywhere._",
+        ]
+        colour = "red"
+    elif "hosting" in traits:
+        lines = [
+            "🏢 **Datacenter address — not a home or mobile connection**",
+            "_A rented server, which may be relaying somebody else's traffic._",
+        ]
+        colour = "orange"
+    elif "mobile" in traits:
+        lines = ["📱 **Mobile carrier address** — the location below is approximate."]
+        colour = "blue"
+    else:
+        lines = [
+            "🏠 **Consumer ISP address** — the location below is most likely the "
+            "user's own area."
+        ]
+        colour = "green"
+    if "abuser" in traits:
+        lines.append("⚠️ _Also listed in abuse / threat feeds._")
+    return lines, colour
+
+
+def _plain(markdown: str) -> str:
+    """Strip the card's emphasis markers for the plain-text mirror."""
+    return markdown.replace("**", "").replace("_", "")
+
+
+def _verdict_multi(resolved: list[IpResult]) -> tuple[list[str], str]:
+    """Verdict for a command spanning several networks. A blanket "location
+    UNKNOWN" would libel the addresses that are ordinary broadband, so this
+    counts the flagged ones and leaves the detail to each network block."""
+    suspect = {*_ANON_TRAITS, "hosting"}
+    flagged = [res for res in resolved if set(res.traits) & suspect]
+    abusive = any("abuser" in res.traits for res in resolved)
+    if not flagged:
+        lines = [
+            "🏠 **No relay or datacenter addresses here** — the locations below "
+            "are most likely the users' own areas."
+        ]
+        colour = "green"
+    elif len(flagged) == len(resolved):
+        lines = [
+            f"🚩 **All {len(resolved)} addresses are relays or datacenter IPs — "
+            "the real user locations are UNKNOWN**",
+            "_Each block below shows what that address is._",
+        ]
+        colour = "red"
+    else:
+        verb = "is a relay or datacenter IP" if len(flagged) == 1 else (
+            "are relays or datacenter IPs"
+        )
+        lines = [
+            f"🚩 **{len(flagged)} of {len(resolved)} addresses {verb} — "
+            "location UNKNOWN for those**",
+            "_Flagged per address in the blocks below._",
+        ]
+        colour = "orange"
+    if abusive:
+        lines.append("⚠️ _At least one appears in abuse / threat feeds._")
+    return lines, colour
+
+
+def _flag_lines(traits: list[str], bullet: str = "  - ") -> Iterator[str]:
+    """Each flag on its own line, in words. Ordered so the ones that change the
+    answer (anonymising, then abuse) come before the merely descriptive."""
+    rank = {t: i for i, t in enumerate((*_ANON_TRAITS, "hosting", "abuser", "mobile"))}
+    for t in sorted(traits, key=lambda t: rank.get(t, len(rank))):
+        yield bullet + _TRAIT_MEANING.get(t, _TRAIT_LABEL.get(t, t))
+
+
 def _bullet(label: str, merged: Merged) -> str:
     value = _md(merged.value)
     if merged.hidden:
@@ -1128,6 +1262,16 @@ def build_card(results: list[IpResult], *, elapsed: float = 0.0) -> dict[str, An
     groups = _group_by_network(results)
     elements: list[dict[str, Any]] = []
 
+    # The verdict goes first and colours the header, so the one thing a reader
+    # must not miss is the one thing they cannot scroll past.
+    banner, colour = (
+        _verdict_multi(resolved) if len(groups) > 1 else _verdict(summary)
+    )
+    if resolved:
+        elements.append(_text_element("\n".join(banner)))
+    else:
+        colour = "grey"
+
     if len(groups) <= 1:
         # One network — the single-IP case and any set of IPs on the same
         # carrier. The three-bullet block says everything, with the addresses
@@ -1146,35 +1290,44 @@ def build_card(results: list[IpResult], *, elapsed: float = 0.0) -> dict[str, An
         # When all three lines came from the same providers, one chip carries
         # the provenance — three identical badges is just noise. Keeping it on
         # the ASN line matches the reference card.
-        isp_m, country_m, asn_m = summary.isp, summary.country, summary.asn
-        if isp_m.chip and isp_m.chip == country_m.chip == asn_m.chip:
-            isp_m = replace(isp_m, chip="")
-            country_m = replace(country_m, chip="")
+        # ISP and country are the two lines a reader acts on, so they stay up
+        # here; ASN, prefix and netname are for whoever is filing an abuse
+        # report and move to the technical footer, where their jargon cannot
+        # crowd out the answer.
+        isp_m, country_m = summary.isp, summary.country
+        if isp_m.chip and isp_m.chip == country_m.chip:
+            country_m = replace(country_m, chip="")  # same provenance, said once
         if isp_m:
             details.append(_bullet("ISP / Organization", isp_m))
         if country_m:
-            details.append(_bullet("Country", country_m))
-        if asn_m:
-            details.append(_bullet("ASN", asn_m))
+            details.append(_bullet("Registered country", country_m))
         if len(details) == 1:
             details.append("_No public ISP data returned._")
         elements.append(_text_element("\n".join(details)))
 
+        anonymising = bool(set(summary.traits) & {*_ANON_TRAITS, "hosting"})
         aside = []
-        if summary.netname:
-            aside.append(_bullet("Netblock / Customer", summary.netname))
-        if summary.prefixes:
-            aside.append(f"- **Prefix:** {_md(' / '.join(summary.prefixes[:4]))}")
         for res in resolved:
             if res.city_region or res.domain:
                 bits = [b for b in (res.city_region, res.domain) if b]
-                aside.append(f"- **Location:** {_md(' · '.join(bits))}")
+                # Never plain "Location" on a relay: that label is exactly what
+                # invites reading the exit node's city as the person's.
+                label = "Server location" if anonymising else "Location (approx.)"
+                tail = " _— the relay, not the user_" if anonymising else ""
+                aside.append(f"- **{label}:** {_md(' · '.join(bits))}{tail}")
                 break
-        if summary.traits:
-            aside.append(
-                "- **Flags:** "
-                + " ".join(_tag(_TRAIT_LABEL.get(t, t), "orange") for t in summary.traits)
+        if summary.country.alts:
+            spread = ", ".join(
+                f"{_md(label)} ({n} source{'' if n == 1 else 's'})"
+                for label, n in summary.country.alts
             )
+            aside.append(
+                f"- **Sources disagree:** also reported as {spread}. "
+                "_Normal for VPN and datacenter ranges — treat the country as unverified._"
+            )
+        if summary.traits:
+            aside.append("- **What this address is:**")
+            aside.extend(_flag_lines(summary.traits))
         if aside:
             elements.append(_text_element("\n".join(aside)))
 
@@ -1201,6 +1354,14 @@ def build_card(results: list[IpResult], *, elapsed: float = 0.0) -> dict[str, An
         elements.append(_text_element(header))
         elements.append(_text_element("\n\n".join(_network_block(g) for g in groups)))
 
+    tech = [summary.asn.value] if summary.asn else []
+    if summary.prefixes:
+        tech.append(" / ".join(summary.prefixes[:4]))
+    if summary.netname:
+        tech.append(summary.netname.value)
+    if tech and len(groups) <= 1:
+        elements.append(_text_element(f"_Network: {_md(' · '.join(tech))}_"))
+
     skipped = _skipped_lines(results)
     if skipped:
         elements.append({"tag": "hr"})
@@ -1219,7 +1380,7 @@ def build_card(results: list[IpResult], *, elapsed: float = 0.0) -> dict[str, An
         "schema": "2.0",
         "config": {"update_multi": True, "width_mode": "fill"},
         "header": {
-            "template": "blue" if resolved else "grey",
+            "template": colour,
             "title": {"tag": "plain_text", "content": "🌐 IP / ISP lookup"},
         },
         "body": {"elements": elements},
@@ -1233,6 +1394,13 @@ def build_text(results: list[IpResult], *, elapsed: float = 0.0) -> str:
     resolved = [res for res in results if res.resolved]
     groups = _group_by_network(results)
     lines: list[str] = []
+
+    if resolved:  # same verdict as the card, with the card's markup taken out
+        banner, _colour = (
+            _verdict_multi(resolved) if len(groups) > 1 else _verdict(summary)
+        )
+        lines.extend(_plain(b) for b in banner)
+        lines.append("")
 
     if len(groups) <= 1:
         shown_res = resolved or results
@@ -1251,17 +1419,29 @@ def build_text(results: list[IpResult], *, elapsed: float = 0.0) -> str:
         if isp_m:
             lines.append(_plain_bullet("ISP / Organization", isp_m))
         if country_m:
-            lines.append(_plain_bullet("Country", country_m))
+            lines.append(_plain_bullet("Registered country", country_m))
         if asn_m:
             lines.append(_plain_bullet("ASN", asn_m))
         if len(lines) == 1:
             lines.append("• No public ISP data returned.")
         if summary.netname:
-            lines.append(_plain_bullet("Netblock / Customer", summary.netname))
+            lines.append(_plain_bullet("Network / Customer", summary.netname))
         if summary.prefixes:
             lines.append(f"• Prefix: {' / '.join(summary.prefixes[:4])}")
+        anonymising = bool(set(summary.traits) & {*_ANON_TRAITS, "hosting"})
+        for res in resolved:
+            if res.city_region or res.domain:
+                bits = [b for b in (res.city_region, res.domain) if b]
+                label = "Server location" if anonymising else "Location (approx.)"
+                tail = " — the relay, not the user" if anonymising else ""
+                lines.append(f"• {label}: {' · '.join(bits)}{tail}")
+                break
+        if summary.country.alts:
+            spread = ", ".join(f"{label} ({n})" for label, n in summary.country.alts)
+            lines.append(f"• Sources disagree — also reported as {spread}; country unverified")
         if summary.traits:
-            lines.append("• Flags: " + ", ".join(_TRAIT_LABEL.get(t, t) for t in summary.traits))
+            lines.append("• What this address is:")
+            lines.extend(_plain(f) for f in _flag_lines(summary.traits, bullet="   - "))
         if len(shown_res) > 1:
             lines.append("")
             lines.append(f"Addresses ({len(shown_res)}):")
