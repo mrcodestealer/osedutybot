@@ -2,26 +2,33 @@
 """
 ``/isp <ip> [ip ...]`` — ISP / Organization, Country and ASN for one or more IPs.
 
-The card leads with a plain-language verdict — whether the address is a relay
-whose geolocation describes a server rather than a person — and only then the
-detail, with a provenance chip per line::
+The card answers one question — "where is this player" — in three lines: what
+the address is, where it is, and who runs it::
 
-    🏠 Consumer ISP address — the location below is most likely the user's own area.
+    🏠 Real connection — user is in 🇵🇭 Philippines
+    112.198.1.1
+    • Location: 🇵🇭 Philippines · Quezon City   [IPinfo]
+    • Operator: Globe Telecoms                 [IPinfo +4]
+    🔎 AS4775 · 112.198.0.0/16 · 6/6 sources
 
-    IP Details · 112.198.1.1
-    • ISP / Organization: Globe Telecom Inc.     [IPinfo +4]
-    • Registered country: 🇵🇭 Philippines         [IPinfo +4]
-    • Location (approx.): Manila
-    Network: AS4775 / AS132199
+    🔒 VPN detected — the user's real location is UNKNOWN
+    217.145.74.203
+    • VPN server: 🇸🇬 Singapore                 [IPinfo]
+    • Operator: GSL Networks Pty LTD           [IPinfo +4]
+    • ⚠️ Listed in abuse reports
+    🔎 AS137409 · 217.145.74.0/24 · 6/6 sources
 
-The verdict exists because the card is read to answer one question — "where is
-this player" — and for a VPN or datacenter address the true answer is "unknown".
-Flag chips alone never said that, so a Singapore exit node was read as a player
-in Singapore. Anything anonymising now says so above the geolocation, the
-geolocation is labelled "Server location", and a country the providers disagree
-on is reported as disputed rather than silently resolved. ASN, prefix and
-netname move to a "Network:" footer: useful for an abuse report, noise for
-everyone else.
+Two rules there earn their keep. When the address is a VPN, proxy, Tor node or
+datacenter IP the headline says the location is unknown and the place is
+labelled as the *server*: an earlier card showed a bare "Location: Singapore"
+for a relay and it was read as the player being in Singapore. And the place is
+taken whole from one provider rather than assembled from the best-supported
+country plus somebody else's city — that mixing is how a card came to show
+"Philippines" beside "Singapore, Singapore".
+
+ASN and prefix ride in the footer for whoever files an abuse report. Netname,
+per-flag prose and provider-by-provider disagreement are deliberately not shown;
+they pushed the answer off the card.
 
 Values are merged across several key-free public IP-intel APIs, and across all
 the IPs in one command — which is where ``AS4775 / AS132199`` comes from: three
@@ -130,29 +137,6 @@ def _flag(code: str) -> str:
     if len(code) != 2 or not code.isalpha():
         return ""
     return "".join(chr(0x1F1E6 + ord(ch) - ord("A")) for ch in code)
-_TRAIT_LABEL = {
-    "mobile": "📱 mobile",
-    "proxy": "🕵️ proxy",
-    "hosting": "🏢 hosting",
-    "vpn": "🔒 vpn",
-    "tor": "🧅 tor",
-    "abuser": "⚠️ abuser",
-}
-# Six lowercase chips told a reader who already knew what they meant nothing
-# they did not know, and told everyone else nothing at all. The card is read by
-# duty and support staff answering "where is this player", so each flag says in
-# words what it implies for that question.
-_TRAIT_MEANING = {
-    "mobile": "📱 **Mobile network** — a phone carrier's data connection.",
-    "proxy": "🕵️ **Proxy** — traffic is relayed, so the origin is hidden.",
-    "hosting": "🏢 **Datacenter** — a rented server, not a home or mobile line.",
-    "vpn": "🔒 **VPN** — traffic is relayed, so the real location is hidden.",
-    "tor": "🧅 **Tor** — routed through the Tor anonymity network.",
-    "abuser": "⚠️ **Abuse reports** — this address appears in abuse/threat feeds.",
-}
-# Traits that mean the geolocation describes a relay rather than a person.
-_ANON_TRAITS = ("vpn", "proxy", "tor")
-_TRAIT_WORD = {"vpn": "VPN", "proxy": "Proxy", "tor": "Tor"}
 # "datacenter" and "hosting" are the same claim wearing two provider vocabularies.
 _TRAIT_CANON = {"datacenter": "hosting"}
 
@@ -584,9 +568,6 @@ class Merged:
     sources: tuple[str, ...] = ()
     # Normalised keys of the groups shown, so a later line can skip repeats.
     keys: frozenset[str] = frozenset()
-    # Answers outvoted by the one shown, as (label, provider count). Only the
-    # country line fills this in.
-    alts: tuple[tuple[str, int], ...] = ()
 
     def __bool__(self) -> bool:
         return bool(self.value)
@@ -730,19 +711,11 @@ def _merge_country(recs: list[Record]) -> Merged:
     # vote, not from whichever provider returned an emoji first. That mismatch
     # is how a card came to read "🇸🇬 Philippines", which no reader could parse.
     value = " / ".join(f"{_flag(key)} {group['label']}".strip() for key, group in shown)
-    # Countries the vote discarded, kept so they can be named. Dropping them in
-    # silence is what makes the card look self-contradictory when the Location
-    # line underneath still shows the outlier's city.
-    alts = tuple(
-        (f"{_flag(key)} {group['label']}".strip(), len(group["providers"]))
-        for key, group in ordered[len(shown) :]
-    )
     return Merged(
         value=value,
         chip=chip,
         sources=names,
         keys=frozenset(key for key, _group in shown),
-        alts=alts,
     )
 
 
@@ -1003,10 +976,10 @@ def summarise(results: list[IpResult]) -> Summary:
         for t in res.traits:
             if t not in traits:
                 traits.append(t)
-    # One IP has one carrier, so two slots is plenty; a multi-IP command
-    # legitimately spans several, and hiding them all behind "(+N more)" would
-    # make the summary less useful than the per-IP block below it.
-    slots = 2 if len(results) <= 1 else min(5, 1 + len(results))
+    # One IP has one carrier and the card shows one name for it; a multi-IP
+    # command legitimately spans several, and hiding them all behind "(+N more)"
+    # would make the summary less useful than the per-IP lines below it.
+    slots = 1 if len(results) <= 1 else min(5, 1 + len(results))
     isp = _merge_names([(n, r.key) for r in good for n in r.isp], max_groups=slots)
     return Summary(
         isp=isp,
@@ -1080,160 +1053,22 @@ def _text_element(content: str) -> dict[str, Any]:
     return {"tag": "div", "text": {"tag": "lark_md", "content": content}}
 
 
-def _verdict(summary: Summary) -> tuple[list[str], str]:
-    """The headline the card was missing: what this address *is*, and whether the
-    location on it can be read as the user's. Returns (lines, header colour).
 
-    Staff run ``/isp`` to answer one question — "where is this player" — and the
-    honest answer for a relay is "unknown", which four lowercase chips never
-    said out loud. Anything anonymising is called out before the geolocation, so
-    nobody reads the relay's city as the person's."""
-    traits = set(summary.traits)
-    anon = [t for t in _ANON_TRAITS if t in traits]
-    if anon:
-        what = " / ".join(_TRAIT_WORD[t] for t in anon)
-        lines = [
-            f"🚩 **{what} address — the real user location is UNKNOWN**",
-            "_Whatever location is shown below is the relay server. "
-            "The person could be anywhere._",
-        ]
-        colour = "red"
-    elif "hosting" in traits:
-        lines = [
-            "🏢 **Datacenter address — not a home or mobile connection**",
-            "_A rented server, which may be relaying somebody else's traffic._",
-        ]
-        colour = "orange"
-    elif "mobile" in traits:
-        lines = ["📱 **Mobile carrier address** — the location below is approximate."]
-        colour = "blue"
-    else:
-        lines = [
-            "🏠 **Consumer ISP address** — the location below is most likely the "
-            "user's own area."
-        ]
-        colour = "green"
-    if "abuser" in traits:
-        lines.append("⚠️ _Also listed in abuse / threat feeds._")
-    return lines, colour
+_SUSPECT = ("vpn", "proxy", "tor", "hosting")
 
 
-def _plain(markdown: str) -> str:
-    """Strip the card's emphasis markers for the plain-text mirror."""
-    return markdown.replace("**", "").replace("_", "")
-
-
-def _verdict_multi(resolved: list[IpResult]) -> tuple[list[str], str]:
-    """Verdict for a command spanning several networks. A blanket "location
-    UNKNOWN" would libel the addresses that are ordinary broadband, so this
-    counts the flagged ones and leaves the detail to each network block."""
-    suspect = {*_ANON_TRAITS, "hosting"}
-    flagged = [res for res in resolved if set(res.traits) & suspect]
-    abusive = any("abuser" in res.traits for res in resolved)
-    if not flagged:
-        lines = [
-            "🏠 **No relay or datacenter addresses here** — the locations below "
-            "are most likely the users' own areas."
-        ]
-        colour = "green"
-    elif len(flagged) == len(resolved):
-        lines = [
-            f"🚩 **All {len(resolved)} addresses are relays or datacenter IPs — "
-            "the real user locations are UNKNOWN**",
-            "_Each block below shows what that address is._",
-        ]
-        colour = "red"
-    else:
-        verb = "is a relay or datacenter IP" if len(flagged) == 1 else (
-            "are relays or datacenter IPs"
-        )
-        lines = [
-            f"🚩 **{len(flagged)} of {len(resolved)} addresses {verb} — "
-            "location UNKNOWN for those**",
-            "_Flagged per address in the blocks below._",
-        ]
-        colour = "orange"
-    if abusive:
-        lines.append("⚠️ _At least one appears in abuse / threat feeds._")
-    return lines, colour
-
-
-def _flag_lines(traits: list[str], bullet: str = "  - ") -> Iterator[str]:
-    """Each flag on its own line, in words. Ordered so the ones that change the
-    answer (anonymising, then abuse) come before the merely descriptive."""
-    rank = {t: i for i, t in enumerate((*_ANON_TRAITS, "hosting", "abuser", "mobile"))}
-    for t in sorted(traits, key=lambda t: rank.get(t, len(rank))):
-        yield bullet + _TRAIT_MEANING.get(t, _TRAIT_LABEL.get(t, t))
-
-
-def _bullet(label: str, merged: Merged) -> str:
+def _bullet(label: str, merged: Merged, *, show_hidden: bool = True) -> str:
     value = _md(merged.value)
-    if merged.hidden:
+    if merged.hidden and show_hidden:
         value += f" _(+{merged.hidden} more)_"
     chip = f" {_tag(merged.chip)}" if merged.chip else ""
     return f"- **{_md(label)}:** {value}{chip}"
 
 
-def _plain_bullet(label: str, merged: Merged) -> str:
-    extra = f" (+{merged.hidden} more)" if merged.hidden else ""
+def _plain_bullet(label: str, merged: Merged, *, show_hidden: bool = True) -> str:
+    extra = f" (+{merged.hidden} more)" if merged.hidden and show_hidden else ""
     chip = f"  [{merged.chip}]" if merged.chip else ""
     return f"• {label}: {merged.value}{extra}{chip}"
-
-
-def _group_by_network(results: list[IpResult]) -> list[dict[str, Any]]:
-    """Bucket the resolved IPs by (ISP, ASN, country), keeping the order they
-    were typed. Grouping is what keeps a multi-IP card readable: an aggregate
-    line across networks reads 'Globe Telecoms / Kinahugan Bojol' and
-    'AS4775 / AS150450' with no way to tell which pairs with which."""
-    groups: list[dict[str, Any]] = []
-    index: dict[tuple[str, str, str], dict[str, Any]] = {}
-    for res in results:
-        if not res.resolved:
-            continue
-        key = (res.isp.value, res.asn.value, res.country.value)
-        group = index.get(key)
-        if group is None:
-            group = {"isp": res.isp, "asn": res.asn, "country": res.country, "members": []}
-            index[key] = group
-            groups.append(group)
-        group["members"].append(res)
-    return groups
-
-
-def _network_block(group: dict[str, Any]) -> str:
-    """One network: carrier name + chip, a meta line, then its addresses."""
-    members: list[IpResult] = group["members"]
-    isp: Merged = group["isp"]
-    name = _md(isp.value) or "_unknown carrier_"
-    chip = f" {_tag(isp.chip)}" if isp.chip else ""
-    lines = [f"**{name}**{chip}"]
-
-    prefixes = {res.prefix for res in members if res.prefix}
-    domains = {res.domain for res in members if res.domain}
-    traits: list[str] = []
-    for res in members:
-        for t in res.traits:
-            if t not in traits:
-                traits.append(t)
-    meta = [group["asn"].value, group["country"].value]
-    if len(prefixes) == 1:  # shared by every member — say it once
-        meta.append(prefixes.pop())
-    if len(domains) == 1:
-        meta.append(domains.pop())
-    meta = [m for m in meta if m]
-    if meta:
-        lines.append(_md(" · ".join(meta)))
-    if traits:
-        lines.append(" ".join(_tag(_TRAIT_LABEL.get(t, t), "orange") for t in traits))
-
-    for res in members:
-        tail = [res.city_region]
-        if prefixes:  # only when members disagree, so it wasn't said above
-            tail.append(res.prefix)
-        tail = [t for t in tail if t]
-        suffix = f" — {_md(' · '.join(tail))}" if tail else ""
-        lines.append(f"`{_md(res.ip)}`{_players_md(res)}{suffix}")
-    return "\n".join(lines)
 
 
 def _players_md(res: IpResult) -> str:
@@ -1254,127 +1089,146 @@ def _skipped_lines(results: list[IpResult]) -> list[str]:
     return out
 
 
+def _plain(markdown: str) -> str:
+    """Strip the card's emphasis markers for the plain-text mirror."""
+    return markdown.replace("**", "").replace("_", "")
+
+
+def _place_for(res: IpResult) -> tuple[str, str]:
+    """One coherent place — country and city taken *whole* from a single
+    provider, highest display priority first. Returns (text, provider name).
+
+    Pasting the country that won a cross-provider vote next to some other
+    provider's city is what put "Philippines" beside "Singapore, Singapore" on
+    one card, and no reader could make sense of that. A place is only meaningful
+    as one provider's single opinion, so that is how it is shown."""
+    names: dict[str, str] = {}
+    for rec in res.good:
+        code = rec.country_code.upper()
+        if code and rec.country_name and code not in names:
+            names[code] = rec.country_name
+    for rec in sorted(res.good, key=lambda r: r.index):
+        code = rec.country_code.upper()
+        if not code:
+            continue
+        label = names.get(code) or rec.country_name or code
+        out = f"{_flag(code)} {label}".strip()
+        city = rec.city or rec.region
+        if city and city.lower() != label.lower():  # "Singapore · Singapore" is noise
+            out += f" · {city}"
+        return out, rec.name
+    return "", ""
+
+
+def _headline(res: IpResult) -> tuple[str, str, str]:
+    """What this address is, in one line. Returns (banner, place label, colour).
+
+    The card answers one question — "where is this player" — so the answer, or
+    the honest absence of one, is the first thing on it."""
+    traits = set(res.traits)
+    if traits & {"vpn", "proxy", "tor"}:
+        what = "VPN" if "vpn" in traits else ("Tor" if "tor" in traits else "Proxy")
+        return f"🔒 **{what} detected — the user's real location is UNKNOWN**", "VPN server", "red"
+    if "hosting" in traits:
+        return (
+            "🏢 **Datacenter IP — not a home connection, real location UNKNOWN**",
+            "Server",
+            "orange",
+        )
+    place, _src = _place_for(res)
+    where = place.split(" · ")[0] or "unknown"
+    if "mobile" in traits:
+        return f"📱 **Mobile data — user is in {where}**", "Location", "blue"
+    return f"🏠 **Real connection — user is in {where}**", "Location", "green"
+
+
+def _one_line(res: IpResult) -> str:
+    """A single address on one line, for the multi-IP card."""
+    traits = set(res.traits)
+    if traits & {"vpn", "proxy", "tor"}:
+        mark = "🔒 VPN"
+    elif "hosting" in traits:
+        mark = "🏢 Datacenter"
+    elif "mobile" in traits:
+        mark = "📱 Mobile"
+    else:
+        mark = "🏠 Real"
+    place, _src = _place_for(res)
+    # First name only: one line per address has no room for the aliases the
+    # providers also returned for the same operator.
+    operator = res.isp.value.split(" / ")[0]
+    bits = [mark, place or "location unknown", operator]
+    if "abuser" in traits:
+        bits.append("⚠️ abuse reports")
+    body = " · ".join(_md(b) for b in bits if b)
+    return f"`{_md(res.ip)}`{_players_md(res)} — {body}"
+
+
 def build_card(results: list[IpResult], *, elapsed: float = 0.0) -> dict[str, Any]:
     """Lark card JSON v2 — ``markdown`` components, so inline ``<text_tag>``
-    chips render as real badges."""
+    chips render as real badges.
+
+    Deliberately short: a verdict, the place, the operator, and an abuse note if
+    there is one. ASN and prefix ride along in the footer for whoever files an
+    abuse report; everything else the providers return is detail that pushed the
+    answer off the card."""
     summary = summarise(results)
     resolved = [res for res in results if res.resolved]
-    groups = _group_by_network(results)
     elements: list[dict[str, Any]] = []
+    colour = "grey"
 
-    # The verdict goes first and colours the header, so the one thing a reader
-    # must not miss is the one thing they cannot scroll past.
-    banner, colour = (
-        _verdict_multi(resolved) if len(groups) > 1 else _verdict(summary)
-    )
-    if resolved:
-        elements.append(_text_element("\n".join(banner)))
-    else:
-        colour = "grey"
-
-    if len(groups) <= 1:
-        # One network — the single-IP case and any set of IPs on the same
-        # carrier. The three-bullet block says everything, with the addresses
-        # on the heading rather than in a separate "Queried" line that the
-        # detail below would only repeat.
-        shown_res = resolved or results
-        # Only ONE address goes on the heading. Several would run their ids
-        # together — "103.40.2.176 👤1081561491, 103.40.2.142 👤1075487320" makes
-        # you hunt for where each pair ends — so they get their own block below.
-        addrs = (
-            f"`{_md(shown_res[0].ip)}`{_players_md(shown_res[0])}"
-            if len(shown_res) == 1
-            else ""
+    if len(resolved) == 1 or (resolved and len({r.isp.value for r in resolved}) == 1):
+        res = resolved[0]
+        banner, place_label, colour = _headline(res)
+        lines = [banner, ""]
+        addrs = ", ".join(f"`{_md(r.ip)}`{_players_md(r)}" for r in resolved)
+        lines.append(addrs)
+        place, src = _place_for(res)
+        if place:
+            chip = f" {_tag(src)}" if src else ""
+            lines.append(f"- **{place_label}:** {_md(place)}{chip}")
+        if summary.isp:
+            lines.append(_bullet("Operator", summary.isp, show_hidden=False))
+        if "abuser" in res.traits:
+            lines.append("- ⚠️ **Listed in abuse reports**")
+        elements.append(_text_element("\n".join(lines)))
+    elif resolved:
+        flagged = [r for r in resolved if set(r.traits) & set(_SUSPECT)]
+        if not flagged:
+            banner, colour = "🏠 **All real connections**", "green"
+        elif len(flagged) == len(resolved):
+            banner, colour = (
+                f"🔒 **All {len(resolved)} are VPN / datacenter — real locations UNKNOWN**",
+                "red",
+            )
+        else:
+            verb = "is" if len(flagged) == 1 else "are"
+            banner, colour = (
+                f"🔒 **{len(flagged)} of {len(resolved)} {verb} VPN / datacenter — "
+                "location unknown for those**",
+                "orange",
+            )
+        elements.append(
+            _text_element("\n".join([banner, ""] + [_one_line(r) for r in resolved]))
         )
-        details = [f"**IP Details** · {addrs}" if addrs else "**IP Details**"]
-        # When all three lines came from the same providers, one chip carries
-        # the provenance — three identical badges is just noise. Keeping it on
-        # the ASN line matches the reference card.
-        # ISP and country are the two lines a reader acts on, so they stay up
-        # here; ASN, prefix and netname are for whoever is filing an abuse
-        # report and move to the technical footer, where their jargon cannot
-        # crowd out the answer.
-        isp_m, country_m = summary.isp, summary.country
-        if isp_m.chip and isp_m.chip == country_m.chip:
-            country_m = replace(country_m, chip="")  # same provenance, said once
-        if isp_m:
-            details.append(_bullet("ISP / Organization", isp_m))
-        if country_m:
-            details.append(_bullet("Registered country", country_m))
-        if len(details) == 1:
-            details.append("_No public ISP data returned._")
-        elements.append(_text_element("\n".join(details)))
-
-        anonymising = bool(set(summary.traits) & {*_ANON_TRAITS, "hosting"})
-        aside = []
-        for res in resolved:
-            if res.city_region or res.domain:
-                bits = [b for b in (res.city_region, res.domain) if b]
-                # Never plain "Location" on a relay: that label is exactly what
-                # invites reading the exit node's city as the person's.
-                label = "Server location" if anonymising else "Location (approx.)"
-                tail = " _— the relay, not the user_" if anonymising else ""
-                aside.append(f"- **{label}:** {_md(' · '.join(bits))}{tail}")
-                break
-        if summary.country.alts:
-            spread = ", ".join(
-                f"{_md(label)} ({n} source{'' if n == 1 else 's'})"
-                for label, n in summary.country.alts
-            )
-            aside.append(
-                f"- **Sources disagree:** also reported as {spread}. "
-                "_Normal for VPN and datacenter ranges — treat the country as unverified._"
-            )
-        if summary.traits:
-            aside.append("- **What this address is:**")
-            aside.extend(_flag_lines(summary.traits))
-        if aside:
-            elements.append(_text_element("\n".join(aside)))
-
-        if len(shown_res) > 1:
-            # One address per line, so each id stays visibly attached to its own
-            # address instead of being separated by a comma from the next pair.
-            cities = {res.city_region for res in shown_res if res.city_region}
-            rows = [f"**Addresses** ({len(shown_res)})"]
-            for res in shown_res:
-                extra = ""
-                if len(cities) > 1 and res.city_region:  # differs, so worth saying
-                    extra = f" — {_md(res.city_region)}"
-                rows.append(f"`{_md(res.ip)}`{_players_md(res)}{extra}")
-            elements.append(_text_element("\n".join(rows)))
-    else:
-        # Several networks: one block each, so carrier / ASN / country stay
-        # attached to the addresses they actually describe.
-        chips = {g["isp"].chip for g in groups}
-        shared = chips.pop() if len(chips) == 1 else ""
-        header = f"**IP Details** · {len(resolved)} addresses on {len(groups)} networks"
-        if shared:  # same provenance everywhere — state it once, up here
-            header += f" {_tag(shared)}"
-            groups = [{**g, "isp": replace(g["isp"], chip="")} for g in groups]
-        elements.append(_text_element(header))
-        elements.append(_text_element("\n\n".join(_network_block(g) for g in groups)))
-
-    tech = [summary.asn.value] if summary.asn else []
-    if summary.prefixes:
-        tech.append(" / ".join(summary.prefixes[:4]))
-    if summary.netname:
-        tech.append(summary.netname.value)
-    if tech and len(groups) <= 1:
-        elements.append(_text_element(f"_Network: {_md(' · '.join(tech))}_"))
 
     skipped = _skipped_lines(results)
     if skipped:
-        elements.append({"tag": "hr"})
+        if elements:  # nothing resolved — no rule needed above the first block
+            elements.append({"tag": "hr"})
         elements.append(_text_element("**Not looked up**\n" + "\n".join(skipped)))
 
     # Card JSON v2 has no "note" component — its component list is div / markdown
-    # / hr / img / … — so the sources footer is an italic text block instead.
-    # A count, not six provider names: the names filled a whole line and only
+    # / hr / img / … — so the footer is an italic text block instead. A source
+    # count, not six provider names: the names filled a whole line and only
     # matter when one is missing, which the count already shows.
-    note = f"🔎 {len(summary.sources)}/{len(_PROVIDERS)} sources"
+    foot = [summary.asn.value] if summary.asn else []
+    if summary.prefixes:
+        foot.append(" / ".join(summary.prefixes[:2]))
+    foot.append(f"🔎 {len(summary.sources)}/{len(_PROVIDERS)} sources")
     if elapsed:
-        note += f" · {elapsed:.1f}s"
-    elements.append(_text_element(f"_{note}_"))
+        foot.append(f"{elapsed:.1f}s")
+    elements.append(_text_element(f"_{_md(' · '.join(foot))}_"))
 
     return {
         "schema": "2.0",
@@ -1388,97 +1242,60 @@ def build_card(results: list[IpResult], *, elapsed: float = 0.0) -> dict[str, An
 
 
 def build_text(results: list[IpResult], *, elapsed: float = 0.0) -> str:
-    """Plain-text mirror of the card, for when the interactive send is rejected.
-    Follows the same one-block-per-network shape."""
+    """Plain-text mirror of the card, for when the interactive send is rejected."""
     summary = summarise(results)
     resolved = [res for res in results if res.resolved]
-    groups = _group_by_network(results)
     lines: list[str] = []
 
-    if resolved:  # same verdict as the card, with the card's markup taken out
-        banner, _colour = (
-            _verdict_multi(resolved) if len(groups) > 1 else _verdict(summary)
-        )
-        lines.extend(_plain(b) for b in banner)
+    if len(resolved) == 1 or (resolved and len({r.isp.value for r in resolved}) == 1):
+        res = resolved[0]
+        banner, place_label, _colour = _headline(res)
+        lines.append(_plain(banner))
         lines.append("")
-
-    if len(groups) <= 1:
-        shown_res = resolved or results
-        head = ""
-        if len(shown_res) == 1:
-            res0 = shown_res[0]
-            head = res0.ip + (
-                f" (player {', '.join(res0.players)})" if res0.players else ""
+        for r in resolved:
+            tag = f" (player {', '.join(r.players)})" if r.players else ""
+            lines.append(f"{r.ip}{tag}")
+        place, src = _place_for(res)
+        if place:
+            chip = f"  [{src}]" if src else ""
+            lines.append(f"• {place_label}: {place}{chip}")
+        if summary.isp:
+            lines.append(_plain_bullet("Operator", summary.isp, show_hidden=False))
+        if "abuser" in res.traits:
+            lines.append("• ⚠️ Listed in abuse reports")
+    elif resolved:
+        flagged = [r for r in resolved if set(r.traits) & set(_SUSPECT)]
+        if not flagged:
+            lines.append("🏠 All real connections")
+        elif len(flagged) == len(resolved):
+            lines.append(f"🔒 All {len(resolved)} are VPN / datacenter — real locations UNKNOWN")
+        else:
+            lines.append(
+                f"🔒 {len(flagged)} of {len(resolved)} "
+                f"{'is' if len(flagged) == 1 else 'are'} VPN / datacenter — "
+                "location unknown for those"
             )
-        lines.append(f"🌐 IP Details — {head}" if head else "🌐 IP Details")
-        # Same one-chip rule as the card, so both renderings read alike.
-        isp_m, country_m, asn_m = summary.isp, summary.country, summary.asn
-        if isp_m.chip and isp_m.chip == country_m.chip == asn_m.chip:
-            isp_m = replace(isp_m, chip="")
-            country_m = replace(country_m, chip="")
-        if isp_m:
-            lines.append(_plain_bullet("ISP / Organization", isp_m))
-        if country_m:
-            lines.append(_plain_bullet("Registered country", country_m))
-        if asn_m:
-            lines.append(_plain_bullet("ASN", asn_m))
-        if len(lines) == 1:
-            lines.append("• No public ISP data returned.")
-        if summary.netname:
-            lines.append(_plain_bullet("Network / Customer", summary.netname))
-        if summary.prefixes:
-            lines.append(f"• Prefix: {' / '.join(summary.prefixes[:4])}")
-        anonymising = bool(set(summary.traits) & {*_ANON_TRAITS, "hosting"})
-        for res in resolved:
-            if res.city_region or res.domain:
-                bits = [b for b in (res.city_region, res.domain) if b]
-                label = "Server location" if anonymising else "Location (approx.)"
-                tail = " — the relay, not the user" if anonymising else ""
-                lines.append(f"• {label}: {' · '.join(bits)}{tail}")
-                break
-        if summary.country.alts:
-            spread = ", ".join(f"{label} ({n})" for label, n in summary.country.alts)
-            lines.append(f"• Sources disagree — also reported as {spread}; country unverified")
-        if summary.traits:
-            lines.append("• What this address is:")
-            lines.extend(_plain(f) for f in _flag_lines(summary.traits, bullet="   - "))
-        if len(shown_res) > 1:
-            lines.append("")
-            lines.append(f"Addresses ({len(shown_res)}):")
-            cities = {res.city_region for res in shown_res if res.city_region}
-            for res in shown_res:
-                pid = f" (player {', '.join(res.players)})" if res.players else ""
-                extra = f" — {res.city_region}" if len(cities) > 1 and res.city_region else ""
-                lines.append(f"• {res.ip}{pid}{extra}")
-    else:
-        lines.append(f"🌐 IP Details — {len(resolved)} addresses on {len(groups)} networks")
-        for group in groups:
-            lines.append("")
-            chip = f"  [{group['isp'].chip}]" if group["isp"].chip else ""
-            lines.append(f"▸ {group['isp'].value or 'unknown carrier'}{chip}")
-            meta = [m for m in (group["asn"].value, group["country"].value) if m]
-            if meta:
-                lines.append(f"  {' · '.join(meta)}")
-            for res in group["members"]:
-                tail = [t for t in (res.city_region, res.prefix, res.domain) if t]
-                pid = f" (player {', '.join(res.players)})" if res.players else ""
-                lines.append(
-                    f"  {res.ip}{pid}" + (f" — {' · '.join(tail)}" if tail else "")
-                )
+        lines.append("")
+        for r in resolved:
+            lines.append("• " + _plain(_one_line(r)).replace("`", ""))
 
     unresolved = [res for res in results if not res.resolved]
     if unresolved:
-        lines.append("")
+        if lines:  # nothing resolved — do not open the message with a blank line
+            lines.append("")
         lines.append("Not looked up:")
         for res in unresolved:
             why = res.note or "; ".join(res.failures[:2]) or "no provider returned data"
             lines.append(f"• {res.ip} — {why}")
 
-    tail = f"{len(summary.sources)}/{len(_PROVIDERS)} sources"
+    foot = [summary.asn.value] if summary.asn else []
+    if summary.prefixes:
+        foot.append(" / ".join(summary.prefixes[:2]))
+    foot.append(f"{len(summary.sources)}/{len(_PROVIDERS)} sources")
     if elapsed:
-        tail += f" · {elapsed:.1f}s"
+        foot.append(f"{elapsed:.1f}s")
     lines.append("")
-    lines.append(f"🔎 {tail}")
+    lines.append("🔎 " + " · ".join(foot))
     return "\n".join(lines)
 
 
