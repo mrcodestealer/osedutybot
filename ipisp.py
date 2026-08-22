@@ -15,7 +15,6 @@ the address is, where it is, and who runs it::
     217.145.74.203
     • VPN server: 🇸🇬 Singapore                 [IPinfo]
     • Operator: GSL Networks Pty LTD           [IPinfo +4]
-    • ⚠️ Listed in abuse reports
     🔎 AS137409 · 217.145.74.0/24 · 6/6 sources
 
 Two rules there earn their keep. When the address is a VPN, proxy, Tor node or
@@ -28,7 +27,10 @@ country plus somebody else's city — that mixing is how a card came to show
 
 ASN and prefix ride in the footer for whoever files an abuse report. Netname,
 per-flag prose and provider-by-provider disagreement are deliberately not shown;
-they pushed the answer off the card.
+they pushed the answer off the card. Nor is ipapi.is's ``is_abuser`` verdict: it
+is a bare boolean with no evidence attached, it is true for every major public
+DNS resolver, and on an address already flagged VPN or datacenter it restated
+that same fact as though it were a second one.
 
 Values are merged across several key-free public IP-intel APIs, and across all
 the IPs in one command — which is where ``AS4775 / AS132199`` comes from: three
@@ -378,7 +380,7 @@ def _fetch_ipapiis(ip: str) -> Record:
     rec.domain = _clean(asn_block.get("domain"))
     rec.traits = tuple(
         t
-        for t in ("datacenter", "vpn", "proxy", "tor", "abuser")
+        for t in ("datacenter", "vpn", "proxy", "tor")
         if data.get(f"is_{t}") is True
     )
     return rec
@@ -1194,8 +1196,6 @@ def _ip_block(res: IpResult) -> str:
     # First name only: a per-address block has no room for the aliases the
     # providers also returned for the same operator.
     tail = [res.isp.value.split(" / ")[0]]
-    if "abuser" in traits:
-        tail.append("⚠️ abuse reports")
     detail = " · ".join(_md(t) for t in tail if t)
     return "\n".join([head, where] + ([detail] if detail else []))
 
@@ -1204,10 +1204,9 @@ def build_card(results: list[IpResult], *, elapsed: float = 0.0) -> dict[str, An
     """Lark card JSON v2 — ``markdown`` components, so inline ``<text_tag>``
     chips render as real badges.
 
-    Deliberately short: a verdict, the place, the operator, and an abuse note if
-    there is one. ASN and prefix ride along in the footer for whoever files an
-    abuse report; everything else the providers return is detail that pushed the
-    answer off the card."""
+    Deliberately short: a verdict, the place, and the operator. ASN and prefix
+    ride along in the footer for whoever files an abuse report; everything else
+    the providers return is detail that pushed the answer off the card."""
     summary = summarise(results)
     resolved = [res for res in results if res.resolved]
     elements: list[dict[str, Any]] = []
@@ -1229,8 +1228,6 @@ def build_card(results: list[IpResult], *, elapsed: float = 0.0) -> dict[str, An
             lines.append(_bullet("Registered in", reg, show_hidden=False))
         if summary.isp:
             lines.append(_bullet("Operator", summary.isp, show_hidden=False))
-        if "abuser" in res.traits:
-            lines.append("- ⚠️ **Listed in abuse reports**")
         elements.append(_text_element("\n".join(lines)))
     elif resolved:
         flagged = [r for r in resolved if set(r.traits) & set(_SUSPECT)]
@@ -1306,8 +1303,6 @@ def build_text(results: list[IpResult], *, elapsed: float = 0.0) -> str:
             lines.append(_plain_bullet("Registered in", reg, show_hidden=False))
         if summary.isp:
             lines.append(_plain_bullet("Operator", summary.isp, show_hidden=False))
-        if "abuser" in res.traits:
-            lines.append("• ⚠️ Listed in abuse reports")
     elif resolved:
         flagged = [r for r in resolved if set(r.traits) & set(_SUSPECT)]
         if not flagged:
