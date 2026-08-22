@@ -82,8 +82,8 @@ import re
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field, replace
-from typing import Any, Iterator, Optional
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
 import requests
 
@@ -1094,9 +1094,9 @@ def _plain(markdown: str) -> str:
     return markdown.replace("**", "").replace("_", "")
 
 
-def _place_for(res: IpResult) -> tuple[str, str]:
+def _place_for(res: IpResult) -> tuple[str, str, str]:
     """One coherent place — country and city taken *whole* from a single
-    provider, highest display priority first. Returns (text, provider name).
+    provider, highest display priority first. Returns (text, ISO code, provider).
 
     Pasting the country that won a cross-provider vote next to some other
     provider's city is what put "Philippines" beside "Singapore, Singapore" on
@@ -1116,52 +1116,88 @@ def _place_for(res: IpResult) -> tuple[str, str]:
         city = rec.city or rec.region
         if city and city.lower() != label.lower():  # "Singapore · Singapore" is noise
             out += f" · {city}"
-        return out, rec.name
-    return "", ""
+        return out, code, rec.name
+    return "", "", ""
 
 
-def _headline(res: IpResult) -> tuple[str, str, str]:
-    """What this address is, in one line. Returns (banner, place label, colour).
-
-    The card answers one question — "where is this player" — so the answer, or
-    the honest absence of one, is the first thing on it."""
-    traits = set(res.traits)
-    if traits & {"vpn", "proxy", "tor"}:
-        what = "VPN" if "vpn" in traits else ("Tor" if "tor" in traits else "Proxy")
-        return f"🔒 **{what} detected — the user's real location is UNKNOWN**", "VPN server", "red"
-    if "hosting" in traits:
-        return (
-            "🏢 **Datacenter IP — not a home connection, real location UNKNOWN**",
-            "Server",
-            "orange",
-        )
-    place, _src = _place_for(res)
+def _headline(res: IpResult) -> tuple[str, _Kind]:
+    """The one line the card exists for: where this player is, or the honest
+    admission that the address cannot say."""
+    kind = _kind_of(set(res.traits))
+    if kind.word == "Datacenter":
+        return "🏢 **Datacenter IP — not a home connection, real location UNKNOWN**", kind
+    if kind.relay:
+        return f"{kind.emoji} **{kind.word} detected — the user's real location is UNKNOWN**", kind
+    place, _code, _src = _place_for(res)
     where = place.split(" · ")[0] or "unknown"
-    if "mobile" in traits:
-        return f"📱 **Mobile data — user is in {where}**", "Location", "blue"
-    return f"🏠 **Real connection — user is in {where}**", "Location", "green"
+    what = "Mobile data" if kind.word == "Mobile" else "Real connection"
+    return f"{kind.emoji} **{what} — user is in {where}**", kind
 
 
-def _one_line(res: IpResult) -> str:
-    """A single address on one line, for the multi-IP card."""
-    traits = set(res.traits)
+def _registered(res: IpResult, place_code: str) -> Merged:
+    """The country the address is *registered* to, but only when that is a second
+    answer — i.e. it differs from where the geolocation puts the address.
+
+    For a VPN exit those two routinely disagree, and the pair is what a reader
+    actually needs: the server answers in one country while the block belongs to
+    another. When they agree, printing the same country twice adds nothing."""
+    reg = res.country
+    if not reg or (place_code and place_code in reg.keys):
+        return Merged()
+    return reg
+
+
+@dataclass(frozen=True)
+class _Kind:
+    """How one address is classified, and every label that follows from it. One
+    place to decide it, so the single-address card and the multi-address blocks
+    cannot drift into calling the same address different things."""
+
+    emoji: str
+    word: str  # "VPN", "Datacenter", … — the block heading
+    label: str  # bullet label for the place: "VPN server", "Location", …
+    inline: str  # same, lowercased where it reads as prose: "(vpn exit)"
+    colour: str
+    relay: bool  # geolocation describes a server, not the user
+
+
+def _kind_of(traits: set[str]) -> _Kind:
     if traits & {"vpn", "proxy", "tor"}:
-        mark = "🔒 VPN"
-    elif "hosting" in traits:
-        mark = "🏢 Datacenter"
-    elif "mobile" in traits:
-        mark = "📱 Mobile"
-    else:
-        mark = "🏠 Real"
-    place, _src = _place_for(res)
-    # First name only: one line per address has no room for the aliases the
+        word = "VPN" if "vpn" in traits else ("Tor" if "tor" in traits else "Proxy")
+        return _Kind("🔒", word, f"{word} server", f"{word} server", "red", True)
+    if "hosting" in traits:
+        return _Kind("🏢", "Datacenter", "Server", "server", "orange", True)
+    if "mobile" in traits:
+        return _Kind("📱", "Mobile", "Location", "", "blue", False)
+    return _Kind("🏠", "Real", "Location", "", "green", False)
+
+
+def _ip_block(res: IpResult) -> str:
+    """One address as its own small block, for the multi-IP card.
+
+    Everything on one line wrapped mid-sentence in Lark once the operator name
+    was appended, so a two-address answer arrived as four ragged lines with no
+    visible boundary between them. A heading line plus indented detail survives
+    wrapping."""
+    traits = set(res.traits)
+    kind = _kind_of(traits)
+    place, code, _src = _place_for(res)
+    head = f"{kind.emoji} **{kind.word}** · `{_md(res.ip)}`{_players_md(res)}"
+
+    where = _md(place) or "_location unknown_"
+    if kind.inline:  # a relay's own city, so say whose city it is
+        where += f" _({kind.inline})_"
+    reg = _registered(res, code)
+    if reg:
+        where += f" · registered in {_md(reg.value)}"
+
+    # First name only: a per-address block has no room for the aliases the
     # providers also returned for the same operator.
-    operator = res.isp.value.split(" / ")[0]
-    bits = [mark, place or "location unknown", operator]
+    tail = [res.isp.value.split(" / ")[0]]
     if "abuser" in traits:
-        bits.append("⚠️ abuse reports")
-    body = " · ".join(_md(b) for b in bits if b)
-    return f"`{_md(res.ip)}`{_players_md(res)} — {body}"
+        tail.append("⚠️ abuse reports")
+    detail = " · ".join(_md(t) for t in tail if t)
+    return "\n".join([head, where] + ([detail] if detail else []))
 
 
 def build_card(results: list[IpResult], *, elapsed: float = 0.0) -> dict[str, Any]:
@@ -1179,14 +1215,18 @@ def build_card(results: list[IpResult], *, elapsed: float = 0.0) -> dict[str, An
 
     if len(resolved) == 1 or (resolved and len({r.isp.value for r in resolved}) == 1):
         res = resolved[0]
-        banner, place_label, colour = _headline(res)
+        banner, kind = _headline(res)
+        colour, place_label = kind.colour, kind.label
         lines = [banner, ""]
         addrs = ", ".join(f"`{_md(r.ip)}`{_players_md(r)}" for r in resolved)
         lines.append(addrs)
-        place, src = _place_for(res)
+        place, code, src = _place_for(res)
         if place:
             chip = f" {_tag(src)}" if src else ""
             lines.append(f"- **{place_label}:** {_md(place)}{chip}")
+        reg = _registered(res, code)
+        if reg:
+            lines.append(_bullet("Registered in", reg, show_hidden=False))
         if summary.isp:
             lines.append(_bullet("Operator", summary.isp, show_hidden=False))
         if "abuser" in res.traits:
@@ -1208,9 +1248,8 @@ def build_card(results: list[IpResult], *, elapsed: float = 0.0) -> dict[str, An
                 "location unknown for those**",
                 "orange",
             )
-        elements.append(
-            _text_element("\n".join([banner, ""] + [_one_line(r) for r in resolved]))
-        )
+        blocks = "\n\n".join(_ip_block(r) for r in resolved)
+        elements.append(_text_element(f"{banner}\n\n{blocks}"))
 
     skipped = _skipped_lines(results)
     if skipped:
@@ -1228,6 +1267,8 @@ def build_card(results: list[IpResult], *, elapsed: float = 0.0) -> dict[str, An
     foot.append(f"🔎 {len(summary.sources)}/{len(_PROVIDERS)} sources")
     if elapsed:
         foot.append(f"{elapsed:.1f}s")
+    if elements and not skipped:  # a rule already separates the skipped block
+        elements.append({"tag": "hr"})
     elements.append(_text_element(f"_{_md(' · '.join(foot))}_"))
 
     return {
@@ -1249,16 +1290,20 @@ def build_text(results: list[IpResult], *, elapsed: float = 0.0) -> str:
 
     if len(resolved) == 1 or (resolved and len({r.isp.value for r in resolved}) == 1):
         res = resolved[0]
-        banner, place_label, _colour = _headline(res)
+        banner, kind = _headline(res)
+        place_label = kind.label
         lines.append(_plain(banner))
         lines.append("")
         for r in resolved:
             tag = f" (player {', '.join(r.players)})" if r.players else ""
             lines.append(f"{r.ip}{tag}")
-        place, src = _place_for(res)
+        place, code, src = _place_for(res)
         if place:
             chip = f"  [{src}]" if src else ""
             lines.append(f"• {place_label}: {place}{chip}")
+        reg = _registered(res, code)
+        if reg:
+            lines.append(_plain_bullet("Registered in", reg, show_hidden=False))
         if summary.isp:
             lines.append(_plain_bullet("Operator", summary.isp, show_hidden=False))
         if "abuser" in res.traits:
@@ -1275,9 +1320,9 @@ def build_text(results: list[IpResult], *, elapsed: float = 0.0) -> str:
                 f"{'is' if len(flagged) == 1 else 'are'} VPN / datacenter — "
                 "location unknown for those"
             )
-        lines.append("")
         for r in resolved:
-            lines.append("• " + _plain(_one_line(r)).replace("`", ""))
+            lines.append("")
+            lines.extend(_plain(_ip_block(r)).replace("`", "").split("\n"))
 
     unresolved = [res for res in results if not res.resolved]
     if unresolved:
