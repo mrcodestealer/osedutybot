@@ -2330,6 +2330,20 @@ def _is_isp_chat(chat_id: Optional[str]) -> bool:
     return (chat_id or "").strip() in ISP_CHAT_IDS
 
 
+# Extra groups that may run `/isp` WITHOUT becoming isp-only. Unlike
+# ISP_CHAT_IDS the binding here is one-way: `/isp` is added to what the group
+# can reach, and every other command / duty routing / AI chat keeps working.
+# Use this for a normal working group that just wants the IP lookup.
+ISP_EXTRA_CHAT_IDS = {
+    c.strip()
+    for c in (
+        os.getenv("ISP_EXTRA_CHAT_IDS", "").strip()
+        or "oc_ad9b5bdbb2826ba2ee9730920ef25432"
+    ).split(",")
+    if c.strip()
+}
+
+
 # Admins who may also run `/isp` in a DM with the bot. This does NOT make their
 # DM isp-only — every other command still works there; it only adds `/isp` to
 # what they can reach privately.
@@ -2346,8 +2360,10 @@ ISP_PM_ADMIN_OPEN_IDS = {
 def _isp_command_allowed(
     chat_id: Optional[str], chat_type: Optional[str], sender_id: Optional[str]
 ) -> bool:
-    """`/isp` runs in its dedicated group, or in a DM with an allowed admin."""
-    if _is_isp_chat(chat_id):
+    """`/isp` runs in its dedicated group, an extra allowed group, or in a DM
+    with an allowed admin."""
+    _cid = (chat_id or "").strip()
+    if _is_isp_chat(_cid) or _cid in ISP_EXTRA_CHAT_IDS:
         return True
     return (chat_type or "").strip() == "p2p" and (
         sender_id or ""
