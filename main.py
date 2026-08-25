@@ -2338,7 +2338,8 @@ ISP_EXTRA_CHAT_IDS = {
     c.strip()
     for c in (
         os.getenv("ISP_EXTRA_CHAT_IDS", "").strip()
-        or "oc_ad9b5bdbb2826ba2ee9730920ef25432"
+        or "oc_ad9b5bdbb2826ba2ee9730920ef25432,"
+        "oc_51b6fbf2636525acfb4ead3afa3c93ce"
     ).split(",")
     if c.strip()
 }
