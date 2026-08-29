@@ -7,23 +7,50 @@ the address is, where it is, and who runs it::
 
     🏠 Real connection — user is in 🇵🇭 Philippines
     112.198.1.1
-    • Location: 🇵🇭 Philippines · Quezon City   [IPinfo]
+    • Location: 🇵🇭 Philippines · Quezon City   [IPinfo +2]
     • Operator: Globe Telecoms                 [IPinfo +4]
     🔎 AS4775 · 112.198.0.0/16 · 6/6 sources
 
     🔒 VPN detected — the user's real location is UNKNOWN
-    217.145.74.203
-    • VPN server: 🇸🇬 Singapore                 [IPinfo]
+    217.145.74.157
+    • VPN server: 🇵🇭 Philippines · Makati City [ip-api +2]
     • Operator: GSL Networks Pty LTD           [IPinfo +4]
     🔎 AS137409 · 217.145.74.0/24 · 6/6 sources
 
-Two rules there earn their keep. When the address is a VPN, proxy, Tor node or
+    🏢 Datacenter IP — not a home connection, real location UNKNOWN
+    2001:4860:4860::8888
+    • Server: 🇺🇸 United States · Mountain View [IPinfo +1] / 🇨🇦 Canada · Montreal [ip-api +1]
+      ↳ both are guesses at this one datacenter server — an address here does
+        not locate a person
+    • Operator: Google LLC                     [IPinfo +4]
+    🔎 AS15169 · 2001:4860::/32 · 6/6 sources
+
+Three rules there earn their keep. When the address is a VPN, proxy, Tor node or
 datacenter IP the headline says the location is unknown and the place is
 labelled as the *server*: an earlier card showed a bare "Location: Singapore"
 for a relay and it was read as the player being in Singapore. And the place is
 taken whole from one provider rather than assembled from the best-supported
 country plus somebody else's city — that mixing is how a card came to show
-"Philippines" beside "Singapore, Singapore".
+"Philippines" beside "Singapore, Singapore". A place chip therefore counts only
+the sources backing the line as written: five providers may agree on Philippines
+while naming five different cities, and "[IPinfo +4]" beside one of those cities
+would borrow the Operator line's vocabulary — where it does mean five sources
+returned the same string — to dress one source's guess as a consensus.
+
+The third is that when the sources split on the country, every answer rides on
+that one place line under that one label, best-supported first. They used to sit
+on two bullets, the second of them called "Registered in" — a label that never
+read whois at all, it returned the majority vote across the same geolocation
+providers as the line above it. An operator read the pair as two facts about two
+places (the server over here, the player over there) and concluded the card had
+located the human. It had not; nothing in this module can see behind a VPN. The
+real registration for that block is GB (RIPE rir-geo, the /20) and VG (the RDAP
+/24 object) — neither country the bullet ever printed, so the label was not
+merely vague, it named a fact this module never fetched. Which answer leads is
+decided by how many providers back it, not by their display order: for
+217.145.74.157 three sources said Philippines while IPinfo alone said Singapore,
+then Australia an hour later for the same address, and the card headlined the
+one answer that kept moving while the player's own VPN client said Philippines.
 
 ASN and prefix ride in the footer for whoever files an abuse report. Netname,
 per-flag prose and provider-by-provider disagreement are deliberately not shown;
@@ -756,6 +783,11 @@ class IpResult:
     def asn(self) -> Merged:
         return _merge_asns([(n, r.key) for r in self.good for n in r.asns])
 
+    # Rendered nowhere since "Registered in" was deleted — summarise() computes
+    # its own. Do not wire a displayed country back to this: a vote winner has
+    # no city to travel with, which is how "Philippines" ended up beside
+    # "Singapore, Singapore". Displayed places come from _places_for(), which
+    # keeps each answer whole and one provider's own.
     @property
     def country(self) -> Merged:
         return _merge_country(self.good)
@@ -1056,6 +1088,22 @@ def _text_element(content: str) -> dict[str, Any]:
 
 
 
+# Competing places join with " / " — the separator _merge_names, _merge_asns and
+# _merge_country already use — but glued to the flag that follows it with a
+# NO-BREAK SPACE. config.width_mode is "fill" and the place line is the longest
+# on the card, so it wraps. If the break lands after the slash, the next visual
+# line opens with a bare "🇸🇬 Singapore" and the "VPN server:" label that was
+# supposed to govern BOTH countries is no longer in front of the second one.
+# That free-standing country claim is the whole bug this change removes, and a
+# wrap must not be able to put it back.
+_PLACE_JOIN = " /\u00a0"  # the space after "/" is a NO-BREAK SPACE
+
+# The short form of the dispute wording, for the multi-IP block, which has no
+# room for the sentence _Kind carries. Both forms must keep saying "disagree":
+# any phrasing that implies the address moved from one country to the other is
+# the misreading this exists to stop.
+_DISPUTE_SHORT = "sources disagree on this address"
+
 _SUSPECT = ("vpn", "proxy", "tor", "hosting")
 
 
@@ -1071,6 +1119,24 @@ def _plain_bullet(label: str, merged: Merged, *, show_hidden: bool = True) -> st
     extra = f" (+{merged.hidden} more)" if merged.hidden and show_hidden else ""
     chip = f"  [{merged.chip}]" if merged.chip else ""
     return f"• {label}: {merged.value}{extra}{chip}"
+
+
+def _place_bullet(label: str, places: list[Merged]) -> str:
+    """Every competing place on ONE bullet, under ONE label.
+
+    The second country used to have a bullet of its own, and a bullet of its own
+    is what let it float free of the word "server": two labelled lines read as
+    two facts about two places — the server over here, the player over there —
+    and an operator concluded the card had located the human. It had not.
+    Sharing the label is what makes both flags visibly answers to the same
+    question about the same address."""
+    parts = [f"{_md(p.value)}{f' {_tag(p.chip)}' if p.chip else ''}" for p in places]
+    return f"- **{_md(label)}:** {_PLACE_JOIN.join(parts)}"
+
+
+def _plain_place_bullet(label: str, places: list[Merged]) -> str:
+    parts = [f"{p.value}{f'  [{p.chip}]' if p.chip else ''}" for p in places]
+    return f"• {label}: {_PLACE_JOIN.join(parts)}"
 
 
 def _players_md(res: IpResult) -> str:
@@ -1096,30 +1162,95 @@ def _plain(markdown: str) -> str:
     return markdown.replace("**", "").replace("_", "")
 
 
-def _place_for(res: IpResult) -> tuple[str, str, str]:
-    """One coherent place — country and city taken *whole* from a single
-    provider, highest display priority first. Returns (text, ISO code, provider).
+def _places_for(res: IpResult) -> list[Merged]:
+    """The competing places for one address, best-supported first.
 
-    Pasting the country that won a cross-provider vote next to some other
-    provider's city is what put "Philippines" beside "Singapore, Singapore" on
-    one card, and no reader could make sense of that. A place is only meaningful
-    as one provider's single opinion, so that is how it is shown."""
+    Each entry is still one provider's *whole* answer — country and city taken
+    together from a single record. Pasting the country that won a cross-provider
+    vote next to some other provider's city is what put "Philippines" beside
+    "Singapore, Singapore" on one card, and no reader could make sense of that.
+    That invariant is unchanged; what changed is which record leads.
+
+    This used to return the first answer by display priority, and it was the only
+    merger in this module that ranked priority ahead of support — _merge_names,
+    _merge_asns and _merge_country all sort on -len(providers) first. On a VPN
+    block that costs real accuracy: for 217.145.74.157 three sources said
+    Philippines while IPinfo alone said Singapore, then Australia an hour later
+    for the same address, and because IPinfo is first in _PROVIDERS the card
+    headlined the one answer that kept moving. The operator's own VPN client
+    said Philippines, so the card looked simply wrong. Support decides now, and
+    display priority only breaks a tie.
+
+    At most two are returned, and the runner-up must be a real second opinion
+    rather than one provider's outlier — a third country, or a lone dissenter
+    against a clear majority, is the noise this line exists to suppress."""
     names: dict[str, str] = {}
     for rec in res.good:
         code = rec.country_code.upper()
         if code and rec.country_name and code not in names:
             names[code] = rec.country_name
+    groups: dict[str, dict[str, Any]] = {}
     for rec in sorted(res.good, key=lambda r: r.index):
         code = rec.country_code.upper()
         if not code:
             continue
+        group = groups.setdefault(
+            code, {"providers": set(), "recs": [], "rec": rec, "seq": len(groups)}
+        )
+        group["providers"].add(rec.key)
+        group["recs"].append(rec)
+        # Keep the highest-priority record that actually carries a city: IPinfo
+        # returns a code with no country name, so a group led by it would render
+        # a bare "🇦🇺 AU" when a later provider had the full "Australia · Sydney".
+        held = group["rec"]
+        if not (held.city or held.region) and (rec.city or rec.region):
+            group["rec"] = rec
+    if not groups:
+        return []
+
+    ordered = sorted(
+        groups.items(),
+        key=lambda kv: (
+            -len(kv[1]["providers"]),
+            min(_PROVIDER_INDEX.get(p, len(_PROVIDERS)) for p in kv[1]["providers"]),
+            kv[1]["seq"],  # deterministic: ties keep first-seen order
+        ),
+    )
+    top = len(ordered[0][1]["providers"])
+    out: list[Merged] = []
+    for code, group in ordered[:2]:  # a third country restores the skim surface
+        support = len(group["providers"])
+        # One provider geolocating a VPN block to its own guess is not a second
+        # country. Same rule _merge_country applies, same reason. A runner-up
+        # that TIES the leader is never an outlier, though — when only two
+        # sources answered and they disagreed, dropping one would hide a
+        # coin-flip behind a display-order tiebreak and show it as settled.
+        if out and support < top and (support < 2 or 2 * support < top):
+            break
+        rec = group["rec"]
         label = names.get(code) or rec.country_name or code
-        out = f"{_flag(code)} {label}".strip()
+        text = f"{_flag(code)} {label}".strip()
         city = rec.city or rec.region
-        if city and city.lower() != label.lower():  # "Singapore · Singapore" is noise
-            out += f" · {city}"
-        return out, code, rec.name
-    return "", "", ""
+        shown = city if city and city.lower() != label.lower() else ""  # "Singapore · Singapore" is noise
+        if shown:
+            text += f" · {shown}"
+        # The chip counts what backs the line as WRITTEN, not just its country.
+        # Everyone in this group agreed on the country, but a provider that named
+        # a different city contradicts half of what is displayed, and counting it
+        # would turn one source's guess at a city into "[IPinfo +5]" — the same
+        # vocabulary the Operator line below uses to mean six sources returned
+        # the same string. A provider that offered no city at all contradicts
+        # nothing, so it still counts.
+        backers = {
+            r.key
+            for r in group["recs"]
+            if not shown
+            or not (r.city or r.region)
+            or (r.city or r.region).strip().lower() == shown.strip().lower()
+        }
+        chip, sources = _chip_for(backers)
+        out.append(Merged(value=text, chip=chip, sources=sources, keys=frozenset({code})))
+    return out
 
 
 def _headline(res: IpResult) -> tuple[str, _Kind]:
@@ -1130,23 +1261,27 @@ def _headline(res: IpResult) -> tuple[str, _Kind]:
         return "🏢 **Datacenter IP — not a home connection, real location UNKNOWN**", kind
     if kind.relay:
         return f"{kind.emoji} **{kind.word} detected — the user's real location is UNKNOWN**", kind
-    place, _code, _src = _place_for(res)
-    where = place.split(" · ")[0] or "unknown"
+    places = _places_for(res)
+    where = places[0].value.split(" · ")[0] if places else "unknown"
+    if len(places) > 1:
+        # Never state a country flat while the bullet underneath is about to
+        # show a second one — the headline is the line most people read alone.
+        where += " (disputed)"
     what = "Mobile data" if kind.word == "Mobile" else "Real connection"
     return f"{kind.emoji} **{what} — user is in {where}**", kind
 
 
-def _registered(res: IpResult, place_code: str) -> Merged:
-    """The country the address is *registered* to, but only when that is a second
-    answer — i.e. it differs from where the geolocation puts the address.
-
-    For a VPN exit those two routinely disagree, and the pair is what a reader
-    actually needs: the server answers in one country while the block belongs to
-    another. When they agree, printing the same country twice adds nothing."""
-    reg = res.country
-    if not reg or (place_code and place_code in reg.keys):
-        return Merged()
-    return reg
+# Deleted: _registered(). It printed a bullet labelled "Registered in" that
+# never read whois — it returned IpResult.country, the majority vote across the
+# same geolocation providers the line above it already quoted. So a card showed
+# "VPN server: 🇸🇬 Singapore" over "Registered in: 🇵🇭 Philippines", an operator
+# read it as two facts about two places — the server over here, the player over
+# there — and concluded the bot had located the human behind the VPN. Nothing
+# here can do that. The real registration for that block is GB (RIPE rir-geo,
+# the /20) and VG (the RDAP /24 object), neither country the bullet ever
+# printed, so the label did not merely read loosely: it named a fact this
+# module never fetched. The genuine second opinion it was groping for is now
+# the second entry _places_for() returns, under the same label as the first.
 
 
 @dataclass(frozen=True)
@@ -1161,17 +1296,58 @@ class _Kind:
     inline: str  # same, lowercased where it reads as prose: "(vpn exit)"
     colour: str
     relay: bool  # geolocation describes a server, not the user
+    # The ↳ sentence, as a template taking {subj}; shown only when sources split.
+    dispute: str
+    noun: str  # what one address IS here, for {subj} — pluralised with "s"
 
 
 def _kind_of(traits: set[str]) -> _Kind:
     if traits & {"vpn", "proxy", "tor"}:
         word = "VPN" if "vpn" in traits else ("Tor" if "tor" in traits else "Proxy")
-        return _Kind("🔒", word, f"{word} server", f"{word} server", "red", True)
+        return _Kind(
+            "🔒", word, f"{word} server", f"{word} server", "red", True,
+            "both are guesses at {subj} — not where the user is",
+            f"{word} exit node",
+        )
     if "hosting" in traits:
-        return _Kind("🏢", "Datacenter", "Server", "server", "orange", True)
+        return _Kind(
+            "🏢", "Datacenter", "Server", "server", "orange", True,
+            "both are guesses at {subj} — an address here does not locate a person",
+            "datacenter server",
+        )
     if "mobile" in traits:
-        return _Kind("📱", "Mobile", "Location", "", "blue", False)
-    return _Kind("🏠", "Real", "Location", "", "green", False)
+        return _Kind(
+            "📱", "Mobile", "Location", "", "blue", False,
+            "sources disagree on {subj}", "address",
+        )
+    return _Kind(
+        "🏠", "Real", "Location", "", "green", False,
+        "sources disagree on {subj}", "address",
+    )
+
+
+def _place_note(places: list[Merged], kind: _Kind, count: int = 1) -> str:
+    """The one sentence saying what two places actually mean.
+
+    An address has ONE location, so two answers mean the sources disagree about
+    it — it never means the address travelled from one to the other, which is
+    precisely how a reader turns "🇵🇭 / 🇸🇬" into "he opened a Philippine VPN
+    into Singapore". That story is what an operator built out of two bullets,
+    and it is the reason this line exists. The wording comes from _Kind so the
+    single-address card and the multi-address block cannot spell it two ways,
+    and so a datacenter is not described in terms of a user who is very likely
+    not behind it. The ↳ carries the attachment to the bullet above even if
+    Lark collapses the indent.
+
+    ``count`` is how many addresses the bullet above is standing for. The
+    single-address branch of build_card also runs when several addresses share
+    one operator, and there the sentence would otherwise say "this one exit
+    node" directly beneath a list of five of them — trading the misreading this
+    line removes for a new one."""
+    if len(places) < 2:
+        return ""
+    subj = f"this one {kind.noun}" if count == 1 else f"these {count} {kind.noun}s"
+    return f"  _↳ {kind.dispute.format(subj=subj)}_"
 
 
 def _ip_block(res: IpResult) -> str:
@@ -1183,15 +1359,15 @@ def _ip_block(res: IpResult) -> str:
     wrapping."""
     traits = set(res.traits)
     kind = _kind_of(traits)
-    place, code, _src = _place_for(res)
+    places = _places_for(res)
     head = f"{kind.emoji} **{kind.word}** · `{_md(res.ip)}`{_players_md(res)}"
 
-    where = _md(place) or "_location unknown_"
-    if kind.inline:  # a relay's own city, so say whose city it is
-        where += f" _({kind.inline})_"
-    reg = _registered(res, code)
-    if reg:
-        where += f" · registered in {_md(reg.value)}"
+    # No chips in a per-address block — there is no room, the footer already
+    # carries the source count, and two flags already show the split.
+    where = _PLACE_JOIN.join(_md(p.value) for p in places) or "_location unknown_"
+    quals = [q for q in (kind.inline, _DISPUTE_SHORT if len(places) > 1 else "") if q]
+    if quals:  # a relay's own city, so say whose city it is
+        where += f" _({'; '.join(quals)})_"
 
     # First name only: a per-address block has no room for the aliases the
     # providers also returned for the same operator.
@@ -1219,13 +1395,12 @@ def build_card(results: list[IpResult], *, elapsed: float = 0.0) -> dict[str, An
         lines = [banner, ""]
         addrs = ", ".join(f"`{_md(r.ip)}`{_players_md(r)}" for r in resolved)
         lines.append(addrs)
-        place, code, src = _place_for(res)
-        if place:
-            chip = f" {_tag(src)}" if src else ""
-            lines.append(f"- **{place_label}:** {_md(place)}{chip}")
-        reg = _registered(res, code)
-        if reg:
-            lines.append(_bullet("Registered in", reg, show_hidden=False))
+        places = _places_for(res)
+        if places:
+            lines.append(_place_bullet(place_label, places))
+            note = _place_note(places, kind, len(resolved))
+            if note:
+                lines.append(note)
         if summary.isp:
             lines.append(_bullet("Operator", summary.isp, show_hidden=False))
         elements.append(_text_element("\n".join(lines)))
@@ -1294,13 +1469,12 @@ def build_text(results: list[IpResult], *, elapsed: float = 0.0) -> str:
         for r in resolved:
             tag = f" (player {', '.join(r.players)})" if r.players else ""
             lines.append(f"{r.ip}{tag}")
-        place, code, src = _place_for(res)
-        if place:
-            chip = f"  [{src}]" if src else ""
-            lines.append(f"• {place_label}: {place}{chip}")
-        reg = _registered(res, code)
-        if reg:
-            lines.append(_plain_bullet("Registered in", reg, show_hidden=False))
+        places = _places_for(res)
+        if places:
+            lines.append(_plain_place_bullet(place_label, places))
+            note = _place_note(places, kind, len(resolved))
+            if note:
+                lines.append(_plain(note))
         if summary.isp:
             lines.append(_plain_bullet("Operator", summary.isp, show_hidden=False))
     elif resolved:
