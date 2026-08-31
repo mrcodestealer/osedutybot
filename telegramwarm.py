@@ -535,7 +535,10 @@ _STEP_WORDS = {
     "code": ("we've sent", "we have sent", "sent the code", "enter code",
              "check your telegram", "type it below", "sent you a message",
              "code we sent"),
-    "phone": ("phone number", "confirm your country"),
+    # Only the distinctive phrase. A bare "phone number" would also match the QR
+    # screen's footer AND the code screen (which offers to correct the number),
+    # so it cannot identify the phone form on its own.
+    "phone": ("confirm your country",),
 }
 
 
@@ -548,10 +551,20 @@ def _auth_step(probe: dict) -> str:
         return "password"
     if probe.get("qrCanvas"):
         return "qr"
+    editables = probe.get("editables", 0) or 0
+    # The phone form is the only auth screen carrying a country selector, so it is
+    # the one identified positively — two fields plus the word "country".
+    if any(w in text for w in _STEP_WORDS["phone"]) or (editables >= 2 and "country" in text):
+        return "phone"
     if any(w in text for w in _STEP_WORDS["code"]):
         return "code"
-    if any(w in text for w in _STEP_WORDS["phone"]):
-        return "phone"
+    # Structural fallback: an auth screen with a field that is not the QR, the
+    # password or the phone form is the code step. Matching the copy alone is too
+    # brittle — Telegram headlines that screen with the phone NUMBER and rewords it
+    # per delivery method (app / SMS / call), so unseen wording must not read as a
+    # failure when the code box is plainly sitting there.
+    if editables >= 1:
+        return "code"
     return "unknown_step"
 
 
@@ -891,6 +904,9 @@ class _TelegramWarm:
         # pending code form. The chat poll runs every 120s, so without this guard a
         # code login would almost always be destroyed before it could be used.
         self._awaiting_code = False
+        # Set by a NEW login request so an in-flight QR wait gives up its hold on the
+        # worker thread instead of blocking the user for the full login timeout.
+        self._cancel_login = threading.Event()
         self._started = False
         self._start_lock = threading.Lock()
 
@@ -955,9 +971,11 @@ class _TelegramWarm:
         self._tasks.put({"kind": "ensure", "auto": auto})
 
     def request_login(self, chat_id: str | None = None) -> None:
+        self._cancel_login.set()      # bump any QR wait already holding the worker
         self._tasks.put({"kind": "login", "chat_id": chat_id})
 
     def request_code_login(self, chat_id: str | None = None) -> None:
+        self._cancel_login.set()
         self._tasks.put({"kind": "login_code", "chat_id": chat_id})
 
     def submit_code(self, code: str, chat_id: str | None = None) -> None:
@@ -1083,15 +1101,20 @@ class _TelegramWarm:
             return
 
         # verdict == "login" → no session, or it was revoked.
-        _wset(phase="login", detail="not logged in")
-        if task.get("auto") and not _get_needs_manual():
-            self._do_qr_login()
-        else:
-            _alert_login_failed("no Telegram Web session — waiting for /logintelegram")
-            print("[tg-warm] not logged in; waiting for /logintelegram", flush=True)
+        #
+        # Deliberately NO automatic QR here. Posting one unprompted would (a) hijack
+        # this single worker thread for the whole login timeout, queueing any
+        # /logintelegram or /telegramcode the user then sends, and (b) spam the group
+        # with QRs nobody asked for. The spec is to *report* the failure and wait for
+        # an explicit /logintelegram.
+        _wset(phase="login", detail="not logged in — run /logintelegram")
+        _set_needs_manual(True)
+        _alert_login_failed("no Telegram Web session — run /logintelegram to sign in")
+        print("[tg-warm] not logged in; waiting for /logintelegram", flush=True)
 
     def _handle_login(self, task: dict) -> None:
         chat_id = task.get("chat_id")
+        self._cancel_login.clear()    # this IS the new request
         if self._login_in_progress:
             if chat_id:
                 send_text(chat_id, "⏳ Telegram login already in progress — check the group for the QR.")
@@ -1116,6 +1139,7 @@ class _TelegramWarm:
         """Phone + code login: enter the number, ask Telegram to send the code,
         then wait for the human to relay it with /telegramcode."""
         chat_id = task.get("chat_id") or _qr_chat_default()
+        self._cancel_login.clear()    # this IS the new request
         if not self._healthy():
             self._launch()
         verdict = self._check_auth()
@@ -1267,6 +1291,9 @@ class _TelegramWarm:
             last_sent = 0.0
             resend_sec = 60  # Telegram rotates the QR itself; re-post periodically
             while time.time() < deadline:
+                if self._cancel_login.is_set():
+                    print("[tg-warm] QR wait cancelled by a newer login request", flush=True)
+                    return False
                 verdict = _classify(_probe(self._page))
 
                 if verdict == "password":
