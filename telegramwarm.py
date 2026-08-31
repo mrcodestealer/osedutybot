@@ -877,6 +877,7 @@ def _submit_code(page, code: str, *, log=print) -> tuple[str, dict]:
 
     deadline = time.time() + 40
     verdict = "login"
+    tried_2fa = False
     while time.time() < deadline:
         page.wait_for_timeout(1500)
         probe = _probe(page)
@@ -884,10 +885,55 @@ def _submit_code(page, code: str, *, log=print) -> tuple[str, dict]:
         if verdict == "authenticated":
             return verdict, probe
         if verdict == "password":
+            # ONCE only. A wrong password leaves the verdict at 'password', so
+            # retrying inside this loop would fire the same bad value every few
+            # seconds and get the account flood-limited by Telegram.
+            if tried_2fa:
+                log("[tg-warm] still on the password screen — the password was refused")
+                return "password_refused", probe
+            tried_2fa = True
             if _maybe_fill_2fa(page, log=log):
-                continue          # password submitted, keep waiting for the client
+                continue          # submitted; keep waiting for the client to load
             return "password", probe
     return verdict, _probe(page)
+
+
+def _secret_from_env_file(key: str) -> str:
+    """Read one key straight out of .env.
+
+    ``load_dotenv()`` runs once at import, so a value added to .env after the bot
+    started is invisible to the process until a restart — which is a poor trade for
+    a value only needed at the moment a login is in progress. This re-reads the file
+    on demand. The value is returned to the caller and never logged.
+    """
+    try:
+        for raw in _ENV_PATH.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, _, val = line.partition("=")
+            if name.strip() != key:
+                continue
+            val = val.strip()
+            # Strip one layer of matching quotes; systemd and dotenv both allow them.
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+                val = val[1:-1]
+            if val:
+                return val            # keep scanning only if empty; last wins otherwise
+    except Exception as err:
+        print(f"[tg-warm] could not read {_ENV_PATH.name}: {err!r}", flush=True)
+    return ""
+
+
+def _2fa_password() -> tuple[str, str]:
+    """(password, source) — process env first, then a live re-read of .env."""
+    pwd = os.getenv("TELEGRAM_2FA_PASSWORD", "")
+    if pwd:
+        return pwd, "process env"
+    pwd = _secret_from_env_file("TELEGRAM_2FA_PASSWORD")
+    if pwd:
+        return pwd, ".env (re-read; the running process had it unset)"
+    return "", "not found"
 
 
 def _maybe_fill_2fa(page, *, log=print) -> bool:
@@ -898,11 +944,16 @@ def _maybe_fill_2fa(page, *, log=print) -> bool:
     caller screenshots the prompt to Lark and lets a human finish. The value is
     read straight from the environment and never logged or persisted.
     """
-    pwd = os.getenv("TELEGRAM_2FA_PASSWORD", "")
+    pwd, source = _2fa_password()
     if not pwd:
-        log("[tg-warm] 2FA prompt reached but TELEGRAM_2FA_PASSWORD is unset")
+        log("[tg-warm] 2FA prompt reached but TELEGRAM_2FA_PASSWORD is unset "
+            "(checked the process env AND .env)")
         return False
+    log(f"[tg-warm] filling the 2FA password from {source}")
     try:
+        # _fill_auth_field clears the box after focusing it (fill() replaces, and the
+        # contenteditable path does Ctrl+A/Delete), so leftover text from a previous
+        # failed attempt is not appended to.
         if not _fill_auth_field(page, pwd, log=log):
             return False
         _click_next(page)
@@ -1377,6 +1428,23 @@ class _TelegramWarm:
                 _send_shot(chat_id, shot)
             return
 
+        if verdict == "password_refused":
+            detail = "two-step verification password refused"
+            _wset(phase="password", detail=detail, last_error=detail)
+            send_text(
+                chat_id,
+                "❌ Telegram: the code was accepted, but the two-step verification "
+                f"password was REFUSED.\n"
+                f"Fix TELEGRAM_2FA_PASSWORD in {_ENV_PATH.name} — it is re-read on "
+                "each attempt, so no restart is needed — then run /logintelegram code "
+                "again.\n"
+                "It was tried once only, on purpose: Telegram flood-limits repeated "
+                "wrong passwords, which can lock the account out for hours.",
+            )
+            if shot:
+                _send_shot(chat_id, shot)
+            return
+
         if verdict == "password":
             self._notify_password_needed(chat_id)
             return
@@ -1403,10 +1471,17 @@ class _TelegramWarm:
             self._page.screenshot(path=shot)
             send_text(
                 target,
-                f"{mention}🟠 Telegram: the QR was accepted, but this account has "
-                f"two-step verification enabled and no password is configured.\n"
-                f"Set TELEGRAM_2FA_PASSWORD in .env, restart the bot, then run "
-                f"/logintelegram again.",
+                f"{mention}🟠 Telegram: login accepted, but this account has two-step "
+                f"verification and no password could be found.\n"
+                f"Looked in: the bot process environment AND {_ENV_PATH.name} "
+                f"(re-read live).\n"
+                f"Add a line to {_ENV_PATH.name} — no restart needed, it is re-read "
+                f"each attempt:\n"
+                f"    TELEGRAM_2FA_PASSWORD=your-password\n"
+                f"Then run /logintelegram code again.\n"
+                f"If the field in the screenshot already shows text, that was a failed "
+                f"attempt — Telegram rate-limits repeated wrong passwords, so fix the "
+                f"value before retrying.",
             )
             _send_shot(target, shot)
         except Exception as err:
@@ -1423,6 +1498,7 @@ class _TelegramWarm:
 
             deadline = time.time() + _login_timeout_s()
             last_sent = 0.0
+            tried_2fa = False
             resend_sec = 60  # Telegram rotates the QR itself; re-post periodically
             while time.time() < deadline:
                 if self._cancel_login.is_set():
@@ -1432,8 +1508,12 @@ class _TelegramWarm:
 
                 if verdict == "password":
                     _wset(phase="password", detail="QR scanned; password required")
-                    if _maybe_fill_2fa(self._page):
-                        continue
+                    # ONCE only — see _submit_code: repeating a refused password here
+                    # would hammer Telegram with wrong attempts.
+                    if not tried_2fa:
+                        tried_2fa = True
+                        if _maybe_fill_2fa(self._page):
+                            continue
                     self._notify_password_needed(target)
                     return False
 
