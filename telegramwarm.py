@@ -619,9 +619,12 @@ def _fill_code(page, code: str, *, log=print) -> bool:
     ``_fill_auth_field``, which prefers ``fill()``.
     """
     target = None
-    for sel in (".input-field-input[contenteditable=true]",
-                "input:not([type=hidden])",
-                ".input-field-input"):
+    # Scoped to #auth-pages and excluding `.stealthy` for the same reason as
+    # _fill_auth_field: Telegram's autofill-decoy inputs would swallow the digits.
+    for sel in ("#auth-pages .input-field-input[contenteditable=true]",
+                "#auth-pages input.input-field-input:not(.stealthy)",
+                "#auth-pages input:not([type=hidden]):not(.stealthy)",
+                "#auth-pages .input-field-input:not(.stealthy)"):
         try:
             el = page.query_selector(sel)
             if el and el.is_visible():
@@ -657,10 +660,18 @@ def _fill_auth_field(page, value: str, *, log=print) -> bool:
     # fields on the screens observed so far, an unscoped "first input" would silently
     # prefer it the moment it does. The visible-match loop is the substantive part —
     # query_selector() alone gives up alone if the first hit happens to be hidden.
+    # `.stealthy` is excluded everywhere. Telegram injects decoy password inputs with
+    # that class to defeat password-manager autofill, and they sit BEFORE the real
+    # field in document order while still reporting a non-zero box — so "first visible
+    # input[type=password]" lands on a honeypot, the value goes nowhere, and the real
+    # field stays empty and in its error state. Verified from a live field inventory:
+    # the genuine control is input[type=password].input-field-input.
     for sel in (
-        "#auth-pages input[type=password]",
+        "#auth-pages input[type=password].input-field-input:not(.stealthy)",
+        "#auth-pages input[type=password]:not(.stealthy)",
         "#auth-pages .input-field-phone .input-field-input[contenteditable=true]",
-        "#auth-pages input:not([type=hidden])",
+        "#auth-pages input.input-field-input:not(.stealthy)",
+        "#auth-pages input:not([type=hidden]):not(.stealthy)",
         "#auth-pages .input-field-input[contenteditable=true]",
         "#auth-pages [contenteditable=true]",
     ):
