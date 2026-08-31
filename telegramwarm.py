@@ -549,15 +549,21 @@ def _auth_step(probe: dict) -> str:
     text = " ".join(probe.get("authLines") or []).lower()
     if any(w in text for w in _STEP_WORDS["password"]):
         return "password"
-    if probe.get("qrCanvas"):
+    # The code step is checked BEFORE the QR step on purpose. Telegram draws the
+    # monkey sticker on the code screen into a square <canvas>, which is exactly what
+    # the qrCanvas heuristic looks for — so a canvas alone cannot mean "QR screen".
+    if any(w in text for w in _STEP_WORDS["code"]):
+        return "code"
+    # A QR screen needs the canvas AND the copy that only it carries.
+    if probe.get("qrCanvas") and any(
+        w in text for w in ("qr code", "scan with", "point your phone")
+    ):
         return "qr"
     editables = probe.get("editables", 0) or 0
     # The phone form is the only auth screen carrying a country selector, so it is
     # the one identified positively — two fields plus the word "country".
     if any(w in text for w in _STEP_WORDS["phone"]) or (editables >= 2 and "country" in text):
         return "phone"
-    if any(w in text for w in _STEP_WORDS["code"]):
-        return "code"
     # Structural fallback: an auth screen with a field that is not the QR, the
     # password or the phone form is the code step. Matching the copy alone is too
     # brittle — Telegram headlines that screen with the phone NUMBER and rewords it
@@ -566,6 +572,40 @@ def _auth_step(probe: dict) -> str:
     if editables >= 1:
         return "code"
     return "unknown_step"
+
+
+def _fill_code(page, code: str, *, log=print) -> bool:
+    """Type the login code digit by digit.
+
+    The code screen is five separate single-character cells and Telegram moves focus
+    to the next one itself as each is filled. ``locator.fill()`` would drop the whole
+    string into the first cell and never trigger that advance, so real keystrokes
+    with a pause between them are required here — this must not be routed through
+    ``_fill_auth_field``, which prefers ``fill()``.
+    """
+    target = None
+    for sel in (".input-field-input[contenteditable=true]",
+                "input:not([type=hidden])",
+                ".input-field-input"):
+        try:
+            el = page.query_selector(sel)
+            if el and el.is_visible():
+                target = el
+                break
+        except Exception:
+            continue
+    if target is None:
+        log("[tg-warm] no code field found on the page")
+        return False
+    try:
+        target.click()
+        for ch in code:
+            page.keyboard.type(ch)
+            page.wait_for_timeout(150)   # give Telegram time to advance the caret
+        return True
+    except Exception as err:
+        log(f"[tg-warm] code fill failed: {err!r}")
+        return False
 
 
 def _fill_auth_field(page, value: str, *, log=print) -> bool:
@@ -713,6 +753,43 @@ def _switch_to_phone_login(page, *, log=print) -> bool:
     return False
 
 
+#: The pencil beside the phone number on the code screen, which returns to the phone
+#: form. Located by its icon glyph (U+E977, seen in authLines) rather than a class
+#: name, since Telegram's icon-font classes are opaque and change.
+_EDIT_NUMBER_JS = """
+() => {
+  const root = document.querySelector('#auth-pages');
+  if (!root) return false;
+  const pencil = String.fromCharCode(0xE977);
+  for (const el of root.querySelectorAll('*')) {
+    if (el.children.length === 0 && (el.textContent || '').includes(pencil)) {
+      (el.closest('button, [role=button], span, div') || el).click();
+      return true;
+    }
+  }
+  return false;
+}
+"""
+
+
+def _back_to_phone_form(page, *, log=print) -> bool:
+    """From the code screen, reopen the phone form so a NEW code can be requested.
+
+    Telegram restores the pending code screen after a page reload, so without this
+    ``/logintelegram code`` would hand back a stale code instead of sending a fresh
+    one. Best-effort: the caller falls back to using the pending code if this fails.
+    """
+    try:
+        if not page.evaluate(_EDIT_NUMBER_JS):
+            log("[tg-warm] edit-number pencil not found on the code screen")
+            return False
+        page.wait_for_timeout(2500)
+        return _auth_step(_probe(page)) == "phone"
+    except Exception as err:
+        log(f"[tg-warm] edit-number click failed: {err!r}")
+        return False
+
+
 def _start_code_login(page, *, log=print) -> tuple[str, dict]:
     """Enter the phone number and ask Telegram to send a login code.
 
@@ -724,6 +801,16 @@ def _start_code_login(page, *, log=print) -> tuple[str, dict]:
     if step == "qr":
         _switch_to_phone_login(page, log=log)
         step = _auth_step(_probe(page))
+    elif step == "code":
+        # Telegram resumed a pending code screen after the reload. Go back to the
+        # phone form so this really does send a fresh code; if the pencil cannot be
+        # found, keep the pending one rather than dead-ending.
+        log("[tg-warm] code screen already pending — reopening the phone form")
+        if _back_to_phone_form(page, log=log):
+            step = "phone"
+        else:
+            log("[tg-warm] keeping the pending code request")
+            return "code", _probe(page)
     if step != "phone":
         log(f"[tg-warm] expected the phone form, got step={step}")
         return step, _probe(page)
@@ -778,7 +865,7 @@ def _submit_code(page, code: str, *, log=print) -> tuple[str, dict]:
         log(f"[tg-warm] not on the code step (step={step}); cannot submit")
         return _classify(_probe(page)), _probe(page)
 
-    if not _fill_auth_field(page, code, log=log):
+    if not _fill_code(page, code, log=log):
         return "login", _probe(page)
     # Web K submits on its own once the digit count matches; NEXT is a no-op then,
     # so a failure to find it is not an error.
@@ -1140,6 +1227,14 @@ class _TelegramWarm:
         then wait for the human to relay it with /telegramcode."""
         chat_id = task.get("chat_id") or _qr_chat_default()
         self._cancel_login.clear()    # this IS the new request
+        # Worker-pickup receipt. main.py posts "requesting…" when the task is QUEUED;
+        # this only fires once the single worker thread actually starts it. Seeing the
+        # first message without this one means the worker was busy, which is the
+        # failure mode that used to look like "the bot did nothing".
+        try:
+            send_text(chat_id, "⚙️ Telegram: opening the phone-number form…")
+        except Exception:
+            pass
         if not self._healthy():
             self._launch()
         verdict = self._check_auth()

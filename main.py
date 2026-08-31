@@ -6672,7 +6672,18 @@ def lark_webhook():
             try:
                 import telegramwarm as _tg_mod
 
-                if mode in ("code", "phone", "sms"):
+                # `/logintelegram 14632` — the one-time code sent to the wrong command.
+                # Treat it as /telegramcode rather than falling through to the QR route:
+                # that route navigates the page and would throw away the pending code
+                # login, which is exactly the dead end this used to create.
+                if mode.isdigit():
+                    send_message(
+                        chat_id_tg,
+                        "ℹ️ Using that as the login code (`/telegramcode` is the usual "
+                        "command for it).",
+                    )
+                    _tg_mod.submit_login_code(mode, chat_id_tg)
+                elif mode in ("code", "phone", "sms"):
                     send_message(
                         chat_id_tg,
                         "📲 Telegram: requesting a login code for the number in "
