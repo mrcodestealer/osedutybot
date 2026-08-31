@@ -575,6 +575,40 @@ def _auth_step(probe: dict) -> str:
     return "unknown_step"
 
 
+#: Inventory of everything on the auth screen that could accept text. The 2FA screen
+#: cannot be reached without a real login, so when a fill fails there this is shipped
+#: to Lark — one round then yields the exact selector instead of another guess.
+_FIELD_INVENTORY_JS = """
+() => {
+  const vis = (el) => {
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && getComputedStyle(el).display !== 'none';
+  };
+  const desc = (e) => ({
+    tag: e.tagName.toLowerCase(),
+    type: e.getAttribute('type'),
+    cls: (e.className || '').toString().slice(0, 70),
+    editable: e.getAttribute('contenteditable'),
+    visible: vis(e),
+    inAuth: !!e.closest('#auth-pages'),
+  });
+  const out = [];
+  for (const el of document.querySelectorAll(
+         'input, textarea, [contenteditable], [class*=input-field]')) {
+    out.push(desc(el));
+  }
+  return out.slice(0, 20);
+}
+"""
+
+
+def _field_inventory(page) -> list[dict]:
+    try:
+        return page.evaluate(_FIELD_INVENTORY_JS) or []
+    except Exception as err:
+        return [{"error": repr(err)}]
+
+
 def _fill_code(page, code: str, *, log=print) -> bool:
     """Type the login code digit by digit.
 
@@ -617,29 +651,37 @@ def _fill_auth_field(page, value: str, *, log=print) -> bool:
     does not apply. Real keystrokes are used instead. A genuine ``<input>`` is
     still tried first in case Telegram ever switches back.
     """
-    try:
-        real = page.query_selector("input:not([type=hidden])")
-        if real and real.is_visible():
-            real.click()
-            real.fill(value)
-            return True
-    except Exception:
-        pass
+    # Every selector is scoped to #auth-pages and takes the first VISIBLE match rather
+    # than merely the first match. Scoping is defensive, not a known fix: #page-chats
+    # is pre-mounted ahead of #auth-pages in document order, and though it holds no
+    # fields on the screens observed so far, an unscoped "first input" would silently
+    # prefer it the moment it does. The visible-match loop is the substantive part —
+    # query_selector() alone gives up alone if the first hit happens to be hidden.
     for sel in (
-        ".input-field-phone .input-field-input[contenteditable=true]",
-        ".input-field-input[contenteditable=true]",
+        "#auth-pages input[type=password]",
+        "#auth-pages .input-field-phone .input-field-input[contenteditable=true]",
+        "#auth-pages input:not([type=hidden])",
+        "#auth-pages .input-field-input[contenteditable=true]",
+        "#auth-pages [contenteditable=true]",
     ):
         try:
-            el = page.query_selector(sel)
-            if el and el.is_visible():
+            for el in page.query_selector_all(sel):
+                if not el.is_visible():
+                    continue
                 el.click()
-                page.keyboard.press("Control+A")
-                page.keyboard.press("Delete")
-                page.keyboard.type(value, delay=45)
+                tag = (el.evaluate("e => e.tagName.toLowerCase()") or "").strip()
+                if tag == "input":
+                    el.fill(value)          # replaces any leftover text
+                else:
+                    page.keyboard.press("Control+A")
+                    page.keyboard.press("Delete")
+                    page.keyboard.type(value, delay=45)
+                # Never log the value itself — only its length.
+                log(f"[tg-warm] filled {sel} <{tag}> ({len(value)} chars)")
                 return True
         except Exception:
             continue
-    log("[tg-warm] could not find an auth field to type into")
+    log("[tg-warm] no visible auth field matched any selector")
     return False
 
 
@@ -892,7 +934,8 @@ def _submit_code(page, code: str, *, log=print) -> tuple[str, dict]:
                 log("[tg-warm] still on the password screen — the password was refused")
                 return "password_refused", probe
             tried_2fa = True
-            if _maybe_fill_2fa(page, log=log):
+            fill_status = _maybe_fill_2fa(page, log=log)
+            if fill_status == "ok":
                 continue          # submitted; keep waiting for the client to load
             return "password", probe
     return verdict, _probe(page)
@@ -936,7 +979,7 @@ def _2fa_password() -> tuple[str, str]:
     return "", "not found"
 
 
-def _maybe_fill_2fa(page, *, log=print) -> bool:
+def _maybe_fill_2fa(page, *, log=print) -> str:
     """Fill the two-step-verification password, only if one is configured.
 
     Telegram asks for the cloud password *after* the QR is scanned when 2FA is on.
@@ -948,21 +991,24 @@ def _maybe_fill_2fa(page, *, log=print) -> bool:
     if not pwd:
         log("[tg-warm] 2FA prompt reached but TELEGRAM_2FA_PASSWORD is unset "
             "(checked the process env AND .env)")
-        return False
+        return "no_password"
     log(f"[tg-warm] filling the 2FA password from {source}")
     try:
         # _fill_auth_field clears the box after focusing it (fill() replaces, and the
         # contenteditable path does Ctrl+A/Delete), so leftover text from a previous
         # failed attempt is not appended to.
         if not _fill_auth_field(page, pwd, log=log):
-            return False
+            # A distinct outcome from "no_password": the value exists but the field
+            # could not be found. Reporting both as "no password" sent the last
+            # debugging round chasing .env when the real fault was the selector.
+            return "fill_failed"
         _click_next(page)
         page.wait_for_timeout(4000)
         log("[tg-warm] submitted two-step verification password")
-        return True
+        return "ok"
     except Exception as err:
         log(f"[tg-warm] 2FA fill failed: {err!r}")
-        return False
+        return "error"
 
 
 # ---------------------------------------------------------------------------
@@ -1226,7 +1272,7 @@ class _TelegramWarm:
 
         if verdict == "password":
             _wset(phase="password", detail="two-step verification password required")
-            if not _maybe_fill_2fa(self._page):
+            if _maybe_fill_2fa(self._page) != "ok":
                 self._notify_password_needed(None)
                 return
             verdict = self._check_auth()
@@ -1277,7 +1323,7 @@ class _TelegramWarm:
                 send_text(chat_id, "✅ Telegram Web is already logged in.")
             return
         if verdict == "password":
-            if not _maybe_fill_2fa(self._page):
+            if _maybe_fill_2fa(self._page) != "ok":
                 self._notify_password_needed(chat_id)
                 return
         _set_needs_manual(False)  # forced fresh attempt
@@ -1305,7 +1351,7 @@ class _TelegramWarm:
             send_text(chat_id, "✅ Telegram is already logged in — nothing to do.")
             return
         if verdict == "password":
-            if _maybe_fill_2fa(self._page):
+            if _maybe_fill_2fa(self._page) == "ok":
                 self._handle_ensure({"auto": False})
                 return
             self._notify_password_needed(chat_id)
@@ -1469,20 +1515,31 @@ class _TelegramWarm:
         try:
             shot = str(SHOT_PNG)
             self._page.screenshot(path=shot)
-            send_text(
-                target,
-                f"{mention}🟠 Telegram: login accepted, but this account has two-step "
-                f"verification and no password could be found.\n"
-                f"Looked in: the bot process environment AND {_ENV_PATH.name} "
-                f"(re-read live).\n"
-                f"Add a line to {_ENV_PATH.name} — no restart needed, it is re-read "
-                f"each attempt:\n"
-                f"    TELEGRAM_2FA_PASSWORD=your-password\n"
-                f"Then run /logintelegram code again.\n"
-                f"If the field in the screenshot already shows text, that was a failed "
-                f"attempt — Telegram rate-limits repeated wrong passwords, so fix the "
-                f"value before retrying.",
-            )
+            # Distinguish "no password configured" from "password configured but it
+            # could not be entered". Conflating the two is what sent the last round of
+            # debugging into .env when the real fault was a selector.
+            pwd, source = _2fa_password()
+            if pwd:
+                fields = _field_inventory(self._page)
+                body = (
+                    f"{mention}🟠 Telegram: login accepted, and a two-step password IS "
+                    f"configured (found in {source}), but it could not be entered on "
+                    f"this screen.\n"
+                    f"That is a bot-side problem, not your .env.\n"
+                    f"Fields present on the page: {json.dumps(fields, ensure_ascii=False)}\n"
+                    f"Send that line back — it names the exact selector needed."
+                )
+            else:
+                body = (
+                    f"{mention}🟠 Telegram: login accepted, but this account has "
+                    f"two-step verification and NO password could be found.\n"
+                    f"Looked in: the bot process environment AND {_ENV_PATH.name} "
+                    f"(re-read live).\n"
+                    f"Add this line to {_ENV_PATH.name} — no restart needed:\n"
+                    f"    TELEGRAM_2FA_PASSWORD=your-password\n"
+                    f"Then run /logintelegram code again."
+                )
+            send_text(target, body)
             _send_shot(target, shot)
         except Exception as err:
             print(f"[tg-warm] password-needed notify failed: {err!r}", flush=True)
@@ -1512,7 +1569,7 @@ class _TelegramWarm:
                     # would hammer Telegram with wrong attempts.
                     if not tried_2fa:
                         tried_2fa = True
-                        if _maybe_fill_2fa(self._page):
+                        if _maybe_fill_2fa(self._page) == "ok":
                             continue
                     self._notify_password_needed(target)
                     return False
@@ -1568,7 +1625,7 @@ class _TelegramWarm:
             if not self._healthy():
                 self._launch()
             verdict = self._check_auth(timeout_ms=task.get("timeout_ms", 90_000))
-            if verdict == "password" and _maybe_fill_2fa(self._page):
+            if verdict == "password" and _maybe_fill_2fa(self._page) == "ok":
                 verdict = self._check_auth()
             if verdict == "authenticated":
                 _wset(phase="authenticated", detail="Telegram Web session live", alerted=False)
