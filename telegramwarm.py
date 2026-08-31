@@ -144,6 +144,19 @@ def _login_timeout_s() -> int:
         return 300
 
 
+def _code_wait_s() -> int:
+    """How long to wait for Telegram's sendCode round trip after pressing NEXT.
+
+    Generous by default: the browser has to complete an MTProto handshake with a
+    data centre, and from a server IP that has never talked to Telegram before,
+    30s was not enough in practice.
+    """
+    try:
+        return max(20, int(os.getenv("TELEGRAM_CODE_WAIT_SEC", "120")))
+    except ValueError:
+        return 120
+
+
 def _chat_poll_sec() -> int:
     try:
         return max(30, int(os.getenv("TELEGRAM_CHAT_POLL_SEC", "120")))
@@ -443,6 +456,27 @@ _PROBE_JS = """
     editables: document.querySelectorAll('.input-field-input[contenteditable=true]').length,
     hasNext: Array.from(document.querySelectorAll('button')).some(
       b => vis(b) && /next/i.test(b.innerText || '')),
+    // The primary button doubles as a progress indicator: after NEXT is pressed it
+    // becomes "PLEASE WAIT..." and stays that way until Telegram answers sendCode.
+    // Without reading it, a slow-but-healthy request is indistinguishable from a
+    // stuck one.
+    primaryBtn: (() => {
+      const b = one('button.btn-primary:not(.btn-secondary)');
+      if (!b) return null;
+      return { text: (b.innerText || '').trim(), disabled: !!b.disabled };
+    })(),
+    // Telegram surfaces refusals ("Invalid phone number", flood waits) as toasts
+    // or inline label errors rather than changing screen.
+    errorText: (() => {
+      const hits = [];
+      for (const el of document.querySelectorAll(
+             '[class*=error], .toast, [class*=Toast], .popup-title, .popup-description')) {
+        if (!vis(el)) continue;
+        const t = (el.innerText || '').trim();
+        if (t) hits.push(t.slice(0, 160));
+      }
+      return hits.slice(0, 4);
+    })(),
     chatItems: document.querySelectorAll('.chatlist-chat, ul.chatlist > li').length,
     chatListVisible: anyVis('.chatlist'),
     sidebarVisible: visOne('#column-left'),
@@ -692,17 +726,32 @@ def _start_code_login(page, *, log=print) -> tuple[str, dict]:
     if not _click_next(page):
         return "next_failed", _probe(page)
 
-    # Telegram takes a moment to accept the number and swap in the code field.
-    deadline = time.time() + 30
+    # Telegram has to reach a data centre before it can swap in the code field, and
+    # from a fresh server IP that handshake can take a while. The primary button
+    # reads "PLEASE WAIT..." for the whole round trip, so treat that as healthy
+    # progress and only give up once it stops saying so (or the budget runs out).
+    deadline = time.time() + _code_wait_s()
+    last_probe: dict = {}
     while time.time() < deadline:
         page.wait_for_timeout(1500)
-        probe = _probe(page)
+        probe = last_probe = _probe(page)
         step = _auth_step(probe)
         if step in ("code", "password"):
             return step, probe
         if step == "none":  # already signed in somehow
             return "none", probe
-    return step, _probe(page)
+        errs = probe.get("errorText") or []
+        if errs:
+            log(f"[tg-warm] Telegram refused the number: {errs}")
+            return "refused", probe
+        btn = (probe.get("primaryBtn") or {}).get("text", "")
+        if "wait" in btn.lower():
+            continue  # sendCode still in flight
+    # Still on the phone form after the full budget.
+    btn = ((last_probe or {}).get("primaryBtn") or {}).get("text", "")
+    if "wait" in btn.lower():
+        return "sendcode_timeout", last_probe or _probe(page)
+    return _auth_step(last_probe or _probe(page)), last_probe or _probe(page)
 
 
 def _submit_code(page, code: str, *, log=print) -> tuple[str, dict]:
@@ -1113,12 +1162,27 @@ class _TelegramWarm:
             "fill_failed": "could not type into the phone field (Telegram DOM changed?)",
             "next_failed": "could not press NEXT",
             "qr": "still on the QR screen — the phone-number link was not found",
+            "refused": "Telegram refused the number (see the error text below)",
+            "sendcode_timeout": (
+                f"Telegram never answered within {_code_wait_s()}s — the button was still "
+                "'PLEASE WAIT…'. The number and the form were fine, so this is the "
+                "server's connection to Telegram: check outbound firewall/egress, or try "
+                "the QR route with /logintelegram. Raise TELEGRAM_CODE_WAIT_SEC if the "
+                "link is just slow."
+            ),
             "unknown_step": "unrecognised auth screen",
         }
         why = reasons.get(step, f"unexpected step '{step}'")
         _wset(phase="login", detail=f"code login failed: {why}", last_error=why)
-        send_text(chat_id, f"❌ Telegram code login failed: {why}\nAuth screen text: "
-                           f"{(probe.get('authLines') or [])[:6]}")
+        btn = (probe.get("primaryBtn") or {}).get("text") if probe else None
+        errs = (probe.get("errorText") or []) if probe else []
+        msg = [f"❌ Telegram code login failed: {why}"]
+        if btn:
+            msg.append(f"Button state: {btn!r}")
+        if errs:
+            msg.append(f"Telegram said: {errs}")
+        msg.append(f"Auth screen text: {(probe.get('authLines') or [])[:8]}")
+        send_text(chat_id, "\n".join(msg))
         if shot:
             _send_shot(chat_id, shot)
 
