@@ -6663,24 +6663,65 @@ def lark_webhook():
         threading.Thread(target=_run_osmwatch_shot, daemon=True).start()
         return _lark_im_done()
     elif cmd == '/logintelegram':
-        # Post a fresh Telegram Web login QR to the lab group. Scan it with the
-        # Telegram phone app (Settings -> Devices -> Link Desktop Device).
-        try:
-            import telegramwarm as _tg_mod
+        # Two ways in. Default posts a QR to scan with the phone; `/logintelegram
+        # code` uses phone-number + one-time code instead, which the user relays
+        # back with /telegramcode. Both end at the same warm browser session.
+        _tg_mode = (cmd_parts[1].lower() if len(cmd_parts) > 1 else "")
 
-            _tg_mod.request_login(chat_id)
+        def _run_telegram_login(chat_id_tg=chat_id, mode=_tg_mode):
+            try:
+                import telegramwarm as _tg_mod
+
+                if mode in ("code", "phone", "sms"):
+                    send_message(
+                        chat_id_tg,
+                        "📲 Telegram: requesting a login code for the number in "
+                        "TELEGRAM_PHONE… watch for it in your Telegram app or by SMS.",
+                    )
+                    _tg_mod.request_code_login(chat_id_tg)
+                else:
+                    _tg_mod.request_login(chat_id_tg)
+                    send_message(
+                        chat_id_tg,
+                        "🔐 Telegram: login requested — a QR will be posted shortly. "
+                        "Scan it with Telegram on your phone (Settings → Devices → "
+                        "Link Desktop Device).\nPrefer typing a code instead? "
+                        "Use `/logintelegram code`.",
+                    )
+            except Exception as _tg_err:
+                print(f"❌ logintelegram: {_tg_err!r}", flush=True)
+                try:
+                    send_message(chat_id_tg, f"❌ /logintelegram failed: {_tg_err}")
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run_telegram_login, daemon=True).start()
+        return _lark_im_done()
+    elif cmd == '/telegramcode':
+        # Relay the one-time Telegram login code into the warm browser. Digits only,
+        # so a pasted "code: 12345" or a stray dash still works.
+        _tg_code = "".join(ch for ch in " ".join(cmd_parts[1:]) if ch.isdigit())
+        if not _tg_code:
             send_message(
                 chat_id,
-                "🔐 Telegram: login requested — a QR will be posted shortly. "
-                "Scan it with Telegram on your phone (Settings → Devices → "
-                "Link Desktop Device).",
+                "ℹ️ Usage: `/telegramcode 12345` — the code Telegram sent to your "
+                "phone. Start with `/logintelegram code` if you have not requested one.",
             )
-        except Exception as _tg_err:
-            print(f"❌ logintelegram: {_tg_err!r}", flush=True)
+            return _lark_im_done()
+
+        def _run_telegram_code(chat_id_tg=chat_id, code_tg=_tg_code):
             try:
-                send_message(chat_id, f"❌ /logintelegram failed: {_tg_err}")
-            except Exception:
-                pass
+                import telegramwarm as _tg_mod
+
+                _tg_mod.submit_login_code(code_tg, chat_id_tg)
+            except Exception as _tg_err:
+                print(f"❌ telegramcode: {_tg_err!r}", flush=True)
+                try:
+                    send_message(chat_id_tg, f"❌ /telegramcode failed: {_tg_err}")
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run_telegram_code, daemon=True).start()
         return _lark_im_done()
     elif cmd == '/telegramstatus':
         # Is the Telegram watcher still monitoring? Replies with a status summary

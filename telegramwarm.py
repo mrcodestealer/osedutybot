@@ -21,15 +21,26 @@ READ-ONLY: nothing here ever types into a Telegram message box. The only field i
 will ever fill is the two-step-verification prompt, and only when
 ``TELEGRAM_2FA_PASSWORD`` is set — see ``_maybe_fill_2fa``.
 
+Two login routes, both ending at the same session:
+  * **QR** — a QR is posted to Lark; scan it with the phone. No secrets anywhere.
+  * **phone + code** — the bot types the number from ``TELEGRAM_PHONE``, Telegram
+    sends a one-time code, and a human relays it with ``/telegramcode 12345``.
+Either way, if the account has two-step verification the cloud password is read
+from ``TELEGRAM_2FA_PASSWORD``; it is never typed by hand or written to disk.
+
 CLI:
-    python telegramwarm.py --login     # post a fresh QR to Lark and wait for the scan
-    python telegramwarm.py --shot      # screenshot Telegram Web to a file
-    python telegramwarm.py --probe     # dump the raw DOM verdict (selector debugging)
-    python telegramwarm.py --chats     # scrape the chat list once
+    python telegramwarm.py --login       # post a fresh QR to Lark, wait for the scan
+    python telegramwarm.py --login-code  # phone-number login, prompts via Lark
+    python telegramwarm.py --code 12345  # relay the one-time code
+    python telegramwarm.py --shot        # screenshot Telegram Web to a file
+    python telegramwarm.py --probe       # dump the raw DOM verdict (selector debugging)
+    python telegramwarm.py --chats       # scrape the chat list once
 
 Exposed to main.py:
     prewarm_telegram_on_startup()   -> boot hook
     request_login(chat_id)          -> /logintelegram
+    request_code_login(chat_id)     -> /logintelegram code
+    submit_login_code(code, chat)   -> /telegramcode <code>
     send_status_to_lark(chat_id)    -> /telegramstatus (status text + real screenshot)
 """
 
@@ -418,8 +429,20 @@ _PROBE_JS = """
     // nothing — only visibility tells you which screen the user is looking at.
     authVisible: visOne('#auth-pages'),
     chatsVisible: visOne('#page-chats'),
-    passwordVisible: visOne('.page-password') || anyVis('input[type=password]'),
     qrCanvas: qr,
+    // Web K renders EVERY field as <div class=input-field-input contenteditable>;
+    // there is not one <input> on the auth screens, so field-type checks (e.g.
+    // input[type=password]) can never match. Steps are told apart by the visible
+    // copy instead, which is why authLines is collected.
+    authLines: (() => {
+      const a = one('#auth-pages');
+      if (!a) return [];
+      return (a.innerText || '').split(String.fromCharCode(10))
+               .map(s => s.trim()).filter(Boolean).slice(0, 14);
+    })(),
+    editables: document.querySelectorAll('.input-field-input[contenteditable=true]').length,
+    hasNext: Array.from(document.querySelectorAll('button')).some(
+      b => vis(b) && /next/i.test(b.innerText || '')),
     chatItems: document.querySelectorAll('.chatlist-chat, ul.chatlist > li').length,
     chatListVisible: anyVis('.chatlist'),
     sidebarVisible: visOne('#column-left'),
@@ -456,18 +479,97 @@ def _classify(probe: dict) -> str:
     """
     if probe.get("error"):
         return "unknown"
-    # 1) 2FA prompt — appears after a good QR scan, auth root still mounted.
-    if probe.get("passwordVisible"):
+    step = _auth_step(probe)
+    if step == "password":
         return "password"
-    # 2) Login wall — the auth screen is on top, or a QR is being drawn.
-    if probe.get("authVisible") or probe.get("qrCanvas"):
+    if step != "none":
+        # Any auth screen on top — QR, phone, code, or something unrecognised.
         return "login"
-    # 3) Real client — chat column visible with the auth screen gone.
+    # Auth screen gone: this is the real client.
     if probe.get("chatsVisible") or probe.get("chatItems", 0) > 0 or (
         probe.get("chatListVisible") and probe.get("sidebarVisible")
     ):
         return "authenticated"
     return "unknown"
+
+
+#: Which auth step is on screen, keyed off the visible copy. Order below matters:
+#: the QR screen's own footer says "LOG IN BY PHONE NUMBER", so 'phone' must be
+#: tested after the QR canvas, or every QR screen would read as the phone form.
+_STEP_WORDS = {
+    "password": ("password", "two-step", "two step"),
+    "code": ("we've sent", "we have sent", "sent the code", "enter code",
+             "check your telegram", "type it below", "sent you a message",
+             "code we sent"),
+    "phone": ("phone number", "confirm your country"),
+}
+
+
+def _auth_step(probe: dict) -> str:
+    """qr | phone | code | password | unknown_step | none."""
+    if not probe.get("authVisible"):
+        return "none"
+    text = " ".join(probe.get("authLines") or []).lower()
+    if any(w in text for w in _STEP_WORDS["password"]):
+        return "password"
+    if probe.get("qrCanvas"):
+        return "qr"
+    if any(w in text for w in _STEP_WORDS["code"]):
+        return "code"
+    if any(w in text for w in _STEP_WORDS["phone"]):
+        return "phone"
+    return "unknown_step"
+
+
+def _fill_auth_field(page, value: str, *, log=print) -> bool:
+    """Type ``value`` into the focused auth field.
+
+    Telegram Web K builds every field as ``div.input-field-input[contenteditable]``
+    — there is no ``<input>`` on the auth screens at all — so ``locator.fill()``
+    does not apply. Real keystrokes are used instead. A genuine ``<input>`` is
+    still tried first in case Telegram ever switches back.
+    """
+    try:
+        real = page.query_selector("input:not([type=hidden])")
+        if real and real.is_visible():
+            real.click()
+            real.fill(value)
+            return True
+    except Exception:
+        pass
+    for sel in (
+        ".input-field-phone .input-field-input[contenteditable=true]",
+        ".input-field-input[contenteditable=true]",
+    ):
+        try:
+            el = page.query_selector(sel)
+            if el and el.is_visible():
+                el.click()
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Delete")
+                page.keyboard.type(value, delay=45)
+                return True
+        except Exception:
+            continue
+    log("[tg-warm] could not find an auth field to type into")
+    return False
+
+
+def _click_next(page) -> bool:
+    """Press the primary NEXT button. The secondary buttons on the same screen
+    ('LOG IN BY QR CODE', 'LOG IN WITH PASSKEY') also carry .btn-primary, so they
+    are excluded by :not(.btn-secondary)."""
+    for attempt in (
+        lambda: page.get_by_role("button", name="Next", exact=False).first.click(timeout=4000),
+        lambda: page.click("button.btn-primary:not(.btn-secondary)", timeout=4000),
+        lambda: page.keyboard.press("Enter"),
+    ):
+        try:
+            attempt()
+            return True
+        except Exception:
+            continue
+    return False
 
 
 def _find_qr_element(page, *, tries: int = 8):
@@ -529,6 +631,112 @@ def _capture_qr(page, out_path: Path) -> Path:
     return out_path
 
 
+def _phone_number() -> str:
+    """The login number, always in +<country><national> form.
+
+    Typing the leading ``+`` matters: it makes Telegram Web pick the country
+    itself. Relying on the pre-selected country is not safe, because that comes
+    from the *server's* geolocation, which need not be Malaysia.
+
+    TELEGRAM_PHONE must carry the country code (``60102693549`` or
+    ``+60102693549``). A local-format number with a leading zero is passed through
+    with a ``+`` bolted on so Telegram rejects it loudly — guessing the country
+    code from a leading zero would silently dial the wrong number instead.
+    """
+    raw = (os.getenv("TELEGRAM_PHONE", "") or "").strip()
+    for junk in (" ", "-", "(", ")"):
+        raw = raw.replace(junk, "")
+    if not raw:
+        return ""
+    return raw if raw.startswith("+") else "+" + raw
+
+
+def _switch_to_phone_login(page, *, log=print) -> bool:
+    """From the QR screen, open the phone-number form."""
+    for label in ("Log in by phone Number", "log in by phone number", "phone number"):
+        try:
+            loc = page.get_by_text(label, exact=False)
+            if loc.count() and loc.first.is_visible():
+                loc.first.click(timeout=4000)
+                page.wait_for_timeout(2500)
+                return True
+        except Exception:
+            continue
+    log("[tg-warm] could not find the 'LOG IN BY PHONE NUMBER' link")
+    return False
+
+
+def _start_code_login(page, *, log=print) -> tuple[str, dict]:
+    """Enter the phone number and ask Telegram to send a login code.
+
+    Returns ``(step, probe)`` where step is the auth step now on screen —
+    'code' on success, 'password' if 2FA came first, anything else is a failure
+    the caller reports with a screenshot.
+    """
+    step = _auth_step(_probe(page))
+    if step == "qr":
+        _switch_to_phone_login(page, log=log)
+        step = _auth_step(_probe(page))
+    if step != "phone":
+        log(f"[tg-warm] expected the phone form, got step={step}")
+        return step, _probe(page)
+
+    phone = _phone_number()
+    if not phone:
+        log("[tg-warm] TELEGRAM_PHONE is not set")
+        return "no_phone", _probe(page)
+
+    if not _fill_auth_field(page, phone, log=log):
+        return "fill_failed", _probe(page)
+    log(f"[tg-warm] phone entered ({phone[:4]}…{phone[-3:]}), requesting the code")
+    if not _click_next(page):
+        return "next_failed", _probe(page)
+
+    # Telegram takes a moment to accept the number and swap in the code field.
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        page.wait_for_timeout(1500)
+        probe = _probe(page)
+        step = _auth_step(probe)
+        if step in ("code", "password"):
+            return step, probe
+        if step == "none":  # already signed in somehow
+            return "none", probe
+    return step, _probe(page)
+
+
+def _submit_code(page, code: str, *, log=print) -> tuple[str, dict]:
+    """Type the login code, then settle onto the next step.
+
+    Returns ``(verdict, probe)`` with verdict from _classify: 'authenticated',
+    'password' (2FA needed and unconfigured), or 'login' (code refused).
+    """
+    step = _auth_step(_probe(page))
+    if step != "code":
+        log(f"[tg-warm] not on the code step (step={step}); cannot submit")
+        return _classify(_probe(page)), _probe(page)
+
+    if not _fill_auth_field(page, code, log=log):
+        return "login", _probe(page)
+    # Web K submits on its own once the digit count matches; NEXT is a no-op then,
+    # so a failure to find it is not an error.
+    _click_next(page)
+
+    deadline = time.time() + 40
+    verdict = "login"
+    while time.time() < deadline:
+        page.wait_for_timeout(1500)
+        probe = _probe(page)
+        verdict = _classify(probe)
+        if verdict == "authenticated":
+            return verdict, probe
+        if verdict == "password":
+            if _maybe_fill_2fa(page, log=log):
+                continue          # password submitted, keep waiting for the client
+            return "password", probe
+    return verdict, _probe(page)
+
+
 def _maybe_fill_2fa(page, *, log=print) -> bool:
     """Fill the two-step-verification password, only if one is configured.
 
@@ -542,21 +750,10 @@ def _maybe_fill_2fa(page, *, log=print) -> bool:
         log("[tg-warm] 2FA prompt reached but TELEGRAM_2FA_PASSWORD is unset")
         return False
     try:
-        field = page.query_selector("input[type=password]")
-        if not field:
+        if not _fill_auth_field(page, pwd, log=log):
             return False
-        field.click()
-        field.fill(pwd)
-        for attempt in (
-            lambda: page.get_by_role("button", name="Next", exact=False).first.click(timeout=3000),
-            lambda: page.keyboard.press("Enter"),
-        ):
-            try:
-                attempt()
-                break
-            except Exception:
-                continue
-        page.wait_for_timeout(3500)
+        _click_next(page)
+        page.wait_for_timeout(4000)
         log("[tg-warm] submitted two-step verification password")
         return True
     except Exception as err:
@@ -640,6 +837,11 @@ class _TelegramWarm:
         self._context = None
         self._page = None
         self._login_in_progress = False
+        # True between 'code requested' and 'code submitted'. While set, nothing may
+        # navigate the page: _check_auth() does a page.goto(), which would wipe the
+        # pending code form. The chat poll runs every 120s, so without this guard a
+        # code login would almost always be destroyed before it could be used.
+        self._awaiting_code = False
         self._started = False
         self._start_lock = threading.Lock()
 
@@ -706,6 +908,12 @@ class _TelegramWarm:
     def request_login(self, chat_id: str | None = None) -> None:
         self._tasks.put({"kind": "login", "chat_id": chat_id})
 
+    def request_code_login(self, chat_id: str | None = None) -> None:
+        self._tasks.put({"kind": "login_code", "chat_id": chat_id})
+
+    def submit_code(self, code: str, chat_id: str | None = None) -> None:
+        self._tasks.put({"kind": "submit_code", "code": code, "chat_id": chat_id})
+
     def capture(self, *, chat_id: str | None = None, timeout_ms: int = 90_000) -> dict:
         done = threading.Event()
         box: dict = {}
@@ -745,6 +953,10 @@ class _TelegramWarm:
                     self._handle_ensure(task)
                 elif kind == "login":
                     self._handle_login(task)
+                elif kind == "login_code":
+                    self._handle_login_code(task)
+                elif kind == "submit_code":
+                    self._handle_submit_code(task)
                 elif kind == "capture":
                     self._handle_capture(task)
                 elif kind == "chats":
@@ -790,6 +1002,9 @@ class _TelegramWarm:
         return verdict
 
     def _handle_ensure(self, task: dict) -> None:
+        if self._awaiting_code:
+            print('[tg-warm] skip ensure — waiting for /telegramcode', flush=True)
+            return
         if not self._healthy():
             self._launch()
         verdict = self._check_auth()
@@ -847,6 +1062,116 @@ class _TelegramWarm:
                 return
         _set_needs_manual(False)  # forced fresh attempt
         self._do_qr_login(ack_chat=chat_id)
+
+    def _handle_login_code(self, task: dict) -> None:
+        """Phone + code login: enter the number, ask Telegram to send the code,
+        then wait for the human to relay it with /telegramcode."""
+        chat_id = task.get("chat_id") or _qr_chat_default()
+        if not self._healthy():
+            self._launch()
+        verdict = self._check_auth()
+        if verdict == "authenticated":
+            _wset(phase="authenticated", detail="already logged in", alerted=False)
+            _set_needs_manual(False)
+            send_text(chat_id, "✅ Telegram is already logged in — nothing to do.")
+            return
+        if verdict == "password":
+            if _maybe_fill_2fa(self._page):
+                self._handle_ensure({"auto": False})
+                return
+            self._notify_password_needed(chat_id)
+            return
+
+        step, probe = _start_code_login(self._page)
+        shot = str(SHOT_PNG)
+        try:
+            self._page.screenshot(path=shot)
+        except Exception:
+            shot = None
+
+        if step == "code":
+            self._awaiting_code = True
+            _wset(phase="login", detail="waiting for /telegramcode <code>")
+            send_text(
+                chat_id,
+                "📲 Telegram sent a login code to "
+                f"{_phone_number()[:4]}…{_phone_number()[-3:]}.\n"
+                "Check the Telegram app on your phone (or SMS), then reply here:\n"
+                "    /telegramcode 12345\n"
+                "⚠️ The code is single-use and expires quickly. Anyone who can read "
+                "this chat can read the code — prefer a direct message to the bot.",
+            )
+            return
+
+        if step == "password":
+            self._notify_password_needed(chat_id)
+            return
+
+        # Anything else is a failure; the screenshot is the most useful evidence.
+        reasons = {
+            "no_phone": "TELEGRAM_PHONE is not set in .env",
+            "fill_failed": "could not type into the phone field (Telegram DOM changed?)",
+            "next_failed": "could not press NEXT",
+            "qr": "still on the QR screen — the phone-number link was not found",
+            "unknown_step": "unrecognised auth screen",
+        }
+        why = reasons.get(step, f"unexpected step '{step}'")
+        _wset(phase="login", detail=f"code login failed: {why}", last_error=why)
+        send_text(chat_id, f"❌ Telegram code login failed: {why}\nAuth screen text: "
+                           f"{(probe.get('authLines') or [])[:6]}")
+        if shot:
+            _send_shot(chat_id, shot)
+
+    def _handle_submit_code(self, task: dict) -> None:
+        """Type the code the human relayed, then report where we landed."""
+        chat_id = task.get("chat_id") or _qr_chat_default()
+        code = (task.get("code") or "").strip()
+        if not self._healthy():
+            send_text(chat_id, "❌ The Telegram browser is not running — run /logintelegram code first.")
+            return
+
+        try:
+            verdict, probe = _submit_code(self._page, code)
+        finally:
+            # Cleared either way: a refused code must not keep the browser frozen.
+            self._awaiting_code = False
+        shot = str(SHOT_PNG)
+        try:
+            self._page.screenshot(path=shot)
+        except Exception:
+            shot = None
+
+        if verdict == "authenticated":
+            _wset(
+                phase="authenticated",
+                detail="logged in via phone code",
+                logged_in_since=_now_str(),
+                last_error=None,
+                alerted=False,
+            )
+            _set_needs_manual(False)
+            send_text(chat_id, "✅ Telegram: logged in — the warm browser is live and monitoring.")
+            if shot:
+                _send_shot(chat_id, shot)
+            return
+
+        if verdict == "password":
+            self._notify_password_needed(chat_id)
+            return
+
+        step = _auth_step(probe)
+        detail = (
+            "the code was refused or has expired" if step == "code"
+            else f"unexpected screen after the code (step={step})"
+        )
+        _wset(phase="login", detail=detail, last_error=detail)
+        send_text(
+            chat_id,
+            f"❌ Telegram login: {detail}.\n"
+            "Run /logintelegram code again to request a fresh code.",
+        )
+        if shot:
+            _send_shot(chat_id, shot)
 
     def _notify_password_needed(self, chat_id: str | None) -> None:
         target = chat_id or _qr_chat_default()
@@ -960,6 +1285,9 @@ class _TelegramWarm:
             self._teardown()
 
     def _handle_chats(self, task: dict) -> None:
+        if self._awaiting_code:
+            print('[tg-warm] skip chat scrape — waiting for /telegramcode', flush=True)
+            return
         box = task.get("box")
         chat_id = task.get("chat_id")
         try:
@@ -1067,6 +1395,20 @@ def request_login(chat_id: str | None = None) -> None:
     w.request_login(chat_id)
 
 
+def request_code_login(chat_id: str | None = None) -> None:
+    """/logintelegram code — phone-number login; the code comes back via Lark."""
+    w = warm()
+    w.start()
+    w.request_code_login(chat_id)
+
+
+def submit_login_code(code: str, chat_id: str | None = None) -> None:
+    """/telegramcode <code> — relay the one-time code into the browser."""
+    w = warm()
+    w.start()
+    w.submit_code(code, chat_id)
+
+
 def capture_and_send(chat_id: str | None = None) -> dict:
     w = warm()
     w.start()
@@ -1123,6 +1465,35 @@ def main(argv: list[str] | None = None) -> int:
         print(f"QR login requested — watch Lark chat {_qr_chat_default()}. Ctrl-C to stop waiting.")
         try:
             deadline = time.time() + _login_timeout_s() + 60
+            while time.time() < deadline and not is_authenticated():
+                time.sleep(3)
+        except KeyboardInterrupt:
+            pass
+        print("\n".join(status_lines()))
+        return 0 if is_authenticated() else 1
+
+    if "--login-code" in args:
+        request_code_login(None)
+        print(f"Code login started — the prompt goes to Lark chat {_qr_chat_default()}.")
+        print("Then send `/telegramcode 12345` in Lark, or run --code 12345 here.")
+        try:
+            deadline = time.time() + 180
+            while time.time() < deadline and not is_authenticated():
+                time.sleep(3)
+        except KeyboardInterrupt:
+            pass
+        print("\n".join(status_lines()))
+        return 0
+
+    if "--code" in args:
+        idx = args.index("--code")
+        code = "".join(ch for ch in " ".join(args[idx + 1:]) if ch.isdigit())
+        if not code:
+            print("usage: python telegramwarm.py --code 12345")
+            return 2
+        submit_login_code(code, None)
+        try:
+            deadline = time.time() + 120
             while time.time() < deadline and not is_authenticated():
                 time.sleep(3)
         except KeyboardInterrupt:
