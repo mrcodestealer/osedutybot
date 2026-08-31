@@ -51,6 +51,7 @@ import json
 import mimetypes
 import os
 import queue
+import shutil
 import sys
 import threading
 import time
@@ -809,8 +810,11 @@ def _start_code_login(page, *, log=print) -> tuple[str, dict]:
         if _back_to_phone_form(page, log=log):
             step = "phone"
         else:
-            log("[tg-warm] keeping the pending code request")
-            return "code", _probe(page)
+            # Distinct from "code": NEXT was never pressed, so NOTHING was sent just
+            # now. Reporting this as a fresh send is what made the bot claim a code
+            # had arrived when none had.
+            log("[tg-warm] keeping the pending code request (no new code sent)")
+            return "code_pending", _probe(page)
     if step != "phone":
         log(f"[tg-warm] expected the phone form, got step={step}")
         return step, _probe(page)
@@ -1065,6 +1069,10 @@ class _TelegramWarm:
         self._cancel_login.set()
         self._tasks.put({"kind": "login_code", "chat_id": chat_id})
 
+    def request_reset(self, chat_id: str | None = None) -> None:
+        self._cancel_login.set()
+        self._tasks.put({"kind": "reset", "chat_id": chat_id})
+
     def submit_code(self, code: str, chat_id: str | None = None) -> None:
         self._tasks.put({"kind": "submit_code", "code": code, "chat_id": chat_id})
 
@@ -1117,6 +1125,8 @@ class _TelegramWarm:
                     self._handle_chats(task)
                 elif kind == "probe":
                     self._handle_probe(task)
+                elif kind == "reset":
+                    self._handle_reset(task)
             except Exception as err:
                 print(f"[tg-warm] task {kind} error: {err!r}", flush=True)
                 _wset(phase="error", detail=f"task {kind} failed", last_error=repr(err))
@@ -1257,18 +1267,47 @@ class _TelegramWarm:
         except Exception:
             shot = None
 
-        if step == "code":
+        if step in ("code", "code_pending"):
             self._awaiting_code = True
             _wset(phase="login", detail="waiting for /telegramcode <code>")
-            send_text(
-                chat_id,
-                "📲 Telegram sent a login code to "
-                f"{_phone_number()[:4]}…{_phone_number()[-3:]}.\n"
-                "Check the Telegram app on your phone (or SMS), then reply here:\n"
-                "    /telegramcode 12345\n"
-                "⚠️ The code is single-use and expires quickly. Anyone who can read "
-                "this chat can read the code — prefer a direct message to the bot.",
+            masked = f"{_phone_number()[:4]}…{_phone_number()[-3:]}"
+            # Telegram states the delivery channel on the screen itself ("…a message
+            # in Telegram" vs "…an SMS"). Quote it rather than guessing, because
+            # looking in the wrong place is indistinguishable from no code arriving.
+            delivery = next(
+                (ln.strip() for ln in (probe.get("authLines") or [])
+                 if "sent" in ln.lower()),
+                "",
             )
+            if step == "code":
+                lines = [f"📲 Telegram sent a login code to {masked}."]
+            else:
+                lines = [
+                    f"⚠️ A code request was ALREADY pending for {masked} — "
+                    "no NEW code was sent just now.",
+                    "If the earlier code has expired, see below to force a fresh one.",
+                ]
+            if delivery:
+                lines.append(f"Telegram says: “{delivery}”")
+                if "sms" not in delivery.lower():
+                    lines.append(
+                        "→ That means an IN-APP message, not an SMS. Open Telegram on "
+                        "your phone and look in the chat named “Telegram” (the blue "
+                        "service account), not your SMS inbox."
+                    )
+            lines.append("Then reply here:    /telegramcode 12345")
+            if step == "code_pending":
+                lines.append(
+                    "To force a brand-new code: /resettelegram (clears the session), "
+                    "then /logintelegram code."
+                )
+            lines.append(
+                "⚠️ Single-use and expires quickly. Anyone who can read this chat can "
+                "read the code — prefer a direct message to the bot."
+            )
+            send_text(chat_id, "\n".join(lines))
+            if shot:
+                _send_shot(chat_id, shot)
             return
 
         if step == "password":
@@ -1528,6 +1567,50 @@ class _TelegramWarm:
             _wset(phase="error", detail="chat scrape failed", last_error=repr(err))
             self._teardown()
 
+    def _handle_reset(self, task: dict) -> None:
+        """Delete the browser profile so the next login starts from nothing.
+
+        Needed because Telegram restores a pending code screen from the profile: a
+        stale, expired code request cannot otherwise be cleared, and the phone form
+        will not issue a second code while one is outstanding. This also signs out
+        any working session, which is why it is only ever run on request.
+        """
+        chat_id = task.get("chat_id") or _qr_chat_default()
+        self._teardown()
+        self._awaiting_code = False
+        removed = False
+        try:
+            if PROFILE_DIR.exists():
+                shutil.rmtree(PROFILE_DIR, ignore_errors=True)
+                removed = not PROFILE_DIR.exists()
+        except Exception as err:
+            print(f"[tg-warm] profile delete failed: {err!r}", flush=True)
+        for path in (CHATS_JSON, _LOGIN_STATE):
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        _wset(
+            phase="idle",
+            detail="session reset — run /logintelegram code",
+            logged_in_since=None,
+            last_verdict=None,
+            last_error=None,
+            alerted=False,
+            chats_seen=0,
+            new_previews=0,
+        )
+        try:
+            send_text(
+                chat_id,
+                ("🧹 Telegram session reset — profile "
+                 + ("deleted" if removed else "could not be fully deleted")
+                 + ".\nNow run /logintelegram code for a brand-new code."),
+            )
+        except Exception:
+            pass
+        print(f"[tg-warm] reset done (profile removed={removed})", flush=True)
+
     def _handle_probe(self, task: dict) -> None:
         box = task.get("box")
         if not self._healthy():
@@ -1593,6 +1676,13 @@ def submit_login_code(code: str, chat_id: str | None = None) -> None:
     w = warm()
     w.start()
     w.submit_code(code, chat_id)
+
+
+def reset_session(chat_id: str | None = None) -> None:
+    """/resettelegram — wipe the profile so the next login starts clean."""
+    w = warm()
+    w.start()
+    w.request_reset(chat_id)
 
 
 def capture_and_send(chat_id: str | None = None) -> dict:

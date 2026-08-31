@@ -6708,6 +6708,25 @@ def lark_webhook():
 
         threading.Thread(target=_run_telegram_login, daemon=True).start()
         return _lark_im_done()
+    elif cmd == '/resettelegram':
+        # Wipe the Telegram browser profile. Needed when a stale code request is
+        # stuck pending — Telegram restores that screen from the profile and will
+        # not issue a second code while one is outstanding. Also signs out any
+        # working session, so it is deliberately a separate, explicit command.
+        def _run_telegram_reset(chat_id_tg=chat_id):
+            try:
+                import telegramwarm as _tg_mod
+
+                _tg_mod.reset_session(chat_id_tg)
+            except Exception as _tg_err:
+                print(f"❌ resettelegram: {_tg_err!r}", flush=True)
+                try:
+                    send_message(chat_id_tg, f"❌ /resettelegram failed: {_tg_err}")
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run_telegram_reset, daemon=True).start()
+        return _lark_im_done()
     elif cmd == '/telegramcode':
         # Relay the one-time Telegram login code into the warm browser. Digits only,
         # so a pasted "code: 12345" or a stray dash still works.
