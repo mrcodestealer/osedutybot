@@ -82,10 +82,8 @@ miniconda.sh
 wireguard-go-*/
 .pldt_prefix_state.json
 
-# ---- Telegram watcher (session file IS the credential) ----
-*.session
-*.session-journal
-telegramwatch_state.json
+# ---- Telegram watcher (browser profile lives under browser_data/) ----
+telegram_chats.json
 
 # ---- Teams watcher (Chromium profile IS the credential) ----
 teamswatch_profile/

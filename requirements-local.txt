@@ -11,4 +11,3 @@ paramiko
 pymysql
 openpyxl
 playwright
-telethon

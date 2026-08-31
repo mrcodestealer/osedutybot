@@ -6662,14 +6662,38 @@ def lark_webhook():
 
         threading.Thread(target=_run_osmwatch_shot, daemon=True).start()
         return _lark_im_done()
+    elif cmd == '/logintelegram':
+        # Post a fresh Telegram Web login QR to the lab group. Scan it with the
+        # Telegram phone app (Settings -> Devices -> Link Desktop Device).
+        try:
+            import telegramwarm as _tg_mod
+
+            _tg_mod.request_login(chat_id)
+            send_message(
+                chat_id,
+                "🔐 Telegram: login requested — a QR will be posted shortly. "
+                "Scan it with Telegram on your phone (Settings → Devices → "
+                "Link Desktop Device).",
+            )
+        except Exception as _tg_err:
+            print(f"❌ logintelegram: {_tg_err!r}", flush=True)
+            try:
+                send_message(chat_id, f"❌ /logintelegram failed: {_tg_err}")
+            except Exception:
+                pass
+        return _lark_im_done()
     elif cmd == '/telegramstatus':
-        # Is the read-only Telegram group watcher still monitoring? Replies with a
-        # text summary, plus a PNG snapshot of the board when it IS monitoring.
+        # Is the Telegram watcher still monitoring? Replies with a status summary
+        # plus a live screenshot of Telegram Web (the warm browser), so you can
+        # see for yourself whether the session is really logged in.
         def _run_telegram_status(chat_id_tg=chat_id):
             try:
-                import telegramwatch as _tg_mod
+                import telegramwarm as _tg_mod
 
-                _tg_mod.send_status_to_lark(chat_id_tg)
+                send_message(chat_id_tg, "📸 Telegram: capturing the client…")
+                box = _tg_mod.send_status_to_lark(chat_id_tg)
+                if box.get("error"):
+                    send_message(chat_id_tg, f"❌ Telegram capture failed: {box['error']}")
             except Exception as _tg_err:
                 print(f"❌ telegramstatus: {_tg_err!r}", flush=True)
                 try:
@@ -8568,11 +8592,11 @@ def _run_main_entry() -> int:
         except Exception as _boot_ow_err:
             print(f"[osmwatch-warm] startup pre-warm skipped: {_boot_ow_err!r}", flush=True)
         try:
-            import telegramwatch as _boot_tg
+            import telegramwarm as _boot_tg
 
-            _boot_tg.start_monitor_on_startup()
+            _boot_tg.prewarm_telegram_on_startup()
         except Exception as _boot_tg_err:
-            print(f"[telegram-watch] startup skipped: {_boot_tg_err!r}", flush=True)
+            print(f"[tg-warm] startup pre-warm skipped: {_boot_tg_err!r}", flush=True)
         try:
             import teamswatch as _boot_tw
 

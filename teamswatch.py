@@ -87,7 +87,7 @@ _STATE_PATH = _ROOT_DIR / "teamswatch_state.json"
 # Loading teams.live.com lets MSAL mint fresh ones.
 TEAMS_URL = os.getenv("TEAMS_ENTRY_URL", "https://teams.live.com/v2/")
 
-# Same Lark group + person as the Telegram watcher alerts (telegramwatch.py:79).
+# Same Lark group + person as the Telegram watcher alerts (telegramwarm.py:87).
 ALERT_CHAT_ID = os.getenv(
     "TEAMS_ALERT_CHAT_ID", "oc_ad9b5bdbb2826ba2ee9730920ef25432"
 ).strip()
