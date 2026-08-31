@@ -95,6 +95,16 @@ OSE_ALL_LEAVE_TABLE_ID = os.getenv(
 OSE_LEAVE_TABLE_ID = os.getenv("OSE_LEAVE_TABLE_ID", OSE_ALL_LEAVE_TABLE_ID).strip()
 OSE_OFFSET_TABLE_ID = os.getenv("OSE_OFFSET_TABLE_ID", "tblC5T2MAydwT42j")
 
+# ================= Offset auto-delete kill-switch =================
+# The bot must NOT delete offset rows on its own. The old cleanup removed any row
+# whose Original AND Exchange dates were >= 2 whole calendar months old (see
+# purge_stale_ose_offset_bitable_rows) — on any day in August that wiped out all
+# of June and earlier. Offset history is now kept indefinitely.
+# Set OSE_OFFSET_AUTO_PURGE=1 to restore that cleanup.
+OSE_OFFSET_AUTO_PURGE_ENABLED = (os.getenv("OSE_OFFSET_AUTO_PURGE") or "0").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
 # Bump when leave/admin Bitable routing changes (check /api/admin/leave-list meta).
 OSE_LEAVE_API_BUILD = "20260603-leaveose-pinned-v4"
 
@@ -6003,8 +6013,22 @@ def purge_stale_ose_offset_bitable_rows(*, ref_date: Optional[date] = None) -> d
     qualifies — e.g. 26–30 Mar is deleted. On **any day in June**, May rows are
     **not** removed (only one month behind). On **any day in July**, May rows are
     removed.
+
+    **Disabled by default.** ``OSE_OFFSET_AUTO_PURGE`` must be set to re-enable it;
+    otherwise this returns ``skipped="auto_purge_disabled"`` and deletes nothing.
     """
     ref = ref_date or date.today()
+    if not OSE_OFFSET_AUTO_PURGE_ENABLED:
+        # Offsets are kept forever unless an operator opts back in.
+        return {
+            "ok": True,
+            "ref_date": ref.isoformat(),
+            "scanned": 0,
+            "eligible": 0,
+            "deleted": 0,
+            "errors": [],
+            "skipped": "auto_purge_disabled",
+        }
     token = get_tenant_access_token()
     items = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_OFFSET_TABLE_ID)
     to_delete: list[str] = []
