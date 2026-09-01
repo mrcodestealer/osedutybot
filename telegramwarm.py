@@ -1110,22 +1110,29 @@ _CHAT_ROW_SELECTOR = "#column-left .chatlist-chat, #column-left ul.chatlist > li
 #: silently ignored. The caller clicks the returned index with Playwright, which
 #: dispatches genuine mouse events.
 _FIND_CHAT_JS = """
-(wanted) => {
-  const want = (wanted || '').trim().toLowerCase();
+(arg) => {
+  const want = (arg.wanted || '').trim().toLowerCase();
   const items = document.querySelectorAll(
     '#column-left .chatlist-chat, #column-left ul.chatlist > li');
   const seen = [];
-  const idx = [];
+  const exact = [];
+  const partial = [];
   items.forEach((li, i) => {
     const t = li.querySelector('.user-title, .peer-title, .dialog-title');
     const title = (t ? t.innerText : '').trim();
     if (!title) return;
     seen.push(title);
-    if (title.toLowerCase() === want) idx.push(i);
+    const low = title.toLowerCase();
+    if (low === want) exact.push(i);
+    else if (arg.allowSubstring && want && low.includes(want)) partial.push(i);
   });
+  // Exact always wins; substring is only consulted when nothing matched exactly,
+  // and only for read-only callers that opted in.
+  const hits = exact.length ? exact : (arg.allowSubstring ? partial : []);
   return {
-    matches: idx.length,
-    index: idx.length === 1 ? idx[0] : -1,
+    matches: hits.length,
+    index: hits.length === 1 ? hits[0] : -1,
+    matchKind: exact.length ? 'exact' : (hits.length ? 'substring' : 'none'),
     candidates: seen.slice(0, 30),
   };
 }
@@ -1160,14 +1167,15 @@ def _search_sidebar(page, title: str, *, log=print) -> bool:
     return False
 
 
-def _open_chat_by_title(page, title: str, *, log=print) -> dict:
+def _open_chat_by_title(page, title: str, *, allow_substring: bool = False, log=print) -> dict:
     """Click the sidebar chat whose title matches exactly. No fuzzy matching.
 
     Tries the already-rendered list first, then falls back to searching, since the
     chat list is virtualised and an inactive chat will not be in the DOM.
     """
+    arg = {"wanted": title, "allowSubstring": bool(allow_substring)}
     try:
-        res = page.evaluate(_FIND_CHAT_JS, title) or {}
+        res = page.evaluate(_FIND_CHAT_JS, arg) or {}
     except Exception as err:
         return {"ok": False, "error": repr(err)}
 
@@ -1175,13 +1183,15 @@ def _open_chat_by_title(page, title: str, *, log=print) -> dict:
         log(f"[tg-warm] {title!r} not in the rendered list — searching")
         if _search_sidebar(page, title, log=log):
             try:
-                res = page.evaluate(_FIND_CHAT_JS, title) or {}
+                res = page.evaluate(_FIND_CHAT_JS, arg) or {}
             except Exception as err:
                 return {"ok": False, "error": repr(err)}
 
     if res.get("matches", 0) != 1:
-        log(f"[tg-warm] chat {title!r}: {res.get('matches', 0)} exact matches")
+        log(f"[tg-warm] chat {title!r}: {res.get('matches', 0)} matches "
+            f"({res.get('matchKind')})")
         return {"ok": False, "matches": res.get("matches", 0),
+                "matchKind": res.get("matchKind"),
                 "candidates": res.get("candidates", [])}
 
     # Real Playwright click (genuine mouse events) — see _FIND_CHAT_JS.
@@ -1204,6 +1214,7 @@ def _open_chat_by_title(page, title: str, *, log=print) -> dict:
         if header:
             break
     return {"ok": True, "title": header or None,
+            "matchKind": res.get("matchKind"),
             "candidates": res.get("candidates", [])}
 
 
@@ -1226,6 +1237,99 @@ def _open_chat_title(page) -> str:
         return (page.evaluate(_HEADER_TITLE_JS) or "").strip()
     except Exception:
         return ""
+
+
+def _check_chat_title() -> str:
+    return (os.getenv("TELEGRAM_CHECK_CHAT", "") or "CP x 5G Integration_new").strip()
+
+
+def _check_count() -> int:
+    try:
+        return max(1, min(50, int(os.getenv("TELEGRAM_CHECK_COUNT", "5"))))
+    except ValueError:
+        return 5
+
+
+#: Read the last N message bubbles of the open conversation. Read-only: this only
+#: queries the DOM, it never focuses the composer or types.
+_READ_MESSAGES_JS = """
+(n) => {
+  const root = document.querySelector('#column-center');
+  if (!root) return { error: 'no #column-center' };
+  let nodes = Array.from(root.querySelectorAll('.bubble[data-mid]'));
+  if (!nodes.length) nodes = Array.from(root.querySelectorAll('.bubble'));
+  if (!nodes.length) nodes = Array.from(root.querySelectorAll('[data-mid]'));
+  const out = [];
+  for (const b of nodes.slice(-n)) {
+    const timeEl = b.querySelector('.time-inner, .time');
+    const time = timeEl ? (timeEl.innerText || '').trim() : '';
+    const txtEl = b.querySelector('.message, .text-content');
+    let text = ((txtEl ? txtEl.innerText : b.innerText) || '').trim();
+    // Web K renders the timestamp inside the text node; strip it off the tail so
+    // the message body does not end with a stray "14:32".
+    if (time && text.endsWith(time)) text = text.slice(0, -time.length).trim();
+    const nameEl = b.querySelector('.peer-title, .bubble-name-content, .name');
+    const isOut = b.classList.contains('is-out');
+    out.push({
+      sender: nameEl ? (nameEl.innerText || '').trim() : (isOut ? 'me' : ''),
+      out: isOut,
+      time: time,
+      text: text.slice(0, 600),
+    });
+  }
+  return { total: nodes.length, messages: out };
+}
+"""
+
+
+def _read_last_messages(page, count: int, *, log=print) -> dict:
+    """Scrape the last ``count`` messages from the open conversation."""
+    try:
+        # Opening a chat lands at the newest message, but give the virtualised list a
+        # moment to render before reading.
+        page.wait_for_timeout(1500)
+        res = page.evaluate(_READ_MESSAGES_JS, count) or {}
+    except Exception as err:
+        return {"error": repr(err)}
+    if res.get("error"):
+        log(f"[tg-warm] read failed: {res['error']}")
+    else:
+        log(f"[tg-warm] read {len(res.get('messages', []))} of {res.get('total', 0)} bubbles")
+    return res
+
+
+def _check_group(page, title: str, count: int, *, log=print) -> dict:
+    """Open a chat, read its last N messages, return to the list. Sends nothing."""
+    opened = _open_chat_by_title(page, title, allow_substring=True, log=log)
+    if not opened.get("ok"):
+        return {
+            "ok": False,
+            "stage": "open",
+            "reason": f"{opened.get('matches', 0)} chats matching {title!r} (need exactly 1)",
+            "candidates": opened.get("candidates", []),
+        }
+
+    header = _open_chat_title(page)
+    res = _read_last_messages(page, count, log=log)
+    if res.get("error") or not res.get("messages"):
+        out = {
+            "ok": False,
+            "stage": "read",
+            "reason": res.get("error") or "no message bubbles found",
+            "header": header,
+            "ui": _chat_ui_inventory(page),
+        }
+        _back_to_chat_list(page, log=log)
+        return out
+
+    _back_to_chat_list(page, log=log)
+    return {
+        "ok": True,
+        "chat": header or title,
+        "matchKind": opened.get("matchKind"),
+        "messages": res.get("messages", []),
+        "total": res.get("total", 0),
+    }
 
 
 def _send_message_in_open_chat(page, text: str, *, log=print) -> bool:
@@ -1455,6 +1559,11 @@ class _TelegramWarm:
     def send_test(self, chat_id: str | None = None) -> None:
         self._tasks.put({"kind": "send_test", "chat_id": chat_id})
 
+    def check_group(self, chat_id: str | None = None, title: str | None = None,
+                    count: int | None = None) -> None:
+        self._tasks.put({"kind": "check_group", "chat_id": chat_id,
+                         "title": title, "count": count})
+
     def submit_code(self, code: str, chat_id: str | None = None) -> None:
         self._tasks.put({"kind": "submit_code", "code": code, "chat_id": chat_id})
 
@@ -1511,6 +1620,8 @@ class _TelegramWarm:
                     self._handle_reset(task)
                 elif kind == "send_test":
                     self._handle_send_test(task)
+                elif kind == "check_group":
+                    self._handle_check_group(task)
             except Exception as err:
                 print(f"[tg-warm] task {kind} error: {err!r}", flush=True)
                 _wset(phase="error", detail=f"task {kind} failed", last_error=repr(err))
@@ -2035,6 +2146,65 @@ class _TelegramWarm:
             pass
         print(f"[tg-warm] reset done (profile removed={removed})", flush=True)
 
+    def _handle_check_group(self, task: dict) -> None:
+        """Read-only: open a chat, report its last N messages, go back to the list."""
+        chat_id = task.get("chat_id") or _qr_chat_default()
+        title = (task.get("title") or "").strip() or _check_chat_title()
+        count = int(task.get("count") or _check_count())
+        try:
+            if not self._healthy():
+                self._launch()
+            verdict = self._check_auth()
+            if verdict != "authenticated":
+                send_text(
+                    chat_id,
+                    f"❌ Telegram: not logged in ({verdict}) — cannot read. "
+                    "Run /logintelegram code first.",
+                )
+                return
+
+            send_text(chat_id, f"🔍 Telegram: reading the last {count} messages of “{title}”…")
+            result = _check_group(self._page, title, count, log=print)
+
+            shot = str(SHOT_PNG)
+            try:
+                self._page.screenshot(path=shot)
+            except Exception:
+                shot = None
+
+            if result.get("ok"):
+                lines = [
+                    f"💬 Telegram — “{result.get('chat')}” "
+                    f"(last {len(result['messages'])} of {result.get('total', 0)} loaded):"
+                ]
+                for m in result["messages"]:
+                    who = m.get("sender") or ("me" if m.get("out") else "?")
+                    when = f" [{m['time']}]" if m.get("time") else ""
+                    body = (m.get("text") or "").replace("\n", " ⏎ ")
+                    lines.append(f"• {who}{when}: {body}")
+                if result.get("matchKind") == "substring":
+                    lines.append(f"(matched {title!r} by substring)")
+                lines.append("Read-only — nothing was sent. Back on the chat list.")
+                send_text(chat_id, "\n".join(lines))
+            else:
+                lines = [f"❌ Telegram read failed at the “{result.get('stage')}” stage: "
+                         f"{result.get('reason')}"]
+                if result.get("candidates"):
+                    lines.append(f"Chats visible in the sidebar: {result['candidates']}")
+                if result.get("ui"):
+                    lines.append(f"Chat UI inventory: {json.dumps(result['ui'], ensure_ascii=False)}")
+                    lines.append("Send that back — it names the selectors needed.")
+                send_text(chat_id, "\n".join(lines))
+            if shot:
+                _send_shot(chat_id, shot)
+        except Exception as err:
+            print(f"[tg-warm] check_group error: {err!r}", flush=True)
+            _wset(last_error=repr(err))
+            try:
+                send_text(chat_id, f"❌ /checktelegramgroup failed: {err}")
+            except Exception:
+                pass
+
     def _handle_send_test(self, task: dict) -> None:
         """The one writing path. Only ever reached from an explicit slash command."""
         chat_id = task.get("chat_id") or _qr_chat_default()
@@ -2154,6 +2324,14 @@ def submit_login_code(code: str, chat_id: str | None = None) -> None:
     w = warm()
     w.start()
     w.submit_code(code, chat_id)
+
+
+def check_group_messages(chat_id: str | None = None, title: str | None = None,
+                         count: int | None = None) -> None:
+    """/checktelegramgroup — read-only: report a chat's latest messages."""
+    w = warm()
+    w.start()
+    w.check_group(chat_id, title, count)
 
 
 def send_test_message(chat_id: str | None = None) -> None:

@@ -6708,6 +6708,27 @@ def lark_webhook():
 
         threading.Thread(target=_run_telegram_login, daemon=True).start()
         return _lark_im_done()
+    elif cmd == '/checktelegramgroup':
+        # Read-only. Opens the chat named in TELEGRAM_CHECK_CHAT (default
+        # "CP x 5G Integration_new"), reports its latest TELEGRAM_CHECK_COUNT
+        # messages, then returns to the chat list. Nothing is ever typed or sent.
+        # Optional override: `/checktelegramgroup <chat title>`.
+        _tg_title = " ".join(cmd_parts[1:]).strip() or None
+
+        def _run_telegram_check(chat_id_tg=chat_id, title_tg=_tg_title):
+            try:
+                import telegramwarm as _tg_mod
+
+                _tg_mod.check_group_messages(chat_id_tg, title_tg)
+            except Exception as _tg_err:
+                print(f"❌ checktelegramgroup: {_tg_err!r}", flush=True)
+                try:
+                    send_message(chat_id_tg, f"❌ /checktelegramgroup failed: {_tg_err}")
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run_telegram_check, daemon=True).start()
+        return _lark_im_done()
     elif cmd == '/telegramsendjctest':
         # The ONLY path that writes to Telegram. Opens the chat named in
         # TELEGRAM_TEST_CHAT (default "jc"), verifies the header title matches before
