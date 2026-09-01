@@ -17,9 +17,12 @@ key in localStorage *and* IndexedDB, and Playwright's ``storage_state`` does not
 round-trip IndexedDB. So this uses a **persistent browser profile**
 (``browser_data/telegram_profile``), which keeps everything.
 
-READ-ONLY: nothing here ever types into a Telegram message box. The only field it
-will ever fill is the two-step-verification prompt, and only when
-``TELEGRAM_2FA_PASSWORD`` is set — see ``_maybe_fill_2fa``.
+MOSTLY READ-ONLY. Watching never writes: the poll only reads the chat list. The one
+exception is ``/telegramsendjctest``, an explicitly-invoked command that posts a
+single fixed message to a single named chat (see ``_send_test_message``) — added on
+request. Nothing sends on a timer, on startup, or in reply to anything; a human has
+to type the command every time. Note this does mean the account is no longer a
+purely passive reader, which is the behaviour Telegram's anti-spam actually watches.
 
 Two login routes, both ending at the same session:
   * **QR** — a QR is posted to Lark; scan it with the phone. No secrets anywhere.
@@ -1046,6 +1049,244 @@ _CHATS_JS = """
 """
 
 
+# ---------------------------------------------------------------------------
+# Sending (explicit command only — see the module docstring)
+# ---------------------------------------------------------------------------
+def _test_chat_title() -> str:
+    return (os.getenv("TELEGRAM_TEST_CHAT", "") or "jc").strip()
+
+
+def _test_message() -> str:
+    return (
+        os.getenv("TELEGRAM_TEST_MESSAGE", "")
+        or "Hi team, are there any maintenance plans for this week?"
+    ).strip()
+
+
+#: What the composer/header/search look like, for when a selector misses. The chat UI
+#: cannot be reached without a live login, so a failure ships this to Lark and one
+#: round yields the real selectors instead of another guess.
+_CHAT_UI_INVENTORY_JS = """
+() => {
+  const vis = (el) => {
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && getComputedStyle(el).display !== 'none';
+  };
+  const desc = (e) => ({
+    tag: e.tagName.toLowerCase(),
+    cls: (e.className || '').toString().slice(0, 70),
+    editable: e.getAttribute('contenteditable'),
+    ph: e.getAttribute('placeholder'),
+    visible: vis(e),
+    text: (e.innerText || e.value || '').trim().slice(0, 40) || null,
+  });
+  const grab = (sel) => Array.from(document.querySelectorAll(sel)).filter(vis).map(desc).slice(0, 6);
+  return {
+    editables: grab('[contenteditable=true]'),
+    inputs: grab('input:not([type=hidden]):not(.stealthy)'),
+    headerTitles: grab('#column-center .peer-title, #column-center .user-title, .chat-info .peer-title'),
+    chatItems: document.querySelectorAll('#column-left .chatlist-chat, #column-left ul.chatlist > li').length,
+  };
+}
+"""
+
+
+def _chat_ui_inventory(page) -> dict:
+    try:
+        return page.evaluate(_CHAT_UI_INVENTORY_JS) or {}
+    except Exception as err:
+        return {"error": repr(err)}
+
+
+#: Open the chat whose title matches exactly (case-insensitive), returning what was
+#: matched. Exactness matters: this drives a SEND, and a fuzzy match could post to the
+#: wrong person. Ambiguity is reported rather than resolved.
+_OPEN_CHAT_JS = """
+(wanted) => {
+  const want = (wanted || '').trim().toLowerCase();
+  const items = document.querySelectorAll(
+    '#column-left .chatlist-chat, #column-left ul.chatlist > li');
+  const seen = [];
+  const hits = [];
+  for (const li of items) {
+    const t = li.querySelector('.user-title, .peer-title, .dialog-title');
+    const title = (t ? t.innerText : '').trim();
+    if (!title) continue;
+    seen.push(title);
+    if (title.toLowerCase() === want) hits.push({ li, title });
+  }
+  if (hits.length === 1) {
+    hits[0].li.click();
+    return { ok: true, title: hits[0].title, candidates: seen.slice(0, 30) };
+  }
+  return { ok: false, matches: hits.length, candidates: seen.slice(0, 30) };
+}
+"""
+
+
+def _search_sidebar(page, title: str, *, log=print) -> bool:
+    """Type a title into the sidebar search box so the chat is rendered.
+
+    Needed because the chat list is virtualised: only rows currently on screen exist
+    in the DOM, so a chat that is not recently active simply is not there to match.
+    """
+    for sel in (
+        "#column-left input.input-search-input",
+        "#column-left .input-search input",
+        "#column-left input:not([type=hidden]):not(.stealthy)",
+    ):
+        try:
+            for el in page.query_selector_all(sel):
+                if not el.is_visible():
+                    continue
+                el.click()
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Delete")
+                page.keyboard.type(title, delay=40)
+                page.wait_for_timeout(2500)   # let results come back
+                log(f"[tg-warm] searched the sidebar for {title!r}")
+                return True
+        except Exception:
+            continue
+    log("[tg-warm] sidebar search box not found")
+    return False
+
+
+def _open_chat_by_title(page, title: str, *, log=print) -> dict:
+    """Click the sidebar chat whose title matches exactly. No fuzzy matching.
+
+    Tries the already-rendered list first, then falls back to searching, since the
+    chat list is virtualised and an inactive chat will not be in the DOM.
+    """
+    try:
+        res = page.evaluate(_OPEN_CHAT_JS, title) or {}
+    except Exception as err:
+        return {"ok": False, "error": repr(err)}
+
+    if not res.get("ok") and res.get("matches", 0) == 0:
+        log(f"[tg-warm] {title!r} not in the rendered list — searching")
+        if _search_sidebar(page, title, log=log):
+            try:
+                res = page.evaluate(_OPEN_CHAT_JS, title) or {}
+            except Exception as err:
+                return {"ok": False, "error": repr(err)}
+
+    if res.get("ok"):
+        page.wait_for_timeout(2500)
+    else:
+        log(f"[tg-warm] chat {title!r}: {res.get('matches', 0)} exact matches")
+    return res
+
+
+_HEADER_TITLE_JS = """
+() => {
+  for (const sel of ['#column-center .chat-info .peer-title',
+                     '#column-center .peer-title',
+                     '#column-center .user-title',
+                     '.chat-info .peer-title']) {
+    const el = document.querySelector(sel);
+    if (el && (el.innerText || '').trim()) return (el.innerText || '').trim();
+  }
+  return null;
+}
+"""
+
+
+def _open_chat_title(page) -> str:
+    try:
+        return (page.evaluate(_HEADER_TITLE_JS) or "").strip()
+    except Exception:
+        return ""
+
+
+def _send_message_in_open_chat(page, text: str, *, log=print) -> bool:
+    """Type into the composer of the currently-open chat and press Enter."""
+    for sel in (
+        "#column-center .input-message-input[contenteditable=true]",
+        ".input-message-input[contenteditable=true]",
+        "#column-center [contenteditable=true]",
+    ):
+        try:
+            for el in page.query_selector_all(sel):
+                if not el.is_visible():
+                    continue
+                el.click()
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Delete")
+                page.keyboard.type(text, delay=25)
+                page.wait_for_timeout(400)
+                page.keyboard.press("Enter")
+                page.wait_for_timeout(2000)
+                log(f"[tg-warm] sent via {sel} ({len(text)} chars)")
+                return True
+        except Exception:
+            continue
+    log("[tg-warm] no visible message composer found")
+    return False
+
+
+def _back_to_chat_list(page, *, log=print) -> None:
+    """Return to the plain chat list and leave the browser idle there."""
+    for _ in range(2):
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(700)
+        except Exception:
+            break
+    # Clear any leftover search text so the next poll sees the full list.
+    try:
+        for el in page.query_selector_all("#column-left input:not([type=hidden])"):
+            if el.is_visible() and (el.input_value() or "").strip():
+                el.click()
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Delete")
+    except Exception:
+        pass
+    try:
+        page.wait_for_timeout(800)
+    except Exception:
+        pass
+    log("[tg-warm] back on the chat list")
+
+
+def _send_test_message(page, *, log=print) -> dict:
+    """Open the configured chat, verify it, send the fixed message, go back.
+
+    Returns a result dict. The verification step is the point: the header title must
+    match what was asked for BEFORE anything is typed, so a mis-click cannot post to
+    the wrong person.
+    """
+    title, text = _test_chat_title(), _test_message()
+
+    opened = _open_chat_by_title(page, title, log=log)
+    if not opened.get("ok"):
+        return {
+            "ok": False,
+            "stage": "open",
+            "reason": (
+                f"{opened.get('matches', 0)} chats exactly titled {title!r} "
+                "(need exactly 1)"
+            ),
+            "candidates": opened.get("candidates", []),
+        }
+
+    header = _open_chat_title(page)
+    if header.strip().lower() != title.strip().lower():
+        # Refuse rather than send into whatever happens to be open.
+        return {
+            "ok": False,
+            "stage": "verify",
+            "reason": f"opened chat header is {header!r}, expected {title!r} — not sending",
+        }
+
+    if not _send_message_in_open_chat(page, text, log=log):
+        return {"ok": False, "stage": "compose", "reason": "message composer not found",
+                "ui": _chat_ui_inventory(page)}
+
+    _back_to_chat_list(page, log=log)
+    return {"ok": True, "chat": header, "text": text}
+
+
 def _preview_key(row: dict) -> str:
     raw = f"{row.get('title', '')}|{row.get('preview', '')}"
     return hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()[:16]
@@ -1181,6 +1422,9 @@ class _TelegramWarm:
         self._cancel_login.set()
         self._tasks.put({"kind": "reset", "chat_id": chat_id})
 
+    def send_test(self, chat_id: str | None = None) -> None:
+        self._tasks.put({"kind": "send_test", "chat_id": chat_id})
+
     def submit_code(self, code: str, chat_id: str | None = None) -> None:
         self._tasks.put({"kind": "submit_code", "code": code, "chat_id": chat_id})
 
@@ -1235,6 +1479,8 @@ class _TelegramWarm:
                     self._handle_probe(task)
                 elif kind == "reset":
                     self._handle_reset(task)
+                elif kind == "send_test":
+                    self._handle_send_test(task)
             except Exception as err:
                 print(f"[tg-warm] task {kind} error: {err!r}", flush=True)
                 _wset(phase="error", detail=f"task {kind} failed", last_error=repr(err))
@@ -1759,6 +2005,60 @@ class _TelegramWarm:
             pass
         print(f"[tg-warm] reset done (profile removed={removed})", flush=True)
 
+    def _handle_send_test(self, task: dict) -> None:
+        """The one writing path. Only ever reached from an explicit slash command."""
+        chat_id = task.get("chat_id") or _qr_chat_default()
+        title, text = _test_chat_title(), _test_message()
+        try:
+            if not self._healthy():
+                self._launch()
+            verdict = self._check_auth()
+            if verdict != "authenticated":
+                send_text(
+                    chat_id,
+                    f"❌ Telegram: not logged in ({verdict}) — cannot send. "
+                    "Run /logintelegram code first.",
+                )
+                return
+
+            send_text(chat_id, f"✍️ Telegram: opening chat “{title}” to send the test message…")
+            result = _send_test_message(self._page, log=print)
+
+            shot = str(SHOT_PNG)
+            try:
+                self._page.screenshot(path=shot)
+            except Exception:
+                shot = None
+
+            if result.get("ok"):
+                _wset(detail=f"test message sent to {result.get('chat')}")
+                send_text(
+                    chat_id,
+                    f"✅ Telegram: sent to “{result.get('chat')}”:\n"
+                    f"    {result.get('text')}\n"
+                    "Back on the chat list, idle.",
+                )
+            else:
+                stage = result.get("stage", "?")
+                lines = [f"❌ Telegram send failed at the “{stage}” stage: {result.get('reason')}"]
+                if result.get("candidates"):
+                    lines.append(f"Chats visible in the sidebar: {result['candidates']}")
+                if result.get("ui"):
+                    lines.append(f"Chat UI inventory: {json.dumps(result['ui'], ensure_ascii=False)}")
+                    lines.append("Send that back — it names the selectors needed.")
+                send_text(chat_id, "\n".join(lines))
+                # Leave the browser where the watcher expects it regardless.
+                _back_to_chat_list(self._page)
+            if shot:
+                _send_shot(chat_id, shot)
+        except Exception as err:
+            print(f"[tg-warm] send_test error: {err!r}", flush=True)
+            _wset(last_error=repr(err))
+            try:
+                send_text(chat_id, f"❌ /telegramsendjctest failed: {err}")
+            except Exception:
+                pass
+
     def _handle_probe(self, task: dict) -> None:
         box = task.get("box")
         if not self._healthy():
@@ -1824,6 +2124,13 @@ def submit_login_code(code: str, chat_id: str | None = None) -> None:
     w = warm()
     w.start()
     w.submit_code(code, chat_id)
+
+
+def send_test_message(chat_id: str | None = None) -> None:
+    """/telegramsendjctest — post the fixed message to the configured chat."""
+    w = warm()
+    w.start()
+    w.send_test(chat_id)
 
 
 def reset_session(chat_id: str | None = None) -> None:

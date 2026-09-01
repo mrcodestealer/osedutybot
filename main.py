@@ -6708,6 +6708,24 @@ def lark_webhook():
 
         threading.Thread(target=_run_telegram_login, daemon=True).start()
         return _lark_im_done()
+    elif cmd == '/telegramsendjctest':
+        # The ONLY path that writes to Telegram. Opens the chat named in
+        # TELEGRAM_TEST_CHAT (default "jc"), verifies the header title matches before
+        # typing anything, sends TELEGRAM_TEST_MESSAGE, then returns to the chat list.
+        def _run_telegram_send(chat_id_tg=chat_id):
+            try:
+                import telegramwarm as _tg_mod
+
+                _tg_mod.send_test_message(chat_id_tg)
+            except Exception as _tg_err:
+                print(f"❌ telegramsendjctest: {_tg_err!r}", flush=True)
+                try:
+                    send_message(chat_id_tg, f"❌ /telegramsendjctest failed: {_tg_err}")
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run_telegram_send, daemon=True).start()
+        return _lark_im_done()
     elif cmd == '/resettelegram':
         # Wipe the Telegram browser profile. Needed when a stale code request is
         # stuck pending — Telegram restores that screen from the profile and will
