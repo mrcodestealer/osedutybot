@@ -27,9 +27,16 @@ def page_html(titles, *, header_for_click=True, composer=True):
             if composer else "")
     # Clicking a sidebar row writes that row's title into the header, the way the
     # real client does when it opens a conversation.
+    #
+    # The isTrusted guard is the important part: Telegram Web K ignores synthetic DOM
+    # clicks and only reacts to real pointer events. An earlier version clicked via
+    # JS (el.click()), which passes a naive listener but never opens the chat against
+    # the real client. Requiring a trusted event makes this test fail if anyone
+    # reintroduces a JS click.
     click_js = """
       document.querySelectorAll('#column-left li').forEach(li => {
-        li.addEventListener('click', () => {
+        li.addEventListener('click', (e) => {
+          if (!e.isTrusted) return;
           document.querySelector('#hdr').innerText = li.getAttribute('data-t');
         });
       });

@@ -1101,25 +1101,33 @@ def _chat_ui_inventory(page) -> dict:
 #: Open the chat whose title matches exactly (case-insensitive), returning what was
 #: matched. Exactness matters: this drives a SEND, and a fuzzy match could post to the
 #: wrong person. Ambiguity is reported rather than resolved.
-_OPEN_CHAT_JS = """
+#: Row selector shared by the JS finder and the Python clicker, so the index returned
+#: by one addresses the same element in the other (both see document order).
+_CHAT_ROW_SELECTOR = "#column-left .chatlist-chat, #column-left ul.chatlist > li"
+
+#: Finds only — it must NOT click. A JS ``el.click()`` does not open the chat:
+#: Telegram Web K reacts to real pointer events, and a synthetic DOM click is
+#: silently ignored. The caller clicks the returned index with Playwright, which
+#: dispatches genuine mouse events.
+_FIND_CHAT_JS = """
 (wanted) => {
   const want = (wanted || '').trim().toLowerCase();
   const items = document.querySelectorAll(
     '#column-left .chatlist-chat, #column-left ul.chatlist > li');
   const seen = [];
-  const hits = [];
-  for (const li of items) {
+  const idx = [];
+  items.forEach((li, i) => {
     const t = li.querySelector('.user-title, .peer-title, .dialog-title');
     const title = (t ? t.innerText : '').trim();
-    if (!title) continue;
+    if (!title) return;
     seen.push(title);
-    if (title.toLowerCase() === want) hits.push({ li, title });
-  }
-  if (hits.length === 1) {
-    hits[0].li.click();
-    return { ok: true, title: hits[0].title, candidates: seen.slice(0, 30) };
-  }
-  return { ok: false, matches: hits.length, candidates: seen.slice(0, 30) };
+    if (title.toLowerCase() === want) idx.push(i);
+  });
+  return {
+    matches: idx.length,
+    index: idx.length === 1 ? idx[0] : -1,
+    candidates: seen.slice(0, 30),
+  };
 }
 """
 
@@ -1159,23 +1167,44 @@ def _open_chat_by_title(page, title: str, *, log=print) -> dict:
     chat list is virtualised and an inactive chat will not be in the DOM.
     """
     try:
-        res = page.evaluate(_OPEN_CHAT_JS, title) or {}
+        res = page.evaluate(_FIND_CHAT_JS, title) or {}
     except Exception as err:
         return {"ok": False, "error": repr(err)}
 
-    if not res.get("ok") and res.get("matches", 0) == 0:
+    if res.get("matches", 0) == 0:
         log(f"[tg-warm] {title!r} not in the rendered list — searching")
         if _search_sidebar(page, title, log=log):
             try:
-                res = page.evaluate(_OPEN_CHAT_JS, title) or {}
+                res = page.evaluate(_FIND_CHAT_JS, title) or {}
             except Exception as err:
                 return {"ok": False, "error": repr(err)}
 
-    if res.get("ok"):
-        page.wait_for_timeout(2500)
-    else:
+    if res.get("matches", 0) != 1:
         log(f"[tg-warm] chat {title!r}: {res.get('matches', 0)} exact matches")
-    return res
+        return {"ok": False, "matches": res.get("matches", 0),
+                "candidates": res.get("candidates", [])}
+
+    # Real Playwright click (genuine mouse events) — see _FIND_CHAT_JS.
+    try:
+        rows = page.query_selector_all(_CHAT_ROW_SELECTOR)
+        idx = res.get("index", -1)
+        if not (0 <= idx < len(rows)):
+            return {"ok": False, "matches": 1, "error": "row index went stale",
+                    "candidates": res.get("candidates", [])}
+        rows[idx].click()
+    except Exception as err:
+        return {"ok": False, "matches": 1, "error": repr(err),
+                "candidates": res.get("candidates", [])}
+
+    # The conversation mounts asynchronously; poll instead of assuming a fixed wait.
+    header = ""
+    for _ in range(16):
+        page.wait_for_timeout(500)
+        header = _open_chat_title(page)
+        if header:
+            break
+    return {"ok": True, "title": header or None,
+            "candidates": res.get("candidates", [])}
 
 
 _HEADER_TITLE_JS = """
@@ -1277,6 +1306,7 @@ def _send_test_message(page, *, log=print) -> dict:
             "ok": False,
             "stage": "verify",
             "reason": f"opened chat header is {header!r}, expected {title!r} — not sending",
+            "ui": _chat_ui_inventory(page),
         }
 
     if not _send_message_in_open_chat(page, text, log=log):
