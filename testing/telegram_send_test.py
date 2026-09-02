@@ -93,14 +93,31 @@ with sync_playwright() as p:
     check("refused", res.get("ok"), False)
     check("stage", res.get("stage"), "open")
 
-    print("\n=== header disagrees -> refuse BEFORE typing ===")
-    # Row click does not update the header, so verification must catch the mismatch.
+    print("\n=== header never matches -> refuse BEFORE typing ===")
+    # The row click does not update the header. _open_chat_by_title now verifies and
+    # retries, so this is caught at the "open" stage rather than reaching the
+    # "verify" gate in _send_test_message — earlier is better, and either way
+    # nothing is typed.
     page.set_content(page_html(["jc", "Ops"], header_for_click=False))
     res = tw._send_test_message(page)
     check("refused", res.get("ok"), False)
-    check("stage", res.get("stage"), "verify")
+    check("stage", res.get("stage"), "open")
+    check("reason names the header problem",
+          "header never became" in (res.get("reason") or ""), True)
     body = page.eval_on_selector(".input-message-input", "e => e.innerText")
     check("composer untouched", body.strip(), "")
+
+    print("\n=== _titles_match: the last gate before a send ===")
+    check("exact equal", tw._titles_match("jc", "jc", allow_substring=False), True)
+    check("whitespace normalised",
+          tw._titles_match("  jc \n ", "jc", allow_substring=False), True)
+    check("case-insensitive", tw._titles_match("JC", "jc", allow_substring=False), True)
+    check("substring rejected when exact required",
+          tw._titles_match("JC Team", "jc", allow_substring=False), False)
+    check("substring accepted when allowed",
+          tw._titles_match("JC Team", "jc", allow_substring=True), True)
+    check("empty header never matches",
+          tw._titles_match("", "jc", allow_substring=True), False)
 
     print("\n=== composer missing -> reports UI inventory ===")
     page.set_content(page_html(["jc"], composer=False))

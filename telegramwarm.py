@@ -1145,9 +1145,21 @@ _FIND_CHAT_JS = """
   // Exact always wins; substring is only consulted when nothing matched exactly,
   // and only for read-only callers that opted in.
   const hits = exact.length ? exact : (arg.allowSubstring ? partial : []);
+  // Return the viewport rect of the single hit, not an element handle. The chat list
+  // re-renders constantly (new messages, presence, clocks), so any handle the caller
+  // holds can detach before it is clicked — "Element is not attached to the DOM".
+  // Clicking coordinates sidesteps that entirely.
+  let rect = null;
+  if (hits.length === 1) {
+    const r = items[hits[0]].getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) {
+      rect = { x: r.x, y: r.y, w: r.width, h: r.height };
+    }
+  }
   return {
     matches: hits.length,
     index: hits.length === 1 ? hits[0] : -1,
+    rect: rect,
     matchKind: exact.length ? 'exact' : (hits.length ? 'substring' : 'none'),
     candidates: seen.slice(0, 30),
   };
@@ -1183,76 +1195,84 @@ def _search_sidebar(page, title: str, *, log=print) -> bool:
     return False
 
 
-def _open_chat_by_title(page, title: str, *, allow_substring: bool = False, log=print) -> dict:
-    """Click the sidebar chat whose title matches exactly. No fuzzy matching.
+def _titles_match(header: str, wanted: str, *, allow_substring: bool) -> bool:
+    """Does the opened conversation's header correspond to what was asked for?"""
+    h = " ".join((header or "").split()).lower()
+    w = " ".join((wanted or "").split()).lower()
+    if not h or not w:
+        return False
+    return (w in h) if allow_substring else (h == w)
 
-    Tries the already-rendered list first, then falls back to searching, since the
-    chat list is virtualised and an inactive chat will not be in the DOM.
+
+def _open_chat_by_title(page, title: str, *, allow_substring: bool = False,
+                        attempts: int = 3, log=print) -> dict:
+    """Open the sidebar chat matching ``title``, confirming it actually opened.
+
+    Clicks by coordinate rather than via an element handle, because the chat list
+    re-renders continuously and a handle detaches ("Element is not attached to the
+    DOM"). Since a coordinate can go stale too — the list may reorder between the
+    measurement and the click — the header is checked afterwards and the whole
+    find/click/verify cycle retried, which is what makes this reliable rather than
+    merely different.
     """
     arg = {"wanted": title, "allowSubstring": bool(allow_substring)}
-    try:
-        res = page.evaluate(_FIND_CHAT_JS, arg) or {}
-    except Exception as err:
-        return {"ok": False, "error": repr(err)}
-
-    if res.get("matches", 0) == 0:
-        log(f"[tg-warm] {title!r} not in the rendered list — searching")
-        if _search_sidebar(page, title, log=log):
-            try:
-                res = page.evaluate(_FIND_CHAT_JS, arg) or {}
-            except Exception as err:
-                return {"ok": False, "error": repr(err)}
-
-    if res.get("matches", 0) != 1:
-        log(f"[tg-warm] chat {title!r}: {res.get('matches', 0)} matches "
-            f"({res.get('matchKind')})")
-        return {"ok": False, "matches": res.get("matches", 0),
-                "matchKind": res.get("matchKind"),
-                "candidates": res.get("candidates", [])}
-
-    # Real Playwright click (genuine mouse events) — see _FIND_CHAT_JS.
-    try:
-        rows = page.query_selector_all(_CHAT_ROW_SELECTOR)
-        idx = res.get("index", -1)
-        if not (0 <= idx < len(rows)):
-            return {"ok": False, "matches": 1,
-                    "error": f"row index {idx} out of range ({len(rows)} rows) — "
-                             "the chat list re-rendered between find and click",
-                    "candidates": res.get("candidates", [])}
-        row = rows[idx]
-        try:
-            row.scroll_into_view_if_needed(timeout=4000)
-        except Exception:
-            pass
-        # Prefer a coordinate click. The chat list re-renders continuously (new
-        # messages, presence, timestamps), so element.click()'s "element is stable"
-        # precondition can time out even though the row is perfectly clickable.
-        # page.mouse.click still produces trusted events, which Web K requires.
-        clicked = False
-        try:
-            box = row.bounding_box()
-            if box and box.get("width") and box.get("height"):
-                page.mouse.click(box["x"] + box["width"] / 2,
-                                 box["y"] + box["height"] / 2)
-                clicked = True
-        except Exception as err:
-            log(f"[tg-warm] coordinate click failed ({err!r}); trying element click")
-        if not clicked:
-            row.click(timeout=8000, force=True)
-    except Exception as err:
-        return {"ok": False, "matches": 1, "error": f"click failed: {err!r}",
-                "candidates": res.get("candidates", [])}
-
-    # The conversation mounts asynchronously; poll instead of assuming a fixed wait.
+    searched = False
+    last: dict = {}
     header = ""
-    for _ in range(16):
-        page.wait_for_timeout(500)
-        header = _open_chat_title(page)
-        if header:
-            break
-    return {"ok": True, "title": header or None,
-            "matchKind": res.get("matchKind"),
-            "candidates": res.get("candidates", [])}
+
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            res = page.evaluate(_FIND_CHAT_JS, arg) or {}
+        except Exception as err:
+            return {"ok": False, "error": f"find failed: {err!r}"}
+        last = res
+
+        if res.get("matches", 0) == 0 and not searched:
+            searched = True
+            log(f"[tg-warm] {title!r} not in the rendered list — searching")
+            if _search_sidebar(page, title, log=log):
+                continue
+            return {"ok": False, "matches": 0, "matchKind": res.get("matchKind"),
+                    "candidates": res.get("candidates", [])}
+
+        if res.get("matches", 0) != 1:
+            log(f"[tg-warm] chat {title!r}: {res.get('matches', 0)} matches "
+                f"({res.get('matchKind')})")
+            return {"ok": False, "matches": res.get("matches", 0),
+                    "matchKind": res.get("matchKind"),
+                    "candidates": res.get("candidates", [])}
+
+        rect = res.get("rect")
+        if not rect:
+            return {"ok": False, "matches": 1,
+                    "error": "matched row has no visible box (scrolled out of view?)",
+                    "candidates": res.get("candidates", [])}
+
+        try:
+            page.mouse.click(rect["x"] + rect["w"] / 2, rect["y"] + rect["h"] / 2)
+        except Exception as err:
+            return {"ok": False, "matches": 1, "error": f"click failed: {err!r}",
+                    "candidates": res.get("candidates", [])}
+
+        # The conversation mounts asynchronously; poll rather than guessing a delay.
+        header = ""
+        for _ in range(16):
+            page.wait_for_timeout(500)
+            header = _open_chat_title(page)
+            if header:
+                break
+
+        if _titles_match(header, title, allow_substring=allow_substring):
+            return {"ok": True, "title": header,
+                    "matchKind": res.get("matchKind"),
+                    "candidates": res.get("candidates", [])}
+
+        log(f"[tg-warm] attempt {attempt}: header is {header!r}, wanted {title!r} — retrying")
+
+    return {"ok": False, "matches": 1, "matchKind": last.get("matchKind"),
+            "error": f"clicked the row but the header never became {title!r} "
+                     f"(last saw {header!r})",
+            "candidates": last.get("candidates", [])}
 
 
 _HEADER_TITLE_JS = """
@@ -1523,8 +1543,10 @@ def _send_test_message(page, *, log=print) -> dict:
         return {"ok": False, "stage": "open", "reason": reason,
                 "candidates": opened.get("candidates", [])}
 
+    # _open_chat_by_title already verified this, but re-check before typing: this is
+    # the last gate before a real send, and it costs nothing.
     header = _open_chat_title(page)
-    if header.strip().lower() != title.strip().lower():
+    if not _titles_match(header, title, allow_substring=False):
         # Refuse rather than send into whatever happens to be open.
         return {
             "ok": False,

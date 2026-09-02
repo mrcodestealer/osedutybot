@@ -135,6 +135,54 @@ with sync_playwright() as p:
     r = page.evaluate(tw._FIND_CHAT_JS, {"wanted": "not present", "allowSubstring": False})
     check("absent title still reports 0", r["matches"], 0)
 
+    print("\n=== retry: first click does not take (list re-rendered) ===")
+    # The live failure was "Element is not attached to the DOM": the chat list
+    # re-renders between find and click. Clicking coordinates avoids holding a
+    # handle, but a coordinate can still miss, so the header is verified and the
+    # cycle retried. Here the first trusted click is deliberately swallowed.
+    flaky = f"""
+    <style>.dialog-time{{display:block}}</style>
+    <div id="column-left"><ul class="chatlist">
+      <li class="chatlist-chat"><span class="user-title">{GROUP}
+        <span class="dialog-time">02:31 PM</span></span></li>
+    </ul></div>
+    <div id="column-center">
+      <div class="chat-info"><span class="peer-title" id="hdr"></span></div>
+      <div class="bubbles">
+        <div class="bubble" data-mid="1"><span class="peer-title">Ada</span>
+          <div class="message">hello<span class="time-inner">10:01</span></div></div>
+      </div>
+      <div class="input-message-input" contenteditable="true"></div>
+    </div>
+    <script>
+      window.__clicks = 0;
+      document.querySelectorAll('#column-left li').forEach(li => {{
+        li.addEventListener('click', (e) => {{
+          if (!e.isTrusted) return;
+          window.__clicks++;
+          if (window.__clicks >= 2) {{
+            document.querySelector('#hdr').innerText = {GROUP!r};
+          }}
+        }});
+      }});
+    </script>
+    """
+    page.set_content(flaky)
+    res = tw._check_group(page, GROUP, 5)
+    check("recovered on retry", res.get("ok"), True)
+    check("trusted clicks needed", page.evaluate("() => window.__clicks"), 2)
+
+    print("\n=== give up cleanly when the header never matches ===")
+    never = flaky.replace("window.__clicks >= 2", "false")
+    page.set_content(never)
+    res = tw._check_group(page, GROUP, 5)
+    check("refused", res.get("ok"), False)
+    check("stage", res.get("stage"), "open")
+    check("reason names the header problem",
+          "header never became" in (res.get("reason") or ""), True)
+    body = page.eval_on_selector(".input-message-input", "e => e.innerText")
+    check("composer untouched", body.strip(), "")
+
     print("\n=== messy real-world bubbles (from live output) ===")
     # Reproduces exactly what the live group returned: an "edited" marker fused to the
     # timestamp, the time rendered INSIDE the message text, a media-only bubble with
