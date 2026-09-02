@@ -1119,9 +1119,25 @@ _FIND_CHAT_JS = """
   const partial = [];
   items.forEach((li, i) => {
     const t = li.querySelector('.user-title, .peer-title, .dialog-title');
-    const title = (t ? t.innerText : '').trim();
+    const raw = ((t ? t.innerText : '') || '').replace(/\\s+/g, ' ').trim();
+    if (!raw) return;
+    // The title element CONTAINS the row's timestamp, so its text reads
+    // "(OG) IGO / YB  Tue". Without removing it no exact comparison can ever match
+    // a row that shows a time, which is every row in the normal sidebar.
+    // Delete the time nodes from a detached clone rather than splitting on a
+    // newline: whether the time renders as a line break or a space depends on its
+    // display style, so a newline split is not reliable.
+    let title = raw;
+    if (t) {
+      const clone = t.cloneNode(true);
+      clone.querySelectorAll(
+        '.time, .dialog-time, .message-time, [class*=time], [class*=Time]'
+      ).forEach(e => e.remove());
+      const stripped = (clone.textContent || '').replace(/\\s+/g, ' ').trim();
+      if (stripped) title = stripped;
+    }
     if (!title) return;
-    seen.push(title);
+    seen.push(raw);
     const low = title.toLowerCase();
     if (low === want) exact.push(i);
     else if (arg.allowSubstring && want && low.includes(want)) partial.push(i);
@@ -1199,11 +1215,32 @@ def _open_chat_by_title(page, title: str, *, allow_substring: bool = False, log=
         rows = page.query_selector_all(_CHAT_ROW_SELECTOR)
         idx = res.get("index", -1)
         if not (0 <= idx < len(rows)):
-            return {"ok": False, "matches": 1, "error": "row index went stale",
+            return {"ok": False, "matches": 1,
+                    "error": f"row index {idx} out of range ({len(rows)} rows) — "
+                             "the chat list re-rendered between find and click",
                     "candidates": res.get("candidates", [])}
-        rows[idx].click()
+        row = rows[idx]
+        try:
+            row.scroll_into_view_if_needed(timeout=4000)
+        except Exception:
+            pass
+        # Prefer a coordinate click. The chat list re-renders continuously (new
+        # messages, presence, timestamps), so element.click()'s "element is stable"
+        # precondition can time out even though the row is perfectly clickable.
+        # page.mouse.click still produces trusted events, which Web K requires.
+        clicked = False
+        try:
+            box = row.bounding_box()
+            if box and box.get("width") and box.get("height"):
+                page.mouse.click(box["x"] + box["width"] / 2,
+                                 box["y"] + box["height"] / 2)
+                clicked = True
+        except Exception as err:
+            log(f"[tg-warm] coordinate click failed ({err!r}); trying element click")
+        if not clicked:
+            row.click(timeout=8000, force=True)
     except Exception as err:
-        return {"ok": False, "matches": 1, "error": repr(err),
+        return {"ok": False, "matches": 1, "error": f"click failed: {err!r}",
                 "candidates": res.get("candidates", [])}
 
     # The conversation mounts asynchronously; poll instead of assuming a fixed wait.
@@ -1349,10 +1386,16 @@ def _check_group(page, title: str, count: int, *, shot_path: str | None = None,
     """
     opened = _open_chat_by_title(page, title, allow_substring=True, log=log)
     if not opened.get("ok"):
+        # Report the real cause. A hardcoded "N chats matching" reason previously
+        # masked click/index failures, producing the nonsense "1 chats ... need
+        # exactly 1".
+        reason = opened.get("error") or (
+            f"{opened.get('matches', 0)} chats matching {title!r} (need exactly 1)"
+        )
         return {
             "ok": False,
             "stage": "open",
-            "reason": f"{opened.get('matches', 0)} chats matching {title!r} (need exactly 1)",
+            "reason": reason,
             "candidates": opened.get("candidates", []),
         }
 
@@ -1474,15 +1517,11 @@ def _send_test_message(page, *, log=print) -> dict:
 
     opened = _open_chat_by_title(page, title, log=log)
     if not opened.get("ok"):
-        return {
-            "ok": False,
-            "stage": "open",
-            "reason": (
-                f"{opened.get('matches', 0)} chats exactly titled {title!r} "
-                "(need exactly 1)"
-            ),
-            "candidates": opened.get("candidates", []),
-        }
+        reason = opened.get("error") or (
+            f"{opened.get('matches', 0)} chats exactly titled {title!r} (need exactly 1)"
+        )
+        return {"ok": False, "stage": "open", "reason": reason,
+                "candidates": opened.get("candidates", [])}
 
     header = _open_chat_title(page)
     if header.strip().lower() != title.strip().lower():

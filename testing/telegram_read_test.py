@@ -19,7 +19,8 @@ GROUP = "CP x 5G Integration_new"
 
 def page_html(titles, bubbles, *, composer=True):
     items = "".join(
-        f'<li class="chatlist-chat" data-t="{t}"><span class="user-title">{t}</span></li>'
+        f'<li class="chatlist-chat" data-t="{t}"><span class="user-title">{t}'
+        f'<span class="dialog-time">02:31 PM</span></span></li>'
         for t in titles
     )
     # Timestamp sits INSIDE .message, exactly as Web K renders it, so the tail-strip
@@ -33,6 +34,7 @@ def page_html(titles, bubbles, *, composer=True):
     comp = ('<div class="input-message-input" contenteditable="true"></div>'
             if composer else "")
     return f"""
+    <style>.dialog-time{{display:block}}</style>
     <div id="column-left"><ul class="chatlist">{items}</ul></div>
     <div id="column-center">
       <div class="chat-info"><span class="peer-title" id="hdr"></span></div>
@@ -118,6 +120,20 @@ with sync_playwright() as p:
     check("refused", res.get("ok"), False)
     check("stage", res.get("stage"), "open")
     check("candidates listed", bool(res.get("candidates")), True)
+
+    print("\n=== regression: sidebar titles carry a timestamp ===")
+    # The live sidebar returns titles like "(OG) IGO / YB\nTue" because the time is a
+    # nested block element inside .user-title. Exact matching must still work, or
+    # /telegramsendjctest (exact-only) can never find any normal sidebar row.
+    live_titles = ["(OG) IGO / YB", "CP x 5G Integration_new",
+                   "Casino Plus | VA Gaming integration group", "jc"]
+    for want in live_titles:
+        page.set_content(page_html(live_titles, BUBBLES))
+        r = page.evaluate(tw._FIND_CHAT_JS, {"wanted": want, "allowSubstring": False})
+        check(f"exact match {want!r}", r["matches"], 1)
+    page.set_content(page_html(live_titles, BUBBLES))
+    r = page.evaluate(tw._FIND_CHAT_JS, {"wanted": "not present", "allowSubstring": False})
+    check("absent title still reports 0", r["matches"], 0)
 
     print("\n=== messy real-world bubbles (from live output) ===")
     # Reproduces exactly what the live group returned: an "edited" marker fused to the

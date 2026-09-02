@@ -20,7 +20,8 @@ from playwright.sync_api import sync_playwright
 
 def page_html(titles, *, header_for_click=True, composer=True):
     items = "".join(
-        f'<li class="chatlist-chat" data-t="{t}"><span class="user-title">{t}</span></li>'
+        f'<li class="chatlist-chat" data-t="{t}"><span class="user-title">{t}'
+        f'<span class="dialog-time">02:31 PM</span></span></li>'
         for t in titles
     )
     comp = ('<div class="input-message-input" contenteditable="true"></div>'
@@ -42,6 +43,7 @@ def page_html(titles, *, header_for_click=True, composer=True):
       });
     """ if header_for_click else ""
     return f"""
+    <style>.dialog-time{{display:block}}</style>
     <div id="column-left"><ul class="chatlist">{items}</ul></div>
     <div id="column-center">
       <div class="chat-info"><span class="peer-title" id="hdr"></span></div>
