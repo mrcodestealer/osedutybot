@@ -1262,19 +1262,60 @@ _READ_MESSAGES_JS = """
   const out = [];
   for (const b of nodes.slice(-n)) {
     const timeEl = b.querySelector('.time-inner, .time');
-    const time = timeEl ? (timeEl.innerText || '').trim() : '';
-    const txtEl = b.querySelector('.message, .text-content');
-    let text = ((txtEl ? txtEl.innerText : b.innerText) || '').trim();
-    // Web K renders the timestamp inside the text node; strip it off the tail so
-    // the message body does not end with a stray "14:32".
-    if (time && text.endsWith(time)) text = text.slice(0, -time.length).trim();
+    // The time element is not just a clock: it can carry an "edited" marker plus
+    // blank lines before the time, and Web K renders the whole block INSIDE the
+    // message text node. So pull the clock out with a pattern, note "edited"
+    // separately, and delete the raw block from the body wherever it sits — an
+    // endsWith() check missed it and leaked the timestamp into the text.
+    // (Keep backslash escapes out of these comments: this JS lives in a non-raw
+    //  Python string, so a literal backslash-n here would become a real newline
+    //  and end the comment early, leaving the rest as broken JS.)
+    const rawTime = timeEl ? (timeEl.innerText || '') : '';
+    const m = rawTime.match(/\\d{1,2}:\\d{2}(?:\\s*[AP]M)?/i);
+    const time = m ? m[0].trim() : rawTime.replace(/\\s+/g, ' ').trim();
+    const edited = /edited/i.test(rawTime);
+
     const nameEl = b.querySelector('.peer-title, .bubble-name-content, .name');
     const isOut = b.classList.contains('is-out');
+
+    // Media kind is detected for every bubble, not only empty ones: a document or
+    // photo can carry a caption, and "(document) GameList.xlsx" beats either an
+    // empty bullet or a bare filename with no hint of what it is.
+    const mediaEl = b.querySelector(
+      '.media-photo, .media-video, .document, .audio, .sticker, .media-sticker, .web, .poll');
+    const kind = mediaEl
+      ? ((mediaEl.className || '').toString().split(' ')[0] || 'media')
+      : null;
+
+    const txtEl = b.querySelector('.message, .text-content');
+    let text;
+    if (txtEl) {
+      text = txtEl.innerText || '';
+    } else {
+      // No text node at all. Falling back to the whole bubble drags in the sender
+      // name and other chrome, so remove the name before using it.
+      text = b.innerText || '';
+      const nm = nameEl ? (nameEl.innerText || '') : '';
+      if (nm) text = text.split(nm).join(' ');
+    }
+    if (rawTime) text = text.split(rawTime).join(' ');
+    if (time) text = text.split(time).join(' ');
+    text = text.replace(/[ \\t]+/g, ' ')
+               .replace(/\\n{3,}/g, '\\n\\n')   // collapse runs of blank lines
+               .trim();
+
+    let truncated = false;
+    if (text.length > 600) { text = text.slice(0, 600); truncated = true; }
+
     out.push({
-      sender: nameEl ? (nameEl.innerText || '').trim() : (isOut ? 'me' : ''),
+      sender: nameEl ? (nameEl.innerText || '').replace(/\\s+/g, ' ').trim()
+                     : (isOut ? 'me' : ''),
       out: isOut,
       time: time,
-      text: text.slice(0, 600),
+      edited: edited,
+      truncated: truncated,
+      kind: kind,
+      text: text,
     });
   }
   return { total: nodes.length, messages: out };
@@ -1298,8 +1339,14 @@ def _read_last_messages(page, count: int, *, log=print) -> dict:
     return res
 
 
-def _check_group(page, title: str, count: int, *, log=print) -> dict:
-    """Open a chat, read its last N messages, return to the list. Sends nothing."""
+def _check_group(page, title: str, count: int, *, shot_path: str | None = None,
+                 log=print) -> dict:
+    """Open a chat, read its last N messages, return to the list. Sends nothing.
+
+    ``shot_path`` is captured while the conversation is still on screen. Screenshotting
+    after the return-to-list leaves a picture of the sidebar (or the search overlay),
+    which tells you nothing about the messages that were just read.
+    """
     opened = _open_chat_by_title(page, title, allow_substring=True, log=log)
     if not opened.get("ok"):
         return {
@@ -1311,6 +1358,14 @@ def _check_group(page, title: str, count: int, *, log=print) -> dict:
 
     header = _open_chat_title(page)
     res = _read_last_messages(page, count, log=log)
+
+    # Capture while the conversation is still open, whatever the outcome.
+    if shot_path:
+        try:
+            page.screenshot(path=shot_path)
+        except Exception as err:
+            log(f"[tg-warm] screenshot failed: {err!r}")
+
     if res.get("error") or not res.get("messages"):
         out = {
             "ok": False,
@@ -1359,24 +1414,50 @@ def _send_message_in_open_chat(page, text: str, *, log=print) -> bool:
 
 
 def _back_to_chat_list(page, *, log=print) -> None:
-    """Return to the plain chat list and leave the browser idle there."""
-    for _ in range(2):
-        try:
-            page.keyboard.press("Escape")
-            page.wait_for_timeout(700)
-        except Exception:
-            break
-    # Clear any leftover search text so the next poll sees the full list.
+    """Return to the plain chat list and leave the browser idle there.
+
+    Order matters. Clearing the search box must come FIRST: pressing Escape out of
+    the conversation while a search is still active just reveals the search overlay
+    (the "Recent" panel), which is not the chat list and leaves the next poll looking
+    at search results.
+    """
     try:
-        for el in page.query_selector_all("#column-left input:not([type=hidden])"):
-            if el.is_visible() and (el.input_value() or "").strip():
+        for el in page.query_selector_all("#column-left input:not([type=hidden]):not(.stealthy)"):
+            if el.is_visible():
+                try:
+                    if not (el.input_value() or "").strip():
+                        continue
+                except Exception:
+                    pass
                 el.click()
                 page.keyboard.press("Control+A")
                 page.keyboard.press("Delete")
+                page.wait_for_timeout(400)
     except Exception:
         pass
+
+    # Then close the search panel / conversation.
+    for _ in range(3):
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(500)
+        except Exception:
+            break
+
+    # Some builds keep the search pane open until its back arrow is clicked.
+    for sel in ("#column-left .sidebar-close-button",
+                "#column-left .sidebar-header .btn-icon"):
+        try:
+            el = page.query_selector(sel)
+            if el and el.is_visible():
+                el.click()
+                page.wait_for_timeout(500)
+                break
+        except Exception:
+            continue
+
     try:
-        page.wait_for_timeout(800)
+        page.wait_for_timeout(600)
     except Exception:
         pass
     log("[tg-warm] back on the chat list")
@@ -2164,12 +2245,9 @@ class _TelegramWarm:
                 return
 
             send_text(chat_id, f"🔍 Telegram: reading the last {count} messages of “{title}”…")
-            result = _check_group(self._page, title, count, log=print)
-
             shot = str(SHOT_PNG)
-            try:
-                self._page.screenshot(path=shot)
-            except Exception:
+            result = _check_group(self._page, title, count, shot_path=shot, log=print)
+            if not Path(shot).exists():
                 shot = None
 
             if result.get("ok"):
@@ -2179,11 +2257,22 @@ class _TelegramWarm:
                 ]
                 for m in result["messages"]:
                     who = m.get("sender") or ("me" if m.get("out") else "?")
-                    when = f" [{m['time']}]" if m.get("time") else ""
-                    body = (m.get("text") or "").replace("\n", " ⏎ ")
+                    bits = [b for b in (m.get("time"), "edited" if m.get("edited") else "") if b]
+                    when = f" [{' · '.join(bits)}]" if bits else ""
+                    body = (m.get("text") or "").strip()
+                    kind = m.get("kind")
+                    if kind:
+                        body = f"({kind}) {body}".strip()
+                    elif not body:
+                        body = "(no text)"
+                    if m.get("truncated"):
+                        body += " …[truncated]"
+                    # Indent continuation lines instead of inlining ⏎ markers, so a
+                    # multi-line message stays readable in Lark.
+                    body = body.replace("\n", "\n    ")
                     lines.append(f"• {who}{when}: {body}")
                 if result.get("matchKind") == "substring":
-                    lines.append(f"(matched {title!r} by substring)")
+                    lines.append(f"(matched “{title}” by substring)")
                 lines.append("Read-only — nothing was sent. Back on the chat list.")
                 send_text(chat_id, "\n".join(lines))
             else:

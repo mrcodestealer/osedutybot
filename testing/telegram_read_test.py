@@ -119,6 +119,59 @@ with sync_playwright() as p:
     check("stage", res.get("stage"), "open")
     check("candidates listed", bool(res.get("candidates")), True)
 
+    print("\n=== messy real-world bubbles (from live output) ===")
+    # Reproduces exactly what the live group returned: an "edited" marker fused to the
+    # timestamp, the time rendered INSIDE the message text, a media-only bubble with
+    # no text at all, and an over-long body.
+    long_body = "X" * 900
+    messy = f"""
+    <div id="column-left"><ul class="chatlist">
+      <li class="chatlist-chat" data-t="{GROUP}"><span class="user-title">{GROUP}</span></li>
+    </ul></div>
+    <div id="column-center">
+      <div class="chat-info"><span class="peer-title" id="hdr"></span></div>
+      <div class="bubbles">
+        <div class="bubble" data-mid="1"><span class="peer-title">king</span>
+          <div class="message">Hello Team,<span class="time-inner">edited
+
+09:59 AM</span></div></div>
+        <div class="bubble is-out" data-mid="2">
+          <div class="message">Hi team, any maintenance?<span class="time-inner">
+
+02:42 PM</span></div></div>
+        <div class="bubble" data-mid="3"><span class="peer-title">VP Support</span>
+          <div class="document">GameList.xlsx</div><span class="time-inner">11:10 AM</span></div>
+        <div class="bubble" data-mid="4"><span class="peer-title">Ada</span>
+          <div class="message">{long_body}<span class="time-inner">11:11 AM</span></div></div>
+      </div>
+      <div class="input-message-input" contenteditable="true"></div>
+    </div>
+    <script>
+      document.querySelectorAll('#column-left li').forEach(li => {{
+        li.addEventListener('click', (e) => {{
+          if (!e.isTrusted) return;
+          document.querySelector('#hdr').innerText = li.getAttribute('data-t');
+        }});
+      }});
+    </script>
+    """
+    page.set_content(messy)
+    res = tw._check_group(page, GROUP, 4)
+    check("ok", res.get("ok"), True)
+    ms = res.get("messages", [])
+    check("edited flagged", ms[0]["edited"], True)
+    check("clock extracted from 'edited\\n\\n09:59 AM'", ms[0]["time"], "09:59 AM")
+    check("body free of the time block", ms[0]["text"], "Hello Team,")
+    check("blank-prefixed time cleaned", ms[1]["time"], "02:42 PM")
+    check("outgoing body intact", ms[1]["text"], "Hi team, any maintenance?")
+    check("media reports a kind", ms[2]["kind"], "document")
+    # The filename is worth keeping; only the sender-name chrome is stripped.
+    check("media body is the filename, not bubble chrome", ms[2]["text"], "GameList.xlsx")
+    check("long body truncated", ms[3]["truncated"], True)
+    check("truncated to 600", len(ms[3]["text"]), 600)
+    body = page.eval_on_selector(".input-message-input", "e => e.innerText")
+    check("still read-only", body.strip(), "")
+
     print("\n=== chat opens but no bubbles -> read stage + inventory ===")
     page.set_content(page_html([GROUP], []))
     res = tw._check_group(page, GROUP, 5)
