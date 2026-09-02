@@ -1149,9 +1149,18 @@ _FIND_CHAT_JS = """
   // re-renders constantly (new messages, presence, clocks), so any handle the caller
   // holds can detach before it is clicked — "Element is not attached to the DOM".
   // Clicking coordinates sidesteps that entirely.
-  let rect = null, hitOk = false, topDesc = null;
+  let rect = null, hitOk = false, topDesc = null, offscreen = false;
   if (hits.length === 1) {
     const li = items[hits[0]];
+    // Scroll the row into view before measuring. The chat list is long and
+    // virtualised: a row far down the list is in the DOM with a rect BELOW the
+    // viewport, where elementFromPoint returns null — indistinguishable from
+    // "covered" unless handled, and unclickable either way.
+    if (arg.scrollIntoView) {
+      try { li.scrollIntoView({ block: 'center', behavior: 'instant' }); } catch (e) {
+        try { li.scrollIntoView(); } catch (e2) {}
+      }
+    }
     const r = li.getBoundingClientRect();
     if (r.width > 0 && r.height > 0) {
       rect = { x: r.x, y: r.y, w: r.width, h: r.height };
@@ -1160,7 +1169,9 @@ _FIND_CHAT_JS = """
       // DOM with real coordinates, so clicking the centre hits the overlay instead
       // and nothing opens. elementFromPoint says who would actually receive it.
       const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
-      const top = document.elementFromPoint(cx, cy);
+      offscreen = (cx < 0 || cy < 0 ||
+                   cx > (window.innerWidth || 0) || cy > (window.innerHeight || 0));
+      const top = offscreen ? null : document.elementFromPoint(cx, cy);
       hitOk = !!(top && (top === li || li.contains(top)));
       if (top) {
         // Include the id: a blocking element may carry an id and no class, which
@@ -1178,6 +1189,7 @@ _FIND_CHAT_JS = """
     rect: rect,
     hitOk: hitOk,
     topDesc: topDesc,
+    offscreen: offscreen,
     matchKind: exact.length ? 'exact' : (hits.length ? 'substring' : 'none'),
     candidates: seen.slice(0, 30),
   };
@@ -1280,7 +1292,8 @@ def _open_chat_by_title(page, title: str, *, allow_substring: bool = False,
     find/click/verify cycle retried, which is what makes this reliable rather than
     merely different.
     """
-    arg = {"wanted": title, "allowSubstring": bool(allow_substring)}
+    arg = {"wanted": title, "allowSubstring": bool(allow_substring),
+           "scrollIntoView": True}
     # Web K puts the open peer id in the URL hash, so a change proves *some*
     # conversation opened. That is weaker evidence of WHICH one than the header or the
     # selected row, so only read callers accept it (accept_hash_change); sending
@@ -1326,18 +1339,26 @@ def _open_chat_by_title(page, title: str, *, allow_substring: bool = False,
             # Something is on top of the row — almost always a search overlay left
             # open. Clicking the coordinates would hit that instead, which is exactly
             # how this failed silently before the hit test existed.
-            log(f"[tg-warm] row is covered by {res.get('topDesc')!r} — clearing and retrying")
+            blocked_by = (
+                "it is scrolled outside the viewport" if res.get("offscreen")
+                else f"{res.get('topDesc') or 'an unidentified element'} is on top of it"
+            )
+            log(f"[tg-warm] row not clickable ({blocked_by}) — clearing and retrying")
             _dismiss_overlays(page, log=log)
-            page.wait_for_timeout(600)
+            page.wait_for_timeout(800)
             try:
                 res = page.evaluate(_FIND_CHAT_JS, arg) or {}
             except Exception as err:
                 return {"ok": False, "error": f"find failed: {err!r}"}
             rect = res.get("rect")
             if not rect or not res.get("hitOk"):
+                blocked_by = (
+                    "it is scrolled outside the viewport even after scrollIntoView"
+                    if res.get("offscreen")
+                    else f"{res.get('topDesc') or 'an unidentified element'} is on top of it"
+                )
                 return {"ok": False, "matches": res.get("matches", 0),
-                        "error": f"the row for {title!r} is not clickable — "
-                                 f"{res.get('topDesc') or 'something'} is on top of it",
+                        "error": f"the row for {title!r} is not clickable — {blocked_by}",
                         "ui": _chat_ui_inventory(page),
                         "candidates": res.get("candidates", [])}
 
@@ -1587,6 +1608,14 @@ def _check_group(page, title: str, count: int, *, shot_path: str | None = None,
         reason = opened.get("error") or (
             f"{opened.get('matches', 0)} chats matching {title!r} (need exactly 1)"
         )
+        # Capture the real state of this failure. Without it the handler falls back to
+        # whatever telegram_web.png happens to be on disk, which is a picture of some
+        # earlier run.
+        if shot_path:
+            try:
+                page.screenshot(path=shot_path)
+            except Exception as err:
+                log(f"[tg-warm] screenshot failed: {err!r}")
         return {
             "ok": False,
             "stage": "open",
@@ -2497,6 +2526,14 @@ class _TelegramWarm:
                 return
 
             send_text(chat_id, f"🔍 Telegram: reading the last {count} messages of “{title}”…")
+            # Remove any previous capture first. An open-stage failure returns before a
+            # screenshot is taken, and without this the handler finds the OLD file on
+            # disk and posts it — showing a stale, contradictory picture of a run that
+            # is not the one being reported.
+            try:
+                SHOT_PNG.unlink(missing_ok=True)
+            except Exception:
+                pass
             shot = str(SHOT_PNG)
             result = _check_group(self._page, title, count, shot_path=shot, log=print)
             if not Path(shot).exists():
@@ -2563,6 +2600,10 @@ class _TelegramWarm:
                 return
 
             send_text(chat_id, f"✍️ Telegram: opening chat “{title}” to send the test message…")
+            try:
+                SHOT_PNG.unlink(missing_ok=True)   # never post a stale capture
+            except Exception:
+                pass
             result = _send_test_message(self._page, log=print)
 
             shot = str(SHOT_PNG)

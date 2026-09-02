@@ -135,6 +135,61 @@ with sync_playwright() as p:
     r = page.evaluate(tw._FIND_CHAT_JS, {"wanted": "not present", "allowSubstring": False})
     check("absent title still reports 0", r["matches"], 0)
 
+    print("\n=== target row scrolled far below the viewport ===")
+    # The live failure: '(OG) IGO / YB' was row 14 of 15, in the DOM but below the
+    # fold, so elementFromPoint returned null and topDesc was None — reported as
+    # "something is on top of it" when nothing was. It must be scrolled into view.
+    filler = "".join(
+        f'<li class="chatlist-chat"><span class="user-title">Filler {i}'
+        f'<span class="dialog-time">10:0{i % 10}</span></span></li>'
+        for i in range(40)
+    )
+    deep = f"""
+    <style>
+      .dialog-time{{display:block}}
+      #column-left{{width:380px;height:900px;overflow-y:scroll}}
+      .chatlist-chat{{height:64px}}
+    </style>
+    <div id="column-left"><ul class="chatlist">
+      {filler}
+      <li class="chatlist-chat"><span class="user-title">{GROUP}
+        <span class="dialog-time">Tue</span></span></li>
+    </ul></div>
+    <div id="column-center">
+      <div class="chat-info"><span class="peer-title" id="hdr"></span></div>
+      <div class="bubbles">
+        <div class="bubble" data-mid="1"><span class="peer-title">Ada</span>
+          <div class="message">deep row<span class="time-inner">10:01</span></div></div>
+      </div>
+      <div class="input-message-input" contenteditable="true"></div>
+    </div>
+    <script>
+      document.querySelectorAll('#column-left li').forEach(li => {{
+        li.addEventListener('click', (e) => {{
+          if (!e.isTrusted) return;
+          li.classList.add('active');
+        }});
+      }});
+    </script>
+    """
+    page.set_content(deep)
+    # Without scrollIntoView the row is off-screen and unhittable...
+    r = page.evaluate(tw._FIND_CHAT_JS,
+                      {"wanted": GROUP, "allowSubstring": False, "scrollIntoView": False})
+    check("found in the DOM", r["matches"], 1)
+    check("reported off-screen", r["offscreen"], True)
+    check("not hittable off-screen", r["hitOk"], False)
+    # ...and with it, the row becomes clickable.
+    r = page.evaluate(tw._FIND_CHAT_JS,
+                      {"wanted": GROUP, "allowSubstring": False, "scrollIntoView": True})
+    check("scrolled into view", r["offscreen"], False)
+    check("now hittable", r["hitOk"], True)
+
+    page.set_content(deep)
+    res = tw._check_group(page, GROUP, 5)
+    check("opens a deep row end to end", res.get("ok"), True)
+    check("messages read", len(res.get("messages", [])), 1)
+
     print("\n=== rows covered by a search overlay (the live failure) ===")
     # Exactly what the live client showed: 15 laid-out rows with valid boxes, an open
     # search overlay on top, and every coordinate click landing on the overlay. A
