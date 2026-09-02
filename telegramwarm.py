@@ -1149,17 +1149,35 @@ _FIND_CHAT_JS = """
   // re-renders constantly (new messages, presence, clocks), so any handle the caller
   // holds can detach before it is clicked — "Element is not attached to the DOM".
   // Clicking coordinates sidesteps that entirely.
-  let rect = null;
+  let rect = null, hitOk = false, topDesc = null;
   if (hits.length === 1) {
-    const r = items[hits[0]].getBoundingClientRect();
+    const li = items[hits[0]];
+    const r = li.getBoundingClientRect();
     if (r.width > 0 && r.height > 0) {
       rect = { x: r.x, y: r.y, w: r.width, h: r.height };
+      // A valid box only proves the row is laid out, NOT that a click would reach
+      // it. The search overlay sits on top of the chat list while leaving it in the
+      // DOM with real coordinates, so clicking the centre hits the overlay instead
+      // and nothing opens. elementFromPoint says who would actually receive it.
+      const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
+      const top = document.elementFromPoint(cx, cy);
+      hitOk = !!(top && (top === li || li.contains(top)));
+      if (top) {
+        // Include the id: a blocking element may carry an id and no class, which
+        // rendered as a useless bare "div." in the first live report.
+        const cls = (top.className || '').toString().trim();
+        topDesc = top.tagName.toLowerCase()
+                + (top.id ? '#' + top.id : '')
+                + (cls ? '.' + cls.split(/\\s+/).join('.').slice(0, 60) : '');
+      }
     }
   }
   return {
     matches: hits.length,
     index: hits.length === 1 ? hits[0] : -1,
     rect: rect,
+    hitOk: hitOk,
+    topDesc: topDesc,
     matchKind: exact.length ? 'exact' : (hits.length ? 'substring' : 'none'),
     candidates: seen.slice(0, 30),
   };
@@ -1195,6 +1213,52 @@ def _search_sidebar(page, title: str, *, log=print) -> bool:
     return False
 
 
+def _dismiss_overlays(page, *, log=print) -> None:
+    """Get back to a bare chat list, closing any search overlay on top of it.
+
+    Essential because the warm browser persists between commands: a search panel left
+    open by an earlier run stays up, covers the chat list, and silently swallows every
+    coordinate click aimed at a row.
+    """
+    # Clear the search box first — Escape on a non-empty search only clears the text.
+    for sel in ("#column-left input.input-search-input",
+                "#column-left input:not([type=hidden]):not(.stealthy)"):
+        try:
+            for el in page.query_selector_all(sel):
+                if not el.is_visible():
+                    continue
+                try:
+                    if (el.input_value() or "").strip():
+                        el.click()
+                        page.keyboard.press("Control+A")
+                        page.keyboard.press("Delete")
+                        page.wait_for_timeout(400)
+                except Exception:
+                    pass
+        except Exception:
+            continue
+
+    # Then close the panel: Escape, and the sidebar back arrow if it lingers.
+    for _ in range(3):
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(400)
+        except Exception:
+            break
+    for sel in ("#column-left .sidebar-close-button",
+                "#column-left .sidebar-header .sidebar-close-button",
+                "#column-left .sidebar-header .btn-icon"):
+        try:
+            for el in page.query_selector_all(sel):
+                if el.is_visible():
+                    el.click(timeout=3000, force=True)
+                    page.wait_for_timeout(500)
+                    break
+        except Exception:
+            continue
+    log("[tg-warm] overlays dismissed")
+
+
 def _titles_match(header: str, wanted: str, *, allow_substring: bool) -> bool:
     """Does the opened conversation's header correspond to what was asked for?"""
     h = " ".join((header or "").split()).lower()
@@ -1221,6 +1285,8 @@ def _open_chat_by_title(page, title: str, *, allow_substring: bool = False,
     # conversation opened. That is weaker evidence of WHICH one than the header or the
     # selected row, so only read callers accept it (accept_hash_change); sending
     # requires one of the two identifying signals.
+    # Leftover UI from an earlier command would cover the rows, so start clean.
+    _dismiss_overlays(page, log=log)
     hash_before = (_row_state(page, title, allow_substring=allow_substring)
                    .get("hash") or "")
     searched = False
@@ -1253,7 +1319,27 @@ def _open_chat_by_title(page, title: str, *, allow_substring: bool = False,
         if not rect:
             return {"ok": False, "matches": 1,
                     "error": "matched row has no visible box (scrolled out of view?)",
+                    "ui": _chat_ui_inventory(page),
                     "candidates": res.get("candidates", [])}
+
+        if not res.get("hitOk"):
+            # Something is on top of the row — almost always a search overlay left
+            # open. Clicking the coordinates would hit that instead, which is exactly
+            # how this failed silently before the hit test existed.
+            log(f"[tg-warm] row is covered by {res.get('topDesc')!r} — clearing and retrying")
+            _dismiss_overlays(page, log=log)
+            page.wait_for_timeout(600)
+            try:
+                res = page.evaluate(_FIND_CHAT_JS, arg) or {}
+            except Exception as err:
+                return {"ok": False, "error": f"find failed: {err!r}"}
+            rect = res.get("rect")
+            if not rect or not res.get("hitOk"):
+                return {"ok": False, "matches": res.get("matches", 0),
+                        "error": f"the row for {title!r} is not clickable — "
+                                 f"{res.get('topDesc') or 'something'} is on top of it",
+                        "ui": _chat_ui_inventory(page),
+                        "candidates": res.get("candidates", [])}
 
         try:
             page.mouse.click(rect["x"] + rect["w"] / 2, rect["y"] + rect["h"] / 2)

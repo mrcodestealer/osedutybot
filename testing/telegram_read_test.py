@@ -135,6 +135,66 @@ with sync_playwright() as p:
     r = page.evaluate(tw._FIND_CHAT_JS, {"wanted": "not present", "allowSubstring": False})
     check("absent title still reports 0", r["matches"], 0)
 
+    print("\n=== rows covered by a search overlay (the live failure) ===")
+    # Exactly what the live client showed: 15 laid-out rows with valid boxes, an open
+    # search overlay on top, and every coordinate click landing on the overlay. A
+    # rect alone proves layout, not hittability — elementFromPoint must be consulted.
+    covered = f"""
+    <style>
+      .dialog-time{{display:block}}
+      /* The real sidebar is ~380px wide, so a row's CENTRE — the point that gets
+         clicked and hit-tested — falls under the overlay. Without constraining the
+         width the row spans the whole page and its centre sits beside the overlay,
+         which made this fixture pass while the live client failed. */
+      #column-left{{width:380px}}
+      #overlay{{position:fixed;left:0;top:0;width:380px;height:900px;background:#fff;z-index:99}}
+      #overlay.gone{{display:none}}
+    </style>
+    <div id="column-left">
+      <ul class="chatlist">
+        <li class="chatlist-chat"><span class="user-title">{GROUP}
+          <span class="dialog-time">02:31 PM</span></span></li>
+      </ul>
+      <!-- The close control belongs INSIDE the overlay, as Telegram's search panel
+           header is. Putting it underneath meant the overlay covered the very
+           button that dismisses it, which no real client does. -->
+      <div id="overlay">
+        <div class="sidebar-header"><button class="sidebar-close-button">back</button></div>
+        <input class="input-search-input" value="">
+      </div>
+    </div>
+    <div id="column-center">
+      <div class="chat-info"><span class="peer-title" id="hdr"></span></div>
+      <div class="bubbles">
+        <div class="bubble" data-mid="1"><span class="peer-title">Ada</span>
+          <div class="message">covered case<span class="time-inner">10:01</span></div></div>
+      </div>
+      <div class="input-message-input" contenteditable="true"></div>
+    </div>
+    <script>
+      // The back button dismisses the overlay, like closing Telegram's search panel.
+      document.querySelector('.sidebar-close-button')
+        .addEventListener('click', () => document.getElementById('overlay').classList.add('gone'));
+      document.querySelectorAll('#column-left li').forEach(li => {{
+        li.addEventListener('click', (e) => {{
+          if (!e.isTrusted) return;
+          li.classList.add('active');
+        }});
+      }});
+    </script>
+    """
+    page.set_content(covered)
+    r = page.evaluate(tw._FIND_CHAT_JS, {"wanted": GROUP, "allowSubstring": False})
+    check("row found despite the overlay", r["matches"], 1)
+    check("rect exists (layout is fine)", bool(r["rect"]), True)
+    check("hit test says NOT clickable", r["hitOk"], False)
+    check("names what is on top", "overlay" in (r.get("topDesc") or ""), True)
+
+    page.set_content(covered)
+    res = tw._check_group(page, GROUP, 5)
+    check("recovers by dismissing the overlay", res.get("ok"), True)
+    check("messages read after recovery", len(res.get("messages", [])), 1)
+
     print("\n=== header unreadable, but selected row confirms it ===")
     # The live client never exposes a readable header, so verification must also
     # accept the sidebar's selected-row state. Here #hdr stays empty forever and the
