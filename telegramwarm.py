@@ -1205,6 +1205,7 @@ def _titles_match(header: str, wanted: str, *, allow_substring: bool) -> bool:
 
 
 def _open_chat_by_title(page, title: str, *, allow_substring: bool = False,
+                        accept_hash_change: bool = False,
                         attempts: int = 3, log=print) -> dict:
     """Open the sidebar chat matching ``title``, confirming it actually opened.
 
@@ -1216,6 +1217,12 @@ def _open_chat_by_title(page, title: str, *, allow_substring: bool = False,
     merely different.
     """
     arg = {"wanted": title, "allowSubstring": bool(allow_substring)}
+    # Web K puts the open peer id in the URL hash, so a change proves *some*
+    # conversation opened. That is weaker evidence of WHICH one than the header or the
+    # selected row, so only read callers accept it (accept_hash_change); sending
+    # requires one of the two identifying signals.
+    hash_before = (_row_state(page, title, allow_substring=allow_substring)
+                   .get("hash") or "")
     searched = False
     last: dict = {}
     header = ""
@@ -1255,38 +1262,119 @@ def _open_chat_by_title(page, title: str, *, allow_substring: bool = False,
                     "candidates": res.get("candidates", [])}
 
         # The conversation mounts asynchronously; poll rather than guessing a delay.
-        header = ""
+        # Two independent confirmations are accepted, because the header text proved
+        # unreadable on the live client while the sidebar's selected-row state is
+        # plain markup. Either one identifies the open conversation.
+        header, state = "", {}
         for _ in range(16):
             page.wait_for_timeout(500)
-            header = _open_chat_title(page)
-            if header:
-                break
+            header = _open_chat_title(page) or ""
+            state = _row_state(page, title, allow_substring=allow_substring)
+            if _titles_match(header, title, allow_substring=allow_substring):
+                return {"ok": True, "title": header, "verifiedBy": "header",
+                        "matchKind": res.get("matchKind"),
+                        "candidates": res.get("candidates", [])}
+            if state.get("active"):
+                return {"ok": True, "title": header or title, "verifiedBy": "row-active",
+                        "matchKind": res.get("matchKind"),
+                        "candidates": res.get("candidates", [])}
+            if (accept_hash_change and state.get("hash")
+                    and state.get("hash") != hash_before):
+                return {"ok": True, "title": header or title,
+                        "verifiedBy": "hash-change",
+                        "matchKind": res.get("matchKind"),
+                        "candidates": res.get("candidates", [])}
 
-        if _titles_match(header, title, allow_substring=allow_substring):
-            return {"ok": True, "title": header,
-                    "matchKind": res.get("matchKind"),
-                    "candidates": res.get("candidates", [])}
-
-        log(f"[tg-warm] attempt {attempt}: header is {header!r}, wanted {title!r} — retrying")
+        log(f"[tg-warm] attempt {attempt}: header={header!r} rowActive="
+            f"{state.get('active')} hash={state.get('hash')!r} — retrying")
 
     return {"ok": False, "matches": 1, "matchKind": last.get("matchKind"),
-            "error": f"clicked the row but the header never became {title!r} "
-                     f"(last saw {header!r})",
+            "error": (
+                f"clicked the row but could not confirm {title!r} opened "
+                f"(header={header!r}, rowActive={state.get('active')}, "
+                f"hash={state.get('hash')!r})"
+            ),
+            "ui": _chat_ui_inventory(page),
             "candidates": last.get("candidates", [])}
 
 
+#: Broadened well past the original four selectors, which returned '' on the live
+#: client every time. _check_group used `header or title`, so the blank went unnoticed
+#: until it was made a verification gate.
 _HEADER_TITLE_JS = """
 () => {
+  const vis = (el) => {
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && getComputedStyle(el).display !== 'none';
+  };
+  const clean = (el) => {
+    const c = el.cloneNode(true);
+    c.querySelectorAll('[class*=time], [class*=Time], .online, .subtitle, [class*=subtitle]')
+     .forEach(e => e.remove());
+    return (c.textContent || '').replace(/\\s+/g, ' ').trim();
+  };
   for (const sel of ['#column-center .chat-info .peer-title',
-                     '#column-center .peer-title',
-                     '#column-center .user-title',
+                     '#column-center .chat-info .user-title',
+                     '#column-center .topbar .peer-title',
+                     '#column-center .sidebar-header .peer-title',
+                     '.chat-info-container .peer-title',
+                     '#column-center [class*=peer-title]',
+                     '#column-center [class*=user-title]',
                      '.chat-info .peer-title']) {
-    const el = document.querySelector(sel);
-    if (el && (el.innerText || '').trim()) return (el.innerText || '').trim();
+    for (const el of document.querySelectorAll(sel)) {
+      if (!vis(el)) continue;
+      // Message bubbles carry .peer-title too — that is the SENDER's name. Treating
+      // it as the conversation header would confirm the wrong chat, and for the send
+      // path that means typing into it.
+      if (el.closest('.bubble') || el.closest('.bubbles') || el.closest('#column-left')) continue;
+      const t = clean(el);
+      if (t) return t;
+    }
   }
   return null;
 }
 """
+
+#: Independent confirmation that the intended conversation is open: Web K marks the
+#: open chat's sidebar row selected. This does not depend on header markup, which is
+#: the part that proved unreadable.
+_ROW_STATE_JS = """
+(arg) => {
+  const want = (arg.wanted || '').trim().toLowerCase();
+  const items = document.querySelectorAll(
+    '#column-left .chatlist-chat, #column-left ul.chatlist > li');
+  let found = false, active = false;
+  for (const li of items) {
+    const t = li.querySelector('.user-title, .peer-title, .dialog-title');
+    if (!t) continue;
+    const clone = t.cloneNode(true);
+    clone.querySelectorAll('.time, .dialog-time, .message-time, [class*=time], [class*=Time]')
+         .forEach(e => e.remove());
+    const title = (clone.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+    if (!title) continue;
+    const hit = arg.allowSubstring ? title.includes(want) : title === want;
+    if (!hit) continue;
+    found = true;
+    const a = li.closest('.chatlist-chat') || li;
+    if (a.classList.contains('active') ||
+        a.getAttribute('aria-selected') === 'true' ||
+        a.querySelector('.active')) {
+      active = true;
+    }
+    break;
+  }
+  return { found: found, active: active, hash: location.hash || '' };
+}
+"""
+
+
+def _row_state(page, title: str, *, allow_substring: bool) -> dict:
+    try:
+        return page.evaluate(
+            _ROW_STATE_JS, {"wanted": title, "allowSubstring": bool(allow_substring)}
+        ) or {}
+    except Exception as err:
+        return {"error": repr(err)}
 
 
 def _open_chat_title(page) -> str:
@@ -1404,7 +1492,8 @@ def _check_group(page, title: str, count: int, *, shot_path: str | None = None,
     after the return-to-list leaves a picture of the sidebar (or the search overlay),
     which tells you nothing about the messages that were just read.
     """
-    opened = _open_chat_by_title(page, title, allow_substring=True, log=log)
+    opened = _open_chat_by_title(page, title, allow_substring=True,
+                                 accept_hash_change=True, log=log)
     if not opened.get("ok"):
         # Report the real cause. A hardcoded "N chats matching" reason previously
         # masked click/index failures, producing the nonsense "1 chats ... need
@@ -1416,6 +1505,7 @@ def _check_group(page, title: str, count: int, *, shot_path: str | None = None,
             "ok": False,
             "stage": "open",
             "reason": reason,
+            "ui": opened.get("ui"),
             "candidates": opened.get("candidates", []),
         }
 
@@ -1543,15 +1633,30 @@ def _send_test_message(page, *, log=print) -> dict:
         return {"ok": False, "stage": "open", "reason": reason,
                 "candidates": opened.get("candidates", [])}
 
-    # _open_chat_by_title already verified this, but re-check before typing: this is
-    # the last gate before a real send, and it costs nothing.
-    header = _open_chat_title(page)
-    if not _titles_match(header, title, allow_substring=False):
+    # Last gate before a real send. _open_chat_by_title has already confirmed the
+    # conversation (by header text or by the sidebar's selected row); only fail here
+    # if a READABLE header actively contradicts the request. Requiring a readable
+    # header outright would block every send, since that text is not reliably
+    # exposed on the live client.
+    header = _open_chat_title(page) or ""
+    verified = opened.get("verifiedBy")
+    if header and not _titles_match(header, title, allow_substring=False):
         # Refuse rather than send into whatever happens to be open.
         return {
             "ok": False,
             "stage": "verify",
             "reason": f"opened chat header is {header!r}, expected {title!r} — not sending",
+            "ui": _chat_ui_inventory(page),
+        }
+
+    if not header and verified != "row-active":
+        # No readable header AND no selected-row confirmation: there is nothing left
+        # proving which conversation is open, so do not type into it.
+        return {
+            "ok": False,
+            "stage": "verify",
+            "reason": f"could not confirm {title!r} is the open conversation "
+                      f"(verifiedBy={verified!r}) — not sending",
             "ui": _chat_ui_inventory(page),
         }
 

@@ -102,8 +102,8 @@ with sync_playwright() as p:
     res = tw._send_test_message(page)
     check("refused", res.get("ok"), False)
     check("stage", res.get("stage"), "open")
-    check("reason names the header problem",
-          "header never became" in (res.get("reason") or ""), True)
+    check("reason explains what could not be confirmed",
+          "could not confirm" in (res.get("reason") or ""), True)
     body = page.eval_on_selector(".input-message-input", "e => e.innerText")
     check("composer untouched", body.strip(), "")
 

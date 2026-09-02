@@ -135,6 +135,53 @@ with sync_playwright() as p:
     r = page.evaluate(tw._FIND_CHAT_JS, {"wanted": "not present", "allowSubstring": False})
     check("absent title still reports 0", r["matches"], 0)
 
+    print("\n=== header unreadable, but selected row confirms it ===")
+    # The live client never exposes a readable header, so verification must also
+    # accept the sidebar's selected-row state. Here #hdr stays empty forever and the
+    # clicked row gains .active instead.
+    rowonly = f"""
+    <style>.dialog-time{{display:block}}</style>
+    <div id="column-left"><ul class="chatlist">
+      <li class="chatlist-chat"><span class="user-title">{GROUP}
+        <span class="dialog-time">02:31 PM</span></span></li>
+      <li class="chatlist-chat"><span class="user-title">Ops
+        <span class="dialog-time">Tue</span></span></li>
+    </ul></div>
+    <div id="column-center">
+      <div class="chat-info"><span class="peer-title" id="hdr"></span></div>
+      <div class="bubbles">
+        <div class="bubble" data-mid="1"><span class="peer-title">Ada</span>
+          <div class="message">hello there<span class="time-inner">10:01</span></div></div>
+      </div>
+      <div class="input-message-input" contenteditable="true"></div>
+    </div>
+    <script>
+      document.querySelectorAll('#column-left li').forEach(li => {{
+        li.addEventListener('click', (e) => {{
+          if (!e.isTrusted) return;
+          document.querySelectorAll('#column-left li').forEach(o => o.classList.remove('active'));
+          li.classList.add('active');       // header deliberately left blank
+        }});
+      }});
+    </script>
+    """
+    page.set_content(rowonly)
+    res = tw._check_group(page, GROUP, 5)
+    check("opened via row-active", res.get("ok"), True)
+    check("messages still read", len(res.get("messages", [])), 1)
+    body = page.eval_on_selector(".input-message-input", "e => e.innerText")
+    check("still read-only", body.strip(), "")
+
+    print("\n=== wrong row active -> refuse ===")
+    # Clicking marks a DIFFERENT row active, so neither signal confirms the target.
+    wrongrow = rowonly.replace("li.classList.add('active');",
+                               "document.querySelectorAll('#column-left li')[1].classList.add('active');")
+    page.set_content(wrongrow)
+    res = tw._check_group(page, GROUP, 5)
+    check("refused", res.get("ok"), False)
+    check("stage", res.get("stage"), "open")
+    check("inventory attached", isinstance(res.get("ui"), dict), True)
+
     print("\n=== retry: first click does not take (list re-rendered) ===")
     # The live failure was "Element is not attached to the DOM": the chat list
     # re-renders between find and click. Clicking coordinates avoids holding a
@@ -178,8 +225,8 @@ with sync_playwright() as p:
     res = tw._check_group(page, GROUP, 5)
     check("refused", res.get("ok"), False)
     check("stage", res.get("stage"), "open")
-    check("reason names the header problem",
-          "header never became" in (res.get("reason") or ""), True)
+    check("reason explains what could not be confirmed",
+          "could not confirm" in (res.get("reason") or ""), True)
     body = page.eval_on_selector(".input-message-input", "e => e.innerText")
     check("composer untouched", body.strip(), "")
 
