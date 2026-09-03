@@ -342,7 +342,7 @@ def _build_check_card(title: str, result: dict, image_key: str | None) -> dict:
                          "alt": {"tag": "plain_text", "content": title}})
 
     elements.append({"tag": "note", "elements": [
-        {"tag": "plain_text",
+        {"tag": "lark_md",
          "content": f"Read-only · nothing was sent · {_now_str()}"}]})
 
     return {
@@ -2651,10 +2651,18 @@ class _TelegramWarm:
                         print(f"[tg-warm] image upload failed: {err!r}", flush=True)
 
                 try:
-                    resp = send_card(chat_id, _build_check_card(title, result, image_key))
+                    card = _build_check_card(title, result, image_key)
+                    resp = send_card(chat_id, card)
                     if resp.get("code") != 0:
-                        # Never lose the content to a card-schema problem.
+                        # Never lose the content to a card-schema problem, and say
+                        # plainly why the card did not render.
                         print(f"[tg-warm] card rejected: {resp}", flush=True)
+                        send_text(
+                            chat_id,
+                            f"⚠️ Lark rejected the message card "
+                            f"(code={resp.get('code')}, msg={resp.get('msg')!r}); "
+                            f"showing plain text instead.",
+                        )
                         send_text(chat_id, self._plain_fallback(title, result))
                 except Exception as err:
                     print(f"[tg-warm] card send failed: {err!r}", flush=True)
