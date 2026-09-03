@@ -432,6 +432,24 @@ check("edited marker shown", "edited" in blob, True)
 check("media kind shown", "(document) GameList.xlsx" in blob, True)
 check("card is JSON-serialisable", isinstance(blob, str), True)
 
+# Schema 2.0 rejects several 1.0 tags outright. Lark returned
+# "ErrCode 200861 ... unsupported tag note" for exactly this, so pin the whitelist:
+# only div / hr / img appear in the 2.0 cards this repo posts successfully.
+_ALLOWED_V2_TAGS = {"div", "hr", "img"}
+
+
+def check_tags(c, label):
+    tags = {e.get("tag") for e in c["body"]["elements"]}
+    check(f"{label}: only 2.0-safe tags", sorted(tags - _ALLOWED_V2_TAGS), [])
+
+
+check_tags(card, "success card")
+check_tags(tw._build_check_card(GROUP, ok_result, None), "card without image")
+check_tags(tw._build_check_card("Nope",
+                                {"ok": False, "stage": "open", "reason": "x",
+                                 "candidates": ["a"], "ui": {"z": 1}}, None),
+           "failure card")
+
 no_img = tw._build_check_card(GROUP, ok_result, None)
 check("no img element without a key",
       [e for e in no_img["body"]["elements"] if e.get("tag") == "img"], [])

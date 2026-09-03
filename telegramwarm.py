@@ -341,9 +341,13 @@ def _build_check_card(title: str, result: dict, image_key: str | None) -> dict:
         elements.append({"tag": "img", "img_key": image_key,
                          "alt": {"tag": "plain_text", "content": title}})
 
-    elements.append({"tag": "note", "elements": [
-        {"tag": "lark_md",
-         "content": f"Read-only · nothing was sent · {_now_str()}"}]})
+    # A plain div, NOT a "note": Lark rejects note in schema 2.0 with
+    # "ErrCode 200861 ... cards of schema V2 no longer support this capability".
+    # Only div / hr / img are used here, all of which 2.0 cards in this repo use.
+    elements.append({"tag": "hr"})
+    elements.append({"tag": "div", "text": {
+        "tag": "lark_md",
+        "content": f"_Read-only · nothing was sent · {_now_str()}_"}})
 
     return {
         "schema": "2.0",
@@ -2687,7 +2691,18 @@ class _TelegramWarm:
         lines = [f"💬 Telegram — “{result.get('chat') or title}” "
                  f"(last {len(result.get('messages', []))} of {result.get('total', 0)}):"]
         for m in result.get("messages", []):
-            lines.append("• " + _fmt_message_line(m).replace("**", "").replace("\n  ", ": "))
+            # Keep the message's own line breaks, indented. Collapsing them into
+            # ": " turned multi-line notices into an unreadable run of colons.
+            who = m.get("sender") or ("me" if m.get("out") else "?")
+            when = f" [{m['time']}]" if m.get("time") else ""
+            body = (m.get("text") or "").strip()
+            if m.get("kind"):
+                body = f"({m['kind']}) {body}".strip()
+            elif not body:
+                body = "(no text)"
+            if m.get("truncated"):
+                body += " …[truncated]"
+            lines.append(f"• {who}{when}: " + body.replace("\n", "\n    "))
         return "\n".join(lines)
 
     def _handle_send_test(self, task: dict) -> None:
