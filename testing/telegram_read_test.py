@@ -407,5 +407,53 @@ with sync_playwright() as p:
 
     browser.close()
 
+print("\n=== card builder (one card per chat, screenshot inside) ===")
+ok_result = {
+    "ok": True, "chat": GROUP, "total": 23, "matchKind": "exact",
+    "messages": [
+        {"sender": "Ada", "time": "10:15", "text": "please confirm",
+         "out": False, "edited": False, "truncated": False, "kind": None},
+        {"sender": "me", "time": "10:20", "text": "confirmed",
+         "out": True, "edited": True, "truncated": False, "kind": None},
+        {"sender": "VP Support", "time": "11:10", "text": "GameList.xlsx",
+         "out": False, "edited": False, "truncated": False, "kind": "document"},
+    ],
+}
+card = tw._build_check_card(GROUP, ok_result, "img_abc123")
+check("schema 2.0", card.get("schema"), "2.0")
+check("green header on success", card["header"]["template"], "green")
+check("chat name in header", GROUP in card["header"]["title"]["content"], True)
+imgs = [e for e in card["body"]["elements"] if e.get("tag") == "img"]
+check("screenshot embedded in the card", len(imgs), 1)
+check("img_key wired", imgs[0]["img_key"], "img_abc123")
+blob = json.dumps(card, ensure_ascii=False)
+check("messages present in body", "please confirm" in blob, True)
+check("edited marker shown", "edited" in blob, True)
+check("media kind shown", "(document) GameList.xlsx" in blob, True)
+check("card is JSON-serialisable", isinstance(blob, str), True)
+
+no_img = tw._build_check_card(GROUP, ok_result, None)
+check("no img element without a key",
+      [e for e in no_img["body"]["elements"] if e.get("tag") == "img"], [])
+
+fail_result = {"ok": False, "stage": "open", "reason": "0 chats matching",
+               "candidates": ["Ops", "Alerts"], "ui": {"editables": []}}
+fcard = tw._build_check_card("Nope", fail_result, None)
+check("red header on failure", fcard["header"]["template"], "red")
+fblob = json.dumps(fcard, ensure_ascii=False)
+check("failure reason shown", "0 chats matching" in fblob, True)
+check("candidates shown", "Alerts" in fblob, True)
+check("inventory shown", "editables" in fblob, True)
+
+print("\n=== per-chat screenshot paths are distinct ===")
+check("distinct paths", tw._shot_path_for(0) != tw._shot_path_for(1), True)
+
+print("\n=== plain-text fallback when a card cannot be sent ===")
+fb = tw._TelegramWarm._plain_fallback(GROUP, ok_result)
+check("fallback names the chat", GROUP in fb, True)
+check("fallback carries a message", "please confirm" in fb, True)
+fb2 = tw._TelegramWarm._plain_fallback("Nope", fail_result)
+check("fallback reports failure", "failed at the" in fb2, True)
+
 print(f"\nTOTAL FAILURES: {fails}")
 sys.exit(1 if fails else 0)

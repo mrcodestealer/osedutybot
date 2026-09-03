@@ -6712,14 +6712,24 @@ def lark_webhook():
         # Read-only. Opens the chat named in TELEGRAM_CHECK_CHAT (default
         # "CP x 5G Integration_new"), reports its latest TELEGRAM_CHECK_COUNT
         # messages, then returns to the chat list. Nothing is ever typed or sent.
-        # Optional override: `/checktelegramgroup <chat title>`.
-        _tg_title = " ".join(cmd_parts[1:]).strip() or None
+        # One chat per line, each answered with its own card:
+        #     /checktelegramgroup
+        #     (OG) IGO / YB
+        #     PP - IGO PR [A-SW-S/LC][A-SPE14-2117]
+        # A single-line `/checktelegramgroup <title>` still works. Read from
+        # clean_text_multiline, NOT clean_text — the latter collapses newlines, so the
+        # separate chat names would run together into one unfindable title.
+        _tg_body = re.sub(
+            r'(?is)^\s*/checktelegramgroup\b[ \t]*', '',
+            clean_text_multiline or clean_text, count=1
+        )
+        _tg_titles = [ln.strip() for ln in _tg_body.splitlines() if ln.strip()] or None
 
-        def _run_telegram_check(chat_id_tg=chat_id, title_tg=_tg_title):
+        def _run_telegram_check(chat_id_tg=chat_id, titles_tg=_tg_titles):
             try:
                 import telegramwarm as _tg_mod
 
-                _tg_mod.check_group_messages(chat_id_tg, title_tg)
+                _tg_mod.check_group_messages(chat_id_tg, titles_tg)
             except Exception as _tg_err:
                 print(f"❌ checktelegramgroup: {_tg_err!r}", flush=True)
                 try:

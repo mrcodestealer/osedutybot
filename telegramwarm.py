@@ -264,6 +264,99 @@ def send_image(chat_id: str, image_key: str) -> dict:
     ).json()
 
 
+def send_card(chat_id: str, card: dict) -> dict:
+    token = _tenant_token()
+    return requests.post(
+        f"{_lark_base()}/open-apis/im/v1/messages",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        params={"receive_id_type": "chat_id"},
+        json={
+            "receive_id": chat_id,
+            "msg_type": "interactive",
+            "content": json.dumps(card, ensure_ascii=False),
+        },
+        timeout=30,
+    ).json()
+
+
+def _shot_path_for(index: int) -> Path:
+    """A distinct capture per chat, so one card cannot show another card's picture."""
+    return _ROOT_DIR / f"telegram_chat_{index}.png"
+
+
+def _fmt_message_line(m: dict) -> str:
+    who = m.get("sender") or ("me" if m.get("out") else "?")
+    bits = [b for b in (m.get("time"), "edited" if m.get("edited") else "") if b]
+    when = f" · {' · '.join(bits)}" if bits else ""
+    body = (m.get("text") or "").strip()
+    kind = m.get("kind")
+    if kind:
+        body = f"({kind}) {body}".strip()
+    elif not body:
+        body = "_(no text)_"
+    if m.get("truncated"):
+        body += " …_[truncated]_"
+    # Indent continuation lines so multi-line messages stay readable in a card.
+    body = body.replace("\n", "\n  ")
+    return f"**{who}**{when}\n  {body}"
+
+
+def _build_check_card(title: str, result: dict, image_key: str | None) -> dict:
+    """One card per chat: the messages, then the screenshot of that same chat.
+
+    Schema 2.0 with body.elements, matching newportwatch.py's cards.
+    """
+    ok = bool(result.get("ok"))
+    elements: list[dict[str, Any]] = []
+
+    if ok:
+        msgs = result.get("messages", [])
+        head = (f"**{result.get('chat') or title}**\n"
+                f"Last {len(msgs)} of {result.get('total', 0)} loaded messages")
+        if result.get("matchKind") == "substring":
+            head += f"\n_(matched “{title}” by substring)_"
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": head}})
+        elements.append({"tag": "hr"})
+        body = "\n\n".join(_fmt_message_line(m) for m in msgs) or "_(no messages)_"
+        if len(body) > 3500:
+            body = body[:3500] + "\n…"
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": body}})
+    else:
+        lines = [f"**{title}**", f"❌ Failed at the “{result.get('stage')}” stage",
+                 str(result.get("reason") or "")]
+        elements.append({"tag": "div",
+                         "text": {"tag": "lark_md", "content": "\n".join(lines)}})
+        if result.get("candidates"):
+            cands = ", ".join(str(c) for c in result["candidates"][:15])
+            elements.append({"tag": "div", "text": {
+                "tag": "lark_md",
+                "content": f"**Sidebar chats:**\n{cands[:1500]}"}})
+        if result.get("ui"):
+            elements.append({"tag": "div", "text": {
+                "tag": "lark_md",
+                "content": f"**UI inventory:**\n`{json.dumps(result['ui'], ensure_ascii=False)[:1200]}`"}})
+
+    if image_key:
+        elements.append({"tag": "hr"})
+        elements.append({"tag": "img", "img_key": image_key,
+                         "alt": {"tag": "plain_text", "content": title}})
+
+    elements.append({"tag": "note", "elements": [
+        {"tag": "plain_text",
+         "content": f"Read-only · nothing was sent · {_now_str()}"}]})
+
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "template": "green" if ok else "red",
+            "title": {"tag": "plain_text",
+                      "content": f"{'💬' if ok else '❌'} Telegram — {title[:60]}"},
+        },
+        "body": {"elements": elements},
+    }
+
+
 def _send_shot(chat_id: str, path: str) -> bool:
     try:
         key = upload_image_lark(path)
@@ -1921,10 +2014,11 @@ class _TelegramWarm:
     def send_test(self, chat_id: str | None = None) -> None:
         self._tasks.put({"kind": "send_test", "chat_id": chat_id})
 
-    def check_group(self, chat_id: str | None = None, title: str | None = None,
+    def check_group(self, chat_id: str | None = None,
+                    titles: list[str] | None = None,
                     count: int | None = None) -> None:
         self._tasks.put({"kind": "check_group", "chat_id": chat_id,
-                         "title": title, "count": count})
+                         "titles": titles, "count": count})
 
     def submit_code(self, code: str, chat_id: str | None = None) -> None:
         self._tasks.put({"kind": "submit_code", "code": code, "chat_id": chat_id})
@@ -2509,10 +2603,14 @@ class _TelegramWarm:
         print(f"[tg-warm] reset done (profile removed={removed})", flush=True)
 
     def _handle_check_group(self, task: dict) -> None:
-        """Read-only: open a chat, report its last N messages, go back to the list."""
+        """Read-only: for each requested chat, post a card with its latest messages
+        and a screenshot of that chat. One card per chat."""
         chat_id = task.get("chat_id") or _qr_chat_default()
-        title = (task.get("title") or "").strip() or _check_chat_title()
+        titles = [t for t in (task.get("titles") or []) if str(t).strip()]
+        if not titles:
+            titles = [_check_chat_title()]
         count = int(task.get("count") or _check_count())
+
         try:
             if not self._healthy():
                 self._launch()
@@ -2525,56 +2623,45 @@ class _TelegramWarm:
                 )
                 return
 
-            send_text(chat_id, f"🔍 Telegram: reading the last {count} messages of “{title}”…")
-            # Remove any previous capture first. An open-stage failure returns before a
-            # screenshot is taken, and without this the handler finds the OLD file on
-            # disk and posts it — showing a stale, contradictory picture of a run that
-            # is not the one being reported.
-            try:
-                SHOT_PNG.unlink(missing_ok=True)
-            except Exception:
-                pass
-            shot = str(SHOT_PNG)
-            result = _check_group(self._page, title, count, shot_path=shot, log=print)
-            if not Path(shot).exists():
-                shot = None
+            plural = "chat" if len(titles) == 1 else "chats"
+            send_text(
+                chat_id,
+                f"🔍 Telegram: reading the last {count} messages from "
+                f"{len(titles)} {plural}…",
+            )
 
-            if result.get("ok"):
-                lines = [
-                    f"💬 Telegram — “{result.get('chat')}” "
-                    f"(last {len(result['messages'])} of {result.get('total', 0)} loaded):"
-                ]
-                for m in result["messages"]:
-                    who = m.get("sender") or ("me" if m.get("out") else "?")
-                    bits = [b for b in (m.get("time"), "edited" if m.get("edited") else "") if b]
-                    when = f" [{' · '.join(bits)}]" if bits else ""
-                    body = (m.get("text") or "").strip()
-                    kind = m.get("kind")
-                    if kind:
-                        body = f"({kind}) {body}".strip()
-                    elif not body:
-                        body = "(no text)"
-                    if m.get("truncated"):
-                        body += " …[truncated]"
-                    # Indent continuation lines instead of inlining ⏎ markers, so a
-                    # multi-line message stays readable in Lark.
-                    body = body.replace("\n", "\n    ")
-                    lines.append(f"• {who}{when}: {body}")
-                if result.get("matchKind") == "substring":
-                    lines.append(f"(matched “{title}” by substring)")
-                lines.append("Read-only — nothing was sent. Back on the chat list.")
-                send_text(chat_id, "\n".join(lines))
-            else:
-                lines = [f"❌ Telegram read failed at the “{result.get('stage')}” stage: "
-                         f"{result.get('reason')}"]
-                if result.get("candidates"):
-                    lines.append(f"Chats visible in the sidebar: {result['candidates']}")
-                if result.get("ui"):
-                    lines.append(f"Chat UI inventory: {json.dumps(result['ui'], ensure_ascii=False)}")
-                    lines.append("Send that back — it names the selectors needed.")
-                send_text(chat_id, "\n".join(lines))
-            if shot:
-                _send_shot(chat_id, shot)
+            for idx, title in enumerate(titles):
+                title = str(title).strip()
+                shot_file = _shot_path_for(idx)
+                # Each chat gets its own file, deleted first: a shared or stale
+                # capture would put the wrong picture in the card.
+                try:
+                    shot_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+                result = _check_group(self._page, title, count,
+                                      shot_path=str(shot_file), log=print)
+
+                image_key = None
+                if shot_file.exists():
+                    try:
+                        image_key = upload_image_lark(str(shot_file))
+                    except Exception as err:
+                        print(f"[tg-warm] image upload failed: {err!r}", flush=True)
+
+                try:
+                    resp = send_card(chat_id, _build_check_card(title, result, image_key))
+                    if resp.get("code") != 0:
+                        # Never lose the content to a card-schema problem.
+                        print(f"[tg-warm] card rejected: {resp}", flush=True)
+                        send_text(chat_id, self._plain_fallback(title, result))
+                except Exception as err:
+                    print(f"[tg-warm] card send failed: {err!r}", flush=True)
+                    try:
+                        send_text(chat_id, self._plain_fallback(title, result))
+                    except Exception:
+                        pass
         except Exception as err:
             print(f"[tg-warm] check_group error: {err!r}", flush=True)
             _wset(last_error=repr(err))
@@ -2582,6 +2669,18 @@ class _TelegramWarm:
                 send_text(chat_id, f"❌ /checktelegramgroup failed: {err}")
             except Exception:
                 pass
+
+    @staticmethod
+    def _plain_fallback(title: str, result: dict) -> str:
+        """Plain-text rendering, used when the card cannot be delivered."""
+        if not result.get("ok"):
+            return (f"❌ Telegram “{title}” failed at the "
+                    f"“{result.get('stage')}” stage: {result.get('reason')}")
+        lines = [f"💬 Telegram — “{result.get('chat') or title}” "
+                 f"(last {len(result.get('messages', []))} of {result.get('total', 0)}):"]
+        for m in result.get("messages", []):
+            lines.append("• " + _fmt_message_line(m).replace("**", "").replace("\n  ", ": "))
+        return "\n".join(lines)
 
     def _handle_send_test(self, task: dict) -> None:
         """The one writing path. Only ever reached from an explicit slash command."""
@@ -2708,12 +2807,15 @@ def submit_login_code(code: str, chat_id: str | None = None) -> None:
     w.submit_code(code, chat_id)
 
 
-def check_group_messages(chat_id: str | None = None, title: str | None = None,
+def check_group_messages(chat_id: str | None = None,
+                         titles: list[str] | str | None = None,
                          count: int | None = None) -> None:
-    """/checktelegramgroup — read-only: report a chat's latest messages."""
+    """/checktelegramgroup — read-only: one card per chat, messages + screenshot."""
+    if isinstance(titles, str):
+        titles = [titles]
     w = warm()
     w.start()
-    w.check_group(chat_id, title, count)
+    w.check_group(chat_id, titles, count)
 
 
 def send_test_message(chat_id: str | None = None) -> None:
