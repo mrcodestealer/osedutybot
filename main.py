@@ -5596,17 +5596,6 @@ def lark_webhook():
     clean_text = re.sub(r'\s+', ' ', clean_text_multiline).strip()
     print(f"🧹 Cleaned text (repr): {repr(clean_text)}")
 
-    # `/isp` group: nothing else runs here — no other command, no duty routing,
-    # no AI chat. Placed straight after clean_text so it short-circuits every
-    # handler below. A slash command gets a one-line refusal so the user knows
-    # why it did nothing; ordinary chat is ignored without a reply, which keeps
-    # the group quiet for the log pastes it exists to serve.
-    if _is_isp_chat(chat_id) and not re.match(r"(?i)^/isp(?![a-z])", clean_text):
-        if clean_text.lstrip().startswith("/"):
-            send_message(chat_id, "❌ Only `/isp <ip> [ip ...]` is available in this group.")
-            return _lark_im_done()
-        print(f"⏭️ /isp-only group — ignoring non-/isp message ({chat_id})", flush=True)
-        return _lark_im_ack()
 
     _pipeline_t0 = time.perf_counter()
 
@@ -5643,6 +5632,20 @@ def lark_webhook():
         if not bot_mentioned and is_mention_old:
             bot_mentioned = True
             print("✅ Bot mentioned (old schema via is_mention flag)")
+
+    # `/isp` group: the bot stays completely silent unless it was @mentioned AND
+    # the message is `/isp`. Nothing else runs here and nothing else gets a
+    # reply — not another command, not duty routing, not AI chat. Sits directly
+    # after bot_mentioned is resolved, because that flag is what the rule turns
+    # on; every handler below is short-circuited.
+    if _is_isp_chat(chat_id) and not (
+        bot_mentioned and re.match(r"(?i)^/isp(?![a-z])", clean_text)
+    ):
+        print(
+            f"⏭️ /isp-only group — silent (mentioned={bot_mentioned}) {clean_text[:40]!r}",
+            flush=True,
+        )
+        return _lark_im_ack()
 
     # Reply **1**–**4** after `/checkcreditdate` NP prompt — works in group **without** @bot
     stripped_choice = clean_text.strip()

@@ -82,9 +82,10 @@ iplocation.net），回复 **IP Details** 卡片。多个地址按**网络分组
 103.40.2.142
 ```
 
-`/isp` 仅限其专用群使用，且该群**只**接受 `/isp`：其他命令会收到一行拒绝提示，普通聊天
-不作回应。`ISP_PM_ADMIN_OPEN_IDS` 中的管理员还可以在与机器人的**私聊**里使用（其私聊
-不受限制，其他命令照常可用）。如需调整，改 `.env` 里的 `ISP_CHAT_IDS` / `ISP_PM_ADMIN_OPEN_IDS`。
+`/isp` 仅限其专用群使用。**在该群，机器人只回应 `@Duty Bot /isp …`**：其他命令、普通聊天、
+甚至没有 @ 机器人的 `/isp`，都完全不回应（不回复、也不加表情）。`ISP_PM_ADMIN_OPEN_IDS`
+中的管理员还可在私聊里使用（私聊无需 @，其他命令照常可用）。如需调整，改 `.env` 里的
+`ISP_CHAT_IDS` / `ISP_PM_ADMIN_OPEN_IDS`。
 
 ---
 
