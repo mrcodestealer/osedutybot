@@ -112,7 +112,7 @@ OSE_LEAVE_API_BUILD = "20260603-leaveose-pinned-v4"
 LEAVEOSE_TABLE_ID_CANONICAL = "tblvoXE0hsPjgb0j"
 LEAVEOSE_TABLE_ID = LEAVEOSE_TABLE_ID_CANONICAL
 
-# OSE roster — sheet col A labels vs roster keys (31 people on ``AS33r7``).
+# OSE roster — sheet col A labels vs roster keys (32 people on ``AS33r7``).
 # HRMS variants like ``Augustine (Si Yew)`` resolve to key ``Augustine Si yew``.
 OSE_LEAVE_SHEET_ROSTER: tuple[tuple[str, str], ...] = (
     ("Louie", "Louie (Senior)"),
@@ -121,6 +121,9 @@ OSE_LEAVE_SHEET_ROSTER: tuple[tuple[str, str], ...] = (
     ("Rizaldy Valdez Jr.", "Rizaldy Valdez Jr."),
     ("Renzfrd Angeles", "Renzfrd Angeles"),
     ("Art Eli Aiuri Bernrdo Bautista", "Art Eli Aiuri Bernrdo Bautista"),
+    # Requester-only: submits his own offsets, never an approver
+    # (deliberately absent from ``offsetleave.OFFSET_APPROVER_OPEN_IDS``).
+    ("Kwang Ming", "Kwang Ming (Senior)"),
     ("Man Chung", "Man Chung [Platform]"),
     ("Augustine Si yew", "Augustine Si yew (Senior)"),
     ("Bryan Peh", "Bryan Peh [Platform]"),
@@ -494,6 +497,7 @@ TARGET_USER_OPEN_ID = (
 _OSE_PERSON_OPEN_ID_DEFAULTS: dict[str, str] = {
     "Jewel": "ou_01a0b531dfbcc0d8af7d64c24262f7e9",
     "Jewell": "ou_01a0b531dfbcc0d8af7d64c24262f7e9",
+    "Kwang Ming": "ou_0d13906b8568671d52bd2a7bab6f093b",
     "Man Chung": "ou_50afe44c066a50645271f87b690d84a8",
     "Eduard James": "ou_cd2d456b36f2fab676b22e45e2b1425b",
     "Louie": "ou_da0c9fead4a1fc32475939898a42ceed",

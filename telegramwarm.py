@@ -315,6 +315,16 @@ def _build_check_card(title: str, result: dict, image_key: str | None) -> dict:
                 f"Last {len(msgs)} of {result.get('total', 0)} loaded messages")
         if result.get("matchKind") == "substring":
             head += f"\n_(matched “{title}” by substring)_"
+        peer = _display_peer(result)
+        if peer:
+            # Printed so the owner can pin a send target to it (TELEGRAM_TEST_CHAT_PEER).
+            head += f"\nPeer id: `{peer}`"
+        vb = result.get("verifiedBy")
+        if vb == "hash-change":
+            head += ("\n_(identity confirmed by navigation only — the sidebar did not mark "
+                     "this row selected)_")
+        elif vb:
+            head += f"\n_(identity confirmed by {vb})_"
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": head}})
         elements.append({"tag": "hr"})
         body = "\n\n".join(_fmt_message_line(m) for m in msgs) or "_(no messages)_"
@@ -1206,9 +1216,46 @@ _CHAT_ROW_SELECTOR = "#column-left .chatlist-chat, #column-left ul.chatlist > li
 #: Telegram Web K reacts to real pointer events, and a synthetic DOM click is
 #: silently ignored. The caller clicks the returned index with Playwright, which
 #: dispatches genuine mouse events.
-_FIND_CHAT_JS = """
+#: Shared by every title extractor below. Inlined into each snippet because each
+#: page.evaluate() runs in isolation.
+#:
+#: Why emoji handling matters: Web K renders emoji in titles as <img class="emoji"
+#: alt="..."> on non-Apple platforms and premium ones as .custom-emoji elements, and
+#: textContent drops both — so "X" compared equal to "X <fire>", a blind spot every
+#: identity gate shared. Alt text is put back before comparing.
+_JS_TITLE_HELPERS = r"""
+  const normTitle = (el) => {
+    if (!el) return '';
+    const c = el.cloneNode(true);
+    c.querySelectorAll('.time, .dialog-time, .message-time, [class*=time], [class*=Time]')
+     .forEach(e => e.remove());
+    // The clone is detached, so textContent is what we get below; make line breaks
+    // survive as spaces rather than gluing adjacent words together.
+    c.querySelectorAll('br').forEach(br => br.replaceWith(document.createTextNode(' ')));
+    c.querySelectorAll('img').forEach(img => {
+      const alt = img.getAttribute('alt') || (img.dataset && img.dataset.emoji) || '';
+      img.replaceWith(document.createTextNode(alt || String.fromCharCode(0xFFFC)));
+    });
+    c.querySelectorAll('.custom-emoji, custom-emoji-element, [data-docid]').forEach(e => {
+      const d = e.dataset || {};
+      const t = e.getAttribute('alt') || d.stickerEmoji || d.emoji || String.fromCharCode(0xFFFC);
+      e.replaceWith(document.createTextNode(t));
+    });
+    return (c.textContent || '').replace(/\s+/g, ' ').trim();
+  };
+  const normWanted = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  const fold = (s, caseSensitive) => caseSensitive ? s : s.toLowerCase();
+  const rowPeerId = (li) => {
+    const a = li.closest('.chatlist-chat') || li;
+    return a.getAttribute('data-peer-id') || (a.dataset && a.dataset.peerId) || null;
+  };
+"""
+
+_FIND_CHAT_JS = r"""
 (arg) => {
-  const want = (arg.wanted || '').trim().toLowerCase();
+""" + _JS_TITLE_HELPERS + r"""
+  const cs = !!arg.caseSensitive;
+  const want = fold(normWanted(arg.wanted), cs);
   const items = document.querySelectorAll(
     '#column-left .chatlist-chat, #column-left ul.chatlist > li');
   const seen = [];
@@ -1216,26 +1263,11 @@ _FIND_CHAT_JS = """
   const partial = [];
   items.forEach((li, i) => {
     const t = li.querySelector('.user-title, .peer-title, .dialog-title');
-    const raw = ((t ? t.innerText : '') || '').replace(/\\s+/g, ' ').trim();
-    if (!raw) return;
-    // The title element CONTAINS the row's timestamp, so its text reads
-    // "(OG) IGO / YB  Tue". Without removing it no exact comparison can ever match
-    // a row that shows a time, which is every row in the normal sidebar.
-    // Delete the time nodes from a detached clone rather than splitting on a
-    // newline: whether the time renders as a line break or a space depends on its
-    // display style, so a newline split is not reliable.
-    let title = raw;
-    if (t) {
-      const clone = t.cloneNode(true);
-      clone.querySelectorAll(
-        '.time, .dialog-time, .message-time, [class*=time], [class*=Time]'
-      ).forEach(e => e.remove());
-      const stripped = (clone.textContent || '').replace(/\\s+/g, ' ').trim();
-      if (stripped) title = stripped;
-    }
+    if (!t) return;
+    const title = normTitle(t);
     if (!title) return;
-    seen.push(raw);
-    const low = title.toLowerCase();
+    seen.push(title);
+    const low = fold(title, cs);
     if (low === want) exact.push(i);
     else if (arg.allowSubstring && want && low.includes(want)) partial.push(i);
   });
@@ -1246,9 +1278,10 @@ _FIND_CHAT_JS = """
   // re-renders constantly (new messages, presence, clocks), so any handle the caller
   // holds can detach before it is clicked — "Element is not attached to the DOM".
   // Clicking coordinates sidesteps that entirely.
-  let rect = null, hitOk = false, topDesc = null, offscreen = false;
+  let rect = null, hitOk = false, topDesc = null, offscreen = false, peerId = null;
   if (hits.length === 1) {
     const li = items[hits[0]];
+    peerId = rowPeerId(li);
     // Scroll the row into view before measuring. The chat list is long and
     // virtualised: a row far down the list is in the DOM with a rect BELOW the
     // viewport, where elementFromPoint returns null — indistinguishable from
@@ -1276,7 +1309,7 @@ _FIND_CHAT_JS = """
         const cls = (top.className || '').toString().trim();
         topDesc = top.tagName.toLowerCase()
                 + (top.id ? '#' + top.id : '')
-                + (cls ? '.' + cls.split(/\\s+/).join('.').slice(0, 60) : '');
+                + (cls ? '.' + cls.split(/\s+/).join('.').slice(0, 60) : '');
       }
     }
   }
@@ -1287,6 +1320,9 @@ _FIND_CHAT_JS = """
     hitOk: hitOk,
     topDesc: topDesc,
     offscreen: offscreen,
+    peerId: peerId,
+    hash: location.hash || '',
+    rendered: items.length,
     matchKind: exact.length ? 'exact' : (hits.length ? 'substring' : 'none'),
     candidates: seen.slice(0, 30),
   };
@@ -1368,69 +1404,133 @@ def _dismiss_overlays(page, *, log=print) -> None:
     log("[tg-warm] overlays dismissed")
 
 
-def _titles_match(header: str, wanted: str, *, allow_substring: bool) -> bool:
-    """Does the opened conversation's header correspond to what was asked for?"""
-    h = " ".join((header or "").split()).lower()
-    w = " ".join((wanted or "").split()).lower()
+def _titles_match(header: str, wanted: str, *, allow_substring: bool,
+                  case_sensitive: bool = False) -> bool:
+    """Does the opened conversation's header correspond to what was asked for?
+
+    Sends compare case-sensitively: Telegram allows "jc" and "JC" to be two different
+    chats, so folding case turns a real distinction into a false match.
+    """
+    h = " ".join((header or "").split())
+    w = " ".join((wanted or "").split())
+    if not case_sensitive:
+        h, w = h.lower(), w.lower()
     if not h or not w:
         return False
     return (w in h) if allow_substring else (h == w)
 
 
+def _norm_peer(value) -> str:
+    """'#-1001234' / '-1001234' / 1001234 -> a comparable bare id string.
+
+    NOTE: Telegram Web K puts '@username' in the hash for any peer that has one, so
+    the result is not always numeric. Use _hash_is_username() before comparing a hash
+    to a data-peer-id.
+    """
+    return str(value or "").strip().lstrip("#").strip()
+
+
+def _hash_is_username(value) -> bool:
+    """True when location.hash names the peer by @username, not by numeric id."""
+    return _norm_peer(value).startswith("@")
+
+
+def _display_peer(result: dict) -> str:
+    """The numeric peer id to show/pin: data-peer-id first, hash only if numeric.
+
+    Printing the hash invited pinning to '@name', which the pre-click check then
+    rejected against the numeric data-peer-id — a pin that could never match.
+    """
+    pid = _norm_peer(result.get("peerId"))
+    if pid and not pid.startswith("@"):
+        return pid
+    h = _norm_peer(result.get("hash"))
+    return "" if (not h or h.startswith("@")) else h
+
+
 def _open_chat_by_title(page, title: str, *, allow_substring: bool = False,
                         accept_hash_change: bool = False,
+                        allow_search: bool = False,
+                        case_sensitive: bool = False,
+                        expected_peer: str | None = None,
                         attempts: int = 3, log=print) -> dict:
     """Open the sidebar chat matching ``title``, confirming it actually opened.
 
     Clicks by coordinate rather than via an element handle, because the chat list
     re-renders continuously and a handle detaches ("Element is not attached to the
     DOM"). Since a coordinate can go stale too — the list may reorder between the
-    measurement and the click — the header is checked afterwards and the whole
-    find/click/verify cycle retried, which is what makes this reliable rather than
-    merely different.
+    measurement and the click — the result is verified afterwards and the whole
+    find/click/verify cycle retried.
+
+    Verification signals, strongest first:
+      peer-id      location.hash names the same peer as the clicked row's data-peer-id.
+                   Independent of title text entirely — defeats emoji/case/same-title
+                   collisions.
+      header       the conversation header text matches.
+      row-active   the clicked row (by peer id when known) gained .active.
+      hash-change  location.hash changed at all. Proves *something* opened, not what;
+                   read-only callers may accept it (accept_hash_change), senders never.
+
+    ``allow_search`` — fall back to the sidebar search when the rendered list has no
+    match. Search results include global hits: users and channels this account has
+    never spoken to, rendered with the same row markup. Fine for reading; for a SEND
+    it means a same-titled stranger becomes a valid target, so the send route leaves
+    this False.
+
+    ``expected_peer`` — when set, the opened chat's peer id MUST equal it, whatever the
+    other signals say. This is the pin that makes a configured send target immune to
+    title collisions altogether.
     """
     arg = {"wanted": title, "allowSubstring": bool(allow_substring),
-           "scrollIntoView": True}
-    # Web K puts the open peer id in the URL hash, so a change proves *some*
-    # conversation opened. That is weaker evidence of WHICH one than the header or the
-    # selected row, so only read callers accept it (accept_hash_change); sending
-    # requires one of the two identifying signals.
+           "caseSensitive": bool(case_sensitive), "scrollIntoView": True}
+    want_peer = _norm_peer(expected_peer)
+
     # Leftover UI from an earlier command would cover the rows, so start clean.
     _dismiss_overlays(page, log=log)
-    hash_before = (_row_state(page, title, allow_substring=allow_substring)
-                   .get("hash") or "")
+    hash_before = (_row_state(page, title, allow_substring=allow_substring,
+                              case_sensitive=case_sensitive).get("hash") or "")
     searched = False
     last: dict = {}
-    header = ""
+    header, state = "", {}
+
+    def _fail(**extra) -> dict:
+        out = {"ok": False, "matchKind": last.get("matchKind"),
+               "candidates": last.get("candidates", []),
+               "peerId": last.get("peerId"), "hash": (state or {}).get("hash")}
+        out.update(extra)
+        return out
 
     for attempt in range(1, max(1, attempts) + 1):
         try:
             res = page.evaluate(_FIND_CHAT_JS, arg) or {}
         except Exception as err:
-            return {"ok": False, "error": f"find failed: {err!r}"}
+            return _fail(error=f"find failed: {err!r}")
         last = res
 
-        if res.get("matches", 0) == 0 and not searched:
+        if res.get("matches", 0) == 0 and not searched and allow_search:
             searched = True
             log(f"[tg-warm] {title!r} not in the rendered list — searching")
             if _search_sidebar(page, title, log=log):
                 continue
-            return {"ok": False, "matches": 0, "matchKind": res.get("matchKind"),
-                    "candidates": res.get("candidates", [])}
+            return _fail(matches=0)
 
         if res.get("matches", 0) != 1:
             log(f"[tg-warm] chat {title!r}: {res.get('matches', 0)} matches "
-                f"({res.get('matchKind')})")
-            return {"ok": False, "matches": res.get("matches", 0),
-                    "matchKind": res.get("matchKind"),
-                    "candidates": res.get("candidates", [])}
+                f"({res.get('matchKind')}, {res.get('rendered')} rows rendered)")
+            return _fail(matches=res.get("matches", 0))
+
+        clicked_peer = res.get("peerId")
+        # Pin check before clicking: if the one matching row is not the pinned peer,
+        # there is no point opening it — and no risk of typing into it later.
+        if want_peer and clicked_peer and _norm_peer(clicked_peer) != want_peer:
+            return _fail(matches=1, error=(
+                f"the row titled {title!r} is peer {clicked_peer}, but the pinned "
+                f"target is {want_peer} — refusing"))
 
         rect = res.get("rect")
         if not rect:
-            return {"ok": False, "matches": 1,
-                    "error": "matched row has no visible box (scrolled out of view?)",
-                    "ui": _chat_ui_inventory(page),
-                    "candidates": res.get("candidates", [])}
+            return _fail(matches=1, ui=_chat_ui_inventory(page),
+                         error="matched row has no visible box (scrolled out of view?)")
 
         if not res.get("hitOk"):
             # Something is on top of the row — almost always a search overlay left
@@ -1446,76 +1546,97 @@ def _open_chat_by_title(page, title: str, *, allow_substring: bool = False,
             try:
                 res = page.evaluate(_FIND_CHAT_JS, arg) or {}
             except Exception as err:
-                return {"ok": False, "error": f"find failed: {err!r}"}
+                return _fail(error=f"find failed: {err!r}")
+            last = res
             rect = res.get("rect")
+            clicked_peer = res.get("peerId")
             if not rect or not res.get("hitOk"):
                 blocked_by = (
                     "it is scrolled outside the viewport even after scrollIntoView"
                     if res.get("offscreen")
                     else f"{res.get('topDesc') or 'an unidentified element'} is on top of it"
                 )
-                return {"ok": False, "matches": res.get("matches", 0),
-                        "error": f"the row for {title!r} is not clickable — {blocked_by}",
-                        "ui": _chat_ui_inventory(page),
-                        "candidates": res.get("candidates", [])}
+                return _fail(matches=res.get("matches", 0), ui=_chat_ui_inventory(page),
+                             error=f"the row for {title!r} is not clickable — {blocked_by}")
 
         try:
             page.mouse.click(rect["x"] + rect["w"] / 2, rect["y"] + rect["h"] / 2)
         except Exception as err:
-            return {"ok": False, "matches": 1, "error": f"click failed: {err!r}",
-                    "candidates": res.get("candidates", [])}
+            return _fail(matches=1, error=f"click failed: {err!r}")
 
         # The conversation mounts asynchronously; poll rather than guessing a delay.
-        # Two independent confirmations are accepted, because the header text proved
-        # unreadable on the live client while the sidebar's selected-row state is
-        # plain markup. Either one identifies the open conversation.
         header, state = "", {}
         for _ in range(16):
             page.wait_for_timeout(500)
             header = _open_chat_title(page) or ""
-            state = _row_state(page, title, allow_substring=allow_substring)
-            if _titles_match(header, title, allow_substring=allow_substring):
-                return {"ok": True, "title": header, "verifiedBy": "header",
+            state = _row_state(page, title, allow_substring=allow_substring,
+                               case_sensitive=case_sensitive, peer_id=clicked_peer)
+            got_peer = _norm_peer(state.get("hash"))
+            uname_hash = bool(state.get("hashIsUsername"))
+
+            def _ok(by):
+                return {"ok": True, "title": header or title, "verifiedBy": by,
+                        "peerId": clicked_peer or (want_peer or None),
+                        "hash": state.get("hash"),
                         "matchKind": res.get("matchKind"),
                         "candidates": res.get("candidates", [])}
-            if state.get("active"):
-                return {"ok": True, "title": header or title, "verifiedBy": "row-active",
-                        "matchKind": res.get("matchKind"),
-                        "candidates": res.get("candidates", [])}
+
+            # Pinned target: identity must be the pin. Two title-independent proofs:
+            # the hash names the pin, or — when Telegram shows '@username' in the hash
+            # instead of the id — the row whose data-peer-id IS the pin has become the
+            # selected row (the pre-click check already forced clicked_peer == pin).
+            if want_peer:
+                if got_peer == want_peer:
+                    return _ok("pinned-peer")
+                if (uname_hash and state.get("active")
+                        and clicked_peer and _norm_peer(clicked_peer) == want_peer):
+                    return _ok("pinned-peer")
+                continue
+
+            if state.get("hashMatchesPeer"):
+                return _ok("peer-id")
+            # _row_state looked the row up by data-peer-id when clicked_peer is known,
+            # so .active on it is identity-grade too (label distinguishes it from the
+            # title-based lookup used when no peer id exists).
+            if clicked_peer and state.get("active"):
+                return _ok("peer-row-active")
+            if _titles_match(header, title, allow_substring=allow_substring,
+                             case_sensitive=case_sensitive):
+                return _ok("header")
+            if not clicked_peer and state.get("active"):
+                return _ok("row-active")
             if (accept_hash_change and state.get("hash")
                     and state.get("hash") != hash_before):
-                return {"ok": True, "title": header or title,
-                        "verifiedBy": "hash-change",
+                return {"ok": True, "title": header or title, "verifiedBy": "hash-change",
+                        "peerId": clicked_peer, "hash": state.get("hash"),
                         "matchKind": res.get("matchKind"),
                         "candidates": res.get("candidates", [])}
 
         log(f"[tg-warm] attempt {attempt}: header={header!r} rowActive="
-            f"{state.get('active')} hash={state.get('hash')!r} — retrying")
+            f"{state.get('active')} hash={state.get('hash')!r} "
+            f"peer={clicked_peer!r} pin={want_peer!r} — retrying")
 
-    return {"ok": False, "matches": 1, "matchKind": last.get("matchKind"),
-            "error": (
-                f"clicked the row but could not confirm {title!r} opened "
-                f"(header={header!r}, rowActive={state.get('active')}, "
-                f"hash={state.get('hash')!r})"
-            ),
-            "ui": _chat_ui_inventory(page),
-            "candidates": last.get("candidates", [])}
+    if want_peer:
+        shown = _norm_peer(state.get("hash")) or "?"
+        err = (f"opened peer {shown} but the pinned target is {want_peer} — refusing"
+               + (" (hash shows a @username, and the pinned row never became selected)"
+                  if _hash_is_username(state.get("hash")) else ""))
+    else:
+        err = (f"clicked the row but could not confirm {title!r} opened "
+               f"(header={header!r}, rowActive={state.get('active')}, "
+               f"hash={state.get('hash')!r}, peer={last.get('peerId')!r})")
+    return _fail(matches=1, error=err, ui=_chat_ui_inventory(page))
 
 
 #: Broadened well past the original four selectors, which returned '' on the live
 #: client every time. _check_group used `header or title`, so the blank went unnoticed
 #: until it was made a verification gate.
-_HEADER_TITLE_JS = """
+_HEADER_TITLE_JS = r"""
 () => {
+""" + _JS_TITLE_HELPERS + r"""
   const vis = (el) => {
     const r = el.getBoundingClientRect();
     return r.width > 0 && r.height > 0 && getComputedStyle(el).display !== 'none';
-  };
-  const clean = (el) => {
-    const c = el.cloneNode(true);
-    c.querySelectorAll('[class*=time], [class*=Time], .online, .subtitle, [class*=subtitle]')
-     .forEach(e => e.remove());
-    return (c.textContent || '').replace(/\\s+/g, ' ').trim();
   };
   for (const sel of ['#column-center .chat-info .peer-title',
                      '#column-center .chat-info .user-title',
@@ -1531,7 +1652,9 @@ _HEADER_TITLE_JS = """
       // it as the conversation header would confirm the wrong chat, and for the send
       // path that means typing into it.
       if (el.closest('.bubble') || el.closest('.bubbles') || el.closest('#column-left')) continue;
-      const t = clean(el);
+      const c = el.cloneNode(true);
+      c.querySelectorAll('.online, .subtitle, [class*=subtitle]').forEach(e => e.remove());
+      const t = normTitle(c);
       if (t) return t;
     }
   }
@@ -1542,23 +1665,32 @@ _HEADER_TITLE_JS = """
 #: Independent confirmation that the intended conversation is open: Web K marks the
 #: open chat's sidebar row selected. This does not depend on header markup, which is
 #: the part that proved unreadable.
-_ROW_STATE_JS = """
+_ROW_STATE_JS = r"""
 (arg) => {
-  const want = (arg.wanted || '').trim().toLowerCase();
+""" + _JS_TITLE_HELPERS + r"""
+  // Prefer identity: if the caller knows which row it clicked (peerId), inspect THAT
+  // row, not "the first row whose title matches" — a same-titled neighbour could
+  // otherwise vouch for a click that landed elsewhere.
+  const cs = !!arg.caseSensitive;
+  const want = fold(normWanted(arg.wanted), cs);
   const items = document.querySelectorAll(
     '#column-left .chatlist-chat, #column-left ul.chatlist > li');
-  let found = false, active = false;
+  let found = false, active = false, peerId = null;
   for (const li of items) {
-    const t = li.querySelector('.user-title, .peer-title, .dialog-title');
-    if (!t) continue;
-    const clone = t.cloneNode(true);
-    clone.querySelectorAll('.time, .dialog-time, .message-time, [class*=time], [class*=Time]')
-         .forEach(e => e.remove());
-    const title = (clone.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-    if (!title) continue;
-    const hit = arg.allowSubstring ? title.includes(want) : title === want;
+    const pid = rowPeerId(li);
+    let hit = false;
+    if (arg.peerId) {
+      hit = (pid === arg.peerId);
+    } else {
+      const t = li.querySelector('.user-title, .peer-title, .dialog-title');
+      if (!t) continue;
+      const title = fold(normTitle(t), cs);
+      if (!title) continue;
+      hit = arg.allowSubstring ? title.includes(want) : title === want;
+    }
     if (!hit) continue;
     found = true;
+    peerId = pid;
     const a = li.closest('.chatlist-chat') || li;
     if (a.classList.contains('active') ||
         a.getAttribute('aria-selected') === 'true' ||
@@ -1567,15 +1699,34 @@ _ROW_STATE_JS = """
     }
     break;
   }
-  return { found: found, active: active, hash: location.hash || '' };
+  const hash = location.hash || '';
+  // The open conversation's peer id is the URL hash. Matching it against the
+  // clicked row's data-peer-id is the only check here that does not depend on
+  // title text at all.
+  const hashPeer = hash.replace(/^#/, '');
+  return {
+    found: found, active: active, hash: hash, peerId: peerId,
+    hashMatchesPeer: !!(arg.peerId && hashPeer && hashPeer === String(arg.peerId)),
+    // '#@name' means Telegram chose to show the username; the numeric id is then
+    // simply not in the hash, which is NOT evidence of a different chat.
+    hashIsUsername: hashPeer.startsWith('@'),
+  };
 }
 """
 
 
-def _row_state(page, title: str, *, allow_substring: bool) -> dict:
+def _row_state(page, title: str, *, allow_substring: bool,
+               case_sensitive: bool = False, peer_id: str | None = None) -> dict:
+    """Selected-row and URL-hash state for the target chat.
+
+    With ``peer_id`` the JS inspects THAT row (the one that was clicked) instead of
+    the first title match, and reports whether location.hash names the same peer.
+    """
     try:
         return page.evaluate(
-            _ROW_STATE_JS, {"wanted": title, "allowSubstring": bool(allow_substring)}
+            _ROW_STATE_JS,
+            {"wanted": title, "allowSubstring": bool(allow_substring),
+             "caseSensitive": bool(case_sensitive), "peerId": peer_id},
         ) or {}
     except Exception as err:
         return {"error": repr(err)}
@@ -1697,7 +1848,8 @@ def _check_group(page, title: str, count: int, *, shot_path: str | None = None,
     which tells you nothing about the messages that were just read.
     """
     opened = _open_chat_by_title(page, title, allow_substring=True,
-                                 accept_hash_change=True, log=log)
+                                 accept_hash_change=True, allow_search=True,
+                                 log=log)
     if not opened.get("ok"):
         # Report the real cause. A hardcoded "N chats matching" reason previously
         # masked click/index failures, producing the nonsense "1 chats ... need
@@ -1747,35 +1899,249 @@ def _check_group(page, title: str, count: int, *, shot_path: str | None = None,
         "ok": True,
         "chat": header or title,
         "matchKind": opened.get("matchKind"),
+        "verifiedBy": opened.get("verifiedBy"),
+        "peerId": opened.get("peerId"),
+        "hash": opened.get("hash"),
         "messages": res.get("messages", []),
         "total": res.get("total", 0),
     }
 
 
-def _send_message_in_open_chat(page, text: str, *, log=print) -> bool:
-    """Type into the composer of the currently-open chat and press Enter."""
-    for sel in (
-        "#column-center .input-message-input[contenteditable=true]",
-        ".input-message-input[contenteditable=true]",
-        "#column-center [contenteditable=true]",
-    ):
+def _test_chat_peer() -> str:
+    """Optional pin for the send target: the peer id Telegram Web shows in
+    location.hash once the chat is open (e.g. ``-1001234567890`` or ``123456``).
+    Discover it with /checktelegramgroup, which prints it. When set, a send is
+    refused unless the opened chat is exactly this peer — title collisions of any
+    kind (emoji, case, same-titled strangers) then cannot redirect a message."""
+    return _norm_peer(os.getenv("TELEGRAM_TEST_CHAT_PEER", ""))
+
+
+def _code_latch_max_s() -> int:
+    """How long a pending code request may hold the navigation latch. Without a
+    ceiling an abandoned /logintelegram code disabled the keepalive and chat poll
+    forever (the latch was only ever cleared by /telegramcode)."""
+    try:
+        return max(60, int(os.getenv("TELEGRAM_CODE_LATCH_MAX_SEC", "600")))
+    except ValueError:
+        return 600
+
+
+def _send_pending_max_s() -> int:
+    """Ceiling on how long a queued/running send may hold the coalescing flag. A
+    worker that died with a send queued would otherwise refuse every later send —
+    the same shape as the code-latch bug."""
+    try:
+        return max(60, int(os.getenv("TELEGRAM_SEND_PENDING_MAX_SEC", "900")))
+    except ValueError:
+        return 900
+
+
+def _send_dedup_sec() -> int:
+    try:
+        return max(0, int(os.getenv("TELEGRAM_SEND_DEDUP_SEC", "600")))
+    except ValueError:
+        return 600
+
+
+_COMPOSER_SELECTORS = (
+    "#column-center .input-message-input[contenteditable=true]",
+    "#column-center .input-message-container [contenteditable=true]",
+)
+
+_COMPOSER_TEXT_JS = r"""
+() => {
+  const el = document.querySelector('#column-center .input-message-input')
+          || document.querySelector('#column-center .input-message-container [contenteditable=true]');
+  return el ? (el.innerText || '') : null;
+}
+"""
+
+#: Text of the newest OUTGOING bubble, timestamp removed. Used twice: to skip a send
+#: whose text is already the last thing we posted (idempotency), and to confirm a
+#: send actually landed (the bubble appears with our text).
+_LAST_OUTGOING_JS = r"""
+() => {
+  const root = document.querySelector('#column-center');
+  if (!root) return null;
+  const outs = Array.from(root.querySelectorAll('.bubble.is-out'));
+  if (!outs.length) return '';
+  const b = outs[outs.length - 1];
+  // Read innerText from the LIVE element, never from a detached clone: a clone has
+  // no layout, so innerText degrades to textContent and <br> contributes nothing —
+  // "line one<br>line two" became "line oneline two" and every multi-line send was
+  // reported as unconfirmed. Strip the timestamp by value instead of by removal.
+  const t = b.querySelector('.message, .text-content') || b;
+  let text = t.innerText || '';
+  b.querySelectorAll('.time, .time-inner, [class*=time], [class*=Time], .reactions')
+   .forEach(e => { const s = (e.innerText || '').trim(); if (s) text = text.split(s).join(' '); });
+  return text.replace(/\s+/g, ' ').trim();
+}
+"""
+
+
+def _norm_text(s: str) -> str:
+    return " ".join((s or "").split())
+
+
+def _composer_text(page) -> str | None:
+    try:
+        return page.evaluate(_COMPOSER_TEXT_JS)
+    except Exception:
+        return None
+
+
+def _last_outgoing_text(page) -> str | None:
+    try:
+        return page.evaluate(_LAST_OUTGOING_JS)
+    except Exception:
+        return None
+
+
+def _find_composer(page, *, log=print):
+    """The message composer of the OPEN conversation — visible and hit-tested.
+
+    Scoped to #column-center's composer container and confirmed with elementFromPoint,
+    so keystrokes cannot land in the search box or another editable. The old broad
+    fallback ('#column-center [contenteditable=true]') is gone: on a send path, typing
+    into "whatever is editable" is exactly the failure this module exists to prevent.
+    """
+    for sel in _COMPOSER_SELECTORS:
         try:
             for el in page.query_selector_all(sel):
                 if not el.is_visible():
                     continue
-                el.click()
-                page.keyboard.press("Control+A")
-                page.keyboard.press("Delete")
-                page.keyboard.type(text, delay=25)
-                page.wait_for_timeout(400)
-                page.keyboard.press("Enter")
-                page.wait_for_timeout(2000)
-                log(f"[tg-warm] sent via {sel} ({len(text)} chars)")
-                return True
+                box = el.bounding_box() or {}
+                if not box.get("width") or not box.get("height"):
+                    continue
+                cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+                ok = page.evaluate(
+                    "([x, y, sel]) => { const top = document.elementFromPoint(x, y);"
+                    " const els = Array.from(document.querySelectorAll(sel));"
+                    # Only the composer itself or a descendant counts. An ANCESTOR being
+                    # the hit means the point is inside the container but NOT over the
+                    # composer (padding, a covering sibling), so keystrokes would miss.
+                    " return !!(top && els.some(e => e === top || e.contains(top))); }",
+                    [cx, cy, sel],
+                )
+                if ok:
+                    return el
+                log(f"[tg-warm] composer {sel} is covered at its centre")
         except Exception:
             continue
-    log("[tg-warm] no visible message composer found")
-    return False
+    return None
+
+
+def _clear_composer(page, el) -> bool:
+    """Focus the composer and empty it. False if it could not even be clicked —
+    callers must not go on to type when that happens."""
+    try:
+        el.click()
+        page.keyboard.press("Control+A")
+        page.keyboard.press("Delete")
+        page.wait_for_timeout(150)
+        return True
+    except Exception:
+        return False
+
+
+def _type_multiline(page, text: str) -> None:
+    """Type ``text`` so that line breaks stay INSIDE one message.
+
+    keyboard.type() turns every newline into an Enter keypress, which in Telegram
+    sends the message — so a multi-line body was fragmented into several sends, and
+    the first fragment went out before the pre-Enter verification could run.
+    """
+    # \r would be typed as an Enter keypress too, so normalise every line ending.
+    lines = (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    for i, line in enumerate(lines):
+        if line:
+            page.keyboard.type(line, delay=20)
+        if i < len(lines) - 1:
+            page.keyboard.press("Shift+Enter")
+
+
+def _confirm_sent(page, text: str, *, timeout_ms: int = 8000, log=print) -> str:
+    """After Enter: 'sent' | 'not_sent' | 'unknown'.
+
+    'sent'     — the composer emptied AND the newest outgoing bubble carries the text.
+    'not_sent' — the composer still holds the text (Telegram's "send with Ctrl+Enter"
+                 setting turns Enter into a newline; nothing left). The draft is
+                 cleared so it cannot be sent later by accident.
+    'unknown'  — composer emptied but no matching bubble appeared in time. Reported
+                 as-is, never upgraded to success.
+    """
+    want = _norm_text(text)
+    deadline = time.time() + timeout_ms / 1000.0
+    composer_empty = False
+    while time.time() < deadline:
+        page.wait_for_timeout(400)
+        cur = _composer_text(page)
+        composer_empty = (cur is not None and not _norm_text(cur))
+        last = _norm_text(_last_outgoing_text(page) or "")
+        if composer_empty and want and want in last:
+            return "sent"
+    cur = _norm_text(_composer_text(page) or "")
+    if cur and want and (want in cur or cur in want):
+        log("[tg-warm] Enter did not send — text still in the composer; clearing the draft")
+        el = _find_composer(page, log=log)
+        if el is not None:
+            _clear_composer(page, el)
+        return "not_sent"
+    return "unknown"
+
+
+def _send_message_in_open_chat(page, text: str, *, pre_enter_check=None, log=print) -> dict:
+    """Type into the open conversation's composer and press Enter — ONCE.
+
+    Returns {"status": sent|not_sent|aborted|no_composer|unknown, "reason": str}.
+    Nothing is typed until the composer is located and hit-tested; Enter is pressed
+    exactly once, outside any retry, so an exception can never re-send; and
+    ``pre_enter_check`` runs with the text already in the box, as the last word on
+    whether this is still the right conversation.
+    """
+    el = _find_composer(page, log=log)
+    if el is None:
+        return {"status": "no_composer", "reason": "message composer not found or covered"}
+
+    if not _clear_composer(page, el):
+        return {"status": "aborted", "reason": "could not focus the composer — not typing"}
+    try:
+        _type_multiline(page, text)
+        page.wait_for_timeout(400)
+    except Exception as err:
+        _clear_composer(page, el)
+        return {"status": "aborted", "reason": f"typing failed: {err!r}"}
+
+    # The text must actually be IN the composer before Enter is pressed. If it landed
+    # somewhere else (focus moved), pressing Enter here could submit that instead.
+    landed = _norm_text(_composer_text(page) or "")
+    if not landed or _norm_text(text) not in landed:
+        _clear_composer(page, el)
+        return {"status": "aborted",
+                "reason": f"typed text did not land in the composer (composer holds {landed[:60]!r})"}
+
+    if pre_enter_check is not None:
+        try:
+            verdict = pre_enter_check()
+        except Exception as err:
+            verdict = f"pre-Enter check raised {err!r}"
+        if verdict is not True:
+            _clear_composer(page, el)
+            return {"status": "aborted",
+                    "reason": f"conversation changed before Enter: {verdict}"}
+
+    try:
+        page.keyboard.press("Enter")
+    except Exception as err:
+        _clear_composer(page, el)
+        return {"status": "aborted", "reason": f"Enter failed: {err!r}"}
+
+    status = _confirm_sent(page, text, log=log)
+    log(f"[tg-warm] send status={status} ({len(text)} chars)")
+    return {"status": status,
+            "reason": {"sent": "confirmed by outgoing bubble",
+                       "not_sent": "text remained in the composer (send-with-Enter off?); draft cleared",
+                       "unknown": "composer emptied but no outgoing bubble seen"}.get(status, "")}
 
 
 def _back_to_chat_list(page, *, log=print) -> None:
@@ -1828,56 +2194,129 @@ def _back_to_chat_list(page, *, log=print) -> None:
     log("[tg-warm] back on the chat list")
 
 
-def _send_test_message(page, *, log=print) -> dict:
-    """Open the configured chat, verify it, send the fixed message, go back.
+def _send_test_message(page, *, shot_path: str | None = None, force: bool = False,
+                       log=print) -> dict:
+    """Open the configured chat, prove it is the right one, send once, go back.
 
-    Returns a result dict. The verification step is the point: the header title must
-    match what was asked for BEFORE anything is typed, so a mis-click cannot post to
-    the wrong person.
+    Every gate here fails CLOSED. The order is: resolve the target (exact, case-
+    sensitive, no search, optionally pinned to a peer id) -> confirm the open
+    conversation by identity -> skip if the text is already the last outgoing
+    message -> type -> re-confirm identity with the text in the box -> Enter once ->
+    accept success only on evidence.
     """
-    title, text = _test_chat_title(), _test_message()
+    title, text, pin = _test_chat_title(), _test_message(), _test_chat_peer()
 
-    opened = _open_chat_by_title(page, title, log=log)
+    def _shot():
+        if shot_path:
+            try:
+                page.screenshot(path=shot_path)
+            except Exception as err:
+                log(f"[tg-warm] screenshot failed: {err!r}")
+
+    opened = _open_chat_by_title(page, title, case_sensitive=True, allow_search=False,
+                                 expected_peer=pin or None, log=log)
     if not opened.get("ok"):
         reason = opened.get("error") or (
             f"{opened.get('matches', 0)} chats exactly titled {title!r} (need exactly 1)"
         )
+        _shot()   # evidence of what was on screen when it refused
         return {"ok": False, "stage": "open", "reason": reason,
-                "candidates": opened.get("candidates", [])}
+                "candidates": opened.get("candidates", []), "ui": opened.get("ui"),
+                "peerId": opened.get("peerId"), "hash": opened.get("hash")}
 
-    # Last gate before a real send. _open_chat_by_title has already confirmed the
-    # conversation (by header text or by the sidebar's selected row); only fail here
-    # if a READABLE header actively contradicts the request. Requiring a readable
-    # header outright would block every send, since that text is not reliably
-    # exposed on the live client.
-    header = _open_chat_title(page) or ""
     verified = opened.get("verifiedBy")
-    if header and not _titles_match(header, title, allow_substring=False):
-        # Refuse rather than send into whatever happens to be open.
-        return {
-            "ok": False,
-            "stage": "verify",
-            "reason": f"opened chat header is {header!r}, expected {title!r} — not sending",
-            "ui": _chat_ui_inventory(page),
-        }
+    peer = opened.get("peerId")
+    header = _open_chat_title(page) or ""
 
-    if not header and verified != "row-active":
-        # No readable header AND no selected-row confirmation: there is nothing left
-        # proving which conversation is open, so do not type into it.
-        return {
-            "ok": False,
-            "stage": "verify",
-            "reason": f"could not confirm {title!r} is the open conversation "
-                      f"(verifiedBy={verified!r}) — not sending",
-            "ui": _chat_ui_inventory(page),
-        }
-
-    if not _send_message_in_open_chat(page, text, log=log):
-        return {"ok": False, "stage": "compose", "reason": "message composer not found",
+    # A READABLE header that contradicts the request is decisive.
+    if header and not _titles_match(header, title, allow_substring=False, case_sensitive=True):
+        _shot()
+        return {"ok": False, "stage": "verify",
+                "reason": f"opened chat header is {header!r}, expected {title!r} — not sending",
                 "ui": _chat_ui_inventory(page)}
 
+    # Otherwise an IDENTIFYING signal is required. hash-change is not one, and the
+    # open routine never returns it for sends, but spell it out anyway.
+    if verified not in ("pinned-peer", "peer-id", "peer-row-active", "header", "row-active"):
+        _shot()
+        return {"ok": False, "stage": "verify",
+                "reason": f"could not confirm {title!r} is the open conversation "
+                          f"(verifiedBy={verified!r}) — not sending",
+                "ui": _chat_ui_inventory(page)}
+
+    # Pin, re-checked here: the hash must be the pin, OR the hash is a @username (so
+    # it cannot carry the id) and the clicked row's data-peer-id is the pin.
+    if pin:
+        cur_hash = opened.get("hash")
+        if not (_norm_peer(cur_hash) == pin
+                or (_hash_is_username(cur_hash) and _norm_peer(peer) == pin)):
+            _shot()
+            return {"ok": False, "stage": "verify",
+                    "reason": f"open peer {cur_hash!r} (row {peer!r}) is not the pinned target {pin!r}"}
+
+    # Idempotency: if our exact text is already the newest outgoing message, this is
+    # a retry of something that already landed. Do not post it again — unless the
+    # caller explicitly forced it (a deliberate repeat of the fixed test message).
+    last_out = _norm_text(_last_outgoing_text(page) or "")
+    if not force and last_out and _norm_text(text) and _norm_text(text) in last_out:
+        if shot_path:
+            try:
+                page.screenshot(path=shot_path)
+            except Exception:
+                pass
+        _back_to_chat_list(page, log=log)
+        return {"ok": True, "status": "already_sent", "chat": header or title,
+                "text": text, "verifiedBy": verified, "peerId": peer,
+                "hash": opened.get("hash"),
+                "note": "skipped — this text is already the last outgoing message"}
+
+    def _still_the_right_chat():
+        """Runs with the text already typed, immediately before Enter.
+
+        Same identity rules as the open step. In particular a '@username' hash is
+        not a contradiction: Telegram shows the username instead of the id for peers
+        that have one, so identity then rests on the clicked row (looked up by
+        data-peer-id) still being the selected row.
+        """
+        st = _row_state(page, title, allow_substring=False, case_sensitive=True,
+                        peer_id=peer or (pin or None))
+        cur = _norm_peer(st.get("hash"))
+        uname = bool(st.get("hashIsUsername"))
+        if pin:
+            if cur == pin:
+                return True
+            if uname and st.get("active") and _norm_peer(peer or pin) == pin:
+                return True
+            return f"hash {cur!r} != pinned {pin!r} and pinned row not selected"
+        if peer:
+            if cur == _norm_peer(peer):
+                return True
+            if uname and st.get("active"):
+                return True
+            return f"hash {cur!r} != clicked peer {peer!r} and its row not selected"
+        if st.get("active"):
+            return True
+        hdr = _open_chat_title(page) or ""
+        if hdr and _titles_match(hdr, title, allow_substring=False, case_sensitive=True):
+            return True
+        return f"row not active and header {hdr!r} does not match"
+
+    result = _send_message_in_open_chat(page, text, pre_enter_check=_still_the_right_chat, log=log)
+
+    # Capture while the conversation is still open — evidence of where it went.
+    if shot_path:
+        try:
+            page.screenshot(path=shot_path)
+        except Exception as err:
+            log(f"[tg-warm] screenshot failed: {err!r}")
+
     _back_to_chat_list(page, log=log)
-    return {"ok": True, "chat": header, "text": text}
+
+    status = result.get("status")
+    return {"ok": status == "sent", "status": status, "reason": result.get("reason"),
+            "stage": "send" if status != "sent" else None,
+            "chat": header or title, "text": text, "verifiedBy": verified,
+            "peerId": peer, "hash": opened.get("hash")}
 
 
 def _preview_key(row: dict) -> str:
@@ -1937,9 +2376,19 @@ class _TelegramWarm:
         # pending code form. The chat poll runs every 120s, so without this guard a
         # code login would almost always be destroyed before it could be used.
         self._awaiting_code = False
+        self._awaiting_code_since = 0.0
         # Set by a NEW login request so an in-flight QR wait gives up its hold on the
         # worker thread instead of blocking the user for the full login timeout.
         self._cancel_login = threading.Event()
+        # The one writing path is coalesced: at most one send queued or running. A
+        # second trigger is answered at once instead of being queued behind a worker
+        # that may be held for minutes, which is how "the bot did nothing, I sent it
+        # again" turned into two messages.
+        self._send_pending = False
+        self._send_pending_since = 0.0
+        self._send_lock = threading.Lock()
+        # (chat title, text) -> monotonic time of the last CONFIRMED send.
+        self._send_ledger: dict[tuple[str, str], float] = {}
         self._started = False
         self._start_lock = threading.Lock()
 
@@ -2015,8 +2464,37 @@ class _TelegramWarm:
         self._cancel_login.set()
         self._tasks.put({"kind": "reset", "chat_id": chat_id})
 
-    def send_test(self, chat_id: str | None = None) -> None:
-        self._tasks.put({"kind": "send_test", "chat_id": chat_id})
+    def send_test(self, chat_id: str | None = None, *, force: bool = False) -> bool:
+        """Queue ONE send. Returns False if a send is already queued or running.
+
+        The worker can be held for minutes (a QR wait, a slow sendCode). A second
+        /telegramsendjctest during that silence used to be queued and executed too —
+        two messages. Now the caller hears back immediately either way.
+        """
+        with self._send_lock:
+            if (self._send_pending and self._send_pending_since
+                    and time.time() - self._send_pending_since > _send_pending_max_s()):
+                print("[tg-warm] stale send flag released (worker never ran it)", flush=True)
+                self._send_pending = False
+            if self._send_pending:
+                if chat_id:
+                    try:
+                        send_text(chat_id, "⏳ Telegram: a send is already queued or running — "
+                                           "not queuing another. Wait for its result.")
+                    except Exception:
+                        pass
+                return False
+            self._send_pending = True
+            self._send_pending_since = time.time()
+        depth = self._tasks.qsize()
+        if chat_id:
+            try:
+                send_text(chat_id, "🕓 Telegram: send queued"
+                                   + (f" — {depth} task(s) ahead of it" if depth else "") + ".")
+            except Exception:
+                pass
+        self._tasks.put({"kind": "send_test", "chat_id": chat_id, "force": bool(force)})
+        return True
 
     def check_group(self, chat_id: str | None = None,
                     titles: list[str] | None = None,
@@ -2120,8 +2598,26 @@ class _TelegramWarm:
         _wset(last_verdict=verdict, last_check=_now_str())
         return verdict
 
+    def _code_wait_active(self) -> bool:
+        """The navigation latch, with an expiry.
+
+        While a code request is pending nothing may page.goto() (it would wipe the
+        code form). But the latch used to be cleared only by /telegramcode, so an
+        abandoned request disabled the keepalive and chat poll indefinitely.
+        """
+        if not self._awaiting_code:
+            return False
+        if (self._awaiting_code_since
+                and time.time() - self._awaiting_code_since > _code_latch_max_s()):
+            print("[tg-warm] pending code request expired — releasing the navigation latch",
+                  flush=True)
+            self._awaiting_code = False
+            self._awaiting_code_since = 0.0
+            return False
+        return True
+
     def _handle_ensure(self, task: dict) -> None:
-        if self._awaiting_code:
+        if self._code_wait_active():
             print('[tg-warm] skip ensure — waiting for /telegramcode', flush=True)
             return
         if not self._healthy():
@@ -2224,6 +2720,7 @@ class _TelegramWarm:
 
         if step in ("code", "code_pending"):
             self._awaiting_code = True
+            self._awaiting_code_since = time.time()
             _wset(phase="login", detail="waiting for /telegramcode <code>")
             masked = f"{_phone_number()[:4]}…{_phone_number()[-3:]}"
             # Telegram states the delivery channel on the screen itself ("…a message
@@ -2479,6 +2976,17 @@ class _TelegramWarm:
     def _handle_capture(self, task: dict) -> None:
         box = task.get("box")
         chat_id = task.get("chat_id")
+        if self._code_wait_active():
+            # _check_auth() navigates; that would destroy the pending code form.
+            if box is not None:
+                box["error"] = "awaiting_code"
+            if chat_id:
+                try:
+                    send_text(chat_id, "⏳ Telegram: a login code is pending — finish it with "
+                                       "/telegramcode first (screenshot skipped).")
+                except Exception:
+                    pass
+            return
         try:
             if not self._healthy():
                 self._launch()
@@ -2505,7 +3013,7 @@ class _TelegramWarm:
             self._teardown()
 
     def _handle_chats(self, task: dict) -> None:
-        if self._awaiting_code:
+        if self._code_wait_active():
             print('[tg-warm] skip chat scrape — waiting for /telegramcode', flush=True)
             return
         box = task.get("box")
@@ -2615,6 +3123,14 @@ class _TelegramWarm:
             titles = [_check_chat_title()]
         count = int(task.get("count") or _check_count())
 
+        if self._code_wait_active():
+            try:
+                send_text(chat_id, "⏳ Telegram: a login code is pending — finish it with "
+                                   "/telegramcode before reading chats.")
+            except Exception:
+                pass
+            return
+
         try:
             if not self._healthy():
                 self._launch()
@@ -2709,39 +3225,71 @@ class _TelegramWarm:
         """The one writing path. Only ever reached from an explicit slash command."""
         chat_id = task.get("chat_id") or _qr_chat_default()
         title, text = _test_chat_title(), _test_message()
+        key = (title, _norm_text(text))
         try:
+            if self._code_wait_active():
+                send_text(chat_id, "⏳ Telegram: a login code is pending — finish it with "
+                                   "/telegramcode before sending.")
+                return
+
+            # Dedup ledger: the same text to the same chat within the window is a
+            # retry of something that already went out, unless explicitly forced.
+            last = self._send_ledger.get(key)
+            if last and not task.get("force") and time.time() - last < _send_dedup_sec():
+                ago = int(time.time() - last)
+                send_text(chat_id, f"ℹ️ Telegram: that exact message was confirmed sent to "
+                                   f"“{title}” {ago}s ago — not sending again "
+                                   f"(window {_send_dedup_sec()}s).")
+                return
+
             if not self._healthy():
                 self._launch()
             verdict = self._check_auth()
             if verdict != "authenticated":
-                send_text(
-                    chat_id,
-                    f"❌ Telegram: not logged in ({verdict}) — cannot send. "
-                    "Run /logintelegram code first.",
-                )
+                send_text(chat_id, f"❌ Telegram: not logged in ({verdict}) — cannot send. "
+                                   "Run /logintelegram code first.")
                 return
 
-            send_text(chat_id, f"✍️ Telegram: opening chat “{title}” to send the test message…")
+            pin = _test_chat_peer()
+            send_text(chat_id, f"✍️ Telegram: opening chat “{title}”"
+                               + (f" (pinned to peer {pin})" if pin else " (unpinned)")
+                               + " to send the test message…")
             try:
                 SHOT_PNG.unlink(missing_ok=True)   # never post a stale capture
             except Exception:
                 pass
-            result = _send_test_message(self._page, log=print)
-
             shot = str(SHOT_PNG)
-            try:
-                self._page.screenshot(path=shot)
-            except Exception:
+            result = _send_test_message(self._page, shot_path=shot,
+                                        force=bool(task.get("force")), log=print)
+            if not Path(shot).exists():
                 shot = None
 
-            if result.get("ok"):
-                _wset(detail=f"test message sent to {result.get('chat')}")
-                send_text(
-                    chat_id,
-                    f"✅ Telegram: sent to “{result.get('chat')}”:\n"
-                    f"    {result.get('text')}\n"
-                    "Back on the chat list, idle.",
-                )
+            status = result.get("status")
+            where = (f"“{result.get('chat') or title}”"
+                     + (f" · peer {result.get('hash')}" if result.get("hash") else "")
+                     + (f" · verified by {result.get('verifiedBy')}" if result.get("verifiedBy") else ""))
+
+            if result.get("ok") and status == "sent":
+                self._send_ledger[key] = time.time()
+                _wset(detail=f"test message sent to {result.get('chat') or title}")
+                lines = [f"✅ Telegram: sent to {where}:", f"    {result.get('text')}"]
+                shown_peer = _display_peer(result)
+                if not pin and shown_peer:
+                    lines.append(f"Tip: pin this target with TELEGRAM_TEST_CHAT_PEER={shown_peer} "
+                                 f"so title collisions can never redirect a send.")
+                lines.append("Back on the chat list, idle.")
+                send_text(chat_id, "\n".join(lines))
+            elif status == "already_sent":
+                send_text(chat_id, f"ℹ️ Telegram: not sent — that text is already the newest "
+                                   f"outgoing message in {where}.")
+            elif status == "not_sent":
+                send_text(chat_id, f"⚠️ Telegram: NOT sent to {where}. Enter did not send — "
+                                   "the text stayed in the composer (Telegram setting “Send with "
+                                   "Enter” may be off). The draft was cleared. Nothing was posted.")
+            elif status == "unknown":
+                send_text(chat_id, f"⚠️ Telegram: send to {where} is UNCONFIRMED — the composer "
+                                   "emptied but no outgoing bubble with the text appeared. Check "
+                                   "the screenshot before retrying; a retry may duplicate.")
             else:
                 stage = result.get("stage", "?")
                 lines = [f"❌ Telegram send failed at the “{stage}” stage: {result.get('reason')}"]
@@ -2751,7 +3299,6 @@ class _TelegramWarm:
                     lines.append(f"Chat UI inventory: {json.dumps(result['ui'], ensure_ascii=False)}")
                     lines.append("Send that back — it names the selectors needed.")
                 send_text(chat_id, "\n".join(lines))
-                # Leave the browser where the watcher expects it regardless.
                 _back_to_chat_list(self._page)
             if shot:
                 _send_shot(chat_id, shot)
@@ -2762,6 +3309,9 @@ class _TelegramWarm:
                 send_text(chat_id, f"❌ /telegramsendjctest failed: {err}")
             except Exception:
                 pass
+        finally:
+            with self._send_lock:
+                self._send_pending = False
 
     def _handle_probe(self, task: dict) -> None:
         box = task.get("box")
@@ -2841,11 +3391,13 @@ def check_group_messages(chat_id: str | None = None,
     w.check_group(chat_id, titles, count)
 
 
-def send_test_message(chat_id: str | None = None) -> None:
-    """/telegramsendjctest — post the fixed message to the configured chat."""
+def send_test_message(chat_id: str | None = None, *, force: bool = False) -> bool:
+    """/telegramsendjctest — post the fixed message to the configured chat.
+
+    Returns False when a send is already queued or running (the caller is told)."""
     w = warm()
     w.start()
-    w.send_test(chat_id)
+    return w.send_test(chat_id, force=force)
 
 
 def reset_session(chat_id: str | None = None) -> None:

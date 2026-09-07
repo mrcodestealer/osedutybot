@@ -1637,6 +1637,26 @@ def _may_read_service_log(open_id: Optional[str]) -> bool:
     return bool(oid) and oid in _LOG_ALLOWED_OPEN_IDS
 
 
+# Who may make the bot WRITE to Telegram (/telegramsendjctest) or wipe its session
+# (/resettelegram). These act on a real personal Telegram account, so they are gated
+# to explicit open_ids like /log is — never any group member who can @ the bot.
+# Override/extend with a comma-separated TELEGRAM_WRITE_ALLOWED_OPEN_IDS.
+_TELEGRAM_WRITE_ALLOWED_OPEN_IDS = frozenset(
+    x.strip()
+    for x in (
+        (os.getenv("TELEGRAM_WRITE_ALLOWED_OPEN_IDS") or "").strip()
+        or "ou_5f660c0fb0769d184aca635d02209272"
+    ).split(",")
+    if x.strip()
+)
+
+
+def _may_write_telegram(open_id: Optional[str]) -> bool:
+    """True only for explicitly allow-listed open_ids (never a blanket allow)."""
+    oid = (open_id or "").strip()
+    return bool(oid) and oid in _TELEGRAM_WRITE_ALLOWED_OPEN_IDS
+
+
 # "who am i" — the asker's own ids. Tolerates /whoami, spacing and the zh form.
 _WHOAMI_RE = re.compile(r"^\s*/?\s*(?:who\s*am\s*i|whoami|我是谁)\s*[?？]?\s*$", re.I)
 
@@ -4857,8 +4877,18 @@ def _reinject_synthetic_command_message(
     _denied = {
         "/restart", "/restarta", "/deploy", "/gitpullrestart",
         "/restartservices", "/restservices", "/secret1", "/secret2", "/cashout",
+        # Telegram: writes to / signs out of a real personal account. Card values are
+        # client data, so a crafted button must never be able to trigger these.
+        "/telegramsendjctest", "/resettelegram", "/logintelegram", "/telegramcode",
     }
-    if cmd.split()[0].lower() in _denied:
+    # Check the command as the pipeline will SEE it, not just the raw first token:
+    # dispatch strips leading @_user_N mention keys and <...> markup, so a value like
+    # "@_user_1 /telegramsendjctest" used to pass this check and then run.
+    _stripped = re.sub(r"^(?:\s*(?:@_user_\d+|<[^>]*>))+\s*", "", cmd).strip()
+    _heads = {cmd.split()[0].lower()}
+    if _stripped:
+        _heads.add(_stripped.split()[0].lower())
+    if _heads & _denied:
         print(f"[cmdbtn] blocked admin command from button: {cmd!r}", flush=True)
         return False
     now_ms = str(int(time.time() * 1000))
@@ -6744,13 +6774,23 @@ def lark_webhook():
         return _lark_im_done()
     elif cmd == '/telegramsendjctest':
         # The ONLY path that writes to Telegram. Opens the chat named in
-        # TELEGRAM_TEST_CHAT (default "jc"), verifies the header title matches before
-        # typing anything, sends TELEGRAM_TEST_MESSAGE, then returns to the chat list.
-        def _run_telegram_send(chat_id_tg=chat_id):
+        # TELEGRAM_TEST_CHAT (default "jc"), confirms the open conversation's identity
+        # before typing anything, sends TELEGRAM_TEST_MESSAGE once, then returns to the
+        # chat list. Gated to allow-listed senders: it posts from a real account.
+        if not _may_write_telegram(sender_id):
+            print(f"[telegram] send refused for sender {sender_id!r}", flush=True)
+            send_message(chat_id, "⛔ /telegramsendjctest is restricted to allow-listed users.")
+            return _lark_im_done()
+
+        # `/telegramsendjctest force` repeats the fixed message even if it is already
+        # the newest outgoing message / was confirmed sent within the dedup window.
+        _tg_force = any(tok.lower() == "force" for tok in cmd_parts[1:])
+
+        def _run_telegram_send(chat_id_tg=chat_id, force_tg=_tg_force):
             try:
                 import telegramwarm as _tg_mod
 
-                _tg_mod.send_test_message(chat_id_tg)
+                _tg_mod.send_test_message(chat_id_tg, force=force_tg)
             except Exception as _tg_err:
                 print(f"❌ telegramsendjctest: {_tg_err!r}", flush=True)
                 try:
@@ -6764,7 +6804,13 @@ def lark_webhook():
         # Wipe the Telegram browser profile. Needed when a stale code request is
         # stuck pending — Telegram restores that screen from the profile and will
         # not issue a second code while one is outstanding. Also signs out any
-        # working session, so it is deliberately a separate, explicit command.
+        # working session, so it is deliberately a separate, explicit command —
+        # and gated like the send: it destroys a real account's login.
+        if not _may_write_telegram(sender_id):
+            print(f"[telegram] reset refused for sender {sender_id!r}", flush=True)
+            send_message(chat_id, "⛔ /resettelegram is restricted to allow-listed users.")
+            return _lark_im_done()
+
         def _run_telegram_reset(chat_id_tg=chat_id):
             try:
                 import telegramwarm as _tg_mod
