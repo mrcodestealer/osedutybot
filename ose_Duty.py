@@ -112,10 +112,14 @@ OSE_LEAVE_API_BUILD = "20260603-leaveose-pinned-v4"
 LEAVEOSE_TABLE_ID_CANONICAL = "tblvoXE0hsPjgb0j"
 LEAVEOSE_TABLE_ID = LEAVEOSE_TABLE_ID_CANONICAL
 
-# OSE roster — sheet col A labels vs roster keys (32 people on ``AS33r7``).
+# OSE roster — sheet col A labels vs roster keys (35 people on ``AS33r7``).
 # HRMS variants like ``Augustine (Si Yew)`` resolve to key ``Augustine Si yew``.
 OSE_LEAVE_SHEET_ROSTER: tuple[tuple[str, str], ...] = (
     ("Louie", "Louie (Senior)"),
+    # Requester-only, like Kwang Ming: OTE names on the OSE shift sheet. They submit
+    # their own offsets and stay out of ``OFFSET_APPROVER_OPEN_IDS``.
+    ("Faye", "Faye (Senior)"),
+    ("Renzel", "Renzel (Senior)"),
     ("Chrisjames", "Chrisjames [Game]"),
     ("Ronnel Dagatan", "Ronnel Dagatan"),
     ("Rizaldy Valdez Jr.", "Rizaldy Valdez Jr."),
@@ -126,6 +130,7 @@ OSE_LEAVE_SHEET_ROSTER: tuple[tuple[str, str], ...] = (
     ("Kwang Ming", "Kwang Ming (Senior)"),
     ("Man Chung", "Man Chung [Platform]"),
     ("Augustine Si yew", "Augustine Si yew (Senior)"),
+    ("Jiun Hou Jeno", "Jiun Hou Jeno (Senior)"),
     ("Bryan Peh", "Bryan Peh [Platform]"),
     ("Jan Rei", "Jan Rei [Platform]"),
     ("Katleen", "Katleen [Game]"),
@@ -498,6 +503,12 @@ _OSE_PERSON_OPEN_ID_DEFAULTS: dict[str, str] = {
     "Jewel": "ou_01a0b531dfbcc0d8af7d64c24262f7e9",
     "Jewell": "ou_01a0b531dfbcc0d8af7d64c24262f7e9",
     "Kwang Ming": "ou_0d13906b8568671d52bd2a7bab6f093b",
+    "Faye": "ou_e20548729077c0f88fb33b8033c40655",
+    "Lyden Faye Reyes": "ou_e20548729077c0f88fb33b8033c40655",
+    "Renzel": "ou_3160a6fe423db65258aa8ed6e70ec9f9",
+    "Renzel Hernandez": "ou_3160a6fe423db65258aa8ed6e70ec9f9",
+    "Jiun Hou Jeno": "ou_4fab5e44abe1e4e231dd13fa5b21dcad",
+    "Jiun Hou (Jeno)": "ou_4fab5e44abe1e4e231dd13fa5b21dcad",
     "Man Chung": "ou_50afe44c066a50645271f87b690d84a8",
     "Eduard James": "ou_cd2d456b36f2fab676b22e45e2b1425b",
     "Louie": "ou_da0c9fead4a1fc32475939898a42ceed",
@@ -4125,6 +4136,7 @@ OSE_OFFSET_FORM_EXCHANGE_EXCLUDED: frozenset[str] = frozenset(
         "Faye",
         "Shie Ni",
         "Jeno",
+        "Jiun Hou Jeno",
         "Kwang Ming",
     )
 )
