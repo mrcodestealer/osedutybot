@@ -105,6 +105,19 @@ OSE_OFFSET_AUTO_PURGE_ENABLED = (os.getenv("OSE_OFFSET_AUTO_PURGE") or "0").stri
     "1", "true", "yes", "on",
 )
 
+
+# ============= OSE duty auto-card kill-switch (07:00 / 19:00) =============
+# The duty card no longer posts itself to the duty group twice a day. ``main.py``
+# skips registering the ``morning_reminder`` (hour=7) and ``evening_reminder``
+# (hour=19) cron jobs unless this is on. Nothing else changes: ``/ose``,
+# ``/osedate``, the weekly offset/meeting cards and every payload builder here
+# still work exactly as before, on demand.
+# Set OSE_DUTY_AUTO_ENABLED=1 to restore the two automatic cards.
+def ose_duty_auto_cards_enabled() -> bool:
+    flag = (os.getenv("OSE_DUTY_AUTO_ENABLED") or "0").strip().lower()
+    return flag in ("1", "true", "yes", "on")
+
+
 # Bump when leave/admin Bitable routing changes (check /api/admin/leave-list meta).
 OSE_LEAVE_API_BUILD = "20260603-leaveose-pinned-v4"
 
@@ -429,7 +442,7 @@ _OSE_SHEET_CACHE_TTL_SEC = int(os.getenv("OSE_SHEET_CACHE_SEC", "120"))
 _OSE_SHEET_CACHE: dict[str, Any] = {"mono": 0.0, "values": None}
 _OSE_LEAVE_SHEET_CACHE: dict[str, Any] = {"mono": 0.0, "values": None}
 
-# Transient TLS/network blips (e.g. 07:00 morning card) — retry before surfacing an error card.
+# Transient TLS/network blips — retry before surfacing an error card.
 _OSE_LARK_HTTP_RETRIES = max(1, int(os.getenv("OSE_LARK_HTTP_RETRIES", "4")))
 _OSE_LARK_HTTP_RETRY_BASE_SEC = float(os.getenv("OSE_LARK_HTTP_RETRY_BASE_SEC", "3"))
 _OSE_BUILD_RETRIES = max(1, int(os.getenv("OSE_BUILD_RETRIES", "3")))
@@ -3366,7 +3379,7 @@ def get_ose_month_calendar(year: int, month: int) -> dict[str, Any]:
     }
 
 
-# Short-lived in-memory cache so morning card + /ose do not double-hit Bitable.
+# Short-lived in-memory cache so repeated /ose calls do not double-hit Bitable.
 # Set OSE_BITABLE_CACHE_SEC=0 to disable. Daily cron calls ``invalidate_ose_bitable_cache``.
 _OSE_BITABLE_RAW: dict[str, Any] = {
     "monotonic": 0.0,
@@ -3885,7 +3898,8 @@ def _build_ose_context_once(
         return [], [], [], [], f"❌ OSE data load failed: {e}"
 
     if mode == "morning":
-        # 7am: Rest = last night's N (yesterday); Good Luck = today's D — filter leave per day.
+        # ``morning``: Rest = last night's N (yesterday); Good Luck = today's D
+        # — filter leave per day. Only reachable with OSE_DUTY_AUTO_ENABLED=1.
         try:
             leave_yesterday = _extract_ose_shift_roster_leave_for_date(
                 target_date - timedelta(days=1), token, items=leave_items
@@ -3895,7 +3909,8 @@ def _build_ose_context_once(
         rest_names = [n for n in rest_names if not _person_listed_on_leave(n, leave_yesterday)]
         luck_names = [n for n in luck_names if not _person_listed_on_leave(n, leave_entries)]
     else:
-        # 7pm, /ose, /osedate — both sections use today's leave list only.
+        # ``evening`` (OSE_DUTY_AUTO_ENABLED=1 only), /ose, /osedate — both
+        # sections use today's leave list only.
         rest_names = [n for n in rest_names if not _person_listed_on_leave(n, leave_entries)]
         luck_names = [n for n in luck_names if not _person_listed_on_leave(n, leave_entries)]
     leave_entries = _dedupe_leave_entries_by_person(leave_entries)

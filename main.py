@@ -2694,7 +2694,7 @@ def poll_offset_approver_notifications_from_bitable():
 
 
 def ose_leave_offset_daily_sync():
-    """Refresh OSE Lark Bitable leave/offset cache once per day (same host TZ as morning OSE)."""
+    """Refresh OSE Lark Bitable leave/offset cache once per day (host TZ)."""
     if not _ose_bitable_sync_lock.acquire(blocking=False):
         print("[OSE Bitable] sync skipped (already running)", flush=True)
         return
@@ -2859,7 +2859,7 @@ def _add_scheduler_job(job_id: str, func, trigger: str, **trigger_kwargs) -> Non
 
 
 # HRMS → leaveose / leave全员 / WFH Bitables — always on (no .env toggles).
-# Full sync can take a few minutes; 06:40 finishes before the 07:00 morning OSE card.
+# Full sync can take a few minutes, so it runs early (06:40) and hourly after that.
 _LEAVE_WFH_SYNC_INTERVAL_MIN = 60
 _LEAVE_WFH_PRE_MORNING_HOUR = 6
 _LEAVE_WFH_PRE_MORNING_MINUTE = 40
@@ -2907,12 +2907,24 @@ def _register_holiday_sync_jobs() -> None:
     print("[Holiday sync] daily 06:35 + every 24h (first run on startup)", flush=True)
 
 
-# Lark leave/offset: clear in-process cache + prefetch before morning OSE card (same TZ as hour=7 job).
+# Lark leave/offset: clear the in-process cache + prefetch once a day. Kept on even
+# with the 07:00 card disabled — /ose and the leave/offset APIs read the same cache.
 _add_scheduler_job("ose_leave_offset_daily_sync", ose_leave_offset_daily_sync, "cron", hour=6, minute=50)
 _register_leave_wfh_sync_jobs()
 _register_holiday_sync_jobs()
-_add_scheduler_job("morning_reminder", morning_reminder, "cron", hour=7, minute=0)
-_add_scheduler_job("evening_reminder", evening_reminder, "cron", hour=19, minute=0)
+# OSE duty auto-display — OFF. The 07:00 + 19:00 cards used to post to
+# DUTY_CHAT_ID unattended every day; they are no longer registered at all.
+# ``/ose`` / ``/osedate`` still render the same card on demand.
+# Set OSE_DUTY_AUTO_ENABLED=1 to restore both cron jobs.
+if ose_Duty.ose_duty_auto_cards_enabled():
+    _add_scheduler_job("morning_reminder", morning_reminder, "cron", hour=7, minute=0)
+    _add_scheduler_job("evening_reminder", evening_reminder, "cron", hour=19, minute=0)
+else:
+    print(
+        "[OSE Duty] 07:00/19:00 auto cards not registered "
+        "(disabled; OSE_DUTY_AUTO_ENABLED=1 to restore)",
+        flush=True,
+    )
 _add_scheduler_job("reminder_sheet_daily_sync", reminder_sheet_daily_sync, "cron", hour=0, minute=5)
 
 
