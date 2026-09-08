@@ -169,9 +169,15 @@ def _chat_poll_sec() -> int:
 
 
 def _chat_poll_enabled() -> bool:
-    """New-message detection is the point of this module, so it defaults ON."""
-    v = os.getenv("TELEGRAM_CHAT_POLL_ENABLED")
-    return True if v is None else _truthy(v)
+    """The background new-message digest. Defaults OFF (opt-in).
+
+    Turned off on request 2026-09-09: the periodic "N chat(s) with new messages"
+    post to the Lark group is not wanted. Leaving it off also stops the poll's
+    page.goto() every TELEGRAM_CHAT_POLL_SEC, which competed with the worker.
+    /checktelegramgroup still reads chats on demand. Set
+    TELEGRAM_CHAT_POLL_ENABLED=1 to bring the digest back.
+    """
+    return _truthy(os.getenv("TELEGRAM_CHAT_POLL_ENABLED"))
 
 
 def _watch_targets() -> list[str]:
@@ -417,8 +423,12 @@ def is_authenticated() -> bool:
 
 
 def is_monitoring() -> bool:
-    """'Still monitoring' == logged in with the chat-list poller running."""
-    return is_authenticated() and _chat_poll_enabled()
+    """Live == the warm browser holds an authenticated session.
+
+    No longer requires the chat-list poller: that digest is off by default now, and
+    tying "monitoring" to it made /telegramstatus report a healthy session as down.
+    """
+    return is_authenticated()
 
 
 _PHASE_EMOJI = {
@@ -462,7 +472,8 @@ def status_lines() -> list[str]:
         )
         lines.append(f"• Last activity: {snap['last_activity'] or '—'}")
     else:
-        lines.append("• New-message poll: disabled (TELEGRAM_CHAT_POLL_ENABLED=0)")
+        lines.append("• New-message digest: OFF — no periodic posts to the group. "
+                     "Read on demand with /checktelegramgroup.")
     if snap["last_shot"]:
         lines.append(f"• Last screenshot: {snap['last_shot']}")
     if snap["last_error"]:

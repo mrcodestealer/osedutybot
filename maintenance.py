@@ -5607,7 +5607,10 @@ EVO_BATCH_FORWARD_CHAT_ID_DEFAULT = "oc_9ffa9a76810abf72e39d597aee37d65a"
 EVO_BATCH_COMMAND_CHAT_ID_DEFAULT = "oc_51b6fbf2636525acfb4ead3afa3c93ce"
 MAINTENANCE_CONFIRM_CHAT_ID_DEFAULT = "oc_9de3d63fc589df6feeb9b0bee9c45b72"
 # Group told when the EVO watcher moves a replied maintenance mail back to INBOX.
-MAINT_MOVED_NOTIFY_CHAT_ID_DEFAULT = "oc_ad9b5bdbb2826ba2ee9730920ef25432"
+# Empty = the "moved back to Inbox" notice is not posted anywhere. Silenced on
+# request 2026-09-09; the mail still moves, only the Lark message is suppressed.
+# Set MAINT_MOVED_NOTIFY_CHAT_ID to a chat id to bring it back.
+MAINT_MOVED_NOTIFY_CHAT_ID_DEFAULT = ""
 
 EVO_BATCH_WRONG_GROUP_MESSAGE = (
     "Wrong group detected, kindly send this message to OSE BOT - Ops & Maintenance"
@@ -5660,8 +5663,12 @@ def maint_moved_notify_chat_id() -> str:
     """Lark group for the "maintenance email moved back to Inbox" notice.
 
     Resolved independently of every other group so a server-side
-    ``EVO_BATCH_FORWARD_CHAT_ID`` override cannot divert it. Override with
-    ``MAINT_MOVED_NOTIFY_CHAT_ID``; empty that env var to silence the notice.
+    ``EVO_BATCH_FORWARD_CHAT_ID`` override cannot divert it.
+
+    Returns "" by default, which silences the notice (the caller early-returns on an
+    empty chat id — the mail is still moved, only the Lark post is skipped). Set
+    ``MAINT_MOVED_NOTIFY_CHAT_ID`` to a chat id to enable it, or to ``off`` to keep it
+    off explicitly.
     """
     raw = (
         os.getenv("MAINT_MOVED_NOTIFY_CHAT_ID", "").strip()
