@@ -2838,10 +2838,18 @@ def myoffset_next_week_reminder():
         print(f"[MY Offset] weekly card error ({span}): {exc!r}", flush=True)
 
 
+# MY OSE weekly meeting reminder kill-switch (Tuesday 17:00) — see the
+# registration below. Set OSE_WEEKLY_MEETING_ENABLED=1 to restore the ping.
+def _ose_weekly_meeting_enabled() -> bool:
+    flag = (os.getenv("OSE_WEEKLY_MEETING_ENABLED") or "0").strip().lower()
+    return flag in ("1", "true", "yes", "on")
+
+
 def myoseweeklymeeting():
     mention_line = f'<at user_id="{TARGET_USER_OPEN_ID}">User</at>'
     msg = mention_line + "\n" + "MY OSE WEEKLY MEETING"
     send_shift_reminder(DUTY_CHAT_ID, msg)
+
 
 scheduler = BackgroundScheduler()
 
@@ -2947,7 +2955,17 @@ try:
         )
 except ImportError:
     print("[Amount Loss] 9:00 cron not registered (amountloss unavailable)", flush=True)
-_add_scheduler_job("myoseweeklymeeting", myoseweeklymeeting, "cron", day_of_week="tue", hour=17, minute=0)
+# MY OSE weekly meeting — OFF. Used to @-ping DUTY_CHAT_ID with
+# "MY OSE WEEKLY MEETING" every Tuesday 17:00; no longer registered.
+# Set OSE_WEEKLY_MEETING_ENABLED=1 to restore.
+if _ose_weekly_meeting_enabled():
+    _add_scheduler_job("myoseweeklymeeting", myoseweeklymeeting, "cron", day_of_week="tue", hour=17, minute=0)
+else:
+    print(
+        "[OSE Meeting] Tuesday 17:00 reminder not registered "
+        "(disabled; OSE_WEEKLY_MEETING_ENABLED=1 to restore)",
+        flush=True,
+    )
 _add_scheduler_job(
     "myoffset_next_week",
     myoffset_next_week_reminder,
