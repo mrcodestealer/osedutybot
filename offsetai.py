@@ -58,9 +58,9 @@ _AGENT_SYSTEM = (
     "4. To submit a new offset: gather fields from conversation; if anything missing, "
     "send_chat_reply asking ONE question; when complete call submit_offset_record.\n"
     "5. If the message is clearly NOT about OSE offset/swap, call pass_not_offset.\n"
-    "6. Offset records are NEVER deleted — there is no delete tool. If the user asks to "
-    "delete / cancel an offset, send_chat_reply telling them to use editoffset instead "
-    "(an approver can also reject the row).\n"
+    "6. To delete / cancel an offset, call show_delete_picker — the user taps the row "
+    "and then Confirm. Never claim offsets cannot be deleted. A row deleted straight "
+    "from the Base is restored by the bot, so deleting must go through this tool.\n"
     "7. inferred_filters in context are AI-extracted from the user message — "
     "you MUST pass them to list_offset_records "
     "(person, status, person_role, year, month).\n"
@@ -184,6 +184,24 @@ _TOOL_SPECS: list[dict[str, Any]] = [
         "function": {
             "name": "show_edit_picker",
             "description": "Open card to edit pending offset rows.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "person": {"type": "string"},
+                    "year": {"type": "integer"},
+                    "month": {"type": "integer", "minimum": 1, "maximum": 12},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "show_delete_picker",
+            "description": (
+                "Open card to delete offset rows. Each row needs a second Confirm tap. "
+                "The requester sees only their own rows; an approver sees everyone's."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -658,11 +676,37 @@ def _execute_tool(ctx: _AgentCtx, name: str, args: dict[str, Any]) -> tuple[str,
         return json.dumps({"ok": True, "sent": True}), True
 
     if name == "show_delete_picker":
-        # Deleting offsets is retired — the tool is gone from the schema, but answer
-        # politely if an older session still asks for it.
+        oid = ctx.sender_open_id
+        mt = _month_target_from_args(args)
+        if ol._is_offset_approver_open_id(oid):
+            rows = ol._all_offsets_for_delete()
+            if mt:
+                rows = ol._filter_offsets_by_month(rows, *mt)
+            rows = filter_rows_by_args(
+                rows,
+                person=args.get("person"),
+                year=args.get("year"),
+                month=args.get("month"),
+            )
+            card = ol.build_offset_delete_list_card(oid, "", rows, is_admin=True)
+        else:
+            rp = ctx.request_person or ol.resolve_request_person(
+                oid, ctx.get_token_func()
+            )
+            rows = ol._offsets_for_request_person(rp)
+            if mt:
+                rows = ol._filter_offsets_by_month(rows, *mt)
+            card = ol.build_offset_delete_list_card(oid, rp, rows, is_admin=False)
         if not ctx.dry_run:
-            ctx.send_message(ctx.chat_id, ol.OFFSET_DELETE_RETIRED_NOTE)
-        return json.dumps({"ok": False, "error": "offset delete is retired"}), True
+            ol._deliver_private_card(
+                owner_open_id=oid,
+                group_chat_id=ctx.chat_id,
+                chat_type=ctx.chat_type,
+                card=card,
+                send_message=ctx.send_message,
+                token=ctx.get_token_func(),
+            )
+        return json.dumps({"ok": True, "delete_picker": True}), True
 
     if name == "show_offset_calendar":
         today = date.today()

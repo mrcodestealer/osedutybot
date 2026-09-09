@@ -113,6 +113,7 @@ def _help_sections() -> list[HelpSection]:
                 ("@bot offset", "Offset form; or “swap my duty shift”", "调休申请表"),
                 ("@bot leave", "Leave form; or “apply for annual leave”", "请假申请表"),
                 ("editoffset", "Edit pending offset; or “change my offset”", "编辑待审调休"),
+                ("deleteoffset", "Delete your offset; or “cancel my offset”", "删除调休"),
                 ("pendingoffset", "Approver queue; or “pending offset approvals”", "审批人待审列表"),
             ],
         ),
