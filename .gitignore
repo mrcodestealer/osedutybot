@@ -62,6 +62,7 @@ offset_rows_snapshot.json
 offset_shift_sheet_applied.json
 offset_delete_actors.json
 offset_deletion_notified.json
+offset_row_guard.json
 leave_shift_sheet_applied.json
 restart_pending.json
 checkperson_data.json

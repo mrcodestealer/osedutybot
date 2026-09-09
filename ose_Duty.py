@@ -94,6 +94,11 @@ OSE_ALL_LEAVE_TABLE_ID = os.getenv(
 # OSE leave request + approval (Submit Leave form; not the same as webapp OSE display list).
 OSE_LEAVE_TABLE_ID = os.getenv("OSE_LEAVE_TABLE_ID", OSE_ALL_LEAVE_TABLE_ID).strip()
 OSE_OFFSET_TABLE_ID = os.getenv("OSE_OFFSET_TABLE_ID", "tblC5T2MAydwT42j")
+# The offset table may live in a DIFFERENT Base from leave — e.g. the wiki duty-shift
+# doc (Offset2026, base I97gbnViZaqSdNs8U8AliyWtgDz / table tblL4rrbJHJSosDX,
+# https://casinoplus.sg.larksuite.com/wiki/O4Dfw4DVTiPpFukn801l5z3WgMd?sheet=02eZI8).
+# Defaults to OSE_BASE_TOKEN, so leave and offset stay in one Base unless split.
+OSE_OFFSET_BASE_TOKEN = os.getenv("OSE_OFFSET_BASE_TOKEN", OSE_BASE_TOKEN).strip()
 
 # ================= Offset auto-delete kill-switch =================
 # The bot must NOT delete offset rows on its own. The old cleanup removed any row
@@ -3477,7 +3482,7 @@ def _get_offset_raw(token: str) -> list[dict[str, Any]]:
     ts = float(_OSE_BITABLE_RAW.get("monotonic") or 0)
     if _OSE_BITABLE_TTL_SEC > 0 and isinstance(cached, list) and now - ts < _OSE_BITABLE_TTL_SEC:
         return cached
-    items = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_OFFSET_TABLE_ID)
+    items = _bitable_get_all_records(token, OSE_OFFSET_BASE_TOKEN, OSE_OFFSET_TABLE_ID)
     _OSE_BITABLE_RAW["offset"] = items
     _OSE_BITABLE_RAW["monotonic"] = now
     return items
@@ -3506,7 +3511,7 @@ def _get_bitable_raw_triple(token: str) -> tuple[list[dict[str, Any]], list[dict
         return leave_disp, leave_appr, offset
     leave_disp = _fetch_leaveose_bitable_records(token)
     leave_appr = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_LEAVE_TABLE_ID)
-    offset = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_OFFSET_TABLE_ID)
+    offset = _bitable_get_all_records(token, OSE_OFFSET_BASE_TOKEN, OSE_OFFSET_TABLE_ID)
     _OSE_BITABLE_RAW["monotonic"] = now
     _OSE_BITABLE_RAW["leave_display"] = leave_disp
     _OSE_BITABLE_RAW["leave_approval"] = leave_appr
@@ -3730,7 +3735,7 @@ def _extract_offset_entries_for_date(
     and night (``N``) offsets under their own shift instead of one flat block.
     """
     if items is None:
-        items = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_OFFSET_TABLE_ID)
+        items = _bitable_get_all_records(token, OSE_OFFSET_BASE_TOKEN, OSE_OFFSET_TABLE_ID)
     out: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for it in items:
@@ -3772,7 +3777,7 @@ def _extract_offset_lines_for_date(
     items: Optional[list[dict[str, Any]]] = None,
 ) -> list[str]:
     if items is None:
-        items = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_OFFSET_TABLE_ID)
+        items = _bitable_get_all_records(token, OSE_OFFSET_BASE_TOKEN, OSE_OFFSET_TABLE_ID)
     lines: list[str] = []
     for it in items:
         f = it.get("fields") or {}
@@ -4334,10 +4339,16 @@ def _schedule_offset_duty_wiki_sync(*, record_id: str = "", delete: bool = False
         print(f"[ose_Duty] duty wiki offset sync schedule failed: {exc!r}", flush=True)
 
 
-def _bitable_create_record(token: str, table_id: str, fields: dict[str, Any]) -> dict[str, Any]:
+def _bitable_create_record(
+    token: str,
+    table_id: str,
+    fields: dict[str, Any],
+    *,
+    base_token: str = "",
+) -> dict[str, Any]:
     url = (
         f"https://open.larksuite.com/open-apis/bitable/v1/apps/"
-        f"{OSE_BASE_TOKEN}/tables/{table_id}/records"
+        f"{base_token or OSE_BASE_TOKEN}/tables/{table_id}/records"
     )
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     res = _lark_request(
@@ -4358,13 +4369,15 @@ def _bitable_update_record(
     table_id: str,
     record_id: str,
     fields: dict[str, Any],
+    *,
+    base_token: str = "",
 ) -> dict[str, Any]:
     rid = (record_id or "").strip()
     if not rid:
         raise ValueError("record_id is required")
     url = (
         f"https://open.larksuite.com/open-apis/bitable/v1/apps/"
-        f"{OSE_BASE_TOKEN}/tables/{table_id}/records/{rid}"
+        f"{base_token or OSE_BASE_TOKEN}/tables/{table_id}/records/{rid}"
     )
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     res = _lark_request(
@@ -4923,7 +4936,9 @@ def update_ose_offset_approval(
         "Approval Date": _bitable_date_ms(approval_date or date.today()),
         "Remarks": (remarks or "").strip(),
     }
-    _bitable_update_record(token, OSE_OFFSET_TABLE_ID, record_id, fields)
+    _bitable_update_record(
+        token, OSE_OFFSET_TABLE_ID, record_id, fields, base_token=OSE_OFFSET_BASE_TOKEN
+    )
     invalidate_ose_bitable_cache()
     _schedule_offset_duty_wiki_sync(record_id=record_id)
     sheet_out: dict[str, Any] = {}
@@ -5754,7 +5769,9 @@ def submit_ose_offset(
         "Request Date": _bitable_date_ms(today),
         "Reason": reason_s,
     }
-    res = _bitable_create_record(token, OSE_OFFSET_TABLE_ID, fields)
+    res = _bitable_create_record(
+        token, OSE_OFFSET_TABLE_ID, fields, base_token=OSE_OFFSET_BASE_TOKEN
+    )
     invalidate_ose_bitable_cache()
     record_id = (res.get("data") or {}).get("record", {}).get("record_id")
     rid = str(record_id or "").strip()
@@ -5816,7 +5833,7 @@ def delete_ose_offset_record(*, record_id: str, skip_cache_invalidate: bool = Fa
     token = get_tenant_access_token()
     url = (
         f"https://open.larksuite.com/open-apis/bitable/v1/apps/"
-        f"{OSE_BASE_TOKEN}/tables/{OSE_OFFSET_TABLE_ID}/records/{rid}"
+        f"{OSE_OFFSET_BASE_TOKEN}/tables/{OSE_OFFSET_TABLE_ID}/records/{rid}"
     )
     headers = {"Authorization": f"Bearer {token}"}
     res = _lark_request(
@@ -5873,6 +5890,16 @@ _OFFSET_GUARD_LOCK = threading.Lock()
 _OFFSET_GUARD_AUTH_TTL_SEC = 7 * 24 * 3600
 
 
+def _offset_state_scope() -> str:
+    """Which Base+table the on-disk offset state describes.
+
+    Stamped into the state files so that repointing ``OSE_OFFSET_BASE_TOKEN`` /
+    ``OSE_OFFSET_TABLE_ID`` at a different table starts clean. Without this the
+    mirror would read as "every row was deleted" and re-create all of them into
+    the new table as duplicates."""
+    return f"{OSE_OFFSET_BASE_TOKEN}/{OSE_OFFSET_TABLE_ID}"
+
+
 def _load_offset_guard_state() -> dict[str, Any]:
     empty = {"rows": {}, "authorized": {}}
     try:
@@ -5882,6 +5909,14 @@ def _load_offset_guard_state() -> dict[str, Any]:
         return dict(empty)
     if not isinstance(data, dict):
         return dict(empty)
+    if str(data.get("scope") or "") != _offset_state_scope():
+        # Offset table was repointed — the old record_ids mean nothing here. Reseed.
+        print(
+            "[ose_Duty] offset guard: table changed, reseeding mirror "
+            f"({data.get('scope') or 'unstamped'} -> {_offset_state_scope()})",
+            flush=True,
+        )
+        return dict(empty)
     rows = data.get("rows") if isinstance(data.get("rows"), dict) else {}
     auth = data.get("authorized") if isinstance(data.get("authorized"), dict) else {}
     return {"rows": dict(rows), "authorized": dict(auth)}
@@ -5889,6 +5924,8 @@ def _load_offset_guard_state() -> dict[str, Any]:
 
 def _save_offset_guard_state(state: dict[str, Any]) -> None:
     tmp = _OFFSET_GUARD_PATH + ".tmp"
+    state = dict(state)
+    state["scope"] = _offset_state_scope()
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(state, fh, ensure_ascii=False, indent=2, default=str)
         fh.write("\n")
@@ -5933,7 +5970,7 @@ def scan_restore_directly_deleted_offsets(
     """
     token = get_tenant_access_token()
     try:
-        items = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_OFFSET_TABLE_ID)
+        items = _bitable_get_all_records(token, OSE_OFFSET_BASE_TOKEN, OSE_OFFSET_TABLE_ID)
     except Exception as exc:  # noqa: BLE001 — a fetch blip must not look like mass deletion
         print(f"[ose_Duty] offset guard skipped (fetch failed): {exc!r}", flush=True)
         return {"ok": False, "error": str(exc), "restored": [], "checked": 0}
@@ -5963,7 +6000,9 @@ def scan_restore_directly_deleted_offsets(
                 rows.pop(rid, None)
                 continue
             try:
-                res = _bitable_create_record(token, OSE_OFFSET_TABLE_ID, fields)
+                res = _bitable_create_record(
+                    token, OSE_OFFSET_TABLE_ID, fields, base_token=OSE_OFFSET_BASE_TOKEN
+                )
                 new_id = str(((res.get("data") or {}).get("record") or {}).get("record_id") or "").strip()
                 restored.append(
                     {
@@ -6061,7 +6100,7 @@ def purge_stale_ose_offset_bitable_rows(*, ref_date: Optional[date] = None) -> d
             "skipped": "auto_purge_disabled",
         }
     token = get_tenant_access_token()
-    items = _bitable_get_all_records(token, OSE_BASE_TOKEN, OSE_OFFSET_TABLE_ID)
+    items = _bitable_get_all_records(token, OSE_OFFSET_BASE_TOKEN, OSE_OFFSET_TABLE_ID)
     to_delete: list[str] = []
     for it in items:
         f = it.get("fields") or {}
@@ -6137,7 +6176,9 @@ def update_ose_offset_request(
         "Exchange Date": _bitable_date_ms(exchange_date),
         "Reason": reason_s,
     }
-    _bitable_update_record(token, OSE_OFFSET_TABLE_ID, record_id, fields)
+    _bitable_update_record(
+        token, OSE_OFFSET_TABLE_ID, record_id, fields, base_token=OSE_OFFSET_BASE_TOKEN
+    )
     invalidate_ose_bitable_cache()
     _schedule_offset_duty_wiki_sync(record_id=record_id)
     return {"ok": True, "record_id": record_id}
@@ -6174,7 +6215,9 @@ def update_ose_offset_record_fields(
         "Exchange Date": _bitable_date_ms(exchange_date),
         "Reason": reason_s,
     }
-    _bitable_update_record(token, OSE_OFFSET_TABLE_ID, rid, fields)
+    _bitable_update_record(
+        token, OSE_OFFSET_TABLE_ID, rid, fields, base_token=OSE_OFFSET_BASE_TOKEN
+    )
     invalidate_ose_bitable_cache()
     sheet_out: dict[str, Any] = {}
     if old_status == "Approved":

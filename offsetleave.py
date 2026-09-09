@@ -130,7 +130,10 @@ OFFSETLEAVE_CARD_CALLBACK_KEYS = frozenset(
 # Source: https://casinoplus.sg.larksuite.com/base/CpdEbEofwaYyyEsSjlElKNxzgec?table=tblC5T2MAydwT42j&view=vewHEvu7K8
 # Dest:   https://casinoplus.sg.larksuite.com/wiki/O4Dfw4DVTiPpFukn801l5z3WgMd?sheet=02eZI8&table=tblL4rrbJHJSosDX&view=vewFF82Q2p
 OFFSET_SOURCE_BASE_TOKEN = (
-    os.getenv("OFFSET_SOURCE_BASE_TOKEN") or os.getenv("OSE_BASE_TOKEN") or "CpdEbEofwaYyyEsSjlElKNxzgec"
+    os.getenv("OFFSET_SOURCE_BASE_TOKEN")
+    or os.getenv("OSE_OFFSET_BASE_TOKEN")
+    or os.getenv("OSE_BASE_TOKEN")
+    or "CpdEbEofwaYyyEsSjlElKNxzgec"
 ).strip()
 OFFSET_SOURCE_TABLE_ID = (os.getenv("OFFSET_SOURCE_TABLE_ID") or os.getenv("OSE_OFFSET_TABLE_ID") or "tblC5T2MAydwT42j").strip()
 OFFSET_DUTY_WIKI_SPREADSHEET_TOKEN = (
@@ -139,6 +142,22 @@ OFFSET_DUTY_WIKI_SPREADSHEET_TOKEN = (
 OFFSET_DUTY_SHEET_ID = (os.getenv("OFFSET_DUTY_SHEET_ID") or "02eZI8").strip()
 OFFSET_DUTY_TABLE_ID = (os.getenv("OFFSET_DUTY_TABLE_ID") or "tblL4rrbJHJSosDX").strip()
 OFFSET_DUTY_BITABLE_BASE = (os.getenv("OFFSET_DUTY_BITABLE_BASE") or "I97gbnViZaqSdNs8U8AliyWtgDz").strip()
+
+
+def _offset_duty_mirror_is_self() -> bool:
+    """True when Offset2026 IS the source table, so there is nothing to mirror.
+
+    Point ``OSE_OFFSET_BASE_TOKEN`` / ``OSE_OFFSET_TABLE_ID`` at the wiki duty-shift
+    table and the bot reads and writes offsets there directly. The mirror must then
+    stay off: syncing a table onto itself would re-upsert every row against its own
+    fingerprint and let the orphan prune delete live rows.
+    """
+    return (
+        OFFSET_SOURCE_BASE_TOKEN == OFFSET_DUTY_BITABLE_BASE
+        and OFFSET_SOURCE_TABLE_ID == OFFSET_DUTY_TABLE_ID
+    )
+
+
 _OFFSET_DUTY_SYNC_STATE_PATH = os.path.join(
     _CHBOX_DIR,
     os.getenv("OFFSET_DUTY_SYNC_STATE", ".offset_duty_sync_state.json"),
@@ -217,6 +236,10 @@ def _write_json_file(path: str, payload: dict[str, Any]) -> None:
 def _load_offset_rows_snapshot() -> dict[str, dict[str, Any]]:
     with _OFFSET_ROWS_SNAPSHOT_LOCK:
         data = _read_json_file(_OFFSET_ROWS_SNAPSHOT_PATH)
+    if str(data.get("scope") or "") != od._offset_state_scope():
+        # Offset table was repointed — every old record_id would look "deleted"
+        # and DM the approvers. Start from an empty snapshot instead.
+        return {}
     rows = data.get("rows") if isinstance(data.get("rows"), dict) else {}
     return {str(k): dict(v) for k, v in rows.items() if k and isinstance(v, dict)}
 
@@ -227,6 +250,7 @@ def _save_offset_rows_snapshot(rows: dict[str, dict[str, Any]]) -> None:
             _OFFSET_ROWS_SNAPSHOT_PATH,
             {
                 "rows": {str(k): dict(v) for k, v in rows.items() if k},
+                "scope": od._offset_state_scope(),
                 "updated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             },
         )
@@ -566,6 +590,8 @@ def sync_offset_to_duty_wiki(*, record_id: str = "", delete: bool = False) -> di
     """
     Mirror one source offset row into the wiki Offset2026 bitable (best-effort, raises on API error).
     """
+    if _offset_duty_mirror_is_self():
+        return {"ok": True, "skipped": "source_is_dest"}
     rid = (record_id or "").strip()
     if not rid:
         return {"ok": False, "error": "missing record_id"}
@@ -586,6 +612,9 @@ def sync_offset_to_duty_wiki(*, record_id: str = "", delete: bool = False) -> di
 
 def sync_all_offsets_to_duty_wiki() -> dict[str, Any]:
     """Full reconcile: every source offset row is upserted into wiki Offset2026."""
+    if _offset_duty_mirror_is_self():
+        return {"ok": True, "skipped": "source_is_dest", "source_rows": 0,
+                "upserted": 0, "deleted": 0, "errors": []}
     token = od.get_tenant_access_token()
     src_items = od._bitable_get_all_records(token, OFFSET_SOURCE_BASE_TOKEN, OFFSET_SOURCE_TABLE_ID)
     upserted = 0
@@ -3921,6 +3950,8 @@ def scan_bitable_offsets_for_duty_wiki_sync() -> dict[str, int]:
 
     Bot submit/update/delete already schedule sync; this poll catches manual Base edits.
     """
+    if _offset_duty_mirror_is_self():
+        return {"scanned": 0, "synced": 0, "deleted": 0}
     od.invalidate_ose_bitable_cache()
     token = od.get_tenant_access_token()
     items = od._bitable_get_all_records(token, OFFSET_SOURCE_BASE_TOKEN, OFFSET_SOURCE_TABLE_ID)
