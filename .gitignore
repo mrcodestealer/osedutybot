@@ -93,6 +93,12 @@ teamswatch_state.json
 teamswatch_frames.jsonl
 teamswatch_chats.json
 
+# ---- /egs + /sports sent-email logs (runtime only; power the reply pickers) ----
+egs.json
+egstest.json
+sports.json
+sportstest.json
+
 # ---- EVO maintenance detector (ledger: what was seen / emailed / cancelled) ----
 detectevomaintenance.json
 detectevomaintenance.json.tmp

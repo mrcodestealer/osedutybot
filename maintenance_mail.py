@@ -220,6 +220,159 @@ EGS_SENT_STORE_PATH = os.path.join(_EGS_DIR, "egs.json")        # real /egs send
 EGS_TEST_STORE_PATH = os.path.join(_EGS_DIR, "egstest.json")   # /egstest sends (for /egsreplytest picker)
 _EGS_SENT_STORE_MAX = max(5, int(os.getenv("EGS_SENT_STORE_MAX", "").strip() or "30"))
 _egs_store_lock = threading.Lock()
+
+# ``/sports`` maintenance notice — the SAME machinery as ``/egs`` (LLM-titled paste →
+# editable preview card → send → reply picker); only the recipients differ. It is a distinct
+# ``kind`` so the two sent-email stores (and therefore the two reply pickers) never mix:
+#   To:  CS (Team) <cs@igo.email>, Toby <toby@igo.ph>
+#   Cc:  CP OM Duty <om@hotelstotsenberg.com>, Allan Guo <allan.guo001@igo.ph>
+SPORTS_MAIL_TO_DEFAULT = "CS (Team) <cs@igo.email>, Toby <toby@igo.ph>"
+SPORTS_MAIL_CC_DEFAULT = (
+    "CP OM Duty <om@hotelstotsenberg.com>, Allan Guo <allan.guo001@igo.ph>"
+)
+
+
+def _normalize_addr_separators(raw: str) -> str:
+    """Make a pasted recipient list safe for :func:`getaddresses`.
+
+    Two real-world shapes break it outright — it returns a single EMPTY pair, discarding
+    every address, rather than partial results:
+      * semicolon separators (``A <a@b>;C <c@d>``) — how Outlook and Lark Mail render a
+        recipient list, so it is the form an operator is most likely to paste;
+      * a TRAILING separator (``A <a@b>, C <c@d>,``) — which that same paste leaves behind.
+    So: semicolons become commas, runs of separators collapse, and leading/trailing ones go.
+    Quoted display names are left intact (nothing is split here).
+    """
+    txt = (raw or "").replace(";", ",")
+    txt = re.sub(r"(?:\s*,\s*)+", ", ", txt).strip()
+    return txt.strip(",").strip()
+
+
+def _parse_addr_pairs(raw: str) -> list[tuple[str, str]]:
+    """``"Name <a@b>, Other <c@d>"`` -> ``[("Name", "a@b"), ("Other", "c@d")]``.
+
+    Accepts comma- OR semicolon-separated lists, with or without a trailing separator
+    (see :func:`_normalize_addr_separators`). A bare address keeps an empty display name
+    (``formataddr`` then emits the address on its own). Entries without an ``@`` are
+    dropped and duplicate addresses collapse. Returns ``[]`` for input it cannot parse —
+    callers must decide what that means (see :func:`_resolve_addr_pairs`).
+    """
+    cleaned = _normalize_addr_separators(raw)
+    pairs = getaddresses([cleaned])
+    if cleaned and not any("@" in (a or "") for _n, a in pairs):
+        # getaddresses rejected the list wholesale — retry token by token so one bad
+        # entry cannot discard the good ones. Only runs after a total failure, so it
+        # can only ever recover addresses, never lose them.
+        pairs = [
+            p
+            for tok in cleaned.split(",")
+            if tok.strip()
+            for p in getaddresses([tok.strip()])
+        ]
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for name, addr in pairs:
+        addr = (addr or "").strip()
+        if "@" not in addr or addr.casefold() in seen:
+            continue
+        seen.add(addr.casefold())
+        out.append(((name or "").strip(), addr))
+    return out
+
+
+def _resolve_addr_pairs(raw: str, default: str, label: str) -> list[tuple[str, str]]:
+    """Parse a recipient env override, falling back to ``default`` if it yields nothing.
+
+    A garbled override must never quietly become "send to nobody" — fall back to the
+    built-in recipients and say so in the log. An explicitly EMPTY value is honoured as
+    "no recipients here" (that is how the Cc is disabled), not treated as garbled.
+    """
+    pairs = _parse_addr_pairs(raw)
+    if pairs or not (raw or "").strip():
+        return pairs
+    print(
+        f"[maint-mail] {label}={raw!r} parsed to no usable address — "
+        f"falling back to {default!r}",
+        flush=True,
+    )
+    return _parse_addr_pairs(default)
+
+
+_SPORTS_TO_RAW = (
+    os.getenv("SPORTS_MAIL_TO", "").strip()
+    or os.getenv("sports_mail_to", "").strip()
+    or SPORTS_MAIL_TO_DEFAULT
+)
+SPORTS_MAIL_TO = _resolve_addr_pairs(
+    _SPORTS_TO_RAW, SPORTS_MAIL_TO_DEFAULT, "SPORTS_MAIL_TO"
+)
+# Empty string ("") disables the Cc; unset falls back to the two default Cc recipients.
+_SPORTS_CC_RAW = os.getenv("SPORTS_MAIL_CC", "sports_unset").strip()
+if _SPORTS_CC_RAW == "sports_unset":
+    _SPORTS_CC_RAW = os.getenv("sports_mail_cc", "sports_unset").strip()
+if _SPORTS_CC_RAW == "sports_unset":
+    _SPORTS_CC_RAW = SPORTS_MAIL_CC_DEFAULT
+SPORTS_MAIL_CC = _resolve_addr_pairs(
+    _SPORTS_CC_RAW, SPORTS_MAIL_CC_DEFAULT, "SPORTS_MAIL_CC"
+)
+# Signature + test targets mirror ``/egs`` unless separately overridden.
+SPORTS_MAIL_SIGNATURE = (
+    (os.getenv("SPORTS_MAIL_SIGNATURE", "") or os.getenv("sports_mail_signature", ""))
+    .replace("\\n", "\n")
+    .strip()
+    or EGS_MAIL_SIGNATURE
+)
+SPORTS_TEST_REPLY_TO = (
+    os.getenv("SPORTS_TEST_REPLY_TO", "").strip()
+    or os.getenv("sports_test_reply_to", "").strip()
+    or EGS_TEST_REPLY_TO
+)
+_SPORTS_TEST_CC_RAW = os.getenv("SPORTS_TEST_REPLY_CC", "sports_unset").strip()
+SPORTS_TEST_REPLY_CC = (
+    EGS_TEST_REPLY_CC if _SPORTS_TEST_CC_RAW == "sports_unset" else _SPORTS_TEST_CC_RAW
+)
+SPORTS_SENT_STORE_PATH = os.path.join(_EGS_DIR, "sports.json")       # real /sports sends
+SPORTS_TEST_STORE_PATH = os.path.join(_EGS_DIR, "sportstest.json")   # /sportstest sends
+
+
+def _egs_kind(kind: str | None) -> str:
+    """Normalize a mail kind to ``"sports"``, else ``"egs"`` (the default)."""
+    return "sports" if (kind or "").strip().lower() == "sports" else "egs"
+
+
+def egs_kind_config(kind: str | None = "egs") -> dict[str, Any]:
+    """Recipients / signature / test targets / stores for one kind (``egs`` | ``sports``).
+
+    ``/egs`` and ``/sports`` share every code path below — this function is the ONLY place
+    the two differ. ``to`` / ``cc`` are ``(display name, address)`` pairs, so a
+    multi-recipient kind (``/sports``) behaves exactly like a single-recipient one
+    (``/egs``).
+    """
+    if _egs_kind(kind) == "sports":
+        return {
+            "kind": "sports",
+            "cmd": "/sports",
+            "reply_cmd": "/sportsreply",
+            "to": list(SPORTS_MAIL_TO),
+            "cc": list(SPORTS_MAIL_CC),
+            "signature": SPORTS_MAIL_SIGNATURE,
+            "test_to": SPORTS_TEST_REPLY_TO,
+            "test_cc": SPORTS_TEST_REPLY_CC,
+            "store": SPORTS_SENT_STORE_PATH,
+            "test_store": SPORTS_TEST_STORE_PATH,
+        }
+    return {
+        "kind": "egs",
+        "cmd": "/egs",
+        "reply_cmd": "/egsreply",
+        "to": [(EGS_MAIL_TO_NAME, EGS_MAIL_TO)],
+        "cc": [(EGS_MAIL_CC_NAME, EGS_MAIL_CC)] if EGS_MAIL_CC else [],
+        "signature": EGS_MAIL_SIGNATURE,
+        "test_to": EGS_TEST_REPLY_TO,
+        "test_cc": EGS_TEST_REPLY_CC,
+        "store": EGS_SENT_STORE_PATH,
+        "test_store": EGS_TEST_STORE_PATH,
+    }
 # Stores auto-reset each Monday 00:00 (GMT+8): entries carry the week they belong to;
 # a stale week reads as empty and is overwritten on the next write. `egs_reset_stores`
 # (scheduled at Monday 00:00) also physically clears them.
@@ -232,15 +385,22 @@ def _egs_week_key() -> str:
     return (now.date() - timedelta(days=now.weekday())).isoformat()
 
 
-def _egs_store_path(test: bool) -> str:
-    return EGS_TEST_STORE_PATH if test else EGS_SENT_STORE_PATH
+def _egs_store_path(test: bool, kind: str | None = "egs") -> str:
+    cfg = egs_kind_config(kind)
+    return cfg["test_store"] if test else cfg["store"]
 
 
 def egs_reset_stores() -> None:
-    """Empty egs.json + egstest.json — weekly clear (scheduled Monday 00:00)."""
+    """Empty every ``/egs`` + ``/sports`` sent-email store — weekly clear (Mon 00:00)."""
     week = _egs_week_key()
+    paths = (
+        EGS_SENT_STORE_PATH,
+        EGS_TEST_STORE_PATH,
+        SPORTS_SENT_STORE_PATH,
+        SPORTS_TEST_STORE_PATH,
+    )
     with _egs_store_lock:
-        for path in (EGS_SENT_STORE_PATH, EGS_TEST_STORE_PATH):
+        for path in paths:
             try:
                 tmp = path + ".tmp"
                 with open(tmp, "w", encoding="utf-8") as f:
@@ -248,7 +408,12 @@ def egs_reset_stores() -> None:
                 os.replace(tmp, path)
             except Exception as ex:  # noqa: BLE001
                 print(f"[maint-mail] egs reset {os.path.basename(path)} failed: {ex!r}", flush=True)
-    print("[maint-mail] egs.json + egstest.json cleared (weekly reset)", flush=True)
+    print(
+        "[maint-mail] "
+        + ", ".join(os.path.basename(p) for p in paths)
+        + " cleared (weekly reset)",
+        flush=True,
+    )
 
 
 def _egs_load_current_week(path: str) -> list[dict[str, Any]]:
@@ -270,8 +435,12 @@ def egs_store_sent_email(
     message_id: str = "",
     to: list[str] | None = None,
     cc: list[str] | None = None,
+    kind: str | None = "egs",
 ) -> None:
-    """Append a sent email to ``egs.json`` (real) or ``egstest.json`` (test). Never raises.
+    """Append a sent email to this ``kind``'s real / test store. Never raises.
+
+    ``kind="egs"`` -> ``egs.json`` / ``egstest.json``; ``kind="sports"`` ->
+    ``sports.json`` / ``sportstest.json``.
 
     Stores the generated ``message_id`` + recipients so ``/egsreply`` can thread the reply
     off the original (``In-Reply-To``) WITHOUT an IMAP search — the send may not land in any
@@ -280,7 +449,7 @@ def egs_store_sent_email(
     subj = (subject or "").strip()
     if not subj:
         return
-    path = _egs_store_path(test)
+    path = _egs_store_path(test, kind)
     try:
         with _egs_store_lock:
             entries = _egs_load_current_week(path)  # drops previous-week data
@@ -304,10 +473,14 @@ def egs_store_sent_email(
         print(f"[maint-mail] {os.path.basename(path)} store failed: {ex!r}", flush=True)
 
 
-def egs_store_lookup(subject: str, *, test: bool = False) -> dict[str, Any] | None:
+def egs_store_lookup(
+    subject: str, *, test: bool = False, kind: str | None = "egs"
+) -> dict[str, Any] | None:
     """Newest CURRENT-WEEK entry with a matching subject AND a Message-ID (for threading)."""
     want = (subject or "").strip().casefold()
-    for e in reversed(_egs_load_current_week(_egs_store_path(test))):  # newest first
+    for e in reversed(
+        _egs_load_current_week(_egs_store_path(test, kind))
+    ):  # newest first
         if str(e.get("subject") or "").strip().casefold() == want and str(
             e.get("message_id") or ""
         ).strip():
@@ -315,9 +488,11 @@ def egs_store_lookup(subject: str, *, test: bool = False) -> dict[str, Any] | No
     return None
 
 
-def egs_recent_sent_emails(limit: int = 8, *, test: bool = False) -> list[dict[str, Any]]:
-    """Newest-first CURRENT-WEEK sent emails (real egs.json / test egstest.json), deduped."""
-    entries = _egs_load_current_week(_egs_store_path(test))
+def egs_recent_sent_emails(
+    limit: int = 8, *, test: bool = False, kind: str | None = "egs"
+) -> list[dict[str, Any]]:
+    """Newest-first CURRENT-WEEK sent emails for this ``kind``'s store, deduped."""
+    entries = _egs_load_current_week(_egs_store_path(test, kind))
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for e in reversed(entries):  # newest first
@@ -1851,22 +2026,28 @@ def send_egs_maintenance_email(
     body: str,
     append_signature: bool = True,
     to_override: str | None = None,
+    kind: str | None = "egs",
 ) -> None:
-    """``/egs`` maintenance notice: om@ mailbox → egs.maintenance@ + Cc om@ (plain text).
+    """Maintenance notice from the om@ mailbox (plain text), routed by ``kind``.
+
+    ``kind="egs"`` (``/egs``)    → egs.maintenance@ + Cc om@.
+    ``kind="sports"`` (``/sports``) → CS (Team) + Toby, Cc CP OM Duty + Allan Guo.
 
     ``append_signature=False`` when the caller's body already ends with the signature
     (e.g. the editable preview card, which shows the full email for the user to edit).
-    ``to_override`` (``/egstest``) sends ONLY to that address (no Cc, no QA/CS tag) and is
-    NOT recorded in egs.json — a throwaway test send to junchen@.
+    ``to_override`` (``/egstest`` / ``/sportstest``) sends ONLY to that address (Cc the
+    kind's test Cc, no QA/CS tag) and is recorded in the kind's TEST store, never the real
+    one — a throwaway test send to junchen@.
     """
     if not MAIL_PASSWORD:
         raise RuntimeError("MAINTENANCE_MAIL_PASSWORD not set")
+    cfg = egs_kind_config(kind)
     subj = (subject or "").strip() or "Maintenance Notification"
     text = (body or "").strip()
     if not text:
-        raise ValueError("empty /egs email body")
-    if append_signature and EGS_MAIL_SIGNATURE:
-        text = f"{text}\n\n{EGS_MAIL_SIGNATURE}"
+        raise ValueError(f"empty {cfg['cmd']} email body")
+    if append_signature and cfg["signature"]:
+        text = f"{text}\n\n{cfg['signature']}"
     msg = MIMEText(text, "plain", "utf-8")
     msg["Subject"] = Header(subj, "utf-8")
     msg["From"] = formataddr((FORWARD_FROM_NAME, MAIL_USER))
@@ -1875,29 +2056,47 @@ def send_egs_maintenance_email(
     msg["Message-ID"] = mid
     test_to = (to_override or "").strip()
     if test_to:
+        test_cc = (cfg["test_cc"] or "").strip()
         msg["To"] = test_to
-        recipients = [test_to]
         store_to, store_cc = [test_to], []
-        if EGS_TEST_REPLY_CC:
-            msg["Cc"] = EGS_TEST_REPLY_CC
-            recipients.append(EGS_TEST_REPLY_CC)
-            store_cc = [EGS_TEST_REPLY_CC]
-        route = f"{test_to} cc={EGS_TEST_REPLY_CC or '-'} (test)"
+        if test_cc:
+            msg["Cc"] = test_cc
+            store_cc = [test_cc]
+        route = f"{test_to} cc={test_cc or '-'} (test)"
     else:
-        msg["To"] = formataddr((EGS_MAIL_TO_NAME, EGS_MAIL_TO))
-        msg["Cc"] = formataddr((EGS_MAIL_CC_NAME, EGS_MAIL_CC))
-        recipients = [EGS_MAIL_TO, EGS_MAIL_CC]
-        store_to, store_cc = [EGS_MAIL_TO], [EGS_MAIL_CC]
-        route = f"{EGS_MAIL_TO} cc={EGS_MAIL_CC}"
+        # Multi-recipient by design: /sports has two To and two Cc addresses, /egs one each.
+        msg["To"] = ", ".join(formataddr(p) for p in cfg["to"])
+        if cfg["cc"]:
+            msg["Cc"] = ", ".join(formataddr(p) for p in cfg["cc"])
+        store_to = [a for _n, a in cfg["to"]]
+        store_cc = [a for _n, a in cfg["cc"]]
+        if not store_to:
+            # Never mail nobody: surfaces as "❌ /sports 失败" on the card instead of a
+            # ✅ for an email that reached no one.
+            raise ValueError(
+                f"{cfg['cmd']} has no To recipient — check the "
+                f"{'SPORTS' if cfg['kind'] == 'sports' else 'EGS'}_MAIL_TO env override"
+            )
+        route = f"{', '.join(store_to)} cc={', '.join(store_cc) or '-'}"
+    # SMTP envelope = To + Cc, order preserved, self-duplicates collapsed.
+    recipients = list(dict.fromkeys([*store_to, *store_cc]))
     ctx = ssl.create_default_context()
     with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=IMAP_TIMEOUT, context=ctx) as smtp:
         smtp.login(MAIL_USER, MAIL_PASSWORD)
         smtp.sendmail(MAIL_USER, recipients, msg.as_string())
-    print(f"[maint-mail] /egs{'test' if test_to else ''} {subj!r} → {route}", flush=True)
-    # Real → egs.json (/egsreply picker); test → egstest.json (/egsreplytest picker).
-    # Store the Message-ID + recipients so /egsreply threads off it (no IMAP search needed).
+    print(
+        f"[maint-mail] {cfg['cmd']}{'test' if test_to else ''} {subj!r} → {route}",
+        flush=True,
+    )
+    # Real → egs.json / sports.json (reply picker); test → egstest.json / sportstest.json.
+    # Store the Message-ID + recipients so the reply threads off it (no IMAP search needed).
     egs_store_sent_email(
-        subj, test=bool(test_to), message_id=mid, to=store_to, cc=store_cc
+        subj,
+        test=bool(test_to),
+        message_id=mid,
+        to=store_to,
+        cc=store_cc,
+        kind=cfg["kind"],
     )
 
 
@@ -5461,34 +5660,42 @@ def _quote_source_by_message_id(
     return find_message_by_message_id(message_id)
 
 
-def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[str, Any]:
-    """``/egsreply``: find the email whose subject matches ``email_title`` and Reply-All
-    inside its thread — To/Cc taken from the original (``In-Reply-To`` set for threading).
+def reply_egs_email(
+    *, email_title: str, body: str, test: bool = False, kind: str | None = "egs"
+) -> dict[str, Any]:
+    """``/egsreply`` / ``/sportsreply``: find the email whose subject matches ``email_title``
+    and Reply-All inside its thread — To/Cc taken from the original (``In-Reply-To`` set for
+    threading).
 
-    ``test=True`` (``/egsreplytest``) sends only to ``EGS_TEST_REPLY_TO`` (junchen@). In test
-    mode, if the original email can't be found it STILL sends a plain ``Re: <title>`` email
-    to the test address (so the test always delivers). Real ``/egsreply`` raises
-    :class:`EmailThreadNotFoundError` when no matching mail is found (can't reply to nothing).
-    ``body`` is sent as-is (the preview card already carries the signature).
+    ``kind`` selects which sent-email store is searched first (``egs.json`` vs
+    ``sports.json``) and which test address the test flow uses.
+
+    ``test=True`` (``/egsreplytest`` / ``/sportsreplytest``) sends only to the kind's test
+    address (junchen@). In test mode, if the original email can't be found it STILL sends a
+    plain ``Re: <title>`` email to the test address (so the test always delivers). A real
+    reply raises :class:`EmailThreadNotFoundError` when no matching mail is found (can't
+    reply to nothing). ``body`` is sent as-is (the preview card already carries the
+    signature).
     """
     if not MAIL_PASSWORD:
         raise RuntimeError("MAINTENANCE_MAIL_PASSWORD not set")
+    cfg = egs_kind_config(kind)
     title = (email_title or "").strip()
     if not title:
         raise ValueError("email title required")
     text = (body or "").strip()
     if not text:
-        raise ValueError("empty /egsreply body")
+        raise ValueError(f"empty {cfg['reply_cmd']} body")
 
     def _test_recipients() -> tuple[list[str], list[str], list[str]]:
-        """Test reply: To junchen@, Cc om@ (EGS_TEST_REPLY_CC)."""
-        cc = [EGS_TEST_REPLY_CC] if EGS_TEST_REPLY_CC else []
-        return [EGS_TEST_REPLY_TO], cc, [EGS_TEST_REPLY_TO] + cc
+        """Test reply: To the kind's test address, Cc its test Cc (om@ by default)."""
+        cc = [cfg["test_cc"]] if cfg["test_cc"] else []
+        return [cfg["test_to"]], cc, [cfg["test_to"]] + cc
 
-    # Tier 1 — stored send (picker / our own /egs|/egstest): we saved the Message-ID at
+    # Tier 1 — stored send (picker / our own real|test send): we saved the Message-ID at
     # send time, so we can thread the reply off it WITHOUT any IMAP search. This is the
     # only reliable path for test sends (they live in junchen@, not our searchable folders).
-    stored = egs_store_lookup(title, test=test)
+    stored = egs_store_lookup(title, test=test, kind=cfg["kind"])
     orig = None
     orig_folder = ""
     orig_mid = ""
@@ -5502,7 +5709,9 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
         if test:
             to_addrs, cc_addrs, recipients = _test_recipients()
         else:
-            to_addrs = [a for a in (stored.get("to") or []) if a] or [EGS_MAIL_TO]
+            to_addrs = [a for a in (stored.get("to") or []) if a] or [
+                a for _n, a in cfg["to"]
+            ]
             cc_addrs = [a for a in (stored.get("cc") or []) if a]
             recipients = list(dict.fromkeys([*to_addrs, *cc_addrs]))
     else:
@@ -5515,8 +5724,9 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
             orig = None
         if orig is None and not test:
             raise EmailThreadNotFoundError(
-                f"Email not found — not in egs.json and no subject fuzzy-matching "
-                f"{title!r} in folder(s): {', '.join(EGS_REPLY_IMAP_FOLDERS)} "
+                f"Email not found — not in {os.path.basename(cfg['store'])} and no subject "
+                f"fuzzy-matching {title!r} in folder(s): "
+                f"{', '.join(EGS_REPLY_IMAP_FOLDERS)} "
                 f"(last {EGS_REPLY_SINCE_DAYS} days)."
             )
         if orig is not None:
@@ -5547,7 +5757,7 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
     if quote_src is None and orig_mid:
         quote_src = _quote_source_by_message_id(orig_mid, subj)
     # …then quote the WHOLE conversation, newest first, instead of just that anchor. The
-    # anchor is the thread ROOT (our own /egs send), which nests nothing — quoting it alone
+    # anchor is the thread ROOT (our own /egs|/sports send), which nests nothing — quoting it alone
     # renders a single message. Rebuilding the chain from the index reproduces a manual
     # **Reply All** even when earlier rounds were sent unquoted. Best-effort: an empty chain
     # leaves ``quote_src`` exactly as it was.
@@ -5584,7 +5794,8 @@ def reply_egs_email(*, email_title: str, body: str, test: bool = False) -> dict[
         smtp.login(MAIL_USER, MAIL_PASSWORD)
         smtp.sendmail(MAIL_USER, recipients, msg.as_string())
     print(
-        f"[maint-mail] /egsreply{'test' if test else ''} via={via} title={title!r} "
+        f"[maint-mail] {cfg['reply_cmd']}{'test' if test else ''} via={via} "
+        f"title={title!r} "
         f"threaded={bool(orig_mid)} quoted={bool(_chain) or quote_src is not None} "
         f"quoted_msgs={len(_chain) if _chain else (1 if quote_src is not None else 0)} "
         f"To={to_addrs!r} Cc={cc_addrs!r} → {', '.join(recipients)}",

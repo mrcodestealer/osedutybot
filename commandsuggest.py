@@ -103,6 +103,10 @@ _EXTRA_ALIASES: dict[str, tuple[str, ...]] = {
     "/egstest": ("egs test", "egstest", "preview egs", "测试维护标题"),
     "/egsreply": ("egs reply", "reply email", "回复邮件"),
     "/egsreplytest": ("egs reply test", "test reply email", "测试回复邮件"),
+    "/sports": ("sports", "sports maintenance", "sportsbook maintenance", "体育维护通知发信"),
+    "/sportstest": ("sports test", "sportstest", "preview sports", "测试体育维护标题"),
+    "/sportsreply": ("sports reply", "reply sports email", "回复体育邮件"),
+    "/sportsreplytest": ("sports reply test", "test reply sports email", "测试回复体育邮件"),
     "/al": ("amount loss", "损失", "输赢"),
     "/pid": ("provider id", "provider", "供应商"),
     # Deliberately no bare "ip" alias — it would fire on unrelated traffic.

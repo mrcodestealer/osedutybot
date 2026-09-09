@@ -2985,7 +2985,8 @@ _add_scheduler_job(
     timezone="Asia/Manila",
 )
 _add_scheduler_job("monthly_duty_check", monthly_duty_check, "cron", day=1, hour=0, minute=0)
-# Weekly clear of /egs + /egstest sent logs (egs.json / egstest.json) — Monday 00:00 (GMT+8).
+# Weekly clear of the /egs + /sports sent logs (egs.json / egstest.json / sports.json /
+# sportstest.json) — Monday 00:00 (GMT+8).
 try:
     import maintenance_mail as _egs_mail_reset
     _add_scheduler_job(
@@ -4501,55 +4502,103 @@ def _egs_reply(chat_id: str, reply_mid: str, payload, *, msg_type: str = "text")
     return send_message(chat_id, payload, msg_type=msg_type, reply_to_message_id=mid)
 
 
-def _process_egs_paste(chat_id: str, body_text: str, *, test: bool = False) -> None:
-    """``/egs`` — show an **editable preview card** for a pasted maintenance notice.
+# ``/egs`` and ``/sports`` are ONE flow over two recipient sets (see
+# ``maintenance_mail.egs_kind_config``) — these tables map each command to its mail
+# ``kind`` and whether it is the test variant. ``/sportstestreply`` is accepted as an
+# alias of ``/sportsreplytest`` so either spelling works.
+_EGS_PASTE_COMMANDS: dict[str, tuple[str, bool]] = {
+    "/egs": ("egs", False),
+    "/egstest": ("egs", True),
+    "/sports": ("sports", False),
+    "/sportstest": ("sports", True),
+}
+_EGS_REPLY_COMMANDS: dict[str, tuple[str, bool]] = {
+    "/egsreply": ("egs", False),
+    "/egsreplytest": ("egs", True),
+    "/sportsreply": ("sports", False),
+    "/sportsreplytest": ("sports", True),
+    "/sportstestreply": ("sports", True),  # alias of /sportsreplytest
+}
+
+
+def _egs_cmd_label(kind: str, *, test: bool = False, reply: bool = False) -> str:
+    """Canonical slash command for a (kind, test, reply) combination — used in replies."""
+    base = "/sports" if maintenance.egs_is_sports_kind(kind) else "/egs"
+    if reply:
+        base += "reply"
+    return base + ("test" if test else "")
+
+
+def _egs_kind_tag(kind: str) -> str:
+    """Short uppercase tag for card headers: ``SPORTS`` or ``EGS``."""
+    return "SPORTS" if maintenance.egs_is_sports_kind(kind) else "EGS"
+
+
+def _process_egs_paste(
+    chat_id: str, body_text: str, *, test: bool = False, kind: str = "egs"
+) -> None:
+    """``/egs`` | ``/sports`` — show an **editable preview card** for a pasted notice.
 
     The LLM-derived subject (``{Vendor} {Type} Maintenance - DD/MM/YYYY``) and the body
     (+ signature) are pre-filled into editable fields; nothing is sent until the user taps
     **Send** on the card. Posted DIRECTLY to the chat (interactive cards render invisibly
     as replies). Gated to the same OSE BOT - Ops & Maintenance group as ``/m``.
 
-    ``test=True`` (``/egstest``) marks the card TEST — Send delivers ONLY to junchen@
-    (``EGS_TEST_REPLY_TO``), no Cc, no QA/CS tag, not recorded in egs.json.
+    ``kind`` picks the recipients: ``egs`` → egs.maintenance@ (Cc om@); ``sports`` →
+    CS (Team) + Toby (Cc CP OM Duty + Allan Guo). ``test=True`` (``/egstest`` /
+    ``/sportstest``) marks the card TEST — Send delivers ONLY to junchen@, no QA/CS tag,
+    and is logged to the kind's TEST store, never the real one.
     """
-    _cmd = "/egstest" if test else "/egs"
+    _cmd = _egs_cmd_label(kind, test=test)
     if not maintenance.is_evo_batch_command_chat(chat_id):
         send_message(chat_id, maintenance.EVO_BATCH_WRONG_GROUP_MESSAGE)
         return
     reply_mid = (_lark_user_message_id.get() or "").strip()
     body = (body_text or "").strip()
+    # Needed before the empty-body reply (it names the recipients), so it can't live in the
+    # try below — guard it separately so an import failure still answers in-chat rather
+    # than escaping into the Lark handler.
+    try:
+        import maintenance_mail as _maint_mail
+
+        _cfg = _maint_mail.egs_kind_config(kind)
+    except Exception as ex:  # noqa: BLE001
+        print(f"[egs] kind config failed kind={kind}: {ex!r}", flush=True)
+        _egs_reply(chat_id, reply_mid, f"❌ `{_cmd}` 处理失败: `{ex}`")
+        return
     if not body:
+        _to_disp, _cc_disp = maintenance.egs_recipients_display(kind)
         _egs_reply(
             chat_id,
             reply_mid,
             f"请在 `{_cmd}` 后粘贴维护通知内容。\n"
             "标题会自动生成：`{维护内容} - {今天日期 DD/MM/YYYY}`，"
             + (
-                "点发送后**只**发到 junchen@snsoft.my（测试）。"
+                f"点发送后**只**发到 {_cfg['test_to']}（测试）。"
                 if test
-                else "邮件发送到 egs.maintenance@om.hotelstotsenberg.com（抄送 om@hotelstotsenberg.com）。"
+                else f"邮件发送到 {_to_disp}（抄送 {_cc_disp}）。"
             ),
         )
         return
     try:
         subject = maintenance.build_egs_email_subject(body)
-        import maintenance_mail as _maint_mail
 
         full_body = body
-        if _maint_mail.EGS_MAIL_SIGNATURE:
-            full_body = f"{body}\n\n{_maint_mail.EGS_MAIL_SIGNATURE}"
+        if _cfg["signature"]:
+            full_body = f"{body}\n\n{_cfg['signature']}"
 
-        kwargs: dict = {}
+        kwargs: dict = {"kind": kind}
         if test:
             _cc_note = (
-                f"（抄送 {_maint_mail.EGS_TEST_REPLY_CC}）"
-                if _maint_mail.EGS_TEST_REPLY_CC
-                else "（无抄送）"
+                f"（抄送 {_cfg['test_cc']}）" if _cfg["test_cc"] else "（无抄送）"
             )
-            kwargs = dict(
-                header_title="🧪 EGS 测试邮件预览 / Test — sends to junchen@",
+            kwargs.update(
+                header_title=(
+                    f"🧪 {_egs_kind_tag(kind)} 测试邮件预览 / Test — sends to "
+                    f"{_cfg['test_to']}"
+                ),
                 info_md=(
-                    f"🧪 测试模式：点 **发送** 后邮件发送到 **{_maint_mail.EGS_TEST_REPLY_TO}**"
+                    f"🧪 测试模式：点 **发送** 后邮件发送到 **{_cfg['test_to']}**"
                     f"{_cc_note}，不 @QA/CS、不记录。可编辑标题/正文。"
                 ),
                 send_label="🧪 发送测试 / Send test",
@@ -4565,39 +4614,47 @@ def _process_egs_paste(chat_id: str, body_text: str, *, test: bool = False) -> N
             reply_to_message_id="",  # force a direct post, not a reply
         )
         print(
-            f"[egs] preview card sent test={test} code={(_resp or {}).get('code')!r} "
-            f"msg={(_resp or {}).get('msg')!r}",
+            f"[egs] preview card sent kind={kind} test={test} "
+            f"code={(_resp or {}).get('code')!r} msg={(_resp or {}).get('msg')!r}",
             flush=True,
         )
     except Exception as ex:
-        print(f"[egs] preview card failed: {ex!r}", flush=True)
+        print(f"[egs] preview card failed kind={kind}: {ex!r}", flush=True)
         _egs_reply(chat_id, reply_mid, f"❌ `{_cmd}` 处理失败: `{ex}`")
 
 
 def _post_egsreply_preview_card(
-    chat_id: str, email_title: str, content: str, reply_mid: str, *, test: bool
+    chat_id: str,
+    email_title: str,
+    content: str,
+    reply_mid: str,
+    *,
+    test: bool,
+    kind: str = "egs",
 ) -> None:
-    """Post the editable ``/egsreply`` reply preview card. ``email_title`` is the PICKED
-    email's subject — it rides in the Send button value (``s``) and locks the reply target,
-    so the reply always threads off that email (editing the shown title can't change it)."""
+    """Post the editable ``/egsreply`` | ``/sportsreply`` reply preview card.
+    ``email_title`` is the PICKED email's subject — it rides in the Send button value
+    (``s``) and locks the reply target, so the reply always threads off that email
+    (editing the shown title can't change it). ``kind`` rides back as ``g`` so the send
+    resolves the right store / test address."""
     import maintenance_mail as _maint_mail
 
+    _cfg = _maint_mail.egs_kind_config(kind)
+    _tag = _egs_kind_tag(kind)
     full_content = content
-    if _maint_mail.EGS_MAIL_SIGNATURE:
+    if _cfg["signature"]:
         full_content = (
-            f"{content}\n\n{_maint_mail.EGS_MAIL_SIGNATURE}"
-            if content
-            else _maint_mail.EGS_MAIL_SIGNATURE
+            f"{content}\n\n{_cfg['signature']}" if content else _cfg["signature"]
         )
     if test:
-        header = "🧪 EGS 回复预览(测试) / Reply preview (TEST)"
+        header = f"🧪 {_tag} 回复预览(测试) / Reply preview (TEST)"
         info = (
-            f"🧪 测试模式：回复只发送到 **{_maint_mail.EGS_TEST_REPLY_TO}**（不发给原收件人）。\n"
+            f"🧪 测试模式：回复只发送到 **{_cfg['test_to']}**（不发给原收件人）。\n"
             "回复的**邮件已选定**（上方标题即所选邮件，勿改）；填写下方**正文**后点 **发送**。"
         )
         send_label = "🧪 回复(测试) / Send Reply (test)"
     else:
-        header = "📧 EGS 回复邮件预览 / Reply — review before sending"
+        header = f"📧 {_tag} 回复邮件预览 / Reply — review before sending"
         info = (
             "将在**所选邮件**的会话内**回复**（收件/抄送同原邮件，保持在原会话内）。\n"
             "回复的**邮件已选定**（上方标题即所选邮件，勿改）；填写**正文**后点 **回复 / Send Reply**。"
@@ -4613,6 +4670,7 @@ def _post_egsreply_preview_card(
         send_key="egsreply_send",
         send_label=send_label,
         info_md=info,
+        kind=kind,
         # Lock the reply subject to the PICKED email (rides in the Send button value as `s`),
         # so the stored-Message-ID lookup always matches even if the title field is edited.
         extra_send_val={"t": "1", "s": email_title} if test else {"s": email_title},
@@ -4624,8 +4682,8 @@ def _post_egsreply_preview_card(
         reply_to_message_id="",  # direct post (interactive cards render invisibly as replies)
     )
     print(
-        f"[egsreply] preview card sent test={test} code={(_resp or {}).get('code')!r} "
-        f"msg={(_resp or {}).get('msg')!r}",
+        f"[egsreply] preview card sent kind={kind} test={test} "
+        f"code={(_resp or {}).get('code')!r} msg={(_resp or {}).get('msg')!r}",
         flush=True,
     )
 
@@ -4675,22 +4733,26 @@ def _egsreply_pop_body(key: str) -> str:
     return body if now - _ts <= _EGSREPLY_PENDING_TTL else ""
 
 
-def _process_egsreply_paste(chat_id: str, content: str = "", *, test: bool = False) -> None:
-    """``/egsreply`` / ``/egsreplytest`` — ALWAYS show the PICKER card so the user picks
-    which previously sent email to reply to.
+def _process_egsreply_paste(
+    chat_id: str, content: str = "", *, test: bool = False, kind: str = "egs"
+) -> None:
+    """``/egsreply`` | ``/sportsreply`` (and their ``…test`` variants) — ALWAYS show the
+    PICKER card so the user picks which previously sent email to reply to.
 
-    The picker lists recent ``/egs`` sends (``egs.json``) — or ``/egstest`` sends
-    (``egstest.json``) for ``/egsreplytest``. Tapping an email opens the editable reply
-    preview card, where the user writes (or reviews) the reply and sends it; the reply threads
-    off the stored Message-ID (no fuzzy search, no "email not found"). ``content`` is the body
-    pasted with the command — stashed here and pre-filled into the preview once the user picks
-    an email (so it isn't retyped). ``test=True`` replies only to the test address (junchen@).
+    The picker lists this ``kind``'s recent sends: ``egs.json`` / ``egstest.json`` for
+    ``/egsreply``, ``sports.json`` / ``sportstest.json`` for ``/sportsreply`` — the two
+    never mix. Tapping an email opens the editable reply preview card, where the user
+    writes (or reviews) the reply and sends it; the reply threads off the stored Message-ID
+    (no fuzzy search, no "email not found"). ``content`` is the body pasted with the
+    command — stashed here and pre-filled into the preview once the user picks an email (so
+    it isn't retyped). ``test=True`` replies only to the test address (junchen@).
 
-    Group gate: ``/egsreply`` (real recipients) is pinned to the ``/m`` command group;
-    ``/egsreplytest`` also runs in the test groups (:func:`maintenance.egsreply_test_chat_ids`)
-    since it can only ever deliver to junchen@.
+    Group gate: the real reply commands are pinned to the ``/m`` command group; the
+    ``…test`` variants also run in the test groups
+    (:func:`maintenance.egsreply_test_chat_ids`) since they can only ever deliver to
+    junchen@.
     """
-    _cmd = "/egsreplytest" if test else "/egsreply"
+    _cmd = _egs_cmd_label(kind, test=test, reply=True)
     _allowed = (
         maintenance.is_egsreply_test_chat(chat_id)
         if test
@@ -4708,10 +4770,11 @@ def _process_egsreply_paste(chat_id: str, content: str = "", *, test: bool = Fal
         # /egsreplytest lists /egstest sends (egstest.json).
         import maintenance_mail as _maint_mail
 
-        entries = _maint_mail.egs_recent_sent_emails(test=test)
+        _cfg = _maint_mail.egs_kind_config(kind)
+        entries = _maint_mail.egs_recent_sent_emails(test=test, kind=kind)
         if not entries:
-            _store = "egstest.json" if test else "egs.json"
-            _src = "/egstest" if test else "/egs"
+            _store = os.path.basename(_cfg["test_store" if test else "store"])
+            _src = _egs_cmd_label(kind, test=test)
             _egs_reply(
                 chat_id,
                 reply_mid,
@@ -4719,7 +4782,7 @@ def _process_egsreply_paste(chat_id: str, content: str = "", *, test: bool = Fal
             )
             return
         picker = maintenance.build_egsreply_picker_card(
-            entries, test=test, reply_to_message_id=reply_mid
+            entries, test=test, reply_to_message_id=reply_mid, kind=kind
         )
         _resp = send_message(
             chat_id,
@@ -4728,7 +4791,7 @@ def _process_egsreply_paste(chat_id: str, content: str = "", *, test: bool = Fal
             reply_to_message_id="",  # direct post
         )
         print(
-            f"[egsreply] picker sent test={test} n={len(entries)} "
+            f"[egsreply] picker sent kind={kind} test={test} n={len(entries)} "
             f"code={(_resp or {}).get('code')!r}",
             flush=True,
         )
@@ -4738,15 +4801,19 @@ def _process_egsreply_paste(chat_id: str, content: str = "", *, test: bool = Fal
 
 
 def _try_egs_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Optional[dict]:
-    """Synchronous card.callback for the ``/egs`` **Send Email** / **Cancel** buttons.
+    """Synchronous card.callback for the ``/egs`` | ``/sports`` **Send Email** / **Cancel**
+    buttons (both kinds share these callback keys).
 
     Reads the (possibly edited) title + content from the form, updates the card in place
     (buttons removed → no double-send), and sends the email in a background thread so we
-    stay within Lark's ~3s callback window.
+    stay within Lark's ~3s callback window. The mail ``kind`` rides on the button value as
+    ``g`` (absent → ``egs``), so a tapped card always routes to the recipients its command
+    chose.
     """
     k = str(parsed_ca.get("k") or "").strip().lower()
     if k not in ("egs_send", "egs_cancel", "egsreply_send", "egsreply_pick"):
         return None
+    kind = "sports" if str(parsed_ca.get("g") or "").strip().lower() == "sports" else "egs"
 
     # The card's own message_id — so we can DELETE the card (make it disappear) after the tap.
     ctx = ev_ca.get("context") if isinstance(ev_ca.get("context"), dict) else {}
@@ -4782,10 +4849,19 @@ def _try_egs_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Opt
             _recall_card()  # remove the picker
             try:
                 _post_egsreply_preview_card(
-                    chat_id_ca, pick_subject, pick_body, orig_mid, test=pick_test
+                    chat_id_ca,
+                    pick_subject,
+                    pick_body,
+                    orig_mid,
+                    test=pick_test,
+                    kind=kind,
                 )
             except Exception as ex:  # noqa: BLE001
-                _egs_reply(chat_id_ca, orig_mid, f"❌ `/egsreply` 打开编辑卡失败: `{ex}`")
+                _egs_reply(
+                    chat_id_ca,
+                    orig_mid,
+                    f"❌ `{_egs_cmd_label(kind, reply=True)}` 打开编辑卡失败: `{ex}`",
+                )
 
         threading.Thread(target=_pick_job, daemon=True).start()
         return {"toast": {"type": "info", "content": "Opening reply editor"}}
@@ -4824,11 +4900,11 @@ def _try_egs_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Opt
             if is_reply:
                 # `title` here is the subject to FIND; reply-all inside that email's thread.
                 info = _maint_mail.reply_egs_email(
-                    email_title=title, body=body, test=is_test
+                    email_title=title, body=body, test=is_test, kind=kind
                 )
                 _to = ", ".join(info.get("to") or [])
                 _cc = ", ".join(info.get("cc") or [])
-                _lbl = "/egsreplytest" if is_test else "/egsreply"
+                _lbl = _egs_cmd_label(kind, test=is_test, reply=True)
                 if info.get("threaded"):
                     _note = "（已在原邮件会话内回复）"
                 elif info.get("found"):
@@ -4842,27 +4918,38 @@ def _try_egs_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Opt
                     + (f"\n📄 抄送: {_cc}" if _cc else ""),
                 )
             elif is_test:
-                # /egstest — throwaway send to junchen@ (Cc om@), no QA/CS tag, not stored.
+                # /egstest | /sportstest — throwaway send to junchen@ (Cc om@), no QA/CS
+                # tag, recorded only in the kind's TEST store.
+                _cfg = _maint_mail.egs_kind_config(kind)
                 _maint_mail.send_egs_maintenance_email(
                     subject=title,
                     body=body,
                     append_signature=False,
-                    to_override=_maint_mail.EGS_TEST_REPLY_TO,
+                    to_override=_cfg["test_to"],
+                    kind=kind,
                 )
-                _cc = _maint_mail.EGS_TEST_REPLY_CC
+                _cc = _cfg["test_cc"]
                 _egs_reply(
                     chat_id_ca,
                     orig_mid,
-                    f"✅ `/egstest` 测试邮件已发送\n📌 主题: {title}\n"
-                    f"📧 收件: {_maint_mail.EGS_TEST_REPLY_TO}"
+                    f"✅ `{_egs_cmd_label(kind, test=True)}` 测试邮件已发送\n"
+                    f"📌 主题: {title}\n"
+                    f"📧 收件: {_cfg['test_to']}"
                     + (f"\n📄 抄送: {_cc}" if _cc else ""),
                 )
             else:
                 # Body already includes the signature (shown/edited in the card) → don't re-append.
                 _maint_mail.send_egs_maintenance_email(
-                    subject=title, body=body, append_signature=False
+                    subject=title, body=body, append_signature=False, kind=kind
                 )
-                _egs_reply(chat_id_ca, orig_mid, f"✅ `/egs` 邮件已发送\n📌 主题: {title}")
+                _to_disp, _cc_disp = maintenance.egs_recipients_display(kind)
+                _egs_reply(
+                    chat_id_ca,
+                    orig_mid,
+                    f"✅ `{_egs_cmd_label(kind)}` 邮件已发送\n📌 主题: {title}\n"
+                    f"📧 收件: {_to_disp}"
+                    + (f"\n📄 抄送: {_cc_disp}" if _cc_disp and _cc_disp != "-" else ""),
+                )
                 # @tag QA Support Team + CS to check the sent email — same pinned forward group
                 # (oc_9ffa9a…) as /m, via evo_batch_check_email_chat_id() (env-independent).
                 check_chat = maintenance.evo_batch_check_email_chat_id()
@@ -4877,10 +4964,7 @@ def _try_egs_card_response(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Opt
                         reply_to_message_id="",  # direct post to the QA/CS group, never a reply
                     )
         except Exception as ex:  # noqa: BLE001
-            if is_reply:
-                _lbl = "/egsreplytest" if is_test else "/egsreply"
-            else:
-                _lbl = "/egstest" if is_test else "/egs"
+            _lbl = _egs_cmd_label(kind, test=is_test, reply=is_reply)
             _egs_reply(chat_id_ca, orig_mid, f"❌ `{_lbl}` 失败: `{ex}`")
 
     threading.Thread(target=_send_job, daemon=True).start()
@@ -7038,12 +7122,14 @@ def lark_webhook():
             return _lark_im_done()
         _process_evo_sd_batch_paste(chat_id, email_text)
         return _lark_im_done()
-    elif cmd in ("/egs", "/egstest"):
-        # Pasted maintenance notice → editable card → Send. `/egs` → egs.maintenance@
-        # (Cc om@) + @QA/CS tag; `/egstest` → test send to junchen@ only.
+    elif cmd in _EGS_PASTE_COMMANDS:
+        # Pasted maintenance notice → editable card → Send.
+        #   `/egs`    → egs.maintenance@ (Cc om@)                      + @QA/CS tag
+        #   `/sports` → CS (Team) + Toby (Cc CP OM Duty + Allan Guo)   + @QA/CS tag
+        # `/egstest` / `/sportstest` → test send to junchen@ only.
         # Rebuild the body from ``original_text`` (keeps newlines, which ``clean_text``
         # collapses) and strip the leading command token + mentions.
-        _egs_test = cmd == "/egstest"
+        _egs_kind, _egs_test = _EGS_PASTE_COMMANDS[cmd]
         _egs_src = original_text or ""
         for _mk in mention_keys:
             _egs_src = _egs_src.replace(_mk, "")
@@ -7054,13 +7140,14 @@ def lark_webhook():
         _egs_src = _egs_src.strip()
         if _egs_src.startswith('"') and _egs_src.endswith('"'):
             _egs_src = _egs_src[1:-1].strip()
-        _process_egs_paste(chat_id, _egs_src, test=_egs_test)
+        _process_egs_paste(chat_id, _egs_src, test=_egs_test, kind=_egs_kind)
         return _lark_im_done()
-    elif cmd in ("/egsreply", "/egsreplytest"):
+    elif cmd in _EGS_REPLY_COMMANDS:
         # Show the picker so the user chooses which sent email to reply to; any text pasted
         # WITH the command becomes the reply body, pre-filled into the preview after picking.
         # Rebuild from ``original_text`` (keeps newlines, which ``clean_text`` collapses) and
-        # strip the leading command token + mentions. `/egsreplytest` → test address only.
+        # strip the leading command token + mentions. The `…test` variants → test address only.
+        _egr_kind, _egr_test = _EGS_REPLY_COMMANDS[cmd]
         _egr_src = original_text or ""
         for _mk in mention_keys:
             _egr_src = _egr_src.replace(_mk, "")
@@ -7074,7 +7161,7 @@ def lark_webhook():
         _egr_src = _egr_src.strip()
         if _egr_src.startswith('"') and _egr_src.endswith('"'):
             _egr_src = _egr_src[1:-1].strip()
-        _process_egsreply_paste(chat_id, _egr_src, test=cmd == "/egsreplytest")
+        _process_egsreply_paste(chat_id, _egr_src, test=_egr_test, kind=_egr_kind)
         return _lark_im_done()
     elif re.search(
         r"(?:^|\s)/(maintenance|maintenanceshort|ms)\s+",

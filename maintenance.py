@@ -5386,14 +5386,53 @@ def build_egs_email_subject(body: str, *, now: datetime | None = None) -> str:
     return f"{title} - {when.strftime('%d/%m/%Y')}"
 
 
-def _egs_recipients_display() -> tuple[str, str]:
-    """(To, Cc) addresses shown on the /egs preview card."""
+def egs_is_sports_kind(kind: str | None) -> bool:
+    """True for the ``/sports`` mail kind; everything else is the ``/egs`` kind."""
+    return (kind or "").strip().lower() == "sports"
+
+
+def _egs_join_addrs(pairs) -> str:
+    """``[(name, addr), …]`` → ``"Name <addr>, Other <addr>"`` (bare addr when unnamed)."""
+    out: list[str] = []
+    for name, addr in pairs or []:
+        name = (name or "").strip()
+        addr = str(addr or "").strip()
+        out.append(
+            f"{name} <{addr}>" if name and name.casefold() != addr.casefold() else addr
+        )
+    return ", ".join(p for p in out if p) or "-"
+
+
+def _egs_recipients_display(kind: str | None = "egs") -> tuple[str, str]:
+    """(To, Cc) addresses shown on the ``/egs`` | ``/sports`` preview card.
+
+    ``/sports`` has two To and two Cc recipients, so they render as a ``Name <addr>``
+    list; ``/egs`` keeps its single bare address per field (unchanged).
+    """
+    sports = egs_is_sports_kind(kind)
     try:
         import maintenance_mail as _mm
 
+        if sports:
+            return (
+                _egs_join_addrs(_mm.SPORTS_MAIL_TO),
+                _egs_join_addrs(_mm.SPORTS_MAIL_CC),
+            )
         return _mm.EGS_MAIL_TO, _mm.EGS_MAIL_CC
     except Exception:
+        if sports:
+            return (
+                "CS (Team) <cs@igo.email>, Toby <toby@igo.ph>",
+                "CP OM Duty <om@hotelstotsenberg.com>, Allan Guo <allan.guo001@igo.ph>",
+            )
         return "egs.maintenance@om.hotelstotsenberg.com", "om@hotelstotsenberg.com"
+
+
+def egs_recipients_display(kind: str | None = "egs") -> tuple[str, str]:
+    """(To, Cc) as shown for this mail kind — public form of
+    :func:`_egs_recipients_display`, used by the ``/egs`` | ``/sports``
+    "paste something" prompt and the send confirmation."""
+    return _egs_recipients_display(kind)
 
 
 def build_egs_preview_card(
@@ -5401,13 +5440,14 @@ def build_egs_preview_card(
     body: str,
     reply_to_message_id: str = "",
     *,
-    header_title: str = "📧 EGS 维护邮件预览 / Review before sending",
+    header_title: str | None = None,
     title_label: str = "标题 Title",
     title_placeholder: str = "Email subject",
     send_key: str = "egs_send",
     send_label: str = "✅ 发送 / Send Email",
     info_md: str | None = None,
     extra_send_val: dict | None = None,
+    kind: str | None = "egs",
 ) -> dict:
     """Editable preview: Title + Content inputs (pre-filled) + Send / Cancel buttons.
 
@@ -5415,16 +5455,30 @@ def build_egs_preview_card(
     title/content ride back in the form values. **Cancel** (``k=egs_cancel``) sends nothing.
     ``reply_to_message_id`` (the user's original message) rides in the button values as
     ``m`` so the confirmation can quote it. ``extra_send_val`` merges into the Send button
-    value (e.g. ``{"t": "1"}`` to flag a test). Reused by ``/egs`` and ``/egsreply``.
+    value (e.g. ``{"t": "1"}`` to flag a test).
+
+    ``kind`` picks the recipients shown in the default info line and rides back on the Send
+    button as ``g`` (only for ``sports`` — an ``/egs`` card's button value is unchanged), so
+    the callback routes the send to the right mailbox. Reused by ``/egs``, ``/egsreply``,
+    ``/sports`` and ``/sportsreply``.
     """
+    sports = egs_is_sports_kind(kind)
+    if not header_title:
+        header_title = (
+            "📧 SPORTS 维护邮件预览 / Review before sending"
+            if sports
+            else "📧 EGS 维护邮件预览 / Review before sending"
+        )
     # Feishu card inputs cap max_length at 1000 — keep both the property AND the
     # pre-filled default_value within it or the whole card is rejected (ErrCode 11310).
     subject = (subject or "").strip()[:300]
     body = (body or "").strip()
     body_input = body[:1000]
-    to_disp, cc_disp = _egs_recipients_display()
+    to_disp, cc_disp = _egs_recipients_display(kind)
     _mid = (reply_to_message_id or "").strip()
     send_val = {"k": send_key}
+    if sports:
+        send_val["g"] = "sports"  # routes the callback to the /sports recipients
     cancel_val = {"k": "egs_cancel"}
     if _mid:
         send_val["m"] = _mid
@@ -5537,13 +5591,19 @@ def build_egsreply_picker_card(
     *,
     test: bool = False,
     reply_to_message_id: str = "",
+    kind: str | None = "egs",
 ) -> dict:
-    """``/egsreply`` picker: one button per recent ``/egs`` sent email (from ``egs.json``).
+    """Reply picker: one button per recent sent email from this ``kind``'s store
+    (``egs.json`` / ``egstest.json`` for ``/egsreply``, ``sports.json`` /
+    ``sportstest.json`` for ``/sportsreply``).
 
     Tapping a button (``k=egsreply_pick``, full subject in ``s``) opens the editable
-    reply preview for that email. ``t=1`` marks the test flow (reply → junchen@ only).
+    reply preview for that email. ``t=1`` marks the test flow (reply → junchen@ only) and
+    ``g=sports`` marks the ``/sports`` kind.
     """
     _mid = (reply_to_message_id or "").strip()
+    sports = egs_is_sports_kind(kind)
+    _src_cmd = ("/sports" if sports else "/egs") + ("test" if test else "")
     elements: list[dict] = [
         {
             "tag": "div",
@@ -5551,7 +5611,7 @@ def build_egsreply_picker_card(
                 "tag": "lark_md",
                 "content": (
                     ("🧪 **测试模式** — 回复只发到 junchen@snsoft.my。\n" if test else "")
-                    + "点击要回复的邮件（按 `/egs` 发送记录，最新在前）："
+                    + f"点击要回复的邮件（按 `{_src_cmd}` 发送记录，最新在前）："
                 ),
             },
         }
@@ -5567,6 +5627,8 @@ def build_egsreply_picker_card(
         val = {"k": "egsreply_pick", "s": subj}
         if test:
             val["t"] = "1"
+        if sports:
+            val["g"] = "sports"
         if _mid:
             val["m"] = _mid
         elements.append(
