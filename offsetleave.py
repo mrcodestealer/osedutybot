@@ -4415,6 +4415,12 @@ def notify_offset_direct_delete_restored(restored: list[dict[str, Any]]) -> None
     """Tell every offset approver that a direct delete was undone."""
     if not restored:
         return
+    # This card IS the deletion notice — it reports the delete AND the restore in one
+    # message. Claim the old record_ids so ``scan_bitable_offsets_for_deletion_notify``
+    # (which runs right after the guard) does not also DM a bare "deleted, operator
+    # could not be determined", which this card would immediately contradict.
+    for _r in restored:
+        _mark_offset_deletion_notified(str(_r.get("old_record_id") or "").strip())
     card = build_offset_direct_delete_card(restored)
     payload = json.dumps(card, ensure_ascii=False)
     for oid in sorted(OFFSET_APPROVER_OPEN_IDS):

@@ -2623,6 +2623,28 @@ def poll_offset_approver_notifications_from_bitable():
                 f"(scanned {(wiki or {}).get('scanned')})",
                 flush=True,
             )
+        import ose_Duty as od
+
+        # Offsets must be removed through the bot menu. A row deleted straight from
+        # the Base is restored here and the approvers are told who to ask.
+        # Runs BEFORE "deletion notify" so a restored row is announced once, as
+        # "deleted but already restored", instead of a "deleted" DM that the
+        # restore card then contradicts. Also before the shift-sheet scans, so a
+        # restored row is re-applied in the same pass rather than looking deleted.
+        import offsetleave as _ol_guard
+
+        _guard = _poll_step(
+            "offset guard (restore direct deletes)",
+            od.scan_restore_directly_deleted_offsets,
+            notify=_ol_guard.notify_offset_direct_delete_restored,
+        )
+        _n_restored = len((_guard or {}).get("restored") or [])
+        if _n_restored:
+            print(
+                f"[ose_Duty] offset guard: restored {_n_restored} directly-deleted offset(s)",
+                flush=True,
+            )
+
         dele = _poll_step("deletion notify", ol.scan_bitable_offsets_for_deletion_notify)
         dn = int((dele or {}).get("notified") or 0)
         if dn:
@@ -2641,26 +2663,6 @@ def poll_offset_approver_notifications_from_bitable():
                 f"[offsetleave] approval poll: notified {rn} requester(s), {pn} peer approver(s)",
                 flush=True,
             )
-        import ose_Duty as od
-
-        # Offsets must be removed through the bot menu. A row deleted straight from
-        # the Base is restored here and the approvers are told who to ask. Runs
-        # BEFORE the shift-sheet scans so a restored row is re-applied in the same
-        # pass rather than briefly looking deleted.
-        import offsetleave as _ol_guard
-
-        _guard = _poll_step(
-            "offset guard (restore direct deletes)",
-            od.scan_restore_directly_deleted_offsets,
-            notify=_ol_guard.notify_offset_direct_delete_restored,
-        )
-        _n_restored = len((_guard or {}).get("restored") or [])
-        if _n_restored:
-            print(
-                f"[ose_Duty] offset guard: restored {_n_restored} directly-deleted offset(s)",
-                flush=True,
-            )
-
         sh = _poll_step(
             "offset → shift sheet apply", od.scan_bitable_approved_offsets_for_shift_sheet
         )
