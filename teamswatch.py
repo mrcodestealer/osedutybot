@@ -3981,6 +3981,9 @@ def main(argv: list[str] | None = None) -> int:
         import detectevomaintenance as _evom
 
         msg = res["messages"][-1]
+        # force_card never auto-generates, even with EVOTEAMS_AUTO_EMAIL on:
+        # --detect-now answers "does the detector see it?", and answering that
+        # by emailing EVO would be a poor trade. The card keeps its button.
         status = _evom.force_card(group=res.get("group"), message=msg)
         print(f"\ndetection status: {status}")
         if status == "duplicate":

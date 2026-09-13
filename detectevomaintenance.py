@@ -24,8 +24,13 @@ every scraped row to handle_new_messages():
         to card these anyway)
      -> advance the cursor — except after a failed card post, where it is held
         back deliberately so the next poll retries
+  -> AUTO (EVOTEAMS_AUTO_EMAIL, on by default) -> a ※SD※ notice needs no tap:
+     the card is posted WITHOUT buttons and the same claim + /m run starts
+     immediately, ending on "EVO maintenance — Email generated". Soft matches are
+     never auto-sent. Set EVOTEAMS_AUTO_EMAIL=0 for the tap-first behaviour.
   -> Generate Email -> claim pending->sending (one tap only, ever), buttons come
-     off, then main._process_evo_sd_batch_paste() == what typing `/m` does. The
+     off, then main._process_evo_sd_batch_paste() == what typing `/m` does. Both
+     routes converge on start_generate(), so auto and tap cannot diverge. The
      ledger records ``emailed`` only if a mail actually went out; otherwise the
      buttons come BACK and the group is told why.
   -> Cancel        -> the ledger records ``cancelled``, nothing is sent. Refused
@@ -122,6 +127,21 @@ def _soft_cards_enabled() -> bool:
     only reason not to have this on.
     """
     return _truthy(os.getenv("EVOTEAMS_SOFT_CARDS"))
+
+
+def _auto_email_enabled() -> bool:
+    """Generate the email on detection, with no **Generate Email** tap?
+
+    ON by default, but only ever reachable when ``EVOTEAMS_ENABLED`` is already
+    set, so this file still changes nothing on its own. Set
+    ``EVOTEAMS_AUTO_EMAIL=0`` to go back to a card that waits for a tap.
+
+    Auto-send applies to ``/m``-ready (``※SD-xxxxx※``) notices ONLY. A soft match
+    is never auto-sent: ``/m`` would refuse it, and guessing on a format ``/m``
+    does not accept is exactly what should stay in front of a human.
+    """
+    return str(os.getenv("EVOTEAMS_AUTO_EMAIL", "1")).strip().lower() not in (
+        "0", "false", "no", "off", "n")
 
 
 def _dry_run() -> bool:
@@ -469,14 +489,22 @@ def _preview(text: str) -> str:
 
 
 def build_card(key: str, *, group: str, sender: str, text: str,
-               m_ready: bool, why: str, when: str = "") -> dict[str, Any]:
+               m_ready: bool, why: str, when: str = "",
+               auto: bool = False) -> dict[str, Any]:
     """Schema-2.0 card with Generate Email / Cancel.
+
+    ``auto=True`` drops both buttons: the email is already being generated, so a
+    live **Generate Email** would be a button whose only possible outcome is the
+    "already sending" toast. The buttons come BACK via :func:`_restore_card` if
+    the run sends nothing, which is what keeps the retry path in auto mode.
 
     The notice text is NOT carried in the button values — it can be thousands of
     characters. Buttons carry only ``key``; the text is read back from the
     ledger, which is also what lets a tap survive a service restart.
     """
     note = (
+        "⏳ **Auto-generating the email now** — no tap needed."
+        if auto else
         "Tap **Generate Email** to send it exactly as `/m` would."
         if m_ready else
         "⚠️ This is **not** in `※SD-xxxxx※` batch format, so `/m` will refuse it. "
@@ -496,7 +524,9 @@ def build_card(key: str, *, group: str, sender: str, text: str,
         {"tag": "div", "text": {"tag": "lark_md", "content": _preview(text)}},
         {"tag": "hr"},
         {"tag": "div", "text": {"tag": "lark_md", "content": note}},
-        {
+    ]
+    if not auto:
+        elements.append({
             "tag": "column_set",
             "columns": [
                 {"tag": "column", "elements": [{
@@ -514,15 +544,14 @@ def build_card(key: str, *, group: str, sender: str, text: str,
                                    "value": {"k": "evom_cancel", "i": key}}],
                 }]},
             ],
-        },
-    ]
+        })
     return {
         "schema": "2.0",
         # update_multi is required or an in-place update may not reach every
         # viewer (repo convention, 50+ occurrences).
         "config": {"update_multi": True, "width_mode": "fill"},
         "header": {
-            "template": "orange" if m_ready else "yellow",
+            "template": "blue" if auto else ("orange" if m_ready else "yellow"),
             "title": {"tag": "plain_text",
                       "content": "Detected new EVO maintenance message in group"},
         },
@@ -531,8 +560,8 @@ def build_card(key: str, *, group: str, sender: str, text: str,
 
 
 def _post_card_and_thread(key: str, *, group: str, sender: str, text: str,
-                          m_ready: bool, why: str,
-                          when: str = "") -> Optional[str]:
+                          m_ready: bool, why: str, when: str = "",
+                          auto: bool = False) -> Optional[str]:
     """Post the card, then thread the raw notice underneath it.
 
     Order matters: the CARD is the standalone parent and the notice is a TEXT
@@ -542,7 +571,7 @@ def _post_card_and_thread(key: str, *, group: str, sender: str, text: str,
     import main as _main
 
     card = build_card(key, group=group, sender=sender, text=text,
-                      m_ready=m_ready, why=why, when=when)
+                      m_ready=m_ready, why=why, when=when, auto=auto)
     # reply_to_message_id="" is mandatory: left at None, send_message silently
     # turns this into a quote-reply to whatever inbound message is in the
     # _lark_user_message_id contextvar (main.py:1904).
@@ -629,18 +658,24 @@ def in_watched_group(group: str) -> bool:
 
 def handle_teams_message(*, group: str, message_id: str, text: str,
                          sender: str = "", ts: Any = None,
-                         force: bool = False) -> str:
+                         force: bool = False,
+                         auto: Optional[bool] = None) -> str:
     """Process one Teams message.
 
-    Returns a status string — ``"carded"``, ``"duplicate"``, ``"not_notice"``,
-    ``"soft_skipped"``, ``"dry_run"``, ``"card_failed"``, ``"disabled"``,
-    ``"wrong_group"`` or ``"empty"``. A string rather than a bool because the poll
+    Returns a status string — ``"carded"``, ``"auto_emailing"``, ``"duplicate"``,
+    ``"not_notice"``, ``"soft_skipped"``, ``"dry_run"``, ``"card_failed"``,
+    ``"disabled"``, ``"wrong_group"`` or ``"empty"``. A string rather than a bool because the poll
     needs to tell "nothing to do" apart from "a notice we chose not to card":
     only the second is worth surfacing on /teamstatus.
 
     ``force`` is the ``--detect-now`` path: it skips the enabled gate and the
     group check so a card can be produced on demand for testing. It still honours
     the ledger, so testing can never send the same maintenance email twice.
+
+    ``auto`` overrides ``EVOTEAMS_AUTO_EMAIL`` for this one message: ``False``
+    always waits for a tap, ``True`` always generates, ``None`` follows the env.
+    ``force_card`` passes ``False`` — running ``--detect-now`` to check the
+    detector must not put a maintenance email in front of EVO.
     """
     if not force and not _enabled():
         return "disabled"
@@ -690,6 +725,13 @@ def handle_teams_message(*, group: str, message_id: str, text: str,
               flush=True)
         return "dry_run"
 
+    # Auto-send only for a notice /m can actually accept. A soft match reaching
+    # this point (EVOTEAMS_SOFT_CARDS=1) still gets the manual card, because /m
+    # would refuse it and an auto run would only produce a red card.
+    auto_send = bool(verdict["m_ready"]) and (
+        _auto_email_enabled() if auto is None else bool(auto)
+    )
+
     # Stored before the card goes out: the button reads the text back from here,
     # so it must exist even if the process dies immediately after posting.
     record(key, outcome="pending", group=group, sender=sender,
@@ -700,7 +742,7 @@ def handle_teams_message(*, group: str, message_id: str, text: str,
     card_mid = _post_card_and_thread(
         key, group=group, sender=sender, text=body,
         m_ready=bool(verdict["m_ready"]), why=verdict["why"],
-        when=str(ts or ""),
+        when=str(ts or ""), auto=auto_send,
     )
     if not card_mid:
         # Leave it pending but flag it, so a failed post is visible instead of
@@ -710,6 +752,20 @@ def handle_teams_message(*, group: str, message_id: str, text: str,
 
     record(key, card_message_id=card_mid)
     print(f"[evoteams] card posted for {key} -> {CARD_CHAT_ID}", flush=True)
+
+    if auto_send:
+        # Claim pending->sending HERE, exactly as the button does. The card is
+        # live for the instant between the post and this claim, and a tap that
+        # lands in that instant loses the claim and is told "already sending"
+        # instead of running /m a second time.
+        if not claim(key, frm=("pending",), to="sending"):
+            print(f"[evoteams] auto-generate skipped for {key} — no longer pending",
+                  flush=True)
+            return "carded"
+        print(f"[evoteams] auto-generating email for {key} (no tap needed)",
+              flush=True)
+        start_generate(key, card_mid, body, auto=True)
+        return "auto_emailing"
     return "carded"
 
 
@@ -746,8 +802,8 @@ def handle_new_messages(*, group: str, messages: list[dict[str, Any]],
     processed OLDEST FIRST so the stored cursor lands on the newest even if a
     middle message throws.
     """
-    out: dict[str, Any] = {"new": 0, "cards": 0, "soft": 0, "baselined": False,
-                           "why": ""}
+    out: dict[str, Any] = {"new": 0, "cards": 0, "soft": 0, "auto": 0,
+                           "baselined": False, "why": ""}
     if not _enabled():
         out["why"] = "EVOTEAMS_ENABLED not set"
         return out
@@ -845,14 +901,20 @@ def handle_new_messages(*, group: str, messages: list[dict[str, Any]],
         set_last_seen(group, str(msg.get("mid") or ""),
                       msg.get("time") or msg.get("time_text"))
     out["why"] = (f"{out['new']} new, {out['cards']} carded"
+                  + (f" ({out['auto']} auto-emailing)" if out.get("auto") else "")
                   + (f", {out['soft']} notice-shaped but uncarded" if out["soft"]
                      else ""))
     return out
 
 
 def _tally(out: dict[str, Any], status: str) -> None:
-    if status == "carded":
+    # "auto_emailing" counts as a card too — the card IS posted, it just never
+    # waits for a tap. Counting only "carded" would make /teamstatus report 0
+    # cards on a fully working auto run.
+    if status in ("carded", "auto_emailing"):
         out["cards"] = int(out.get("cards") or 0) + 1
+    if status == "auto_emailing":
+        out["auto"] = int(out.get("auto") or 0) + 1
     elif status == "soft_skipped":
         out["soft"] = int(out.get("soft") or 0) + 1
 
@@ -862,6 +924,11 @@ def force_card(*, group: str | None = None, message: dict[str, Any]) -> str:
 
     Bypasses the enabled flag and the baseline, NOT the ledger — so it can be run
     twice without any risk of two maintenance emails for one notice.
+
+    Never auto-generates, whatever ``EVOTEAMS_AUTO_EMAIL`` says: this is the
+    by-hand "is the detector seeing it?" check, and it would be a poor trade to
+    answer that question by emailing EVO. The card it posts still has its
+    **Generate Email** button.
     """
     return handle_teams_message(
         group=group or WATCH_GROUP,
@@ -870,6 +937,7 @@ def force_card(*, group: str | None = None, message: dict[str, Any]) -> str:
         sender=str(message.get("author") or ""),
         ts=message.get("time") or message.get("time_text"),
         force=True,
+        auto=False,
     )
 
 
@@ -931,9 +999,36 @@ def handle_card_callback(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Optio
         now = str(get_record(key).get("outcome") or "?")
         return {"toast": {"type": "info", "content": f"Already {now} — nothing to do."}}
 
-    def _gen_job() -> None:
+    start_generate(key, card_mid, text, auto=False)
+    return {"toast": {"type": "success", "content": "Generating email…"}}
+
+
+# One /m run at a time. A burst of notices inside a single poll would otherwise
+# start several pipelines together — concurrent SMTP sends plus three Lark posts
+# each, interleaved — and a tap landing while auto is mid-run would join them.
+_GEN_LOCK = threading.Lock()
+
+
+def start_generate(key: str, card_mid: str, text: str, *, auto: bool) -> None:
+    """Spawn the `/m` run for an ALREADY-CLAIMED notice.
+
+    The caller must have won ``claim(key, frm=("pending",), to="sending")`` first.
+    That claim, not anything in here, is what stops one notice producing two
+    maintenance emails — whether the second trigger is Lark redelivering a tap or
+    auto mode racing a human finger.
+    """
+    threading.Thread(target=_generate_email_job, args=(key, card_mid, text),
+                     kwargs={"auto": auto}, daemon=True).start()
+
+
+def _generate_email_job(key: str, card_mid: str, text: str, *,
+                        auto: bool) -> None:
+    """Run `/m` for one claimed notice and settle its card. Never raises."""
+    how = "auto" if auto else "tap"
+    with _GEN_LOCK:
         # Buttons off first, not last: they used to stay live for the whole
-        # pipeline, inviting the impatient second tap.
+        # pipeline, inviting the impatient second tap. In auto mode the card is
+        # posted without them, and this just moves it to "Generating email…".
         _finish_card(card_mid, key, "Generating email…")
         try:
             import main as _main
@@ -945,8 +1040,9 @@ def handle_card_callback(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Optio
             # _process_evo_sd_batch_paste refuses it.
             out = _main._process_evo_sd_batch_paste(CARD_CHAT_ID, text) or {}
             if out.get("email_sent"):
-                record(key, outcome="emailed")
+                record(key, outcome="emailed", generated_by=how)
                 _finish_card(card_mid, key, "Email generated")
+                print(f"[evoteams] {how}: email generated for {key}", flush=True)
                 return
             # No mail went out. Recording "emailed" here — which is what merely
             # returning used to mean — greened the card AND made already_handled
@@ -957,14 +1053,11 @@ def handle_card_callback(parsed_ca: dict, ev_ca: dict, chat_id_ca: str) -> Optio
             _notify(f"⚠️ No EVO maintenance email was sent for `{key}`: {reason}\n"
                     f"The card's **Generate Email** button is live again.")
         except Exception as err:  # noqa: BLE001
-            print(f"[evoteams] generate email failed: {err!r}", flush=True)
+            print(f"[evoteams] {how} generate email failed: {err!r}", flush=True)
             record(key, outcome="pending", last_error=repr(err))
             _restore_card(card_mid, key, repr(err))
             _notify(f"❌ EVO maintenance email failed for `{key}`: `{err}`\n"
                     f"The card's **Generate Email** button is live again.")
-
-    threading.Thread(target=_gen_job, daemon=True).start()
-    return {"toast": {"type": "success", "content": "Generating email…"}}
 
 
 def _notify(text: str) -> None:
@@ -1084,6 +1177,12 @@ def status_lines() -> list[str]:
     if _dry_run():
         lines.append("🧪 DRY RUN: EVOTEAMS_DRY_RUN=1 — detects and logs, posts "
                      "NOTHING. Clear it to start carding.")
+    lines.append(
+        "⚡ Auto-generate: ON — a ※SD※ notice is emailed on detection, "
+        "no tap (EVOTEAMS_AUTO_EMAIL=0 to require the button)"
+        if _auto_email_enabled() else
+        "✋ Auto-generate: OFF — every notice waits for a **Generate Email** tap"
+    )
     lines.append(
         "• Cards for: ※SD※ batch notices only"
         + ("" if not _soft_cards_enabled() else " + soft matches (EVOTEAMS_SOFT_CARDS=1)")

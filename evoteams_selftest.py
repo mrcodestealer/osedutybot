@@ -20,6 +20,10 @@ guarantee the rest of the design leans on:
   * a failed card post HOLDS THE CURSOR BACK so the next poll retries
   * a read that did not reach the end of the chat is refused outright
   * the cursor never regresses
+  * with EVOTEAMS_AUTO_EMAIL on (the default) a ※SD※ notice is emailed on
+    detection with no tap, the card has no buttons, and a re-poll does not email
+    a second time
+  * a soft match is never auto-emailed, even when it is carded
   * two taps of [Generate Email] send the email exactly ONCE
   * a /m run that emailed nothing leaves the notice retryable, not green
   * Cancel is refused once a send is already in flight
@@ -209,12 +213,36 @@ def check(name: str, cond: bool, detail: str = "") -> None:
     RESULTS.append((bool(cond), name, detail))
 
 
+def _wait(pred, limit: int = 80) -> bool:
+    """Wait for an observable SIDE EFFECT, not for the ledger.
+
+    Both settle paths in _generate_email_job write the record FIRST and only then
+    patch the card and post to the group:
+
+        record(key, outcome="emailed", ...)   /   record(key, outcome="pending", ...)
+        _finish_card(...)                     /   _restore_card(...) + _notify(...)
+
+    So a wait that stops at the outcome (or at last_error) can legitimately observe
+    the card and the group before either has happened. Every assertion about a
+    patch or a posted message waits on that patch or message instead.
+    """
+    import time as _t
+    for _ in range(limit):
+        if pred():
+            return True
+        _t.sleep(0.05)
+    return False
+
+
 def run() -> None:
     import os
 
     os.environ["EVOTEAMS_ENABLED"] = "1"
     os.environ.pop("EVOTEAMS_SOFT_CARDS", None)
     os.environ.pop("EVOTEAMS_DRY_RUN", None)
+    # Cases 1-15 cover the TAP path, which is now the non-default mode. Auto is
+    # exercised by case 16, which turns it back on.
+    os.environ["EVOTEAMS_AUTO_EMAIL"] = "0"
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -385,11 +413,10 @@ def run() -> None:
         h7.m_result = {"ok": True, "email_sent": False,
                        "reason": "no CP-launched games in the notice"}
         h7.tap(key)
-        for _ in range(40):
-            if h7.evom.get_record(key).get("last_error"):
-                break
-            import time as _t
-            _t.sleep(0.05)
+        _wait(lambda: h7.evom.get_record(key).get("last_error"))
+        _wait(lambda: bool(h7.texts)
+              and any('"tag": "button"' in json.dumps(pt["card"])
+                      for pt in h7.patches))
         rec = h7.evom.get_record(key)
         check("a /m run that sent NO email is not recorded as emailed",
               rec.get("outcome") == "pending", f"outcome={rec.get('outcome')}")
@@ -516,6 +543,107 @@ def run() -> None:
                 tw._yield_requested = real_yield
         finally:
             tw._read_on_page = real_read_on_page
+
+        # -- 16. AUTO mode: no tap at all --------------------------------
+        os.environ.pop("EVOTEAMS_AUTO_EMAIL", None)      # default = ON
+
+        def _settle(h, key, want=("emailed", "pending"), limit=60):
+            import time as _t
+            for _ in range(limit):
+                if h.evom.get_record(key).get("outcome") in want:
+                    return
+                _t.sleep(0.05)
+
+        h12 = Harness(tmp / "l")
+        (tmp / "l").mkdir()
+        h12.poll([_row("1000", CHATTER)])                   # baseline
+        out = h12.poll([_row("2000", BATCH_NOTICE)])
+        key = h12.evom.content_key(BATCH_NOTICE)
+        _settle(h12, key)
+        check("auto: a ※SD※ notice is emailed with NO tap",
+              len(h12.m_runs) == 1 and h12.m_runs[0].strip() == BATCH_NOTICE.strip(),
+              f"runs={len(h12.m_runs)}")
+        check("auto: the notice is recorded emailed, marked auto",
+              h12.evom.get_record(key).get("outcome") == "emailed"
+              and h12.evom.get_record(key).get("generated_by") == "auto",
+              json.dumps({k: v for k, v in h12.evom.get_record(key).items()
+                          if k in ("outcome", "generated_by")}))
+        check("auto: the card carries NO buttons to tap",
+              '"tag": "button"' not in json.dumps(h12.cards[0]["card"]),
+              json.dumps(h12.cards[0]["card"])[:160])
+        check("auto: the full notice is still threaded under the card",
+              h12.replies and h12.replies[0][0] == h12.cards[0]["mid"]
+              and BATCH_NOTICE.strip() in h12.replies[0][1])
+        # Wait on the PATCH, not the record: _generate_email_job records
+        # outcome="emailed" one line BEFORE it patches the card, so settling on
+        # the ledger alone can read the card while it still says "Generating".
+        _wait(lambda: bool(h12.patches)
+              and h12.patch_header() == "EVO maintenance — Email generated")
+        check("auto: the card ends on \"Email generated\"",
+              h12.patch_header() == "EVO maintenance — Email generated",
+              h12.patch_header())
+        check("auto: the poll reports it as carded AND auto",
+              out["cards"] == 1 and out.get("auto") == 1, f"out={out}")
+
+        # the dedupe that matters most: nothing may email EVO twice for one notice.
+        # Two separate guards, so both are pinned: the CURSOR (same mid re-served)
+        # and the CONTENT KEY (same notice re-posted under a NEW mid, which is the
+        # only one of the two that can stop a genuine repost).
+        h12.poll([_row("2000", BATCH_NOTICE)])
+        _settle(h12, key)
+        check("auto: re-polling the same row does NOT email again (cursor)",
+              len(h12.m_runs) == 1, f"runs={len(h12.m_runs)}")
+        out_re = h12.poll([_row("3000", BATCH_NOTICE)])
+        _settle(h12, key)
+        import time as _t0
+        _t0.sleep(0.2)
+        check("auto: the SAME notice re-posted under a new mid does NOT email "
+              "again (content key)",
+              len(h12.m_runs) == 1 and out_re["cards"] == 0
+              and not out_re.get("auto"),
+              f"runs={len(h12.m_runs)} out={out_re}")
+
+        # a stray tap on the finished card still cannot re-send
+        late = json.dumps(h12.tap(key, card_mid="om_fake1"))
+        check("auto: a tap on the finished card is refused", "nothing to do" in late,
+              late)
+
+        # an auto run that sent nothing must come back as a tappable retry
+        h13 = Harness(tmp / "m")
+        (tmp / "m").mkdir()
+        h13.m_result = {"ok": True, "email_sent": False,
+                        "reason": "no CP-launched games in the notice"}
+        h13.poll([_row("1000", CHATTER)])
+        h13.poll([_row("2000", BATCH_NOTICE)])
+        key13 = h13.evom.content_key(BATCH_NOTICE)
+        _settle(h13, key13, want=("pending",))
+        _wait(lambda: bool(h13.texts)
+              and any('"tag": "button"' in json.dumps(pt["card"])
+                      for pt in h13.patches))
+        check("auto: a run that emailed nothing leaves it pending",
+              h13.evom.get_record(key13).get("outcome") == "pending",
+              str(h13.evom.get_record(key13).get("outcome")))
+        check("auto: ...and puts the Generate Email button BACK",
+              any('"tag": "button"' in json.dumps(p["card"]) for p in h13.patches),
+              json.dumps([p["card"]["header"]["title"]["content"]
+                          for p in h13.patches]))
+        check("auto: ...and says why in the group",
+              any("No EVO maintenance email was sent" in t for _c, t in h13.texts))
+
+        # a soft match is never auto-sent: /m would refuse the format
+        os.environ["EVOTEAMS_SOFT_CARDS"] = "1"
+        h14 = Harness(tmp / "n")
+        (tmp / "n").mkdir()
+        h14.poll([_row("1000", CHATTER)])
+        h14.poll([_row("2000", SOFT_NOTICE)])
+        import time as _t
+        _t.sleep(0.3)
+        check("auto: a non-※SD※ soft match is NOT auto-emailed",
+              not h14.m_runs and len(h14.cards) == 1, f"runs={len(h14.m_runs)}")
+        check("auto: ...it gets the manual buttons instead",
+              '"tag": "button"' in json.dumps(h14.cards[0]["card"]))
+        os.environ.pop("EVOTEAMS_SOFT_CARDS", None)
+        os.environ["EVOTEAMS_AUTO_EMAIL"] = "0"
 
         # -- 15. wrong group is ignored ----------------------------------
         h10 = Harness(tmp / "j")
