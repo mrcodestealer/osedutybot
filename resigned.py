@@ -4,26 +4,35 @@ Resigned Member list — read + write.
 Source of truth is the ``Resigned Member`` Bitable table (Name + Status), kept by hand:
 https://casinoplus.sg.larksuite.com/base/CpdEbEofwaYyyEsSjlElKNxzgec?table=tblQHimmQDEIlQ9n
 
-Automatic detection is deliberately NOT attempted. Probing 2026-09-16 showed every
-available Lark signal is unusable for this org:
+Detection (``--sync``) is a HELPER, not a source of truth. It can only ever find people
+whose Lark account still exists, and it finds them two ways:
 
-* ``contact/v3`` ``status.is_resigned`` is false for all 194 in-scope users — Lark drops
-  a resigned user from their departments rather than flagging them.
-* ``status.is_frozen`` covers 22 accounts but mixes in shared/service accounts, and the
-  org's own "Lark Account Renewal Review Guidelines" states an employee may resign while
-  "the account has not yet been deactivated".
-* Absence-from-directory cannot be used either: only 2 of 235 leave-calendar names match
-  the directory at all, because the app's contact scope and the company leave calendar
-  cover different populations.
+* ``name_suffix`` — HR renames a departing account to ``<Full Name>_Resigned``. Explicit
+  and deliberate, so these are written with ``Status=Resigned`` directly. 7 real people
+  as of 2026-09-17.
+* ``frozen`` — ``status.is_frozen``. Weak: 10 of the 22 frozen accounts share one join
+  date and look like shared/service accounts, and the org's own "Lark Account Renewal
+  Review Guidelines" describes employees who resign while "the account has not yet been
+  deactivated". Written with ``Status`` BLANK so a human confirms before anything is
+  hidden. Note the two signals barely overlap — only 1 account is both.
 
-So a human maintains the table and the bot reads it. Reads are cached for
-``RESIGNED_CACHE_TTL`` seconds (default 300) so the list stays current without
-re-fetching on every command.
+What detection CANNOT do, and why the table still needs people added by hand: Lark removes
+a resigned user from their departments, so they vanish from ``contact/v3`` entirely.
+``status.is_resigned`` is therefore false for all 194 in-scope users, and a fully-removed
+person has no account left to carry a suffix or a frozen flag. Zi Yang is the worked
+example — confirmed resigned, absent from the directory, yet still holding three leave
+rows on the company calendar. Absence itself is not usable as a signal either: only 2 of
+235 leave-calendar names match the directory at all, because the app's contact scope and
+the company leave calendar cover different populations.
+
+Reads are cached for ``RESIGNED_CACHE_TTL`` seconds (default 300) so the list stays
+current without re-fetching on every command.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 from typing import Any, Optional
@@ -154,19 +163,33 @@ def filter_rows(
 
     by_key: dict[str, set[str]] = {}
     for nm in row_names:
-        by_key.setdefault(od._name_key(nm), set()).add(nm)
+        by_key.setdefault(_key(nm), set()).add(nm)
 
     targets: set[str] = set()
     ambiguous: list[str] = []
     for entry in pool:
-        exact = by_key.get(od._name_key(entry)) or set()
+        exact = by_key.get(_key(entry)) or set()
         if len(exact) == 1:
             targets |= exact
             continue
         if len(exact) > 1:
             ambiguous.append(entry)
             continue
-        fuzzy = {nm for nm in row_names if od._names_same_person(nm, entry)}
+        # Fuzzy matching is only safe between two multi-token names. Allowing a longer
+        # entry to swallow a one-word calendar name hides the wrong person: the entry
+        # "Jerry Ann Bisonga" matched a calendar person called plain "Jerry", who is a
+        # different human (the directory has a separate "Jerry" account). A one-word name
+        # on either side must therefore match exactly or not at all.
+        if len(entry.split()) < 2:
+            # One-word entry with no exact hit. Report it if it would have matched
+            # anyone, so a useless table row is visible rather than silently inert.
+            if any(od._names_same_person(nm, entry) for nm in row_names):
+                ambiguous.append(entry)
+            continue
+        fuzzy = {
+            nm for nm in row_names
+            if len(nm.split()) >= 2 and od._names_same_person(nm, entry)
+        }
         if len(fuzzy) == 1:
             targets |= fuzzy
         elif len(fuzzy) > 1:
@@ -174,6 +197,175 @@ def filter_rows(
 
     kept = [r for r in rows if str(r.get(key) or "").strip() not in targets]
     return kept, sorted(targets), ambiguous
+
+
+def _open_api_base() -> str:
+    return (os.getenv("LARK_OPEN_API_BASE") or "https://open.larksuite.com/open-apis").rstrip("/")
+
+
+# HR renames a departing employee's Lark display name to "<Full Name>_Resigned".
+# Anchored on the underscore and the end of the string on purpose: it must match
+# "Larry Beltran_Resigned" but NOT the shared accounts "Resignations" or
+# "User Acquisition (Resigned)", which are not people.
+RESIGNED_SUFFIX_RE = re.compile(r"\s*_resigned\s*$", re.I)
+
+
+def strip_resigned_suffix(name: str) -> str:
+    return RESIGNED_SUFFIX_RE.sub("", (name or "").strip()).strip()
+
+
+def _key(name: str) -> str:
+    """
+    Identity key for exact name comparison.
+
+    ``od._name_key`` strips everything non-ASCII, so every CJK name keys to ``''`` and
+    would compare equal to every other — 白墨, 白驹, 白龙 and 神书 are different people.
+    Fall back to the casefolded raw string whenever the ASCII key comes out empty.
+    """
+    nm = (name or "").strip()
+    return od._name_key(nm) or " ".join(nm.casefold().split())
+
+
+def fetch_directory_users(token: Optional[str] = None) -> list[dict[str, Any]]:
+    """
+    Every user in the app's contact scope, with the fields needed to spot a leaver.
+
+    ``status.is_resigned`` is useless here — it is false for everyone, because Lark drops
+    a resigned user out of their departments entirely rather than flagging them. The two
+    signals that do work are the ``_Resigned`` display-name suffix (an explicit HR action,
+    high confidence) and ``is_frozen`` (account suspended — a weak hint, since the org's
+    own account guidelines describe employees who resign while "the account has not yet
+    been deactivated", and shared/service accounts are frozen too).
+    """
+    import requests
+
+    tok = token or od.get_tenant_access_token()
+    base = _open_api_base()
+    headers = {"Authorization": f"Bearer {tok}"}
+
+    def _get(path: str, **params: Any) -> dict[str, Any]:
+        return requests.get(f"{base}{path}", headers=headers, params=params, timeout=25).json()
+
+    depts: list[str] = []
+    page: Optional[str] = None
+    while True:
+        data = (_get("/contact/v3/scopes", page_size=50, **({"page_token": page} if page else {}))
+                .get("data") or {})
+        depts += data.get("department_ids") or []
+        page = data.get("page_token")
+        if not data.get("has_more"):
+            break
+
+    out: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for dept in depts:
+        page = None
+        while True:
+            data = (_get("/contact/v3/users", department_id=dept,
+                         department_id_type="open_department_id", user_id_type="open_id",
+                         page_size=50, **({"page_token": page} if page else {})).get("data") or {})
+            for u in data.get("items") or []:
+                oid = u.get("open_id") or ""
+                if oid in seen_ids:
+                    continue
+                seen_ids.add(oid)
+                out.append(
+                    {
+                        "name": (u.get("name") or "").strip(),
+                        "en_name": (u.get("en_name") or "").strip(),
+                        "open_id": oid,
+                        "employee_no": u.get("employee_no") or "",
+                        "job_title": u.get("job_title") or "",
+                        "join_time": u.get("join_time") or 0,
+                        "frozen": bool((u.get("status") or {}).get("is_frozen")),
+                    }
+                )
+            page = data.get("page_token")
+            if not data.get("has_more"):
+                break
+    out.sort(key=lambda u: u["name"].lower())
+    return out
+
+
+def detect_leavers(token: Optional[str] = None) -> list[dict[str, Any]]:
+    """
+    Candidate leavers from the Lark directory, each tagged with how it was found.
+
+    ``source="name_suffix"`` — HR renamed the account to ``<Name>_Resigned``. An explicit,
+    deliberate marking, so ``confident`` is True and the clean name is the stripped one.
+
+    ``source="frozen"`` — the account is suspended. ``confident`` is False: 10 of the 22
+    frozen accounts share a single join date and look like shared/service accounts, and a
+    resigned employee's account is often left active, so this both over- and under-counts.
+    """
+    found: list[dict[str, Any]] = []
+    for u in fetch_directory_users(token):
+        raw = u["name"] or u["en_name"]
+        if not raw:
+            continue
+        if RESIGNED_SUFFIX_RE.search(raw):
+            found.append({**u, "clean_name": strip_resigned_suffix(raw),
+                          "source": "name_suffix", "confident": True})
+        elif u["frozen"]:
+            found.append({**u, "clean_name": raw, "source": "frozen", "confident": False})
+    return found
+
+
+def sync_detected(
+    token: Optional[str] = None,
+    *,
+    sources: tuple[str, ...] = ("name_suffix", "frozen"),
+    mark_frozen_resigned: bool = False,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """
+    Record detected leavers in the Resigned Member table.
+
+    ``name_suffix`` hits are written with ``Status=Resigned`` — HR renaming an account to
+    ``<Name>_Resigned`` is an explicit statement that the person has left.
+
+    ``frozen`` hits are written with ``Status`` BLANK unless ``mark_frozen_resigned`` is
+    set. A blank row is listed for review but does NOT filter anything, because
+    ``resigned_names()`` only honours rows whose Status a human has set. That keeps a
+    suspended-but-still-employed account from silently hiding someone's leave.
+    """
+    tok = token or od.get_tenant_access_token()
+    detected = [d for d in detect_leavers(tok) if d["source"] in sources]
+    existing = fetch_rows(tok)
+
+    # Dedup on the EXACT normalised name, never od._names_same_person. These are distinct
+    # directory accounts with known identities, and the fuzzy matcher prefix-matches:
+    # it collapses "Jerry Ann Bisonga" into "Jerry", and folds every CJK handle account
+    # (白驹, 白龙, 神书 …) into whichever one was seen first.
+    have: set[str] = {_key(r["name"]) for r in existing if r["name"]}
+
+    added: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for u in detected:
+        nm = u["clean_name"]
+        match = nm if _key(nm) in have else None
+        if match:
+            skipped.append({"name": nm, "source": u["source"], "reason": "already listed"})
+            continue
+        confirmed = u["confident"] or mark_frozen_resigned
+        entry = {"name": nm, "source": u["source"], "status": RESIGNED_STATUS if confirmed else ""}
+        if not dry_run:
+            fields: dict[str, Any] = {NAME_FIELD: nm}
+            if confirmed:
+                fields[STATUS_FIELD] = RESIGNED_STATUS
+            res = od._bitable_create_record(tok, TABLE_ID, fields, base_token=BASE_TOKEN)
+            entry["record_id"] = ((res.get("data") or {}).get("record") or {}).get("record_id") or ""
+        added.append(entry)
+        have.add(_key(nm))
+
+    if added and not dry_run:
+        _cache["at"] = 0.0
+    return {
+        "detected": len(detected),
+        "added": added,
+        "skipped": skipped,
+        "dry_run": dry_run,
+    }
 
 
 def add_resigned(name: str, token: Optional[str] = None) -> dict[str, Any]:
@@ -187,9 +379,13 @@ def add_resigned(name: str, token: Optional[str] = None) -> dict[str, Any]:
         raise ValueError("name is required")
     tok = token or od.get_tenant_access_token()
     existing = fetch_rows(tok)
+    # Exact match blocks the add; a fuzzy near-match only warns. "Jerry Ann Bisonga" and
+    # "Jerry" are different people, so od._names_same_person must not veto the write.
+    key = _key(nm)
     for r in existing:
-        if r["name"] and od._names_same_person(nm, r["name"]):
+        if r["name"] and _key(r["name"]) == key:
             return {"added": False, "reason": "already listed", "matched": r["name"]}
+    near = [r["name"] for r in existing if r["name"] and od._names_same_person(nm, r["name"])]
     res = od._bitable_create_record(
         tok,
         TABLE_ID,
@@ -199,6 +395,8 @@ def add_resigned(name: str, token: Optional[str] = None) -> dict[str, Any]:
     record_id = ((res.get("data") or {}).get("record") or {}).get("record_id") or ""
     _cache["at"] = 0.0  # force refresh on next read
     out: dict[str, Any] = {"added": True, "name": nm, "record_id": record_id}
+    if near:
+        out["near_matches"] = near
     if len(nm.split()) < 2:
         out["warning"] = (
             f"{nm!r} is a single word. Prefix matching means it may identify several "
@@ -221,6 +419,28 @@ def _main(argv: list[str]) -> int:
             print(f"  {len(blank)} row(s) have a Name but no Status — ignored until set:")
             for r in blank:
                 print(f"    ? {r['name']}")
+        return 0
+    if argv[0] == "--sync":
+        dry = "--dry-run" in argv
+        mark_frozen = "--mark-frozen-resigned" in argv
+        srcs: tuple[str, ...] = ("name_suffix", "frozen")
+        if "--suffix-only" in argv:
+            srcs = ("name_suffix",)
+        elif "--frozen-only" in argv:
+            srcs = ("frozen",)
+        res = sync_detected(sources=srcs, mark_frozen_resigned=mark_frozen, dry_run=dry)
+        verb = "would add" if dry else "added"
+        print(f"detected        : {res['detected']}   (sources: {', '.join(srcs)})")
+        print(f"already listed  : {len(res['skipped'])}")
+        print(f"{verb:<15} : {len(res['added'])}\n")
+        for a in res["added"]:
+            tag = "Resigned" if a["status"] else "blank — review"
+            print(f"    + {a['name']:<28} [{a['source']:<11}] status={tag}")
+        for s in res["skipped"]:
+            print(f"    = {s['name']:<28} [{s['source']:<11}] {s['reason']}")
+        if any(a["source"] == "frozen" and not a["status"] for a in res["added"]):
+            print("\nfrozen rows are CANDIDATES only — they change nothing until you set")
+            print("Status=Resigned in Lark. Blank rows are ignored by the leave/WFH filter.")
         return 0
     if argv[0] in ("--add", "-a"):
         if len(argv) < 2:
