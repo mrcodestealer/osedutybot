@@ -4,26 +4,34 @@ Resigned Member list — read + write.
 Source of truth is the ``Resigned Member`` Bitable table (Name + Status), kept by hand:
 https://casinoplus.sg.larksuite.com/base/CpdEbEofwaYyyEsSjlElKNxzgec?table=tblQHimmQDEIlQ9n
 
-Detection (``--sync``) is a HELPER, not a source of truth. It can only ever find people
-whose Lark account still exists, and it finds them two ways:
+Detection (``--sync``) is a HELPER, not a source of truth. Two signals, measured 2026-09-17
+against the full 1454-user directory:
 
-* ``name_suffix`` — HR renames a departing account to ``<Full Name>_Resigned``. Explicit
-  and deliberate, so these are written with ``Status=Resigned`` directly. 7 real people
-  as of 2026-09-17.
-* ``frozen`` — ``status.is_frozen``. Weak: 10 of the 22 frozen accounts share one join
-  date and look like shared/service accounts, and the org's own "Lark Account Renewal
-  Review Guidelines" describes employees who resign while "the account has not yet been
-  deactivated". Written with ``Status`` BLANK so a human confirms before anything is
-  hidden. Note the two signals barely overlap — only 1 account is both.
+* ``name_suffix`` — HR renames a departing account to ``<Full Name>_Resigned``. Explicit,
+  deliberate and monotone, so these are written with ``Status=Resigned``. 8 accounts, no
+  false positives, and all 8 hold zero leave rows so they cannot hide anyone by accident.
+* ``frozen`` — ``status.is_frozen``. Written with ``Status`` BLANK, always: there is
+  deliberately no option to mark these Resigned automatically. ``is_frozen`` is an
+  untimestamped, mutable snapshot Lark also uses for dormant and unprovisioned accounts,
+  and the org's own "Lark Account Renewal Review Guidelines" describes employees who
+  resign while "the account has not yet been deactivated". Guarded by: an employee number
+  must exist, the name must not be role/room/bot shaped, and EVERY account sharing the
+  name must be frozen — "Edmond" and "Jerry" each exist twice, one frozen and one not,
+  and without unanimity a dormant namesake would hide a working colleague.
 
-What detection CANNOT do, and why the table still needs people added by hand: Lark removes
-a resigned user from their departments, so they vanish from ``contact/v3`` entirely.
-``status.is_resigned`` is therefore false for all 194 in-scope users, and a fully-removed
-person has no account left to carry a suffix or a frozen flag. Zi Yang is the worked
-example — confirmed resigned, absent from the directory, yet still holding three leave
-rows on the company calendar. Absence itself is not usable as a signal either: only 2 of
-235 leave-calendar names match the directory at all, because the app's contact scope and
-the company leave calendar cover different populations.
+``status.is_resigned`` is dead: false for all 1454 users, because Lark drops a resigned
+user from their departments rather than flagging them.
+
+Absence from the directory is NOT a usable signal, despite appearances. It looked
+compelling only because this module used to query the 18 root departments alone, which
+returns 194 accounts — mostly meeting rooms, bots and role handles — making ~230 employed
+people look absent. Zi Yang was the worked example of that mistake: apparently gone, in
+fact present as SN0310 "Database Administrator" with ``is_frozen`` set. Hence
+``MIN_DIRECTORY_USERS``, which refuses to detect at all on a short fetch.
+
+What detection still cannot catch, and why names are added by hand: anyone who leaves with
+an account that is neither renamed nor frozen, plus the ~24 calendar names with no
+directory account at all. Both depend on IT/HR housekeeping that does not always happen.
 
 Reads are cached for ``RESIGNED_CACHE_TTL`` seconds (default 300) so the list stays
 current without re-fetching on every command.
@@ -209,6 +217,38 @@ def _open_api_base() -> str:
 # "User Acquisition (Resigned)", which are not people.
 RESIGNED_SUFFIX_RE = re.compile(r"\s*_resigned\s*$", re.I)
 
+# Shared/role/equipment accounts, never individual people.
+NON_PERSON_RE = re.compile(
+    r"(?i)\b(bot|room|dept|department|team|test|on[- ]?duty|shift|payroll|public|"
+    r"supervisor|trainer|technician|acquisition|resignations)\b"
+)
+
+# Job-function handles appended to a name: "Myra QC-TL", "Imee RC". These belong to a role
+# rather than a person, so they must never be written as an active filter entry.
+ROLE_HANDLE_RE = re.compile(r"(?i)(?:^|[\s\-])(RC|QC|TL|HR|OPS|SUP|ADMIN)(?:[\s\-]|$)")
+
+
+def is_safe_to_activate(name: str) -> bool:
+    """
+    Whether a detected name may be written with ``Status=Resigned`` rather than left blank.
+
+    Conservative by design, and it costs nothing: every suffix-marked account holds zero
+    leave rows, so a blank status changes no output. A single token (``Zola``, ``Alyssa``)
+    has too many namesakes to activate unattended, a CJK-only name cannot be keyed by
+    ``od._name_key``, and a role handle is not a person at all.
+    """
+    nm = (name or "").strip()
+    return bool(
+        len(nm.split()) >= 2
+        and od._name_key(nm)
+        and not ROLE_HANDLE_RE.search(nm)
+        and not NON_PERSON_RE.search(nm)
+    )
+
+# The directory must come back roughly whole. A truncated fetch is the one failure that
+# silently reclassifies hundreds of employed people, so detection refuses to run below this.
+MIN_DIRECTORY_USERS = _int_env("RESIGNED_MIN_DIRECTORY_USERS", 1000)
+
 
 def strip_resigned_suffix(name: str) -> str:
     return RESIGNED_SUFFIX_RE.sub("", (name or "").strip()).strip()
@@ -246,15 +286,34 @@ def fetch_directory_users(token: Optional[str] = None) -> list[dict[str, Any]]:
     def _get(path: str, **params: Any) -> dict[str, Any]:
         return requests.get(f"{base}{path}", headers=headers, params=params, timeout=25).json()
 
-    depts: list[str] = []
+    roots: list[str] = []
     page: Optional[str] = None
     while True:
         data = (_get("/contact/v3/scopes", page_size=50, **({"page_token": page} if page else {}))
                 .get("data") or {})
-        depts += data.get("department_ids") or []
+        roots += data.get("department_ids") or []
         page = data.get("page_token")
         if not data.get("has_more"):
             break
+
+    # /contact/v3/users returns DIRECT members of a department only — it does not recurse.
+    # Querying just the 18 roots returns 194 accounts, and they are almost entirely meeting
+    # rooms, bots and role handles ("IT on Duty- Stots", "QA on Duty - Dheights"); the real
+    # staff all sit in child departments. Expanding to the 372 departments yields 1454 users.
+    # Getting this wrong makes ~230 employed people look "absent from the directory".
+    depts: set[str] = set(roots)
+    for root in roots:
+        page = None
+        while True:
+            data = (_get(f"/contact/v3/departments/{root}/children",
+                         department_id_type="open_department_id", fetch_child=True,
+                         page_size=50, **({"page_token": page} if page else {})).get("data") or {})
+            for child in data.get("items") or []:
+                if child.get("open_department_id"):
+                    depts.add(child["open_department_id"])
+            page = data.get("page_token")
+            if not data.get("has_more"):
+                break
 
     out: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
@@ -298,24 +357,72 @@ def detect_leavers(token: Optional[str] = None) -> list[dict[str, Any]]:
     frozen accounts share a single join date and look like shared/service accounts, and a
     resigned employee's account is often left active, so this both over- and under-counts.
     """
+    users = fetch_directory_users(token)
+    if len(users) < MIN_DIRECTORY_USERS:
+        raise RuntimeError(
+            f"directory fetch returned only {len(users)} users (expected >= {MIN_DIRECTORY_USERS}). "
+            "Refusing to detect: a truncated fetch makes employed people look absent."
+        )
+
+    # Namesake map: a frozen account only counts if EVERY account sharing its name is
+    # frozen. "Edmond" exists twice — SN0448 frozen, T0174 not — and "Jerry" likewise.
+    # Without this, one dormant namesake hides a working colleague's leave.
+    by_name: dict[str, list[dict[str, Any]]] = {}
+    for u in users:
+        raw = u["name"] or u["en_name"]
+        if raw:
+            by_name.setdefault(_key(strip_resigned_suffix(raw)), []).append(u)
+
     found: list[dict[str, Any]] = []
-    for u in fetch_directory_users(token):
+    for u in users:
         raw = u["name"] or u["en_name"]
         if not raw:
             continue
         if RESIGNED_SUFFIX_RE.search(raw):
             found.append({**u, "clean_name": strip_resigned_suffix(raw),
                           "source": "name_suffix", "confident": True})
-        elif u["frozen"]:
-            found.append({**u, "clean_name": raw, "source": "frozen", "confident": False})
+            continue
+        if not u["frozen"]:
+            continue
+        # A real departing employee has an employee number. The 2025-01-08 batch without
+        # one, and anything role/room/bot shaped, are shared accounts — never people.
+        if not (u["employee_no"] or "").strip():
+            continue
+        if NON_PERSON_RE.search(raw):
+            continue
+        if not all(o["frozen"] for o in by_name.get(_key(raw), [])):
+            continue
+        found.append({**u, "clean_name": raw, "source": "frozen", "confident": False})
     return found
+
+
+def calendar_names(token: Optional[str] = None, months: int = 4) -> set[str]:
+    """Distinct person names on the company leave calendar over the trailing window."""
+    import datetime
+
+    import leavewfh as lw
+
+    tok = token or od.get_tenant_access_token()
+    today = datetime.date.today()
+    out: set[str] = set()
+    y, m = today.year, today.month
+    for _ in range(max(1, months)):
+        try:
+            rows, _w = lw.fetch_leave_from_company_leave_calendar(tok, y, m)
+            out |= {_key(r["name"]) for r in rows if r.get("name")}
+        except Exception as exc:
+            print(f"[resigned] calendar {y}-{m:02d} unreadable: {exc!r}", flush=True)
+        m -= 1
+        if m == 0:
+            y, m = y - 1, 12
+    return out
 
 
 def sync_detected(
     token: Optional[str] = None,
     *,
     sources: tuple[str, ...] = ("name_suffix", "frozen"),
-    mark_frozen_resigned: bool = False,
+    relevant_only: bool = True,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """
@@ -324,13 +431,30 @@ def sync_detected(
     ``name_suffix`` hits are written with ``Status=Resigned`` — HR renaming an account to
     ``<Name>_Resigned`` is an explicit statement that the person has left.
 
-    ``frozen`` hits are written with ``Status`` BLANK unless ``mark_frozen_resigned`` is
-    set. A blank row is listed for review but does NOT filter anything, because
-    ``resigned_names()`` only honours rows whose Status a human has set. That keeps a
-    suspended-but-still-employed account from silently hiding someone's leave.
+    ``frozen`` hits are ALWAYS written with ``Status`` blank — there is deliberately no
+    option to mark them Resigned automatically. ``is_frozen`` is an untimestamped, mutable
+    snapshot that Lark also uses for dormant and not-yet-provisioned accounts, so a blank
+    row is listed for review and filters nothing until a human sets the Status.
     """
     tok = token or od.get_tenant_access_token()
     detected = [d for d in detect_leavers(tok) if d["source"] in sources]
+
+    # A frozen account only earns a row if the person actually appears on the leave
+    # calendar. Zi Yang is the template: frozen AND still holding leave rows the bot would
+    # otherwise display. A frozen ex-colleague who never appears there is invisible either
+    # way, so recording them is pure noise — it was that noise (27 inert rows) that made
+    # the table unreadable. Suffix hits are exempt: an HR rename is evidence on its own.
+    skipped_irrelevant: list[str] = []
+    if relevant_only and any(d["source"] == "frozen" for d in detected):
+        on_calendar = calendar_names(tok)
+        keep = []
+        for d in detected:
+            if d["source"] == "frozen" and _key(d["clean_name"]) not in on_calendar:
+                skipped_irrelevant.append(d["clean_name"])
+            else:
+                keep.append(d)
+        detected = keep
+
     existing = fetch_rows(tok)
 
     # Dedup on the EXACT normalised name, never od._names_same_person. These are distinct
@@ -347,7 +471,7 @@ def sync_detected(
         if match:
             skipped.append({"name": nm, "source": u["source"], "reason": "already listed"})
             continue
-        confirmed = u["confident"] or mark_frozen_resigned
+        confirmed = u["confident"] and is_safe_to_activate(nm)
         entry = {"name": nm, "source": u["source"], "status": RESIGNED_STATUS if confirmed else ""}
         if not dry_run:
             fields: dict[str, Any] = {NAME_FIELD: nm}
@@ -364,6 +488,7 @@ def sync_detected(
         "detected": len(detected),
         "added": added,
         "skipped": skipped,
+        "skipped_irrelevant": skipped_irrelevant,
         "dry_run": dry_run,
     }
 
@@ -422,13 +547,12 @@ def _main(argv: list[str]) -> int:
         return 0
     if argv[0] == "--sync":
         dry = "--dry-run" in argv
-        mark_frozen = "--mark-frozen-resigned" in argv
         srcs: tuple[str, ...] = ("name_suffix", "frozen")
         if "--suffix-only" in argv:
             srcs = ("name_suffix",)
         elif "--frozen-only" in argv:
             srcs = ("frozen",)
-        res = sync_detected(sources=srcs, mark_frozen_resigned=mark_frozen, dry_run=dry)
+        res = sync_detected(sources=srcs, relevant_only="--all-frozen" not in argv, dry_run=dry)
         verb = "would add" if dry else "added"
         print(f"detected        : {res['detected']}   (sources: {', '.join(srcs)})")
         print(f"already listed  : {len(res['skipped'])}")
@@ -438,6 +562,10 @@ def _main(argv: list[str]) -> int:
             print(f"    + {a['name']:<28} [{a['source']:<11}] status={tag}")
         for s in res["skipped"]:
             print(f"    = {s['name']:<28} [{s['source']:<11}] {s['reason']}")
+        if res.get("skipped_irrelevant"):
+            n = len(res["skipped_irrelevant"])
+            print(f"\n  ({n} frozen account(s) skipped: no leave-calendar rows, so recording")
+            print("   them would change nothing. Use --all-frozen to include them.)")
         if any(a["source"] == "frozen" and not a["status"] for a in res["added"]):
             print("\nfrozen rows are CANDIDATES only — they change nothing until you set")
             print("Status=Resigned in Lark. Blank rows are ignored by the leave/WFH filter.")
