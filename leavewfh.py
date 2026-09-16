@@ -2361,6 +2361,34 @@ def _attendance_span_for_row(row: dict[str, Any], on_date: date) -> str:
     return f"{_format_leave_day(st)} → {_format_leave_day(ed)}"
 
 
+def _drop_resigned(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Hide people listed on the ``Resigned Member`` Bitable (see ``resigned.py``).
+
+    Never raises: a failure to read that table must not take out /leave or /wfh, so on
+    any error the rows are returned untouched.
+    """
+    if not rows:
+        return rows
+    try:
+        import resigned as _resigned
+
+        kept, dropped, ambiguous = _resigned.filter_rows(rows)
+        if dropped:
+            print(f"[leavewfh] hid {len(dropped)} resigned: {', '.join(dropped)}", flush=True)
+        if ambiguous:
+            print(
+                f"[leavewfh] Resigned Member entr{'y' if len(ambiguous) == 1 else 'ies'} "
+                f"{', '.join(repr(a) for a in ambiguous)} match more than one person and "
+                "were IGNORED — use the person's full name as it appears on the leave calendar.",
+                flush=True,
+            )
+        return kept
+    except Exception as exc:
+        print(f"[leavewfh] resigned filter skipped: {exc!r}", flush=True)
+        return rows
+
+
 def _dutylist_bucket_rows(
     hrms_rows: list[dict[str, Any]],
     on_date: date,
@@ -2372,6 +2400,7 @@ def _dutylist_bucket_rows(
 
     duty = dlm.load_duty_list()
     today = rows_on_wfh_date(hrms_rows, on_date) if wfh else rows_on_leave_date(hrms_rows, on_date)
+    today = _drop_resigned(today)
     ose_out: list[dict[str, Any]] = []
     other_out: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -2408,7 +2437,7 @@ def _dutylist_bucket_rows_for_month(
     import duty_list_match as dlm
 
     duty = dlm.load_duty_list()
-    in_month = rows_in_month(hrms_rows, year, month, wfh=wfh)
+    in_month = _drop_resigned(rows_in_month(hrms_rows, year, month, wfh=wfh))
     ose_out: list[dict[str, Any]] = []
     other_out: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
@@ -3336,7 +3365,7 @@ def get_wholeave_today_payload(ref_date: Optional[date] = None) -> dict[str, Any
             table_id=od.OSE_HRMS_LEAVE_TABLE_ID,
             require_approved=False,
         )
-        today_rows = rows_on_leave_date(rows, on_date)
+        today_rows = _drop_resigned(rows_on_leave_date(rows, on_date))
         warnings: list[str] = []
         if not rows:
             warnings.append(

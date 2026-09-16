@@ -938,7 +938,7 @@ def _leave_payload(dates: list[date]) -> Optional[dict]:
         day_bodies: list[tuple[date, str]] = []
         for d in dates:
             try:
-                day_rows = lw.rows_on_leave_date(rows, d)
+                day_rows = lw._drop_resigned(lw.rows_on_leave_date(rows, d))
             except Exception:
                 day_rows = []
             if day_rows:
