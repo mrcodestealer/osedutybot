@@ -152,11 +152,19 @@ _LEAVE_EVENT_TITLE_RE = re.compile(
 _MEETING_TITLE_RE = re.compile(
     r"(?i)(meeting|weekly|1-on-1|maintenance|okr|例会|会议|migration|checking of pending)"
 )
-# HRMS shared leave calendar titles: ``AL - Bk``, ``SL - Name``, …
+# HRMS shared leave calendar titles: ``AL - Bk``, ``SL - Name``, ``EL (AM) - Name``, …
+# The half-day marker always sits *before* the dash. Brackets *after* the dash are part of
+# the name (``AL - Shou Kwee (Eng)``) and must not be mistaken for one, so the optional
+# group is anchored between the code and the separator. ``name`` is trimmed explicitly:
+# some titles carry a trailing space, which otherwise breaks roster name matching.
 _SHARED_LEAVE_TITLE_RE = re.compile(
-    r"^(?P<code>AL|SL|MC|EL|ML|PL|HL|OB|WFH)\s*[-–—]\s*(?P<name>.+)$",
+    r"^\s*(?P<code>WFH|AL|SL|MC|EL|ML|PL|HL|OB|RL|UL|CL)"
+    r"(?:\s*\(\s*(?P<half>AM|PM)\s*\))?"
+    r"\s*[-–—]\s*(?P<name>\S.*?)\s*$",
     re.IGNORECASE,
 )
+# NOTE: these strings are written into the leave tracking Bitable's ``Leave Type``
+# single-select, so every value here must already exist as an option on that field.
 _LEAVE_CODE_TO_TYPE: dict[str, str] = {
     "AL": ANNUAL_LEAVE_TYPE,
     "SL": "Sick Leave",
@@ -167,6 +175,9 @@ _LEAVE_CODE_TO_TYPE: dict[str, str] = {
     "HL": "Hospitalisation Leave",
     "OB": "Out of Office",
     "WFH": "Work From Home",
+    "RL": "Replacement Leave",
+    "UL": "Non Pay Leave",
+    "CL": "Compassionate Leave",
 }
 
 DEBUG = False
@@ -980,11 +991,15 @@ def fetch_leave_from_company_leave_calendar(
         return [], warnings
 
     rows: list[dict[str, Any]] = []
+    unparsed: list[str] = []
     for ev in events:
         if (ev.get("status") or "").strip().lower() == "cancelled":
             continue
         parsed = _parse_shared_leave_event(ev.get("summary") or "")
         if not parsed:
+            title = (ev.get("summary") or "").strip()
+            if title:
+                unparsed.append(title)
             continue
         name, leave_type = parsed
         start_d, end_d = _event_date_range(ev)
@@ -1001,6 +1016,13 @@ def fetch_leave_from_company_leave_calendar(
                 "reason": f"{cal_title}: {ev.get('summary') or ''}",
                 "source": "company_leave_calendar",
             }
+        )
+    if unparsed:
+        sample = ", ".join(sorted(set(unparsed))[:5])
+        warnings.append(
+            f"{len(unparsed)} event(s) on {cal_title!r} for {year}-{month:02d} did not match "
+            f"the leave title format and were skipped (e.g. {sample}). If that is a real leave "
+            "code, add it to _SHARED_LEAVE_TITLE_RE and _LEAVE_CODE_TO_TYPE."
         )
     rows = _consolidate_leave_rows(rows)
     return rows, warnings
