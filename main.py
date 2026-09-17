@@ -2378,6 +2378,29 @@ ISP_PM_ADMIN_OPEN_IDS = {
 }
 
 
+# ``/sports`` (and ``/sportstest``) may also be used in a DM by these people. ``/egs``
+# stays group-only — only the sports kind is opened up here.
+SPORTS_DM_ADMIN_OPEN_IDS = {
+    c.strip()
+    for c in (
+        os.getenv("SPORTS_DM_ADMIN_OPEN_IDS", "").strip()
+        or "ou_5f660c0fb0769d184aca635d02209272"
+    ).split(",")
+    if c.strip()
+}
+
+
+def _sports_dm_allowed(
+    kind: Optional[str], chat_type: Optional[str], sender_id: Optional[str]
+) -> bool:
+    """True for a DM from an allowed admin on the ``sports`` mail kind only."""
+    if not maintenance.egs_is_sports_kind(kind):
+        return False
+    return (chat_type or "").strip() == "p2p" and (
+        sender_id or ""
+    ).strip() in SPORTS_DM_ADMIN_OPEN_IDS
+
+
 def _isp_command_allowed(
     chat_id: Optional[str], chat_type: Optional[str], sender_id: Optional[str]
 ) -> bool:
@@ -4589,7 +4612,13 @@ def _egs_kind_tag(kind: str) -> str:
 
 
 def _process_egs_paste(
-    chat_id: str, body_text: str, *, test: bool = False, kind: str = "egs"
+    chat_id: str,
+    body_text: str,
+    *,
+    test: bool = False,
+    kind: str = "egs",
+    chat_type: Optional[str] = None,
+    sender_id: Optional[str] = None,
 ) -> None:
     """``/egs`` | ``/sports`` — show an **editable preview card** for a pasted notice.
 
@@ -4604,7 +4633,9 @@ def _process_egs_paste(
     and is logged to the kind's TEST store, never the real one.
     """
     _cmd = _egs_cmd_label(kind, test=test)
-    if not maintenance.is_evo_batch_command_chat(chat_id):
+    if not maintenance.is_evo_batch_command_chat(chat_id) and not _sports_dm_allowed(
+        kind, chat_type, sender_id
+    ):
         send_message(chat_id, maintenance.EVO_BATCH_WRONG_GROUP_MESSAGE)
         return
     reply_mid = (_lark_user_message_id.get() or "").strip()
@@ -7194,7 +7225,14 @@ def lark_webhook():
         _egs_src = _egs_src.strip()
         if _egs_src.startswith('"') and _egs_src.endswith('"'):
             _egs_src = _egs_src[1:-1].strip()
-        _process_egs_paste(chat_id, _egs_src, test=_egs_test, kind=_egs_kind)
+        _process_egs_paste(
+            chat_id,
+            _egs_src,
+            test=_egs_test,
+            kind=_egs_kind,
+            chat_type=chat_type,
+            sender_id=sender_id,
+        )
         return _lark_im_done()
     elif cmd in _EGS_REPLY_COMMANDS:
         # Show the picker so the user chooses which sent email to reply to; any text pasted
