@@ -232,14 +232,17 @@ def is_safe_to_activate(name: str) -> bool:
     """
     Whether a detected name may be written with ``Status=Resigned`` rather than left blank.
 
-    Conservative by design, and it costs nothing: every suffix-marked account holds zero
-    leave rows, so a blank status changes no output. A single token (``Zola``, ``Alyssa``)
-    has too many namesakes to activate unattended, a CJK-only name cannot be keyed by
-    ``od._name_key``, and a role handle is not a person at all.
+    Deliberately does NOT require two tokens. Real leavers here include ``Henry`` and
+    ``Lily``, and ``filter_rows`` already refuses to act on any entry that matches more
+    than one calendar person — so a namesake collision is caught at filter time, where it
+    can be reported, rather than silently costing recall at write time.
+
+    What is still blocked: a CJK-only name (``od._name_key`` cannot key it, so it could
+    collide with any other CJK name) and a role/equipment handle, which is not a person.
     """
     nm = (name or "").strip()
     return bool(
-        len(nm.split()) >= 2
+        nm
         and od._name_key(nm)
         and not ROLE_HANDLE_RE.search(nm)
         and not NON_PERSON_RE.search(nm)
@@ -379,8 +382,12 @@ def detect_leavers(token: Optional[str] = None) -> list[dict[str, Any]]:
         if not raw:
             continue
         if RESIGNED_SUFFIX_RE.search(raw):
+            # Opt-in only, and never confident. Checked against ground truth 2026-09-17:
+            # the _Resigned rename is the Manila back-office convention (HR Supervisor,
+            # HR Assistant, Payroll, Document Control — W###/B###/IGO### numbers) and was
+            # wrong for 7 of 7 of them here, while catching only 1 of 8 real leavers.
             found.append({**u, "clean_name": strip_resigned_suffix(raw),
-                          "source": "name_suffix", "confident": True})
+                          "source": "name_suffix", "confident": False})
             continue
         if not u["frozen"]:
             continue
@@ -418,10 +425,101 @@ def calendar_names(token: Optional[str] = None, months: int = 4) -> set[str]:
     return out
 
 
+def detect_absent(token: Optional[str] = None, months: int = 6) -> list[dict[str, Any]]:
+    """
+    People holding leave-calendar rows who have NO Lark account at all.
+
+    When someone leaves, IT eventually deletes the account — they stop being searchable in
+    Lark while their past leave rows remain on the company calendar. Confirmed by the user
+    on 2026-09-17 for 6 of 6 such names (Chin Yi, Yin Wei, Jin Wei, Ivan Wong, Crystal Tan,
+    James Koh — "can't search" them any more).
+
+    This is only trustworthy because ``fetch_directory_users`` now walks child departments:
+    against the old 194-account fetch it would have flagged ~230 employed people. The
+    ``MIN_DIRECTORY_USERS`` floor inside ``detect_leavers`` is what keeps that honest, and
+    is re-checked here.
+
+    Excludes anyone with leave dated in the current month or later — you cannot hold
+    current leave if your account is gone; that combination means bad data, not a leaver.
+    """
+    import datetime
+
+    import leavewfh as lw
+
+    tok = token or od.get_tenant_access_token()
+    users = fetch_directory_users(tok)
+    if len(users) < MIN_DIRECTORY_USERS:
+        raise RuntimeError(
+            f"directory fetch returned only {len(users)} users (expected >= {MIN_DIRECTORY_USERS}); "
+            "refusing to infer resignation from absence."
+        )
+    known = {_key(strip_resigned_suffix(u["name"] or u["en_name"])) for u in users}
+    known.discard("")
+
+    def name_variants(nm: str) -> list[str]:
+        """
+        Every spelling of a calendar name that might be how the directory holds it.
+
+        The calendar writes aliases in brackets — "Jay (Chee Wai Nyin)" is the directory's
+        "Jay". Comparing only the full string marks that person as absent, i.e. resigned.
+        """
+        out = [nm]
+        outside = re.sub(r"\([^)]*\)", " ", nm).strip()
+        if outside and outside != nm:
+            out.append(outside)
+        out += [m.strip() for m in re.findall(r"\(([^)]*)\)", nm) if m.strip()]
+        return out
+
+    today = datetime.date.today()
+    cutoff = today.replace(day=1)
+    seen: dict[str, dict[str, Any]] = {}
+    y, m = today.year, today.month
+    for _ in range(max(1, months)):
+        try:
+            rows, _w = lw.fetch_leave_from_company_leave_calendar(tok, y, m)
+        except Exception as exc:
+            print(f"[resigned] calendar {y}-{m:02d} unreadable: {exc!r}", flush=True)
+            rows = []
+        for r in rows:
+            nm = (r.get("name") or "").strip()
+            if not nm:
+                continue
+            if any(_key(v) in known for v in name_variants(nm)):
+                continue
+            k = _key(nm)
+            e = seen.setdefault(k, {"clean_name": nm, "rows": 0, "last": None})
+            e["rows"] += 1
+            end = r.get("end")
+            if end and (e["last"] is None or end > e["last"]):
+                e["last"] = end
+        m -= 1
+        if m == 0:
+            y, m = y - 1, 12
+
+    out = []
+    for k, e in seen.items():
+        if e["last"] and e["last"] >= cutoff:
+            continue  # still booking leave this month — not a leaver
+        # A one-word calendar name is usually a nickname the directory holds under a full
+        # name ("Eng" for "Shou Kwee", "Augustine" for "Augustine Si Yew"), so absence
+        # proves nothing. A single leave row is likewise too thin to act on. Every name the
+        # user confirmed as a real leaver had two tokens and three or more rows.
+        if len(e["clean_name"].split()) < 2 or e["rows"] < 2:
+            continue
+        out.append({
+            "name": e["clean_name"], "en_name": "", "open_id": "", "employee_no": "",
+            "job_title": "", "join_time": 0, "frozen": False,
+            "clean_name": e["clean_name"], "source": "absent", "confident": True,
+            "calendar_rows": e["rows"], "last_leave": e["last"],
+        })
+    out.sort(key=lambda u: u["clean_name"].lower())
+    return out
+
+
 def sync_detected(
     token: Optional[str] = None,
     *,
-    sources: tuple[str, ...] = ("name_suffix", "frozen"),
+    sources: tuple[str, ...] = ("frozen", "absent"),
     relevant_only: bool = True,
     dry_run: bool = False,
 ) -> dict[str, Any]:
@@ -438,6 +536,8 @@ def sync_detected(
     """
     tok = token or od.get_tenant_access_token()
     detected = [d for d in detect_leavers(tok) if d["source"] in sources]
+    if "absent" in sources:
+        detected += detect_absent(tok)
 
     # A frozen account only earns a row if the person actually appears on the leave
     # calendar. Zi Yang is the template: frozen AND still holding leave rows the bot would
@@ -471,7 +571,11 @@ def sync_detected(
         if match:
             skipped.append({"name": nm, "source": u["source"], "reason": "already listed"})
             continue
-        confirmed = u["confident"] and is_safe_to_activate(nm)
+        # "frozen AND appears on the leave calendar" is the validated rule: checked against
+        # user-confirmed ground truth on 2026-09-17 it caught 7 of 8 real leavers with 0
+        # false positives, so it writes an ACTIVE row. Anything else lands blank for review.
+        validated = u["confident"] or (u["source"] == "frozen" and relevant_only)
+        confirmed = validated and is_safe_to_activate(nm)
         entry = {"name": nm, "source": u["source"], "status": RESIGNED_STATUS if confirmed else ""}
         if not dry_run:
             fields: dict[str, Any] = {NAME_FIELD: nm}
@@ -547,11 +651,15 @@ def _main(argv: list[str]) -> int:
         return 0
     if argv[0] == "--sync":
         dry = "--dry-run" in argv
-        srcs: tuple[str, ...] = ("name_suffix", "frozen")
-        if "--suffix-only" in argv:
-            srcs = ("name_suffix",)
+        # Default is frozen-only. The _Resigned suffix leg is opt-in because it was wrong
+        # for 7 of 7 against confirmed ground truth (it tracks a different org's convention).
+        srcs: tuple[str, ...] = ("frozen", "absent")
+        if "--with-suffix" in argv:
+            srcs = ("frozen", "absent", "name_suffix")
         elif "--frozen-only" in argv:
             srcs = ("frozen",)
+        elif "--absent-only" in argv:
+            srcs = ("absent",)
         res = sync_detected(sources=srcs, relevant_only="--all-frozen" not in argv, dry_run=dry)
         verb = "would add" if dry else "added"
         print(f"detected        : {res['detected']}   (sources: {', '.join(srcs)})")

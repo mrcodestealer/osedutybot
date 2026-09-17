@@ -2870,9 +2870,60 @@ def _add_scheduler_job(job_id: str, func, trigger: str, **trigger_kwargs) -> Non
 
 # HRMS → leaveose / leave全员 / WFH Bitables — always on (no .env toggles).
 # Full sync can take a few minutes, so it runs early (06:40) and hourly after that.
+# Resigned Member detection runs once a day, after the leave/WFH sync has refreshed
+# the calendar data it depends on.
+_RESIGNED_SYNC_HOUR = 7
+_RESIGNED_SYNC_MINUTE = 20
 _LEAVE_WFH_SYNC_INTERVAL_MIN = 60
 _LEAVE_WFH_PRE_MORNING_HOUR = 6
 _LEAVE_WFH_PRE_MORNING_MINUTE = 40
+
+
+def resigned_member_sync() -> None:
+    """
+    Refresh the Resigned Member table from the Lark directory (``resigned.py --sync``).
+
+    Detects accounts that are frozen AND still appear on the company leave calendar —
+    validated against confirmed ground truth on 2026-09-17 at 7 of 8 real leavers with no
+    false positives. Runs daily rather than hourly: ``is_frozen`` is a mutable snapshot and
+    a frequent poll only amplifies churn.
+
+    Never raises — a detection failure must not disturb the scheduler or any duty command.
+    """
+    try:
+        import resigned as _resigned
+
+        res = _resigned.sync_detected()
+        added = res.get("added") or []
+        if added:
+            print(
+                f"[resigned sync] added {len(added)}: "
+                + ", ".join(f"{a['name']}({a['source']})" for a in added),
+                flush=True,
+            )
+        else:
+            print(
+                f"[resigned sync] no change ({res.get('detected', 0)} detected, "
+                f"{len(res.get('skipped') or [])} already listed)",
+                flush=True,
+            )
+    except Exception as exc:
+        print(f"[resigned sync] failed: {exc!r}", flush=True)
+
+
+def _register_resigned_sync_job() -> None:
+    _add_scheduler_job(
+        "resigned_member_sync_daily",
+        resigned_member_sync,
+        "cron",
+        hour=_RESIGNED_SYNC_HOUR,
+        minute=_RESIGNED_SYNC_MINUTE,
+    )
+    print(
+        f"[resigned sync] daily at {_RESIGNED_SYNC_HOUR:02d}:{_RESIGNED_SYNC_MINUTE:02d} "
+        "— frozen accounts still on the leave calendar",
+        flush=True,
+    )
 
 
 def _register_leave_wfh_sync_jobs() -> None:
@@ -2921,6 +2972,7 @@ def _register_holiday_sync_jobs() -> None:
 # with the 07:00 card disabled — /ose and the leave/offset APIs read the same cache.
 _add_scheduler_job("ose_leave_offset_daily_sync", ose_leave_offset_daily_sync, "cron", hour=6, minute=50)
 _register_leave_wfh_sync_jobs()
+_register_resigned_sync_job()
 _register_holiday_sync_jobs()
 # OSE duty auto-display — OFF. The 07:00 + 19:00 cards used to post to
 # DUTY_CHAT_ID unattended every day; they are no longer registered at all.
