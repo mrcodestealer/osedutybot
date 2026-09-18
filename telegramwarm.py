@@ -1282,9 +1282,37 @@ _FIND_CHAT_JS = r"""
     if (low === want) exact.push(i);
     else if (arg.allowSubstring && want && low.includes(want)) partial.push(i);
   });
+  // Telegram renders the SAME conversation more than once inside #column-left:
+  // the main chat list stays in the DOM underneath the search overlay, and a chat
+  // can sit in both the overlay's "recent" and its results section. Those rows are
+  // one chat, not a title collision, so `dedupePeers` collapses rows sharing a
+  // data-peer-id. OFF by default: the send path's refusal to guess between two
+  // same-titled rows must not change. Rows with NO peer id are never collapsed -
+  // unknown identity is not sameness. Among copies of one peer, prefer a row that
+  // is actually laid out, because a zero-box copy cannot be clicked.
+  const dedupe = (list) => {
+    if (!arg.dedupePeers) return list;
+    const byPeer = new Map();
+    const noPeer = [];
+    for (const i of list) {
+      const pid = rowPeerId(items[i]);
+      if (!pid) { noPeer.push(i); continue; }
+      const r = items[i].getBoundingClientRect();
+      const visible = r.width > 0 && r.height > 0;
+      const cur = byPeer.get(pid);
+      if (cur === undefined || (!cur.visible && visible)) {
+        byPeer.set(pid, { i: i, visible: visible });
+      }
+    }
+    const out = noPeer.concat(Array.from(byPeer.values()).map(v => v.i));
+    out.sort((a, b) => a - b);
+    return out;
+  };
+  const exactHits = dedupe(exact);
+  const partialHits = dedupe(partial);
   // Exact always wins; substring is only consulted when nothing matched exactly,
   // and only for read-only callers that opted in.
-  const hits = exact.length ? exact : (arg.allowSubstring ? partial : []);
+  const hits = exactHits.length ? exactHits : (arg.allowSubstring ? partialHits : []);
   // Return the viewport rect of the single hit, not an element handle. The chat list
   // re-renders constantly (new messages, presence, clocks), so any handle the caller
   // holds can detach before it is clicked — "Element is not attached to the DOM".
@@ -1334,8 +1362,12 @@ _FIND_CHAT_JS = r"""
     peerId: peerId,
     hash: location.hash || '',
     rendered: items.length,
-    matchKind: exact.length ? 'exact' : (hits.length ? 'substring' : 'none'),
+    matchKind: exactHits.length ? 'exact' : (hits.length ? 'substring' : 'none'),
     candidates: seen.slice(0, 30),
+    // Pre-dedupe counts + the peers behind them, so a multi-match refusal can be
+    // told apart from one chat rendered twice without another round trip.
+    exactRaw: exact.length,
+    exactPeers: Array.from(new Set(exact.map(i => rowPeerId(items[i])))),
   };
 }
 """
@@ -1464,6 +1496,7 @@ def _open_chat_by_title(page, title: str, *, allow_substring: bool = False,
                         allow_search: bool = False,
                         case_sensitive: bool = False,
                         expected_peer: str | None = None,
+                        dedupe_peers: bool = False,
                         attempts: int = 3, log=print) -> dict:
     """Open the sidebar chat matching ``title``, confirming it actually opened.
 
@@ -1491,9 +1524,16 @@ def _open_chat_by_title(page, title: str, *, allow_substring: bool = False,
     ``expected_peer`` — when set, the opened chat's peer id MUST equal it, whatever the
     other signals say. This is the pin that makes a configured send target immune to
     title collisions altogether.
+
+    ``dedupe_peers`` — treat several rendered rows that carry the SAME data-peer-id as
+    the one chat they are, instead of "N chats share this name". Telegram keeps the
+    main chat list in the DOM under the search overlay, so a searched-for chat is
+    routinely rendered twice. OFF by default so the send path keeps refusing to guess;
+    genuinely different chats have different peer ids and are still refused either way.
     """
     arg = {"wanted": title, "allowSubstring": bool(allow_substring),
-           "caseSensitive": bool(case_sensitive), "scrollIntoView": True}
+           "caseSensitive": bool(case_sensitive), "scrollIntoView": True,
+           "dedupePeers": bool(dedupe_peers)}
     want_peer = _norm_peer(expected_peer)
 
     # Leftover UI from an earlier command would cover the rows, so start clean.
@@ -1960,6 +2000,28 @@ def _pane_shot(page, selector: str, out_path: str, *, log=print) -> str:
         return ""
 
 
+def _near_misses(wanted: str, candidates: list, limit: int = 4) -> str:
+    """The rendered sidebar titles closest to ``wanted``, for a not-found report."""
+    import difflib
+
+    def norm(s: str) -> str:
+        return " ".join(str(s or "").split()).lower()
+
+    w = norm(wanted)
+    if not w or not candidates:
+        return ""
+    scored = sorted(
+        ((difflib.SequenceMatcher(None, w, norm(c)).ratio(), c) for c in candidates),
+        key=lambda p: p[0], reverse=True,
+    )
+    close = [(r, c) for r, c in scored if r >= 0.55][:limit]
+    if not close:
+        return (f" — Telegram rendered {len(candidates)} chat(s), none resembling it"
+                " (the group may have been renamed, or this account removed from it)")
+    shown = "; ".join(f"{c!r} ({int(r * 100)}%)" for r, c in close)
+    return f" — closest rendered titles: {shown}"
+
+
 def _probe_group(page, title: str, *, shot_path: str, log=print) -> dict:
     """Does a chat named EXACTLY ``title`` exist? Read-only; photographs it.
 
@@ -1987,6 +2049,7 @@ def _probe_group(page, title: str, *, shot_path: str, log=print) -> dict:
             allow_search=True,         # the chat list is virtualised: most rows
                                        # of a 20-name Base are not in the DOM
             accept_hash_change=False,  # "something opened" is not "this opened"
+            dedupe_peers=True,         # one chat drawn twice is not two chats
             log=log,
         )
     except Exception as err:
@@ -2001,9 +2064,18 @@ def _probe_group(page, title: str, *, shot_path: str, log=print) -> dict:
         if opened.get("error"):
             out["reason"] = str(opened["error"])
         elif not matches:
-            out["reason"] = "no chat with this exact name"
+            # "not found" on its own is undiagnosable: a renamed group, a group the
+            # account was removed from and a search that simply did not surface it
+            # all look identical. Name the closest titles Telegram DID render, which
+            # is what tells those three apart.
+            out["reason"] = ("no chat with this exact name"
+                             + _near_misses(title, opened.get("candidates") or []))
         else:
-            out["reason"] = f"{matches} chats share this name - refusing to guess"
+            peers = [p for p in (opened.get("exactPeers") or []) if p]
+            out["reason"] = (
+                f"{matches} different chats share this name - refusing to guess"
+                + (f" (peers {', '.join(str(p) for p in peers[:4])})" if peers else "")
+            )
         _back_to_chat_list(page, log=log)
         return out
 
