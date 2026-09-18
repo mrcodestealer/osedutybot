@@ -3048,6 +3048,283 @@ def _pick_messages(rows: list[dict[str, Any]], limit: int) -> dict[str, Any]:
             "skipped_system": skipped, "scanned": len(rows or [])}
 
 
+# ---------------------------------------------------------------------------
+# /telegramgroupcheck - does this EXACT Teams chat exist?
+# ---------------------------------------------------------------------------
+
+# How long one activation attempt may wait for the header to become the target.
+_EXACT_CONFIRM_S = 15
+# Sweeps of the virtualised chat list before calling a title missing.
+_LIST_SWEEPS = 5
+
+# The chat list is virtualised - a group far down it is not in the DOM at all,
+# and unlike Telegram this module has no search fallback. Scrolling renders more
+# rows so "not found" means absent rather than merely off-screen.
+_CHAT_LIST_SCROLL_JS = r"""
+(dy) => {
+  const sels = ["[data-tid='chat-list']", "[data-tid='app-layout-area--mid-nav']",
+                "[role='tree']", "[role='list']"];
+  for (const s of sels) {
+    for (const el of document.querySelectorAll(s)) {
+      if (el.scrollHeight > el.clientHeight + 40) {
+        if (dy === 0) { el.scrollTop = 0; return 0; }   // rewind to the top
+        const before = el.scrollTop;
+        el.scrollTop += dy;
+        return el.scrollTop > before ? el.scrollTop : -1;
+      }
+    }
+  }
+  return -1;
+}
+"""
+
+
+def _chat_list_home(page) -> None:
+    """Rewind the chat list to the top.
+
+    The sidebar scroll is a BORROWED resource. Without this, the sweep in
+    _open_group_exact leaves the list parked at the bottom, so every later title
+    in the same batch is searched only from there and reads as missing - and the
+    EVO watcher inherits a scrolled sidebar it never asked for.
+    """
+    try:
+        page.evaluate(_CHAT_LIST_SCROLL_JS, 0)
+        page.wait_for_timeout(400)
+    except Exception:
+        pass
+
+
+def _titles_equal(want: str, got: str) -> bool:
+    """Whole-string title equality - the /telegramgroupcheck rule.
+
+    _titles_match is an ANCHORED PREFIX test, so "X CS Group" matches
+    "X CS Group (backup)" in both directions. That is right for the EVO watcher,
+    whose real key is a conversation id, but wrong here: the caller captions each
+    screenshot with a provider's name, so a prefix hit would attribute another
+    provider's group to the wrong provider.
+
+    The _TITLE_MIN_CHARS floor goes with the prefix test it existed to guard -
+    equality needs no length hedge. The closed/archived guard stays: an archived
+    clone is a different chat.
+
+    _norm_title strips a trailing ellipsis, so a header Teams truncated compares
+    short and reads as "not found". That is the safe direction to fail, and in
+    practice _open_chat_title prefers the untruncated title= attribute.
+    """
+    a, b = _norm_title(want), _norm_title(got)
+    if not a or not b:
+        return False
+    if bool(_CLOSED_MARKER_RE.search(a)) != bool(_CLOSED_MARKER_RE.search(b)):
+        return False
+    return a == b
+
+
+def _confirm_exact_chat(page, title: str) -> tuple[bool, str]:
+    """Is EXACTLY ``title`` the conversation on screen? Returns (ok, reason).
+
+    Deliberately does NOT consult _wanted_thread_id. That returns
+    EVOTEAMS_THREAD_ID for ANY title, so with it set _confirm_open_chat would
+    confirm the EVO group as a match for a provider's name - and because the
+    watcher keeps EVO open, _open_group would return True "on arrival" without
+    clicking anything at all. Title equality is the only key that can tell
+    twenty provider groups apart.
+    """
+    header = _open_chat_title(page)
+    if _titles_equal(title, header):
+        return True, f"header matches ({header!r})"
+    picked = _selected_chat_title(page)
+    if _titles_equal(title, picked):
+        return True, f"selected sidebar row matches ({picked!r})"
+    return False, "; ".join([
+        f"header={header!r}" if header else "header=<none found>",
+        f"selected-row={picked!r}" if picked else "selected-row=<none found>",
+    ])
+
+
+def _open_group_exact(page, title: str) -> tuple[bool, str]:
+    """_open_group, but confirmed by exact title rather than by thread id."""
+    needle = (title or "").strip()
+    if not needle:
+        return False, "empty title"
+
+    ok, why = _confirm_exact_chat(page, needle)
+    if ok:
+        page.wait_for_timeout(1500)
+        return True, why
+
+    prefix = _row_needle(needle)
+    # Always start a search from the top, whatever the previous title left behind.
+    _chat_list_home(page)
+    for sweep in range(_LIST_SWEEPS):
+        if sweep:
+            try:
+                moved = page.evaluate(_CHAT_LIST_SCROLL_JS, 700)
+            except Exception:
+                moved = -1
+            if moved is None or moved < 0:
+                break          # list will not scroll further; it is not here
+            page.wait_for_timeout(800)
+        for method in ("enter", "click"):
+            # press() silently no-ops on a node that ignores the key, so the
+            # only honest test is whether the conversation actually changed.
+            if not _click_chat_row(page, prefix, method=method):
+                continue
+            deadline = time.monotonic() + _EXACT_CONFIRM_S
+            while time.monotonic() < deadline:
+                ok, why = _confirm_exact_chat(page, needle)
+                if ok:
+                    page.wait_for_timeout(2500)   # let the list settle
+                    return True, why
+                page.wait_for_timeout(1200)
+            print(f"[teams] sweep {sweep} method={method} unconfirmed - {why}",
+                  flush=True)
+    return False, why or "no sidebar row matched this exact name"
+
+
+def _pane_shot(page, out_path: str) -> str:
+    """Screenshot the conversation region only, clipped to the viewport. '' fails.
+
+    The plain page.screenshot() used elsewhere captures the whole 1600x900
+    window, which always includes the left sidebar listing every OTHER chat's
+    name and last-message preview - not something to post into a Lark group.
+
+    Deliberately NOT locator.screenshot(): the pane Teams renders is a
+    full-height message runway, so an element shot shows the ENTIRE loaded
+    conversation as one enormous PNG. Clipping to the viewport keeps it to what
+    is on screen.
+    """
+    box = None
+    for sel in _MAIN_REGION_SELS:
+        try:
+            box = page.locator(sel).first.bounding_box()
+        except Exception:
+            box = None
+        if box and float(box.get("width") or 0) > 200:
+            break
+        box = None
+    try:
+        if box:
+            vp = page.viewport_size or {"width": 1600, "height": 900}
+            x = max(0.0, float(box["x"]))
+            y = max(0.0, float(box["y"]))
+            w = min(float(box["x"]) + float(box["width"]), float(vp["width"])) - x
+            h = min(float(box["y"]) + float(box["height"]), float(vp["height"])) - y
+            if w > 1 and h > 1:
+                page.screenshot(path=out_path,
+                                clip={"x": x, "y": y, "width": w, "height": h})
+                return out_path
+        # A Teams UI change should cost fidelity, never the whole check.
+        print("[teams] main region not measurable - full-viewport shot instead",
+              flush=True)
+        page.screenshot(path=out_path, full_page=False)
+        return out_path
+    except Exception as err:
+        print(f"[teams] pane screenshot failed: {err!r}", flush=True)
+        return ""
+
+
+def _probe_group(page, title: str, *, shot_path: str) -> dict:
+    """Does a Teams chat named EXACTLY ``title`` exist? Read-only; shoots it.
+
+    Returns ``{title, ok, opened, reason, shot}``. Nothing is typed and nothing
+    is sent: the only inputs are sidebar row clicks / Enter presses and a
+    programmatic scroll of the chat list. Note that opening a chat DOES mark it
+    read for this Teams account - there is no read-only existence probe here.
+    """
+    out = {"title": title, "ok": False, "opened": "", "reason": "", "shot": ""}
+    try:
+        ok, why = _open_group_exact(page, title)
+    except Exception as err:
+        out["reason"] = f"lookup failed: {err!r}"
+        return out
+    out["opened"] = _open_chat_title(page) or ""
+    if not ok:
+        out["reason"] = why or "no chat with this exact name"
+        return out
+    out["ok"] = True
+    out["shot"] = _pane_shot(page, shot_path)
+    return out
+
+
+def _probe_groups_on_page(page, titles, sink=None) -> list:
+    """Run _probe_group over ``titles`` on an already-booted page."""
+    results = []
+    for idx, title in enumerate(titles):
+        shot_file = _ROOT_DIR / f"groupcheck_tm_{idx}.png"
+        # Its own file, deleted first: a shared or stale capture would put one
+        # provider's picture in another provider's card.
+        try:
+            shot_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+        try:
+            res = _probe_group(page, str(title), shot_path=str(shot_file))
+        except Exception as err:  # noqa: BLE001
+            res = {"title": title, "ok": False, "opened": "",
+                   "reason": repr(err), "shot": ""}
+        results.append(res)
+        # Hand the sidebar back as it was found, so neither the next title nor
+        # the EVO watcher starts from wherever this one stopped scrolling.
+        _chat_list_home(page)
+        if sink is not None:
+            # A caller's Lark send must never tear the watcher down: _loop's
+            # except clause drops the page (and its lock) for ANY raised job.
+            try:
+                sink(res)
+            except Exception as err:  # noqa: BLE001
+                print(f"[teams-warm] probe sink failed: {err!r}", flush=True)
+    return results
+
+
+def probe_groups_cold(titles, *, sink=None, headless: bool = True) -> dict:
+    """Check every title in ONE cold Chromium boot, under the profile lock.
+
+    One boot for the whole list, not one per title: the boot is ~90s and the
+    lock is exclusive. Only used when the warm watcher is not running.
+    """
+    from playwright.sync_api import sync_playwright
+
+    out: dict = {"ok": False, "error": "", "results": []}
+    titles = [str(t).strip() for t in (titles or []) if str(t).strip()]
+    if not titles:
+        out["ok"] = True
+        return out
+
+    with _profile_lock("groupcheck"), sync_playwright() as p:
+        ctx, page = _open(p, headless=headless)
+        try:
+            page.goto(TEAMS_URL, wait_until="domcontentloaded", timeout=60000)
+            stage = _wait_teams_loaded(page)
+            if stage != "teams_loaded":
+                out["error"] = f"Teams not signed in (stage: {stage}) - run --login"
+                return out
+            out["ok"] = True
+            out["results"] = _probe_groups_on_page(page, titles, sink=sink)
+        except Exception as err:  # noqa: BLE001
+            out["error"] = repr(err)
+        finally:
+            try:
+                ctx.close()
+            except Exception:
+                pass
+    return out
+
+
+def check_groups_exist(titles, *, sink=None, timeout_s: int = 900) -> dict:
+    """/telegramgroupcheck's Teams half - read-only exact-title lookup.
+
+    Returns ``{"ok": bool, "error": str, "results": [...]}``. Routes to the warm
+    watcher when it is running: it holds the profile lock for its whole life, so
+    a cold read here would wait 120s and then fail with "profile is busy".
+    """
+    titles = [str(t).strip() for t in (titles or []) if str(t).strip()]
+    if not titles:
+        return {"ok": True, "error": "", "results": []}
+    if warm_running():
+        return warm().probe_groups(titles, sink=sink, timeout_s=timeout_s)
+    return probe_groups_cold(titles, sink=sink, headless=_headless())
+
+
 def _watch_target(group: str | None = None) -> str:
     """The group title every reader agrees on: argument, then env, then default.
 
@@ -3632,6 +3909,21 @@ class _TeamsWarm:
                                         int(task.get("limit") or 0), quiet=False)
                     if box is not None:
                         box.update(out)
+                elif kind == "probe_groups":
+                    if not self._ready():
+                        if box is not None:
+                            box.update({
+                                "ok": False, "results": [],
+                                "error": ("standing aside - another run holds "
+                                          "the Teams profile" if _yield_requested()
+                                          else "no signed-in Teams page"),
+                            })
+                    else:
+                        res = _probe_groups_on_page(
+                            self._page, task.get("titles") or [],
+                            sink=task.get("sink"))
+                        if box is not None:
+                            box.update({"ok": True, "error": "", "results": res})
                 elif kind == "shot":
                     ready = self._ready()
                     if box is not None:
@@ -3682,6 +3974,33 @@ class _TeamsWarm:
         if not done.wait(timeout=timeout_s):
             return {"ok": False, "shot": _snapshot().get("last_shot"),
                     "stage": "timeout"}
+        return box
+
+    def probe_groups(self, titles: list[str], *, sink=None,
+                     timeout_s: int = 900) -> dict:
+        """Blocking: check a list of exact chat titles on the warm page.
+
+        One job for the whole list - the Teams shell takes ~90s to boot and the
+        page is thread-confined, so every title must be driven from the worker.
+        The EVO poll cannot tick while this runs; ``sink`` reports each result as
+        it lands so the caller is not silent meanwhile.
+        """
+        self.start(poll=_watch_enabled())
+        done = threading.Event()
+        box: dict[str, Any] = {}
+        self._tasks.put({"kind": "probe_groups", "titles": list(titles),
+                         "sink": sink, "done": done, "box": box})
+        if not done.wait(timeout=timeout_s):
+            return {"ok": False, "results": [],
+                    "error": f"the warm Teams watcher did not answer within "
+                             f"{timeout_s}s"}
+        if not box:
+            # Belt and braces: _loop's except already fills the box, but a path
+            # that set `done` without writing it would otherwise read as an
+            # all-clear for groups that were never looked at.
+            return {"ok": False, "results": [],
+                    "error": "the Teams check crashed before it started "
+                             "(see the service log)"}
         return box
 
     def poll_now(self) -> None:

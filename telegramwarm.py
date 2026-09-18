@@ -1918,6 +1918,109 @@ def _check_group(page, title: str, count: int, *, shot_path: str | None = None,
     }
 
 
+# ---------------------------------------------------------------------------
+# /telegramgroupcheck - does this EXACT chat exist, and what does it look like?
+# ---------------------------------------------------------------------------
+
+# The chat column: conversation header + message pane, WITHOUT the left chat
+# list. A full-viewport shot would leak every other conversation's name and
+# last-message preview into a card posted to a Lark group.
+_CHAT_PANE_SEL = "#column-center"
+
+
+def _pane_shot(page, selector: str, out_path: str, *, log=print) -> str:
+    """Screenshot ``selector`` only, clipped to the viewport. '' on failure.
+
+    Deliberately NOT ``locator.screenshot()``: a pane whose scroll runway is
+    taller than the window renders the ENTIRE loaded conversation as one
+    enormous PNG. Intersecting the element's box with the viewport keeps the
+    image to what is actually on screen.
+    """
+    try:
+        box = page.locator(selector).first.bounding_box()
+    except Exception:
+        box = None
+    try:
+        if box:
+            vp = page.viewport_size or {"width": 1600, "height": 900}
+            x = max(0.0, float(box["x"]))
+            y = max(0.0, float(box["y"]))
+            w = min(float(box["x"]) + float(box["width"]), float(vp["width"])) - x
+            h = min(float(box["y"]) + float(box["height"]), float(vp["height"])) - y
+            if w > 1 and h > 1:
+                page.screenshot(path=out_path,
+                                clip={"x": x, "y": y, "width": w, "height": h})
+                return out_path
+        # A Telegram UI change should cost fidelity, never the whole check.
+        log(f"[tg-warm] {selector} not measurable - full-viewport shot instead")
+        page.screenshot(path=out_path)
+        return out_path
+    except Exception as err:
+        log(f"[tg-warm] pane screenshot failed: {err!r}")
+        return ""
+
+
+def _probe_group(page, title: str, *, shot_path: str, log=print) -> dict:
+    """Does a chat named EXACTLY ``title`` exist? Read-only; photographs it.
+
+    Returns ``{title, ok, opened, reason, shot, peerId, verifiedBy}``.
+
+    Exactness is the entire point. The caller feeds titles from a Base and
+    labels each screenshot with a provider's name, so a substring hit would
+    photograph a DIFFERENT provider's group and caption it with the wrong
+    provider. Hence ``allow_substring=False`` - whole-string equality after
+    whitespace collapsing, case-insensitive (see _titles_match) - and, because
+    _open_chat_by_title can confirm by peer id without ever comparing the
+    header, the header is re-checked against ``title`` here as well.
+
+    Nothing is typed into the conversation. The only keystrokes go to the
+    sidebar search box (scoped to #column-left by _search_sidebar); the
+    composer lives in #column-center and is never touched.
+    """
+    out = {"title": title, "ok": False, "opened": "", "reason": "",
+           "shot": "", "peerId": "", "verifiedBy": ""}
+    try:
+        opened = _open_chat_by_title(
+            page, title,
+            allow_substring=False,     # whole-string, never a prefix
+            case_sensitive=False,
+            allow_search=True,         # the chat list is virtualised: most rows
+                                       # of a 20-name Base are not in the DOM
+            accept_hash_change=False,  # "something opened" is not "this opened"
+            log=log,
+        )
+    except Exception as err:
+        out["reason"] = f"lookup failed: {err!r}"
+        return out
+
+    out["peerId"] = _display_peer(opened)
+    out["verifiedBy"] = str(opened.get("verifiedBy") or "")
+
+    if not opened.get("ok"):
+        matches = opened.get("matches")
+        if opened.get("error"):
+            out["reason"] = str(opened["error"])
+        elif not matches:
+            out["reason"] = "no chat with this exact name"
+        else:
+            out["reason"] = f"{matches} chats share this name - refusing to guess"
+        _back_to_chat_list(page, log=log)
+        return out
+
+    header = _open_chat_title(page) or str(opened.get("title") or "")
+    out["opened"] = header
+    if header and not _titles_match(header, title, allow_substring=False,
+                                    case_sensitive=False):
+        out["reason"] = f"opened chat is titled {header!r}, not this"
+        _back_to_chat_list(page, log=log)
+        return out
+
+    out["ok"] = True
+    out["shot"] = _pane_shot(page, _CHAT_PANE_SEL, shot_path, log=log)
+    _back_to_chat_list(page, log=log)
+    return out
+
+
 def _test_chat_peer() -> str:
     """Optional pin for the send target: the peer id Telegram Web shows in
     location.hash once the chat is open (e.g. ``-1001234567890`` or ``123456``).
@@ -2545,6 +2648,33 @@ class _TelegramWarm:
         done.wait(timeout=180)
         return box
 
+    def probe_groups(self, titles: list[str], *, sink=None,
+                     timeout_s: int = 900) -> dict:
+        """Blocking: check a whole list of exact chat titles in ONE job.
+
+        One job for the whole list, not one per title, because _check_auth()
+        reloads Telegram Web on every invocation - 20 jobs would mean 20 full
+        page reloads. ``sink``, if given, is called with each per-title result
+        AS IT COMPLETES (on the worker thread), so the caller can post progress
+        rather than waiting for the entire batch.
+        """
+        done = threading.Event()
+        box: dict = {}
+        self._tasks.put({"kind": "probe_groups", "titles": list(titles),
+                         "sink": sink, "done": done, "box": box})
+        if not done.wait(timeout=timeout_s):
+            return {"ok": False, "results": [],
+                    "error": f"Telegram did not answer within {timeout_s}s"}
+        if not box:
+            # _loop caught something, tore the page down and set `done` in its
+            # finally WITHOUT ever writing the box. Returning {} here made the
+            # caller read "no error, no results" as an all-clear for groups that
+            # were never looked at, so an empty box is an explicit failure.
+            return {"ok": False, "results": [],
+                    "error": "the Telegram check crashed before it started - "
+                             "the browser was torn down (see the service log)"}
+        return box
+
     # -- worker loop ---------------------------------------------------------
     def _loop(self) -> None:
         while True:
@@ -2569,6 +2699,8 @@ class _TelegramWarm:
                     self._handle_reset(task)
                 elif kind == "send_test":
                     self._handle_send_test(task)
+                elif kind == "probe_groups":
+                    self._handle_probe_groups(task)
                 elif kind == "check_group":
                     self._handle_check_group(task)
             except Exception as err:
@@ -3125,6 +3257,67 @@ class _TelegramWarm:
             pass
         print(f"[tg-warm] reset done (profile removed={removed})", flush=True)
 
+    def _handle_probe_groups(self, task: dict) -> None:
+        """Worker side of /telegramgroupcheck. Read-only, one shot per title."""
+        box = task.get("box")
+        titles = [str(t).strip() for t in (task.get("titles") or []) if str(t).strip()]
+        sink = task.get("sink")
+        out: dict = {"ok": False, "error": "", "results": []}
+
+        if self._code_wait_active():
+            out["error"] = ("a Telegram login code is pending - finish it with "
+                            "/telegramcode before reading chats")
+            if box is not None:
+                box.update(out)
+            return
+
+        try:
+            if not self._healthy():
+                self._launch()
+            verdict = self._check_auth()
+        except Exception as err:  # noqa: BLE001
+            # _check_auth reloads Telegram Web on a 90s budget and _launch opens
+            # Chromium; both raise in normal operation (slow load, dead target,
+            # profile still locked). Report it instead of letting _loop swallow
+            # it and leave the caller with an empty box.
+            out["error"] = f"could not reach Telegram: {err!r}"
+            if box is not None:
+                box.update(out)
+            return
+        if verdict != "authenticated":
+            out["error"] = (f"Telegram not logged in ({verdict}) - "
+                            f"run /logintelegram code first")
+            if box is not None:
+                box.update(out)
+            return
+
+        out["ok"] = True
+        for idx, title in enumerate(titles):
+            shot_file = _ROOT_DIR / f"groupcheck_tg_{idx}.png"
+            # Its own file, deleted first: a shared or stale capture would put
+            # one provider's picture in another provider's card.
+            try:
+                shot_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+            try:
+                res = _probe_group(self._page, title, shot_path=str(shot_file))
+            except Exception as err:
+                res = {"title": title, "ok": False, "opened": "",
+                       "reason": repr(err), "shot": "", "peerId": "",
+                       "verifiedBy": ""}
+            out["results"].append(res)
+            if sink is not None:
+                # A caller's Lark send must never tear down the browser:
+                # _loop's except clause drops the page for ANY raised job.
+                try:
+                    sink(res)
+                except Exception as err:
+                    print(f"[tg-warm] probe sink failed: {err!r}", flush=True)
+
+        if box is not None:
+            box.update(out)
+
     def _handle_check_group(self, task: dict) -> None:
         """Read-only: for each requested chat, post a card with its latest messages
         and a screenshot of that chat. One card per chat."""
@@ -3400,6 +3593,23 @@ def check_group_messages(chat_id: str | None = None,
     w = warm()
     w.start()
     w.check_group(chat_id, titles, count)
+
+
+def check_groups_exist(titles, *, sink=None, timeout_s: int = 900) -> dict:
+    """/telegramgroupcheck's Telegram half - read-only exact-title lookup.
+
+    Returns ``{"ok": bool, "error": str, "results": [...]}``; each result is the
+    dict from _probe_group. ``sink`` is called with each result as it lands, so
+    the caller can post one card per group instead of waiting for all of them.
+    Unlike check_group_messages this RETURNS its findings - the caller has to
+    label each screenshot with the provider it belongs to.
+    """
+    titles = [str(t).strip() for t in (titles or []) if str(t).strip()]
+    if not titles:
+        return {"ok": True, "error": "", "results": []}
+    w = warm()
+    w.start()
+    return w.probe_groups(titles, sink=sink, timeout_s=timeout_s)
 
 
 def send_test_message(chat_id: str | None = None, *, force: bool = False) -> bool:

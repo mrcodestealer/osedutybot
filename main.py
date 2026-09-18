@@ -6971,6 +6971,35 @@ def lark_webhook():
 
         threading.Thread(target=_run_telegram_check, daemon=True).start()
         return _lark_im_done()
+    elif cmd == '/telegramgroupcheck':
+        # Read every provider row of the maintenance Base, then ask whichever
+        # platform that row's APP column names (TELEGRAM / TEAMS) whether a chat
+        # with EXACTLY that Group Name exists. Each hit comes back as its own
+        # card carrying a screenshot of that chat's window, captioned with the
+        # provider it belongs to; everything missing is listed by name at the end.
+        #
+        # Read-only on both platforms: nothing is typed into any conversation and
+        # nothing is sent. Ungated for the same reason /checktelegramgroup is —
+        # unlike /telegramsendjctest below, it cannot write anywhere.
+        #
+        # Takes no arguments: the Base IS the list. Overriding which Base is an
+        # env matter (GROUPCHECK_APP_TOKEN / _TABLE_ID / _VIEW_ID), not something
+        # a group chat should be able to redirect.
+        def _run_group_check(chat_id_gc=chat_id):
+            try:
+                import groupcheck as _gc_mod
+
+                _gc_mod.run_check(chat_id_gc)
+            except Exception as _gc_err:
+                print(f"❌ telegramgroupcheck: {_gc_err!r}", flush=True)
+                try:
+                    send_message(chat_id_gc,
+                                 f"❌ /telegramgroupcheck failed: {_gc_err}")
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run_group_check, daemon=True).start()
+        return _lark_im_done()
     elif cmd == '/telegramsendjctest':
         # The ONLY path that writes to Telegram. Opens the chat named in
         # TELEGRAM_TEST_CHAT (default "jc"), confirms the open conversation's identity
