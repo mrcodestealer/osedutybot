@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Watch the VA announcements Telegram group for scheduled-maintenance notices.
+"""Watch every provider Telegram group for scheduled-maintenance notices.
 
-When VA posts a notice for an UPCOMING maintenance window, this:
+One group is read per tick, round-robin (see ``next_target``), so a full cycle
+over ~17 groups costs under 20 minutes of a single-threaded browser instead of
+saturating it. The group list comes from the Base via ``groupcheck.partition``,
+so the excluded groups and the blank rows are defined in one place.
+
+When a provider posts a notice for an UPCOMING maintenance window, this:
   * fills that provider's row in the maintenance Lark Base —
       Start Time, End Time (from the notice), Remark (the whole message),
       Last Check (now). Reference is left alone.
@@ -16,9 +21,11 @@ only looked for a window would re-fire on it.
 
 Nothing is ever sent in Telegram. The watcher only reads.
 
-Detection is rule-based on purpose. Production is CPU-only and runs qwen2.5:0.5b,
-so an LLM cannot be the gate for something that WRITES to a shared operational
-sheet that people act on.
+Detection here is rule-based on purpose (``noticeparse``): this path writes to a
+shared operational sheet unattended, so the rule that fired has to be
+inspectable afterwards. The LLM is used only where a judgement call is genuinely
+needed - deciding whether a message REPLIES to us - which is
+/provideraskmaintenance's job, not this one's.
 
 Deliberately NOT importing main (it starts the scheduler and can forward a real
 maintenance email) and NOT importing ose_Duty: its bitable helpers hard-code
@@ -97,89 +104,70 @@ def _now_str() -> str:
 # Classification
 # ---------------------------------------------------------------------------
 
-# Checked FIRST and unconditionally. A completion notice repeats the original
-# window verbatim, so a window-based rule alone would re-fire on it. 取消 is
-# deliberately loose: because this pattern wins outright, a false hit means
-# SKIPPING a notice (a miss someone notices) rather than writing a maintenance
-# window into a shared sheet for work that is not happening.
-DONE_RE = re.compile(
-    r"维护完成|維護完成|維護已完成|维护已完成|已经完成|已經完成|维护结束|維護結束"
-    r"|maintenance\s+(?:has\s+been\s+)?completed"
-    r"|completed\s+successfully"
-    r"|has\s+been\s+completed"
-    r"|(?:已|将|將)?取消|cancell?ed|postponed|rescheduled",
-    re.I)
+def classify(text: str) -> dict:
+    """Delegates to noticeparse.
 
-# An UPCOMING window. 例行性维护 / "scheduled maintenance" are the load-bearing
-# ones; the rest are shapes other providers in this Base use.
-SCHED_RE = re.compile(
-    r"例行性维护|例行性維護|例行维护|例行維護|定期维护|定期維護"
-    r"|正式环境.{0,12}维护|正式環境.{0,12}維護"
-    r"|进行.{0,8}维护|進行.{0,8}維護|停机维护|停機維護|系统维护|系統維護"
-    r"|scheduled\s+maintenance|routine\s+maintenance"
-    r"|maintenance\s+notice|under\s+maintenance"
-    r"|will\s+have\s+.{0,30}maintenance",
-    re.I)
+    The rules moved there when the watcher grew from one group to all of them:
+    a "Rescheduled / 时间变更" notice must OVERRIDE the row, and this module's
+    first cut had `rescheduled|postponed` inside its completed/cancelled pattern,
+    which made the override a guaranteed no-op. Keeping one copy of the rules
+    means /provideraskmaintenance and the passive watcher can never disagree
+    about what a message means.
+    """
+    import noticeparse
 
-_D = r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})"
-_T = r"(\d{1,2}):(\d{2})"
-_DASH = r"\s*(?:-|--|–|—|~|～|to|至|until)\s*"
-# "2026-09-16 09:00 - 12:00" (one date, two times) and
-# "2026-09-16 22:00 - 2026-09-17 03:00" (two dates) in one pattern.
-WINDOW_RE = re.compile(_D + r"\s+" + _T + _DASH + r"(?:" + _D + r"\s+)?" + _T)
-
-TZ_RE = re.compile(r"(?:GMT|UTC)\s*([+-])\s*(\d{1,2})(?::(\d{2}))?"
-                   r"|(?<![\d:])([+-])(\d{1,2}):(\d{2})(?!\d)", re.I)
-
-
-def _tz_of(text: str):
-    """The zone the notice states, else the configured default."""
-    m = TZ_RE.search(text or "")
-    if not m:
-        return _tz()
-    if m.group(2) is not None:
-        sign, hh, mm = m.group(1), int(m.group(2)), int(m.group(3) or 0)
-    else:
-        sign, hh, mm = m.group(4), int(m.group(5)), int(m.group(6) or 0)
-    off = timedelta(hours=hh, minutes=mm)
-    return timezone(-off if sign == "-" else off)
+    return noticeparse.classify(text)
 
 
 def find_window(text: str):
-    """-> (start, end) as aware datetimes, or None."""
-    m = WINDOW_RE.search(text or "")
-    if not m:
-        return None
-    tz = _tz_of(text)
-    y1, mo1, d1, h1, mi1, y2, mo2, d2, h2, mi2 = m.groups()
+    import noticeparse
+
+    return noticeparse.find_window(text)
+
+
+# ---------------------------------------------------------------------------
+# Which groups to watch
+# ---------------------------------------------------------------------------
+
+def targets() -> list:
+    """Every Telegram provider group worth watching, from the Base.
+
+    Reuses groupcheck's partition, so the excluded groups and the blank rows are
+    defined in exactly one place and the watcher can never drift from what
+    /telegramgroupcheck reports.
+    """
     try:
-        start = datetime(int(y1), int(mo1), int(d1), int(h1), int(mi1), tzinfo=tz)
-        if y2:
-            end = datetime(int(y2), int(mo2), int(d2), int(h2), int(mi2), tzinfo=tz)
-        else:
-            end = start.replace(hour=int(h2), minute=int(mi2))
-            if end <= start:        # "22:00 - 02:00" crosses midnight
-                end += timedelta(days=1)
-    except ValueError:              # e.g. month 13 from a mangled read
-        return None
-    return start, end
+        import groupcheck as gc
+
+        telegram, _teams, _skipped = gc.partition(gc.fetch_rows())
+        out = [{"provider": r.get("provider") or "", "group": r.get("group") or ""}
+               for r in telegram if (r.get("group") or "").strip()]
+        if out:
+            return out
+    except Exception as err:  # noqa: BLE001
+        print(f"[vawatch] could not read the Base ({err!r}); "
+              f"falling back to the configured single group", flush=True)
+    single = _chat_title()
+    return [{"provider": _provider(), "group": single}] if single else []
 
 
-def classify(text: str) -> dict:
-    """-> {action: 'fill'|'ignore', reason, start, end}"""
-    t = text or ""
-    if DONE_RE.search(t):
-        return {"action": "ignore", "start": None, "end": None,
-                "reason": "maintenance completed / cancelled notice"}
-    if not SCHED_RE.search(t):
-        return {"action": "ignore", "start": None, "end": None,
-                "reason": "no scheduled-maintenance wording"}
-    win = find_window(t)
-    if not win:
-        return {"action": "ignore", "start": None, "end": None,
-                "reason": "maintenance wording but no parseable date/time window"}
-    return {"action": "fill", "reason": "scheduled maintenance",
-            "start": win[0], "end": win[1]}
+def next_target() -> dict:
+    """One group per tick, round-robin.
+
+    Reading all ~17 groups on every tick would take ~5 minutes of the single
+    Telegram worker and starve every other command. One per 60s tick means a
+    full cycle in under 20 minutes, which is far inside the notice period a
+    provider gives, and leaves the worker free the rest of the time.
+    """
+    rows = targets()
+    if not rows:
+        return {}
+    d = _load()
+    idx = int(d.get("cursor") or 0) % len(rows)
+    d["cursor"] = (idx + 1) % len(rows)
+    with _ledger_lock:
+        _save(d)
+    return rows[idx]
 
 
 # ---------------------------------------------------------------------------
@@ -302,15 +290,22 @@ def update_row(record_id: str, fields: dict) -> dict:
 _ledger_lock = threading.Lock()
 
 
-def _key(msg: dict) -> str:
-    """Identity of a message. data-mid when Telegram gives one, else a content
-    hash. Content-hashed rather than counted so the same notice re-posted maps to
-    the same record instead of a new one."""
+def _key(msg: dict, group: str = "") -> str:
+    """Identity of a message WITHIN a group.
+
+    The group is part of the key because the watcher now rotates over ~17 chats
+    that all share one ledger. Telegram's data-mid is per-CHAT, so ids collide
+    across groups, and providers relay each other's notices verbatim so the
+    content hash collides too. Without the group, one provider's notice silently
+    marked another provider's identical notice as already handled - and that
+    provider's row was never filled.
+    """
+    g = " ".join(str(group or "").split()).casefold()
     mid = str(msg.get("mid") or "").strip()
     if mid:
-        return f"mid:{mid}"
+        return f"{g}|mid:{mid}"
     body = " ".join(str(msg.get("text") or "").split())
-    return "sha:" + hashlib.sha1(body.encode("utf-8")).hexdigest()[:16]
+    return f"{g}|sha:" + hashlib.sha1(body.encode("utf-8")).hexdigest()[:16]
 
 
 def _load() -> dict:
@@ -327,6 +322,8 @@ def _load() -> dict:
 
 
 def _save(d: dict) -> None:
+    d.setdefault("order", [])
+    d.setdefault("handled", {})
     d["order"] = d["order"][-2000:]
     d["handled"] = {k: v for k, v in d["handled"].items() if k in set(d["order"])}
     try:
@@ -349,8 +346,46 @@ def _mark(d: dict, key: str, outcome: str, extra: Optional[dict] = None) -> None
 
 
 def ledger_is_cold() -> bool:
-    """True before the first sweep has ever run."""
+    """Deprecated: file-existence is NOT a usable cold-start test any more.
+
+    Kept only so an external caller does not break. ``next_target`` writes the
+    ledger to persist its rotation cursor, so by the time a sweep reaches
+    handle_messages the file always exists - which silently disabled the
+    backlog guard for EVERY group, including the first. Use ``is_baselined``.
+    """
     return not LEDGER_PATH.exists()
+
+
+def is_baselined(group: str) -> bool:
+    """Has this group's existing backlog already been recorded?
+
+    Per GROUP, not per file. The watcher rotates over ~17 groups, so a single
+    global flag meant group #2 onwards were never baselined at all and would act
+    on whatever old notices happened to be in them - up to 17 provider rows
+    filled from history the moment the watcher was switched on.
+    """
+    key = " ".join(str(group or "").split()).casefold()
+    return bool((_load().get("baselined") or {}).get(key))
+
+
+def _bump_empty_reads(group: str) -> int:
+    """Count consecutive reads of ``group`` that returned nothing."""
+    key = " ".join(str(group or "").split()).casefold()
+    with _ledger_lock:
+        d = _load()
+        n = int((d.setdefault("empty_reads", {})).get(key) or 0) + 1
+        d["empty_reads"][key] = n
+        _save(d)
+    return n
+
+
+def mark_baselined(group: str) -> None:
+    key = " ".join(str(group or "").split()).casefold()
+    with _ledger_lock:
+        d = _load()
+        d.setdefault("baselined", {})[key] = _now_str()
+        (d.setdefault("empty_reads", {})).pop(key, None)
+        _save(d)
 
 
 # ---------------------------------------------------------------------------
@@ -403,9 +438,11 @@ def build_text(group: str, provider: str, text: str, verdict: dict,
 # The detector
 # ---------------------------------------------------------------------------
 
-def act_on_notice(text: str, verdict: dict) -> dict:
+def act_on_notice(text: str, verdict: dict, *, provider: str = "",
+                  group: str = "") -> dict:
     """Write the provider's row, then card the Laboratory group."""
-    provider, group = _provider(), _chat_title()
+    provider = provider or _provider()
+    group = group or _chat_title()
     out: dict = {"wrote": None, "error": "", "record_id": ""}
     try:
         row = find_provider_row(provider)
@@ -420,7 +457,8 @@ def act_on_notice(text: str, verdict: dict) -> dict:
             # Reference is deliberately absent: leaving it out leaves it alone.
         })
         out["wrote"] = (f"{verdict['start']:%Y-%m-%d %H:%M} → "
-                        f"{verdict['end']:%H:%M}")
+                        f"{verdict['end']:%H:%M}"
+                        + (" (rescheduled)" if verdict.get("reschedule") else ""))
     except Exception as err:          # noqa: BLE001
         # A failed write must never look like an ignored message, so the card
         # still goes out and says so.
@@ -439,29 +477,41 @@ def act_on_notice(text: str, verdict: dict) -> dict:
     return out
 
 
-def handle_messages(messages: list, *, force: bool = False) -> dict:
+def handle_messages(messages: list, *, force: bool = False,
+                    provider: str = "", group: str = "") -> dict:
     """Classify each message, act on new maintenance notices.
 
     ``force`` re-acts on the newest maintenance notice even if the ledger has
     already handled it — for a manual /vacheck when you want to prove the path.
     """
     d = _load()
-    cold = ledger_is_cold()
+    cold = not is_baselined(group) if group else ledger_is_cold()
     res = {"seen": 0, "acted": 0, "ignored": 0, "already": 0,
            "cold_start": cold, "details": []}
 
-    for msg in messages or []:
+    # Bubbles arrive OLDEST first. Normally that is what we want - each later
+    # message overwrites the earlier one, so the newest ends up on the row. But
+    # `force` stops at the first message it acts on, so it has to start from the
+    # NEWEST or it would re-assert a notice that a later reschedule superseded.
+    for msg in (list(reversed(messages or [])) if force else (messages or [])):
         text = str(msg.get("text") or "").strip()
         if not text:
             continue
         res["seen"] += 1
-        key = _key(msg)
+        key = _key(msg, group)
         verdict = classify(text)
         known = _seen(d, key)
 
         if known and not force:
             res["already"] += 1
             res["details"].append({"key": key, "action": "already handled"})
+            continue
+        if verdict["action"] == "fill" and verdict.get("stale") and not force:
+            # A window that has already finished: the provider is re-quoting an
+            # old notice. Writing it would replace a live row with dead dates.
+            _mark(d, key, "stale", {"why": "window already passed"})
+            res["ignored"] += 1
+            res["details"].append({"key": key, "action": "stale"})
             continue
         if verdict["action"] != "fill":
             _mark(d, key, "ignored", {"why": verdict["reason"]})
@@ -477,7 +527,7 @@ def handle_messages(messages: list, *, force: bool = False) -> dict:
             res["details"].append({"key": key, "action": "cold-start skip"})
             continue
 
-        done = act_on_notice(text, verdict)
+        done = act_on_notice(text, verdict, provider=provider, group=group)
         _mark(d, key, "filled" if done["wrote"] else "write-failed",
               {"window": done["wrote"] or "", "error": done["error"]})
         res["acted"] += 1
@@ -488,6 +538,19 @@ def handle_messages(messages: list, *, force: bool = False) -> dict:
 
     with _ledger_lock:
         _save(d)
+    if cold and group:
+        # Record the baseline only AFTER the backlog has been marked, so a crash
+        # midway does not leave the group looking baselined with its history
+        # unrecorded - which would then act on it next tick.
+        #
+        # And only when the read actually SAW something. A chat whose virtualised
+        # list had not rendered yet returns zero messages, and baselining on that
+        # spends the one-time guard on nothing: the next tick would treat the
+        # group as baselined and act on its whole real backlog. A second
+        # consecutive empty read is accepted as "this group is genuinely empty",
+        # so a quiet group does not stay unbaselined forever.
+        if res["seen"] > 0 or _bump_empty_reads(group) >= 2:
+            mark_baselined(group)
     return res
 
 

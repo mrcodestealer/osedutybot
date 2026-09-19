@@ -6971,6 +6971,107 @@ def lark_webhook():
 
         threading.Thread(target=_run_telegram_check, daemon=True).start()
         return _lark_im_done()
+    elif cmd == '/provideraskmaintenance':
+        # Ask every pinned provider group "any maintenance plans for this week?",
+        # then collect the answers for an hour and file them into the Base.
+        #
+        # This is the ONLY command that writes into external partner groups. It
+        # is ungated by explicit choice; the safety comes from elsewhere:
+        #   * each send is pinned to a peer id harvested by /telegramgroupcheck.
+        #     A group with no pin is reported, never messaged.
+        #   * sends are paced 30-60s apart and the run stops on the first send
+        #     that does not confirm (a flood wait would hit every later group).
+        #   * only one run at a time, journalled to disk so a restart resumes.
+        def _run_provider_ask(chat_id_pa=chat_id):
+            try:
+                import telegramwarm as _pa_tg
+
+                res = _pa_tg.provider_ask_start(chat_id_pa)
+                if not res.get("ok"):
+                    send_message(chat_id_pa, f"⏳ {res.get('error')}")
+                    return
+                plan = res.get("plan") or {}
+                ask = plan.get("ask") or []
+                unpinned = plan.get("unpinned") or []
+                lines = [
+                    f"📣 Asking {len(ask)} provider group(s): "
+                    f"\"Hi team, are there any maintenance plans for this week?\"",
+                    "Sends are paced 30-60s apart, so this takes ~"
+                    f"{max(1, len(ask) * 45 // 60)} min. Nothing else is sent.",
+                ]
+                if ask:
+                    lines.append("")
+                    lines += [f"  • {r.get('provider')}" for r in ask[:25]]
+                if unpinned:
+                    lines.append("")
+                    lines.append(f"⚠️ {len(unpinned)} group(s) have no peer id and "
+                                 f"will NOT be messaged — run /telegramgroupcheck "
+                                 f"once to pin them:")
+                    lines += [f"  • {r.get('provider')}" for r in unpinned[:25]]
+                lines.append("")
+                lines.append("I will post a summary card in about an hour.")
+                send_message(chat_id_pa, "\n".join(lines))
+            except Exception as _pa_err:
+                print(f"❌ provideraskmaintenance: {_pa_err!r}", flush=True)
+                try:
+                    send_message(chat_id_pa,
+                                 f"❌ /provideraskmaintenance failed: {_pa_err}")
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run_provider_ask, daemon=True).start()
+        return _lark_im_done()
+    elif cmd == '/telegramdumpreply':
+        # Read-only DOM probe. Nothing in this repo has ever touched a Telegram
+        # reply bubble, so a selector for "follow the quoted message" has to be
+        # written against the real markup rather than guessed.
+        _dr_body = re.sub(r'(?is)^\s*/telegramdumpreply\b[ \t]*', '',
+                          clean_text_multiline or clean_text, count=1)
+        _dr_title = (_dr_body.strip().splitlines() or [""])[0].strip()
+        if not _dr_title:
+            send_message(chat_id,
+                         "ℹ️ Usage: `/telegramdumpreply <exact group name>` — "
+                         "opens it read-only and describes a reply bubble's "
+                         "structure so quote-following can be built.")
+            return _lark_im_done()
+
+        def _run_dump_reply(chat_id_dr=chat_id, title_dr=_dr_title):
+            try:
+                import json as _dr_json
+
+                import telegramwarm as _dr_tg
+
+                send_message(chat_id_dr, f"🔬 Reading {title_dr!r} (read-only)…")
+                res = _dr_tg.dump_reply_dom(title_dr)
+                if not res.get("ok"):
+                    send_message(chat_id_dr, f"❌ /telegramdumpreply: {res.get('error')}")
+                    return
+                replies = res.get("replies") or []
+                if not replies:
+                    send_message(
+                        chat_id_dr,
+                        f"No reply/quote bubble found in the last "
+                        f"{res.get('scanned')} of {res.get('total')} messages. "
+                        f"Scroll the group so a reply is visible, or try a group "
+                        f"where someone quoted a message.")
+                    return
+                body = _dr_json.dumps(replies, ensure_ascii=False, indent=1)
+                head = (f"🔬 {res.get('chat')} — {len(replies)} reply bubble(s), "
+                        f"scanned {res.get('scanned')}/{res.get('total')}\n"
+                        f"quote sits INSIDE .message: "
+                        f"{[r.get('replyInsideMessage') for r in replies]}")
+                send_message(chat_id_dr, head)
+                for i in range(0, len(body), 3500):
+                    send_message(chat_id_dr, f"```\n{body[i:i + 3500]}\n```")
+            except Exception as _dr_err:
+                print(f"❌ telegramdumpreply: {_dr_err!r}", flush=True)
+                try:
+                    send_message(chat_id_dr, f"❌ /telegramdumpreply failed: {_dr_err}")
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run_dump_reply, daemon=True).start()
+        return _lark_im_done()
     elif cmd == '/vacheck':
         # One VA sweep on demand: read the VA announcements group, and if its
         # newest messages carry an UPCOMING maintenance window, fill that

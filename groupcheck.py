@@ -74,6 +74,25 @@ _APP_FIELDS = ("APP", "App", "Platform")
 _TELEGRAM_WORDS = {"telegram", "tg"}
 _TEAMS_WORDS = {"teams", "team", "msteams", "ms teams"}
 
+# Groups to leave alone. Matched against the row's Group Name OR its provider,
+# by the same rule the lookup itself uses (trim, collapse whitespace, case-fold,
+# whole string) so an entry here cannot accidentally silence a similarly-named
+# group. Separate several with a newline or a semicolon — NOT a comma, which is
+# legal inside a chat title.
+_SKIP_DEFAULT = "[CasinoPlus] CasinoPlus x BTi(SL) Support"
+
+
+def _norm(value: str) -> str:
+    """The lookup's own normalisation, reused so exclusions match identically."""
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _skip_set() -> set:
+    raw = os.getenv("GROUPCHECK_SKIP")
+    if raw is None:
+        raw = _SKIP_DEFAULT
+    return {_norm(p) for p in re.split(r"[\n;]+", raw) if p.strip()}
+
 
 def _tz():
     try:
@@ -279,12 +298,17 @@ def partition(rows: list) -> tuple:
     telegram: list = []
     teams: list = []
     skipped: list = []
+    skip = _skip_set()
     for row in rows:
         name = (row.get("group") or "").strip()
         apps = row.get("apps") or set()
         want_tg = bool(apps & _TELEGRAM_WORDS)
         want_tm = bool(apps & _TEAMS_WORDS)
-        if not name and not apps:
+        if skip and (_norm(name) in skip or _norm(row.get("provider")) in skip):
+            # Checked before everything else: an excluded group is never opened,
+            # never screenshotted, and never reported as undetectable.
+            row["why"] = "excluded from scanning (GROUPCHECK_SKIP)"
+        elif not name and not apps:
             row["why"] = "no Group Name and no APP set"
         elif not name:
             row["why"] = "no Group Name set"
@@ -380,7 +404,7 @@ def build_summary_card(found: list, missing: list, skipped: list,
     elements: list = [_div(
         f"**Checked {total} group(s) from the Base**\n"
         f"✅ Detected: **{len(found)}**   ❌ Not detected: **{len(missing)}**"
-        f"   ⚪ Not configured: **{len(skipped)}**"
+        f"   ⚪ Skipped: **{len(skipped)}**"
     )]
 
     if missing:
@@ -395,7 +419,7 @@ def build_summary_card(found: list, missing: list, skipped: list,
 
     if skipped:
         elements.append({"tag": "hr"})
-        lines = ["**⚪ Skipped — nothing to look up in the Base:**"]
+        lines = ["**⚪ Skipped — not looked up:**"]
         for row in skipped:
             lines.append(f"• **{row.get('provider') or '?'}** — "
                          f"_{row.get('why') or 'no Group Name / APP'}_")
@@ -450,7 +474,7 @@ def build_summary_text(found: list, missing: list, skipped: list,
                   f"{r.get('group') or ''} — {reason}"
                   for r, p, reason in missing]
     if skipped:
-        lines.append("\n⚪ Skipped (not configured in the Base):")
+        lines.append("\n⚪ Skipped:")
         lines += [f"  • {r.get('provider') or '?'} — {r.get('why') or ''}"
                   for r in skipped]
     if found:
@@ -494,6 +518,20 @@ def _make_sink(chat_id: str, rows: list, platform: str,
         seen.add(idx)
         row = rows[idx] if idx < len(rows) else {"provider": "?", "group":
                                                  result.get("title") or ""}
+        # Harvest the peer id while we have it. This is the only command that
+        # resolves every provider group, and /provideraskmaintenance refuses to
+        # message a group it cannot pin to an id.
+        if platform == "Telegram" and result.get("ok") and result.get("peerId"):
+            try:
+                import peerstore
+
+                peerstore.remember(row.get("group") or result.get("title") or "",
+                                   result["peerId"],
+                                   provider=row.get("provider") or "")
+            except Exception as err:  # noqa: BLE001
+                print(f"[groupcheck] could not store the peer id: {err!r}",
+                      flush=True)
+
         image_key = None
         shot = (result.get("shot") or "").strip()
         if result.get("ok") and shot and os.path.exists(shot):
@@ -593,7 +631,7 @@ def run_check(chat_id: str) -> dict:
             chat_id,
             f"🔍 Group check: {len(rows)} row(s) in the Base — "
             f"{len(telegram)} Telegram, {len(teams)} Teams, "
-            f"{len(skipped)} with nothing to look up.\n"
+            f"{len(skipped)} skipped.\n"
             f"Opening each group read-only and screenshotting its chat window. "
             f"Nothing will be sent in Telegram or Teams.",
         )

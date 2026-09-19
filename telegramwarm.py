@@ -54,6 +54,7 @@ import json
 import mimetypes
 import os
 import queue
+import random
 import shutil
 import sys
 import threading
@@ -187,6 +188,15 @@ def _va_watch_enabled() -> bool:
     deliberately switched off on 2026-09-09.
     """
     return _truthy(os.getenv("VAWATCH_ENABLED"))
+
+
+def _pa_sweep_sec() -> int:
+    try:
+        import providerask as pa
+
+        return max(120, pa._sweep_minutes() * 60)
+    except Exception:
+        return 600
 
 
 def _va_watch_sec() -> int:
@@ -2078,6 +2088,181 @@ def _near_misses(wanted: str, candidates: list, limit: int = 4) -> str:
     return f" — closest rendered titles: {shown}"
 
 
+_DUMP_REPLY_JS = """
+(n) => {
+  const root = document.querySelector('#column-center');
+  if (!root) return { error: 'no #column-center' };
+  let nodes = Array.from(root.querySelectorAll('.bubble[data-mid]'));
+  if (!nodes.length) nodes = Array.from(root.querySelectorAll('.bubble'));
+  const cls = (el) => (el.className || '').toString().trim();
+  // Describe a bubble's element tree, so the reply container is identifiable
+  // even if it carries a class nobody expected.
+  const tree = (el, depth) => {
+    if (depth > 4) return [];
+    const out = [];
+    for (const c of Array.from(el.children || [])) {
+      const t = (c.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 70);
+      out.push({
+        d: depth,
+        tag: c.tagName.toLowerCase(),
+        cls: cls(c).slice(0, 90),
+        attrs: Array.from(c.attributes || [])
+                    .map(a => a.name + '=' + String(a.value).slice(0, 40))
+                    .filter(a => !a.startsWith('style='))
+                    .slice(0, 6),
+        text: t,
+      });
+      out.push(...tree(c, depth + 1));
+    }
+    return out;
+  };
+  const RX = /reply|quote|forward/i;
+  const hits = [];
+  for (const b of nodes.slice(-n)) {
+    const marks = Array.from(b.querySelectorAll('*'))
+      .filter(e => RX.test(cls(e)) || RX.test(e.getAttribute('data-tid') || ''))
+      .map(e => ({ tag: e.tagName.toLowerCase(), cls: cls(e).slice(0, 90),
+                   text: (e.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 120),
+                   attrs: Array.from(e.attributes || [])
+                               .map(a => a.name + '=' + String(a.value).slice(0, 40))
+                               .filter(a => !a.startsWith('style='))
+                               .slice(0, 8) }));
+    if (!marks.length) continue;
+    const msgEl = b.querySelector('.message, .text-content');
+    hits.push({
+      mid: b.getAttribute('data-mid') || '',
+      bubbleCls: cls(b).slice(0, 120),
+      // The question this probe exists to answer: is the quoted text INSIDE
+      // .message (glued to the reply body) or a sibling of it (dropped)?
+      replyInsideMessage: !!(msgEl && msgEl.querySelector('*') &&
+                             Array.from(msgEl.querySelectorAll('*'))
+                                  .some(e => RX.test(cls(e)))),
+      messageText: msgEl ? (msgEl.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 300) : null,
+      bubbleText: (b.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 300),
+      marks: marks.slice(0, 6),
+      tree: tree(b, 0).slice(0, 40),
+    });
+  }
+  return { total: nodes.length, scanned: Math.min(n, nodes.length),
+           replies: hits.slice(0, 3) };
+}
+"""
+
+
+def _dump_reply(page, title: str, count: int, *, log=print) -> dict:
+    """Open ``title`` read-only and describe any reply/quote bubble in it.
+
+    Nothing in this repo has ever touched a reply bubble, so there is no
+    evidence for what markup this Web K build uses. Guessing a selector on a
+    path that fills a shared sheet fails SILENTLY - the quoted notice is simply
+    missing and the provider looks like it never answered. This probe settles it
+    from the real DOM.
+    """
+    opened = _open_chat_by_title(page, title, allow_substring=False,
+                                 case_sensitive=False, allow_search=True,
+                                 dedupe_peers=True, log=log)
+    if not opened.get("ok"):
+        return {"ok": False,
+                "error": opened.get("error") or "no chat with this exact name"}
+    try:
+        page.wait_for_timeout(1500)
+        res = page.evaluate(_DUMP_REPLY_JS, int(count)) or {}
+    except Exception as err:  # noqa: BLE001
+        res = {"error": repr(err)}
+    # Read the header BEFORE leaving: afterwards no chat is open, so this
+    # always fell back to the requested title - defeating the point of
+    # reporting what was actually read.
+    res["chat"] = _open_chat_title(page) or title
+    _back_to_chat_list(page, log=log)
+    res["ok"] = not res.get("error")
+    return res
+
+
+def _pinned_peer_for(title: str) -> str:
+    """The harvested peer id for ``title``, or "" when it was never pinned."""
+    try:
+        import peerstore
+
+        return peerstore.peer_for(title)
+    except Exception:
+        return ""
+
+
+def _open_verified(page, title: str, *, pin: str = "", log=print) -> dict:
+    """Open ``title`` and PROVE that is what opened. -> {ok, header, peerId, reason}
+
+    _open_chat_by_title can report success having confirmed by peer id, or merely
+    by the clicked row going active, WITHOUT ever comparing the conversation
+    header. That is right for a pinned send, where the peer id is the identity.
+    It is NOT enough for a reader whose output gets attributed to a named
+    provider: a mis-click there files one provider's notice under another
+    provider's row in a shared sheet, and nothing downstream could ever notice.
+
+    So: the header must match, and when no header can be read at all the open
+    must have been confirmed by an identity-grade signal. Anything less is an
+    ERROR rather than a best guess - a group we cannot positively identify is
+    reported, never silently substituted.
+    """
+    out = {"ok": False, "header": "", "peerId": "", "reason": "",
+           "verifiedBy": ""}
+    # Pin the read to the harvested id when there is one. The SEND path has
+    # always done this; the READ paths did not, so a chat that merely carried
+    # the right title could have its messages filed under a provider's row.
+    # A title is what a stranger can copy; the peer id is not.
+    pin = _norm_peer(pin or _pinned_peer_for(title))
+    try:
+        opened = _open_chat_by_title(
+            page, title, allow_substring=False, case_sensitive=False,
+            allow_search=True, accept_hash_change=False, dedupe_peers=True,
+            expected_peer=pin or None, log=log)
+    except Exception as err:  # noqa: BLE001
+        out["reason"] = f"lookup failed: {err!r}"
+        return out
+
+    out["peerId"] = _display_peer(opened)
+    out["verifiedBy"] = str(opened.get("verifiedBy") or "")
+    if not opened.get("ok"):
+        matches = opened.get("matches")
+        if opened.get("error"):
+            out["reason"] = str(opened["error"])
+        elif not matches:
+            out["reason"] = "no chat with this exact name"
+        else:
+            out["reason"] = (f"{matches} different chats share this name - "
+                             f"refusing to guess")
+        return out
+
+    header = _open_chat_title(page) or ""
+    out["header"] = header
+    if header:
+        if not _titles_match(header, title, allow_substring=False,
+                             case_sensitive=False):
+            out["reason"] = f"opened chat is titled {header!r}, not {title!r}"
+            return out
+    elif out["verifiedBy"] not in ("pinned-peer", "peer-id", "peer-row-active"):
+        # No header AND no identity-grade signal: we genuinely do not know what
+        # is on screen.
+        out["reason"] = (f"could not read the chat header, and identity rests "
+                         f"only on {out['verifiedBy']!r}")
+        return out
+
+    if pin:
+        # Re-checked after the open, exactly as the send path does: the hash must
+        # BE the pin, or the hash is a @username (which cannot carry an id) and
+        # the row we clicked is the pinned one.
+        got = _norm_peer(opened.get("hash"))
+        row = _norm_peer(out["peerId"])
+        if not (got == pin or (_hash_is_username(opened.get("hash")) and row == pin)):
+            out["reason"] = (f"opened peer {got or row or '?'} is not the pinned "
+                             f"{pin} for {title!r}")
+            return out
+        out["verifiedBy"] = "pinned-peer"
+
+    out["ok"] = True
+    out["header"] = header or title
+    return out
+
+
 def _probe_group(page, title: str, *, shot_path: str, log=print) -> dict:
     """Does a chat named EXACTLY ``title`` exist? Read-only; photographs it.
 
@@ -2097,49 +2282,19 @@ def _probe_group(page, title: str, *, shot_path: str, log=print) -> dict:
     """
     out = {"title": title, "ok": False, "opened": "", "reason": "",
            "shot": "", "peerId": "", "verifiedBy": ""}
-    try:
-        opened = _open_chat_by_title(
-            page, title,
-            allow_substring=False,     # whole-string, never a prefix
-            case_sensitive=False,
-            allow_search=True,         # the chat list is virtualised: most rows
-                                       # of a 20-name Base are not in the DOM
-            accept_hash_change=False,  # "something opened" is not "this opened"
-            dedupe_peers=True,         # one chat drawn twice is not two chats
-            log=log,
-        )
-    except Exception as err:
-        out["reason"] = f"lookup failed: {err!r}"
-        return out
-
-    out["peerId"] = _display_peer(opened)
-    out["verifiedBy"] = str(opened.get("verifiedBy") or "")
-
-    if not opened.get("ok"):
-        matches = opened.get("matches")
-        if opened.get("error"):
-            out["reason"] = str(opened["error"])
-        elif not matches:
-            # "not found" on its own is undiagnosable: a renamed group, a group the
-            # account was removed from and a search that simply did not surface it
-            # all look identical. Name the closest titles Telegram DID render, which
-            # is what tells those three apart.
-            out["reason"] = ("no chat with this exact name"
-                             + _near_misses(title, opened.get("candidates") or []))
-        else:
-            peers = [p for p in (opened.get("exactPeers") or []) if p]
-            out["reason"] = (
-                f"{matches} different chats share this name - refusing to guess"
-                + (f" (peers {', '.join(str(p) for p in peers[:4])})" if peers else "")
-            )
-        _back_to_chat_list(page, log=log)
-        return out
-
-    header = _open_chat_title(page) or str(opened.get("title") or "")
-    out["opened"] = header
-    if header and not _titles_match(header, title, allow_substring=False,
-                                    case_sensitive=False):
-        out["reason"] = f"opened chat is titled {header!r}, not this"
+    got = _open_verified(page, title, log=log)
+    out["peerId"] = got.get("peerId") or ""
+    out["verifiedBy"] = got.get("verifiedBy") or ""
+    out["opened"] = got.get("header") or ""
+    if not got.get("ok"):
+        reason = got.get("reason") or "no chat with this exact name"
+        if reason == "no chat with this exact name":
+            # "not found" on its own is undiagnosable: a renamed group, a group
+            # the account was removed from and a search that simply did not
+            # surface it all look identical. Name the closest titles Telegram DID
+            # render, which is what tells those three apart.
+            reason += _near_misses(title, [])
+        out["reason"] = reason
         _back_to_chat_list(page, log=log)
         return out
 
@@ -2436,8 +2591,24 @@ def _back_to_chat_list(page, *, log=print) -> None:
     log("[tg-warm] back on the chat list")
 
 
+def _send_text_to(page, title: str, text: str, *, pin: str = "",
+                  force: bool = False, shot_path: str | None = None,
+                  log=print) -> dict:
+    """Send ``text`` to ``title``, pinned to ``pin``. Same gates as the test send.
+
+    Literally the same code path - only the target is parameterised - so a batch
+    send cannot drift from the single-target send's safety rules. The alternative
+    (mutating TELEGRAM_TEST_CHAT per provider) would race any concurrent
+    /telegramsendjctest and, on a crash mid-loop, leave the env pointing at a
+    partner group so the next test send would post there.
+    """
+    return _send_test_message(page, shot_path=shot_path, force=force, log=log,
+                              title=title, text=text, pin=pin)
+
+
 def _send_test_message(page, *, shot_path: str | None = None, force: bool = False,
-                       log=print) -> dict:
+                       log=print, title: str | None = None,
+                       text: str | None = None, pin: str | None = None) -> dict:
     """Open the configured chat, prove it is the right one, send once, go back.
 
     Every gate here fails CLOSED. The order is: resolve the target (exact, case-
@@ -2446,7 +2617,11 @@ def _send_test_message(page, *, shot_path: str | None = None, force: bool = Fals
     message -> type -> re-confirm identity with the text in the box -> Enter once ->
     accept success only on evidence.
     """
-    title, text, pin = _test_chat_title(), _test_message(), _test_chat_peer()
+    # Defaults come from env (the /telegramsendjctest target); an explicit
+    # argument is what /provideraskmaintenance passes per provider.
+    title = _test_chat_title() if title is None else title
+    text = _test_message() if text is None else text
+    pin = _test_chat_peer() if pin is None else _norm_peer(pin)
 
     def _shot():
         if shot_path:
@@ -2645,6 +2820,10 @@ class _TelegramWarm:
             if _va_watch_enabled():
                 threading.Thread(target=self._va_loop, name="tg-warm-va",
                                  daemon=True).start()
+            # Always started: it is inert unless a run is open, and it is what
+            # resumes a collection window after a restart.
+            threading.Thread(target=self._pa_loop, name="tg-warm-pa",
+                             daemon=True).start()
             if _chat_poll_enabled():
                 threading.Thread(target=self._chat_loop, name="tg-warm-chats", daemon=True).start()
 
@@ -2845,6 +3024,14 @@ class _TelegramWarm:
                     self._handle_reset(task)
                 elif kind == "send_test":
                     self._handle_send_test(task)
+                elif kind == "provider_ask":
+                    self._handle_provider_ask(task)
+                elif kind == "provider_ask_one":
+                    self._handle_provider_ask_one(task)
+                elif kind == "provider_sweep":
+                    self._handle_provider_sweep(task)
+                elif kind == "dump_reply":
+                    self._handle_dump_reply(task)
                 elif kind == "va_watch":
                     self._handle_va_watch(task)
                 elif kind == "probe_groups":
@@ -2863,6 +3050,37 @@ class _TelegramWarm:
         while True:
             time.sleep(_keepalive_sec())
             self._tasks.put({"kind": "keepalive", "auto": True})
+
+    def _pa_loop(self) -> None:
+        """Collection sweeps while a /provideraskmaintenance run is open.
+
+        Enqueues only when the queue is empty and only while a run is actually
+        active, so outside the collection window this thread costs nothing and
+        never competes with the VA watcher or an interactive command.
+        """
+        while True:
+            delay = _pa_sweep_sec()
+            try:
+                import providerask as pa
+
+                if pa.run_open():
+                    if pa.next_to_ask():
+                        # Still sending. One group per task, and the 30-60s
+                        # flood gap is slept HERE rather than inside the worker,
+                        # so every other Telegram command interleaves between
+                        # groups instead of queueing behind a 15-minute task.
+                        if self._tasks.empty():
+                            self._tasks.put({"kind": "provider_ask_one"})
+                        lo, hi = pa._gap_range()
+                        delay = random.uniform(lo, hi)
+                    elif self._tasks.empty():
+                        # run_open, not run_active: the LAST sweep - the one that
+                        # posts the summary and closes the run - is due exactly
+                        # when the deadline has passed.
+                        self._tasks.put({"kind": "provider_sweep"})
+            except Exception as err:  # noqa: BLE001
+                print(f"[providerask] tick failed: {err!r}", flush=True)
+            time.sleep(delay)
 
     def _va_loop(self) -> None:
         """Poll the VA announcements group for maintenance notices.
@@ -3421,6 +3639,195 @@ class _TelegramWarm:
             pass
         print(f"[tg-warm] reset done (profile removed={removed})", flush=True)
 
+    def _ready_to_drive(self) -> str:
+        """'' when the page is usable, else the reason it is not."""
+        if self._code_wait_active():
+            return "a Telegram login code is pending - finish it with /telegramcode"
+        try:
+            if not self._healthy():
+                self._launch()
+            verdict = self._check_auth()
+        except Exception as err:  # noqa: BLE001
+            return f"could not reach Telegram: {err!r}"
+        if verdict != "authenticated":
+            return f"Telegram not logged in ({verdict}) - run /logintelegram code first"
+        return ""
+
+    def _handle_provider_ask(self, task: dict) -> None:
+        """Send the weekly question to every pinned provider group."""
+        chat_id = task.get("chat_id") or _qr_chat_default()
+        box = task.get("box")
+        out: dict = {"ok": False, "error": "", "result": {}}
+
+        def finish():
+            if box is not None:
+                box.update(out)
+
+        def fail(msg: str):
+            # This task is queued WITHOUT a box (fire and forget), so finish()
+            # is a no-op and the error would otherwise vanish entirely: no Lark
+            # message, nothing in the journal, and an operator left believing 17
+            # partners had been asked.
+            out["error"] = msg
+            print(f"[tg-warm] provider ask aborted: {msg}", flush=True)
+            try:
+                send_text(chat_id, f"\u274c /provideraskmaintenance: {msg}")
+            except Exception:
+                pass
+            return finish()
+
+        why = self._ready_to_drive()
+        if why:
+            return fail(why)
+        try:
+            import providerask as pa
+        except Exception as err:  # noqa: BLE001
+            return fail(f"providerask import failed: {err!r}")
+
+        def send_one(title: str, text: str, pin: str) -> dict:
+            # force=True, deliberately. _send_test_message skips a send when the
+            # same text is already the newest OUTGOING message - right for a
+            # one-off test message, wrong here: the weekly question is identical
+            # every week, so from week two onward it would be silently skipped
+            # (and counted as asked) in every group nobody from our side had
+            # posted in since. force bypasses ONLY that idempotency skip; every
+            # identity gate - exact title, pinned peer before and after the
+            # click, header re-check, post-Enter confirmation - still runs.
+            # Re-asking is prevented instead by the run journal, which records
+            # each provider the moment its send confirms.
+            return _send_text_to(self._page, title, text, pin=pin, force=True)
+
+        def notify(msg: str) -> None:
+            try:
+                send_text(chat_id, msg)
+            except Exception:
+                pass
+
+        try:
+            out["result"] = pa.do_ask(send_one, notify)
+            out["ok"] = True
+        except Exception as err:  # noqa: BLE001
+            # Never let this reach _loop: its except tears the browser down, and
+            # a half-finished send run must still leave its journal behind.
+            return fail(f"ask run failed: {err!r}")
+        return finish()
+
+    def _handle_provider_ask_one(self, task: dict) -> None:
+        """Send the weekly question to ONE provider. Paced by _pa_loop."""
+        try:
+            import providerask as pa
+        except Exception as err:  # noqa: BLE001
+            print(f"[tg-warm] providerask import failed: {err!r}", flush=True)
+            return
+        chat_id = (pa.load_state() or {}).get("chat_id") or _qr_chat_default()
+
+        why = self._ready_to_drive()
+        if why:
+            # Record it as an abort rather than spinning: the timer would
+            # otherwise re-enqueue this every gap for the whole window.
+            st = pa.load_state()
+            if st:
+                st["aborted"] = why
+                pa.save_state(st)
+            print(f"[tg-warm] provider ask aborted: {why}", flush=True)
+            try:
+                send_text(chat_id, f"\u274c /provideraskmaintenance: {why}")
+            except Exception:
+                pass
+            return
+
+        def send_one(title: str, text: str, pin: str) -> dict:
+            # force=True, deliberately - see the note in _handle_provider_ask.
+            return _send_text_to(self._page, title, text, pin=pin, force=True)
+
+        def notify(msg: str) -> None:
+            try:
+                send_text(chat_id, msg)
+            except Exception:
+                pass
+
+        try:
+            pa.ask_one(send_one, notify)
+        except Exception as err:  # noqa: BLE001
+            # Must not reach _loop: its except tears the browser down.
+            print(f"[tg-warm] provider ask_one failed: {err!r}", flush=True)
+
+    def _handle_provider_sweep(self, task: dict) -> None:
+        """One collection pass over the providers still waiting."""
+        box = task.get("box")
+        out: dict = {"ok": False, "error": "", "result": {}}
+
+        def finish():
+            if box is not None:
+                box.update(out)
+
+        try:
+            import providerask as pa
+        except Exception as err:  # noqa: BLE001
+            out["error"] = f"providerask import failed: {err!r}"
+            return finish()
+
+        chat_id = (pa.load_state() or {}).get("chat_id") or _qr_chat_default()
+        why = self._ready_to_drive()
+        if why:
+            out["error"] = why
+            return finish()
+
+        def read_one(title: str, count: int) -> dict:
+            # Same rule as the watcher: a reply read here is attributed to a
+            # provider row, so the chat has to be positively identified.
+            got = _open_verified(self._page, title,
+                                 pin=_pinned_peer_for(title))
+            if not got.get("ok"):
+                return {"ok": False, "messages": [],
+                        "error": got.get("reason") or "chat not confirmed"}
+            res = _read_last_messages(self._page, count, max_chars=0)
+            _back_to_chat_list(self._page)
+            return {"ok": not res.get("error"),
+                    "messages": res.get("messages") or [],
+                    "error": res.get("error") or ""}
+
+        def notify(msg: str) -> None:
+            try:
+                send_text(chat_id, msg)
+            except Exception:
+                pass
+
+        def card(payload: dict) -> None:
+            resp = send_card(pa._card_chat_id(), payload)
+            if not isinstance(resp, dict) or resp.get("code") != 0:
+                print(f"[providerask] card rejected: {resp!r}", flush=True)
+
+        try:
+            out["result"] = pa.do_sweep(read_one, notify, card)
+            out["ok"] = True
+        except Exception as err:  # noqa: BLE001
+            out["error"] = f"sweep failed: {err!r}"
+            print(f"[tg-warm] provider sweep failed: {err!r}", flush=True)
+        return finish()
+
+    def _handle_dump_reply(self, task: dict) -> None:
+        """Worker side of /telegramdumpreply. Read-only."""
+        box = task.get("box")
+        out: dict = {"ok": False, "error": ""}
+        # _ready_to_drive, not a bare _check_auth: that does a full page.goto,
+        # which throws away a login-code form that is sitting on screen waiting
+        # for /telegramcode. Telegram will not issue a second code while one is
+        # outstanding, so this probe could strand the account.
+        why = self._ready_to_drive()
+        if why:
+            out["error"] = why
+            if box is not None:
+                box.update(out)
+            return
+        try:
+            out = _dump_reply(self._page, str(task.get("title") or ""),
+                              int(task.get("count") or 12))
+        except Exception as err:  # noqa: BLE001
+            out = {"ok": False, "error": repr(err)}
+        if box is not None:
+            box.update(out)
+
     def _handle_va_watch(self, task: dict) -> None:
         """Read the VA group and hand its messages to the detector.
 
@@ -3446,18 +3853,22 @@ class _TelegramWarm:
             out["error"] = f"vawatch import failed: {err!r}"
             return finish()
 
-        title = _va._chat_title()
         force = bool(task.get("force"))
+        # One provider group per tick, round-robin across every watched group.
+        # Reading all ~17 on every tick would cost ~5 minutes of the single
+        # worker and starve every other command.
+        tgt = task.get("target") or _va.next_target()
+        title = (tgt or {}).get("group") or _va._chat_title()
+        provider = (tgt or {}).get("provider") or _va._provider()
 
         def _sweep() -> dict:
-            opened = _open_chat_by_title(
-                self._page, title, allow_substring=False, case_sensitive=False,
-                allow_search=True, accept_hash_change=False, dedupe_peers=True,
-            )
-            if not opened.get("ok"):
-                raise RuntimeError(
-                    f"could not open {title!r}: "
-                    f"{opened.get('error') or 'no chat with this exact name'}")
+            # Verified, not merely opened: what is read here is written to
+            # `provider`'s row, so reading the wrong chat would file one
+            # provider's notice under another's name.
+            got = _open_verified(self._page, title,
+                                 pin=_pinned_peer_for(title))
+            if not got.get("ok"):
+                raise RuntimeError(f"could not confirm {title!r}: {got.get('reason')}")
             res = _read_last_messages(self._page, _va._read_count(), max_chars=0)
             _back_to_chat_list(self._page)
             if res.get("error"):
@@ -3497,7 +3908,10 @@ class _TelegramWarm:
 
         try:
             out["result"] = _va.handle_messages(res.get("messages") or [],
-                                                force=force)
+                                                force=force, provider=provider,
+                                                group=title)
+            out["result"]["group"] = title
+            out["result"]["provider"] = provider
             out["ok"] = True
         except Exception as err:  # noqa: BLE001
             # The detector writes to a Lark Base and posts cards. A failure there
@@ -3859,6 +4273,39 @@ def start_va_watch_on_startup() -> None:
               f"{_va_watch_sec()}s", flush=True)
     except Exception as err:  # noqa: BLE001
         print(f"[vawatch] could not start: {err!r}", flush=True)
+
+
+def provider_ask_start(chat_id: str) -> dict:
+    """/provideraskmaintenance - plan, then queue the send run.
+
+    Returns the PLAN immediately so the caller can report what will be asked;
+    the sending itself happens on the worker and is paced over many minutes.
+    """
+    import providerask as pa
+
+    if pa.run_active():
+        return {"ok": False, "error": "a provider ask is already running - "
+                                      "wait for its summary card"}
+    plan = pa.begin(chat_id)
+    w = warm()
+    w.start()
+    # No task is queued here: _pa_loop picks the run up on its next tick and
+    # paces the sends one group at a time.
+    return {"ok": True, "plan": plan["plan"]}
+
+
+def dump_reply_dom(title: str, *, count: int = 12,
+                   timeout_s: int = 300) -> dict:
+    """/telegramdumpreply - describe a reply bubble's real markup. Read-only."""
+    w = warm()
+    w.start()
+    done = threading.Event()
+    box: dict = {}
+    w._tasks.put({"kind": "dump_reply", "title": title, "count": count,
+                  "done": done, "box": box})
+    if not done.wait(timeout=timeout_s):
+        return {"ok": False, "error": f"no answer within {timeout_s}s"}
+    return box or {"ok": False, "error": "the probe crashed (see the service log)"}
 
 
 def va_check_now(*, force: bool = False, timeout_s: int = 300) -> dict:

@@ -195,6 +195,8 @@ def _help_sections() -> list[HelpSection]:
                     ("/checkerror [24h|3d]", "AI reviews larkbot service journal — errors only: what error + what time", "AI 审查 larkbot 服务日志——仅错误：何时+什么错误"),
                     ("/log [6h] [-n 100] [text]", "Raw service log tail; filter like grep (regex ok)", "查看服务日志；可按关键字/正则过滤"),
                     ("/checkevo <game>", "Look up a game in the EVO gamelist sheet (row + 遊戲入口圖 status)", "在 EVO gamelist 表按游戏名查该行（含上线状态）"),
+                    ("/provideraskmaintenance", "Ask every pinned provider group about this week, collect replies for 1h, fill the Base + summary card", "向已绑定的供应商群询问本周维护，收集1小时回复，填表并发汇总卡片"),
+                    ("/telegramdumpreply <group>", "Read-only: describe a reply bubble's DOM (for building quote-following)", "只读：导出回复消息的 DOM 结构"),
                     ("/vacheck [force]", "Read the VA announcements group now; an upcoming maintenance window fills the VA row in the Base + cards Laboratory", "立即读取 VA 公告群；若有即将维护的时间段，则填入维护表 VA 行并发卡片"),
                     ("/telegramgroupcheck", "Check every provider group in the maintenance Base exists in Telegram/Teams (exact name) + screenshot each chat window", "按维护表逐个核对 Telegram/Teams 群是否存在（名称完全一致），并截图每个群聊天窗口"),
                     ("/restartA", "Pi restart one-liner", "Pi 重启命令"),
