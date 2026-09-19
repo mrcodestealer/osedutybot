@@ -84,6 +84,7 @@ wireguard-go-*/
 .pldt_prefix_state.json
 
 # ---- Telegram watcher (browser profile lives under browser_data/) ----
+vawatch.json
 telegram_chats.json
 
 # ---- Teams watcher (Chromium profile IS the credential) ----

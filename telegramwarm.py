@@ -180,6 +180,36 @@ def _chat_poll_enabled() -> bool:
     return _truthy(os.getenv("TELEGRAM_CHAT_POLL_ENABLED"))
 
 
+def _va_watch_enabled() -> bool:
+    """Its own switch, NOT TELEGRAM_CHAT_POLL_ENABLED.
+
+    That flag also turns the periodic chat-list digest back on, which was
+    deliberately switched off on 2026-09-09.
+    """
+    return _truthy(os.getenv("VAWATCH_ENABLED"))
+
+
+def _va_watch_sec() -> int:
+    try:
+        return max(30, int(os.getenv("VAWATCH_POLL_SEC", "60")))
+    except ValueError:
+        return 60
+
+
+def _va_auth_recheck_sec() -> int:
+    """How stale a successful read may get before the auth page-reload is redone.
+
+    _check_auth() does a full page.goto of Telegram Web on every call, and a
+    60s poll that reloaded the client every minute is exactly the cost that got
+    the old chat poll disabled. A read that succeeds is itself proof the session
+    is alive, so the reload only happens after a failure or a long quiet spell.
+    """
+    try:
+        return max(60, int(os.getenv("VAWATCH_AUTH_RECHECK_SEC", "900")))
+    except ValueError:
+        return 900
+
+
 def _watch_targets() -> list[str]:
     """Chat titles to report on (substring, case-insensitive). Empty = all chats."""
     raw = os.getenv("TELEGRAM_WATCH_CHATS", "") or ""
@@ -1804,7 +1834,11 @@ def _check_count() -> int:
 #: Read the last N message bubbles of the open conversation. Read-only: this only
 #: queries the DOM, it never focuses the composer or types.
 _READ_MESSAGES_JS = """
-(n) => {
+(arg) => {
+  const n = (arg && arg.n) || 1;
+  // 0 means no cap. The whole body is needed when a message is parsed rather
+  // than merely shown on a card.
+  const maxChars = (arg && typeof arg.maxChars === 'number') ? arg.maxChars : 600;
   const root = document.querySelector('#column-center');
   if (!root) return { error: 'no #column-center' };
   let nodes = Array.from(root.querySelectorAll('.bubble[data-mid]'));
@@ -1815,9 +1849,15 @@ _READ_MESSAGES_JS = """
     const timeEl = b.querySelector('.time-inner, .time');
     // The time element is not just a clock: it can carry an "edited" marker plus
     // blank lines before the time, and Web K renders the whole block INSIDE the
-    // message text node. So pull the clock out with a pattern, note "edited"
-    // separately, and delete the raw block from the body wherever it sits — an
-    // endsWith() check missed it and leaked the timestamp into the text.
+    // message text node. Two earlier attempts both failed: a bare endsWith()
+    // check missed the block (blank lines and "edited" sit between body and
+    // clock) and leaked the timestamp into the text, so it was replaced by
+    // deleting the clock wherever it sat — which then deleted the clock from the
+    // BODY too. A notice posted at 09:00 silently lost the "09:00" out of
+    // "2026-09-16 09:00 - 12:00", destroying the very time being parsed.
+    // TAIL_CLOCK below fixes both: it is anchored to the end of the string and
+    // absorbs the whitespace/"edited" run itself, so it always catches the block
+    // and can never reach a time in the middle of the message.
     // (Keep backslash escapes out of these comments: this JS lives in a non-raw
     //  Python string, so a literal backslash-n here would become a real newline
     //  and end the comment early, leaving the rest as broken JS.)
@@ -1849,16 +1889,23 @@ _READ_MESSAGES_JS = """
       const nm = nameEl ? (nameEl.innerText || '') : '';
       if (nm) text = text.split(nm).join(' ');
     }
-    if (rawTime) text = text.split(rawTime).join(' ');
-    if (time) text = text.split(time).join(' ');
+    // Tail only, and only when the bubble actually has a clock element.
+    const TAIL_CLOCK =
+      /[\\s\\u00a0]*(?:edited[\\s\\u00a0]*)?\\d{1,2}:\\d{2}(?:[\\s\\u00a0]*[AP]M)?[\\s\\u00a0]*$/i;
+    if (time) text = text.replace(TAIL_CLOCK, '');
     text = text.replace(/[ \\t]+/g, ' ')
                .replace(/\\n{3,}/g, '\\n\\n')   // collapse runs of blank lines
                .trim();
 
     let truncated = false;
-    if (text.length > 600) { text = text.slice(0, 600); truncated = true; }
+    if (maxChars > 0 && text.length > maxChars) {
+      text = text.slice(0, maxChars); truncated = true;
+    }
 
     out.push({
+      // Selected on above but never reported before; a watcher needs a stable
+      // per-message id to cursor on instead of hashing content alone.
+      mid: b.getAttribute('data-mid') || '',
       sender: nameEl ? (nameEl.innerText || '').replace(/\\s+/g, ' ').trim()
                      : (isOut ? 'me' : ''),
       out: isOut,
@@ -1874,13 +1921,22 @@ _READ_MESSAGES_JS = """
 """
 
 
-def _read_last_messages(page, count: int, *, log=print) -> dict:
-    """Scrape the last ``count`` messages from the open conversation."""
+def _read_last_messages(page, count: int, *, max_chars: int = 600,
+                        log=print) -> dict:
+    """Scrape the last ``count`` messages from the open conversation.
+
+    ``max_chars`` caps each message body; 0 means no cap. The default keeps
+    /checktelegramgroup's cards the size they have always been, while a caller
+    that PARSES a message (the VA maintenance watcher) asks for the whole thing —
+    a notice cut at 600 characters loses its tail and hashes differently from the
+    same notice read in full.
+    """
     try:
         # Opening a chat lands at the newest message, but give the virtualised list a
         # moment to render before reading.
         page.wait_for_timeout(1500)
-        res = page.evaluate(_READ_MESSAGES_JS, count) or {}
+        res = page.evaluate(_READ_MESSAGES_JS,
+                            {"n": count, "maxChars": int(max_chars)}) or {}
     except Exception as err:
         return {"error": repr(err)}
     if res.get("error"):
@@ -2586,6 +2642,9 @@ class _TelegramWarm:
             self._started = True
             threading.Thread(target=self._loop, name="tg-warm", daemon=True).start()
             threading.Thread(target=self._keepalive_loop, name="tg-warm-ka", daemon=True).start()
+            if _va_watch_enabled():
+                threading.Thread(target=self._va_loop, name="tg-warm-va",
+                                 daemon=True).start()
             if _chat_poll_enabled():
                 threading.Thread(target=self._chat_loop, name="tg-warm-chats", daemon=True).start()
 
@@ -2747,7 +2806,22 @@ class _TelegramWarm:
                              "the browser was torn down (see the service log)"}
         return box
 
-    # -- worker loop ---------------------------------------------------------
+    def va_watch_now(self, *, force: bool = False, timeout_s: int = 300) -> dict:
+        """Run one VA sweep and wait for the result (the /vacheck path)."""
+        done = threading.Event()
+        box: dict = {}
+        self._tasks.put({"kind": "va_watch", "force": bool(force),
+                         "done": done, "box": box})
+        if not done.wait(timeout=timeout_s):
+            return {"ok": False, "error": f"no answer within {timeout_s}s",
+                    "result": {}}
+        if not box:
+            return {"ok": False, "result": {},
+                    "error": "the VA sweep crashed before it started "
+                             "(see the service log)"}
+        return box
+
+
     def _loop(self) -> None:
         while True:
             task = self._tasks.get()
@@ -2771,6 +2845,8 @@ class _TelegramWarm:
                     self._handle_reset(task)
                 elif kind == "send_test":
                     self._handle_send_test(task)
+                elif kind == "va_watch":
+                    self._handle_va_watch(task)
                 elif kind == "probe_groups":
                     self._handle_probe_groups(task)
                 elif kind == "check_group":
@@ -2787,6 +2863,22 @@ class _TelegramWarm:
         while True:
             time.sleep(_keepalive_sec())
             self._tasks.put({"kind": "keepalive", "auto": True})
+
+    def _va_loop(self) -> None:
+        """Poll the VA announcements group for maintenance notices.
+
+        Enqueues only when the queue is EMPTY. _chat_loop does not do this, and
+        a tick that arrives while a cold launch (~90s) is still running would
+        pile up behind it and re-read the same messages repeatedly.
+        """
+        time.sleep(min(90, _va_watch_sec()))
+        while True:
+            try:
+                if self._tasks.empty():
+                    self._tasks.put({"kind": "va_watch"})
+            except Exception:
+                pass
+            time.sleep(_va_watch_sec())
 
     def _chat_loop(self) -> None:
         time.sleep(min(120, _chat_poll_sec()))
@@ -3329,6 +3421,91 @@ class _TelegramWarm:
             pass
         print(f"[tg-warm] reset done (profile removed={removed})", flush=True)
 
+    def _handle_va_watch(self, task: dict) -> None:
+        """Read the VA group and hand its messages to the detector.
+
+        Reads UNCAPPED (max_chars=0): the whole notice goes into a Base Remark
+        field, and a body cut at 600 characters also hashes differently from the
+        same notice read in full, which would defeat the ledger.
+        """
+        box = task.get("box")
+        out: dict = {"ok": False, "error": "", "result": {}}
+
+        def finish():
+            if box is not None:
+                box.update(out)
+
+        if self._code_wait_active():
+            out["error"] = ("a Telegram login code is pending - finish it with "
+                            "/telegramcode")
+            return finish()
+
+        try:
+            import vawatch as _va
+        except Exception as err:  # noqa: BLE001
+            out["error"] = f"vawatch import failed: {err!r}"
+            return finish()
+
+        title = _va._chat_title()
+        force = bool(task.get("force"))
+
+        def _sweep() -> dict:
+            opened = _open_chat_by_title(
+                self._page, title, allow_substring=False, case_sensitive=False,
+                allow_search=True, accept_hash_change=False, dedupe_peers=True,
+            )
+            if not opened.get("ok"):
+                raise RuntimeError(
+                    f"could not open {title!r}: "
+                    f"{opened.get('error') or 'no chat with this exact name'}")
+            res = _read_last_messages(self._page, _va._read_count(), max_chars=0)
+            _back_to_chat_list(self._page)
+            if res.get("error"):
+                raise RuntimeError(f"read failed: {res['error']}")
+            return res
+
+        try:
+            if not self._healthy():
+                self._launch()
+                self._check_auth()
+                self._va_auth_at = time.monotonic()
+            elif (time.monotonic() - getattr(self, "_va_auth_at", 0.0)
+                    > _va_auth_recheck_sec()):
+                # Only now pay for the full page.goto; a succeeding read is its
+                # own proof that the session is still signed in.
+                verdict = self._check_auth()
+                self._va_auth_at = time.monotonic()
+                if verdict != "authenticated":
+                    out["error"] = (f"Telegram not logged in ({verdict}) - "
+                                    f"run /logintelegram code first")
+                    return finish()
+            try:
+                res = _sweep()
+            except Exception:
+                # One retry through a full re-auth: this is how a session that
+                # died since the last tick recovers without reloading every tick.
+                verdict = self._check_auth()
+                self._va_auth_at = time.monotonic()
+                if verdict != "authenticated":
+                    out["error"] = (f"Telegram not logged in ({verdict}) - "
+                                    f"run /logintelegram code first")
+                    return finish()
+                res = _sweep()
+        except Exception as err:  # noqa: BLE001
+            out["error"] = repr(err)
+            return finish()
+
+        try:
+            out["result"] = _va.handle_messages(res.get("messages") or [],
+                                                force=force)
+            out["ok"] = True
+        except Exception as err:  # noqa: BLE001
+            # The detector writes to a Lark Base and posts cards. A failure there
+            # must not reach _loop's except, which tears the whole browser down.
+            out["error"] = f"detector failed: {err!r}"
+            print(f"[tg-warm] vawatch detector failed: {err!r}", flush=True)
+        return finish()
+
     def _handle_probe_groups(self, task: dict) -> None:
         """Worker side of /telegramgroupcheck. Read-only, one shot per title."""
         box = task.get("box")
@@ -3665,6 +3842,30 @@ def check_group_messages(chat_id: str | None = None,
     w = warm()
     w.start()
     w.check_group(chat_id, titles, count)
+
+
+def start_va_watch_on_startup() -> None:
+    """Begin watching the VA announcements group, if VAWATCH_ENABLED is set."""
+    if not _va_watch_enabled():
+        print("[vawatch] disabled (set VAWATCH_ENABLED=1 to switch it on)",
+              flush=True)
+        return
+    try:
+        import vawatch as _va
+
+        w = warm()
+        w.start()
+        print(f"[vawatch] watching {_va._chat_title()!r} every "
+              f"{_va_watch_sec()}s", flush=True)
+    except Exception as err:  # noqa: BLE001
+        print(f"[vawatch] could not start: {err!r}", flush=True)
+
+
+def va_check_now(*, force: bool = False, timeout_s: int = 300) -> dict:
+    """/vacheck - one sweep on demand, returning what it did."""
+    w = warm()
+    w.start()
+    return w.va_watch_now(force=force, timeout_s=timeout_s)
 
 
 def check_groups_exist(titles, *, sink=None, timeout_s: int = 900) -> dict:

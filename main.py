@@ -6971,6 +6971,51 @@ def lark_webhook():
 
         threading.Thread(target=_run_telegram_check, daemon=True).start()
         return _lark_im_done()
+    elif cmd == '/vacheck':
+        # One VA sweep on demand: read the VA announcements group, and if its
+        # newest messages carry an UPCOMING maintenance window, fill that
+        # provider's row in the Base and card the Laboratory group. The watcher
+        # does this on a timer; this is the manual trigger for it.
+        #
+        # `/vacheck force` re-acts on the newest maintenance notice even when the
+        # ledger has already handled it — for proving the path end to end.
+        # Read-only in Telegram: nothing is typed and nothing is sent there.
+        _va_force = any(tok.lower() == "force" for tok in cmd_parts[1:])
+
+        def _run_va_check(chat_id_va=chat_id, force_va=_va_force):
+            try:
+                import telegramwarm as _va_mod
+
+                send_message(chat_id_va,
+                             "🔍 VA: reading the announcements group…"
+                             + (" (force)" if force_va else ""))
+                res = _va_mod.va_check_now(force=force_va)
+                if not res.get("ok"):
+                    send_message(chat_id_va,
+                                 f"❌ /vacheck failed: {res.get('error')}")
+                    return
+                r = res.get("result") or {}
+                bits = [
+                    f"✅ VA sweep done — read {r.get('seen', 0)} message(s)",
+                    f"• filled: {r.get('acted', 0)}",
+                    f"• ignored (not scheduled maintenance): {r.get('ignored', 0)}",
+                    f"• already handled: {r.get('already', 0)}",
+                ]
+                if r.get("cold_start"):
+                    bits.append("• first run — the existing backlog was recorded "
+                                "without acting, so a new notice fires from now on")
+                if r.get("acted"):
+                    bits.append("A card was posted to the Laboratory group.")
+                send_message(chat_id_va, "\n".join(bits))
+            except Exception as _va_err:
+                print(f"❌ vacheck: {_va_err!r}", flush=True)
+                try:
+                    send_message(chat_id_va, f"❌ /vacheck failed: {_va_err}")
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run_va_check, daemon=True).start()
+        return _lark_im_done()
     elif cmd == '/telegramgroupcheck':
         # Read every provider row of the maintenance Base, then ask whichever
         # platform that row's APP column names (TELEGRAM / TEAMS) whether a chat
@@ -9002,6 +9047,10 @@ def _run_main_entry() -> int:
             import telegramwarm as _boot_tg
 
             _boot_tg.prewarm_telegram_on_startup()
+            # Watch the VA announcements group for scheduled-maintenance notices
+            # and fill that provider's row in the maintenance Base. No-op unless
+            # VAWATCH_ENABLED is set, so this line alone changes nothing.
+            _boot_tg.start_va_watch_on_startup()
         except Exception as _boot_tg_err:
             print(f"[tg-warm] startup pre-warm skipped: {_boot_tg_err!r}", flush=True)
         try:
