@@ -94,8 +94,27 @@ DONE_RE = re.compile(
     # The reverse direction ("cancelled ... maintenance") is deliberately gone:
     # it matched "All ongoing rounds will be cancelled during the maintenance",
     # an ordinary notice, and threw the whole thing away.
-    r"|maintenance[^.\n]{0,40}\b(?:is|are|was|were|has\s+been|have\s+been|"
-    r"will\s+be|being)\s+cancell?ed",
+    # The gap has to clear the window the notice restates - "maintenance
+    # planned for 2026-09-24 10:00 - 12:00 (GMT+8) is cancelled" is 46
+    # characters - so {0,40} silently missed real cancellations and the window
+    # was then written as active. Widened, but TEMPERED: if another subject
+    # noun appears in between, that noun is what was cancelled ("all ongoing
+    # rounds will be cancelled"), not the maintenance.
+    r"|maintenance(?:(?!\b(?:rounds?|bets?|bonus|promos?|tickets?|"
+    r"transactions?|tournaments?|games?|sessions?)\b)[^.\n]){0,80}"
+    r"\b(?:is|are|was|were|has\s+been|have\s+been|will\s+be|being)"
+    r"\s+cancell?ed"
+    # "Cancellation of the scheduled maintenance" - unambiguous: the noun
+    # takes the maintenance as its object.
+    # Direct object only. "Cancellation of the promo during the maintenance"
+    # is about the promo and must not suppress a real notice.
+    r"|cancell?ation\s+of\s+(?:the\s+|our\s+|this\s+)?"
+    r"(?:scheduled\s+|routine\s+|planned\s+|upcoming\s+)?maintenance"
+    r"|maintenance\s+cancell?ation"
+    # "We are cancelling the maintenance". The {0,12} window is deliberately
+    # short: "cancelling the rounds during the maintenance" is 22 characters
+    # between and must NOT match.
+    r"|cancell?ing\s+(?:the\s+)?[^.\n]{0,12}maintenance",
     re.I)
 
 # "originally planned for X" - the window quoted in a reschedule that is being
@@ -295,9 +314,19 @@ def find_window(text: str):
             ls = scope.rfind("\n", 0, rm.start()) + 1
             le = scope.find("\n", rm.end())
             le = len(scope) if le == -1 else le
-            same_line = [d for p, _e, d in dates if ls <= p < le]
-            if same_line:
-                y, mo, d = same_line[0]
+            # NEAREST same-line date before the range wins; only if there is
+            # none does a date written AFTER the range apply. Taking the first
+            # date on the line made "planned for 2026-09-24 has been moved to
+            # 2026-09-26, 10:00 - 12:00" write the SUPERSEDED date - two days
+            # before the real outage, and not stale, so nothing caught it.
+            sl_before = [d for p, _e, d in dates
+                         if ls <= p < le and p <= rm.start()]
+            sl_after = [d for p, _e, d in dates
+                        if ls <= p < le and p > rm.start()]
+            if sl_before:
+                y, mo, d = sl_before[-1]
+            elif sl_after:
+                y, mo, d = sl_after[0]
             else:
                 before = [d for p, _e, d in dates if p <= rm.start()]
                 y, mo, d = before[-1] if before else dates[0][2]

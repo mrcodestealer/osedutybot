@@ -441,6 +441,15 @@ def build_text(group: str, provider: str, text: str, verdict: dict,
 def act_on_notice(text: str, verdict: dict, *, provider: str = "",
                   group: str = "") -> dict:
     """Write the provider's row, then card the Laboratory group."""
+    # NO fallback when the caller passed a group. A Base row with a blank
+    # Provider used to fall through to _provider() (default "VA"), filing
+    # another group's notice onto the VA row.
+    if group and not (provider or "").strip():
+        out = {"wrote": None, "record_id": "",
+               "error": f"the Base row for {group!r} has no Provider - refusing "
+                        f"to guess which row to write"}
+        print(f"[vawatch] {out['error']}", flush=True)
+        return out
     provider = provider or _provider()
     group = group or _chat_title()
     out: dict = {"wrote": None, "error": "", "record_id": ""}

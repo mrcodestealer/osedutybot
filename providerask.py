@@ -187,7 +187,16 @@ def targets() -> dict:
             skipped.append(row)
             telegram.remove(row)
     ask, unpinned = [], []
+    seen_groups = set()
     for row in telegram:
+        # Two Base rows can name the SAME chat (the sheet already has two YGG
+        # rows). Asking one partner group twice is both rude and pointless.
+        gkey = _norm(row.get("group"))
+        if gkey in seen_groups:
+            row["why"] = "another row already covers this group"
+            skipped.append(row)
+            continue
+        seen_groups.add(gkey)
         peer = peerstore.peer_for(row.get("group") or "")
         if peer:
             ask.append({**row, "peer": peer})
@@ -233,9 +242,9 @@ def file_answer(row: dict, verdict: dict, text: str) -> dict:
             fields["Start Time"] = va._ms(verdict["start"])
             fields["End Time"] = va._ms(verdict["end"])
             fields["Remark"] = text
-            out["wrote"] = (f"{verdict['start']:%Y-%m-%d %H:%M} → "
-                            f"{verdict['end']:%H:%M}"
-                            + (" (rescheduled)" if verdict.get("reschedule") else ""))
+            pending = (f"{verdict['start']:%Y-%m-%d %H:%M} → "
+                       f"{verdict['end']:%H:%M}"
+                       + (" (rescheduled)" if verdict.get("reschedule") else ""))
         else:                       # 'clear'
             fields["Remark"] = "No maintenance"
             # Blank the window too. The Base's 'Maintenance' column is
@@ -244,8 +253,13 @@ def file_answer(row: dict, verdict: dict, text: str) -> dict:
             # there is none - and the row contradicts itself.
             fields["Start Time"] = None
             fields["End Time"] = None
-            out["wrote"] = "No maintenance (window cleared)"
+            pending = "No maintenance (window cleared)"
         va.update_row(found["record_id"], fields)
+        # Only AFTER the write returns. Setting it beforehand meant a failed
+        # write still produced a non-empty `wrote`, which do_sweep reads as
+        # success: the row was marked "filled" and the summary card went green
+        # claiming the sheet had been updated.
+        out["wrote"] = pending
     except Exception as err:        # noqa: BLE001
         out["error"] = repr(err)
         print(f"[providerask] filing {row.get('provider')!r} failed: {err!r}",
@@ -349,6 +363,7 @@ def build_summary_card(state: dict) -> dict:
     filled = [(k, v) for k, v in provs.items() if v.get("outcome") == "filled"]
     cleared = [(k, v) for k, v in provs.items() if v.get("outcome") == "no_maintenance"]
     human = [(k, v) for k, v in provs.items() if v.get("outcome") == "needs_human"]
+    errored = [(k, v) for k, v in provs.items() if v.get("outcome") == "error"]
     silent = [(k, v) for k, v in provs.items()
               if v.get("outcome") in (None, "", "waiting") and v.get("asked")]
     unsent = [(k, v) for k, v in provs.items() if not v.get("asked")]
@@ -358,7 +373,8 @@ def build_summary_card(state: dict) -> dict:
         f"group(s) at {state.get('asked_at', '?')}**\n"
         f"Collected for {state.get('window_min', 60)} minutes.\n"
         f"✅ filled: **{len(filled)}**   🟢 no maintenance: **{len(cleared)}**   "
-        f"❓ needs a human: **{len(human)}**   ⌛ no reply: **{len(silent)}**")]
+        f"❓ needs a human: **{len(human)}**   ⚠️ unreadable: **{len(errored)}**"
+        f"   ⌛ no reply: **{len(silent)}**")]
 
     def block(head, rows, fmt):
         if not rows:
@@ -371,6 +387,8 @@ def build_summary_card(state: dict) -> dict:
     block("**🟢 Answered: no maintenance this week:**", cleared,
           lambda k, v: f"• **{k}**")
     block("**❓ Answered, but needs a human:**", human,
+          lambda k, v: f"• **{k}** — _{v.get('why') or ''}_")
+    block("**⚠️ Could not be read - OUR problem, not theirs:**", errored,
           lambda k, v: f"• **{k}** — _{v.get('why') or ''}_")
     block("**⌛ No update from the provider:**", silent,
           lambda k, v: f"• **{k}**")
@@ -564,24 +582,48 @@ def do_ask(send_one, notify) -> dict:
     return {"sent": sent, "planned": len(todo), "aborted": state.get("aborted")}
 
 
-def _after_our_ask(messages: list) -> list:
-    """Only the messages that came AFTER our own question.
+def _after_our_ask(messages: list, rec: Optional[dict] = None) -> tuple:
+    """-> (messages after our question, boundary_found)
 
-    Without this, a maintenance notice the provider posted BEFORE we asked is
-    read as their answer and written to the row. Our own ask is in the
-    transcript as an outgoing bubble, so its position IS the boundary - no extra
-    state to keep and nothing to get stale. If our ask is not in the window that
-    was read, nothing is judged: better silent than wrong.
+    Without a boundary, a notice the provider posted BEFORE we asked is read as
+    their answer. Our own ask is in the transcript as an outgoing bubble, so its
+    position is the natural boundary.
+
+    But only ~12 bubbles are read per sweep, and a busy support group can push
+    the ask out of that window inside one 10-minute interval. Re-deriving the
+    boundary from the text every sweep then returned NOTHING, permanently, for
+    the rest of the hour - while the provider's answer sat right there - and the
+    summary blamed the provider for not replying. So the ask's message id is
+    remembered the first time it is seen: once the ask is older than everything
+    on screen, everything on screen is by definition after it.
+
+    boundary_found is False only when we have never located the ask at all; the
+    caller must report that rather than silently treating the group as silent.
     """
+    msgs = list(messages or [])
     want = " ".join(ASK_TEXT.split()).casefold()
     cut = -1
-    for i, m in enumerate(messages or []):
+    for i, m in enumerate(msgs):
         if not m.get("out"):
             continue
         body = " ".join(str(m.get("text") or "").split()).casefold()
         if want and want in body:
             cut = i
-    return list(messages or [])[cut + 1:] if cut >= 0 else []
+    if cut >= 0:
+        mid = str(msgs[cut].get("mid") or "")
+        if rec is not None and mid:
+            rec["ask_mid"] = mid
+        return msgs[cut + 1:], True
+
+    remembered = str((rec or {}).get("ask_mid") or "")
+    if remembered:
+        for i, m in enumerate(msgs):
+            if str(m.get("mid") or "") == remembered:
+                return msgs[i + 1:], True
+        # The ask is older than the oldest bubble we can see, so everything
+        # read is newer than it.
+        return msgs, True
+    return [], False
 
 
 def _message_is_new(rec: dict, msg: dict) -> bool:
@@ -621,16 +663,30 @@ def do_sweep(read_one, notify, send_card) -> dict:
         try:
             res = read_one(rec["group"], _read_count())
         except Exception as err:  # noqa: BLE001
-            # A group that cannot be opened is reported, never guessed at: it
-            # stays "waiting" and appears in the summary as no-reply.
             print(f"[providerask] read {prov} failed: {err!r}", flush=True)
+            rec["outcome"] = "error"
             rec["why"] = repr(err)[:200]
+            save_state(state)
             continue
         checked += 1
         if not res.get("ok"):
+            # "could not identify this group" is NOT "the provider did not
+            # reply". Blaming the partner for our own lookup failure is exactly
+            # the silent-wrong-answer this command must not produce.
+            rec["outcome"] = "error"
+            rec["why"] = str(res.get("error") or "could not read the group")[:200]
+            save_state(state)
             continue
 
-        msgs = _after_our_ask(res.get("messages") or [])
+        msgs, boundary = _after_our_ask(res.get("messages") or [], rec)
+        if not boundary:
+            # Never guess. Say so, and let the summary show it as a problem
+            # rather than as "the provider did not reply".
+            rec["why"] = ("could not find our question in the last "
+                          f"{_read_count()} messages - the group may be too busy; "
+                          "raise PROVIDERASK_READ_COUNT")
+            save_state(state)
+            continue
         # Newest first: a provider who posts a notice and then a correction
         # inside one sweep interval must have the CORRECTION win, not the notice
         # it superseded.

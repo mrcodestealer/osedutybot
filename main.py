@@ -5079,6 +5079,9 @@ def _reinject_synthetic_command_message(
         # Telegram: writes to / signs out of a real personal account. Card values are
         # client data, so a crafted button must never be able to trigger these.
         "/telegramsendjctest", "/resettelegram", "/logintelegram", "/telegramcode",
+        # Sends the weekly question into ~17 real partner groups. One tap on a
+        # "did you mean" card must not be able to do that.
+        "/provideraskmaintenance",
     }
     # Check the command as the pipeline will SEE it, not just the raw first token:
     # dispatch strips leading @_user_N mention keys and <...> markup, so a value like

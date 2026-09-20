@@ -55,6 +55,7 @@ import mimetypes
 import os
 import queue
 import random
+import re
 import shutil
 import sys
 import threading
@@ -1413,6 +1414,43 @@ _FIND_CHAT_JS = r"""
 """
 
 
+def _search_queries(title: str) -> list:
+    """Search terms to try for one chat title, most specific first.
+
+    Telegram's sidebar search is not a substring match over the whole title.
+    A long query mixing Latin, CJK and punctuation - e.g.
+    "JDB & IGO (IGOS 單) 合規 技術群 Casino Plus" - can return NOTHING while the
+    chat is sitting right there, which then surfaces as "no chat with this exact
+    name". Shorter fragments find it.
+
+    Widening the QUERY does not widen what is ACCEPTED: the caller still
+    requires the full title to match exactly (_titles_match, allow_substring
+    False) and, for the paths that write anywhere, the pinned peer id as well.
+    """
+    t = " ".join((title or "").split())
+    if not t:
+        return []
+    out = [t]
+    # Everything before the first bracket: punctuation is what search chokes on.
+    head = re.split(r"[()\[\]{}|/\\]", t)[0].strip()
+    if head and head != t:
+        out.append(head)
+    # The longest single word, which is usually the distinctive one.
+    words = [w for w in t.split() if len(w) >= 3]
+    if words:
+        out.append(max(words, key=len))
+    for n in (24, 16, 10):
+        if len(t) > n:
+            out.append(t[:n].strip())
+    seen, uniq = set(), []
+    for q in out:
+        k = q.casefold()
+        if q and k not in seen:
+            seen.add(k)
+            uniq.append(q)
+    return uniq[:5]
+
+
 def _search_sidebar(page, title: str, *, log=print) -> bool:
     """Type a title into the sidebar search box so the chat is rendered.
 
@@ -1601,7 +1639,21 @@ def _open_chat_by_title(page, title: str, *, allow_substring: bool = False,
         if res.get("matches", 0) == 0 and not searched and allow_search:
             searched = True
             log(f"[tg-warm] {title!r} not in the rendered list — searching")
-            if _search_sidebar(page, title, log=log):
+            found = False
+            for q in _search_queries(title):
+                if not _search_sidebar(page, q, log=log):
+                    break
+                try:
+                    probe = page.evaluate(_FIND_CHAT_JS, arg) or {}
+                except Exception as err:
+                    return _fail(error=f"find failed: {err!r}")
+                last = probe
+                if probe.get("matches", 0) >= 1:
+                    found = True
+                    break
+                log(f"[tg-warm]   {q!r} surfaced "
+                    f"{probe.get('rendered', 0)} row(s), none matching")
+            if found:
                 continue
             return _fail(matches=0)
 
@@ -2188,7 +2240,8 @@ def _pinned_peer_for(title: str) -> str:
         return ""
 
 
-def _open_verified(page, title: str, *, pin: str = "", log=print) -> dict:
+def _open_verified(page, title: str, *, pin: str = "",
+                   allow_search: Optional[bool] = None, log=print) -> dict:
     """Open ``title`` and PROVE that is what opened. -> {ok, header, peerId, reason}
 
     _open_chat_by_title can report success having confirmed by peer id, or merely
@@ -2204,16 +2257,29 @@ def _open_verified(page, title: str, *, pin: str = "", log=print) -> dict:
     reported, never silently substituted.
     """
     out = {"ok": False, "header": "", "peerId": "", "reason": "",
-           "verifiedBy": ""}
+           "verifiedBy": "", "candidates": []}
     # Pin the read to the harvested id when there is one. The SEND path has
     # always done this; the READ paths did not, so a chat that merely carried
     # the right title could have its messages filed under a provider's row.
     # A title is what a stranger can copy; the peer id is not.
     pin = _norm_peer(pin or _pinned_peer_for(title))
+    # Telegram's search returns GLOBAL hits - public groups this account has
+    # never joined - so an unpinned search could match a stranger's
+    # identically-titled channel. With a pin the peer id is re-checked below and
+    # a stranger cannot survive it, so search is safe. Without a pin the default
+    # is OFF, which is what the unattended writers (the VA watcher and the
+    # provider sweep) must use: whatever they read is filed onto a named
+    # provider's row.
+    #
+    # /telegramgroupcheck passes allow_search=True explicitly. It is the command
+    # that HARVESTS the pins, so it cannot require one; it is read-only, and
+    # every result is reviewed by a human as a captioned screenshot carrying the
+    # peer id it opened.
+    search = bool(pin) if allow_search is None else bool(allow_search)
     try:
         opened = _open_chat_by_title(
             page, title, allow_substring=False, case_sensitive=False,
-            allow_search=True, accept_hash_change=False, dedupe_peers=True,
+            allow_search=search, accept_hash_change=False, dedupe_peers=True,
             expected_peer=pin or None, log=log)
     except Exception as err:  # noqa: BLE001
         out["reason"] = f"lookup failed: {err!r}"
@@ -2221,12 +2287,19 @@ def _open_verified(page, title: str, *, pin: str = "", log=print) -> dict:
 
     out["peerId"] = _display_peer(opened)
     out["verifiedBy"] = str(opened.get("verifiedBy") or "")
+    # Carried so a "not found" can name the closest titles Telegram DID render.
+    out["candidates"] = list(opened.get("candidates") or [])
     if not opened.get("ok"):
         matches = opened.get("matches")
         if opened.get("error"):
             out["reason"] = str(opened["error"])
         elif not matches:
-            out["reason"] = "no chat with this exact name"
+            out["reason"] = (
+                "no chat with this exact name"
+                if pin else
+                "no chat with this exact name in the rendered chat list, and no "
+                "peer id is pinned for it - run /telegramgroupcheck once so it "
+                "can be searched for safely")
         else:
             out["reason"] = (f"{matches} different chats share this name - "
                              f"refusing to guess")
@@ -2282,7 +2355,9 @@ def _probe_group(page, title: str, *, shot_path: str, log=print) -> dict:
     """
     out = {"title": title, "ok": False, "opened": "", "reason": "",
            "shot": "", "peerId": "", "verifiedBy": ""}
-    got = _open_verified(page, title, log=log)
+    # allow_search=True: this is the harvest command, so it cannot demand the
+    # pin it is about to create, and its output is human-reviewed.
+    got = _open_verified(page, title, allow_search=True, log=log)
     out["peerId"] = got.get("peerId") or ""
     out["verifiedBy"] = got.get("verifiedBy") or ""
     out["opened"] = got.get("header") or ""
@@ -2290,10 +2365,11 @@ def _probe_group(page, title: str, *, shot_path: str, log=print) -> dict:
         reason = got.get("reason") or "no chat with this exact name"
         if reason == "no chat with this exact name":
             # "not found" on its own is undiagnosable: a renamed group, a group
-            # the account was removed from and a search that simply did not
+            # the account was removed from, and a search that simply did not
             # surface it all look identical. Name the closest titles Telegram DID
-            # render, which is what tells those three apart.
-            reason += _near_misses(title, [])
+            # render, which is what tells those three apart. (This was passing an
+            # empty list, so it printed nothing at all.)
+            reason += _near_misses(title, got.get("candidates") or [])
         out["reason"] = reason
         _back_to_chat_list(page, log=log)
         return out
@@ -2784,6 +2860,7 @@ class _TelegramWarm:
 
     def __init__(self) -> None:
         self._tasks: queue.Queue[dict] = queue.Queue()
+        self._va_fail: dict = {}
         self._p = None
         self._context = None
         self._page = None
@@ -3828,6 +3905,25 @@ class _TelegramWarm:
         if box is not None:
             box.update(out)
 
+    def _va_note_failure(self, title: str, why: str) -> None:
+        """Alert once when one group keeps failing, instead of never.
+
+        Gated on the watcher being ENABLED. An alert about a watcher that is not
+        running says nothing, and without the gate merely calling this function -
+        from a test, a REPL, anything - posts into a real Lark group. It did
+        exactly that once.
+        """
+        n = self._va_fail.get(title, 0) + 1
+        self._va_fail[title] = n
+        if n not in (3, 12, 60) or not _va_watch_enabled():
+            return
+        try:
+            send_text(_qr_chat_default(),
+                      f"\u26a0\ufe0f VA watcher: {title!r} has failed {n} times "
+                      f"in a row \u2014 {why[:200]}")
+        except Exception:
+            pass
+
     def _handle_va_watch(self, task: dict) -> None:
         """Read the VA group and hand its messages to the detector.
 
@@ -3904,6 +4000,11 @@ class _TelegramWarm:
                 res = _sweep()
         except Exception as err:  # noqa: BLE001
             out["error"] = repr(err)
+            # The timer path queues this with no box, so `finish()` is a no-op
+            # and the reason would vanish entirely: a group that can never be
+            # confirmed would simply never be watched, silently, forever.
+            print(f"[vawatch] {title!r}: {out['error']}", flush=True)
+            self._va_note_failure(title, out["error"])
             return finish()
 
         try:
@@ -3912,6 +4013,7 @@ class _TelegramWarm:
                                                 group=title)
             out["result"]["group"] = title
             out["result"]["provider"] = provider
+            self._va_fail.pop(title, None)   # a clean tick clears the streak
             out["ok"] = True
         except Exception as err:  # noqa: BLE001
             # The detector writes to a Lark Base and posts cards. A failure there
@@ -4283,9 +4385,15 @@ def provider_ask_start(chat_id: str) -> dict:
     """
     import providerask as pa
 
-    if pa.run_active():
-        return {"ok": False, "error": "a provider ask is already running - "
-                                      "wait for its summary card"}
+    if pa.run_open():
+        # run_OPEN, not run_active. A run stays open until its final sweep posts
+        # the summary; between the deadline and that sweep (up to one sweep
+        # interval) run_active is already False. Gating on it let a second
+        # /provideraskmaintenance in that gap call begin(), overwrite the
+        # journal, and re-send the question to ~17 partner groups.
+        return {"ok": False,
+                "error": "a provider ask is still open - wait for its summary "
+                         "card (or delete providerask_state.json to force one)"}
     plan = pa.begin(chat_id)
     w = warm()
     w.start()
