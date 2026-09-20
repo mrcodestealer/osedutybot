@@ -130,16 +130,20 @@ OFFSETLEAVE_CARD_CALLBACK_KEYS = frozenset(
     }
 )
 
-# Mirror OSE offset rows from the bot Base table into the wiki duty-shift Offset2026 bitable.
-# Source: https://casinoplus.sg.larksuite.com/base/CpdEbEofwaYyyEsSjlElKNxzgec?table=tblC5T2MAydwT42j&view=vewHEvu7K8
-# Dest:   https://casinoplus.sg.larksuite.com/wiki/O4Dfw4DVTiPpFukn801l5z3WgMd?sheet=02eZI8&table=tblL4rrbJHJSosDX&view=vewFF82Q2p
+# Offsets live directly in the wiki duty-shift Offset2026 bitable — source == dest, so this
+# mirror is inert (``_offset_duty_mirror_is_self()`` below is True and every sync no-ops).
+# Kept only so a host that explicitly repoints OFFSET_SOURCE_* elsewhere can still mirror in.
+# Source/Dest: https://casinoplus.sg.larksuite.com/wiki/O4Dfw4DVTiPpFukn801l5z3WgMd?sheet=02eZI8&table=tblL4rrbJHJSosDX&view=vewFF82Q2p
+#
+# Never fall back to ``OSE_BASE_TOKEN``: that is the LEAVE Base, and a host that sets it
+# without OSE_OFFSET_BASE_TOKEN would silently point the mirror source at the retired
+# offset table — source != dest, the mirror wakes up and the orphan prune deletes live rows.
 OFFSET_SOURCE_BASE_TOKEN = (
     os.getenv("OFFSET_SOURCE_BASE_TOKEN")
     or os.getenv("OSE_OFFSET_BASE_TOKEN")
-    or os.getenv("OSE_BASE_TOKEN")
-    or "CpdEbEofwaYyyEsSjlElKNxzgec"
+    or "I97gbnViZaqSdNs8U8AliyWtgDz"
 ).strip()
-OFFSET_SOURCE_TABLE_ID = (os.getenv("OFFSET_SOURCE_TABLE_ID") or os.getenv("OSE_OFFSET_TABLE_ID") or "tblC5T2MAydwT42j").strip()
+OFFSET_SOURCE_TABLE_ID = (os.getenv("OFFSET_SOURCE_TABLE_ID") or os.getenv("OSE_OFFSET_TABLE_ID") or "tblL4rrbJHJSosDX").strip()
 OFFSET_DUTY_WIKI_SPREADSHEET_TOKEN = (
     os.getenv("OFFSET_DUTY_WIKI_SPREADSHEET_TOKEN") or "UjF0saOVuhJSWLtBv9GlaQOkgbe"
 ).strip()
@@ -151,10 +155,11 @@ OFFSET_DUTY_BITABLE_BASE = (os.getenv("OFFSET_DUTY_BITABLE_BASE") or "I97gbnViZa
 def _offset_duty_mirror_is_self() -> bool:
     """True when Offset2026 IS the source table, so there is nothing to mirror.
 
-    Point ``OSE_OFFSET_BASE_TOKEN`` / ``OSE_OFFSET_TABLE_ID`` at the wiki duty-shift
-    table and the bot reads and writes offsets there directly. The mirror must then
-    stay off: syncing a table onto itself would re-upsert every row against its own
-    fingerprint and let the orphan prune delete live rows.
+    This is now the default: the bot reads and writes offsets in the wiki duty-shift
+    table directly, so only a host that explicitly overrides ``OFFSET_SOURCE_*`` /
+    ``OSE_OFFSET_*`` turns the mirror back on. It must stay off in the default state:
+    syncing a table onto itself would re-upsert every row against its own fingerprint
+    and let the orphan prune delete live rows.
     """
     return (
         OFFSET_SOURCE_BASE_TOKEN == OFFSET_DUTY_BITABLE_BASE

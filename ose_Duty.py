@@ -79,7 +79,8 @@ def _resolve_ose_leave_sheet_id() -> str:
 
 LEAVE_SHEET_ID = _resolve_ose_leave_sheet_id()
 
-# Leave / Offset Bitable (defaults from user-provided URLs).
+# Leave Bitable (leaveose / leave 全员 / OSE leave approval). NOT offset — offset has
+# its own Base + table below (OSE_OFFSET_BASE_TOKEN / OSE_OFFSET_TABLE_ID).
 OSE_BASE_TOKEN = os.getenv("OSE_BASE_TOKEN", "CpdEbEofwaYyyEsSjlElKNxzgec")
 # HRMS → OSE display sheet (webapp / admin ALL / duty calendar leave list).
 # https://casinoplus.sg.larksuite.com/base/CpdEbEofwaYyyEsSjlElKNxzgec?table=tblvoXE0hsPjgb0j
@@ -93,12 +94,12 @@ OSE_ALL_LEAVE_TABLE_ID = os.getenv(
 ).strip()
 # OSE leave request + approval (Submit Leave form; not the same as webapp OSE display list).
 OSE_LEAVE_TABLE_ID = os.getenv("OSE_LEAVE_TABLE_ID", OSE_ALL_LEAVE_TABLE_ID).strip()
-OSE_OFFSET_TABLE_ID = os.getenv("OSE_OFFSET_TABLE_ID", "tblC5T2MAydwT42j")
-# The offset table may live in a DIFFERENT Base from leave — e.g. the wiki duty-shift
-# doc (Offset2026, base I97gbnViZaqSdNs8U8AliyWtgDz / table tblL4rrbJHJSosDX,
-# https://casinoplus.sg.larksuite.com/wiki/O4Dfw4DVTiPpFukn801l5z3WgMd?sheet=02eZI8).
-# Defaults to OSE_BASE_TOKEN, so leave and offset stay in one Base unless split.
-OSE_OFFSET_BASE_TOKEN = os.getenv("OSE_OFFSET_BASE_TOKEN", OSE_BASE_TOKEN).strip()
+OSE_OFFSET_TABLE_ID = os.getenv("OSE_OFFSET_TABLE_ID", "tblL4rrbJHJSosDX").strip()
+# Offsets live in the wiki duty-shift doc (Offset2026), a DIFFERENT Base from leave:
+# https://casinoplus.sg.larksuite.com/wiki/O4Dfw4DVTiPpFukn801l5z3WgMd?sheet=02eZI8&table=tblL4rrbJHJSosDX&view=vewFF82Q2p
+# Deliberately does NOT default to OSE_BASE_TOKEN: offset must never resolve back to the
+# retired source Base. A host with no OSE_OFFSET_* in its .env still lands on Offset2026.
+OSE_OFFSET_BASE_TOKEN = os.getenv("OSE_OFFSET_BASE_TOKEN", "I97gbnViZaqSdNs8U8AliyWtgDz").strip()
 
 # ================= Offset auto-delete kill-switch =================
 # The bot must NOT delete offset rows on its own. The old cleanup removed any row
@@ -1274,8 +1275,20 @@ def _load_offset_shift_sheet_state() -> dict[str, Any]:
     except Exception:
         return {"record_ids": [], "by_record": {}}
     if isinstance(data, list):
-        return {"record_ids": [str(x).strip() for x in data if str(x).strip()], "by_record": {}}
+        # Legacy bare list — no scope stamp, so its ids may belong to a retired offset
+        # table. Reverting those against the current roster would edit unrelated cells.
+        return {"record_ids": [], "by_record": {}}
     if not isinstance(data, dict):
+        return {"record_ids": [], "by_record": {}}
+    if str(data.get("scope") or "") != _offset_state_scope():
+        # Offset table was repointed — the old record_ids mean nothing here, and the
+        # revert scan would read every one of them as "deleted from Base" and undo
+        # duty-sheet cells that no longer correspond to anything. Reseed.
+        print(
+            "[ose_Duty] offset shift-sheet state: table changed, reseeding "
+            f"({data.get('scope') or 'unstamped'} -> {_offset_state_scope()})",
+            flush=True,
+        )
         return {"record_ids": [], "by_record": {}}
     ids = [str(x).strip() for x in (data.get("record_ids") or []) if str(x).strip()]
     raw_by = data.get("by_record") if isinstance(data.get("by_record"), dict) else {}
@@ -1288,6 +1301,7 @@ def _save_offset_shift_sheet_state(record_ids: set[str], by_record: dict[str, di
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(
             {
+                "scope": _offset_state_scope(),
                 "record_ids": sorted(record_ids),
                 "by_record": {k: by_record[k] for k in sorted(by_record)},
             },
