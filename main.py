@@ -7099,16 +7099,45 @@ def lark_webhook():
                                  f"❌ /vacheck failed: {res.get('error')}")
                     return
                 r = res.get("result") or {}
+                # Every line below is a DISTINCT outcome. The summary used to
+                # print `acted` as "filled" and label the whole `ignored` total
+                # "not scheduled maintenance", which was false for three of the
+                # four things that total covers — and a notice whose Base write
+                # FAILED was reported as filled. The sweep now reports each
+                # outcome under its own name, so a message that was read and
+                # then dropped can no longer vanish out of the arithmetic.
                 bits = [
-                    f"✅ VA sweep done — read {r.get('seen', 0)} message(s)",
+                    f"✅ VA sweep done — {r.get('group') or 'group'} "
+                    f"({r.get('provider') or '?'}) — read "
+                    f"{r.get('seen', 0)} message(s)",
                     f"• filled: {r.get('acted', 0)}",
-                    f"• ignored (not scheduled maintenance): {r.get('ignored', 0)}",
-                    f"• already handled: {r.get('already', 0)}",
                 ]
+                for label, key in (
+                        ("row cleared (no maintenance)", "cleared"),
+                        ("⚠️ write FAILED (see the red card)", "write_failed"),
+                        ("⚠️ needs a human", "needs_human"),
+                        ("ignored (not about maintenance)",
+                         "ignored_not_maintenance"),
+                        ("ignored (maintenance wording, no readable window)",
+                         "ignored_unparsed"),
+                        ("ignored (window already passed)", "ignored_stale"),
+                        ("re-tried after an earlier failure", "retried"),
+                ):
+                    if r.get(key):
+                        bits.append(f"• {label}: {r[key]}")
+                bits.append(f"• already handled: {r.get('already', 0)}")
                 if r.get("cold_start"):
                     bits.append("• first run — the existing backlog was recorded "
                                 "without acting, so a new notice fires from now on")
-                if r.get("acted"):
+                unwatched = r.get("unwatched") or []
+                if unwatched:
+                    # These rows are not a sweep result at all: nothing on this
+                    # path can ever fill them (APP=TEAMS, excluded, or blank).
+                    # Saying so here is the only place an operator finds out.
+                    bits.append("• NOT autofilled by any code path: "
+                                + ", ".join(str(u) for u in unwatched[:8]))
+                if r.get("acted") or r.get("cleared") or r.get("write_failed") \
+                        or r.get("needs_human"):
                     bits.append("A card was posted to the Laboratory group.")
                 send_message(chat_id_va, "\n".join(bits))
             except Exception as _va_err:
