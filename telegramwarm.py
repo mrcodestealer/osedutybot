@@ -3062,11 +3062,19 @@ class _TelegramWarm:
                              "the browser was torn down (see the service log)"}
         return box
 
-    def va_watch_now(self, *, force: bool = False, timeout_s: int = 300) -> dict:
-        """Run one VA sweep and wait for the result (the /vacheck path)."""
+    def va_watch_now(self, *, force: bool = False, timeout_s: int = 300,
+                     target: Optional[dict] = None) -> dict:
+        """Run one VA sweep and wait for the result (the /vacheck path).
+
+        ``target`` ({provider, group, record_id, shared_with}) is the group to
+        read. Without one the worker falls back to next_target(), which reads
+        the rotation's next provider and advances the timer's cursor - fine for
+        the timer, wrong for a manual check that names its group (F56).
+        """
         done = threading.Event()
         box: dict = {}
         self._tasks.put({"kind": "va_watch", "force": bool(force),
+                         "target": dict(target) if target else None,
                          "done": done, "box": box})
         if not done.wait(timeout=timeout_s):
             return {"ok": False, "error": f"no answer within {timeout_s}s",
@@ -3905,6 +3913,9 @@ class _TelegramWarm:
         if box is not None:
             box.update(out)
 
+    # The _va_fail key for a fault that is not any one group's (the ledger).
+    _VA_LEDGER_STREAK = "the VA watcher's ledger (vawatch.json)"
+
     def _va_note_failure(self, title: str, why: str) -> None:
         """Alert once when one group keeps failing, instead of never.
 
@@ -3953,9 +3964,29 @@ class _TelegramWarm:
         # One provider group per tick, round-robin across every watched group.
         # Reading all ~17 on every tick would cost ~5 minutes of the single
         # worker and starve every other command.
-        tgt = task.get("target") or _va.next_target()
-        title = (tgt or {}).get("group") or _va._chat_title()
-        provider = (tgt or {}).get("provider") or _va._provider()
+        try:
+            tgt = task.get("target") or _va.next_target()
+        except Exception as err:  # noqa: BLE001
+            # Outside every other try: an exception here reached _loop's
+            # except, which tears the browser down, and was never counted.
+            out["error"] = f"could not pick the next group: {err!r}"
+            print(f"[vawatch] {out['error']}", flush=True)
+            self._va_note_failure(self._VA_LEDGER_STREAK, out["error"])
+            return finish()
+        if tgt:
+            # The target's OWN provider, blank included. `or _va._provider()`
+            # here turned a Base row with an empty Provider into "VA", so that
+            # group's notices were written onto the VA row before vawatch's
+            # blank-provider refusal could ever see the blank (F39). The
+            # configured VA pair is only for the case with no target at all.
+            title = str(tgt.get("group") or "").strip()
+            provider = str(tgt.get("provider") or "").strip()
+            if not title:
+                out["error"] = f"the watch target has no Group Name: {tgt!r}"
+                print(f"[vawatch] {out['error']}", flush=True)
+                return finish()
+        else:
+            title, provider = _va._chat_title(), _va._provider()
 
         def _sweep() -> dict:
             # Verified, not merely opened: what is read here is written to
@@ -3965,7 +3996,26 @@ class _TelegramWarm:
                                  pin=_pinned_peer_for(title))
             if not got.get("ok"):
                 raise RuntimeError(f"could not confirm {title!r}: {got.get('reason')}")
-            res = _read_last_messages(self._page, _va._read_count(), max_chars=0)
+            n = _va._read_count()
+            res = _read_last_messages(self._page, n, max_chars=0)
+            if not res.get("error"):
+                # F57: every bubble read is newer than the newest one the last
+                # visit saw, so the ones in between - possibly a notice - were
+                # never read. Re-read wider while the chat is still open (capped
+                # at VAWATCH_GAP_READ_COUNT); vawatch cards it if even that does
+                # not reach back.
+                try:
+                    wide = int(_va.gap_read_count(res.get("messages") or [],
+                                                  provider=provider, group=title,
+                                                  asked=n) or 0)
+                except Exception:  # noqa: BLE001
+                    wide = 0
+                if wide > n:
+                    more = _read_last_messages(self._page, wide, max_chars=0)
+                    if not more.get("error") and len(more.get("messages") or []) \
+                            >= len(res.get("messages") or []):
+                        more["widened"] = {"from": n, "to": wide}
+                        res = more
             _back_to_chat_list(self._page)
             if res.get("error"):
                 raise RuntimeError(f"read failed: {res['error']}")
@@ -4008,18 +4058,39 @@ class _TelegramWarm:
             return finish()
 
         try:
-            out["result"] = _va.handle_messages(res.get("messages") or [],
-                                                force=force, provider=provider,
-                                                group=title)
+            # record_id: write the row the watch list read, not a re-lookup by
+            # name (F70). shared_with: which other rows name this group, so a
+            # Hacksaw/YGG notice is written only onto the row it names (F37);
+            # None (an old cached target) makes vawatch look it up itself.
+            out["result"] = _va.handle_messages(
+                res.get("messages") or [], force=force, provider=provider,
+                group=title, record_id=str((tgt or {}).get("record_id") or ""),
+                shared_with=(tgt or {}).get("shared_with"))
             out["result"]["group"] = title
             out["result"]["provider"] = provider
+            if res.get("widened"):
+                out["result"]["widened"] = res["widened"]
             self._va_fail.pop(title, None)   # a clean tick clears the streak
+            if out["result"].get("ledger_error"):
+                # The sweep acted, then could not record it, and stopped.
+                self._va_note_failure(self._VA_LEDGER_STREAK,
+                                      out["result"]["ledger_error"])
+            else:
+                self._va_fail.pop(self._VA_LEDGER_STREAK, None)
             out["ok"] = True
         except Exception as err:  # noqa: BLE001
             # The detector writes to a Lark Base and posts cards. A failure there
             # must not reach _loop's except, which tears the whole browser down.
             out["error"] = f"detector failed: {err!r}"
             print(f"[tg-warm] vawatch detector failed: {err!r}", flush=True)
+            # Counted now. It used to be only a stdout line, so an unreadable or
+            # unwritable ledger (which stops every group) or a detector that
+            # raised on one group's bubble never built a streak or an alert
+            # (F76, F77, F82). Ledger faults are one streak for the whole
+            # watcher, not one per group.
+            ledger = isinstance(err, getattr(_va, "LedgerError", ()))
+            self._va_note_failure(self._VA_LEDGER_STREAK if ledger else title,
+                                  out["error"])
         return finish()
 
     def _handle_probe_groups(self, task: dict) -> None:
@@ -4416,11 +4487,12 @@ def dump_reply_dom(title: str, *, count: int = 12,
     return box or {"ok": False, "error": "the probe crashed (see the service log)"}
 
 
-def va_check_now(*, force: bool = False, timeout_s: int = 300) -> dict:
+def va_check_now(*, force: bool = False, timeout_s: int = 300,
+                 target: Optional[dict] = None) -> dict:
     """/vacheck - one sweep on demand, returning what it did."""
     w = warm()
     w.start()
-    return w.va_watch_now(force=force, timeout_s=timeout_s)
+    return w.va_watch_now(force=force, timeout_s=timeout_s, target=target)
 
 
 def check_groups_exist(titles, *, sink=None, timeout_s: int = 900) -> dict:

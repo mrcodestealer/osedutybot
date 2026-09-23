@@ -213,6 +213,31 @@ def available() -> bool:
         return bool(_base_url())
 
 
+def _answers_us(value) -> Optional[bool]:
+    """The model's answers_us field -> True / False, or None when unreadable.
+
+    ``bool(obj.get("answers_us"))`` read the STRING "false" as True - any
+    non-empty string is truthy - so a model that quoted its boolean turned
+    "@BrandX_ops No maintenance for BrandX this week" into an answer to US, and
+    judge() blanked our row on another operator's say-so. Only a real JSON
+    boolean or the exact word "true" counts as yes; "false" / "no" / "0" are
+    no; anything else (missing, "yes", 1, "maybe") is None, which the caller
+    turns into ok=False - fail closed, the row is left alone for a human.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        word = value.strip().lower()
+        if word == "true":
+            return True
+        if word in ("false", "no", "0"):
+            return False
+        return None
+    if isinstance(value, int) and value == 0:
+        return False
+    return None
+
+
 def classify_reply(text: str, *, group: str = "", quoted_text: str = "",
                    asked_at: str = "", sender: str = "") -> dict:
     """Is this message an answer to our weekly ask?
@@ -254,12 +279,17 @@ def classify_reply(text: str, *, group: str = "", quoted_text: str = "",
     if verdict not in ("no_maintenance", "maintenance", "unrelated", "unclear"):
         out["why"] = f"unknown verdict {verdict!r}"
         return out
+    answers = _answers_us(obj.get("answers_us"))
+    if answers is None:
+        out["why"] = f"unreadable answers_us {obj.get('answers_us')!r}"
+        print(f"[providerllm] {out['why']}", flush=True)
+        return out
     try:
         conf = float(obj.get("confidence", 0.0))
     except (TypeError, ValueError):
         conf = 0.0
     out.update(ok=True, verdict=verdict,
-               answers_us=bool(obj.get("answers_us")),
+               answers_us=answers,
                confidence=max(0.0, min(1.0, conf)),
                why=str(obj.get("why") or "")[:120])
     return out

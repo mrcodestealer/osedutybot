@@ -7083,63 +7083,43 @@ def lark_webhook():
         #
         # `/vacheck force` re-acts on the newest maintenance notice even when the
         # ledger has already handled it — for proving the path end to end.
-        # Read-only in Telegram: nothing is typed and nothing is sent there.
+        # `/vacheck <provider>` reads that provider's group instead of the VA
+        # one. Read-only in Telegram: nothing is typed and nothing is sent there.
         _va_force = any(tok.lower() == "force" for tok in cmd_parts[1:])
+        _va_name = " ".join(tok for tok in cmd_parts[1:]
+                            if tok.lower() != "force").strip()
 
-        def _run_va_check(chat_id_va=chat_id, force_va=_va_force):
+        def _run_va_check(chat_id_va=chat_id, force_va=_va_force,
+                          name_va=_va_name):
             try:
                 import telegramwarm as _va_mod
+                import vawatch as _va_w
 
+                # An explicit target, so the sweep reads the group this reply
+                # names. With none, the worker called next_target(): it read
+                # whichever provider the rotation reached next - not "the
+                # announcements group" this line promised - and consumed the
+                # timer's cursor doing it (F56).
+                tgt = _va_w.manual_target(name_va)
+                if tgt.get("error"):
+                    send_message(chat_id_va, f"❌ /vacheck: {tgt['error']}")
+                    return
                 send_message(chat_id_va,
-                             "🔍 VA: reading the announcements group…"
+                             f"🔍 VA: reading {tgt.get('group')!r} "
+                             f"({tgt.get('provider') or '?'})…"
                              + (" (force)" if force_va else ""))
-                res = _va_mod.va_check_now(force=force_va)
+                res = _va_mod.va_check_now(force=force_va, target=tgt)
                 if not res.get("ok"):
                     send_message(chat_id_va,
                                  f"❌ /vacheck failed: {res.get('error')}")
                     return
-                r = res.get("result") or {}
-                # Every line below is a DISTINCT outcome. The summary used to
-                # print `acted` as "filled" and label the whole `ignored` total
-                # "not scheduled maintenance", which was false for three of the
-                # four things that total covers — and a notice whose Base write
-                # FAILED was reported as filled. The sweep now reports each
-                # outcome under its own name, so a message that was read and
-                # then dropped can no longer vanish out of the arithmetic.
-                bits = [
-                    f"✅ VA sweep done — {r.get('group') or 'group'} "
-                    f"({r.get('provider') or '?'}) — read "
-                    f"{r.get('seen', 0)} message(s)",
-                    f"• filled: {r.get('acted', 0)}",
-                ]
-                for label, key in (
-                        ("row cleared (no maintenance)", "cleared"),
-                        ("⚠️ write FAILED (see the red card)", "write_failed"),
-                        ("⚠️ needs a human", "needs_human"),
-                        ("ignored (not about maintenance)",
-                         "ignored_not_maintenance"),
-                        ("ignored (maintenance wording, no readable window)",
-                         "ignored_unparsed"),
-                        ("ignored (window already passed)", "ignored_stale"),
-                        ("re-tried after an earlier failure", "retried"),
-                ):
-                    if r.get(key):
-                        bits.append(f"• {label}: {r[key]}")
-                bits.append(f"• already handled: {r.get('already', 0)}")
-                if r.get("cold_start"):
-                    bits.append("• first run — the existing backlog was recorded "
-                                "without acting, so a new notice fires from now on")
-                unwatched = r.get("unwatched") or []
-                if unwatched:
-                    # These rows are not a sweep result at all: nothing on this
-                    # path can ever fill them (APP=TEAMS, excluded, or blank).
-                    # Saying so here is the only place an operator finds out.
-                    bits.append("• NOT autofilled by any code path: "
-                                + ", ".join(str(u) for u in unwatched[:8]))
-                if r.get("acted") or r.get("cleared") or r.get("write_failed") \
-                        or r.get("needs_human"):
-                    bits.append("A card was posted to the Laboratory group.")
-                send_message(chat_id_va, "\n".join(bits))
+                # Rendered by vawatch so its offline selftest runs this exact
+                # text against a real sweep result. Built here, it sliced the
+                # `unwatched` dict like a list and EVERY /vacheck replied
+                # "❌ /vacheck failed: slice(None, 8, None)" after the sweep had
+                # already written the Base and carded the Laboratory group (F55).
+                send_message(chat_id_va,
+                             _va_w.format_check_summary(res.get("result") or {}))
             except Exception as _va_err:
                 print(f"❌ vacheck: {_va_err!r}", flush=True)
                 try:

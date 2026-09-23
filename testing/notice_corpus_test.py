@@ -159,20 +159,45 @@ disagrees with one of these is wrong even if it makes more cases pass.
    accident, an hour wrong for JST, thirteen hours wrong for EST.
 
 5. WHICH WINDOW, WHEN A NOTICE HOLDS MORE THAN ONE — NOTICE_WINDOW_PICK=best
-   Candidate windows are ranked, highest first:
+   A range is a candidate only if it is PART OF THE MAINTENANCE STATEMENT: the
+   nearest subject word in its sentence names the maintenance (not the support
+   desk, a promotion, a tournament, settlement, a deposit channel, a holiday),
+   or it is a data line ("Time: …", "Slots: …") under a heading that is not
+   about something else. Support hours and promo periods are never windows.
+   A range takes a date only if one belongs to it, in this order:
+     1. a date written against it - attached in front, or introduced after
+        ("… 10:00-12:00 on 2026-09-30", "…，日期：9月30日"); an introduced date
+        beats a merely earlier date on the line; both, disagreeing, is
+        ambiguous
+     2. the nearest eligible date earlier on the same line
+     3. the nearest eligible date on an earlier line, unless the range's own
+        sentence names a weekday that date does not fall on
+     4. for a Time line only: a bare Date line directly below it
+   A letterhead "Issued:"/"发布日期" date is never lent. A date is ELIGIBLE only
+   if it is itself part of the maintenance statement. A range with no date that
+   belongs to it is no window (policy 9: ignore) - it used to take the first
+   date in the message, promo end dates and ticket ids included.
+   Candidate windows are then ranked, highest first:
      a. not inside an Original/原定 block that an Updated block supersedes
      b. not introduced as a PAST window (上次/上周/last/previous/已完成)
-     c. its date comes from the same line as the range, or from the nearest
-        preceding line, rather than from a letterhead "Issued:"/"发布日期" date
-     d. it ends at or after `now`
-   Equal rank is broken by document order. When two surviving windows fall on
-   the SAME date (or within 24h of each other) the row takes their UNION,
-   earliest start to latest end, because the row answers one question — when is
-   this provider down — and a shorter span than reality is the dangerous error.
-   Two windows more than 24h apart are two separate outages and the row takes
-   the EARLIEST one still in the future; the later one arrives on its own tick.
-   Set NOTICE_WINDOW_PICK=first for today's behaviour (the first range in the
-   text wins), which is what makes case I1 write 02:00-04:00.
+     c. it ends at or after `now`
+   The same window in two zones is ONE window (a converted copy that crossed
+   midnight is moved back onto the same instant). Survivors that overlap,
+   touch, or leave at most a two-hour gap are pieces of one outage and the row
+   takes their UNION (case I6). Survivors further apart are separate outages
+   and are NEVER merged: the row takes the EARLIEST one still in the future and
+   classify() returns the rest in `others` and names them in `reason`.
+   Where the text cannot settle the window the verdict is needs_human (nothing
+   is written, a person is carded): two dates against one range, two zones on
+   one line that disagree, a zone not in the table, the same window twice 12h
+   apart, a row that could fall either side of midnight, a reschedule or
+   correction still stating two windows with neither marked old, an earliest
+   window only described ("the backoffice will be unavailable") while the
+   named maintenance is later, and anything longer than
+   NOTICE_MAX_WINDOW_HOURS (default 48; 0 switches the cap off).
+   Set NOTICE_WINDOW_PICK=first for the old behaviour (the first range in the
+   text wins), which is what makes case I6 write 10:00-12:00 only. The
+   relevance and date rules apply in both modes.
 
 6. WHAT COUNTS AS A MAINTENANCE NOTICE — NOTICE_WORDING=wide
    The gate widens to the headings providers actually use (group E) — upgrade,
@@ -233,6 +258,7 @@ GROUPS = {
     "G": "COMPLETED / CANCELLED — false negatives and true positives",
     "H": "RESCHEDULE",
     "I": "WINDOW SELECTION",
+    "K": "WINDOW CHOICE — audit round 2 (which range, which date)",
 }
 
 
@@ -248,10 +274,14 @@ def M(s: str) -> str:
 
 
 def C(cid, group, provider, text, action, start=None, end=None, *,
-      now=NOW, stale=None, resched=None, note=""):
+      now=NOW, stale=None, resched=None, others=None, env=None, note=""):
+    """One case. ``others`` pins classify()'s list of further windows the
+    notice states but the row does not get, as [(start, end), ...] ISO pairs;
+    ``env`` sets flags for this case only (noticeparse reads them per call)."""
     return {"id": cid, "group": group, "provider": provider, "text": text,
             "action": action, "start": start, "end": end, "now": now,
-            "stale": stale, "resched": resched, "note": note}
+            "stale": stale, "resched": resched, "others": others,
+            "env": env or {}, "note": note}
 
 
 KINGMIDAS = M("""
@@ -1352,6 +1382,355 @@ CASES = [
       "The scheduled maintenance has been cancelled.", "ignore",
       note="the surviving window's own sentence must itself be about maintenance"),
 
+
+    # -- K. WINDOW CHOICE, AUDIT ROUND 2 -----------------------------------
+    # The 24h union and the "any date will do" fallback wrote windows nobody
+    # announced. Each case is a finding from the second audit (F<n>), pinned
+    # at the outcome policy 5 now states. Where a later lane may legitimately
+    # upgrade a needs_human to a fill (it learns to read a new shape), the
+    # note says so and says what the fill must NEVER be.
+
+    # F2 - a letterhead / unrelated date above the Time line was lent to it.
+    C("K-F2a", "K", "Hacksaw",
+      M("""
+        Scheduled maintenance notice
+        Issued: 2026-09-22
+        Time: 22:00 - 02:00 (GMT+8)
+        Date: 2026-09-24 (Thu)
+      """),
+      "fill", "2026-09-24T22:00:00+08:00", "2026-09-25T02:00:00+08:00",
+      now="2026-09-22T08:00:00+08:00",
+      note="F2: the letterhead is never lent; the Date line BELOW a Time line "
+           "dates it. Was 09-22 22:00, two days early and not stale"),
+    C("K-F2b", "K", "KingMidas",
+      M("""
+        維護公告
+        發佈日期：2026-09-22
+        維護時間：22:00 - 02:00 (GMT+8)
+        維護日期：2026年9月24日
+      """),
+      "fill", "2026-09-24T22:00:00+08:00", "2026-09-25T02:00:00+08:00",
+      now="2026-09-22T08:00:00+08:00",
+      note="F2: the same shape in traditional Chinese"),
+    C("K-F2c", "K", "Hacksaw",
+      M("""
+        Scheduled maintenance notice
+        Issued: 2026-09-22
+        Time: 22:00 - 02:00 (GMT+8)
+        Maintenance date: to be confirmed
+      """),
+      "ignore", now="2026-09-22T08:00:00+08:00",
+      note="F2: the letterhead is the ONLY date - no window, never 09-22"),
+    C("K-F2d", "K", "PP",
+      M("""
+        ---------- Forwarded message ---------
+        From: Ops <ops@example.com>
+        Date: Tue, Sep 22, 2026 at 3:15 PM
+        Subject: Maintenance
+
+        Scheduled maintenance on Thursday from 22:00 to 02:00 (GMT+8).
+      """),
+      "ignore", now="2026-09-22T08:00:00+08:00",
+      note="F2: a forwarded mail header is not the maintenance date. If "
+           "relative days become readable the answer is Thursday 09-24, "
+           "never Tuesday 09-22"),
+    C("K-F2e", "K", "JILI",
+      "New game Dragon Fortune launches on 2026-09-25!\n"
+      "Scheduled maintenance 10:00-12:00 (GMT+8).",
+      "ignore",
+      note="F2: a date in an unrelated sentence does not date the window"),
+    C("K-F2f", "K", "Hacksaw",
+      "Issued: 2026-09-23. Scheduled maintenance 10:00 - 12:00 (GMT+8) on "
+      "2026-09-25.",
+      "fill", "2026-09-25T10:00:00+08:00", "2026-09-25T12:00:00+08:00",
+      note="F2: letterhead is decided per DATE (its own label), not per line; "
+           "the 25th on the same line is the window's"),
+
+    # F3 - a range with no date of its own took any date-shaped token.
+    C("K-F3a", "K", "KingMidas",
+      "Scheduled maintenance 10:00 - 12:00 (GMT+8).\n"
+      "Note: the Mid-Autumn promotion runs until 2026-09-30.",
+      "ignore", note="F3: a promo end date is not the window's day"),
+    C("K-F3b", "K", "KingMidas",
+      M("""
+        Dear partners,
+        Scheduled maintenance 10:00 - 12:00 (GMT+8).
+        Thank you.
+        KingMidas Team
+        2026/09/22
+      """),
+      "ignore", note="F3: a sign-off date is not the window's day"),
+    C("K-F3c", "K", "Hacksaw",
+      "Scheduled maintenance 10:00 - 12:00 (GMT+8) to deploy release 2026.10.1",
+      "ignore", note="F3: CalVer after 'release' is not a date"),
+    C("K-F3d", "K", "Hacksaw",
+      "Scheduled maintenance 10:00 - 12:00 (GMT+8). Ticket: MNT2026-10-08",
+      "ignore", note="F3: a ticket id is not a date"),
+    C("K-F3e", "K", "Hacksaw",
+      "[MNT2026-10-08] Scheduled maintenance 10:00 - 12:00 (GMT+8)",
+      "ignore", note="F3: nor when it sits in front of the range"),
+    C("K-F3f", "K", "Hacksaw",
+      "Scheduled maintenance 10:00 - 12:00 (GMT+8). Details: "
+      "https://status.example.com/incident?date=2026-10-01",
+      "ignore", note="F3: a URL parameter is not a date"),
+    C("K-F3g", "K", "Yggdrasil",
+      "Scheduled maintenance\nTime: 22:00 - 02:00 (GMT+8)\nDate: 24/09/2026",
+      "fill", "2026-09-24T22:00:00+08:00", "2026-09-25T02:00:00+08:00",
+      note="F3 load-bearing: Time ABOVE Date still fills (the next line is a "
+           "labelled date line)"),
+    C("K-F3h", "K", "JDB",
+      "维护公告\n维护时间：10:00-12:00\n维护日期：2026年9月24日",
+      "fill", "2026-09-24T10:00:00+08:00", "2026-09-24T12:00:00+08:00",
+      note="F3 load-bearing: the Chinese Time-above-Date layout"),
+    C("K-F3i", "K", "VA",
+      "Scheduled maintenance\n10:00 - 12:00 (GMT+8)\n2026-09-24 (Thu)",
+      "fill", "2026-09-24T10:00:00+08:00", "2026-09-24T12:00:00+08:00",
+      note="F3 load-bearing: a bare range line over a bare date line"),
+    C("K-F3j", "K", "SimplePlay",
+      "排定维护，时间 10:00 - 12:00 (GMT+8)，敬请留意。\n2026-09-22",
+      "needs_human",
+      note="F3: a prose window over a bare date - the date may be a sign-off "
+           "(it was written as 09-22); nothing is written, a human decides"),
+
+    # F4 - the nearest same-line date BEFORE beat the "on <date>" after.
+    C("K-F4a", "K", "PG Soft",
+      "Because of the National Day holiday (2026-10-01), this week's scheduled "
+      "maintenance will be held 10:00 - 12:00 (GMT+8) on 2026-09-30.",
+      "fill", "2026-09-30T10:00:00+08:00", "2026-09-30T12:00:00+08:00",
+      note="F4: the date introduced after the range governs it (was 10-01)"),
+    C("K-F4b", "K", "JDB",
+      "因国庆节(10月1日)放假，本周例行维护时间为 10:00-12:00 (GMT+8)，日期：9月30日。",
+      "fill", "2026-09-30T10:00:00+08:00", "2026-09-30T12:00:00+08:00",
+      note="F4: the same with 日期： (was 10-01)"),
+    C("K-F4c", "K", "Evolution",
+      "Following the 2026-09-16 maintenance, the next scheduled maintenance is "
+      "10:00 - 12:00 (GMT+8) on 2026-09-24.",
+      "fill", "2026-09-24T10:00:00+08:00", "2026-09-24T12:00:00+08:00",
+      note="F4: last time's date in front is not this window's (was 09-16, "
+           "stale, silently dropped)"),
+    C("K-F4d", "K", "Evolution",
+      "Scheduled maintenance 2026-09-23 10:00 - 12:00 (GMT+8) on 2026-09-24.",
+      "needs_human",
+      note="F4: two dates written against one range disagree - ambiguous"),
+
+    # F6 - the bare n/m date was switched off by any other date in the bubble.
+    C("K-F6a", "K", "KingMidas",
+      "维护公告 将于9/24 (四) 10:00 - 12:00 (GMT+8) 排定维护。国庆节(10月1日)期间客服正常。",
+      "fill", "2026-09-24T10:00:00+08:00", "2026-09-24T12:00:00+08:00",
+      note="F6: a holiday date elsewhere no longer disables 9/24 (was 10-01)"),
+    C("K-F6b", "K", "KingMidas",
+      "Scheduled maintenance on 9/24 (Thu) 10:00-12:00 GMT+8. The next one is "
+      "planned for 2026-10-15.",
+      "fill", "2026-09-24T10:00:00+08:00", "2026-09-24T12:00:00+08:00",
+      note="F6: next week's full date no longer wins (was 10-15)"),
+    C("K-F6c", "K", "KingMidas",
+      "發佈日期：2026-09-22\n维护公告\n将于9/24 (四) 22:00-02:00 (GMT+8) 进行例行维护",
+      "fill", "2026-09-24T22:00:00+08:00", "2026-09-25T02:00:00+08:00",
+      now="2026-09-22T08:00:00+08:00",
+      note="F6: nor does the letterhead (was 09-22 22:00)"),
+    C("K-F6d", "K", "KingMidas",
+      "国庆节(10月1日-10月7日)期间，本周例行维护将于9/30 (三) 10:00-12:00 (GMT+8) 进行。",
+      "fill", "2026-09-30T10:00:00+08:00", "2026-09-30T12:00:00+08:00",
+      note="F6: the holiday span's end date no longer wins (was 10-07)"),
+
+    # F9 - two zones on ONE line: every range took the line's first token.
+    C("K-F9a", "K", "Playtech",
+      "Scheduled maintenance 2026-09-23 10:00 - 12:00 GMT+8 (02:00 - 04:00 UTC).",
+      "fill", "2026-09-23T10:00:00+08:00", "2026-09-23T12:00:00+08:00",
+      note="F9: each range takes the zone written after it (was 02:00-12:00)"),
+    C("K-F9b", "K", "Hacksaw",
+      "Scheduled maintenance on 2026-09-23, 06:00-08:00 UTC / 14:00-16:00 GMT+8",
+      "fill", "2026-09-23T14:00:00+08:00", "2026-09-23T16:00:00+08:00",
+      note="F9: foreign zone first (was 14:00 -> 09-24 00:00)"),
+    C("K-F9c", "K", "KingMidas",
+      "【维护通知】2026年9月23日 北京时间 10:00-12:00（UTC 02:00-04:00）进行系统维护",
+      "fill", "2026-09-23T10:00:00+08:00", "2026-09-23T12:00:00+08:00",
+      note="F9: prefix-style zones take the token in FRONT of each range"),
+    C("K-F9d", "K", "Playtech",
+      "Scheduled maintenance 2026-09-23 (GMT+8) 10:00 - 12:00 / 02:00 - 04:00 UTC",
+      "needs_human",
+      note="F9: a line mixing prefix and suffix zones cannot be bound with "
+           "confidence; its two copies do not agree, so a human decides"),
+
+    # F10 - a converted-time line took the local date and landed 24h away.
+    C("K-F10a", "K", "PG Soft",
+      M("""
+        Scheduled maintenance
+        Date: 2026-09-23
+        Time: 01:00 - 03:00 (GMT+8)
+        UTC: 17:00 - 19:00
+      """),
+      "fill", "2026-09-23T01:00:00+08:00", "2026-09-23T03:00:00+08:00",
+      note="F10: the UTC copy is the SAME instant, not a window 24h later (was "
+           "a 26h union)"),
+    C("K-F10b", "K", "PG Soft",
+      M("""
+        Scheduled maintenance
+        Date: 2026-09-23
+        Time: 01:00 - 03:00 (GMT+8)
+        UTC: 17:00 - 19:00
+      """),
+      "fill", "2026-09-23T01:00:00+08:00", "2026-09-23T03:00:00+08:00",
+      now="2026-09-23T04:00:00+08:00", stale=True,
+      note="F10: read after the window, it is stale - not a phantom 09-24 "
+           "01:00-03:00 that the stale guard cannot see"),
+    C("K-F10c", "K", "BNG",
+      "Scheduled maintenance 2026-09-23 06:00 - 08:00 (GMT+8) / 22:00 - 00:00 (UTC)",
+      "fill", "2026-09-23T06:00:00+08:00", "2026-09-23T08:00:00+08:00",
+      note="F10: the same-line conversion across midnight (was 18h)"),
+
+    # F15 / F31 - unrelated ranges replaced or widened the window.
+    C("K-F15a", "K", "EEZE Slot",
+      M("""
+        Scheduled maintenance
+        Date: 23.09.2026
+        Time: 10.00 - 12.00 (GMT+8)
+        Support desk hours: 09:00 - 18:00
+      """),
+      "fill", "2026-09-23T10:00:00+08:00", "2026-09-23T12:00:00+08:00",
+      note="F15: the dotted window survives a colon footer, and desk hours are "
+           "not the outage (was 09:00-18:00)"),
+    C("K-F15b", "K", "Hacksaw",
+      "Scheduled maintenance 2026-09-23 10:00-12:00 (GMT+8). Please stop "
+      "placing bets from 09:45 - 10:00.",
+      "fill", "2026-09-23T10:00:00+08:00", "2026-09-23T12:00:00+08:00",
+      note="F15: a betting cut-off is not the outage (was 09:45-12:00)"),
+    C("K-F31a", "K", "Yggdrasil",
+      "Scheduled maintenance on 2026-09-23 10:00-12:00 (GMT+8).\n"
+      "Our customer service team is available 09:00-21:00 daily.",
+      "fill", "2026-09-23T10:00:00+08:00", "2026-09-23T12:00:00+08:00",
+      note="F31: support hours (was 09:00-21:00)"),
+    C("K-F31b", "K", "Evolution",
+      "Scheduled maintenance 2026-09-23 10:00-12:00 (GMT+8). Unsettled bets "
+      "will be settled between 12:00-18:00.",
+      "fill", "2026-09-23T10:00:00+08:00", "2026-09-23T12:00:00+08:00",
+      note="F31: settlement (was 10:00-18:00)"),
+    C("K-F31c", "K", "FC",
+      "系统维护通知\n维护时间：2026-09-23 10:00-12:00 (GMT+8)\n充值通道将于 2026-09-22 20:00-23:59 暂停。",
+      "fill", "2026-09-23T10:00:00+08:00", "2026-09-23T12:00:00+08:00",
+      note="F31: a deposit-channel pause the evening before (was 09-22 20:00)"),
+    C("K-F31d", "K", "Playtech",
+      "Scheduled maintenance 2026-09-23 10:00-12:00 (GMT+8).\n"
+      "Backoffice will be unavailable on 2026-09-22 22:00-23:00 for data migration.",
+      "needs_human",
+      note="F31: the earliest window is only DESCRIBED (a subsystem is "
+           "unavailable) and the named maintenance is a separate later one - "
+           "which the row carries is a human's call (was 09-22 22:00 -> "
+           "09-23 12:00)"),
+    C("K-F31e", "K", "Playtech",
+      "Scheduled maintenance 2026-09-23 10:00-12:00 (GMT+8).\n"
+      "API will be unavailable 12:00-12:30.",
+      "fill", "2026-09-23T10:00:00+08:00", "2026-09-23T12:30:00+08:00",
+      note="F31 control: a genuine piece of the same outage, touching it, is "
+           "still unioned"),
+
+    # F32 - a cross-day promo / holiday period won and outlived the stale guard.
+    C("K-F32a", "K", "Hacksaw",
+      "Scheduled maintenance on 2026-09-23 10:00-12:00 (GMT+8).\n"
+      "Note: the Mid-Autumn promotion (2026-09-20 00:00 - 2026-09-30 23:59) "
+      "is not affected.",
+      "fill", "2026-09-23T10:00:00+08:00", "2026-09-23T12:00:00+08:00",
+      note="F32: the promotion is not the outage (was a ten-day window)"),
+    C("K-F32b", "K", "Hacksaw",
+      "Scheduled maintenance on 2026-09-21 10:00-12:00 (GMT+8).\n"
+      "Note: the Mid-Autumn promotion (2026-09-20 00:00 - 2026-09-30 23:59) "
+      "is not affected.",
+      "fill", "2026-09-21T10:00:00+08:00", "2026-09-21T12:00:00+08:00",
+      stale=True,
+      note="F32: a re-quoted old notice is stale again - the promo no longer "
+           "defeats the stale guard"),
+    C("K-F32c", "K", "JDB",
+      "国庆假期期间（2026-10-01 00:00 - 2026-10-07 23:59）暂停例行维护，"
+      "最后一次例行维护为 2026-09-30 10:00-12:00 (GMT+8)。",
+      "fill", "2026-09-30T10:00:00+08:00", "2026-09-30T12:00:00+08:00",
+      now="2026-09-30T13:00:00+08:00", stale=True,
+      note="F32: read after the last window, the Golden Week pause is still "
+           "not written as a seven-day outage"),
+    C("K-F32d", "K", "Evolution",
+      "Scheduled maintenance 2026-09-23 00:00 - 2026-09-26 00:00 (GMT+8)",
+      "needs_human",
+      note="F32 backstop: a 72h window exceeds NOTICE_MAX_WINDOW_HOURS (48)"),
+    C("K-F32e", "K", "Evolution",
+      "Scheduled maintenance 2026-09-23 00:00 - 2026-09-26 00:00 (GMT+8)",
+      "fill", "2026-09-23T00:00:00+08:00", "2026-09-26T00:00:00+08:00",
+      env={"NOTICE_MAX_WINDOW_HOURS": "0"},
+      note="F32: NOTICE_MAX_WINDOW_HOURS=0 switches the cap off"),
+
+    # F33 - separate days were joined into one 21-26h window.
+    C("K-F33a", "K", "PG Soft",
+      "Scheduled maintenance (GMT+8)\n2026-09-23 02:00 - 04:00\n2026-09-24 02:00 - 04:00",
+      "fill", "2026-09-23T02:00:00+08:00", "2026-09-23T04:00:00+08:00",
+      others=[("2026-09-24T02:00:00+08:00", "2026-09-24T04:00:00+08:00")],
+      note="F33: two nights are two outages; the second is named in others "
+           "(was 09-23 02:00 -> 09-24 04:00)"),
+    C("K-F33b", "K", "Playtech",
+      "Scheduled maintenance (GMT+8)\n| Slots | 2026-09-23 | 10:00-12:00 |\n"
+      "| Fishing | 2026-09-24 | 09:00-10:00 |",
+      "fill", "2026-09-23T10:00:00+08:00", "2026-09-23T12:00:00+08:00",
+      others=[("2026-09-24T09:00:00+08:00", "2026-09-24T10:00:00+08:00")],
+      note="F33: a table across two days (was a 24h window)"),
+    C("K-F33c", "K", "Playtech",
+      "Scheduled maintenance on 2026-09-23 (GMT+8)\nSlots: 23:00 - 01:00\n"
+      "Live Casino: 00:30 - 02:00",
+      "needs_human",
+      note="F33: a row after an overnight row under one date could be either "
+           "day - never the 24.5h union"),
+    C("K-F33d", "K", "PG Soft",
+      "Scheduled maintenance (GMT+8)\n2026-09-23 02:00 - 04:00\n2026-09-24 02:00 - 04:00",
+      "fill", "2026-09-23T02:00:00+08:00", "2026-09-23T04:00:00+08:00",
+      env={"NOTICE_WINDOW_PICK": "first"},
+      note="F33: NOTICE_WINDOW_PICK=first still takes the first range"),
+
+    # F67 - a second window more than 24h later was dropped without a word.
+    C("K-F67", "K", "Hacksaw",
+      "Scheduled maintenance (GMT+8)\nPhase 1: 2026-09-23 22:00 - 23:59\n"
+      "Phase 2: 2026-09-25 00:00 - 02:00",
+      "fill", "2026-09-23T22:00:00+08:00", "2026-09-23T23:59:00+08:00",
+      others=[("2026-09-25T00:00:00+08:00", "2026-09-25T02:00:00+08:00")],
+      note="F67: Phase 1 fills and Phase 2 is returned in others (and named "
+           "in reason) so the caller can card or re-act on it"),
+
+    # Guards that keep "separate windows are never merged" from turning the
+    # old superset into a WRONG narrower window where the parse is unsure.
+    C("K-G1", "K", "Hacksaw",
+      "The maintenance scheduled for 2026-09-23 10:00-12:00 (GMT+8) has been "
+      "postponed to 2026-09-24 10:00-12:00 (GMT+8).",
+      "needs_human", resched=True,
+      note="guard: a reschedule stating two windows with neither marked old. "
+           "May become a fill of the NEW 09-24 window once 'postponed to' is "
+           "understood; never the withdrawn 09-23, never a union"),
+    C("K-G2", "K", "Yggdrasil",
+      "Correction: scheduled maintenance is 25/09/2026 10:00-12:00 (GMT+8), "
+      "NOT 24/09/2026 10:00-12:00.",
+      "needs_human",
+      note="guard: a correction stating the wrong window beside the right one"),
+    C("K-G3", "K", "Yggdrasil",
+      "Scheduled maintenance 2026-09-23 04:00 - 06:00 CEST (10:00 - 12:00 GMT+8)",
+      "needs_human",
+      note="guard: a zone the table does not know - its range was read as "
+           "+08 and would be written as a 04:00 window. May become a fill once "
+           "CEST is in the table; never 04:00-06:00 +08"),
+    C("K-G4", "K", "BNG",
+      "Scheduled maintenance 2026-09-23 10:00 - 12:00 Vietnam time (GMT+7)",
+      "fill", "2026-09-23T10:00:00+07:00", "2026-09-23T12:00:00+07:00",
+      note="guard control: an unknown zone NAME followed by a known offset "
+           "is not unknown"),
+    C("K-G5", "K", "KingMidas",
+      M("""
+        维护公告 Maintenance Notice
+        维护时间：2026年9月23日 下午2:00-4:00 (GMT+8)
+        Maintenance time: Sep 23, 2026 2:00PM-4:00PM (GMT+8)
+      """),
+      "needs_human",
+      note="guard: the same window twice, 12h apart - one copy lost its "
+           "下午. May become 14:00-16:00 once 下午 is read; never 02:00-04:00"),
+    C("K-G6", "K", "Yggdrasil",
+      "Scheduled maintenance on 2026-09-23 10:00-12:00 (GMT+8).\n"
+      "Our customer service team is available 09:00-21:00 daily.",
+      "fill", "2026-09-23T10:00:00+08:00", "2026-09-23T12:00:00+08:00",
+      env={"NOTICE_WINDOW_PICK": "first"},
+      note="the relevance rule applies under NOTICE_WINDOW_PICK=first too"),
+
 ]
 
 
@@ -1365,6 +1744,8 @@ def _dt(s):
 
 def check(case, strict_offset=False):
     """-> [] when the case passes, else a list of one-line mismatches."""
+    saved = {k: os.environ.get(k) for k in case.get("env", {})}
+    os.environ.update(case.get("env", {}))
     try:
         v = noticeparse.classify(case["text"], now=_dt(case["now"]))
     except Exception as err:                        # noqa: BLE001
@@ -1372,6 +1753,12 @@ def check(case, strict_offset=False):
         # raises ValueError inside the parser today and a corpus that dies on
         # the first one tells you nothing about the other 150.
         return ["classify() RAISED {!r}".format(err)]
+    finally:
+        for k, old in saved.items():
+            if old is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = old
 
     bad = []
     got_action = v.get("action")
@@ -1404,6 +1791,13 @@ def check(case, strict_offset=False):
     if case["resched"] is not None and bool(v.get("reschedule")) != case["resched"]:
         bad.append("reschedule={} expected {}".format(
             bool(v.get("reschedule")), case["resched"]))
+    if case.get("others") is not None:
+        want = [(_dt(a), _dt(b)) for a, b in case["others"]]
+        got = list(v.get("others") or [])
+        if got != want:
+            bad.append("others={} expected {}".format(
+                [(a.isoformat(), b.isoformat()) for a, b in got],
+                [(a.isoformat(), b.isoformat()) for a, b in want]))
     return bad
 
 
@@ -1485,7 +1879,16 @@ def main(argv=None):
     print("")
     print("{} of {} cases pass. Run --policy for the ambiguity rules the "
           "expected values follow.".format(total - failed, total))
-    return 1 if failed else 0
+    # The corpus must never be able to reach the Base or a group: nothing that
+    # can send may even be LOADED by the parser it tests. A failure here means
+    # noticeparse grew an import that can talk to the network.
+    senders = sorted(m for m in _NETWORK_MODULES if m in sys.modules)
+    print("Network-capable modules loaded: {}".format(", ".join(senders) or "none"))
+    return 1 if (failed or senders) else 0
+
+
+_NETWORK_MODULES = ("requests", "urllib3", "http.client", "vawatch", "providerask",
+                    "providerllm", "telegramwarm", "groupcheck", "main")
 
 
 if __name__ == "__main__":
