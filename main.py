@@ -72,6 +72,11 @@ import ecsre
 
 import bot_help
 import list_range
+try:
+    import health_report
+except ImportError as _hr_err:  # optional daily report: a missing file must never stop boot
+    health_report = None
+    print(f"[health] daily report off: {_hr_err!r}", flush=True)
 
 # amountloss pulls playwright — avoid top-level import so startup survives flaky browsers.
 
@@ -5222,7 +5227,8 @@ def lark_webhook():
     if not token_ok:
         sch = data.get("schema") if isinstance(data, dict) else None
         print(
-            f"❌ Token mismatch: expected {VERIFICATION_TOKEN}, got {token!r} schema={sch!r}",
+            f"❌ Token mismatch: expected the configured VERIFICATION_TOKEN (len {len(VERIFICATION_TOKEN)}), "
+            f"got {token!r} schema={sch!r}",
             flush=True,
         )
         return jsonify({"error": "Invalid token"}), 403
@@ -5231,6 +5237,9 @@ def lark_webhook():
     # ``meeting_room.*`` and similar — subscribed but unhandled; ACK without logging (high volume).
     if _lark_ack_only_event_type(hdr_et):
         return jsonify({"success": True})
+    if health_report is not None:
+        health_report.bump("Lark events")
+        health_report.mark("Last Lark event")
 
     # One line per POST — if this never appears when you tap a card button, Feishu is not reaching this process
     # (wrong public URL/port, nginx not proxy_pass to here, or firewall). Fix infra before debugging Python.
@@ -5901,6 +5910,8 @@ def lark_webhook():
             print("⏭️ Bot not mentioned in group chat – ignoring further commands")
         return _lark_im_ack()
 
+    if health_report is not None:
+        health_report.bump("Messages handled")
     set_lark_incoming_message(message_id, chat_id)
     if message_id and (chat_type == "p2p" or bot_mentioned):
         remember_gotit_reaction(add_gotit_reaction(message_id))
@@ -9190,6 +9201,14 @@ def _run_main_entry() -> int:
             _boot_tw.start_watch_on_startup()
         except Exception as _boot_tw_err:
             print(f"[teams-warm] startup skipped: {_boot_tw_err!r}", flush=True)
+        try:
+            import health_checks as _boot_hc
+
+            # Daily health card to the Laboratory group (09:00 UTC+8). Starts one
+            # daemon thread, no network on this path; HEALTH_REPORT_ENABLE=0 turns it off.
+            _boot_hc.start(sys.modules[__name__])
+        except Exception as _boot_hc_err:
+            print(f"[health] startup skipped: {_boot_hc_err!r}", flush=True)
         if _lark_ws_uses_persistent_connection():
             def _flask_bg() -> None:
                 app.run(host="127.0.0.1", port=port, debug=False, threaded=True, use_reloader=False)
