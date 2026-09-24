@@ -187,8 +187,14 @@ def _va_watch_enabled() -> bool:
 
     That flag also turns the periodic chat-list digest back on, which was
     deliberately switched off on 2026-09-09.
+
+    ON BY DEFAULT: an unset or empty VAWATCH_ENABLED means the watcher runs.
+    Set VAWATCH_ENABLED=0 (or false/off/no) to stop it without a code change.
     """
-    return _truthy(os.getenv("VAWATCH_ENABLED"))
+    raw = os.getenv("VAWATCH_ENABLED")
+    if raw is None or not raw.strip():
+        return True
+    return _truthy(raw)
 
 
 def _pa_sweep_sec() -> int:
@@ -4434,7 +4440,7 @@ def check_group_messages(chat_id: str | None = None,
 def start_va_watch_on_startup() -> None:
     """Begin watching the VA announcements group, if VAWATCH_ENABLED is set."""
     if not _va_watch_enabled():
-        print("[vawatch] disabled (set VAWATCH_ENABLED=1 to switch it on)",
+        print("[vawatch] disabled by VAWATCH_ENABLED=0 (unset it to switch it on)",
               flush=True)
         return
     try:
