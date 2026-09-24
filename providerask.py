@@ -351,6 +351,97 @@ def _clear_plan(fields: dict) -> tuple:
     return "", True
 
 
+def _confirm_on() -> bool:
+    return os.getenv("PROVIDERASK_LLM_CONFIRM", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _confirm(row: dict, verdict: dict, text: str) -> dict:
+    """Confirm-before-write, the providerask half (see vawatch._llm_confirm):
+    the local model must agree that the answer announces exactly this window as
+    this provider's outage. PROVIDERASK_LLM_CONFIRM=0 writes on the parser alone."""
+    if not _confirm_on():
+        return {"verdict": "yes", "transient": False, "why": "confirm switched off"}
+    import providerllm
+    import vawatch as va
+    prov = row.get("provider") or ""
+    try:
+        return providerllm.confirm_window(
+            text, provider=prov, start=verdict.get("start"), end=verdict.get("end"),
+            names=list(va._names_for(prov) or []), reschedule=bool(verdict.get("reschedule")),
+            group=row.get("group") or "")
+    except Exception as err:  # noqa: BLE001 - fail closed
+        return {"verdict": "unclear", "transient": True, "why": f"confirm failed: {err!r}"[:200]}
+
+
+def _fill_refusal(fields: dict, verdict: dict, text: str = "") -> str:
+    """Why an answer's window must NOT overwrite this row, or "".
+
+    G3.1, the providerask half (vawatch defers the same case): the row still
+    holds a window that has not ended, and the answer names a SEPARATE outage
+    starting 24h or more after it, with no reschedule wording. Newest-wins
+    erased the imminent outage from the row - "24/09 10:00-12:00" replaced by
+    "01/10 ..." the week before it happened. A person decides which the row
+    shows. A reschedule, an overlapping or adjacent window, or a row whose
+    window has ended is written as before; a row that cannot be read is too,
+    as it was (find_provider_row has just read it).
+
+    audit-2: a reschedule skipped this check outright, so "Our maintenance on
+    28/09 has been rescheduled to 01/10" and "The maintenance on 28/09 ... is
+    extended until 14:00" - both about ANOTHER outage than the row's upcoming
+    24/09 - were filed over it. A reschedule is let through only when it may
+    be the row's own window moving (vawatch._about_other_outage).
+    """
+    try:
+        start = _cell_ms(fields.get("Start Time"))
+        end = _cell_ms(fields.get("End Time"))
+    except ValueError:
+        return ""
+    if start is None or end is None:
+        return ""
+    now_ms = int(_now().timestamp() * 1000)
+    new_ms = int(verdict["start"].timestamp() * 1000)
+    if not (end > now_ms and new_ms >= end + 24 * 3600 * 1000):
+        return ""
+    held = (f"the row still holds an upcoming one ({_ms_str(start)} → "
+            f"{_ms_str(end)}) - not overwritten; decide which the row should show")
+    if verdict.get("reschedule"):
+        try:
+            import vawatch as va
+            other = va._about_other_outage(
+                text, verdict, datetime.fromtimestamp(start / 1000, _tz()))
+        except Exception as err:  # noqa: BLE001 - cannot tell: the safe side
+            other = f"it could not be checked ({err!r:.60})"
+        if not other:
+            return ""
+        return (f"the answer reschedules another outage "
+                f"({verdict['start']:%Y-%m-%d %H:%M} → {verdict['end']:%H:%M}; "
+                f"{other}) while {held}")
+    return (f"the answer names a second, later outage "
+            f"({verdict['start']:%Y-%m-%d %H:%M} → {verdict['end']:%H:%M}) while "
+            f"{held}")
+
+
+def _replaced_note(fields: dict, verdict: dict) -> str:
+    """#91: a SOONER separate outage is written over a later upcoming one - both
+    rules agree it goes on the row, but the hit card said only "Base row
+    updated", and the later window vanished with nobody told. -> the line that
+    names it, or ""."""
+    try:
+        start = _cell_ms(fields.get("Start Time"))
+        end = _cell_ms(fields.get("End Time"))
+    except ValueError:
+        return ""
+    if start is None or end is None or verdict.get("reschedule"):
+        return ""
+    now_ms = int(_now().timestamp() * 1000)
+    new_end = int(verdict["end"].timestamp() * 1000)
+    if end > now_ms and new_end + 24 * 3600 * 1000 <= start:
+        return (f"⚠️ **Replaced a LATER window still ahead** ({_ms_str(start)} → "
+                f"{_ms_str(end)}). If that maintenance still stands, re-enter it by "
+                f"hand after this one ends.")
+    return ""
+
+
 def file_answer(row: dict, verdict: dict, text: str) -> dict:
     """Write one provider's answer. -> {wrote, error, refused}
 
@@ -359,13 +450,29 @@ def file_answer(row: dict, verdict: dict, text: str) -> dict:
     """
     import vawatch as va
 
-    out = {"wrote": "", "error": "", "refused": ""}
+    out = {"wrote": "", "error": "", "refused": "", "note": ""}
     try:
         found = va.find_provider_row(row.get("provider") or "")
         if not found:
             raise RuntimeError(f"no Base row for {row.get('provider')!r}")
         fields: dict[str, Any] = {"Last Check": va._ms(_now())}
         if verdict["action"] == "fill":
+            refusal = _fill_refusal(found.get("fields") or {}, verdict, text)
+            if refusal:
+                out["refused"] = refusal
+                return out
+            gate = _confirm(row, verdict, text)
+            if gate["verdict"] != "yes":
+                if gate.get("transient"):
+                    # A cold or unreachable model: this raises into the write
+                    # retry (PROVIDERASK_WRITE_ATTEMPTS) - never a write.
+                    raise RuntimeError("the confirming model could not be reached: "
+                                       + (gate.get("why") or "no answer"))
+                out["refused"] = ("the model did not confirm {} → {} - {}".format(
+                    f"{verdict['start']:%Y-%m-%d %H:%M}", f"{verdict['end']:%H:%M}",
+                    gate.get("why") or "no reason given"))
+                return out
+            out["note"] = _replaced_note(found.get("fields") or {}, verdict)
             fields["Start Time"] = va._ms(verdict["start"])
             fields["End Time"] = va._ms(verdict["end"])
             fields["Remark"] = text
@@ -440,13 +547,17 @@ def judge(text: str, *, group: str, asked_at: str, sender: str = "",
                 "Let me check with our tech team" used to stop the provider
                 being read for the rest of the hour, so the real answer that
                 followed was never filed. 'note' is a past window (a quoted old
-                notice): reported, never decisive.
+                notice) or, in a shared chat, a co-tenant's answer
+                (_shared_route): reported, never decisive.
       retry     the model was not asked or not understood; re-judge next sweep.
       mx        this bubble may announce a maintenance, so a later "no
                 maintenance" bubble cannot simply cancel it.
       additive  (clear only) see _additive.
       model_down  the model was unreachable - do_sweep stops asking it for the
                 rest of the sweep, so a 600s timeout is paid once, not per bubble.
+      win       noticeparse found a live window in this bubble. Only such a
+                bubble can ever be judged 'fill', so a retry WITHOUT one cannot
+                change the outcome once a newer bubble is a fill (see _decide).
     ``llm_down`` (a reason) skips the model call and returns a retry verdict.
     """
     import noticeparse as np
@@ -456,12 +567,12 @@ def judge(text: str, *, group: str, asked_at: str, sender: str = "",
     # and this is what lets a test pin "now" without patching noticeparse.
     now = _now()
     parsed = np.classify(text, now=now)
+    has_window = parsed["action"] == "fill" and not parsed.get("stale")
     extra = {"kind": "soft", "retry": False, "mx": False, "additive": False,
-             "model_down": False}
+             "model_down": False, "win": has_window}
     if parsed["action"] == "needs_human":
         return {**parsed, **extra, "kind": "human", "mx": True,
                 "llm": {"ok": False, "why": "not consulted"}}
-    has_window = parsed["action"] == "fill" and not parsed.get("stale")
     if llm_down:
         llm = {"ok": False, "why": f"not asked - {llm_down}"}
     else:
@@ -516,6 +627,16 @@ def judge(text: str, *, group: str, asked_at: str, sender: str = "",
             out["reason"] = ("announces a window that has already passed - "
                              "probably quoting an old notice")
             out["kind"] = "note"
+        elif parsed["action"] != "fill" and parsed.get("refused"):
+            # F63 (#141): the parser READ a window but refused it - a question
+            # ("Maintenance on 25/09 14:00-16:00? Please confirm."), a no-outage
+            # or UAT notice. The reason used to claim the window was missing,
+            # which sent the person looking for a quoted message that is not
+            # there. It says which guard refused, in the parser's own words.
+            out["action"] = "needs_human"
+            out["reason"] = (f"says maintenance, but the parser refused it "
+                             f"({parsed['refused']}): {parsed.get('reason') or ''}")[:300]
+            out.update(kind="soft", mx=True)
         elif parsed["action"] != "fill":
             # The model sees maintenance but no window could be parsed - this is
             # the reply-quote case, where the times live in the quoted message.
@@ -636,7 +757,7 @@ def build_summary_card(state: dict) -> dict:
 
 
 def build_hit_card(provider: str, group: str, verdict: dict, text: str,
-                   wrote: str) -> dict:
+                   wrote: str, note: str = "") -> dict:
     v = verdict
     head = f"**{provider}** · {group}"
     if v["action"] == "fill":
@@ -644,6 +765,8 @@ def build_hit_card(provider: str, group: str, verdict: dict, text: str,
                  f"\n**End:** {v['end']:%Y-%m-%d %H:%M}")
         if v.get("reschedule"):
             head += "\n_Rescheduled — this overrides the previous window._"
+        if note and wrote:
+            head += "\n" + note
     else:
         head += "\n**No maintenance this week**"
     el = [_div(head), {"tag": "hr"}, _div(_clamp(text)), {"tag": "hr"},
@@ -883,9 +1006,21 @@ def _after_our_ask(messages: list, rec: Optional[dict] = None) -> tuple:
         for i, m in enumerate(msgs):
             if str(m.get("mid") or "") == remembered:
                 return msgs[i + 1:], True
-        # The ask is older than the oldest bubble we can see, so everything
-        # read is newer than it.
-        return msgs, True
+        # G3.6 (#92): "the ask is older than the oldest bubble" was ASSUMED, so
+        # a read of [38 'no maintenance this week' (posted BEFORE the ask),
+        # 39, 41] with ask_mid 50 filed that old bubble as the answer. Message
+        # ids only grow within a chat: keep the bubbles newer than the ask; a
+        # read with none newer than it has not reached the ask at all - the
+        # boundary is lost (our problem), never guessed.
+        try:
+            ask_n = float(remembered)
+            nums = [float(str(m.get("mid") or "")) for m in msgs]
+        except ValueError:
+            return msgs, True         # ids that cannot be compared: as before
+        newer = [m for m, n in zip(msgs, nums) if n > ask_n]
+        if not newer:
+            return [], False
+        return newer, True
     return [], False
 
 
@@ -935,6 +1070,13 @@ def _entry(key: str, verdict: dict, text: str) -> Optional[dict]:
         return None
     e = {"k": key, "kind": kind, "retry": bool(verdict.get("retry")),
          "mx": bool(verdict.get("mx")), "add": bool(verdict.get("additive")),
+         # Unknown counts as "has a window": only a bubble noticeparse has
+         # positively found windowless may be stepped over by _decide.
+         "win": bool(verdict.get("win", True)),
+         # How many sweeps have asked the model about this bubble; _put_entry
+         # carries the count over a re-judge, so the deadline card can say
+         # "asked 6 times" instead of repeating one sweep's error.
+         "tries": 1 if verdict.get("retry") else 0,
          "why": str(verdict.get("reason") or "")[:240],
          # Fill and clear keep the whole text: it is the Remark, and a write
          # that failed is retried from here on a later sweep.
@@ -947,13 +1089,44 @@ def _entry(key: str, verdict: dict, text: str) -> Optional[dict]:
 
 
 def _put_entry(rec: dict, e: dict) -> None:
-    """Append, or replace in place a bubble that is being re-judged."""
+    """Append, or replace in place a bubble that is being re-judged.
+
+    A bubble still unjudged after another try keeps its attempt count, and its
+    reason says so: the model returning non-JSON for the same holding reply at
+    temperature 0 every sweep is a different situation from one timeout.
+    """
     replies = rec.setdefault("replies", [])
     for i, old in enumerate(replies):
         if old.get("k") == e["k"]:
+            if e.get("retry") and old.get("retry"):
+                e["tries"] = int(old.get("tries") or 1) + 1
+                e["why"] = f"{e.get('why') or 'could not be judged'} - asked {e['tries']} times"[:240]
             replies[i] = e
             return
     replies.append(e)
+
+
+def _mark_unread(rec: dict, on_screen: list, read_n: int) -> None:
+    """A bubble the model could not judge, and which has since left the read.
+
+    Its entry stays a retry (see _decide: it holds the row only while its
+    verdict could still matter), but its reason must stop describing the sweep
+    that failed. "Checking, one moment please." timed out at 10:10, scrolled
+    out of the 12-bubble read, and at the 11:00 deadline the card still said
+    "model unreachable: ReadTimeout" - about a model that had answered every
+    call for 50 minutes. What actually happened is that the bubble was never
+    re-read, and that is what a person needs to hear to go and read it.
+    """
+    keys = {_message_key(m) for m in on_screen}
+    for e in rec.get("replies") or []:
+        if not e.get("retry") or e.get("k") in keys:
+            continue
+        first = e.get("why0") or e.get("why") or "could not be judged"
+        e["why0"] = first
+        e["gone"] = int(e.get("gone") or 0) + 1
+        e["why"] = (f"a reply the model could not judge at the time ({first}) has "
+                    f"since scrolled out of the last {read_n} messages read, so it "
+                    f"was never re-judged - read the chat by hand")[:240]
 
 
 def _entry_window(e: dict) -> str:
@@ -986,7 +1159,9 @@ def _decide(replies: list) -> dict:
     """-> {action: wait | fill | clear | needs_human, entry, why}
 
     Deterministic, newest-decisive:
-      * a bubble the model could not judge (retry) holds everything: wait;
+      * a bubble the model could not judge (retry) holds everything - wait -
+        unless its verdict could not change the outcome: the newest bubble is
+        a definite needs-a-human, or it is a window and the retry carries none;
       * the newest relevant bubble is a window -> file it (see _pick_fill);
         older "no maintenance" or unreadable bubbles do not override it;
       * the newest is undecided (soft) -> wait; it may be a correction of an
@@ -997,11 +1172,25 @@ def _decide(replies: list) -> dict:
         ADDITIVE bubble ("no other maintenance") may stand, and then the
         window is what gets filed. Anything else is a retraction-or-"no
         other" question the text cannot settle: needs_human.
-    'note' bubbles (a quoted past window) are never decisive; at the deadline
-    they only explain why nothing was filed.
+    'note' bubbles (a quoted past window; a co-tenant's answer in a shared
+    chat) are never decisive; at the deadline they only explain why nothing
+    was filed.
     """
     live = [e for e in replies if e.get("kind") != "note"]
     pending = [e for e in live if e.get("retry")]
+    newest_kind = live[-1].get("kind") if live else ""
+    if newest_kind == "human":
+        # Decisive whatever the older bubbles turn out to be.
+        pending = []
+    elif newest_kind == "fill":
+        # Once the newest bubble is a window, only another window among the
+        # older ones can change the answer (_pick_fill), and a bubble
+        # noticeparse found windowless can never be judged one. Holding on it
+        # anyway meant a "Checking, one moment please." the model never
+        # answered - it timed out that sweep, then the bubble scrolled out of
+        # the read, or the model returned non-JSON for it every time -
+        # kept the window posted right after it unfiled for the whole hour.
+        pending = [e for e in pending if e.get("win", True)]
     if pending:
         return {"action": "wait", "entry": None, "why": pending[-1].get("why") or ""}
     if not live:
@@ -1085,7 +1274,8 @@ def _conclude(prov: str, rec: dict, send_card) -> int:
         rec["wrote"] = done["wrote"]
         rec["why"] = ""
         try:
-            send_card(build_hit_card(prov, rec["group"], verdict, text, done["wrote"]))
+            send_card(build_hit_card(prov, rec["group"], verdict, text, done["wrote"],
+                                     note=done.get("note") or ""))
         except Exception as err:  # noqa: BLE001
             print(f"[providerask] hit card failed: {err!r}", flush=True)
         return 1
@@ -1140,28 +1330,69 @@ def _read(read_one, title: str, count: int) -> dict:
     return res
 
 
-def _shared_route(verdict: dict, text: str, sharers: list) -> dict:
+def _shared_route(verdict: dict, text: str, prov: str, sharers: list) -> dict:
     """In a chat that serves two Base rows, decide whose answer a bubble is.
 
-    A bubble that names none of the sharing providers is filed onto all of
-    them - the same thing vawatch does with a notice in that chat. A bubble
-    that names any of them cannot be attributed from its text: "YGG scheduled
-    maintenance ... Hacksaw games are not affected" names both and belongs to
-    one, and an alias ("Yggdrasil", "HS") defeats any name match. That goes to
-    a human, never onto the row it did not mean.
+    The same rule, on the same alias table, as vawatch._attribute - the two
+    consumers read the SAME chat, and when they disagreed the row ended up with
+    whichever wrote last:
+      * the bubble names this row only (its Provider, or an alias from
+        VAWATCH_PROVIDER_ALIASES: "HS" is Hacksaw, "Yggdrasil" is YGG) -> it is
+        this row's answer and is filed;
+      * it names only a co-tenant -> that row takes it; for THIS row it is a
+        'note', so nothing is written and the deadline reports that its own
+        status was never stated;
+      * it names both, or names nobody ("Hi team, maintenance on 24/09 ...")
+        -> a human, nothing written on either row.
+    The old version matched the literal Provider names only, so "HS scheduled
+    maintenance ..." read as naming nobody and put Hacksaw's window onto YGG,
+    and "Yggdrasil scheduled maintenance ..." put YGG's onto Hacksaw. Naming
+    is sentence-scoped with negation for a fill (vawatch._mentions): "YGG
+    maintenance ... Hacksaw games are not affected" names YGG only.
+    VAWATCH_SHARED_GROUP_CHECK=0 is the same kill-switch as in vawatch: the
+    bubble is filed onto every sharer, whatever it names.
     """
     if len(sharers) < 2 or verdict.get("kind") not in ("fill", "clear"):
         return verdict
-    body = _norm(text)
-    named = [p for p in sharers
-             if p and re.search(r"(?<![0-9a-z])" + re.escape(_norm(p)) + r"(?![0-9a-z])",
-                                body)]
-    if not named:
+    others = [p for p in sharers if p and _norm(p) != _norm(prov)]
+    if not others:
         return verdict
-    return {**verdict, "action": "needs_human", "kind": "human", "mx": True,
-            "reason": (f"this chat serves {', '.join(sharers)} and the answer "
-                       f"names {', '.join(named)} - which row it is for cannot be "
-                       f"told from the text, so nothing was filed")}
+    label = ", ".join(others)
+
+    def human(reason: str) -> dict:
+        return {**verdict, "action": "needs_human", "kind": "human", "mx": True,
+                "reason": reason}
+
+    try:
+        import vawatch as va
+        if not va._shared_group_check():
+            return verdict
+        fill = verdict.get("kind") == "fill"
+
+        def named(p: str) -> bool:
+            # For a fill, "Hacksaw is NOT affected" is not naming Hacksaw. For
+            # a clear the negation IS the content ("no maintenance for
+            # Hacksaw"), so any mention counts - as in vawatch._attribute.
+            pos, neg = va._mentions(text, va._names_for(p))
+            return pos > 0 if fill else (pos + neg) > 0
+        own = named(prov)
+        co = [p for p in others if named(p)]
+    except Exception as err:  # noqa: BLE001
+        # vawatch's alias helpers are its own; if they move, fail closed
+        # rather than fall back to "names nobody -> file onto every row".
+        return human(f"this chat serves {prov} and {label}; whose answer this is "
+                     f"could not be checked ({err!r}) - nothing was filed")
+    if own and not co:
+        return verdict
+    if co and not own:
+        return {**verdict, "action": "needs_human", "kind": "note", "mx": False,
+                "reason": (f"names {', '.join(co)}, not {prov} - filed on that row; "
+                           f"whether {prov} has maintenance was not stated")}
+    if own and co:
+        return human(f"names both {prov} and {', '.join(co)} - which row it is for "
+                     f"cannot be told from the text, so nothing was filed")
+    return human(f"this chat serves {prov} and {label}, and the answer names none "
+                 f"of them - whose it is cannot be told, so nothing was filed")
 
 
 def do_sweep(read_one, notify, send_card) -> dict:
@@ -1231,6 +1462,53 @@ def do_sweep(read_one, notify, send_card) -> dict:
                     f"PROVIDERASK_READ_COUNT")
                 continue
             rec["read_problem"] = ""
+
+            def _judge_one(msg, key, text, prov=prov, rec=rec):
+                try:
+                    verdict = judge(text, group=rec["group"], asked_at=asked_at,
+                                    sender=str(msg.get("sender") or ""),
+                                    llm_down=llm_down["why"])
+                except Exception as err:  # noqa: BLE001
+                    # One unparseable message must not abort the sweep: the
+                    # deadline block at the end is what posts the summary
+                    # and CLOSES the run. It is kept as an undecided bubble,
+                    # so it cannot be skipped over in favour of an older one.
+                    print(f"[providerask] judging a message for {prov} "
+                          f"failed: {err!r}", flush=True)
+                    verdict = {"action": "needs_human", "kind": "soft",
+                               "mx": True, "retry": False,
+                               "reason": f"could not judge this message ({err!r})"[:200]}
+                if verdict.get("model_down") and not llm_down["why"]:
+                    llm_down["why"] = str((verdict.get("llm") or {}).get("why")
+                                          or "model unreachable")[:120]
+                judged[key] = verdict
+                return verdict
+
+            # R1.53 (#274): the bubbles that CARRY a window are put to the model
+            # first. The model timing out on an older holding reply ("Let me
+            # check with our tech team") marked it down for the rest of the
+            # sweep, so the notice right after it was never judged - on every
+            # sweep, until the deadline carded "LLM unavailable" over a window
+            # sitting on screen. The model is still asked at most once while
+            # it is down; only the order changes, and entries keep their
+            # oldest-first order below.
+            for msg in after:
+                key = _message_key(msg)
+                # Not _message_is_new: that MARKS the bubble seen, and the
+                # ordered pass below must still take it.
+                if (msg.get("out") or not key or key in judged
+                        or key in (rec.get("seen") or [])):
+                    continue
+                text = str(msg.get("text") or "")
+                try:
+                    import noticeparse as _np
+                    pv = _np.classify(text, now=_now())
+                    has_win = pv.get("action") == "fill" and not pv.get("stale")
+                except Exception:     # noqa: BLE001 - judged in order below
+                    has_win = False
+                if has_win:
+                    _judge_one(msg, key, text)
+
             for msg in after:             # oldest first: replies keep their order
                 if msg.get("out"):        # our own message
                     continue
@@ -1240,25 +1518,8 @@ def do_sweep(read_one, notify, send_card) -> dict:
                 text = str(msg.get("text") or "")
                 verdict = judged.get(key)
                 if verdict is None:
-                    try:
-                        verdict = judge(text, group=rec["group"], asked_at=asked_at,
-                                        sender=str(msg.get("sender") or ""),
-                                        llm_down=llm_down["why"])
-                    except Exception as err:  # noqa: BLE001
-                        # One unparseable message must not abort the sweep: the
-                        # deadline block at the end is what posts the summary
-                        # and CLOSES the run. It is kept as an undecided bubble,
-                        # so it cannot be skipped over in favour of an older one.
-                        print(f"[providerask] judging a message for {prov} "
-                              f"failed: {err!r}", flush=True)
-                        verdict = {"action": "needs_human", "kind": "soft",
-                                   "mx": True, "retry": False,
-                                   "reason": f"could not judge this message ({err!r})"[:200]}
-                    if verdict.get("model_down") and not llm_down["why"]:
-                        llm_down["why"] = str((verdict.get("llm") or {}).get("why")
-                                              or "model unreachable")[:120]
-                    judged[key] = verdict
-                routed = _shared_route(verdict, text, sharers)
+                    verdict = _judge_one(msg, key, text)
+                routed = _shared_route(verdict, text, prov, sharers)
                 if routed.get("retry"):
                     _unsee(rec, key)
                 e = _entry(key, routed, text)
@@ -1269,6 +1530,7 @@ def do_sweep(read_one, notify, send_card) -> dict:
                     # must go, or it would hold the row waiting forever.
                     rec["replies"] = [x for x in (rec.get("replies") or [])
                                       if x.get("k") != key]
+            _mark_unread(rec, after, len(msgs))
             try:
                 filed += _conclude(prov, rec, send_card)
             except Exception as err:  # noqa: BLE001

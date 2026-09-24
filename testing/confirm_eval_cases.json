@@ -1,0 +1,1881 @@
+{
+ "about": "Labelled cases for testing/confirm_gate_eval.py. 'confirm' = a notice whose parser reading is right and must be confirmed; 'reject' = a message the regex parser reads as a fill but that must NOT be written (from the 2026-09-24 adversarial hunt).",
+ "cases": [
+  {
+   "label": "confirm",
+   "provider": "JDB",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "系统维护通知\n维护时间：2026年9月23日 晚上11:00-1:00",
+   "note": "K-F13f"
+  },
+  {
+   "label": "confirm",
+   "provider": "Playtech",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled Maintainance 25/09/2026 14:00-16:00 (GMT+8)",
+   "note": "K-G1.1f"
+  },
+  {
+   "label": "confirm",
+   "provider": "CQ9",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-24 10:00 - 12:00 CST",
+   "note": "K-F14h"
+  },
+  {
+   "label": "confirm",
+   "provider": "JDB",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "敬请贵司提前做好维护准备：2026-09-25 10:00-12:00 (GMT+8) 例行维护。",
+   "note": "K-G4.3l"
+  },
+  {
+   "label": "confirm",
+   "provider": "Playtech",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance on 2026-09-23 from 10:00 till 12:00 (GMT+8)",
+   "note": "K-F44f"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled​maintenance 25/09/2026 14:00-16:00 (GMT+8)",
+   "note": "K-G1.8a"
+  },
+  {
+   "label": "confirm",
+   "provider": "VA",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "上次维护已完成。下次例行维护将于 2026-09-25 10:00 - 12:00 (GMT+8) 进行。",
+   "note": "G4"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance on 2026-09-23 10:00-12:00 (GMT+8). We will notify you once it has been completed.",
+   "note": "G1"
+  },
+  {
+   "label": "confirm",
+   "provider": "Playtech",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-23 10:00 - 11:00 and 14:00 - 15:00 (GMT+8)",
+   "note": "K-F44h"
+  },
+  {
+   "label": "confirm",
+   "provider": "BNG",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "系统维护 2026-09-24 10:00 - 12:00 泰国时间",
+   "note": "K-F16f"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-23T11:00:00+08:00",
+   "text": "The scheduled maintenance on 2026-09-23 10:00 - 12:00 (GMT+8) has been extended by 2 hours.",
+   "note": "K-F50e"
+  },
+  {
+   "label": "confirm",
+   "provider": "JDB",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "上次维护已完成，下次例行维护将于 2026-09-30 10:00-12:00 (GMT+8) 进行。",
+   "note": "K-F48a"
+  },
+  {
+   "label": "confirm",
+   "provider": "KingMidas",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "维护时间 2026-09-23 10:00-12:00。维护期间未结算注单将取消。",
+   "note": "G2"
+  },
+  {
+   "label": "confirm",
+   "provider": "Dropball",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "排定维护 2026-09-23 10:00至12:00 (GMT+8)",
+   "note": "C13"
+  },
+  {
+   "label": "confirm",
+   "provider": "CQ9",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "系统维护通知\n维护时间：2026年9月23日 下午2:00 ~ 下午4:00",
+   "note": "K-F13c"
+  },
+  {
+   "label": "confirm",
+   "provider": "JDB",
+   "now": "2026-09-30T13:00:00+08:00",
+   "text": "国庆假期期间（2026-10-01 00:00 - 2026-10-07 23:59）暂停例行维护，最后一次例行维护为 2026-09-30 10:00-12:00 (GMT+8)。",
+   "note": "K-F32c"
+  },
+  {
+   "label": "confirm",
+   "provider": "EEZE",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "排定维护 2026-09-23 10:00 - 12:00 新加坡时间",
+   "note": "D17"
+  },
+  {
+   "label": "confirm",
+   "provider": "Playstar",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-23 10:00 – 12:00 (GMT+8)",
+   "note": "C11"
+  },
+  {
+   "label": "confirm",
+   "provider": "Yggdrasil",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Dear partners, please be informed that we will have a scheduled maintenance on 24 Sep 2026 from 10:00 to 12:00 (GMT+8). Could you please help to inform your players? Thank you.",
+   "note": "K-F45a"
+  },
+  {
+   "label": "confirm",
+   "provider": "JDB",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "维护时间调整为 2026-09-25 10:00-12:00 (GMT+8)，原 2026-09-23 10:00-12:00 取消。",
+   "note": "K-F22o"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-23T11:00:00+08:00",
+   "text": "Scheduled maintenance on 2026-09-23 has been extended from 10:00 - 12:00 to 10:00 - 14:00 (GMT+8).",
+   "note": "K-F50h"
+  },
+  {
+   "label": "confirm",
+   "provider": "PG Soft",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 23rd September 2026 10:00 - 12:00 (GMT+8)",
+   "note": "B9"
+  },
+  {
+   "label": "confirm",
+   "provider": "Evolution",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance for Live Casino: 2026-09-24 14:00-16:00 (GMT+8) will proceed as planned. The Slots maintenance on 2026-09-24 10:00-11:00 has been cancelled.",
+   "note": "K-F25b"
+  },
+  {
+   "label": "confirm",
+   "provider": "KingMidas",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "排定维护 1月25日 (一) 10:00 - 12:00 (GMT+8)",
+   "note": "K-F73e"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Postponed\nNew time: 26/09/2026 10:00-12:00 (GMT+8)\nOld time: 24/09/2026 10:00-12:00",
+   "note": "K-G2.2j"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-24 10:00-12:00 (GMT+8). Please ignore this message if you have already updated your whitelist.",
+   "note": "K-G2.1f"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Last week's maintenance has been completed, and the next scheduled maintenance is on 2026-09-30 10:00 - 12:00 (GMT+8).",
+   "note": "K-F48b"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "[Maintenance Notice] Scheduled maintenance on 2026-09-25 10:00 - 12:00 (GMT+8).",
+   "note": "K-G2.1t5"
+  },
+  {
+   "label": "confirm",
+   "provider": "JILI",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "停服公告\n2026-09-23 10:00 - 12:00 (GMT+8)\n届时所有游戏将下线。",
+   "note": "E6"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-23T11:00:00+08:00",
+   "text": "Maintenance extended until 14:00. The scheduled maintenance on 2026-09-23 10:00 - 12:00 (GMT+8) is extended until 14:00 GMT+8.",
+   "note": "K-F50a"
+  },
+  {
+   "label": "confirm",
+   "provider": "Yggdrasil",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance on 2026-09-23 from 10:00 to 12:00 (GMT+8)",
+   "note": "A8"
+  },
+  {
+   "label": "confirm",
+   "provider": "JILI",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-25 03:00-05:00 (GMT+8). No downtime outside the window.",
+   "note": "K-F18h"
+  },
+  {
+   "label": "confirm",
+   "provider": "KingMidas",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "排定维护\n2026年9月23日 10:00 至 12:00 (GMT+8)",
+   "note": "B20"
+  },
+  {
+   "label": "confirm",
+   "provider": "JILI",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "维护公告\n日期：1月5日\n时间：10:00 - 12:00 (GMT+8)",
+   "note": "B18"
+  },
+  {
+   "label": "confirm",
+   "provider": "Yggdrasil",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 23-09-2026 10:00 - 12:00 (GMT+8)",
+   "note": "B6"
+  },
+  {
+   "label": "confirm",
+   "provider": "JDB",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "更正：9月24日系统维护时间为 14:00-16:00 (GMT+8)，而非 10:00-12:00。",
+   "note": "K-G2.2g"
+  },
+  {
+   "label": "confirm",
+   "provider": "SimplePlay",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "维护公告\n①2026-09-23 10:00-12:00 (GMT+8) 系统维护",
+   "note": "J12"
+  },
+  {
+   "label": "confirm",
+   "provider": "JDB",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "例行维护：2026-09-23 10:00-12:00 (GMT+8)。所有注单在维护期间将取消。",
+   "note": "K-F30f"
+  },
+  {
+   "label": "confirm",
+   "provider": "VA",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "排定维护 2026.9.23 10:00 - 12:00 (GMT+8)",
+   "note": "B3"
+  },
+  {
+   "label": "confirm",
+   "provider": "Playtech",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-24 10:00 - 12:00 IST (GMT+5:30)",
+   "note": "K-F14g"
+  },
+  {
+   "label": "confirm",
+   "provider": "JILI",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "系统维护通知\n维护日期：9月24日(四)-9月25日(五)\n维护时间：22:00 - 02:00 (GMT+8)",
+   "note": "K-F1d"
+  },
+  {
+   "label": "confirm",
+   "provider": "KingMidas",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance on Sep 23, 2026 from 11:00 - 1:00 PM (GMT+8)",
+   "note": "K-F12j"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "𝐒𝐜𝐡𝐞𝐝𝐮𝐥𝐞𝐝 𝐌𝐚𝐢𝐧𝐭𝐞𝐧𝐚𝐧𝐜𝐞 25/09/2026 14:00-16:00 (GMT+8)",
+   "note": "K-G1.8c"
+  },
+  {
+   "label": "confirm",
+   "provider": "PG Soft",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-23 10:00 - 12:00 (GMT+8). We will inform you as soon as the maintenance has been completed.",
+   "note": "G10"
+  },
+  {
+   "label": "confirm",
+   "provider": "JDB",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 23.09.2026 10.00 - 12.00 (GMT+8), we apologise for any mistake",
+   "note": "K-F62c"
+  },
+  {
+   "label": "confirm",
+   "provider": "Yellow Bat",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-24 10:00 - 12:00 (GMT+8). Min bet is 1.00 - 5.00 USD.",
+   "note": "J7"
+  },
+  {
+   "label": "confirm",
+   "provider": "Evolution",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-24 10:00 - 12:00 (GMT+8), any unfinished games will be cancelled",
+   "note": "K-F60b"
+  },
+  {
+   "label": "confirm",
+   "provider": "Evolution",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-23 10:00-12:00 (GMT+8). Unsettled bets will be settled between 12:00-18:00.",
+   "note": "K-F31b"
+  },
+  {
+   "label": "confirm",
+   "provider": "JILI",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "系统维护通知\n维护时间：2026年9月23日 22:00 至 次日02:00",
+   "note": "K-F44a"
+  },
+  {
+   "label": "confirm",
+   "provider": "Playtech",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance notification.\nTime: Wednesday, September 2, 2026, 14:30 - 15:30 (UTC+8)",
+   "note": "A3"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-10-14 10:00-12:00 (GMT+8). If you received this in the wrong group, please let us know.",
+   "note": "K-G2.1i"
+  },
+  {
+   "label": "confirm",
+   "provider": "PG Soft",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance on 2026-09-23 from 10:00 to 12:00 (GMT+8)",
+   "note": "C8"
+  },
+  {
+   "label": "confirm",
+   "provider": "VA",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-24 10:00 - 12:00 PST",
+   "note": "K-F14b"
+  },
+  {
+   "label": "confirm",
+   "provider": "JDB",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "例行维护：2026-09-24 10:00-12:00 (GMT+8)。维护期间如出现异常提示请忽略。",
+   "note": "K-G2.1g"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance on 2026-09-23, 06:00-08:00 UTC / 14:00-16:00 GMT+8",
+   "note": "K-F9b"
+  },
+  {
+   "label": "confirm",
+   "provider": "YGR",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-23 10:00-12:00 (GMT 9)",
+   "note": "K-F8d"
+  },
+  {
+   "label": "confirm",
+   "provider": "Evolution",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Maintenance Time: 25/09/2026 14:00-16:00 (GMT+8)",
+   "note": "K-G1.1b"
+  },
+  {
+   "label": "confirm",
+   "provider": "Yggdrasil",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-23 23:00-01:00 (GMT+8)",
+   "note": "C7"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Issued: 2026-09-23. Scheduled maintenance 10:00 - 12:00 (GMT+8) on 2026-09-25.",
+   "note": "K-F2f"
+  },
+  {
+   "label": "confirm",
+   "provider": "Yggdrasil",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-23 04:00 - 06:00 CEST (10:00 - 12:00 GMT+8)",
+   "note": "K-G3"
+  },
+  {
+   "label": "confirm",
+   "provider": "PG Soft",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance (GMT+8)\n2026-09-23 10:00 - 12:00\n2026-09-30 10:00 - 12:00",
+   "note": "I7"
+  },
+  {
+   "label": "confirm",
+   "provider": "KingMidas",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "更正維護通知\n錯誤：2026-09-24 10:00-12:00\n正確：2026-09-26 10:00-12:00 (GMT+8)",
+   "note": "K-G2.2e"
+  },
+  {
+   "label": "confirm",
+   "provider": "EEZE Slot",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance\nDate: 23.09.2026\nTime: 10.00 - 12.00 (GMT+8)\nSupport desk hours: 09:00 - 18:00",
+   "note": "K-F15a"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-25 10:00-12:00 (GMT+8). During maintenance, some deposits may be delayed.",
+   "note": "K-F26j"
+  },
+  {
+   "label": "confirm",
+   "provider": "JILI",
+   "now": "2027-01-05T09:00:00+08:00",
+   "text": "维护公告\n日期：12月30日\n时间：10:00 - 12:00 (GMT+8)",
+   "note": "B23"
+  },
+  {
+   "label": "confirm",
+   "provider": "Evolution",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Dear Partner, Evolution maintenance Sept. 25, 2026 14:00-16:00 (GMT+8)",
+   "note": "K-G1.1m"
+  },
+  {
+   "label": "confirm",
+   "provider": "Gemini",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-23 24:00 - 02:00 (GMT+8)",
+   "note": "C20"
+  },
+  {
+   "label": "confirm",
+   "provider": "JDB",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "维护公告\n时间：2026-09-23 10:00-12:00 (UTC/GMT+08:00)",
+   "note": "K-F8a"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Today's maintenance has been completed. Next week's maintenance will be on 02/10/2026 14:00-16:00 (GMT+8).",
+   "note": "K-G1.6c"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-23 10:00-12:00 (GMT+8). Please stop placing bets from 09:45 - 10:00.",
+   "note": "K-F15b"
+  },
+  {
+   "label": "confirm",
+   "provider": "PP",
+   "now": "2026-09-23T09:00:00+08:00",
+   "text": "Scheduled maintenance on 9/24 users cannot log in 10:00 - 12:00 (GMT+8).",
+   "note": "K-F61b"
+  },
+  {
+   "label": "confirm",
+   "provider": "Evolution",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 23 Sep 2026 10:00 - 12:00 (GMT+8)",
+   "note": "B22"
+  },
+  {
+   "label": "confirm",
+   "provider": "TWSlot",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "排定维护 2026-09-23 10:00~12:00 (GMT+8)",
+   "note": "A9"
+  },
+  {
+   "label": "confirm",
+   "provider": "KingMidas",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "🚧🚧🚧  維護公告 Maintenance Notification  🚧🚧🚧\n\n尊敬的客户,\nHi Team,\n\n我们恭敬地向您报告， KingMidas - KM系统 将于9/23 (三) 10:00AM (GMT+8) 排定维护，在这个期间 KingMidas - KM系统所有的游戏服务都会暂停使用。\n有任何更新信息，我们将尽快向您报告，不便之处敬请原谅。\n\nPlease note that the KingMidas - Sysyem scheduled maintenance will commence at 10:00AM 23th(Wed) Sep (GMT+8).\nDuring this period, you will not be able to access to all the games.\nWe will keep you posted on the status. Thank you for your understanding of any inconvenience caused.\n\n日期Date：Sep 23th, 2026 (Wed)\n时间Time：10:00 - 12:00  (GMT+8)\n受影响之游戏Affected Game :\n正式环境所有的游戏服务、后台与API\nAll games(Slots, TableGames), Backoffice and API service on Production",
+   "note": "A1"
+  },
+  {
+   "label": "confirm",
+   "provider": "TWSlot",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "改期通知：维护改至2026-09-25 10:00 - 12:00 (GMT+8)。",
+   "note": "H9"
+  },
+  {
+   "label": "confirm",
+   "provider": "JDB",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "时间变更：新时间 2026-09-25 10:00 - 12:00 (GMT+8)，原时间 2026-09-23 10:00 - 12:00。",
+   "note": "H6"
+  },
+  {
+   "label": "confirm",
+   "provider": "Yggdrasil",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 11/12/2026 10:00 - 12:00 (GMT+8)",
+   "note": "B14"
+  },
+  {
+   "label": "confirm",
+   "provider": "RTG",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "SCHEDULED MAINTENANCE 2026-09-24 10:00 - 12:00\nEST. DURATION: 2 HOURS",
+   "note": "K-F14k"
+  },
+  {
+   "label": "confirm",
+   "provider": "JILI",
+   "now": "2026-09-23T09:00:00+08:00",
+   "text": "系统维护：9.24（周四）10:00-12:00 (GMT+8)",
+   "note": "K-F42f"
+  },
+  {
+   "label": "confirm",
+   "provider": "PP",
+   "now": "2026-09-23T09:00:00+08:00",
+   "text": "Emergency maintenance today 2026-09-23 15:00-16:00 (GMT+8)",
+   "note": "K-G1.3k"
+  },
+  {
+   "label": "confirm",
+   "provider": "PP",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-23 22:30:00 ~ 2026-09-24 01:00:00 (GMT+8)",
+   "note": "K-F11d"
+  },
+  {
+   "label": "confirm",
+   "provider": "JDB",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "排定维护 2026-09-23 10.00-12.00 (GMT+8)",
+   "note": "C2"
+  },
+  {
+   "label": "confirm",
+   "provider": "KingMidas",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "【KingMidas】游戏维护\n日期：2026年9月25日\n时间：14:00-16:00 (GMT+8)\n届时游戏将无法进入，敬请见谅。",
+   "note": "K-G1.2a"
+  },
+  {
+   "label": "confirm",
+   "provider": "Dropball",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "维护延后至2026-09-25 10:00 - 12:00 (GMT+8)，原定2026-09-23的维护取消。",
+   "note": "G13"
+  },
+  {
+   "label": "confirm",
+   "provider": "KingMidas",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance on 9/24 (Thu) 10:00-12:00 GMT+8. The next one is planned for 2026-10-15.",
+   "note": "K-F6b"
+  },
+  {
+   "label": "confirm",
+   "provider": "Evolution",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance\nDate: 24th - 25th September 2026\nTime: 22:00 - 02:00 (GMT+8)",
+   "note": "K-F1i"
+  },
+  {
+   "label": "confirm",
+   "provider": "SimplePlay",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "排定维护 2026-09-23 10:00~12:00 (GMT+8)",
+   "note": "C9"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "The maintenance scheduled for 2026-09-23 10:00-12:00 (GMT+8) has been postponed to 2026-09-24 10:00-12:00 (GMT+8).",
+   "note": "K-G1"
+  },
+  {
+   "label": "confirm",
+   "provider": "PG Soft",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance\nDate: Sep 24 - Sep 25, 2026\nTime: 22:00 - 02:00 (GMT+8)",
+   "note": "K-F1g"
+  },
+  {
+   "label": "confirm",
+   "provider": "JDB",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "维护时间调整为 2026-09-25 10:00-12:00 (GMT+8)。原定 2026-09-23 10:00-12:00。\n公告更新时间：2026-09-22 08:00",
+   "note": "K-F28d"
+  },
+  {
+   "label": "confirm",
+   "provider": "YGR",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-23 10:00-12:00 (GMT 08:00)",
+   "note": "K-F8e"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-23 10:00 - 12:00 SGT",
+   "note": "D5"
+  },
+  {
+   "label": "confirm",
+   "provider": "PG Soft",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance\nDate: 2026-09-23\n02:00 - 04:00 (UTC)\n10:00 - 12:00 (GMT+8)",
+   "note": "D13"
+  },
+  {
+   "label": "confirm",
+   "provider": "KingMidas",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance\n日期Date：2026-09-23\n时间Time：10AM - 12PM (GMT+8)",
+   "note": "J17"
+  },
+  {
+   "label": "confirm",
+   "provider": "Roulette",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-23 12:00AM - 02:00AM (GMT+8)",
+   "note": "C16"
+  },
+  {
+   "label": "confirm",
+   "provider": "JDB",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "排定维护 2026-09-23 23:00 - 01:00 (GMT+8)",
+   "note": "A6"
+  },
+  {
+   "label": "confirm",
+   "provider": "JDB",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "例行维护：2026-09-23 10:00-12:00 (GMT+8)\n客户端更新时间：2026-09-24 02:00-03:00",
+   "note": "K-F28"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Please be informed that our maintenance has been rescheduled to 2026-09-25 10:00-12:00 (GMT+8).",
+   "note": "K-G4.3j"
+  },
+  {
+   "label": "confirm",
+   "provider": "Evolution",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance: 2026-09-24 22:00 (GMT+8) - 2026-09-25 02:00 (GMT+8)",
+   "note": "K-F43c"
+  },
+  {
+   "label": "confirm",
+   "provider": "EEZE",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "All game services will be temporarily suspended on 2026-09-23, 10:00 - 12:00 (GMT+8).",
+   "note": "E16"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Kindly note the scheduled maintenance on 2026-09-25 10:00-12:00 (GMT+8). Please avoid placing bets during this period.",
+   "note": "K-G4.3k"
+  },
+  {
+   "label": "confirm",
+   "provider": "Evolution",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-23 10:00 - 12:00 (GMT+8). All ongoing rounds before the maintenance will be cancelled.",
+   "note": "G3"
+  },
+  {
+   "label": "confirm",
+   "provider": "FC",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "系统维护通知\n维护时间：2026年9月23日 下午2时-4时",
+   "note": "K-F13d"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance rescheduled from 24/09/2026 10:00-12:00 to 26/09/2026 10:00-12:00 (GMT+8)",
+   "note": "K-G2.2i"
+  },
+  {
+   "label": "confirm",
+   "provider": "VA",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "感谢您之前的支持。例行维护：2026-09-23 10:00-12:00 (GMT+8)。新游戏上线：2026-09-25 14:00-16:00 (GMT+8)。",
+   "note": "K-F27b"
+  },
+  {
+   "label": "confirm",
+   "provider": "PG Soft",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance\nDate: 2026-09-23\n02:00 - 04:00 (UTC+0)\n10:00 - 12:00 (GMT+8)",
+   "note": "D12"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-23T11:00:00+08:00",
+   "text": "The maintenance on 2026-09-23 10:00-12:00 has been completed. Next scheduled maintenance: 2026-09-30 10:00-12:00 (GMT+8).",
+   "note": "K-F49b"
+  },
+  {
+   "label": "confirm",
+   "provider": "PP",
+   "now": "2026-09-23T09:00:00+08:00",
+   "text": "On 9/24 players will not be able to access games from 10:00 - 12:00 (GMT+8) due to scheduled maintenance.",
+   "note": "K-F61a"
+  },
+  {
+   "label": "confirm",
+   "provider": "Playtech",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-23 10:00 - 12:00 (GMT+05:30)",
+   "note": "D4"
+  },
+  {
+   "label": "confirm",
+   "provider": "VA",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "维护时间变更：原定 2026-09-23 10:00-12:00 的例行维护改期至 2026-09-25 10:00-12:00 (GMT+8)",
+   "note": "K-F52b"
+  },
+  {
+   "label": "confirm",
+   "provider": "JDB",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "维护日期：2026年9月24日\n维护时间：10:00:00-12:00:00",
+   "note": "K-F11e"
+  },
+  {
+   "label": "confirm",
+   "provider": "Playtech",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "维护通知：时间变更\n更新后时间：\n2026-09-25 10:00 - 12:00 (GMT+8)\n原定时间：\n2026-09-23 10:00 - 12:00 (GMT+8)",
+   "note": "H7"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "The maintenance originally planned for 2026-09-23 10:00-12:00 has been postponed to 2026-09-25 10:00-12:00 (GMT+8).",
+   "note": "K-F52e"
+  },
+  {
+   "label": "confirm",
+   "provider": "JDB",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "例行维护：2026-09-23 10:00-12:00 (GMT+8)，维护期间未完成的游戏将自动结算。",
+   "note": "K-F47f"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "The maintenance previously announced for 2026-09-23 10:00-12:00 (GMT+8) will proceed as scheduled. The backoffice will be unavailable 10:00-10:30.",
+   "note": "K-F54"
+  },
+  {
+   "label": "confirm",
+   "provider": "Dropball",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "维护公告：2026-09-23 10:00 - 12:00",
+   "note": "A11"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "UPDATE: Scheduled maintenance time changed.\nNew time: 26/09/2026 10:00-12:00 (GMT+8)\nOld time: 24/09/2026 10:00-12:00",
+   "note": "K-G2.2c"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Sorry, the scheduled maintenance date in the notice above is wrong.\nWrong: 24/09/2026 10:00-12:00 (GMT+8)\nCorrect: 26/09/2026 10:00-12:00 (GMT+8)",
+   "note": "K-G2.2"
+  },
+  {
+   "label": "confirm",
+   "provider": "KingMidas",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "排定维护 1月5日 10:00 - 12:00 (GMT+8)",
+   "note": "K-F73d"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance: 2026-09-23 10:00-12:00 (GMT+8). Maintenance for 2026-09-23 14:00-16:00 has been cancelled.",
+   "note": "K-F25a"
+  },
+  {
+   "label": "confirm",
+   "provider": "VA",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "原本定于2026-09-23 10:00-12:00的维护将延至2026-09-25 10:00-12:00",
+   "note": "K-F52d"
+  },
+  {
+   "label": "confirm",
+   "provider": "Gemini",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-23 10:00 - 12:00 +08:00",
+   "note": "D19"
+  },
+  {
+   "label": "confirm",
+   "provider": "JDB",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "例行维护通知\n维护开始时间：2026-09-23 10:00\n维护结束时间：2026-09-23 12:00",
+   "note": "K-F50g"
+  },
+  {
+   "label": "confirm",
+   "provider": "JILI",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "系统维护通知\n维护时间：2026年9月23日 下午2:00-4:00",
+   "note": "K-F13a"
+  },
+  {
+   "label": "confirm",
+   "provider": "JDB",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "维护公告\n维护时间：10:00-12:00\n维护日期：2026年9月24日",
+   "note": "K-F3h"
+  },
+  {
+   "label": "confirm",
+   "provider": "SimplePlay",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "維護公告\n日期Date：Sep 16th, 2026 (Wed)\n時間Time：10:00 - 12:00 (GMT+8)",
+   "note": "A5"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance on 24/09/2026 - 25/09/2026, 22:00 - 02:00 (GMT+8)",
+   "note": "K-F1e"
+  },
+  {
+   "label": "confirm",
+   "provider": "FC",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "系统维护通知\n维护时间：2026-09-23 10:00-12:00 (GMT+8)\n充值通道将于 2026-09-22 20:00-23:59 暂停。",
+   "note": "K-F31c"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance moved: 2026-09-23 10:00-12:00 -> 2026-09-25 10:00-12:00 (GMT+8)",
+   "note": "K-F22k"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Maintenance on 2026-09-23 10:00-12:00 has been cancelled. Next scheduled maintenance: 2026-09-30 10:00-12:00 (GMT+8).",
+   "note": "K-F49a"
+  },
+  {
+   "label": "confirm",
+   "provider": "VA",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "排定维护 2026-09-23 10：00-12：00 (GMT+8)",
+   "note": "C3"
+  },
+  {
+   "label": "confirm",
+   "provider": "Evolution",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance: 2026-09-23 10:00-12:00 (GMT+8). Any revised schedule will be announced in this group.",
+   "note": "K-F53c"
+  },
+  {
+   "label": "confirm",
+   "provider": "Evolution",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Rescheduled: the maintenance will now take place on 2026-09-25 10:00 - 12:00 (GMT+8) instead of 2026-09-23.",
+   "note": "H5"
+  },
+  {
+   "label": "confirm",
+   "provider": "KingMidas",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "维护公告 将于9/23 (三) 10:00 - 12:00 (GMT+8) 排定维护",
+   "note": "J15"
+  },
+  {
+   "label": "confirm",
+   "provider": "JDB",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "例行维护：2026-09-23 10:00-12:00 (GMT+8)，维护将于12:00结束。",
+   "note": "K-F47a"
+  },
+  {
+   "label": "confirm",
+   "provider": "KingMidas",
+   "now": "2026-09-23T09:00:00+08:00",
+   "text": "Scheduled maintenance will commence at 10:00 - 12:00 24th(Thu) Sep (GMT+8).",
+   "note": "K-F42b"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-23T09:00:00+08:00",
+   "text": "Scheduled maintenance 24-Sep-2026 10:00 - 12:00 (GMT+8)",
+   "note": "K-F42d"
+  },
+  {
+   "label": "confirm",
+   "provider": "JDB",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "系统维护通知\n维护时间：2026年9月23日 上午10:00-12:00",
+   "note": "K-F13h"
+  },
+  {
+   "label": "confirm",
+   "provider": "TWSlot",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "排定维护 2026-09-23 10:00 - 12:00 北京时间",
+   "note": "D10"
+  },
+  {
+   "label": "confirm",
+   "provider": "Evolution",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance\nStart: 2026-09-24 22:00 (GMT+8)\nEnd: 2026-09-25 02:00 (GMT+8)",
+   "note": "K-F43a"
+  },
+  {
+   "label": "confirm",
+   "provider": "SimplePlay",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "排定维护 2026-09-23 10:00 - 12:00 (GMT +8)",
+   "note": "D14"
+  },
+  {
+   "label": "confirm",
+   "provider": "JILI",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "系统维护：2026年9月24日 10:00-12:00 (GMT+8)，维护结束后游戏将正常运行。",
+   "note": "K-F18f"
+  },
+  {
+   "label": "confirm",
+   "provider": "Gemini",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "停机公告\n2026-09-23 10:00 - 12:00 (GMT+8)\n请提前下线。",
+   "note": "E19"
+  },
+  {
+   "label": "confirm",
+   "provider": "Yggdrasil",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Correction: scheduled maintenance is 25/09/2026 10:00-12:00 (GMT+8), NOT 24/09/2026 10:00-12:00.",
+   "note": "K-G2"
+  },
+  {
+   "label": "confirm",
+   "provider": "TWSlot",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "排定维护 2026-09-23 １０：００－１２：００ (GMT+8)",
+   "note": "C4"
+  },
+  {
+   "label": "confirm",
+   "provider": "Dropball",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "维护通告\n2026-09-23 10:00 - 12:00 (GMT+8)\n感谢您的理解。",
+   "note": "E5"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 25/09/2026 14:00-16:00 (GMT+8).\nAny questions, please contact us?",
+   "note": "K-G1.4a"
+  },
+  {
+   "label": "confirm",
+   "provider": "Playtech",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-23 10:00 - 12:00 (GMT+0530)",
+   "note": "D3"
+  },
+  {
+   "label": "confirm",
+   "provider": "Hacksaw",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance on 2026-09-25 10:00-12:00 (GMT+8), the new game launch has been delayed to next week.",
+   "note": "K-F26k"
+  },
+  {
+   "label": "confirm",
+   "provider": "PG Soft",
+   "now": "2026-09-22T09:00:00+08:00",
+   "text": "Scheduled maintenance (GMT+8)\n2026-09-23 02:00 - 04:00\n2026-09-24 02:00 - 04:00",
+   "note": "K-F33a"
+  },
+  {
+   "label": "reject",
+   "provider": "EEZE Slot",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Hi all, infra maintenance window 29/09/2026 02:00-04:00 (GMT+8). Expected player impact: none, traffic will be switched to the standby cluster.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "JILI",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Dear Partner, the JILI Fishing lobby will undergo maintenance on 2026-09-29 02:00-04:00 (GMT+8). Slots and Table games are NOT affected.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "Playstar",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Dear partner, the free spins (promotion tool) module will be under maintenance on 29/09/2026 02:00-04:00 GMT+8. You will not be able to create new campaigns during this period.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Hello, kindly advise if the scheduled maintenance on 29/09/2026 02:00-04:00 (GMT+8) will affect the Live Casino as well.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "KingMidas",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "KM 您好，我們這邊想確認 9/29 (二) 02:00-04:00 是否會有例行維護，謝謝",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "FC",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "FC team, kindly put all games under maintenance mode on 29/09/2026 02:00-04:00 (GMT+8) for our side's server migration. thanks!",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "CQ9",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "好的收到 👍 2026/09/29 02:00-04:00 維護我方已排班跟進",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Sharing the notice we got from our payment provider: Scheduled maintenance 29/09/2026 02:00-04:00 GMT+8, deposits and withdrawals unavailable.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "JILI",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Dear Partner, JILI Poker (table games) will undergo maintenance on 2026-09-29 02:00-04:00 (GMT+8). Slot games are not affected.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "Playstar",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Dear partner, the jackpot module will be under maintenance on 29/09/2026 02:00-04:00 GMT+8. Jackpot contributions will be paused during this period.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "FC",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Hi team, the FC tournament / leaderboard service will be under maintenance on 29/09/2026 02:00-04:00 (GMT+8); leaderboards will not update.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Hi all, the Enhance promo tools (Tournaments & Prize Drops) will undergo maintenance on 29/09/2026 02:00-04:00 (GMT+8). Operators won't be able to create new promotions.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "JDB",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Dear partner, JDB lottery games will be under maintenance on 29/09/2026 02:00-04:00 (GMT+8). Other game types are available.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "VP",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Scheduled maintenance 2026-09-29 02:00 - 04:00 (GMT+8)\nScope: data warehouse and BO reports\nPlayer impact: no",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Dear Partners, planned maintenance on 29/09/2026 02:00-04:00 (GMT+8). Impact on players: none - the maintenance is on redundant nodes.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "5G",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Dear partners, scheduled maintenance on 29/09/2026 02:00-04:00 (GMT+8). Games will be available, however new player registration will be disabled.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "CQ9",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "CQ9 您好，我們這邊想確認 9/29 (二) 02:00-04:00 是否會有例行維護，麻煩回覆，謝謝",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "JDB",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "JDB team, please close all games for CasinoPlus on 29/09/2026 02:00-04:00 (GMT+8) for our database maintenance. Thank you.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "CQ9",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "麻煩 CQ9 於 2026/09/29 02:00-04:00 將我方所有遊戲關閉，我方需要進行錢包維護，謝謝。",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "JILI",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "JILI team, please help to put CasinoPlus games under maintenance 29/09/2026 02:00-04:00 GMT+8, we have a system upgrade.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "JDB",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "好的收到 👍 2026/09/29 02:00-04:00 維護我方已安排人員跟進",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Sharing the notice we received from our PSP: Scheduled maintenance 29/09/2026 02:00-04:00 GMT+8. Deposits will be unavailable.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "JDB",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "FYI 我们支付渠道通知：2026/09/29 02:00-04:00 进行系统维护，届时充值提款暂停。",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Hi team, our SMS provider has scheduled maintenance on 29/09/2026 02:00-04:00 GMT+8; OTP may be delayed. Just FYI.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "JILI",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Notice from our aggregator: scheduled maintenance 29/09/2026 02:00-04:00 GMT+8, all games will be unavailable.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "🎁 Weekly Prize Drop\nRuns 29/09/2026 02:00 - 04:00 GMT+8 (right after the Tuesday maintenance window). €50,000 in prizes!",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "JDB",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "各位好，我司平台将于2026年9月29日 02:00-04:00 进行系统升级维护，届时无法进入贵司游戏，请知悉。",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "JILI",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Hello JILI team 👋 we have planned maintenance on 29/09/2026 02:00-04:00 GMT+8, please don't be alarmed by the drop in traffic.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "KingMidas",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "KM team, FYI our wallet service will be under maintenance 29/09/2026 02:00-04:00 (GMT+8). Launches will fail during this time.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "FC",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "FC 您好，本司將於 2026/09/29 02:00-04:00 進行資料庫維護，期間錢包接口將無法回應，請知悉。",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Dear Partners,\nScheduled maintenance on 29/09/2026 02:00-04:00 (GMT+8). This maintenance will be transparent to players.\nKind regards, Pragmatic Play",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "VP",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Hi CP, VP maintenance on 29/09/2026 02:00-04:00 GMT+8 - no need to close the games on your side, it's a background job.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "OMNIPLAY",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Maintenance notice\nWhen: 29/09/2026 02:00-04:00 GMT+8\nImpact: none for players, only a short reconnect for open sessions",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Dear Partners,\nMaintenance on 29/09/2026 02:00-04:00 (GMT+8).\nExpected downtime: 0 min\nGames: available",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Dear Partners,\nScheduled maintenance on 29/09/2026 02:00-04:00 (GMT+8).\nAffected product: Live Casino\nThank you.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Dear Partners,\nScheduled maintenance on 29/09/2026 02:00-04:00 (GMT+8).\nAffected games: Gates of Olympus, Sugar Rush, Sweet Bonanza",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "JDB",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "【维护公告】JDB将于2026年9月29日 02:00-04:00 进行维护。\n受影响游戏：捕鱼系列",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "CQ9",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "CQ9 維護通知\n時間：2026/09/29 02:00-04:00 (GMT+8)\n維護範圍：真人視訊",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "YGR",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Maintenance notice\nDate: 2026-09-29\nTime: 02:00-04:00 GMT+8\nAffected Region: LATAM",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "KingMidas",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "KM 維護通知：2026/09/29 02:00-04:00 (GMT+8) 越南站維護，請知悉。",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "Playstar",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Dear partner, maintenance on 29/09/2026 02:00-04:00 GMT+8 for Playstar table games. Slot games will remain open.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Dear Partners,\nPlease be informed that the Pragmatic Play Data Feed API will undergo scheduled maintenance on 29/09/2026 02:00-04:00 (GMT+8). Round history requests will return errors.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "JILI",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Dear Partner,\nJILI scheduled maintenance on 29/09/2026 02:00-04:00 (GMT+8) for the transfer wallet mode only. Seamless wallet operators are not affected.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Dear Partners,\nScheduled maintenance on 29/09/2026 02:00-04:00 (GMT+8) for operators on the EU-2 cluster.\nKind regards",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "We are planning maintenance on 29/09/2026 02:00-04:00 GMT+8. Does this time work for you?",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "If tomorrow's release fails, we will do an emergency maintenance on 29/09/2026 02:00-04:00 GMT+8.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Dear Partners, maintenance on 29/09/2026 02:00-04:00 (GMT+8) will affect only operators still using the legacy API v1.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "JDB",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "如有需要，JDB将于2026年9月29日 02:00-04:00 进行紧急维护，届时另行通知。",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Can you check if this format works for your bot?\nScheduled maintenance 29/09/2026 02:00-04:00 GMT+8",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "KingMidas",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "Here's the player-facing text we will post (CP side):\n【公告】KM遊戲將於 9/29 (二) 02:00-04:00 維護，敬請見諒。",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "KingMidas",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "KM 通知：系統維護補償 Free Spin 發放時間 2026/09/29 02:00-04:00，玩家登入即可領取。",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "JDB",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "JDB 您好，我方将于 2026/09/29 02:00-04:00 进行机房迁移维护，届时贵司游戏回调会失败，请知悉。",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "KingMidas",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "KM 團隊您好，我方 9/29 (二) 02:00-04:00 將進行系統維護，期間會關閉所有遊戲入口。",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "CQ9",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "CQ9 你好 🙏 我們這邊 2026/09/29 02:00-04:00 要做錢包維護，這段時間請先不要推版。",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "Playstar",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "@Playstar_support our platform will be under maintenance 29/09/2026 02:00-04:00 GMT+8, please take note.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "SimplePlay",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "SimplePlay team, good day. Our system maintenance is scheduled on 29/09/2026 02:00-04:00 (GMT+8). Kindly take note.",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "JDB",
+   "now": "2026-09-24 12:00:00+08:00",
+   "text": "我们的短信服务商通知：2026/09/29 02:00-04:00 系统维护，届时验证码可能延迟。",
+   "note": "hunt: card or ignore, nothing written"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-27 03:50:00+08:00",
+   "text": "The maintenance scheduled for 27/09/2026 02:00-04:00 (GMT+8) has been successfully carried out. Thank you.",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-27 03:30:00+08:00",
+   "text": "Maintenance 27/09/2026 02:00-04:00 GMT+8 wrapped up, all games are live again 🎉",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "📢 Maintenance Notice (Updated)\nDate: 27/09/2026\nTime: 02:00-04:00 03:00-05:00 (GMT+8)\nAll Pragmatic Play games will be unavailable.",
+   "note": "hunt: 2026-09-27 03:00 -> 2026-09-27 05:00"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "【维护通知】\n维护时间：2026-09-27 02:00-04:00 03:00-05:00 (GMT+8)\n维护期间所有游戏暂停服务。",
+   "note": "hunt: 2026-09-27 03:00 -> 2026-09-27 05:00"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-27 03:30:00+08:00",
+   "text": "The scheduled maintenance on 27/09/2026 02:00-04:00 (GMT+8) has been performed successfully.",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-27 03:30:00+08:00",
+   "text": "例行维护（2026-09-27 02:00-04:00 GMT+8）已维护完毕，游戏已开放。",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-27 03:30:00+08:00",
+   "text": "Scheduled maintenance 27/09/2026 02:00-04:00 (GMT+8)\nProgress: 100% ✅",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-27 03:30:00+08:00",
+   "text": "Maintenance 27/09/2026 02:00-04:00 GMT+8 accomplished, we are back!",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-27 03:30:00+08:00",
+   "text": "Maintenance 27/09/2026 02:00-04:00 (GMT+8) closed. Games available.",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "JILI",
+   "now": "2026-09-27 03:30:00+08:00",
+   "text": "Hi all, maintenance 27/09 02:00-04:00 (GMT+8) finish already, games can play now.",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "JILI",
+   "now": "2026-09-27 03:30:00+08:00",
+   "text": "Maintenance 27/09/2026 02:00-04:00 GMT+8 done already, can play now ya",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-27 03:30:00+08:00",
+   "text": "Scheduled maintenance 27/09/2026 02:00-04:00 (GMT+8) ended at 03:25. Thank you.",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-27 03:30:00+08:00",
+   "text": "Maintenance on 27/09/2026 02:00-04:00 (GMT+8) has been carried out successfully.",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "Maintenance Notice\nDate: 27/09/2026 28/09/2026\nTime: 02:00-04:00 03:00-05:00 (GMT+8)",
+   "note": "hunt: 2026-09-28 03:00 -> 2026-09-28 05:00"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "Scheduled Maintenance\nDate: 27/09/2026\nTime: 02:00-04:00 01:00-03:00 (GMT+8)",
+   "note": "hunt: 2026-09-27 01:00 -> 2026-09-27 03:00"
+  },
+  {
+   "label": "reject",
+   "provider": "CQ9",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "维护时间：2026年9月27日 02:00-04:00 02:00-03:00 (GMT+8)",
+   "note": "hunt: 2026-09-27 02:00 -> 2026-09-27 03:00"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "Scheduled maintenance 27/09/2026\n02:00-04:00 (GMT+8) 02:30-04:30 (GMT+8)",
+   "note": "hunt: 2026-09-27 02:30 -> 2026-09-27 04:30"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "【已失效】例行维护 2026-09-27 02:00-04:00 (GMT+8)",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "CQ9",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "【失效】例行维护 2026-09-27 02:00-04:00 (GMT+8)",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "*OUTDATED* Scheduled maintenance on 27/09/2026 02:00-04:00 (GMT+8).",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "FC",
+   "now": "2026-09-27 03:30:00+08:00",
+   "text": "維護結束公告\n維護時間：2026/09/27 02:00-04:00 (GMT+8)\n遊戲已全面開放。",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-27 04:45:00+08:00",
+   "text": "Maintenance 27/09/2026 02:00-04:00 (GMT+8) was extended to 05:00.\nUpdate 04:40: maintenance has been completed.",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "JILI",
+   "now": "2026-09-27 03:30:00+08:00",
+   "text": "Maintenance Finish Notice 📢\nDear partners, the maintenance on 27/09/2026 02:00-04:00 (GMT+8) is finish. Thank you!",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "Maintenance on 27/09/2026 02:00-04:00 (GMT+8) will not be required.",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "CQ9",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "例行维护\n日期：2026-09-27\n时间：02:00-04:00 (GMT+8)\n状态：延期",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "FC",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "例行維護\n日期：2026/09/27\n時間：02:00-04:00 (GMT+8)\n狀態：暫停",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "Maintenance on 27/09/2026 02:00-04:00 (GMT+8) is not happening anymore.",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-27 03:30:00+08:00",
+   "text": "Scheduled maintenance\nDate: 27/09/2026\nTime: 02:00-04:00 (GMT+8)\nStatus: Closed",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-27 03:30:00+08:00",
+   "text": "Scheduled maintenance\nDate: 27/09/2026\nTime: 02:00-04:00 (GMT+8)\nStatus: Normal ✅",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-27 03:30:00+08:00",
+   "text": "Scheduled maintenance\nDate: 27/09/2026\nTime: 02:00-04:00 (GMT+8)\nStatus: Live",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-27 03:30:00+08:00",
+   "text": "Scheduled maintenance\nDate: 27/09/2026\nTime: 02:00-04:00 (GMT+8)\nCurrent status: back to normal",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-27 03:30:00+08:00",
+   "text": "Maintenance 27/09/2026 02:00-04:00 (GMT+8)\nUpdate: Completed at 03:20, all games restored",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "Hi team, the maintenance on 27/09/2026 02:00-04:00 (GMT+8) isn't happening, all good.",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "Please note the maintenance on 27/09/2026 02:00-04:00 (GMT+8) will not be necessary.",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "The planned maintenance on 27/09/2026 02:00-04:00 (GMT+8) will not be executed.",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "Scheduled maintenance on 27/09/2026 02:00-04:00 (GMT+8) will not start as planned; a new date will follow.",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "The maintenance on 27/09/2026 02:00-04:00 (GMT+8) will not be done this week.",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "CQ9",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "2026-09-27 02:00-04:00 的维护不用做了。",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "CQ9",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "例行维护\n日期：2026-09-27\n时间：02:00-04:00 (GMT+8)\n状态：已延期",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "CQ9",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "例行维护\n日期：2026-09-27\n时间：02:00-04:00 (GMT+8)\n状态：暂停",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "CQ9",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "例行维护\n日期：2026-09-27\n时间：02:00-04:00 (GMT+8)\n状态：推迟",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "FC",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "例行維護\n日期：2026/09/27\n時間：02:00-04:00 (GMT+8)\n狀態：改期",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "Scheduled maintenance\nDate: 27/09/2026\nTime: 02:00-04:00 (GMT+8)\nStatus: Delayed",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "Scheduled maintenance\nDate: 27/09/2026\nTime: 02:00-04:00 (GMT+8)\nStatus: Deferred",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "Scheduled maintenance\nDate: 27/09/2026\nTime: 02:00-04:00 (GMT+8)\nStatus: Pending confirmation",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "Scheduled maintenance\nDate: 27/09/2026\nTime: 02:00-04:00 (GMT+8)\nStatus: Suspended",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "Scheduled maintenance\nDate: 27/09/2026\nTime: 02:00-04:00 (GMT+8)\nStatus: Not required",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "Scheduled maintenance\nDate: 27/09/2026\nTime: 02:00-04:00 (GMT+8)\nStatus: Skipped",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-27 03:30:00+08:00",
+   "text": "Scheduled maintenance\nDate: 27/09/2026\nTime: 02:00-04:00 (GMT+8)\nStatus: Resumed service",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-27 03:30:00+08:00",
+   "text": "Scheduled maintenance\nDate: 27/09/2026\nTime: 02:00-04:00 (GMT+8)\nStatus: All games available",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-27 03:30:00+08:00",
+   "text": "Scheduled maintenance\nDate: 27/09/2026\nTime: 02:00-04:00 (GMT+8)\nStatus: Ended",
+   "note": "hunt: nothing written (card or ignore)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-27 03:15:00+08:00",
+   "text": "The maintenance on 27/09/2026 02:00-04:00 (GMT+8) was performed. Next one: 04/10/2026 02:00-04:00 (GMT+8).",
+   "note": "hunt: 2026-10-04 02:00 -> 2026-10-04 04:00"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "Scheduled maintenance: Friday 25 Sep 2026, late night 1:00 AM - 3:00 AM (GMT+8) (technically Saturday morning).",
+   "note": "hunt: 2026-09-26 01:00 -> 03:00 (+08), or a card"
+  },
+  {
+   "label": "reject",
+   "provider": "VA",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "【维护通知】维护时间：9月25日晚间（即26日凌晨）02:00-04:00",
+   "note": "hunt: 2026-09-26 02:00 -> 04:00 (+08)"
+  },
+  {
+   "label": "reject",
+   "provider": "VA",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "【更正】维护日期更正为9月27日（非9月26日），维护时间02:00-04:00（北京时间）",
+   "note": "hunt: 2026-09-27 02:00 -> 04:00 (+08)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "Scheduled maintenance 26/09/2026 02:00 - 05:00 GMT+8 (previously announced as 02:00 - 04:00, now extended by one hour).",
+   "note": "hunt: 2026-09-26 02:00 -> 05:00 (+08)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "Scheduled maintenance 26/09/2026 10:00-12:00 (Thailand: 09:00-11:00 ICT)",
+   "note": "hunt: 2026-09-26 10:00 -> 12:00 (+08)"
+  },
+  {
+   "label": "reject",
+   "provider": "VA",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "【维护通知】维护时间：2026年9月26日 10:00-12:00（即越南时间09:00-11:00）",
+   "note": "hunt: 2026-09-26 10:00 -> 12:00 (+08)"
+  },
+  {
+   "label": "reject",
+   "provider": "VA",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "【维护通知】\n维护时间：2026年9月26日 02:00-04:00\n维护前请于01:00-02:00完成对账",
+   "note": "hunt: 2026-09-26 02:00 -> 04:00 (+08)"
+  },
+  {
+   "label": "reject",
+   "provider": "VA",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "【维护通知】\n维护时间：2026年9月26日 02:00-04:00\n维护后05:00-06:00为数据核对时间",
+   "note": "hunt: 2026-09-26 02:00 -> 04:00 (+08)"
+  },
+  {
+   "label": "reject",
+   "provider": "PP",
+   "now": "2026-09-24 10:00:00+08:00",
+   "text": "Scheduled maintenance 26/09/2026 02:00 - 04:00 (GMT+8)\nRollback window (only if needed): 04:00 - 05:00",
+   "note": "hunt: 2026-09-26 02:00 -> 04:00 (+08), or a card"
+  }
+ ]
+}

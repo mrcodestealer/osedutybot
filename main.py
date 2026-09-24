@@ -7005,6 +7005,21 @@ def lark_webhook():
                 if ask:
                     lines.append("")
                     lines += [f"  • {r.get('provider')}" for r in ask[:25]]
+                # A row whose chat another row already names (YGG in Hacksaw's
+                # group) is not asked twice; providerask files the one answer
+                # onto both. It used to sit in `skipped`, which this message
+                # never shows, so nobody could tell YGG was covered at all.
+                shared = plan.get("shared") or []
+                asked_keys = {r.get("provider") or r.get("group") for r in ask}
+                if shared:
+                    lines.append("")
+                    lines.append(f"{len(shared)} more row(s) share a chat with "
+                                 f"another row and are not asked separately:")
+                    lines += [f"  • {r.get('provider')} (answer from "
+                              f"{r.get('shared_with')}'s group"
+                              + ("" if r.get("shared_with") in asked_keys
+                                 else " — which is NOT being asked") + ")"
+                              for r in shared[:25]]
                 if unpinned:
                     lines.append("")
                     lines.append(f"⚠️ {len(unpinned)} group(s) have no peer id and "
