@@ -4,34 +4,35 @@ Resigned Member list — read + write.
 Source of truth is the ``Resigned Member`` Bitable table (Name + Status), kept by hand:
 https://casinoplus.sg.larksuite.com/base/CpdEbEofwaYyyEsSjlElKNxzgec?table=tblQHimmQDEIlQ9n
 
-Detection (``--sync``) is a HELPER, not a source of truth. Two signals, measured 2026-09-17
-against the full 1454-user directory:
+Detection (``--sync``, daily at 07:20 via ``main.resigned_member_sync``) uses two rules,
+both validated against user-confirmed ground truth on 2026-09-17 and both written with
+``Status=Resigned``:
 
-* ``name_suffix`` — HR renames a departing account to ``<Full Name>_Resigned``. Explicit,
-  deliberate and monotone, so these are written with ``Status=Resigned``. 8 accounts, no
-  false positives, and all 8 hold zero leave rows so they cannot hide anyone by accident.
-* ``frozen`` — ``status.is_frozen``. Written with ``Status`` BLANK, always: there is
-  deliberately no option to mark these Resigned automatically. ``is_frozen`` is an
-  untimestamped, mutable snapshot Lark also uses for dormant and unprovisioned accounts,
-  and the org's own "Lark Account Renewal Review Guidelines" describes employees who
-  resign while "the account has not yet been deactivated". Guarded by: an employee number
+* ``frozen`` — account ``is_frozen`` AND the person still appears on the company leave
+  calendar. 7 of 8 real leavers, 0 of 7 false positives. Guarded by: an employee number
   must exist, the name must not be role/room/bot shaped, and EVERY account sharing the
-  name must be frozen — "Edmond" and "Jerry" each exist twice, one frozen and one not,
-  and without unanimity a dormant namesake would hide a working colleague.
+  name must be frozen — "Edmond" and "Jerry" each exist twice, one frozen and one not.
+* ``absent`` — the person holds leave-calendar rows but has no Lark account at all (IT
+  deleted it; they are no longer searchable). 6 of 6 confirmed. Bracketed aliases are
+  compared both ways ("Jay (Chee Wai Nyin)" is the directory's "Jay"), and one-word names,
+  single-row names and anyone with leave this month are excluded.
 
-``status.is_resigned`` is dead: false for all 1454 users, because Lark drops a resigned
-user from their departments rather than flagging them.
+Each newly confirmed leaver is announced to the Ops & Maintenance group (``notify_resigned``).
+Blank-status rows are never announced.
 
-Absence from the directory is NOT a usable signal, despite appearances. It looked
-compelling only because this module used to query the 18 root departments alone, which
-returns 194 accounts — mostly meeting rooms, bots and role handles — making ~230 employed
-people look absent. Zi Yang was the worked example of that mistake: apparently gone, in
-fact present as SN0310 "Database Administrator" with ``is_frozen`` set. Hence
-``MIN_DIRECTORY_USERS``, which refuses to detect at all on a short fetch.
+``name_suffix`` (``<Full Name>_Resigned``) is OPT-IN only (``--with-suffix``) and never
+active: it is the Manila back-office convention and was wrong for 7 of 7 here.
 
-What detection still cannot catch, and why names are added by hand: anyone who leaves with
-an account that is neither renamed nor frozen, plus the ~24 calendar names with no
-directory account at all. Both depend on IT/HR housekeeping that does not always happen.
+``status.is_resigned`` is dead — false for all 1454 users; Lark drops a resigned user from
+their departments rather than flagging them.
+
+``fetch_directory_users`` MUST walk child departments. The 18 roots alone return 194
+accounts, mostly meeting rooms and role handles, which made ~230 employed people look
+absent and once led to the false conclusion that Zi Yang had no account (he is SN0310,
+frozen). ``MIN_DIRECTORY_USERS`` refuses to detect at all on a short fetch.
+
+Still manual: anyone who leaves with an account that is neither frozen nor deleted, and
+namesake collisions such as Edmond (SN0448), which the unanimity guard suppresses.
 
 Reads are cached for ``RESIGNED_CACHE_TTL`` seconds (default 300) so the list stays
 current without re-fetching on every command.
@@ -209,6 +210,58 @@ def filter_rows(
 
 def _open_api_base() -> str:
     return (os.getenv("LARK_OPEN_API_BASE") or "https://open.larksuite.com/open-apis").rstrip("/")
+
+
+# Announce each newly confirmed leaver to the Ops & Maintenance group so the rest of the
+# organisation hears about it. All three IDs verified against the bot app 2026-09-24.
+NOTIFY_CHAT_ID = (os.getenv("RESIGNED_NOTIFY_CHAT_ID") or "oc_51b6fbf2636525acfb4ead3afa3c93ce").strip()
+NOTIFY_TAG_OPEN_ID = (os.getenv("RESIGNED_NOTIFY_TAG_OPEN_ID") or "ou_d7bc33724e2d6ced4050c944c2ca5650").strip()
+NOTIFY_CC_OPEN_ID = (os.getenv("RESIGNED_NOTIFY_CC_OPEN_ID") or "ou_5f660c0fb0769d184aca635d02209272").strip()
+
+
+def build_resigned_notice(name: str) -> str:
+    """Text of the group announcement for one newly listed leaver."""
+    return (
+        f'<at user_id="{NOTIFY_TAG_OPEN_ID}">CP OM Duty</at> '
+        f"Kindly take note {name} is resigned. Kindly check and inform other team.\n"
+        f'CC: <at user_id="{NOTIFY_CC_OPEN_ID}">Jun Chen</at>'
+    )
+
+
+def notify_resigned(name: str, token: Optional[str] = None) -> bool:
+    """
+    Post the resigned announcement for ``name`` to ``NOTIFY_CHAT_ID``.
+
+    Never raises: a failed announcement must not undo or block the table write that
+    triggered it. Returns whether Lark accepted the message.
+    """
+    import json
+
+    import requests
+
+    nm = (name or "").strip()
+    if not nm or not NOTIFY_CHAT_ID:
+        return False
+    try:
+        tok = token or od.get_tenant_access_token()
+        res = requests.post(
+            f"{_open_api_base()}/im/v1/messages",
+            headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
+            params={"receive_id_type": "chat_id"},
+            json={
+                "receive_id": NOTIFY_CHAT_ID,
+                "msg_type": "text",
+                "content": json.dumps({"text": build_resigned_notice(nm)}, ensure_ascii=False),
+            },
+            timeout=25,
+        ).json()
+        if res.get("code") != 0:
+            print(f"[resigned] notify failed for {nm!r}: {res}", flush=True)
+            return False
+        return True
+    except Exception as exc:
+        print(f"[resigned] notify error for {nm!r}: {exc!r}", flush=True)
+        return False
 
 
 # HR renames a departing employee's Lark display name to "<Full Name>_Resigned".
@@ -522,6 +575,7 @@ def sync_detected(
     sources: tuple[str, ...] = ("frozen", "absent"),
     relevant_only: bool = True,
     dry_run: bool = False,
+    notify: bool = True,
 ) -> dict[str, Any]:
     """
     Record detected leavers in the Resigned Member table.
@@ -583,6 +637,10 @@ def sync_detected(
                 fields[STATUS_FIELD] = RESIGNED_STATUS
             res = od._bitable_create_record(tok, TABLE_ID, fields, base_token=BASE_TOKEN)
             entry["record_id"] = ((res.get("data") or {}).get("record") or {}).get("record_id") or ""
+            # Announce only confirmed leavers. A blank-status row is a candidate awaiting
+            # review, and telling the organisation someone resigned on that basis is wrong.
+            if notify and confirmed:
+                entry["notified"] = notify_resigned(nm, tok)
         added.append(entry)
         have.add(_key(nm))
 
@@ -597,11 +655,15 @@ def sync_detected(
     }
 
 
-def add_resigned(name: str, token: Optional[str] = None) -> dict[str, Any]:
+def add_resigned(
+    name: str, token: Optional[str] = None, *, notify: bool = True
+) -> dict[str, Any]:
     """
-    Add a person to the Resigned Member table. Writes Status=Resigned immediately.
+    Add a person to the Resigned Member table. Writes Status=Resigned immediately and
+    announces it to ``NOTIFY_CHAT_ID`` unless ``notify=False``.
 
-    Refuses duplicates so repeated calls are safe.
+    Refuses duplicates so repeated calls are safe — and a refused duplicate is never
+    re-announced.
     """
     nm = (name or "").strip()
     if not nm:
@@ -624,6 +686,8 @@ def add_resigned(name: str, token: Optional[str] = None) -> dict[str, Any]:
     record_id = ((res.get("data") or {}).get("record") or {}).get("record_id") or ""
     _cache["at"] = 0.0  # force refresh on next read
     out: dict[str, Any] = {"added": True, "name": nm, "record_id": record_id}
+    if notify:
+        out["notified"] = notify_resigned(nm, tok)
     if near:
         out["near_matches"] = near
     if len(nm.split()) < 2:
@@ -660,7 +724,12 @@ def _main(argv: list[str]) -> int:
             srcs = ("frozen",)
         elif "--absent-only" in argv:
             srcs = ("absent",)
-        res = sync_detected(sources=srcs, relevant_only="--all-frozen" not in argv, dry_run=dry)
+        res = sync_detected(
+            sources=srcs,
+            relevant_only="--all-frozen" not in argv,
+            dry_run=dry,
+            notify="--no-notify" not in argv,
+        )
         verb = "would add" if dry else "added"
         print(f"detected        : {res['detected']}   (sources: {', '.join(srcs)})")
         print(f"already listed  : {len(res['skipped'])}")
@@ -682,7 +751,8 @@ def _main(argv: list[str]) -> int:
         if len(argv) < 2:
             print("usage: resigned.py --add \"Full Name\"", file=sys.stderr)
             return 2
-        res = add_resigned(" ".join(argv[1:]))
+        args = [a for a in argv[1:] if a != "--no-notify"]
+        res = add_resigned(" ".join(args), notify="--no-notify" not in argv)
         print(res)
         return 0
     if argv[0] in ("--check", "-c"):
