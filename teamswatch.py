@@ -2215,12 +2215,49 @@ _THREAD_ID_RE = re.compile(r"19:[A-Za-z0-9_\-+=/.]+@(?:thread\.v2|thread\.skype|
 #   <button data-tid="sendMessageCommands-send" data-track-thread-id="19:…">
 # The compose send button is the strongest of the two: it names the thread a
 # message would actually be posted to, so it cannot be stale relative to the pane.
+# Is this element really on screen? Not just laid out: Teams can keep the chat
+# it just left mounted but hidden (visibility / opacity / off-screen), and the
+# first-match reads below then answered for THAT chat. Embedded in every
+# resolver that has to name the open conversation.
+_SHOWN_JS = r"""
+    // shown(el): rendered, not hidden by CSS or opacity, inside the viewport.
+    // shown(el, true): and ON TOP at its centre - a chat stacked underneath the
+    // one on screen passes the first test but not this one.
+    const shown = (el, onTop) => {
+        if (!el || !el.getBoundingClientRect) return false;
+        try {
+            if (el.checkVisibility &&
+                !el.checkVisibility({checkOpacity: true, checkVisibilityCSS: true}))
+                return false;
+        } catch (e) { /* older engine: fall through to geometry */ }
+        const r = el.getBoundingClientRect();
+        if (!(r.width > 0 && r.height > 0)) return false;
+        const vw = window.innerWidth || document.documentElement.clientWidth;
+        const vh = window.innerHeight || document.documentElement.clientHeight;
+        if (!(r.right > 0 && r.bottom > 0 && r.left < vw && r.top < vh)) return false;
+        if (!onTop) return true;
+        const cx = Math.min(Math.max((Math.max(r.left, 0) + Math.min(r.right, vw)) / 2, 0), vw - 1);
+        const cy = Math.min(Math.max((Math.max(r.top, 0) + Math.min(r.bottom, vh)) / 2, 0), vh - 1);
+        const t = document.elementFromPoint(cx, cy);
+        return !!t && (t === el || el.contains(t));
+    };
+    // Best candidate: on top, else merely shown. null when neither.
+    const pickShown = (list) => list.find(e => shown(e, true)) || list.find(e => shown(e)) || null;
+"""
+
 _OPEN_THREAD_JS = r"""
     () => {
-        const send = document.querySelector('[data-track-thread-id]');
+""" + _SHOWN_JS + r"""
+        // The SHOWN one first; the first in the document only if none is (the
+        // old behaviour, so a Teams build this test misjudges still reads).
+        const pick = (sel) => {
+            const all = [...document.querySelectorAll(sel)];
+            return pickShown(all) || all[0] || null;
+        };
+        const send = pick('[data-track-thread-id]');
         const fromSend = send ? (send.getAttribute('data-track-thread-id') || '') : '';
         if (fromSend) return fromSend;
-        const hdr = document.querySelector("[id^='chat-header-19:']");
+        const hdr = pick("[id^='chat-header-19:']");
         if (hdr) return hdr.id.slice('chat-header-'.length);
         return '';
     }
@@ -2330,9 +2367,15 @@ def _open_chat_title(page) -> str:
     try:
         found = (page.evaluate(
             """([sels, chrome]) => {
+""" + _SHOWN_JS + """
+                // Two passes: a header ON TOP first, then any shown one.
+                for (const onTop of [true, false])
                 for (const s of sels) {
                     for (const el of document.querySelectorAll(s)) {
-                        if (!(el.offsetParent || el.offsetWidth || el.offsetHeight))
+                        // shown(), not offsetParent: a hidden, still-mounted
+                        // previous chat's header passed that test and named the
+                        // wrong chat (PG Soft read as GEMINI, 2026-09-26).
+                        if (!shown(el, onTop))
                             continue;
                         // Teams truncates the rendered header with an ellipsis but
                         // keeps the full name in title=, and a truncated title is
@@ -2703,17 +2746,21 @@ _SIDEBAR_MARK_SELS = [
 # the main region, and refuse to return anything that contains the chat list.
 _RESOLVE_PANE_JS = """
     (mainSels, paneSels, sidebarSels) => {
+""" + _SHOWN_JS + """
+        // SHOWN first, then the first match (the old behaviour): a previous chat
+        // Teams keeps mounted but hidden must never be the pane that is scraped.
         let main = null;
         for (const s of mainSels) {
-            const el = document.querySelector(s);
+            const all = [...document.querySelectorAll(s)];
+            const el = pickShown(all) || all[0];
             if (el) { main = el; break; }
         }
         if (!main) return null;
         const bad = (el) => sidebarSels.some(s => el.querySelector(s));
         for (const s of paneSels) {
-            for (const el of main.querySelectorAll(s)) {
-                if (!bad(el)) return el;
-            }
+            const ok = [...main.querySelectorAll(s)].filter(el => !bad(el));
+            const el = pickShown(ok) || ok[0];
+            if (el) return el;
         }
         // No labelled pane: fall back to the main region itself, but only if it
         // does not contain the sidebar.
@@ -3152,6 +3199,22 @@ def _confirm_exact_chat(page, title: str) -> tuple[bool, str]:
     clicking anything at all. Title equality is the only key that can tell
     twenty provider groups apart.
     """
+    # ID FIRST. The open conversation's id (the shown compose box) against the
+    # id of the sidebar row titled exactly this: two independent elements that
+    # must name the same conversation. Header text can lag or come from a
+    # hidden chat; an id match cannot be a look-alike, and an id mismatch is a
+    # no whatever the header says.
+    open_id = _open_thread_id(page)
+    exact = _exact_row_threads(page, title)
+    if open_id and exact:
+        if len(exact) > 1:
+            return False, (f"{len(exact)} sidebar chats are named exactly {title!r} - "
+                           f"refusing to guess")
+        if open_id == exact[0]:
+            return True, (f"open conversation {open_id[:30]}... is the chat named "
+                          f"exactly {title!r}")
+        return False, (f"the open conversation ({open_id[:30]}...) is not the chat "
+                       f"named {title!r} ({exact[0][:30]}...)")
     header = _open_chat_title(page)
     if _titles_equal(title, header):
         return True, f"header matches ({header!r})"
@@ -3210,6 +3273,30 @@ def _open_group_exact(page, title: str) -> tuple[bool, str]:
             print(f"[teams] sweep {sweep} method={method} unconfirmed - {why}",
                   flush=True)
     return False, why or "no sidebar row matched this exact name"
+
+
+def _exact_row_threads(page, title: str) -> list:
+    """Conversation ids of the RENDERED sidebar rows titled exactly ``title``.
+
+    Read from each row's own name span (<span id="title-chat-list-item_<id>">),
+    so id and title come from one element.
+    """
+    try:
+        pairs = page.evaluate(
+            """() => [...document.querySelectorAll("[id^='title-chat-list-item_']")]
+                   .map(el => [el.id.slice('title-chat-list-item_'.length),
+                               (el.innerText || el.textContent || '').trim()])""") or []
+    except Exception:
+        return []
+    out: list = []
+    for pair in pairs:
+        try:
+            tid, text = str(pair[0]), str(pair[1])
+        except Exception:
+            continue
+        if tid and _titles_equal(title, text) and tid not in out:
+            out.append(tid)
+    return out
 
 
 def _row_title_for_thread(page, thread: str):
@@ -3303,14 +3390,18 @@ def _probe_group(page, title: str, *, shot_path: str) -> dict:
     row_title = _row_title_for_thread(page, thread)
     if not thread:
         out["thread_note"] = "no conversation id visible - not pinned"
-    elif not _titles_equal(title, out["opened"]):
-        out["thread_note"] = (f"header is {out['opened']!r}, not the exact title - "
-                              f"not pinned")
-    elif row_title is not None and not _titles_equal(title, row_title):
-        out["thread_note"] = (f"conversation {thread[:30]}...'s own row is "
-                              f"{row_title!r} - not pinned")
+    elif row_title is not None:
+        # The id's OWN sidebar row names it: one element, no lag possible.
+        if _titles_equal(title, row_title):
+            out["thread"] = thread
+        else:
+            out["thread_note"] = (f"conversation {thread[:30]}...'s own row is "
+                                  f"{row_title!r} - not pinned")
+    elif _titles_equal(title, out["opened"]):
+        out["thread"] = thread            # row not rendered: the header must say it
     else:
-        out["thread"] = thread
+        out["thread_note"] = (f"header is {out['opened']!r} and the conversation's "
+                              f"row is not rendered - not pinned")
     if out.get("thread_note"):
         print(f"[teams] {title!r}: {out['thread_note']}", flush=True)
     out["shot"] = _pane_shot(page, shot_path)

@@ -657,8 +657,24 @@ check("reader: deleted-message placeholders dropped (EN + ZH)",
       r["ok"] and [m["mid"] for m in r["messages"]] == ["100"] and r["deleted_rows"] == 2, r)
 restore_page_helpers()
 
-# -- _confirm_exact_chat: a header naming another chat is final
+# -- _confirm_exact_chat: the id decides when both ids are readable
 _oct, _sct = tws._open_chat_title, tws._selected_chat_title
+_otid, _ert = tws._open_thread_id, tws._exact_row_threads
+PGS_ID, GEM_ID = THREAD[PGSG], THREAD[GEMG]
+for open_id, rows, header, want, label in (
+        (PGS_ID, [PGS_ID], GEMG, True, "PG Soft open by id, header still GEMINI's (the 2026-09-26 case) -> yes"),
+        (GEM_ID, [PGS_ID], PGSG, False, "header says PG Soft but the open conversation is GEMINI's -> NO"),
+        (PGS_ID, [PGS_ID, "19:dupe@thread.v2"], PGSG, False, "two chats named exactly this -> refuse"),
+        (GEM_ID, [PGS_ID], "", False, "selected row lagged onto PG Soft, conversation still GEMINI -> NO")):
+    tws._open_thread_id = lambda page, x=open_id: x
+    tws._exact_row_threads = lambda page, t, r=rows: list(r)
+    tws._open_chat_title = lambda page, h=header: h
+    tws._selected_chat_title = lambda page: PGSG
+    got = tws._confirm_exact_chat(FakePage(), PGSG)[0]
+    check(f"_confirm_exact_chat (id first): {label}", got is want, (open_id, rows, header, got))
+# -- ...and falls back to the header rules only when an id is missing
+tws._open_thread_id = lambda page: ""
+tws._exact_row_threads = lambda page, t: []
 for header, selected, want, label in (
         ("EVO group", GEMG, False, "header names another chat, selected row = title -> NO"),
         ("", GEMG, True, "no header, selected row = title -> yes"),
@@ -668,8 +684,9 @@ for header, selected, want, label in (
     tws._open_chat_title = lambda page, h=header: h
     tws._selected_chat_title = lambda page, x=selected: x
     got = tws._confirm_exact_chat(FakePage(), GEMG)[0]
-    check(f"_confirm_exact_chat: {label}", got is want, (header, selected, got))
+    check(f"_confirm_exact_chat (no ids): {label}", got is want, (header, selected, got))
 tws._open_chat_title, tws._selected_chat_title = _oct, _sct
+tws._open_thread_id, tws._exact_row_threads = _otid, _ert
 
 # -- the harvest pins only an id tied to the title
 _saved_probe = {n: getattr(tws, n) for n in ("_open_group_exact", "_open_chat_title", "_open_thread_id",
@@ -690,7 +707,10 @@ check("harvest: header + own row = title -> id offered", r["ok"] and r.get("thre
 r = probe(GEMG, THREAD[GEMG], None)
 check("harvest: row not rendered, header = title -> id offered", r.get("thread") == THREAD[GEMG], r)
 r = probe("EVO group", THREAD[GEMG], GEMG)
-check("harvest: header still on the previous chat -> NOT pinned",
+check("harvest: stale header text, but the open id's own row = title -> pinned (PG Soft case)",
+      r["ok"] and r.get("thread") == THREAD[GEMG], r)
+r = probe("EVO group", THREAD[GEMG], None)
+check("harvest: stale header AND the id's row not rendered -> NOT pinned",
       r["ok"] and not r.get("thread") and r.get("thread_note"), r)
 r = probe(GEMG, "19:evo@thread.skype", "@EVO C88live")
 check("harvest: the id's own row names another chat -> NOT pinned", not r.get("thread"), r)
@@ -910,6 +930,65 @@ if have_pw:
             vm = [tws._to_va_message(r) for r in picked]
             check("scraper -> mapping end to end",
                   [(m["sender"], m["out"]) for m in vm] == [("Natalia", False), ("", True), ("", True)], vm)
+
+        # The 2026-09-26 PG Soft case: the chat just left (GEMINI) still mounted,
+        # hidden, EARLIER in the document than the chat on screen (PG Soft).
+        GT, PT = "IGO/Gemini(FA) integration group", "PG & CP _ ZF918(B)【技术】对接群"
+        GID, PID = "19:gemini0001@thread.v2", "19:pgsoft0002@thread.v2"
+
+        def conv(tid, title, mids, style=""):
+            rows = "".join(
+                f'<div data-tid="chat-pane-message" data-mid="{m}"><div class="fui-ChatMessage">'
+                f'<span id="author-{m}">Agent</span><div id="content-{m}" data-message-content>'
+                f'{title} message {m}</div></div></div>' for m in mids)
+            return (f'<div class="conv" style="{style}"><h2 data-tid="chat-title" title="{title}">{title[:12]}…</h2>'
+                    f'<div id="chat-pane-list">{rows}</div>'
+                    f'<button data-tid="sendMessageCommands-send" data-track-thread-id="{tid}">send</button></div>')
+
+        sidebar = (f'<div data-tid="app-layout-area--nav"><div data-tid="chat-list">'
+                   f'<div role="treeitem" data-fui-tree-item-value="a|b|{GID}"><span id="title-chat-list-item_{GID}">{GT}</span></div>'
+                   f'<div role="treeitem" data-fui-tree-item-value="a|b|{PID}"><span id="title-chat-list-item_{PID}">{PT}</span></div>'
+                   f'</div></div>')
+        for how, style in (("visibility:hidden", "visibility:hidden"), ("opacity:0", "opacity:0"),
+                           ("moved off-screen", "position:absolute; left:-6000px; top:0; width:800px"),
+                           ("display:none", "display:none"),
+                           ("stacked underneath", "position:absolute; left:0; top:0; width:900px; z-index:1")):
+            # "stacked underneath": both chats in the same place, the shown one on top.
+            top_style = ("position:absolute; left:0; top:0; width:900px; z-index:2; background:#fff"
+                         if how == "stacked underneath" else "")
+            pg.set_content("<!doctype html><html><body>" + sidebar
+                           + '<div data-tid="app-layout-area--main" style="position:relative; height:600px">'
+                           + conv(GID, GT, [1790000000001, 1790000000002], style)
+                           + conv(PID, PT, [1790000000101, 1790000000102, 1790000000103], top_style)
+                           + "</div></body></html>")
+            check(f"hidden previous chat ({how}): conversation id is the SHOWN chat's",
+                  tws._open_thread_id(pg) == PID, tws._open_thread_id(pg))
+            check(f"hidden previous chat ({how}): header is the SHOWN chat's",
+                  tws._open_chat_title(pg) == PT, tws._open_chat_title(pg))
+            got = tws._scrape_rows(pg, 50)
+            check(f"hidden previous chat ({how}): scraper reads ONLY the shown chat",
+                  [r["mid"] for r in got.get("rows") or []] == ["1790000000101", "1790000000102", "1790000000103"],
+                  [r.get("mid") for r in got.get("rows") or []])
+            st = tws._pane_bottom_step(pg, scroll=False) or {}
+            check(f"hidden previous chat ({how}): bottom check measures the shown chat",
+                  str(st.get("maxMid")) == "1790000000103", st)
+            check(f"hidden previous chat ({how}): PG Soft confirmed by id",
+                  tws._confirm_exact_chat(pg, PT)[0], tws._confirm_exact_chat(pg, PT))
+            check(f"hidden previous chat ({how}): GEMINI NOT confirmed",
+                  not tws._confirm_exact_chat(pg, GT)[0], tws._confirm_exact_chat(pg, GT))
+        check("row name span ties id to title", tws._row_title_for_thread(pg, PID) == PT
+              and tws._exact_row_threads(pg, PT) == [PID])
+
+        # The review's lag case: selection/rows say PG Soft, the SHOWN conversation is GEMINI.
+        pg.set_content("<!doctype html><html><body>" + sidebar
+                       + '<div data-tid="app-layout-area--main">' + conv(GID, GT, [1790000000001]) + "</div></body></html>")
+        check("shown conversation is GEMINI: PG Soft NOT confirmed", not tws._confirm_exact_chat(pg, PT)[0])
+        # One conversation on the page (how EVO always runs): unchanged answers.
+        pg.set_content("<!doctype html><html><body>" + sidebar
+                       + '<div data-tid="app-layout-area--main">' + conv(PID, PT, [1790000000101]) + "</div></body></html>")
+        check("single conversation: id, header and rows as before",
+              tws._open_thread_id(pg) == PID and tws._open_chat_title(pg) == PT
+              and [r["mid"] for r in tws._scrape_rows(pg, 50).get("rows") or []] == ["1790000000101"])
         b.close()
 
 print("-" * 78)
