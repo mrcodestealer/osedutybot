@@ -989,6 +989,65 @@ if have_pw:
         check("single conversation: id, header and rows as before",
               tws._open_thread_id(pg) == PID and tws._open_chat_title(pg) == PT
               and [r["mid"] for r in tws._scrape_rows(pg, 50).get("rows") or []] == ["1790000000101"])
+
+        # The 2026-09-26 PG Soft failure, second cause: several provider groups
+        # share "… & CP _ ZF918(B)【技术】对接群", and the text click opened the
+        # first of them (JDB's), not PG Soft's. A live sidebar: clicking a row
+        # really switches the conversation.
+        JT, JID = "JDB & CP _ ZF918(B)【技术】对接群", "19:jdb00003@thread.v2"
+
+        def live_sidebar(rows):
+            items = "".join(
+                f'<div role="treeitem" data-item-type="chat" data-id="{tid}" '
+                f'data-fui-tree-item-value="a|OneGQL_GroupChatConversation|{tid}" style="height:48px">'
+                f'<div data-inp="simple-collab-chat-switch"><span id="title-chat-list-item_{tid}">{t}</span>'
+                f'<div>last message preview</div></div></div>' for tid, t in rows)
+            convs = json.dumps({tid: t for tid, t in rows}, ensure_ascii=False)
+            return ("<!doctype html><html><body>"
+                    f'<div data-tid="app-layout-area--nav"><div data-tid="chat-list">{items}</div></div>'
+                    '<div data-tid="app-layout-area--main"><div id="conv"></div></div><script>'
+                    f"const C = {convs};"
+                    "function openChat(id){ const t = C[id];"
+                    " document.getElementById('conv').innerHTML ="
+                    " `<h2 data-tid=\"chat-title\" title=\"${t}\">${t}</h2><div id=\"chat-pane-list\">"
+                    " <div data-tid=\"chat-pane-message\" data-mid=\"1790000000200\"><div id=\"content-1790000000200\""
+                    " data-message-content>${t} says hi</div></div></div>"
+                    " <button data-tid=\"sendMessageCommands-send\" data-track-thread-id=\"${id}\">send</button>`;"
+                    " document.querySelectorAll('[role=treeitem]').forEach(r => r.setAttribute('data-tabster',"
+                    "  r.dataset.id === id ? '{\"observed\":{\"names\":[\"LeftRailSelectedItem\"]}}' : '{}')); }"
+                    "document.querySelectorAll('[role=treeitem]').forEach(r => { r.tabIndex = 0;"
+                    " r.addEventListener('click', () => openChat(r.dataset.id));"
+                    " r.addEventListener('keydown', e => { if (e.key === 'Enter') openChat(r.dataset.id); }); });"
+                    f"openChat('{GID}');</script></body></html>")
+
+        def live(rows):
+            # A fresh tab each time: set_content keeps the window, so a second
+            # page's top-level `const` would throw and the page would not load.
+            tab = b.new_page()
+            tab.set_content(live_sidebar(rows))
+            return tab
+
+        tws._EXACT_CONFIRM_S = 2
+        pg = live([(JID, JT), (PID, PT), (GID, GT)])
+        tws._click_chat_row(pg, tws._row_needle(PT), method="click")
+        check("root cause reproduced: the text click opens JDB's '…ZF918(B)【技术】对接群', not PG Soft's",
+              tws._open_thread_id(pg) == JID, tws._open_thread_id(pg))
+        pg = live([(JID, JT), (PID, PT), (GID, GT)])
+        ok, why = tws._open_group_exact(pg, PT)
+        check("fixed: PG Soft opened by its own row's id, confirmed",
+              ok and tws._open_thread_id(pg) == PID and tws._open_chat_title(pg) == PT, (ok, why))
+        r = tws._probe_group(pg, PT, shot_path=str(_TMP / "probe.png"))
+        check("fixed: /telegramgroupcheck's probe now offers PG Soft's id for pinning",
+              r["ok"] and r.get("thread") == PID, r)
+        pg = live([(JID, JT), (PID, PT), ("19:pgdupe04@thread.v2", PT), (GID, GT)])
+        ok, why = tws._open_group_exact(pg, PT)
+        check("two chats named exactly PG Soft's name -> refused, nothing guessed",
+              not ok and "named exactly" in why, why)
+        pg = live([(JID, JT), (GID, GT)])       # PG Soft's row not rendered
+        ok, why = tws._open_group_exact(pg, PT)
+        check("PG Soft's row absent: the text click lands on JDB and is REFUSED",
+              not ok and tws._open_thread_id(pg) == JID, (ok, why))
+        tws._EXACT_CONFIRM_S = _REAL_EXACT_S
         b.close()
 
 print("-" * 78)

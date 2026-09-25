@@ -3258,10 +3258,24 @@ def _open_group_exact(page, title: str) -> tuple[bool, str]:
             if moved is None or moved < 0:
                 break          # list will not scroll further; it is not here
             page.wait_for_timeout(800)
-        for method in ("enter", "click"):
+        # A row named EXACTLY this is clicked by its own conversation id. The
+        # text click below matches the longest word of the title ANYWHERE in a
+        # row's first line, and many provider groups share one - "PG & CP _
+        # ZF918(B)【技术】对接群" and the other "… & CP _ ZF918(B)【技术】对接群"
+        # rows - so it opened whichever of them sorted first (2026-09-26).
+        exact_ids = _exact_row_threads(page, needle)
+        if len(exact_ids) > 1:
+            return False, (f"{len(exact_ids)} sidebar chats are named exactly "
+                           f"{needle!r} - refusing to guess")
+        attempts = ([("id", exact_ids[0])] * 2 if exact_ids
+                    else [("enter", ""), ("click", "")])
+        for method, tid in attempts:
             # press() silently no-ops on a node that ignores the key, so the
             # only honest test is whether the conversation actually changed.
-            if not _click_chat_row(page, prefix, method=method):
+            if method == "id":
+                if not _click_chat_row_by_thread(page, tid):
+                    continue
+            elif not _click_chat_row(page, prefix, method=method):
                 continue
             deadline = time.monotonic() + _EXACT_CONFIRM_S
             while time.monotonic() < deadline:
