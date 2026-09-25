@@ -58,6 +58,7 @@ self-contained, the same way groupcheck/telegramwarm/teamswatch each carry one.
 
 from __future__ import annotations
 
+import contextvars
 import functools
 import hashlib
 import json
@@ -93,6 +94,61 @@ def _chat_title() -> str:
 def _provider() -> str:
     """The Provider / Games value whose row gets filled."""
     return (os.getenv("VAWATCH_PROVIDER") or "VA").strip()
+
+
+# Which app the sweep in progress read ("Telegram" / "Teams"), for the card
+# footers only. A context variable, so a Teams sweep's cards say Teams without
+# threading a parameter through every card builder; each thread has its own.
+_PLATFORM = contextvars.ContextVar("vawatch_platform", default="Telegram")
+
+
+def _platform_label() -> str:
+    return str(_PLATFORM.get() or "Telegram")
+
+
+def _env_off(name: str) -> bool:
+    return (os.getenv(name) or "").strip().lower() in ("0", "false", "no", "off")
+
+
+def teams_watch_enabled() -> bool:
+    """Is teamswatch's provider reader (the APP=TEAMS rows) switched on?
+
+    It rides on the warm Teams browser, which only runs under EVOTEAMS_ENABLED.
+    It follows VAWATCH_ENABLED exactly as telegramwarm reads it (unset or empty =
+    on, anything else must be truthy), and VAWATCH_TEAMS_ENABLED=0 stops only the
+    Teams half. Read here, not in teamswatch, so the watch list can say whether
+    the TEAMS rows are read without importing Playwright.
+    """
+    if (os.getenv("EVOTEAMS_ENABLED") or "").strip().lower() not in (
+            "1", "true", "yes", "on", "y"):
+        return False
+    raw = (os.getenv("VAWATCH_ENABLED") or "").strip().lower()
+    if raw and raw not in ("1", "true", "yes", "on", "y"):
+        return False
+    return not _env_off("VAWATCH_TEAMS_ENABLED")
+
+
+# In-process heartbeat from teamswatch's provider loop (monotonic seconds, and
+# that loop's interval). The switch alone said "on" even when the loop never
+# started (no Teams profile), and the "NOT autofilled" reports went quiet about
+# three rows nothing read (review finding).
+_TEAMS_READER = {"at": 0.0, "every": 0.0}
+
+
+def mark_teams_reader_alive(every_s: float = 0.0) -> None:
+    import time as _t
+
+    _TEAMS_READER["at"] = _t.monotonic()
+    _TEAMS_READER["every"] = float(every_s or 0.0)
+
+
+def teams_reader_running() -> bool:
+    """Switched on AND its loop has ticked recently (within 3 intervals + 5 min)."""
+    import time as _t
+
+    if not teams_watch_enabled() or not _TEAMS_READER["at"]:
+        return False
+    return _t.monotonic() - _TEAMS_READER["at"] < 3 * max(60.0, _TEAMS_READER["every"]) + 300
 
 
 def _card_chat_id() -> str:
@@ -537,10 +593,25 @@ def watch_list() -> dict:
         watched = {_row_ident(r) for r in rows}
         both = [r for r in teams if _row_ident(r) in watched]
         teams = [r for r in teams if _row_ident(r) not in watched]
+        # The APP=TEAMS rows teamswatch's provider reader reads, record_id and
+        # shared_with carried the same way as the Telegram rows'. `teams` below
+        # stays the printable note list it always was.
+        teams_rows = [{"provider": (r.get("provider") or "").strip(),
+                       "group": r.get("group") or "",
+                       "record_id": r.get("record_id") or ""}
+                      for r in teams if (r.get("group") or "").strip()]
+        blank += [r for r in teams_rows if not r["provider"]]
+        teams_rows = [r for r in teams_rows if r["provider"]]
+        teams = [r for r in teams
+                 if (r.get("provider") or "").strip() and (r.get("group") or "").strip()]
+        _annotate_shared(teams_rows)
+        teams_why = ("APP is TEAMS - read by the Teams provider watcher"
+                     if teams_reader_running() else
+                     "APP is TEAMS - the Teams provider watcher is not running")
         if rows:
             rep = {"telegram": rows,
-                   "teams": [_row_note(r, "APP is TEAMS - this watcher only "
-                                          "reads Telegram") for r in teams],
+                   "teams_rows": teams_rows,
+                   "teams": [_row_note(r, teams_why) for r in teams],
                    "also_teams": [_row_note(r, "APP is TELEGRAM+TEAMS - the "
                                                "Telegram group is watched, the "
                                                "Teams channel is not read")
@@ -574,7 +645,11 @@ def watch_list() -> dict:
         _annotate_shared(rows)
         _LAST_SOURCE.update(source="cache", at=cached.get("at") or "", error=err)
         _alert_stale_targets(cached, err)
+        trows = [dict(r) for r in cached.get("teams_rows") or []
+                 if str(r.get("provider") or "").strip()]
+        _annotate_shared(trows)
         return {"telegram": rows,
+                "teams_rows": trows,
                 "teams": list(cached.get("teams") or []),
                 "also_teams": list(cached.get("also_teams") or []),
                 "skipped": list(cached.get("skipped") or []),
@@ -587,7 +662,7 @@ def watch_list() -> dict:
     _LAST_SOURCE.update(source="fallback", at=_now_str(), error=err)
     return {"telegram": ([{"provider": _provider(), "group": single}]
                          if single else []),
-            "teams": [], "skipped": [], "source": "fallback",
+            "teams_rows": [], "teams": [], "skipped": [], "source": "fallback",
             "at": _now_str(), "error": err}
 
 
@@ -620,26 +695,40 @@ def _alert_stale_targets(cached: dict, err: str) -> None:
     at = _parse_now_str(cached.get("at"))
     if not cap or at is None or _now_dt() - at < timedelta(hours=cap):
         return
+    # CLAIMED before the send: the Telegram worker and the Teams provider reader
+    # both reach this, and a check-then-send let both post the "sent once" card
+    # (review finding). A send that definitely failed gives the claim back.
     with _ledger_lock:
         d = _load()
         if d.get("_unreadable") or d.get("targets_alerted") == cached.get("at"):
             return
+        prev_alerted = d.get("targets_alerted")
+        d["targets_alerted"] = cached.get("at")
+        if not _save(d):
+            return
     hours = int((_now_dt() - at).total_seconds() // 3600)
-    sent = _post_note(
-        "⚠️ VA watcher: the watch list is stale", "orange",
-        [f"**The Base's provider list could not be read for {hours} hours.** The "
-         f"watcher keeps reading the {len(cached.get('telegram') or [])} group(s) "
-         f"it last saw (read at {cached.get('at')}), so a provider row added or "
-         f"renamed since then is NOT watched.",
-         f"**Last error:** {str(err)[:300]}",
-         "Check the maintenance Base's view (GROUPCHECK_VIEW_ID) and the APP "
-         "column. This card is sent once; it re-arms after a good read."],
-        "(No message text: this note is about the watcher's own provider list.)")
-    if sent.get("carded") or sent.get("unknown"):
+    sent: dict = {}
+    try:
+        sent = _post_note(
+            "⚠️ VA watcher: the watch list is stale", "orange",
+            [f"**The Base's provider list could not be read for {hours} hours.** The "
+             f"watcher keeps reading the {len(cached.get('telegram') or [])} group(s) "
+             f"it last saw (read at {cached.get('at')}), so a provider row added or "
+             f"renamed since then is NOT watched.",
+             f"**Last error:** {str(err)[:300]}",
+             "Check the maintenance Base's view (GROUPCHECK_VIEW_ID) and the APP "
+             "column. This card is sent once; it re-arms after a good read."],
+            "(No message text: this note is about the watcher's own provider list.)")
+    except Exception as exc:  # noqa: BLE001 - the claim must be given back
+        print(f"[vawatch] stale-list note failed: {exc!r}", flush=True)
+    if not (sent.get("carded") or sent.get("unknown")):
         with _ledger_lock:
             d = _load()
-            if not d.get("_unreadable"):
-                d["targets_alerted"] = cached.get("at")
+            if not d.get("_unreadable") and d.get("targets_alerted") == cached.get("at"):
+                if prev_alerted is None:
+                    d.pop("targets_alerted", None)
+                else:
+                    d["targets_alerted"] = prev_alerted
                 _save(d)
 
 
@@ -650,7 +739,8 @@ def targets() -> list:
 
 def _log_unwatched(rep: dict) -> None:
     """Say out loud, once per rotation, which Base rows nothing reads."""
-    gaps = list(rep.get("teams") or []) + list(rep.get("skipped") or [])
+    gaps = ([] if teams_reader_running() else list(rep.get("teams") or [])) \
+        + list(rep.get("skipped") or [])
     if rep.get("source") != "base":
         print(f"[vawatch] watch list came from {rep.get('source')} "
               f"(read at {rep.get('at')}): {rep.get('error')}", flush=True)
@@ -818,6 +908,31 @@ def manual_target(name: str = "") -> dict:
                          + ") - name the provider"}
     return {"error": f"no watched TELEGRAM row is named {name!r}. Watched: "
                      + ", ".join(sorted({r.get("provider") or "?" for r in rows}))}
+
+
+def manual_teams_target(name: str) -> dict:
+    """manual_target for the APP=TEAMS rows. -> row dict, or {"error": str}.
+
+    Same matching (Provider or alias first, then the exact Group Name) and the
+    same refusal of a name that fits several rows.
+    """
+    rows = watch_list().get("teams_rows") or []
+    want = _norm(name)
+    if not want:
+        return {"error": "name the Teams provider"}
+    hits = [r for r in rows
+            if want in {_norm(n) for n in _names_for(r.get("provider") or "")}]
+    if not hits:
+        hits = [r for r in rows if _norm(r.get("group")) == want]
+    if len(hits) == 1:
+        return dict(hits[0])
+    if hits:
+        return {"error": f"{name!r} matches {len(hits)} Teams rows ("
+                         + ", ".join(r.get("provider") or "?" for r in hits)
+                         + ") - name the provider"}
+    return {"error": f"no TEAMS row is named {name!r}. Teams rows: "
+                     + (", ".join(sorted({r.get("provider") or "?" for r in rows}))
+                        or "none")}
 
 
 # ---------------------------------------------------------------------------
@@ -997,7 +1112,15 @@ def _cell_ms(value: Any) -> Optional[int]:
 # Ledger — so one notice is acted on exactly once
 # ---------------------------------------------------------------------------
 
-_ledger_lock = threading.Lock()
+# RE-ENTRANT, and held for the WHOLE of every handle_messages sweep (see its
+# wrapper). A sweep loads the ledger once, works for seconds (the confirm model,
+# the Base write, the card) and saves it back. Two sweeps at once - the Telegram
+# worker and the Teams worker (teamswatch's provider reader) - would each save
+# their own copy over the other's: handled keys resurrected (a notice re-written
+# and re-carded) or a baseline lost (a backlog acted on as new). Every other
+# ledger writer already takes this lock, so holding it across the sweep
+# serialises all of them. Re-entrant because the sweep calls those writers.
+_ledger_lock = threading.RLock()
 
 
 # Bumped whenever _key changes shape. Every entry written under an older scheme
@@ -1339,6 +1462,9 @@ def _remember_targets(rep: dict) -> None:
         d["targets"] = {"at": rep.get("at") or _now_str(),
                         "source": rep.get("source") or "base",
                         "telegram": list(rep.get("telegram") or []),
+                        # The Teams provider reader's rotation, so a Base
+                        # outage does not stop it either.
+                        "teams_rows": list(rep.get("teams_rows") or []),
                         "teams": list(rep.get("teams") or []),
                         "also_teams": list(rep.get("also_teams") or []),
                         "skipped": list(rep.get("skipped") or [])}
@@ -1348,7 +1474,8 @@ def _remember_targets(rep: dict) -> None:
 def _unwatched_from_cache(d: dict) -> dict:
     """The rows nothing reads, from the ledger - no Base call, no network."""
     cached = d.get("targets") or {}
-    return {"teams": list(cached.get("teams") or []),
+    # With the Teams provider reader on, the TEAMS rows ARE watched.
+    return {"teams": ([] if teams_reader_running() else list(cached.get("teams") or [])),
             "skipped": list(cached.get("skipped") or []),
             "at": cached.get("at") or ""}
 
@@ -2407,7 +2534,7 @@ def build_card(group: str, provider: str, text: str, verdict: dict,
             (f"_Base row updated · {wrote}_" if wrote
              else f"_{_UNKNOWN_WRITE}_" if unknown
              else "_⚠️ the Base row was NOT updated — see the service log_")
-            + f"\n_Read-only in Telegram · {_now_str()}_"}},
+            + f"\n_Read-only in {_platform_label()} · {_now_str()}_"}},
     ]
     return {
         "schema": "2.0",
@@ -2455,7 +2582,7 @@ def build_note_card(title: str, template: str, lines: list, text: str) -> dict:
             {"tag": "div", "text": {"tag": "lark_md", "content": body}},
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md",
-                                    "content": f"_Read-only in Telegram · "
+                                    "content": f"_Read-only in {_platform_label()} · "
                                                f"{_now_str()}_"}},
         ]},
     }
@@ -4180,6 +4307,34 @@ def _apply_pending(d: dict, sc: dict, res: dict, *, provider: str, group: str,
 
 def handle_messages(messages: list, *, force: bool = False,
                     provider: str = "", group: str = "", record_id: str = "",
+                    shared_with: Optional[list] = None,
+                    platform: str = "Telegram") -> dict:
+    """Classify each message, act on new maintenance notices (see _sweep_messages).
+
+    One sweep at a time in the whole process: the Telegram worker and the Teams
+    worker both call this, and each sweep holds a loaded copy of the ledger for
+    its whole run - see _ledger_lock. ``platform`` only labels the cards (and
+    switches off the Telegram-only mid-restart rule).
+
+    The cost, accepted on purpose: while one watcher's sweep waits on the model,
+    the Base or Lark, the other watcher's next_target()/watch_list() wait too.
+    A sweep with nothing new makes no network call, so this only happens while a
+    notice is actually being handled; releasing the lock around that I/O would
+    need a per-scope merge of the ledger, and a lost update there means a notice
+    re-written and re-carded.
+    """
+    token = _PLATFORM.set(str(platform or "Telegram"))
+    try:
+        with _ledger_lock:
+            return _sweep_messages(messages, force=force, provider=provider,
+                                   group=group, record_id=record_id,
+                                   shared_with=shared_with)
+    finally:
+        _PLATFORM.reset(token)
+
+
+def _sweep_messages(messages: list, *, force: bool = False,
+                    provider: str = "", group: str = "", record_id: str = "",
                     shared_with: Optional[list] = None) -> dict:
     """Classify each message, act on new maintenance notices.
 
@@ -4362,7 +4517,13 @@ def handle_messages(messages: list, *, force: bool = False,
     # read whose NEWEST bubble is at or below half the old cold-start floor is
     # a restart too: late-rendering history always arrives with the newest
     # bubbles beside it, and a recent deletion never removes half the chat.
-    if (known and last is not None and floor is not None
+    # Telegram only. Teams' data-mid is the send time in epoch ms: it never
+    # restarts (a re-created Teams chat is a new conversation id, which the
+    # reader's pin refuses), and one deleted newest message is thousands of
+    # "ids" below `last` - the restart rule would fire, reset the floor, and
+    # act on history still on screen (review finding).
+    if (_platform_label() != "Teams"
+            and known and last is not None and floor is not None
             and max(known) < float(floor)
             and (float(last) - max(known) > _MID_RESTART_GAP
                  or max(known) <= float(floor) / 2)):

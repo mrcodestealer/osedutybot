@@ -531,6 +531,20 @@ def _make_sink(chat_id: str, rows: list, platform: str,
             except Exception as err:  # noqa: BLE001
                 print(f"[groupcheck] could not store the peer id: {err!r}",
                       flush=True)
+        # The Teams equivalent: the conversation id teamswatch's provider reader
+        # requires before it reads an APP=TEAMS group.
+        if platform == "Teams" and result.get("ok") and result.get("thread"):
+            try:
+                import peerstore
+
+                if not peerstore.remember_teams(
+                        row.get("group") or result.get("title") or "",
+                        result["thread"], provider=row.get("provider") or ""):
+                    print(f"[groupcheck] not a Teams conversation id: "
+                          f"{result['thread']!r}", flush=True)
+            except Exception as err:  # noqa: BLE001
+                print(f"[groupcheck] could not store the Teams id: {err!r}",
+                      flush=True)
 
         image_key = None
         shot = (result.get("shot") or "").strip()

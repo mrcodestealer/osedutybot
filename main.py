@@ -7178,6 +7178,28 @@ def lark_webhook():
                 # announcements group" this line promised - and consumed the
                 # timer's cursor doing it (F56).
                 tgt = _va_w.manual_target(name_va)
+                if (tgt.get("error") and name_va
+                        and "no watched TELEGRAM row" in tgt["error"]):
+                    # Not a Telegram row - maybe an APP=TEAMS one, which
+                    # teamswatch's provider reader reads on the warm Teams page.
+                    ttgt = _va_w.manual_teams_target(name_va)
+                    if not ttgt.get("error"):
+                        import teamswatch as _tw_va
+
+                        send_message(chat_id_va,
+                                     f"🔍 VA: reading Teams group "
+                                     f"{ttgt.get('group')!r} "
+                                     f"({ttgt.get('provider') or '?'})…"
+                                     + (" (force)" if force_va else ""))
+                        tres = _tw_va.provider_check_now(ttgt, force=force_va)
+                        if not tres.get("ok"):
+                            send_message(chat_id_va,
+                                         f"❌ /vacheck failed: {tres.get('error')}")
+                            return
+                        send_message(chat_id_va,
+                                     _va_w.format_check_summary(tres.get("result") or {})
+                                     + "\n\n" + _tw_va.format_read_lines(tres))
+                        return
                 if tgt.get("error"):
                     send_message(chat_id_va, f"❌ /vacheck: {tgt['error']}")
                     return

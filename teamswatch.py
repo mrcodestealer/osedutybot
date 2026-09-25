@@ -2959,7 +2959,30 @@ def _scrape_rows(page, scan: int) -> dict[str, Any]:
                         // that in _open_chat_title — so fall back to textContent.
                         const txt = (n) => n
                             ? ((n.innerText || n.textContent || '').trim()) : '';
+                        // Our own bubble? Teams' chat renders the signed-in
+                        // account's messages as ChatMyMessage, with no author
+                        // line. The provider reader needs it so a window WE post
+                        // in a provider group is never filed as the provider's.
+                        // Guarded: this scraper also feeds the EVO watcher, and a
+                        // throw here would fail every EVO poll.
+                        let mine = false;
+                        try {
+                            const own = (n) => {
+                                if (!n || !n.getAttribute) return false;
+                                const c = String(n.getAttribute('class') || '');
+                                const t = String(n.getAttribute('data-tid') || '');
+                                return /ChatMyMessage/i.test(c) || /(^|-)my-?message/i.test(t);
+                            };
+                            for (let n = el, i = 0; n && n !== pane && i < 6;
+                                 n = n.parentElement, i++) {
+                                if (own(n)) { mine = true; break; }
+                            }
+                            if (!mine && el.querySelector) {
+                                mine = !!el.querySelector("[class*='ChatMyMessage']");
+                            }
+                        } catch (e) { mine = false; }
                         out.rows.push({
+                            mine: mine,
                             // data-mid is Teams' own message id — a stable key for
                             // "have we already handled this message?", which a text
                             // hash only approximates.
@@ -3132,6 +3155,14 @@ def _confirm_exact_chat(page, title: str) -> tuple[bool, str]:
     header = _open_chat_title(page)
     if _titles_equal(title, header):
         return True, f"header matches ({header!r})"
+    # A header that names a DIFFERENT chat settles it: Teams can move the
+    # sidebar selection before the conversation switches, so "selected row
+    # matches" alone once confirmed the PREVIOUS chat (review finding). The
+    # selected row may only stand in for a header that is missing, or that is
+    # a truncated start of this title.
+    h, want = _norm_title(header), _norm_title(title)
+    if h and not want.startswith(h):
+        return False, f"header names another chat ({header!r})"
     picked = _selected_chat_title(page)
     if _titles_equal(title, picked):
         return True, f"selected sidebar row matches ({picked!r})"
@@ -3179,6 +3210,28 @@ def _open_group_exact(page, title: str) -> tuple[bool, str]:
             print(f"[teams] sweep {sweep} method={method} unconfirmed - {why}",
                   flush=True)
     return False, why or "no sidebar row matched this exact name"
+
+
+def _row_title_for_thread(page, thread: str):
+    """The title on the sidebar row keyed by ``thread``, or None if not rendered.
+
+    The row's name span is id'd by the conversation id itself
+    (<span id="title-chat-list-item_19:...">), so this ties an id to a title in
+    ONE element - no lag between a header and a compose button can pair them
+    wrongly.
+    """
+    t = (thread or "").strip()
+    if not t:
+        return None
+    try:
+        got = page.evaluate(
+            """(t) => {
+                const el = document.getElementById('title-chat-list-item_' + t);
+                return el ? ((el.innerText || el.textContent || '').trim()) : null;
+            }""", t)
+    except Exception:
+        return None
+    return None if got is None else str(got)
 
 
 def _pane_shot(page, out_path: str) -> str:
@@ -3242,6 +3295,24 @@ def _probe_group(page, title: str, *, shot_path: str) -> dict:
         out["reason"] = why or "no chat with this exact name"
         return out
     out["ok"] = True
+    # The Teams equivalent of a Telegram peer id: groupcheck pins it, and the
+    # provider reader refuses to read this group under any other id. Offered
+    # for pinning only when the HEADER is exactly this title (not merely the
+    # selected row) and the id's own sidebar row, when rendered, says so too.
+    thread = _open_thread_id(page)
+    row_title = _row_title_for_thread(page, thread)
+    if not thread:
+        out["thread_note"] = "no conversation id visible - not pinned"
+    elif not _titles_equal(title, out["opened"]):
+        out["thread_note"] = (f"header is {out['opened']!r}, not the exact title - "
+                              f"not pinned")
+    elif row_title is not None and not _titles_equal(title, row_title):
+        out["thread_note"] = (f"conversation {thread[:30]}...'s own row is "
+                              f"{row_title!r} - not pinned")
+    else:
+        out["thread"] = thread
+    if out.get("thread_note"):
+        print(f"[teams] {title!r}: {out['thread_note']}", flush=True)
     out["shot"] = _pane_shot(page, shot_path)
     return out
 
@@ -3323,6 +3394,268 @@ def check_groups_exist(titles, *, sink=None, timeout_s: int = 900) -> dict:
     if warm_running():
         return warm().probe_groups(titles, sink=sink, timeout_s=timeout_s)
     return probe_groups_cold(titles, sink=sink, headless=_headless())
+
+
+# ---------------------------------------------------------------------------
+# Provider groups on Teams (the maintenance Base's APP=TEAMS rows) -> vawatch
+# ---------------------------------------------------------------------------
+#
+# The Telegram watcher (telegramwarm + vawatch) reads every APP=TELEGRAM row;
+# nothing read the APP=TEAMS ones (GEMINI, PG Soft, RTG). This reads them on the
+# SAME warm page the EVO watcher uses - one group per VAWATCH_TEAMS_POLL_SEC,
+# queued only when the worker is idle, so an EVO poll is at most one provider
+# read late - and hands the messages to vawatch.handle_messages, which does
+# exactly what it does for Telegram: first visit baselines, a new scheduled
+# maintenance fills the provider's Base row and cards the Laboratory group.
+#
+# WRONG-GROUP SAFETY. Deliberately NOT _read_on_page / _open_group: those
+# confirm through _wanted_thread_id, which answers EVOTEAMS_THREAD_ID for ANY
+# title - with it set and EVO open, "GEMINI" would read EVO's messages. Here a
+# group is read only when BOTH hold, before the scrape and again after it:
+#   * the header (or selected row) is EXACTLY the Base's Group Name, and
+#   * the open conversation id is the one /telegramgroupcheck pinned for it
+#     (peerstore.thread_for). No pin -> not read.
+# Anything else is an error for that group, never a guess.
+
+_PROVIDER_SCAN = 50               # rows scraped per read (vawatch's gap cap)
+_PROVIDER_FIRST_DELAY_S = 120     # let the EVO boot and first poll go first
+_EDITED_RE = re.compile(r"(?im)^\s*(?:edited|已编辑|已編輯)\s*$")
+# What Teams leaves where a deleted message was - under the SAME data-mid. Kept,
+# it read as the notice "already handled" and vawatch's deleted-notice rules
+# (which look for the notice's mid to be GONE) never fired.
+_DELETED_RE = re.compile(
+    r"^\s*(?:this message (?:has been|was) deleted\.?|message deleted\.?"
+    r"|此(?:消息|讯息|訊息)已(?:被)?(?:删除|刪除|撤回)。?|(?:消息|訊息)已(?:删除|刪除)。?)\s*$",
+    re.I)
+
+
+def _provider_watch_enabled() -> bool:
+    """vawatch.teams_watch_enabled: EVOTEAMS_ENABLED (this browser), VAWATCH_ENABLED
+    (unset = on) and VAWATCH_TEAMS_ENABLED (unset = on)."""
+    try:
+        import vawatch as _va
+
+        return bool(_va.teams_watch_enabled())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _mark_provider_alive() -> None:
+    """Tell vawatch the reader loop is running, so its "NOT autofilled" reports
+    stop listing the TEAMS rows only while something really reads them."""
+    try:
+        import vawatch as _va
+
+        _va.mark_teams_reader_alive(_provider_poll_seconds())
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _provider_poll_seconds() -> int:
+    try:
+        return max(60, min(3600, int(os.getenv("VAWATCH_TEAMS_POLL_SEC", "120"))))
+    except ValueError:
+        return 120
+
+
+def _self_names() -> set:
+    """TEAMS_SELF_NAMES: this account's display name(s), comma separated - a
+    second way to recognise our own messages if the DOM marker ever changes."""
+    raw = os.getenv("TEAMS_SELF_NAMES") or ""
+    return {" ".join(x.split()).casefold() for x in re.split(r"[,|]", raw) if x.strip()}
+
+
+def _to_va_message(row: dict, raw_text: str = "") -> dict:
+    """One scraped Teams row in the shape vawatch reads from Telegram's reader."""
+    author = " ".join(str(row.get("author") or "").split())
+    out = bool(row.get("mine")) or (bool(author) and author.casefold() in _self_names())
+    return {
+        "mid": str(row.get("mid") or "").strip(),
+        "text": str(row.get("text") or ""),
+        "sender": "" if out else author,
+        "out": out,
+        "edited": bool(_EDITED_RE.search(raw_text or "")),
+        "time": str(row.get("time") or ""),
+        "when": str(row.get("time_text") or ""),
+    }
+
+
+def _exact_and_pinned_now(page, title: str, pin: str) -> tuple[bool, str]:
+    """Is the open chat EXACTLY ``title`` AND conversation ``pin``?"""
+    thread = _open_thread_id(page)
+    ok, why = _confirm_exact_chat(page, title)
+    if not thread:
+        return False, "could not read the open chat's conversation id - refusing to guess"
+    if thread != pin:
+        return False, (f"a different chat is open (conversation {thread[:30]}..., "
+                       f"pinned {pin[:30]}...) - {why}")
+    if not ok:
+        return False, (f"the pinned chat is not titled {title!r} any more ({why}) - "
+                       f"renamed? fix the Base's Group Name or re-run /telegramgroupcheck")
+    row_title = _row_title_for_thread(page, pin)
+    if row_title is not None and not _titles_equal(title, row_title):
+        return False, (f"the pinned conversation's sidebar row is titled "
+                       f"{row_title!r}, not {title!r}")
+    return True, why
+
+
+def _read_provider_on_page(page, title: str, *, pin: str) -> dict:
+    """Open one provider's Teams group by pin + exact title, scrape it, verify again.
+
+    -> {ok, group, messages[vawatch shape], error, thread, at_bottom, newest_mid,
+        opened_by}. Read-only: only sidebar clicks and scrolling. Opening a chat
+        does mark it read for this Teams account (see _probe_group).
+    """
+    title = (title or "").strip()
+    res: dict[str, Any] = {"ok": False, "group": title, "messages": [], "error": "",
+                           "thread": "", "at_bottom": None, "newest_mid": "",
+                           "opened_by": ""}
+    if not title:
+        res["error"] = "no Group Name"
+        return res
+    if not pin:
+        res["error"] = ("not pinned - run /telegramgroupcheck once so this group's "
+                        "Teams conversation id is recorded")
+        return res
+    try:
+        _chat_list_home(page)
+        res["opened_by"] = "id"
+        if not _click_chat_row_by_thread(page, pin):
+            # The row is not rendered (virtualised list): find it by exact title;
+            # the pin is still required below.
+            res["opened_by"] = "title"
+            ok, why = _open_group_exact(page, title)
+            if not ok:
+                res["error"] = f"no chat named exactly {title!r} ({why})"
+                return res
+        deadline = time.monotonic() + _EXACT_CONFIRM_S
+        while True:
+            ok, why = _exact_and_pinned_now(page, title, pin)
+            if ok or time.monotonic() > deadline:
+                break
+            page.wait_for_timeout(1000)
+        if not ok:
+            res["error"] = why
+            return res
+        bottom = _scroll_pane_to_bottom(page)
+        res["at_bottom"] = bool(bottom.get("at_bottom"))
+        res["newest_mid"] = str(bottom.get("newest_mid") or "")
+        if not res["at_bottom"]:
+            # A read that is not at the end can miss the newest notice, and on a
+            # first visit would baseline BELOW it. Try again next round instead.
+            res["error"] = "could not reach the newest message - read again next round"
+            return res
+        scraped = _scrape_rows(page, _PROVIDER_SCAN)
+        if scraped.get("error"):
+            res["error"] = f"pane not resolved: {scraped['error']}"
+            return res
+        ok, why = _exact_and_pinned_now(page, title, pin)
+        if not ok:
+            res["error"] = f"chat changed while reading - {why}"
+            return res
+        rows = scraped.get("rows") or []
+        raw_by_mid = {str(r.get("mid") or ""): str(r.get("text") or "") for r in rows}
+        picked = _pick_messages(rows, 0)
+        kept = [r for r in picked["messages"]
+                if not _DELETED_RE.match(str(r.get("text") or ""))]
+        res["deleted_rows"] = len(picked["messages"]) - len(kept)
+        res["messages"] = [_to_va_message(r, raw_by_mid.get(str(r.get("mid") or ""), ""))
+                           for r in kept]
+        res["thread"] = pin
+        res["ok"] = True
+        return res
+    finally:
+        # The sidebar scroll is borrowed from the EVO watcher (_chat_list_home).
+        _chat_list_home(page)
+
+
+def _restore_evo(page) -> bool:
+    """Leave the EVO chat open again after a provider read.
+
+    The EVO poll's cheap path is "EVO is already open" (_read_on_page's
+    already_ok), and a relaunch reopens whatever chat was last viewed. A
+    provider read leaves a provider chat open, and _open_group cannot scroll
+    the virtualised sidebar - so a quiet EVO row below the rendered top failed
+    every EVO poll and backed it off to 15 minutes (review finding). This opens
+    EVO by its conversation id, sweeping the list like _open_group_exact does.
+    """
+    target = _watch_target()
+    wanted = _wanted_thread_id(target)
+    try:
+        if wanted and _open_thread_id(page) == wanted:
+            return True
+        if not wanted:
+            return bool(_open_group(page, target))
+        _chat_list_home(page)
+        for sweep in range(_LIST_SWEEPS):
+            if sweep:
+                try:
+                    moved = page.evaluate(_CHAT_LIST_SCROLL_JS, 700)
+                except Exception:
+                    moved = -1
+                if moved is None or moved < 0:
+                    break
+                page.wait_for_timeout(800)
+            if not _click_chat_row_by_thread(page, wanted):
+                continue
+            deadline = time.monotonic() + _EXACT_CONFIRM_S
+            while time.monotonic() < deadline:
+                if _open_thread_id(page) == wanted:
+                    page.wait_for_timeout(1500)
+                    return True
+                page.wait_for_timeout(1000)
+        print(f"[teams-provider] could not put {target!r} back on screen - the "
+              f"next EVO poll opens it itself", flush=True)
+        return False
+    except Exception as err:  # noqa: BLE001
+        print(f"[teams-provider] restoring EVO failed: {err!r}", flush=True)
+        return False
+    finally:
+        _chat_list_home(page)
+
+
+def provider_check_now(target: dict, *, force: bool = False) -> dict:
+    """/vacheck <Teams provider>: one read + sweep on the warm page, blocking."""
+    return warm().provider_check(target, force=force)
+
+
+def format_read_lines(res: dict, limit: int = 6) -> str:
+    """The newest messages a Teams read handed to vawatch, one line each, for the
+    /vacheck reply - so "(us)" can be checked against the chat by eye."""
+    msgs = list((res or {}).get("read") or (res or {}).get("messages") or [])
+    if not msgs:
+        return "Teams: no messages were read."
+    lines = [f"Teams messages read (newest last; (us) = this Teams account), "
+             f"conversation {str((res or {}).get('thread') or '')[:30]}:"]
+    for m in msgs[-limit:]:
+        who = "(us)" if m.get("out") else (m.get("sender") or "(no name)")
+        body = " ".join(str(m.get("text") or "").split())
+        lines.append(f"• {m.get('when') or m.get('time') or '?'} · {who} · "
+                     f"{body[:80]}{'…' if len(body) > 80 else ''}")
+    return "\n".join(lines)
+
+
+def _provider_status_lines() -> list[str]:
+    if not _provider_watch_enabled():
+        return ["• Provider groups (Teams): OFF (needs EVOTEAMS_ENABLED=1; "
+                "VAWATCH_ENABLED / VAWATCH_TEAMS_ENABLED not 0)"]
+    lines = [f"• Provider groups (Teams): ON — one group every "
+             f"{_provider_poll_seconds()}s"]
+    try:
+        import peerstore
+
+        pinned = peerstore.all_teams_pins()
+    except Exception:  # noqa: BLE001
+        pinned = {}
+    st = warm().provider_stats() if warm_running() else {}
+    for title, pv in sorted(st.items()):
+        fails = int(pv.get("fails") or 0)
+        lines.append(f"  – {title}: {'ok' if pv.get('last_ok') else 'FAILED'} at "
+                     f"{pv.get('last_at') or '—'}"
+                     + (f" ({fails} in a row: {pv.get('last_error')})" if fails else ""))
+    if not pinned:
+        lines.append("  ⚠️ no Teams group is pinned yet — run /telegramgroupcheck")
+    return lines
 
 
 def _watch_target(group: str | None = None) -> str:
@@ -3640,6 +3973,12 @@ class _TeamsWarm:
         self._holding_lock = False
         self._started = False
         self._polling = False
+        self._pv_polling = False
+        self._pv_idx = -1
+        # Per provider group: {last_at, last_ok, last_error, fails}. Its own box:
+        # last_poll_error / consec_fail belong to the EVO poll and drive its
+        # backoff, which a failing provider group must not touch.
+        self._pv: dict[str, dict] = {}
         self._start_lock = threading.Lock()
         self._st_lock = threading.Lock()
         self._st: dict[str, Any] = {
@@ -3679,6 +4018,10 @@ class _TeamsWarm:
                 self._polling = True
                 threading.Thread(target=self._poll_loop, name="teams-warm-poll",
                                  daemon=True).start()
+            if poll and not self._pv_polling:
+                self._pv_polling = True
+                threading.Thread(target=self._provider_loop,
+                                 name="teams-provider-poll", daemon=True).start()
 
     def _heartbeat_loop(self) -> None:
         """Keep our own lock from ageing into 'stale' — see _touch_profile_lock."""
@@ -3707,6 +4050,145 @@ class _TeamsWarm:
             fails = int(self.stats().get("consec_fail") or 0)
             delay = _poll_seconds() * (2 ** min(fails, 4))
             time.sleep(min(max(delay, _poll_seconds()), 900))
+
+    # -- provider groups (see _read_provider_on_page) --------------------------
+    def _provider_loop(self) -> None:
+        """Queue one provider-group read per interval, only when the worker is idle.
+
+        Idle-only for the same reason as _poll_loop: a backlog would never drain,
+        and the EVO poll must never wait behind more than one provider read.
+        """
+        _mark_provider_alive()
+        time.sleep(_PROVIDER_FIRST_DELAY_S)
+        while True:
+            _mark_provider_alive()
+            try:
+                if _provider_watch_enabled() and self._tasks.empty():
+                    tgt = self._next_provider_target()
+                    if tgt:
+                        self._tasks.put({"kind": "provider_read", "target": tgt})
+            except Exception as err:  # noqa: BLE001
+                print(f"[teams-provider] could not queue a read: {err!r}", flush=True)
+            time.sleep(_provider_poll_seconds())
+
+    def _next_provider_target(self) -> dict:
+        import vawatch as _va
+
+        rows = list(_va.watch_list().get("teams_rows") or [])
+        if not rows:
+            return {}
+        self._pv_idx = (self._pv_idx + 1) % len(rows)
+        return dict(rows[self._pv_idx])
+
+    def provider_stats(self) -> dict:
+        with self._st_lock:
+            return {k: dict(v) for k, v in self._pv.items()}
+
+    def _pv_ok(self, title: str) -> None:
+        with self._st_lock:
+            self._pv[title] = {"last_at": _now_str(), "last_ok": True,
+                               "last_error": "", "fails": 0}
+
+    def _pv_failed(self, title: str, why: str, *, count: bool) -> None:
+        """Record a failed read; alert at 3, 12 and 60 in a row.
+
+        Only timer reads count (a manual /vacheck answers its caller itself), and
+        only while the watcher is switched on - an alert from a test or a REPL
+        would post into a real Lark group.
+        """
+        with self._st_lock:
+            pv = self._pv.setdefault(title, {"fails": 0})
+            pv.update(last_at=_now_str(), last_ok=False, last_error=str(why)[:300])
+            if count:
+                pv["fails"] = int(pv.get("fails") or 0) + 1
+            n = int(pv.get("fails") or 0)
+        print(f"[teams-provider] {title!r}: {why}", flush=True)
+        if not count or n not in (3, 12, 60) or not _provider_watch_enabled():
+            return
+        try:
+            import vawatch as _va
+
+            _va.send_text(_va._card_chat_id(),
+                          f"\u26a0\ufe0f Teams provider watcher: {title!r} has failed "
+                          f"{n} times in a row \u2014 {str(why)[:200]}")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _do_provider_read(self, task: dict) -> dict:
+        """Read one provider's Teams group and hand it to vawatch."""
+        tgt = dict(task.get("target") or {})
+        title = str(tgt.get("group") or "").strip()
+        provider = str(tgt.get("provider") or "").strip()
+        count = task.get("box") is None          # a timer read, not a /vacheck
+        out: dict[str, Any] = {"ok": False, "error": "", "group": title,
+                               "provider": provider, "result": {}, "messages": [],
+                               "read": [], "thread": ""}
+        if not title or not provider:
+            out["error"] = f"the Teams target has no Group Name / Provider: {tgt!r}"
+            return out
+        if count:
+            # A TIMER read never launches the browser: on a signed-out account
+            # that would be a Chromium + Teams boot every tick, past the EVO
+            # poll's backoff (review finding). The EVO poll owns launching,
+            # backing off and alerting; this just waits for its page.
+            if _yield_requested():
+                self._stand_down()
+                out["error"] = "standing aside - another run holds the Teams profile"
+                return out
+            if not self._healthy():
+                out["error"] = "no signed-in Teams page yet - the EVO poll relaunches it"
+                return out
+        elif not self._ready():
+            out["error"] = ("standing aside - another run holds the Teams profile"
+                            if _yield_requested() else "no signed-in Teams page")
+            return out
+        try:
+            import peerstore
+
+            pin = peerstore.thread_for(title)
+        except Exception:  # noqa: BLE001
+            pin = ""
+        try:
+            got = _read_provider_on_page(self._page, title, pin=pin)
+        except Exception as err:  # noqa: BLE001
+            got = {"ok": False, "error": f"read raised: {err!r}"}
+        # Before anything slow (the sweep can wait on the model): the EVO poll
+        # queued behind this job should find EVO open.
+        if self._healthy():
+            _restore_evo(self._page)
+        else:
+            self._teardown()
+        out["messages"] = list(got.get("messages") or [])
+        out["thread"] = str(got.get("thread") or "")
+        if not got.get("ok"):
+            out["error"] = str(got.get("error") or "read failed")
+            self._pv_failed(title, out["error"], count=count)
+            return out
+        try:
+            import vawatch as _va
+
+            n = _va._read_count()
+            batch = out["messages"][-n:]
+            try:
+                wide = int(_va.gap_read_count(batch, provider=provider, group=title,
+                                              asked=n) or 0)
+            except Exception:  # noqa: BLE001
+                wide = 0
+            if wide > len(batch):
+                batch = out["messages"][-wide:]
+            out["read"] = batch
+            res = _va.handle_messages(
+                batch, force=bool(task.get("force")), provider=provider, group=title,
+                record_id=str(tgt.get("record_id") or ""),
+                shared_with=tgt.get("shared_with"), platform="Teams")
+            res["group"], res["provider"] = title, provider
+            out["result"] = res
+            out["ok"] = True
+            self._pv_ok(title)
+        except Exception as err:  # noqa: BLE001
+            out["error"] = f"detector failed: {err!r}"
+            self._pv_failed(title, out["error"], count=count)
+        return out
 
     def _launch(self) -> bool:
         """Take the lock, start Chromium, boot Teams. False if it did not come up."""
@@ -3909,6 +4391,10 @@ class _TeamsWarm:
                                         int(task.get("limit") or 0), quiet=False)
                     if box is not None:
                         box.update(out)
+                elif kind == "provider_read":
+                    out = self._do_provider_read(task)
+                    if box is not None:
+                        box.update(out)
                 elif kind == "probe_groups":
                     if not self._ready():
                         if box is not None:
@@ -4007,6 +4493,24 @@ class _TeamsWarm:
         self.start(poll=_watch_enabled())
         self._tasks.put({"kind": "poll"})
 
+    def provider_check(self, target: dict, *, force: bool = False,
+                       timeout_s: int = 420) -> dict:
+        """Blocking: one provider-group read + sweep (for /vacheck)."""
+        self.start(poll=_watch_enabled())
+        done = threading.Event()
+        box: dict[str, Any] = {}
+        self._tasks.put({"kind": "provider_read", "target": dict(target or {}),
+                         "force": bool(force), "done": done, "box": box})
+        if not done.wait(timeout=timeout_s):
+            return {"ok": False, "result": {}, "read": [],
+                    "error": f"the warm Teams watcher did not answer within "
+                             f"{timeout_s}s - it may still be booting Teams"}
+        if not box:
+            return {"ok": False, "result": {}, "read": [],
+                    "error": "the Teams read crashed before it started "
+                             "(see the service log)"}
+        return box
+
 
 _warm: _TeamsWarm | None = None
 _warm_lock = threading.Lock()
@@ -4042,6 +4546,9 @@ def start_watch_on_startup() -> None:
         print(f"[teams-warm] ❌ {detail}", flush=True)
         return
     warm().start(poll=True)
+    print(f"[teams-provider] {'ON' if _provider_watch_enabled() else 'OFF'} — "
+          f"APP=TEAMS provider groups, one every {_provider_poll_seconds()}s",
+          flush=True)
     print(f"[teams-warm] auto-detect ON — {_watch_target()!r} every "
           f"{_poll_seconds()}s, cards to "
           f"{os.getenv('EVOTEAMS_CARD_CHAT_ID') or 'the /m group'}", flush=True)
@@ -4126,7 +4633,7 @@ def _warm_status_lines() -> list[str]:
     if st.get("yielded_at"):
         lines.append(f"• Last yielded the profile at {st['yielded_at']} "
                      f"(a --login or CLI read asked for it)")
-    return lines
+    return lines + _provider_status_lines()
 
 
 def status_lines() -> list[str]:
