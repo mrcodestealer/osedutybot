@@ -5087,6 +5087,8 @@ def _reinject_synthetic_command_message(
         # Sends the weekly question into ~17 real partner groups. One tap on a
         # "did you mean" card must not be able to do that.
         "/provideraskmaintenance",
+        # Read / write the bot's .env (secrets). Typed only, never from a button.
+        "/showenv", "/addenv", "/editenv",
     }
     # Check the command as the pipeline will SEE it, not just the raw first token:
     # dispatch strips leading @_user_N mention keys and <...> markup, so a value like
@@ -5358,6 +5360,23 @@ def lark_webhook():
                 if eid_ca:
                     _remember_processed_message_id(eid_ca)
                 return _lark_http_card_callback_response(evom_sync)
+            # Save on an /editenv card. Synchronous: a file write is fast, and
+            # the answer replaces the card (removing the values from the chat).
+            try:
+                import envadmin as _envadmin_cb
+
+                env_sync = _envadmin_cb.handle_card_callback(
+                    parsed_sync,
+                    ev_sync,
+                    chat_id_ca or "",
+                )
+            except Exception as _env_cb_err:  # noqa: BLE001
+                print(f"❌ envadmin card callback: {_env_cb_err!r}", flush=True)
+                env_sync = None
+            if env_sync is not None:
+                if eid_ca:
+                    _remember_processed_message_id(eid_ca)
+                return _lark_http_card_callback_response(env_sync)
         # Never wait on ``processed_lock`` in this thread — Lark times out ~3s; lock contention → ``code: undefined``.
         def _run_card_callback_worker() -> None:
             if eid_ca and _remember_processed_message_id(eid_ca):
@@ -5820,8 +5839,13 @@ def lark_webhook():
         return _lark_im_ack()
 
     original_text = text
+    # `/addenv KEY=value` carries a secret: keep its value out of the journal
+    # (these three lines are the only place message text is logged).
+    _log_redact = bool(re.search(r"(?i)/addenv(?![a-z0-9_])", original_text or ""))
     print(
-        f"📝 Original text: {repr(original_text)} sender={sender_id!r} "
+        f"📝 Original text: "
+        f"{'<redacted /addenv>' if _log_redact else repr(original_text)} "
+        f"sender={sender_id!r} "
         f"content_len={len(message_content_raw or '')}",
         flush=True,
     )
@@ -5835,7 +5859,8 @@ def lark_webhook():
     clean_text_multiline = re.sub(r'[ \t]+\n', '\n', text).strip()
     clean_text_multiline = re.sub(r'\n[ \t]+', '\n', clean_text_multiline)
     clean_text = re.sub(r'\s+', ' ', clean_text_multiline).strip()
-    print(f"🧹 Cleaned text (repr): {repr(clean_text)}")
+    print(f"🧹 Cleaned text (repr): "
+          f"{'<redacted /addenv>' if _log_redact else repr(clean_text)}")
 
 
     _pipeline_t0 = time.perf_counter()
@@ -5846,7 +5871,8 @@ def lark_webhook():
             flush=True,
         )
 
-    _pipeline_mark(f"msg {clean_text[:60]!r}")
+    _pipeline_mark("msg <redacted /addenv>" if _log_redact
+                   else f"msg {clean_text[:60]!r}")
 
     jenkins_bot_oid = _jenkins_bot_open_id()
     is_jenkins_bot_sender = bool(
@@ -5915,6 +5941,31 @@ def lark_webhook():
     set_lark_incoming_message(message_id, chat_id)
     if message_id and (chat_type == "p2p" or bot_mentioned):
         remember_gotit_reaction(add_gotit_reaction(message_id))
+
+    # /showenv, /addenv, /editenv — the bot's own .env, admin-only (envadmin.py).
+    # Here, before every AI / chat-memory handler below: an `/addenv KEY=secret`
+    # must never fall through to them. Always returns once matched, even if the
+    # module fails to import.
+    if re.match(r"(?i)^/(?:showenv|addenv|editenv)(?![a-z0-9_])", clean_text or ""):
+        try:
+            import envadmin as _envadmin
+
+            # Raw text first (values keep any <...>); the cleaned multi-line
+            # text if markup hid the command there. Never the one-line
+            # clean_text: it would join several /addenv lines into one value.
+            for _env_src in (original_text, clean_text_multiline):
+                if _envadmin.handle_command(
+                    _env_src or "",
+                    sender_id=sender_id or "",
+                    chat_id=chat_id,
+                    chat_type=chat_type or "",
+                    send_message=send_message,
+                ):
+                    break
+        except Exception as _env_err:  # noqa: BLE001
+            print(f"❌ env command failed: {_env_err!r}", flush=True)
+            send_message(chat_id, f"❌ Env command failed: {type(_env_err).__name__}")
+        return _lark_im_done()
 
     # "who am i" / "whoami" / 我是谁 → show the ASKER's own ids. Handy for filling in
     # the ou_… env vars (approvers, QA/CS tags, reminder targets) without digging
